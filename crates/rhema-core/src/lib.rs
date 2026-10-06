@@ -12,6 +12,7 @@
 pub mod event;
 pub mod message;
 pub mod output;
+pub mod provider;
 pub mod request;
 pub mod session;
 pub mod tool;
@@ -19,6 +20,7 @@ pub mod tool;
 pub use event::{Event, EventSink};
 pub use message::{Content, Message, Role};
 pub use output::{ModelOutput, Step, StopReason, Usage};
+pub use provider::{ModelProvider, ProviderError};
 pub use request::{ChatParams, ModelRequest, ToolSpec};
 pub use session::Session;
 pub use tool::{ToolCall, ToolContext, ToolResolver, ToolResult};
