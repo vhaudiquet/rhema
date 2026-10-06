@@ -32,6 +32,9 @@ pub mod request;
 pub mod session;
 pub mod tool;
 
+// Re-exported so implementors of the async seams can apply #[async_trait]
+// without adding the crate themselves.
+pub use async_trait::async_trait;
 pub use engine::{Agent, AgentBuilder, AgentError, run_turn};
 pub use event::{Event, EventSink};
 pub use message::{Content, Message, Role};
