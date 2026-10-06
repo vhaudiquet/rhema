@@ -476,11 +476,12 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     } else {
         theme.accent
     };
+    // No fill of its own: the input sits on the same canvas as everything
+    // else; only the border marks it.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(border))
-        .style(Style::default().bg(theme.surface));
+        .border_style(Style::default().fg(border));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

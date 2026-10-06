@@ -580,9 +580,10 @@ impl App {
                             // list instead.
                             if picker.purpose == PickerPurpose::Initial && picker.models.len() == 1
                             {
+                                // Nothing follows in this arm: the chat
+                                // screen choose_model installed stands.
                                 let id = picker.models[0].id.clone();
                                 self.choose_model(&id);
-                                return;
                             }
                         }
                         Err(message) => picker.status = PickerStatus::Error(message),
