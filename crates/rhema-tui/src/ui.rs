@@ -647,6 +647,7 @@ mod tests {
         let picker = PickerScreen::new(
             vec![model("model-a"), model("model-b")],
             PickerPurpose::Initial,
+            "google",
         );
         assert_eq!(picker.selected, 0);
 
@@ -674,7 +675,7 @@ mod tests {
     #[test]
     fn the_marker_never_lands_on_the_footer_row() {
         let models: Vec<GeminiModel> = (0..20).map(|i| model(&format!("model-{i:02}"))).collect();
-        let mut picker = PickerScreen::new(models, PickerPurpose::Initial);
+        let mut picker = PickerScreen::new(models, PickerPurpose::Initial, "google");
         picker.selected = 19;
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();

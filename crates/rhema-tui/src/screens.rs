@@ -318,12 +318,16 @@ pub struct PickerScreen {
 impl PickerScreen {
     /// A picker over `models` (sorted by id, text chat models only),
     /// initially unfiltered.
-    pub fn new(mut models: Vec<GeminiModel>, purpose: PickerPurpose) -> Self {
+    pub fn new(
+        mut models: Vec<GeminiModel>,
+        purpose: PickerPurpose,
+        provider: &'static str,
+    ) -> Self {
         models.retain(Self::usable);
         models.sort_by(|a, b| a.id.cmp(&b.id));
         Self {
             models,
-            provider: "google",
+            provider,
             filter: String::new(),
             selected: 0,
             status: PickerStatus::Ready,
@@ -691,6 +695,7 @@ mod tests {
                 model("veo-3.1-generate-preview", "Veo 3.1", true),
             ],
             PickerPurpose::Initial,
+            "google",
         )
     }
 
@@ -800,7 +805,7 @@ mod tests {
     fn picker_esc_quits_initially_and_returns_to_chat_mid_session() {
         let mut picker = picker();
         assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::Quit);
-        let mut picker = PickerScreen::new(Vec::new(), PickerPurpose::FromChat);
+        let mut picker = PickerScreen::new(Vec::new(), PickerPurpose::FromChat, "google");
         assert_eq!(
             picker.handle_key(key(KeyCode::Esc)),
             PickerAction::BackToChat

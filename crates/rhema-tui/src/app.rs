@@ -231,7 +231,15 @@ impl App {
             }
             (Some(_), None) => Screen::Picker(PickerScreen {
                 status: PickerStatus::Loading,
-                ..PickerScreen::new(Vec::new(), PickerPurpose::Initial)
+                ..PickerScreen::new(
+                    Vec::new(),
+                    PickerPurpose::Initial,
+                    setup
+                        .backend
+                        .as_ref()
+                        .map(Backend::config_name)
+                        .unwrap_or("google"),
+                )
             }),
             (None, _) => Screen::Login(LoginScreen::new()),
         };
@@ -498,7 +506,14 @@ impl App {
         }
         self.screen = Screen::Picker(PickerScreen {
             status,
-            ..PickerScreen::new(self.models.clone(), PickerPurpose::FromChat)
+            ..PickerScreen::new(
+                self.models.clone(),
+                PickerPurpose::FromChat,
+                self.backend
+                    .as_ref()
+                    .map(Backend::config_name)
+                    .unwrap_or("google"),
+            )
         });
         effects
     }
@@ -574,7 +589,8 @@ impl App {
                         } else {
                             PickerPurpose::Initial
                         };
-                        self.screen = Screen::Picker(PickerScreen::new(models, purpose));
+                        let provider = backend.config_name();
+                        self.screen = Screen::Picker(PickerScreen::new(models, purpose, provider));
                     }
                     Err(message) => login.on_validated(&Err(message)),
                 }
@@ -923,9 +939,11 @@ mod tests {
             },
             result: Ok(vec![llama_model("qwen3-8b"), llama_model("qwen3-32b")]),
         });
-        // Router mode: several models land in the picker with no metadata.
+        // Router mode: several models land in the picker with no
+        // metadata, and the rows carry the llama.cpp prefix — not google's.
         match &h.app.screen {
             Screen::Picker(picker) => {
+                assert_eq!(picker.provider, "llama-cpp");
                 assert_eq!(picker.models.len(), 2);
                 let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
                 assert_eq!(ids, ["qwen3-32b", "qwen3-8b"]);
