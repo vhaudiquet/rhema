@@ -22,3 +22,7 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+
+[[example]]
+name = "step_demo"
+required-features = ["mock"]
