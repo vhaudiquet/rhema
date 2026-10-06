@@ -72,6 +72,8 @@ struct MarkdownRenderer {
     ordered_counter: Option<u64>,
     /// Inside a fenced code block: rows carry the block background.
     in_code_block: bool,
+    /// Inside a block quote: every line carries the rail.
+    in_block_quote: bool,
 }
 
 impl MarkdownRenderer {
@@ -129,7 +131,13 @@ impl MarkdownRenderer {
             Event::Start(Tag::BlockQuote(_)) => {
                 self.flush_line();
                 self.separate();
+                self.in_block_quote = true;
                 self.spans.push(Span::raw("│ ").dim());
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                self.flush_line();
+                self.in_block_quote = false;
+                self.separate();
             }
             Event::Start(Tag::Strong) => self.style.bold = true,
             Event::End(TagEnd::Strong) => self.style.bold = false,
@@ -162,7 +170,12 @@ impl MarkdownRenderer {
                     self.spans.push(self.style.apply(text.to_string()));
                 }
             }
-            Event::SoftBreak | Event::HardBreak => self.flush_line(),
+            Event::SoftBreak | Event::HardBreak => {
+                self.flush_line();
+                if self.in_block_quote {
+                    self.spans.push(Span::raw("│ ").dim());
+                }
+            }
             Event::Rule => {
                 self.flush_line();
                 self.separate();
@@ -248,6 +261,16 @@ mod tests {
         );
         let code = spans.iter().find(|(text, _)| text == "code").unwrap();
         assert_eq!(code.1.fg, Some(code_color()));
+    }
+
+    #[test]
+    fn block_quote_lines_all_carry_the_rail_and_separate() {
+        let lines = render_markdown("before\n\n> quoted one\n> quoted two\n\nafter");
+        let rendered = plain(&lines);
+        assert_eq!(
+            rendered,
+            ["before", "", "│ quoted one", "│ quoted two", "", "after"]
+        );
     }
 
     #[test]
