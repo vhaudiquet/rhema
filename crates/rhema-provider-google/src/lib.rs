@@ -44,10 +44,12 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod pricing;
 pub mod provider;
 pub mod stream;
 pub mod wire;
 
+pub use pricing::{Pricing, model_pricing};
 pub use provider::{DEFAULT_BASE_URL, GoogleProvider};
 pub use stream::SseDecoder;
 pub use wire::{

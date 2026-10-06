@@ -626,6 +626,29 @@ impl GeminiModel {
             .iter()
             .any(|m| m == "generateContent")
     }
+
+    /// Whether the model is a text chat model. `generateContent` alone does
+    /// not discriminate — video (veo), image (nano-banana), speech (tts,
+    /// audio), realtime (live), and specialty models expose it too — so
+    /// non-chat families are excluded by id.
+    pub fn is_text(&self) -> bool {
+        const NON_TEXT: [&str; 13] = [
+            "veo",
+            "image",
+            "nano-banana",
+            "tts",
+            "audio",
+            "live",
+            "omni",
+            "transcribe",
+            "embedding",
+            "aqa",
+            "computer-use",
+            "robotics",
+            "lyria",
+        ];
+        !NON_TEXT.iter().any(|marker| self.id.contains(marker))
+    }
 }
 
 /// One page of the ListModels response.
