@@ -178,6 +178,9 @@ pub struct App {
     pub transcript: Transcript,
     /// Token accounting of the last finished turn.
     pub usage: Option<Usage>,
+    /// Accumulated cost of the session in USD, summed per turn from the
+    /// current model's pricing; turns on unpriced models add nothing.
+    pub session_cost: f64,
     /// The last turn's error, shown in the status line until the next
     /// submit.
     pub error: Option<String>,
@@ -251,6 +254,7 @@ impl App {
             turn_started: None,
             transcript,
             usage: None,
+            session_cost: 0.0,
             error: None,
             pending_approval: None,
             confirm_quit: false,
@@ -535,6 +539,16 @@ impl App {
                         Ok(models) => {
                             picker.set_models(models);
                             picker.status = PickerStatus::Ready;
+                            // The single-model failover applies at startup
+                            // too: a server with one offering has nothing
+                            // to pick. Refresh (ctrl-p) always shows the
+                            // list instead.
+                            if picker.purpose == PickerPurpose::Initial && picker.models.len() == 1
+                            {
+                                let id = picker.models[0].id.clone();
+                                self.choose_model(&id);
+                                return;
+                            }
                         }
                         Err(message) => picker.status = PickerStatus::Error(message),
                     }
@@ -613,9 +627,36 @@ impl App {
         self.pending_approval = None;
         self.answers = None;
         match result {
-            Ok(output) => self.usage = Some(output.usage),
+            Ok(output) => {
+                if let Some(pricing) = self.current_model_pricing() {
+                    let usage = output.usage;
+                    self.session_cost += usage.input_tokens as f64 / 1_000_000.0
+                        * pricing.input_per_mtok
+                        + usage.output_tokens as f64 / 1_000_000.0 * pricing.output_per_mtok;
+                }
+                self.usage = Some(output.usage);
+            }
             Err(message) => self.error = Some(message),
         }
+    }
+
+    /// The pricing of the model the session currently runs on, when it is
+    /// one this crate prices.
+    fn current_model_pricing(&self) -> Option<rhema_provider_google::Pricing> {
+        let model = self.config.model.as_deref()?;
+        self.models
+            .iter()
+            .find(|entry| entry.id == model)
+            .and_then(|entry| entry.pricing())
+    }
+
+    /// The context window of the current model, when known.
+    pub fn current_context_window(&self) -> Option<u64> {
+        let model = self.config.model.as_deref()?;
+        self.models
+            .iter()
+            .find(|entry| entry.id == model)
+            .and_then(|entry| entry.input_token_limit)
     }
 }
 
@@ -662,6 +703,11 @@ mod tests {
         vec![model("m-b"), model("m-a")]
     }
 
+    /// A model whose id is in the pricing table, for cost-math tests.
+    fn priced_model(id: &str) -> GeminiModel {
+        model(id)
+    }
+
     /// A llama.cpp row: an id with none of the metadata Google reports.
     fn llama_model(id: &str) -> GeminiModel {
         GeminiModel {
@@ -699,7 +745,6 @@ mod tests {
         let backend: Option<Backend> = api_key.map(|key| Backend::Google {
             api_key: key.to_owned(),
         });
-        let provider: Option<Arc<dyn ModelProvider>> = backend.as_ref().map(Backend::provider);
         let app = App::new(AppSetup {
             store: store.clone(),
             config,
@@ -843,6 +888,44 @@ mod tests {
         let config = h.store.load().unwrap();
         assert_eq!(config.provider.as_deref(), Some("llama-cpp"));
         assert_eq!(config.llama_cpp_url.as_deref(), Some("http://box:8080"));
+    }
+
+    #[test]
+    fn turn_costs_accumulate_from_the_model_pricing() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: Ok(models()),
+        });
+        // models() carries a 1M-token limit; give the fixture a price by
+        // matching a priced id instead.
+        let mut h = harness(Some("k"), None, Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            // gemini-3.8-flash prices at $0.75/M in and $3.75/M out.
+            result: Ok(vec![priced_model("gemini-3.8-flash")]),
+        });
+        h.app.on_key(key(KeyCode::Char('a')));
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        match effects.as_slice() {
+            [Effect::StartTurn(_)] => {}
+            other => panic!("expected a turn start, got {other:?}"),
+        }
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage {
+                    input_tokens: 1_000_000,
+                    output_tokens: 1_000_000,
+                    cached_input_tokens: 0,
+                },
+            }),
+        });
+        // 1M in at $0.75/M + 1M out at $3.75/M.
+        assert!((h.app.session_cost - 4.50).abs() < 1e-9);
     }
 
     #[test]

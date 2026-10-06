@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use rhema_coding_agent::{Approval, CodingAgent};
 use rhema_core::{Event, EventSink};
-use rhema_provider_google::GoogleProvider;
 #[cfg(feature = "mock")]
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;

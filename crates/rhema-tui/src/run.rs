@@ -20,8 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rhema_coding_agent::{AllowAll, Approval, CodingAgent};
 use rhema_config::Config;
-use rhema_core::{ModelProvider, Session};
-use rhema_provider_google::GoogleProvider;
+use rhema_core::Session;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Backend;
@@ -65,7 +64,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             api_key: config.llama_cpp_api_key(),
         }),
     };
-    let provider: Option<Arc<dyn ModelProvider>> = backend.as_ref().map(Backend::provider);
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
             .with_context(|| format!("cannot resume session: {}", path.display()))?,

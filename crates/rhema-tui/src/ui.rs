@@ -17,10 +17,10 @@ use rhema_provider_google::GeminiModel;
 /// Renders one frame.
 pub fn render(app: &App, frame: &mut Frame) {
     let theme = app.theme;
-    // The canvas: Jadeite's ground, painted, so the app reads the same on
-    // any terminal.
+    // The canvas: one background everywhere, the model output's. Nothing
+    // in the chat screen sits on a different panel.
     frame.render_widget(
-        Block::default().style(Style::default().bg(theme.ground).fg(theme.text)),
+        Block::default().style(Style::default().bg(theme.sunken).fg(theme.text)),
         frame.area(),
     );
     match &app.screen {
@@ -37,21 +37,13 @@ pub fn render(app: &App, frame: &mut Frame) {
                 })
                 .unwrap_or(1)
                 .max(1);
-            let [
-                header_area,
-                transcript_area,
-                status_area,
-                input_area,
-                footer_area,
-            ] = Layout::vertical([
-                Constraint::Length(4),
+            let [transcript_area, status_area, input_area, footer_area] = Layout::vertical([
                 Constraint::Min(0),
                 Constraint::Length(status_rows),
                 Constraint::Length(3),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
-            render_header(frame, app, header_area, theme);
             render_transcript(frame, app, transcript_area, theme);
             render_status(frame, app, status_area, theme);
             render_input(frame, app, input_area, theme);
@@ -63,42 +55,6 @@ pub fn render(app: &App, frame: &mut Frame) {
             }
         }
     }
-}
-
-/// The compact header box: the app mark, then model and workspace as the
-/// dim context line.
-fn render_header(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let model = app.config.model.as_deref().unwrap_or("no model");
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.surface))
-        .padding(Padding::horizontal(1));
-    frame.render_widget(block, area);
-    let inner = Rect {
-        x: area.x + 2,
-        y: area.y + 1,
-        width: area.width.saturating_sub(4),
-        height: 2,
-    };
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::raw("ῥ ").fg(theme.accent_text).bold(),
-                Span::raw("rhema").bold(),
-            ]),
-            Line::from(
-                Span::raw(format!(
-                    "{model} · {} · /help for commands",
-                    app.options.workspace.display()
-                ))
-                .fg(theme.text3),
-            ),
-        ])
-        .style(Style::default().bg(theme.surface).fg(theme.text)),
-        inner,
-    );
 }
 
 /// A centered box clipped to `area`.
@@ -244,10 +200,26 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // Wrapping is done here rather than by Paragraph so the row count is
     // exact: the scroll offset is expressed in rendered rows.
     let width = inner.width as usize;
+    // The banner is the conversation's first content, not chrome: it
+    // scrolls away with the history and shares the transcript background.
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::raw("ῥ ").fg(theme.accent_text).bold(),
+            Span::raw("rhema").bold(),
+        ]),
+        Line::from(
+            Span::raw(format!(
+                "{} · {} · /help for commands",
+                app.config.model.as_deref().unwrap_or("no model"),
+                app.options.workspace.display()
+            ))
+            .fg(theme.text3),
+        ),
+        Line::from(""),
+    ];
     // Consecutive assistant lines form one markdown response and render
     // through the parser; everything else renders as-is. The bullet marks
     // the first row of each response.
-    let mut lines: Vec<Line> = Vec::new();
     let mut group: Vec<String> = Vec::new();
     let mut marked = false;
     for line in app.transcript.lines() {
@@ -303,7 +275,8 @@ fn format_tokens(limit: Option<u64>) -> String {
         Some(limit) if limit >= 1_000_000 => {
             format!("{:.1}M", limit as f64 / 1_000_000.0)
         }
-        Some(limit) => format!("{}k", limit / 1_000),
+        Some(limit) if limit >= 10_000 => format!("{}k", limit / 1_000),
+        Some(limit) => format!("{limit}"),
     }
 }
 
@@ -464,23 +437,35 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 /// history-pinned indicator.
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let line = match app.usage {
-        Some(usage) => Line::from(format!(
-            "tokens: {} in / {} out ({} cached)",
-            usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
-        ))
-        .fg(theme.text3),
-        None => {
-            Line::from("pgup/pgdn or wheel: history · ctrl-p: model · ctrl-c: quit").fg(theme.text3)
+        Some(usage) => {
+            // The last turn's input is exactly the context footprint that
+            // produced it.
+            let mut parts = vec![Span::raw(app.config.model.as_deref().unwrap_or("no model"))];
+            let context = format_tokens(Some(u64::from(usage.input_tokens)));
+            match app.current_context_window() {
+                Some(limit) => parts.push(Span::raw(format!(
+                    " · ctx {}/{}",
+                    context,
+                    format_tokens(Some(limit))
+                ))),
+                None => parts.push(Span::raw(format!(" · ctx {context}"))),
+            }
+            if app.session_cost > 0.0 {
+                parts.push(Span::raw(format!(" · session ${:.4}", app.session_cost)));
+            }
+            Line::from(parts)
         }
+        None => Line::from(format!(
+            "{} · pgup/pgdn or wheel: history · ctrl-p: model · ctrl-c: quit",
+            app.config.model.as_deref().unwrap_or("no model")
+        )),
     };
-    let line = if app.chat.scroll > 0 && app.error.is_none() {
-        let mut spans = line.spans;
-        spans.push(Span::raw("  ·  viewing history · pgdn: latest").fg(theme.text3));
-        Line::from(spans)
-    } else {
-        line
-    };
-    frame.render_widget(Paragraph::new(line), area);
+    let mut line = line;
+    if app.chat.scroll > 0 && app.error.is_none() {
+        line.spans
+            .push(Span::raw("  ·  viewing history · pgdn: latest").fg(theme.text3));
+    }
+    frame.render_widget(Paragraph::new(line).fg(theme.text3), area);
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -720,10 +705,8 @@ mod scroll_tests {
     use super::render;
     use crate::app::{App, AppSetup, RunOptions};
     use crate::args::ThemeKind;
-    use crate::palette::DARK;
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
-    use rhema_core::MockProvider;
     use std::path::PathBuf;
     use std::sync::Arc;
 
