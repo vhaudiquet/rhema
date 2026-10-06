@@ -480,14 +480,16 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
         .take(visible as usize)
         .enumerate()
         .map(|(index, (name, description))| {
-            let row_bg = if index == selected {
-                Style::default().bg(theme.elevated)
+            // The selection lives in the text, not the row: bold marks it,
+            // the background stays shared.
+            let name_style = if index == selected {
+                Style::default().fg(theme.accent_text).bold()
             } else {
-                Style::default().bg(theme.sunken)
+                Style::default().fg(theme.accent_text)
             };
             Line::from(vec![
-                Span::styled(name.to_string(), row_bg.fg(theme.accent_text)),
-                Span::styled(format!("  {description}"), row_bg.fg(theme.text3)),
+                Span::styled(name.to_string(), name_style),
+                Span::styled(format!("  {description}"), Style::default().fg(theme.text3)),
             ])
         })
         .collect();
