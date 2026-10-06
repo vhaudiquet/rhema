@@ -17,5 +17,7 @@ serde_json = "1.0"
 thiserror = "2"
 # Async traits must stay object-safe (dyn ModelProvider, dyn ToolResolver)
 async-trait = "0.1"
+# Config file format (flat scalar fields; see crates/rhema-config)
+serde_yaml = "0.9"
 # Test runtime
 tokio = { version = "1", features = ["macros", "rt"] }

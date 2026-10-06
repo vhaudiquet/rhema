@@ -1,9 +1,10 @@
 //! Persistent rhema settings: the config file backs login (stored provider
-//! keys) and the last-used model choice.
+//! keys), provider selection, and the last-used model choice.
 //!
-//! The file lives at `$XDG_CONFIG_HOME/rhema/config.json`, falling back to
+//! The file lives at `$XDG_CONFIG_HOME/rhema/config.yaml`, falling back to
 //! `$HOME/.config/rhema/config.json`, written with `0600` permissions since
-//! it holds credentials. Environment variables (`GEMINI_API_KEY`,
+//! it holds credentials. A legacy `config.json` is read when no YAML file
+//! exists but never written. Environment variables (`GEMINI_API_KEY`,
 //! `GOOGLE_API_KEY`) always win over a stored key — a stored key is the
 //! fallback, not the override.
 
@@ -23,7 +24,10 @@ pub enum ConfigError {
     /// Reading or writing the file failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    /// The file is not valid JSON or not the expected shape.
+    /// The YAML file is not valid or not the expected shape.
+    #[error(transparent)]
+    Yaml(#[from] serde_yaml::Error),
+    /// The legacy JSON file is not valid or not the expected shape.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
@@ -32,10 +36,16 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Config {
+    /// Which provider serves turns: `google` (default) or `llama-cpp`.
+    pub provider: Option<String>,
     /// The Google API key entered at login, when one is stored.
     pub google_api_key: Option<String>,
     /// The last-used model, when one was picked.
     pub model: Option<String>,
+    /// The llama.cpp server base URL (e.g. `http://localhost:8080`).
+    pub llama_cpp_url: Option<String>,
+    /// Optional bearer key for the llama.cpp server, when it asks for one.
+    pub llama_cpp_api_key: Option<String>,
 }
 
 impl Config {
@@ -52,12 +62,13 @@ impl Config {
         }
     }
 
-    /// The config file path (`<dir>/config.json`).
+    /// The config file path (`<dir>/config.yaml`).
     pub fn path() -> Result<PathBuf, ConfigError> {
-        Ok(Self::dir()?.join("config.json"))
+        Ok(Self::dir()?.join("config.yaml"))
     }
 
-    /// Loads the config; a missing file is the default config, not an error.
+    /// Loads the config; a missing file is the default config, not an
+    /// error. Falls back to the legacy JSON file when no YAML exists.
     pub fn load() -> Result<Config, ConfigError> {
         match Self::path() {
             Ok(path) => Self::load_from(&path),
@@ -71,22 +82,38 @@ impl Config {
     pub fn save(&self) -> Result<(), ConfigError> {
         let dir = Self::dir()?;
         std::fs::create_dir_all(&dir)?;
-        Self::save_to(&dir.join("config.json"), self)
+        Self::save_to(&dir.join("config.yaml"), self)
     }
 
     /// [`Config::load`] against an explicit file (missing file is the
-    /// default config).
+    /// default config). A `.json` file parses as the legacy format.
     pub fn load_from(path: &impl AsRef<Path>) -> Result<Config, ConfigError> {
-        match std::fs::read_to_string(path) {
-            Ok(raw) => Ok(serde_json::from_str(&raw)?),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
-            Err(err) => Err(err.into()),
+        let raw = match std::fs::read_to_string(path) {
+            Ok(raw) => raw,
+            // No YAML yet: a legacy JSON file beside it still counts.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let legacy = path
+                    .as_ref()
+                    .parent()
+                    .map(|dir| dir.join("config.json"))
+                    .unwrap_or_else(|| path.as_ref().to_path_buf());
+                if legacy != path.as_ref() {
+                    return Self::load_from(&legacy);
+                }
+                return Ok(Config::default());
+            }
+            Err(err) => return Err(err.into()),
+        };
+        if path.as_ref().extension().is_some_and(|ext| ext == "json") {
+            Ok(serde_json::from_str(&raw)?)
+        } else {
+            Ok(serde_yaml::from_str(&raw)?)
         }
     }
 
     /// [`Config::save`] to an explicit file, with the same `0600` handling.
     pub fn save_to(path: &impl AsRef<Path>, config: &Config) -> Result<(), ConfigError> {
-        let json = serde_json::to_string_pretty(config)?;
+        let yaml = serde_yaml::to_string(config)?;
         // Mode applies at create time so the credentials never touch disk
         // world-readable.
         let mut file = std::fs::OpenOptions::new()
@@ -96,14 +123,40 @@ impl Config {
             .mode_0600_on_unix()
             .open(path)?;
         use std::io::Write;
-        file.write_all(json.as_bytes())?;
+        file.write_all(yaml.as_bytes())?;
         Ok(())
     }
 
     /// The Google API key to use: `GEMINI_API_KEY`, then `GOOGLE_API_KEY`,
     /// then the stored key. Whitespace-only values count as unset.
     pub fn google_api_key(&self) -> Option<String> {
-        resolve_google_key(|name| std::env::var(name).ok(), self.google_api_key.clone())
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            self.google_api_key.clone(),
+        )
+    }
+
+    /// The llama.cpp server URL to use: `LLAMA_CPP_URL`, then the stored
+    /// URL, then `http://localhost:8080`. Whitespace-only values count as
+    /// unset.
+    pub fn llama_cpp_url(&self) -> String {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["LLAMA_CPP_URL"],
+            self.llama_cpp_url.clone(),
+        )
+        .unwrap_or_else(|| "http://localhost:8080".to_owned())
+    }
+
+    /// The llama.cpp bearer key to use: `LLAMA_CPP_API_KEY`, then the
+    /// stored key; `None` when the server is open.
+    pub fn llama_cpp_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["LLAMA_CPP_API_KEY"],
+            self.llama_cpp_api_key.clone(),
+        )
     }
 }
 
@@ -124,15 +177,16 @@ impl OpenOptionsExt0600 for std::fs::OpenOptions {
     }
 }
 
-/// Pure key resolution: `env` looks up one variable name; the first
-/// non-blank of `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `stored` wins.
-fn resolve_google_key(
+/// Pure key resolution: the first non-blank of the named environment
+/// variables, then `stored`; whitespace-only values count as unset.
+fn resolve_key(
     env: impl Fn(&str) -> Option<String>,
+    names: &[&str],
     stored: Option<String>,
 ) -> Option<String> {
-    ["GEMINI_API_KEY", "GOOGLE_API_KEY"]
-        .into_iter()
-        .filter_map(env)
+    names
+        .iter()
+        .filter_map(|name| env(name))
         .map(|value| value.trim().to_owned())
         .find(|value| !value.is_empty())
         .or(stored
@@ -152,26 +206,39 @@ mod tests {
             _ => None,
         };
         assert_eq!(
-            resolve_google_key(env, Some("stored".into())),
+            resolve_key(
+                env,
+                &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+                Some("stored".into())
+            ),
             Some("from-env".into())
         );
         assert_eq!(
-            resolve_google_key(|_| None, Some(" stored ".into())),
+            resolve_key(|_| None, &["GEMINI_API_KEY"], Some(" stored ".into())),
             Some("stored".into())
         );
-        assert_eq!(resolve_google_key(|_| None, Some("  ".into())), None);
-        assert_eq!(resolve_google_key(|_| None, None), None);
+        assert_eq!(
+            resolve_key(|_| None, &["GEMINI_API_KEY"], Some("  ".into())),
+            None
+        );
+        assert_eq!(resolve_key(|_| None, &["GEMINI_API_KEY"], None), None);
     }
 
     #[test]
-    fn config_round_trips_through_disk() {
+    fn config_round_trips_through_disk_as_yaml() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.json");
+        let path = dir.path().join("config.yaml");
         let config = Config {
+            provider: Some("llama-cpp".into()),
             google_api_key: Some("key-123".into()),
             model: Some("gemini-3.8-flash".into()),
+            llama_cpp_url: Some("http://localhost:8080".into()),
+            llama_cpp_api_key: None,
         };
         Config::save_to(&path, &config).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("google_api_key:"), "yaml on disk: {raw}");
+        assert!(!raw.contains('{'), "not json: {raw}");
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, config);
 
@@ -184,9 +251,25 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_yaml_falls_back_to_a_legacy_json_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("config.json");
+        std::fs::write(
+            &legacy,
+            r#"{"google_api_key": "json-key", "model": "m", "llama_cpp_url": null,
+                "llama_cpp_api_key": null, "provider": null}"#,
+        )
+        .unwrap();
+        let yaml = dir.path().join("config.yaml");
+        let config = Config::load_from(&yaml).unwrap();
+        assert_eq!(config.google_api_key.as_deref(), Some("json-key"));
+        assert_eq!(config.model.as_deref(), Some("m"));
+    }
+
+    #[test]
     fn a_missing_file_loads_as_the_default_config() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("does-not-exist.json");
+        let path = dir.path().join("does-not-exist.yaml");
         assert_eq!(Config::load_from(&path).unwrap(), Config::default());
     }
 }
