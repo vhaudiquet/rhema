@@ -475,6 +475,15 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
     frame.render_widget(block, area);
 
     let selected = app.chat.palette_index.min(candidates.len() - 1);
+    // Descriptions align in a column: every name is padded to the longest
+    // visible name plus a three-space gap.
+    let name_width = candidates
+        .iter()
+        .take(visible as usize)
+        .map(|(name, _)| name.width())
+        .max()
+        .unwrap_or(0)
+        + 3;
     let rows: Vec<Line> = candidates
         .iter()
         .take(visible as usize)
@@ -488,8 +497,8 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
                 Style::default().fg(theme.accent_text)
             };
             Line::from(vec![
-                Span::styled(name.to_string(), name_style),
-                Span::styled(format!("  {description}"), Style::default().fg(theme.text3)),
+                Span::styled(format!("{name:<name_width$}"), name_style),
+                Span::styled(description.to_string(), Style::default().fg(theme.text3)),
             ])
         })
         .collect();
@@ -796,6 +805,44 @@ mod scroll_tests {
         (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn palette_descriptions_align_in_one_column() {
+        let mut app = chat_app();
+        app.chat.input = "/".to_owned();
+        app.chat.cursor = 1;
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+
+        // Each command's description starts at the same column: the
+        // longest name plus the three-space gap.
+        let mut columns = Vec::new();
+        for y in 0..buffer.area.height {
+            let row = row_text(y);
+            if let Some(pos) = row.find("commands and keys") {
+                columns.push(("commands and keys", pos));
+            }
+            if let Some(pos) = row.find("pick the model") {
+                columns.push(("pick the model", pos));
+            }
+            if let Some(pos) = row.find("quit") {
+                columns.push(("quit", pos));
+            }
+        }
+        assert_eq!(columns.len(), 3, "all three commands visible: {columns:?}");
+        assert!(
+            columns.iter().all(|(_, pos)| *pos == columns[0].1),
+            "descriptions misaligned: {columns:?}"
+        );
     }
 
     #[test]
