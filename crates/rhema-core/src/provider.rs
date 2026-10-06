@@ -2,7 +2,8 @@
 //!
 //! Transport, auth, retries, and provider wire formats all live behind this
 //! trait (future `rhema-provider-*` crates). The engine only ever sees
-//! [`ModelRequest`] in and [`ModelOutput`] plus streamed [`Event`]s out.
+//! [`ModelRequest`] in and [`ModelOutput`] plus streamed
+//! [`Event`](crate::Event)s out.
 
 use async_trait::async_trait;
 
