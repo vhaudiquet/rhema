@@ -412,12 +412,23 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .map(|line| line.style(Style::default().fg(theme.error).bold()))
             .collect()
     } else if app.running {
+        // A square rotating through its quadrants, animated off the
+        // running turn's clock — no timer machinery of its own.
+        const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
+        let frame = app
+            .turn_started
+            .map(|started| (started.elapsed().as_millis() / 120) as usize % SPINNER.len())
+            .unwrap_or(0);
         let elapsed = app
             .turn_started
             .map(|started| format!(" · {}s", started.elapsed().as_secs()))
             .unwrap_or_default();
         vec![Line::from(vec![
-            Span::styled("✳ thinking", Style::default().fg(theme.running)),
+            Span::styled(
+                SPINNER[frame].to_string(),
+                Style::default().fg(theme.running),
+            ),
+            Span::raw(" thinking").fg(theme.running),
             Span::raw(elapsed).fg(theme.text3),
             Span::raw(" · esc declines pending tools").fg(theme.text3),
         ])]
