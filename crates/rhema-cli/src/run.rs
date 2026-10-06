@@ -8,9 +8,10 @@ use anyhow::{Context, bail};
 use rhema_coding_agent::{AllowAll, Approval, CodingAgent, CodingAgentConfig};
 use rhema_core::{ModelProvider, Session};
 use rhema_provider_google::GoogleProvider;
+use rhema_provider_llama_cpp::LlamaCppProvider;
 
 use crate::approval::ConsoleApproval;
-use crate::args::Args;
+use crate::args::{Args, ProviderChoice};
 use crate::sink::{TermSink, format_usage};
 
 /// The REPL prompt, on stderr so stdout stays clean for streamed text.
@@ -59,6 +60,10 @@ pub fn classify(line: &str) -> Input {
         _ => Input::Unknown,
     }
 }
+
+/// The model string sent to a llama.cpp server when none is set. The
+/// server typically ignores it, but OpenAI-shaped APIs require the field.
+pub const DEFAULT_LLAMA_MODEL: &str = "local";
 
 /// The model used when neither `--model` nor the stored config names one.
 /// Google closed `gemini-2.5-flash` to new users; the error's own
@@ -109,9 +114,17 @@ fn pick_key(
 /// Runs the CLI: validates options, builds the provider and agent, then
 /// either executes the one-shot prompt or enters the REPL.
 pub async fn run(args: Args) -> anyhow::Result<()> {
+    let config = stored_config();
+    let provider_choice = args
+        .provider
+        .unwrap_or_else(|| ProviderChoice::from_stored(config.provider.as_deref()));
     // The key check precedes any session work: no point touching the
-    // filesystem for a run that cannot authenticate.
-    let api_key = resolve_api_key()?;
+    // filesystem for a run that cannot authenticate. The llama.cpp server
+    // needs no key.
+    let api_key = match provider_choice {
+        ProviderChoice::Google => resolve_api_key()?,
+        ProviderChoice::LlamaCpp => String::new(),
+    };
 
     if let (Some(resume), Some(save)) = (&args.resume, &args.save) {
         if resume != save {
@@ -123,12 +136,29 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         }
     }
 
-    let provider: Arc<dyn ModelProvider> = Arc::new(GoogleProvider::new(api_key));
-    let model = args
-        .model
-        .clone()
-        .or_else(|| stored_config().model)
-        .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
+    let provider: Arc<dyn ModelProvider> = match provider_choice {
+        ProviderChoice::LlamaCpp => {
+            let mut llamacpp = LlamaCppProvider::new(
+                args.llama_url
+                    .clone()
+                    .unwrap_or_else(|| config.llama_cpp_url()),
+            );
+            if let Some(key) = config.llama_cpp_api_key() {
+                llamacpp = llamacpp.with_api_key(key);
+            }
+            Arc::new(llamacpp)
+        }
+        ProviderChoice::Google => Arc::new(GoogleProvider::new(api_key)),
+    };
+    let model = args.model.clone().unwrap_or_else(|| {
+        config
+            .model
+            .clone()
+            .unwrap_or_else(|| match provider_choice {
+                ProviderChoice::LlamaCpp => DEFAULT_LLAMA_MODEL.to_owned(),
+                ProviderChoice::Google => DEFAULT_MODEL.to_owned(),
+            })
+    });
     let config = CodingAgentConfig {
         max_turn_steps: args.max_steps,
         ..CodingAgentConfig::new(model, &args.workspace)

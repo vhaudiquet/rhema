@@ -5,6 +5,27 @@ use std::path::PathBuf;
 use clap::Parser;
 use rhema_coding_agent::CodingAgentConfig;
 
+/// Which model backend serves turns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum ProviderChoice {
+    /// Google Gemini via the Generative Language API.
+    Google,
+    /// A llama.cpp server (`llama-server`) speaking the OpenAI-compatible
+    /// chat completions API.
+    LlamaCpp,
+}
+
+impl ProviderChoice {
+    /// Parses a stored config value; unknown spellings fall back to
+    /// google.
+    pub fn from_stored(value: Option<&str>) -> Self {
+        match value {
+            Some("llama-cpp") | Some("llama_cpp") | Some("llamacpp") => Self::LlamaCpp,
+            _ => Self::Google,
+        }
+    }
+}
+
 /// `rhema` — terminal REPL for the rhema coding agent. The full-screen TUI lives in `rhema-tui`.
 #[derive(Debug, Parser)]
 #[command(
@@ -16,6 +37,16 @@ pub struct Args {
     /// One-shot: run a single turn with this prompt and exit. Omit for the
     /// interactive REPL.
     pub prompt: Option<String>,
+
+    /// Model backend for turns. Defaults to the stored choice, then
+    /// google.
+    #[arg(long, value_enum)]
+    pub provider: Option<ProviderChoice>,
+
+    /// llama.cpp server base URL (provider llama-cpp). Defaults to the
+    /// stored URL, then http://localhost:8080.
+    #[arg(long)]
+    pub llama_url: Option<String>,
 
     /// Model name. Defaults to the stored choice in the rhema config, then
     /// to `gemini-3.8-flash`.
@@ -55,6 +86,8 @@ mod tests {
     fn defaults_match_the_spec() {
         let args = parse(&[]);
         assert_eq!(args.model, None);
+        assert_eq!(args.provider, None);
+        assert_eq!(args.llama_url, None);
         assert_eq!(args.workspace, PathBuf::from("."));
         assert_eq!(args.resume, None);
         assert_eq!(args.save, None);
@@ -94,5 +127,25 @@ mod tests {
     #[test]
     fn the_step_budget_defaults_to_the_agent_constant() {
         assert_eq!(CodingAgentConfig::DEFAULT_MAX_TURN_STEPS, 16);
+    }
+
+    #[test]
+    fn provider_flags_parse_and_stored_values_map() {
+        let args = parse(&["--provider", "llama-cpp", "--llama-url", "http://box:8080"]);
+        assert_eq!(args.provider, Some(ProviderChoice::LlamaCpp));
+        assert_eq!(args.llama_url.as_deref(), Some("http://box:8080"));
+        assert_eq!(
+            ProviderChoice::from_stored(Some("llama_cpp")),
+            ProviderChoice::LlamaCpp
+        );
+        assert_eq!(
+            ProviderChoice::from_stored(Some("google")),
+            ProviderChoice::Google
+        );
+        assert_eq!(ProviderChoice::from_stored(None), ProviderChoice::Google);
+        assert_eq!(
+            ProviderChoice::from_stored(Some("nonsense")),
+            ProviderChoice::Google
+        );
     }
 }
