@@ -9,12 +9,14 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod event;
 pub mod message;
 pub mod output;
 pub mod request;
 pub mod session;
 pub mod tool;
 
+pub use event::{Event, EventSink};
 pub use message::{Content, Message, Role};
 pub use output::{ModelOutput, Step, StopReason, Usage};
 pub use request::{ChatParams, ModelRequest, ToolSpec};
