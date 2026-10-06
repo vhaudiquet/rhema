@@ -48,7 +48,10 @@ pub enum Event<'a> {
 
 /// Receives a step's events. Drivers implement this to stream into a UI, a
 /// log, or a channel; a simple collector is a `Vec` behind a closure.
-pub trait EventSink {
+///
+/// `Send` because the sink reference crosses await points inside provider
+/// implementations, which must produce `Send` futures.
+pub trait EventSink: Send {
     /// Handle one event. Called synchronously, in stream order.
     fn emit(&mut self, event: Event<'_>);
 }

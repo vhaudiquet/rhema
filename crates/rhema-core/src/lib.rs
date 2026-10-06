@@ -24,6 +24,8 @@
 pub mod engine;
 pub mod event;
 pub mod message;
+#[cfg(feature = "mock")]
+pub mod mock;
 pub mod output;
 pub mod provider;
 pub mod request;
@@ -33,6 +35,8 @@ pub mod tool;
 pub use engine::{Agent, AgentBuilder, AgentError, run_turn};
 pub use event::{Event, EventSink};
 pub use message::{Content, Message, Role};
+#[cfg(feature = "mock")]
+pub use mock::MockProvider;
 pub use output::{ModelOutput, Step, StopReason, Usage};
 pub use provider::{ModelProvider, ProviderError};
 pub use request::{ChatParams, ModelRequest, ToolSpec};

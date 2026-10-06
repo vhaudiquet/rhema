@@ -24,12 +24,17 @@ pub struct MockProvider {
 impl MockProvider {
     /// A mock scripted with `replies`, consumed one per `complete()` call.
     pub fn new(replies: impl IntoIterator<Item = ModelOutput>) -> Self {
-        Self { replies: Mutex::new(replies.into_iter().collect()) }
+        Self {
+            replies: Mutex::new(replies.into_iter().collect()),
+        }
     }
 
     /// Appends one more reply to the script.
     pub fn push(&self, reply: ModelOutput) {
-        self.replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push_back(reply);
+        self.replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(reply);
     }
 }
 
@@ -40,7 +45,10 @@ impl ModelProvider for MockProvider {
         _req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        let mut replies = self.replies.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut replies = self
+            .replies
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let out = replies
             .pop_front()
             .ok_or_else(|| ProviderError::Api("mock provider script exhausted".into()))?;
@@ -50,7 +58,10 @@ impl ModelProvider for MockProvider {
             match content {
                 crate::message::Content::Text(text) => sink.emit(Event::TextDelta(text)),
                 crate::message::Content::ToolCall(call) => {
-                    sink.emit(Event::ToolCallStart { id: &call.id, name: &call.name });
+                    sink.emit(Event::ToolCallStart {
+                        id: &call.id,
+                        name: &call.name,
+                    });
                     sink.emit(Event::ToolCallArgsDelta(call.args.to_string().as_str()));
                 }
                 crate::message::Content::ToolResult(_) => {}
