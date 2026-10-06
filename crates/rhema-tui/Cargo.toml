@@ -1,0 +1,36 @@
+[package]
+name = "rhema-tui"
+description = "Full-screen terminal UI for the rhema coding agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "rhema-tui"
+path = "src/main.rs"
+
+[features]
+# Scripted MockProvider for offline turn-level tests; mirrors rhema-core's
+# feature.
+mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
+
+[dependencies]
+rhema-core = { path = "../rhema-core" }
+rhema-config = { path = "../rhema-config" }
+rhema-coding-agent = { path = "../rhema-coding-agent" }
+rhema-provider-google = { path = "../rhema-provider-google" }
+# Full-screen rendering; the crossterm version must stay the one ratatui
+# builds on so the event types unify.
+ratatui = "0.30"
+crossterm = "0.29"
+# Argument wiring and binary error reporting
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1"
+serde_json = { workspace = true }
+# Turn tasks and the unbounded UI event channel
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"

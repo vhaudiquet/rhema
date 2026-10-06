@@ -1,0 +1,738 @@
+//! The three screens' input handling and outcome logic — pure state, no
+//! terminal. The renderer reads these structs; [`crate::app`] routes their
+//! actions into transitions and effects.
+
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use rhema_provider_google::GeminiModel;
+
+/// The provider rows shown at login. Only Google is selectable; the rest
+/// render with a "(coming soon)" marker and refuse selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderEntry {
+    /// Display name.
+    pub name: &'static str,
+    /// Whether the row can be chosen.
+    pub selectable: bool,
+}
+
+/// The login provider list, in display order.
+pub const PROVIDERS: &[ProviderEntry] = &[
+    ProviderEntry {
+        name: "Google Gemini",
+        selectable: true,
+    },
+    ProviderEntry {
+        name: "Anthropic",
+        selectable: false,
+    },
+    ProviderEntry {
+        name: "OpenAI",
+        selectable: false,
+    },
+];
+
+/// Outcome marker for non-selectable providers.
+pub const COMING_SOON: &str = "(coming soon)";
+
+// --- Login ---
+
+/// Where the login screen stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginStatus {
+    /// Waiting for input.
+    Idle,
+    /// A key was submitted; validation is in flight. Enter is inert until
+    /// the outcome arrives.
+    Validating,
+    /// The last validation failed; the text is the provider's error.
+    Error(String),
+}
+
+/// What one login keypress means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoginAction {
+    /// Nothing to do.
+    None,
+    /// Validate the entered key against the provider.
+    Validate,
+    /// Leave the app (no key to log in with, nothing else to show).
+    Quit,
+}
+
+/// The login screen: provider list, masked API-key input, validation
+/// status.
+#[derive(Debug)]
+pub struct LoginScreen {
+    /// The API key being typed (rendered masked).
+    pub input: String,
+    /// Index into [`PROVIDERS`].
+    pub selected: usize,
+    /// Current status.
+    pub status: LoginStatus,
+}
+
+impl Default for LoginScreen {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LoginScreen {
+    /// A fresh login screen: Google selected, empty key, idle.
+    pub fn new() -> Self {
+        Self {
+            input: String::new(),
+            selected: 0,
+            status: LoginStatus::Idle,
+        }
+    }
+
+    /// The masked echo of the input: one bullet per character, no key
+    /// material ever rendered.
+    pub fn masked_input(&self) -> String {
+        "\u{2022}".repeat(self.input.chars().count())
+    }
+
+    /// Handles one keypress.
+    pub fn handle_key(&mut self, key: KeyEvent) -> LoginAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return LoginAction::None;
+        }
+        match key.code {
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                LoginAction::None
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                LoginAction::None
+            }
+            KeyCode::Up | KeyCode::Down => {
+                self.move_selection(key.code == KeyCode::Down);
+                LoginAction::None
+            }
+            KeyCode::Enter => self.submit(),
+            KeyCode::Esc => LoginAction::Quit,
+            _ => LoginAction::None,
+        }
+    }
+
+    /// Moves the selection among the selectable providers; with a single
+    /// selectable row the selection cannot move (the list is fixed).
+    fn move_selection(&mut self, down: bool) {
+        let selectable: Vec<usize> = PROVIDERS
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.selectable)
+            .map(|(index, _)| index)
+            .collect();
+        if selectable.is_empty() {
+            return;
+        }
+        let position = selectable
+            .iter()
+            .position(|&index| index == self.selected)
+            .unwrap_or(0);
+        let count = selectable.len() as isize;
+        let step = if down { 1 } else { -1 };
+        let next = (position as isize + step).rem_euclid(count) as usize;
+        self.selected = selectable[next];
+    }
+
+    /// Enter: validate the key, unless a validation is already in flight
+    /// or the input is blank.
+    fn submit(&mut self) -> LoginAction {
+        if matches!(self.status, LoginStatus::Validating) {
+            return LoginAction::None;
+        }
+        if self.input.trim().is_empty() {
+            return LoginAction::None;
+        }
+        self.status = LoginStatus::Validating;
+        LoginAction::Validate
+    }
+
+    /// Records the validation outcome: an error renders inline and allows
+    /// retrying; success leaves the transition to the app (it needs the
+    /// models and the store).
+    pub fn on_validated(&mut self, result: &Result<Vec<GeminiModel>, String>) {
+        if let Err(message) = result {
+            self.status = LoginStatus::Error(message.clone());
+        }
+    }
+}
+
+// --- Model picker ---
+
+/// Where the picker stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerStatus {
+    /// The model list is being fetched.
+    Loading,
+    /// Models are available.
+    Ready,
+    /// The fetch failed; the text is the provider's error. `r` retries.
+    Error(String),
+}
+
+/// What the picker returns to when dismissed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PickerPurpose {
+    /// No model is chosen yet; Esc quits the app.
+    Initial,
+    /// Opened mid-session with Ctrl-P; Esc returns to the chat.
+    FromChat,
+}
+
+/// What one picker keypress means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerAction {
+    /// Nothing to do.
+    None,
+    /// The highlighted model was chosen.
+    Choose(String),
+    /// Leave the app.
+    Quit,
+    /// Return to the chat.
+    BackToChat,
+    /// Retry the failed model fetch.
+    Retry,
+}
+
+/// The model picker: chat-capable models sorted by id, an optional filter
+/// prompt, and one highlighted row.
+#[derive(Debug)]
+pub struct PickerScreen {
+    /// The models to pick from, sorted by id.
+    pub models: Vec<GeminiModel>,
+    /// The filter text from the `/` prompt.
+    pub filter: String,
+    /// Whether the filter prompt is open.
+    pub filtering: bool,
+    /// Index into the filtered list of the highlighted row.
+    pub selected: usize,
+    /// Current status.
+    pub status: PickerStatus,
+    /// What Esc does here.
+    pub purpose: PickerPurpose,
+}
+
+impl PickerScreen {
+    /// A picker over `models` (sorted by id), initially unfiltered.
+    pub fn new(models: Vec<GeminiModel>, purpose: PickerPurpose) -> Self {
+        let mut models = models;
+        models.sort_by(|a, b| a.id.cmp(&b.id));
+        Self {
+            models,
+            filter: String::new(),
+            filtering: false,
+            selected: 0,
+            status: PickerStatus::Ready,
+            purpose,
+        }
+    }
+
+    /// Replaces the model list (re-sorted) and clamps the selection.
+    pub fn set_models(&mut self, models: Vec<GeminiModel>) {
+        self.models = models;
+        self.models.sort_by(|a, b| a.id.cmp(&b.id));
+        self.clamp_selection();
+    }
+
+    /// The models matching the filter: case-insensitive substring on id or
+    /// display name, in the sorted order.
+    pub fn filtered(&self) -> Vec<&GeminiModel> {
+        let needle = self.filter.to_lowercase();
+        self.models
+            .iter()
+            .filter(|model| {
+                needle.is_empty()
+                    || model.id.to_lowercase().contains(&needle)
+                    || model.display_name.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    fn clamp_selection(&mut self) {
+        let count = self.filtered().len();
+        if count == 0 {
+            self.selected = 0;
+        } else if self.selected >= count {
+            self.selected = count - 1;
+        }
+    }
+
+    /// Handles one keypress.
+    pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return PickerAction::None;
+        }
+        if self.filtering {
+            return self.handle_filter_key(key);
+        }
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.selected = self.selected.saturating_sub(1);
+                PickerAction::None
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.selected = (self.selected + 1).min(self.filtered().len().saturating_sub(1));
+                PickerAction::None
+            }
+            KeyCode::Char('/') if self.status == PickerStatus::Ready => {
+                self.filtering = true;
+                PickerAction::None
+            }
+            KeyCode::Enter => self.choose(),
+            KeyCode::Esc => match self.purpose {
+                PickerPurpose::Initial => PickerAction::Quit,
+                PickerPurpose::FromChat => PickerAction::BackToChat,
+            },
+            KeyCode::Char('r') => match self.status {
+                PickerStatus::Error(_) => {
+                    self.status = PickerStatus::Loading;
+                    PickerAction::Retry
+                }
+                _ => PickerAction::None,
+            },
+            _ => PickerAction::None,
+        }
+    }
+
+    /// Keys while the filter prompt is open: typing extends the filter,
+    /// Esc closes it, Enter picks the highlighted model. j/k are filter
+    /// text here; navigation is arrows-only while filtering.
+    fn handle_filter_key(&mut self, key: KeyEvent) -> PickerAction {
+        match key.code {
+            KeyCode::Char(c) => {
+                self.filter.push(c);
+                self.clamp_selection();
+                PickerAction::None
+            }
+            KeyCode::Backspace => {
+                self.filter.pop();
+                self.clamp_selection();
+                PickerAction::None
+            }
+            KeyCode::Esc => {
+                self.filter.clear();
+                self.filtering = false;
+                self.clamp_selection();
+                PickerAction::None
+            }
+            KeyCode::Enter => self.choose(),
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                PickerAction::None
+            }
+            KeyCode::Down => {
+                self.selected = (self.selected + 1).min(self.filtered().len().saturating_sub(1));
+                PickerAction::None
+            }
+            _ => PickerAction::None,
+        }
+    }
+
+    /// Enter: choose the highlighted model; an empty list chooses nothing.
+    fn choose(&mut self) -> PickerAction {
+        if self.status != PickerStatus::Ready {
+            return PickerAction::None;
+        }
+        match self.filtered().get(self.selected) {
+            Some(model) => PickerAction::Choose(model.id.clone()),
+            None => PickerAction::None,
+        }
+    }
+}
+
+// --- Chat input ---
+
+/// What one chat keypress means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatAction {
+    /// Nothing to do.
+    None,
+    /// Enter on the (possibly empty) input; the app drops empty and
+    /// suppresses submits while a turn runs.
+    Submit(String),
+}
+
+/// The chat screen's input-box state: text, cursor (character index), and
+/// the transcript scroll offset (lines kept above the bottom).
+#[derive(Debug, Default)]
+pub struct ChatState {
+    /// The input being typed.
+    pub input: String,
+    /// Cursor position as a character index into `input`.
+    pub cursor: usize,
+    /// Transcript scroll: lines scrolled up beyond the bottom.
+    pub scroll: usize,
+}
+
+impl ChatState {
+    /// A fresh input box.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Byte offset of the cursor inside `input` (a char boundary).
+    fn byte_offset(&self) -> usize {
+        self.input
+            .char_indices()
+            .nth(self.cursor)
+            .map(|(index, _)| index)
+            .unwrap_or(self.input.len())
+    }
+
+    /// Handles one keypress. Ctrl combos are the app's (quit, model
+    /// picker); Esc is the app's (approval decline / quit confirm).
+    pub fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return ChatAction::None;
+        }
+        match key.code {
+            KeyCode::Char(c) => {
+                self.input.insert(self.byte_offset(), c);
+                self.cursor += 1;
+                ChatAction::None
+            }
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    let end = self.byte_offset();
+                    self.cursor -= 1;
+                    let start = self.byte_offset();
+                    self.input.replace_range(start..end, "");
+                }
+                ChatAction::None
+            }
+            KeyCode::Delete => {
+                let start = self.byte_offset();
+                if start < self.input.len() {
+                    self.cursor += 1;
+                    let end = self.byte_offset();
+                    self.cursor -= 1;
+                    self.input.replace_range(start..end, "");
+                }
+                ChatAction::None
+            }
+            KeyCode::Left => {
+                self.cursor = self.cursor.saturating_sub(1);
+                ChatAction::None
+            }
+            KeyCode::Right => {
+                self.cursor = (self.cursor + 1).min(self.input.chars().count());
+                ChatAction::None
+            }
+            KeyCode::Home => {
+                self.cursor = 0;
+                ChatAction::None
+            }
+            KeyCode::End => {
+                self.cursor = self.input.chars().count();
+                ChatAction::None
+            }
+            KeyCode::PageUp => {
+                self.scroll = self.scroll.saturating_add(10);
+                ChatAction::None
+            }
+            KeyCode::PageDown => {
+                self.scroll = self.scroll.saturating_sub(10);
+                ChatAction::None
+            }
+            KeyCode::Enter => ChatAction::Submit(self.input.clone()),
+            _ => ChatAction::None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhema_provider_google::GeminiModel;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    fn model(id: &str, display: &str, chat: bool) -> GeminiModel {
+        GeminiModel {
+            id: id.into(),
+            display_name: display.into(),
+            description: String::new(),
+            input_token_limit: Some(1_048_576),
+            output_token_limit: Some(65_536),
+            generation_methods: if chat {
+                vec!["generateContent".into()]
+            } else {
+                vec!["generateAudio".into()]
+            },
+        }
+    }
+
+    // --- Login ---
+
+    #[test]
+    fn login_buffers_typing_and_masks_it() {
+        let mut login = LoginScreen::new();
+        for c in "sk-abc".chars() {
+            login.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(login.input, "sk-abc");
+        login.handle_key(key(KeyCode::Backspace));
+        assert_eq!(login.input, "sk-ab");
+        assert_eq!(
+            login.masked_input(),
+            "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"
+        );
+        assert!(!login.masked_input().contains("sk"));
+    }
+
+    #[test]
+    fn login_enter_with_a_blank_input_does_nothing() {
+        let mut login = LoginScreen::new();
+        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
+        assert_eq!(login.status, LoginStatus::Idle);
+        login.input = "   ".into();
+        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
+    }
+
+    #[test]
+    fn login_enter_validates_and_locks_until_the_outcome() {
+        let mut login = LoginScreen::new();
+        login.input = " key ".into();
+        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::Validate);
+        assert_eq!(login.status, LoginStatus::Validating);
+        // A validation in flight swallows Enter.
+        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
+        assert_eq!(login.status, LoginStatus::Validating);
+    }
+
+    #[test]
+    fn login_error_renders_inline_and_allows_retry() {
+        let mut login = LoginScreen::new();
+        login.input = "bad-key".into();
+        login.status = LoginStatus::Validating;
+        login.on_validated(&Err("gemini api error (HTTP 403): denied".into()));
+        assert_eq!(
+            login.status,
+            LoginStatus::Error("gemini api error (HTTP 403): denied".into())
+        );
+        // Error state accepts Enter again (retry).
+        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::Validate);
+    }
+
+    #[test]
+    fn login_selection_stays_on_the_only_selectable_provider() {
+        let mut login = LoginScreen::new();
+        login.handle_key(key(KeyCode::Down));
+        login.handle_key(key(KeyCode::Up));
+        assert_eq!(login.selected, 0);
+        assert!(PROVIDERS[0].selectable);
+        assert!(!PROVIDERS[1].selectable);
+        assert!(!PROVIDERS[2].selectable);
+    }
+
+    // --- Picker ---
+
+    fn picker() -> PickerScreen {
+        PickerScreen::new(
+            vec![
+                model("gemini-3.8-pro", "Gemini 3.8 Pro", true),
+                model("gemini-3.8-flash", "Gemini 3.8 Flash", true),
+                model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", true),
+            ],
+            PickerPurpose::Initial,
+        )
+    }
+
+    #[test]
+    fn picker_sorts_by_id() {
+        let picker = picker();
+        let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["gemini-3.8-flash", "gemini-3.8-flash-tts", "gemini-3.8-pro"]
+        );
+    }
+
+    #[test]
+    fn picker_filter_matches_id_or_display_name_case_insensitively() {
+        let mut picker = picker();
+        picker.filter = "FLASH".into();
+        let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gemini-3.8-flash", "gemini-3.8-flash-tts"]);
+
+        picker.filter = "3.8 pro".into();
+        let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gemini-3.8-pro"]);
+
+        picker.filter = "zzz".into();
+        assert!(picker.filtered().is_empty());
+    }
+
+    #[test]
+    fn picker_slash_opens_the_filter_prompt_and_typing_filters() {
+        let mut picker = picker();
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Char('/'))),
+            PickerAction::None
+        );
+        assert!(picker.filtering);
+        picker.handle_key(key(KeyCode::Char('p')));
+        picker.handle_key(key(KeyCode::Char('R')));
+        assert_eq!(picker.filter, "pR");
+        let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["gemini-3.8-pro"]);
+        picker.handle_key(key(KeyCode::Esc));
+        assert!(!picker.filtering);
+        assert_eq!(picker.filter, "");
+    }
+
+    #[test]
+    fn picker_enter_while_filtering_chooses_the_highlighted_model() {
+        let mut picker = picker();
+        picker.handle_key(key(KeyCode::Char('/')));
+        for c in "tts".chars() {
+            picker.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Enter)),
+            PickerAction::Choose("gemini-3.8-flash-tts".into())
+        );
+    }
+
+    #[test]
+    fn picker_navigation_clamps_to_the_list() {
+        let mut picker = picker();
+        for _ in 0..10 {
+            picker.handle_key(key(KeyCode::Char('j')));
+        }
+        assert_eq!(picker.selected, 2);
+        picker.handle_key(key(KeyCode::Up));
+        assert_eq!(picker.selected, 1);
+        picker.handle_key(key(KeyCode::Char('k')));
+        picker.handle_key(key(KeyCode::Char('k')));
+        assert_eq!(picker.selected, 0);
+    }
+
+    #[test]
+    fn picker_enter_chooses_nothing_on_an_empty_list() {
+        let mut picker = picker();
+        picker.filter = "zzz".into();
+        assert_eq!(picker.handle_key(key(KeyCode::Enter)), PickerAction::None);
+    }
+
+    #[test]
+    fn picker_esc_quits_initially_and_returns_to_chat_mid_session() {
+        let mut picker = picker();
+        assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::Quit);
+        let mut picker = PickerScreen::new(Vec::new(), PickerPurpose::FromChat);
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Esc)),
+            PickerAction::BackToChat
+        );
+    }
+
+    #[test]
+    fn picker_r_retries_only_from_the_error_state() {
+        let mut picker = picker();
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Char('r'))),
+            PickerAction::None
+        );
+        picker.status = PickerStatus::Error("network error".into());
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Char('r'))),
+            PickerAction::Retry
+        );
+        assert_eq!(picker.status, PickerStatus::Loading);
+    }
+
+    #[test]
+    fn picker_set_models_replaces_and_clamps() {
+        let mut picker = picker();
+        picker.selected = 2;
+        picker.set_models(vec![model("a-model", "A", true)]);
+        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.models[0].id, "a-model");
+    }
+
+    #[test]
+    fn picker_backspace_shrinks_the_filter() {
+        let mut picker = picker();
+        picker.handle_key(key(KeyCode::Char('/')));
+        picker.handle_key(key(KeyCode::Char('a')));
+        picker.handle_key(key(KeyCode::Char('b')));
+        picker.handle_key(key(KeyCode::Backspace));
+        assert_eq!(picker.filter, "a");
+    }
+
+    // --- Chat input ---
+
+    #[test]
+    fn chat_input_buffers_with_cursor_editing() {
+        let mut chat = ChatState::new();
+        for c in "helo".chars() {
+            chat.handle_key(key(KeyCode::Char(c)));
+        }
+        chat.handle_key(key(KeyCode::Left));
+        chat.handle_key(key(KeyCode::Left));
+        // cursor sits between "hel" and "o"
+        chat.handle_key(key(KeyCode::Char('l')));
+        assert_eq!(chat.input, "hello");
+        assert_eq!(chat.cursor, 3);
+        chat.handle_key(key(KeyCode::Backspace));
+        assert_eq!(chat.input, "helo");
+        chat.handle_key(key(KeyCode::End));
+        chat.handle_key(key(KeyCode::Char('!')));
+        assert_eq!(chat.input, "helo!");
+        chat.handle_key(key(KeyCode::Home));
+        chat.handle_key(key(KeyCode::Delete));
+        assert_eq!(chat.input, "elo!");
+    }
+
+    #[test]
+    fn chat_enter_submits_the_input_text() {
+        let mut chat = ChatState::new();
+        for c in "fix it".chars() {
+            chat.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Submit("fix it".into())
+        );
+        // The input box is NOT cleared here: the app clears it only when
+        // it accepts the submit (a rejected submit — empty or mid-turn —
+        // must not lose typed text).
+        assert_eq!(chat.input, "fix it");
+    }
+
+    #[test]
+    fn chat_enter_on_an_empty_input_yields_an_empty_submit() {
+        let mut chat = ChatState::new();
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Submit(String::new())
+        );
+    }
+
+    #[test]
+    fn chat_scroll_moves_with_page_keys_and_never_goes_negative() {
+        let mut chat = ChatState::new();
+        chat.handle_key(key(KeyCode::PageUp));
+        assert_eq!(chat.scroll, 10);
+        chat.handle_key(key(KeyCode::PageDown));
+        chat.handle_key(key(KeyCode::PageDown));
+        assert_eq!(chat.scroll, 0);
+    }
+
+    #[test]
+    fn chat_ctrl_combos_are_left_to_the_app() {
+        let mut chat = ChatState::new();
+        assert_eq!(
+            chat.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ChatAction::None
+        );
+        assert_eq!(chat.input, "");
+    }
+}
