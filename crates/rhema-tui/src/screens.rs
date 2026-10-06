@@ -218,10 +218,10 @@ pub struct PickerScreen {
 }
 
 impl PickerScreen {
-    /// A picker over `models` (sorted by id, non-text models dropped),
+    /// A picker over `models` (sorted by id, text chat models only),
     /// initially unfiltered.
     pub fn new(mut models: Vec<GeminiModel>, purpose: PickerPurpose) -> Self {
-        models.retain(|model| model.supports_chat() && model.is_text());
+        models.retain(Self::usable);
         models.sort_by(|a, b| a.id.cmp(&b.id));
         Self {
             models,
@@ -233,11 +233,16 @@ impl PickerScreen {
         }
     }
 
+    /// The models this coding agent can drive: text chat models.
+    fn usable(model: &GeminiModel) -> bool {
+        model.supports_chat() && model.is_text()
+    }
+
     /// Replaces the model list (scoped and re-sorted) and clamps the
     /// selection.
     pub fn set_models(&mut self, models: Vec<GeminiModel>) {
         let mut models = models;
-        models.retain(|model| model.supports_chat() && model.is_text());
+        models.retain(Self::usable);
         self.models = models;
         self.models.sort_by(|a, b| a.id.cmp(&b.id));
         self.clamp_selection();
@@ -466,6 +471,7 @@ mod tests {
     }
 
     fn model(id: &str, display: &str, chat: bool) -> GeminiModel {
+        assert!(chat, "pickers only list chat models");
         GeminiModel {
             id: id.into(),
             display_name: display.into(),

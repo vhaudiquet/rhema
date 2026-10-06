@@ -25,6 +25,16 @@ pub fn render(app: &App, frame: &mut Frame) {
         Screen::Login(login) => render_login(frame, login),
         Screen::Picker(picker) => render_picker(frame, picker),
         Screen::Chat => {
+            // An error wraps, so the status strip grows to its wrapped
+            // height; every other strip is fixed.
+            let status_rows = app
+                .error
+                .as_ref()
+                .map(|error| {
+                    wrap_line(&Line::from(error.clone()), frame.area().width as usize).len() as u16
+                })
+                .unwrap_or(1)
+                .max(1);
             let [
                 header_area,
                 transcript_area,
@@ -34,7 +44,7 @@ pub fn render(app: &App, frame: &mut Frame) {
             ] = Layout::vertical([
                 Constraint::Length(4),
                 Constraint::Min(0),
-                Constraint::Length(1),
+                Constraint::Length(status_rows),
                 Constraint::Length(3),
                 Constraint::Length(1),
             ])
@@ -271,8 +281,6 @@ fn model_row(provider: &str, model: &GeminiModel) -> Line<'static> {
         Span::raw(format!("{provider}/")).dim(),
         Span::raw(model.id.clone()).bold(),
         Span::raw("  "),
-        Span::raw(model.display_name.clone()),
-        Span::raw("  "),
         Span::raw(details).dim(),
     ])
 }
@@ -386,22 +394,33 @@ fn render_line(line: &transcript::Line) -> Line<'static> {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let line = if let Some(error) = &app.error {
-        Line::from(error.clone()).red().bold()
+    let width = area.width as usize;
+    let mut lines: Vec<Line> = if let Some(error) = &app.error {
+        wrap_line(&Line::from(error.clone()), width)
+            .into_iter()
+            .map(|line| line.style(Style::default().fg(Color::Red).bold()))
+            .collect()
     } else if app.running {
         let elapsed = app
             .turn_started
             .map(|started| format!(" · {}s", started.elapsed().as_secs()))
             .unwrap_or_default();
-        Line::from(vec![
+        vec![Line::from(vec![
             Span::styled("✳ thinking", Style::default().fg(accent())),
             Span::raw(elapsed).dim(),
             Span::raw(" · esc declines pending tools").dim(),
-        ])
+        ])]
     } else {
-        Line::from("")
+        vec![Line::from("")]
     };
-    frame.render_widget(Paragraph::new(line), area);
+    if app.chat.scroll > 0 && app.error.is_none() {
+        lines
+            .last_mut()
+            .unwrap()
+            .spans
+            .push(Span::raw("  ·  viewing history · pgdn: latest").dim());
+    }
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The dim telemetry strip under the input: last turn's tokens, and the
