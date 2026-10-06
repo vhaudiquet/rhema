@@ -72,6 +72,8 @@ mod tests {
                     id: "call_1".into(),
                     name: "cargo_test".into(),
                     args: serde_json::json!({ "package": "rhema-core" }),
+
+                    provider_data: serde_json::Value::Null,
                 }),
             ],
         };

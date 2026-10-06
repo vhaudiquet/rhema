@@ -500,6 +500,8 @@ mod tests {
             id: "c1".into(),
             name: "write_file".into(),
             args: serde_json::json!({ "path": "x" }),
+
+            provider_data: serde_json::Value::Null,
         }
     }
 

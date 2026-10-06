@@ -49,6 +49,8 @@ async fn main() {
                     id: "call_1".into(),
                     name: "echo".into(),
                     args: json!({ "text": "hello, rhema" }),
+
+                    provider_data: serde_json::Value::Null,
                 })],
             },
             stop_reason: StopReason::ToolUse,

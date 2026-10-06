@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 /// One tool invocation requested by the model.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Model-chosen correlation id; the result must carry it back.
     pub id: String,
@@ -22,6 +22,14 @@ pub struct ToolCall {
     pub name: String,
     /// Arguments as JSON, validated against the spec's `parameters` schema.
     pub args: serde_json::Value,
+    /// Opaque provider metadata that must round-trip with this call through
+    /// the session history. Stateful providers mark their function calls
+    /// (e.g. Gemini's thought signatures) and reject replays that lose the
+    /// marker; the provider stores it here on the way in and reads it back
+    /// on the way out. Crate 1 never interprets it — the provider owns the
+    /// shape.
+    #[serde(default)]
+    pub provider_data: serde_json::Value,
 }
 
 /// The outcome of resolving one [`ToolCall`], appended to the session

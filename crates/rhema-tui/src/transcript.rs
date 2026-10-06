@@ -230,6 +230,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             args: json!({ "path": "notes.txt" }),
+            provider_data: serde_json::Value::Null,
         }
     }
 

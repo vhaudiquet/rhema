@@ -105,6 +105,8 @@ mod tests {
             id: "c1".into(),
             name: "write_file".into(),
             args: json!({ "path": "notes.txt" }),
+
+            provider_data: serde_json::Value::Null,
         }
     }
 

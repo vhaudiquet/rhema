@@ -23,6 +23,8 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
         id: id.into(),
         name: name.into(),
         args,
+
+        provider_data: serde_json::Value::Null,
     }
 }
 
