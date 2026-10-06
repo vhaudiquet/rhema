@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Valentin Haudiquet"]
+
+[workspace.dependencies]
+# Serialization: session and message types must round-trip for checkpointing
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Typed library errors
+thiserror = "2"
+# Async traits must stay object-safe (dyn ModelProvider, dyn ToolResolver)
+async-trait = "0.1"
+# Test runtime
+tokio = { version = "1", features = ["macros", "rt"] }
