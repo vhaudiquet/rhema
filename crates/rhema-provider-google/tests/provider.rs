@@ -71,6 +71,8 @@ async fn streams_sse_into_events_and_an_assembled_output() {
                 id: "call_0".into(),
                 name: "echo".into(),
                 args: json!({ "x": 1 }),
+
+                provider_data: serde_json::Value::Null
             }),
         ]
     );

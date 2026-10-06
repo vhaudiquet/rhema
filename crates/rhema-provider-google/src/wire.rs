@@ -83,6 +83,11 @@ pub struct WirePart {
     /// Present on a function-response part (requests only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub function_response: Option<WireFunctionResponse>,
+    /// Thinking-model marker attached to function calls: the API rejects
+    /// history replays that drop it, so it round-trips through
+    /// `ToolCall::provider_data`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 /// A `functionCall` part: the model requesting a tool invocation.
@@ -279,6 +284,7 @@ pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, Provid
                 Content::ToolCall(call) => {
                     call_names.insert(call.id.clone(), call.name.clone());
                     parts.push(WirePart {
+                        thought_signature: thought_signature(&call.provider_data),
                         function_call: Some(WireFunctionCall {
                             // Synthesized rhema-core ids are never echoed;
                             // the model matches by name.
@@ -383,6 +389,16 @@ fn texts_of(message: &Message) -> Vec<String> {
         .collect()
 }
 
+/// Extracts the thought signature the provider stored in
+/// `ToolCall::provider_data` on the way in; `None` when absent.
+fn thought_signature(provider_data: &Value) -> Option<String> {
+    provider_data
+        .get("thoughtSignature")
+        .and_then(|value| value.as_str())
+        .filter(|signature| !signature.is_empty())
+        .map(str::to_owned)
+}
+
 /// `functionCall.args` must be a JSON object: objects pass through, absent
 /// args become `{}`, anything else is wrapped under [`WRAPPED_ARGS_KEY`].
 fn object_args(args: &Value) -> Value {
@@ -471,6 +487,12 @@ impl PartNormalizer {
                 Some(id) if !id.is_empty() => id.clone(),
                 _ => format!("call_{index}"),
             };
+            let provider_data = match &part.thought_signature {
+                Some(signature) if !signature.is_empty() => {
+                    serde_json::json!({ "thoughtSignature": signature })
+                }
+                _ => Value::Null,
+            };
             return Some(NormalizedPart::ToolCall(ToolCall {
                 id,
                 name: call.name.clone(),
@@ -478,6 +500,7 @@ impl PartNormalizer {
                     .args
                     .clone()
                     .unwrap_or_else(|| Value::Object(serde_json::Map::new())),
+                provider_data,
             }));
         }
         match part.text.as_deref() {
@@ -667,6 +690,60 @@ mod tests {
     use rhema_core::tool::ToolResult;
     use serde_json::json;
 
+    #[test]
+    fn thought_signatures_round_trip_through_provider_data() {
+        // The wire part carries a signature; the mapped ToolCall must keep
+        // it in the opaque provider_data slot.
+        let part: WirePart = serde_json::from_str(
+            // thoughtSignature lives on the Part, next to functionCall.
+            r#"{"functionCall": {"id": "abc", "name": "list_dir", "args": {}},
+                "thoughtSignature": "sig1"}"#,
+        )
+        .unwrap();
+        let mut normalizer = PartNormalizer::new();
+        let Some(NormalizedPart::ToolCall(call)) = normalizer.normalize(&part) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(call.provider_data, json!({ "thoughtSignature": "sig1" }));
+
+        // Replaying the call through history must put the signature back on
+        // the wire part — the API rejects the replay otherwise.
+        let request = rhema_core::request::ModelRequest {
+            system: None,
+            messages: vec![
+                rhema_core::Message {
+                    role: rhema_core::Role::Assistant,
+                    content: vec![rhema_core::Content::ToolCall(call)],
+                },
+                rhema_core::Message {
+                    role: rhema_core::Role::Tool,
+                    content: vec![rhema_core::Content::ToolResult(ToolResult::success(
+                        "abc", "ok",
+                    ))],
+                },
+            ],
+            tools: vec![],
+            params: ChatParams::new("m"),
+        };
+        let body = serde_json::to_value(request_body(&request).unwrap()).unwrap();
+        assert_eq!(body["contents"][0]["parts"][0]["thoughtSignature"], "sig1");
+        assert_eq!(
+            body["contents"][1]["parts"][0]["functionResponse"]["name"],
+            "list_dir"
+        );
+    }
+
+    #[test]
+    fn a_call_without_a_signature_maps_to_null_provider_data() {
+        let part: WirePart =
+            serde_json::from_str(r#"{"functionCall": {"name": "list_dir", "args": {}}}"#).unwrap();
+        let mut normalizer = PartNormalizer::new();
+        let Some(NormalizedPart::ToolCall(call)) = normalizer.normalize(&part) else {
+            panic!("expected a tool call");
+        };
+        assert_eq!(call.provider_data, serde_json::Value::Null);
+    }
+
     /// Records events as their debug strings; `Event` borrows, so this keeps
     /// the assertions format-based.
     struct Collector(Vec<String>);
@@ -701,6 +778,8 @@ mod tests {
                             id: "call_0".into(),
                             name: "list_dir".into(),
                             args: json!({ "path": "." }),
+
+                            provider_data: serde_json::Value::Null,
                         }),
                     ],
                 },
@@ -809,6 +888,8 @@ mod tests {
                         id: "call_0".into(),
                         name: "odd".into(),
                         args: json!("not an object"),
+
+                        provider_data: serde_json::Value::Null,
                     })],
                 },
                 Message {
@@ -817,6 +898,8 @@ mod tests {
                         id: "call_1".into(),
                         name: "bare".into(),
                         args: Value::Null,
+
+                        provider_data: serde_json::Value::Null,
                     })],
                 },
             ],
@@ -914,6 +997,8 @@ mod tests {
                 id: "call_0".into(),
                 name: "echo".into(),
                 args: json!({ "x": 1 }),
+
+                provider_data: serde_json::Value::Null
             })]
         );
         assert_eq!(
@@ -970,6 +1055,8 @@ mod tests {
                 id: "call_0".into(),
                 name: "bare".into(),
                 args: json!({}),
+
+                provider_data: serde_json::Value::Null
             })]
         );
     }
