@@ -447,30 +447,29 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
 /// The dim telemetry strip under the input: last turn's tokens, and the
 /// history-pinned indicator.
-/// The completion popup: while the input names commands, it floats above
-/// the input listing the matches — command in accent, description dim,
-/// the highlighted row on elevated. Tab completes, enter runs.
+/// The completion popup: while the input names commands, the matches
+/// float above it — full terminal width, the shared background, no panel.
+/// The command reads in accent, the description dim, and the highlighted
+/// row carries the elevated tone. Tab completes, enter runs.
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme: &Theme) {
     let candidates = crate::screens::filtered_commands(&app.chat.input);
     if candidates.is_empty() {
         return;
     }
     let visible = candidates.len().min(6) as u16;
-    let height = visible + 2;
     let area = Rect {
-        x: input_area.x + 1,
-        y: input_area.y.saturating_sub(height),
-        width: input_area.width.saturating_sub(2).min(72),
-        height,
+        x: input_area.x,
+        y: input_area.y.saturating_sub(visible),
+        width: input_area.width,
+        height: visible,
     };
+    // Clear erases the transcript beneath; the well tone is painted back
+    // so the rows sit on the shared background.
     frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.surface));
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.sunken)),
+        area,
+    );
 
     let selected = app.chat.palette_index.min(candidates.len() - 1);
     let rows: Vec<Line> = candidates
@@ -478,25 +477,18 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
         .take(visible as usize)
         .enumerate()
         .map(|(index, (name, description))| {
-            let mut style = Style::default().bg(theme.surface);
-            let mut name_style = Style::default().fg(theme.accent_text);
-            if index == selected {
-                style = style.bg(theme.elevated);
-                name_style = name_style.bold();
-            }
+            let row_bg = if index == selected {
+                Style::default().bg(theme.elevated)
+            } else {
+                Style::default().bg(theme.sunken)
+            };
             Line::from(vec![
-                Span::styled(name.to_string(), name_style.bg(style.bg.unwrap())),
-                Span::styled(
-                    format!("  {description}"),
-                    Style::default().fg(theme.text3).bg(style.bg.unwrap()),
-                ),
+                Span::styled(name.to_string(), row_bg.fg(theme.accent_text)),
+                Span::styled(format!("  {description}"), row_bg.fg(theme.text3)),
             ])
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(rows).style(Style::default().bg(theme.surface)),
-        inner,
-    );
+    frame.render_widget(Paragraph::new(rows), area);
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
