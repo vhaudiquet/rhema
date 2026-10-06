@@ -1889,6 +1889,7 @@ dependencies = [
  "rhema-config",
  "rhema-core",
  "rhema-provider-google",
+ "rhema-provider-llama-cpp",
  "serde_json",
  "tokio",
 ]
@@ -1939,6 +1940,21 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
+name = "rhema-provider-llama-cpp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "reqwest",
+ "rhema-core",
+ "serde",
+ "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "wiremock",
