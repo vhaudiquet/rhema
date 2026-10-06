@@ -23,7 +23,10 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   - `run_turn` — the provided coding-agent driver (~15 lines, not the primitive)
   - `MockProvider` — scripted offline provider, behind the `mock` feature
 - `rhema-provider-google` — Gemini adapter: streaming SSE, native function
-  calling, `GoogleProvider::new(api_key)` implements `ModelProvider`
+  calling, live model listing; `GoogleProvider::new(api_key)` implements
+  `ModelProvider`
+- `rhema-config` — the XDG config file: stored API key (0600) and
+  last-used model; env vars always win over the stored key
 - `rhema-coding-agent` — the coding-agent driver: built-in workspace tools
   (`read_file`, `list_dir`, `write_file`, `run_command`), per-turn approval
   gating, session save/resume
@@ -40,13 +43,16 @@ cargo run --bin rhema            # REPL in the current directory
 rhema [OPTIONS] [PROMPT]
 
   [PROMPT]               one-shot: a single turn, then exit
-  -m, --model <MODEL>    model name [default: gemini-2.5-flash]
+  -m, --model <MODEL>    model name [default: stored choice, then gemini-3.8-flash]
   -w, --workspace <DIR>  workspace root for tools [default: .]
       --resume <PATH>    resume a saved session file
       --save <PATH>      checkpoint the session after every turn
       --no-confirm       approve gated tool calls without asking
       --max-steps <N>    max steps per turn [default: 16]
 ```
+
+The API key resolves from `GEMINI_API_KEY`, then `GOOGLE_API_KEY`, then the
+key stored in `~/.config/rhema/config.json` (what the TUI login writes).
 
 The model sees four tools, all scoped inside the workspace: `read_file`,
 `list_dir`, `write_file`, and `run_command` (`bash -c`, capped output, 120 s
