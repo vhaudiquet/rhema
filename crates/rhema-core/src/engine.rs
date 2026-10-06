@@ -12,11 +12,11 @@ use std::sync::Arc;
 
 use crate::event::{Event, EventSink};
 use crate::message::{Content, Message, Role};
-use crate::output::{Step, StopReason};
+use crate::output::{ModelOutput, Step, StopReason};
 use crate::provider::{ModelProvider, ProviderError};
 use crate::request::{ChatParams, ModelRequest};
 use crate::session::Session;
-use crate::tool::{ToolCall, ToolContext, ToolResult, ToolResolver};
+use crate::tool::{ToolContext, ToolResolver, ToolResult};
 
 /// Why a step or a turn failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -76,13 +76,20 @@ impl Agent {
         let iteration = self.steps;
         self.steps += 1;
 
-        let mut events = ForwardingSink { inner: sink, announced: HashSet::new() };
+        let mut events = ForwardingSink {
+            inner: sink,
+            announced: HashSet::new(),
+        };
         events.emit(Event::StepStart { iteration });
 
         let req = ModelRequest {
             system: self.system.clone(),
             messages: session.history.clone(),
-            tools: self.resolver.as_ref().map(|r| r.specs()).unwrap_or_default(),
+            tools: self
+                .resolver
+                .as_ref()
+                .map(|r| r.specs())
+                .unwrap_or_default(),
             params: self.params.clone(),
         };
         let out = self.provider.complete(req, &mut events).await?;
@@ -104,7 +111,10 @@ impl Agent {
                 if !events.announced.contains(&call.id) {
                     // A provider that did not stream the call start still
                     // owes the sink one lifecycle event before the result.
-                    events.emit(Event::ToolCallStart { id: &call.id, name: &call.name });
+                    events.emit(Event::ToolCallStart {
+                        id: &call.id,
+                        name: &call.name,
+                    });
                 }
                 let result = match &self.resolver {
                     Some(resolver) => resolver.resolve(call.clone(), ctx).await,
@@ -122,7 +132,10 @@ impl Agent {
             }
         }
 
-        events.emit(Event::StepEnd { usage: out.usage, stop_reason: &out.stop_reason });
+        events.emit(Event::StepEnd {
+            usage: out.usage,
+            stop_reason: &out.stop_reason,
+        });
         Ok(Step { output: out })
     }
 }

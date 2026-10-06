@@ -1,14 +1,27 @@
 //! rhema-core — a small, embeddable, generic step engine for model exchanges.
 //!
-//! The primitive is `Agent::step` (coming in the engine module): ONE
-//! exchange with a model — build the request from the caller-owned session,
-//! stream through a model provider, append the assistant message, resolve
-//! tool calls, append the results. The engine never loops, never persists;
-//! those belong to drivers (SPEC.md §0, §5).
+//! The primitive is [`Agent::step`]: ONE exchange with a model. Build the
+//! request from the caller-owned [`Session`], stream it through a
+//! [`ModelProvider`], append the assistant message to the session, resolve
+//! any tool calls through a [`ToolResolver`], and append the results. The
+//! engine never loops, never dispatches, never persists — those belong to
+//! drivers (SPEC.md §0, §5).
+//!
+//! Layout:
+//! - [`message`] — `Role`, `Content`, `Message`
+//! - [`session`] — the caller-owned, serializable `Session`
+//! - [`request`] — `ModelRequest`, `ChatParams`, `ToolSpec`
+//! - [`output`] — `ModelOutput`, `StopReason`, `Usage`, `Step`
+//! - [`provider`] — the `ModelProvider` seam
+//! - [`tool`] — the `ToolResolver` seam
+//! - [`event`] — `Event`, `EventSink`
+//! - [`engine`] — the `Agent` step engine, `AgentBuilder`, `run_turn`
+//! - [`mock`] — scripted `MockProvider` (behind the `mock` feature)
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod engine;
 pub mod event;
 pub mod message;
 pub mod output;
@@ -17,6 +30,7 @@ pub mod request;
 pub mod session;
 pub mod tool;
 
+pub use engine::{Agent, AgentBuilder, AgentError, run_turn};
 pub use event::{Event, EventSink};
 pub use message::{Content, Message, Role};
 pub use output::{ModelOutput, Step, StopReason, Usage};
