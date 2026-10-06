@@ -294,7 +294,8 @@ impl App {
                     .collect::<Vec<_>>()
                     .join(" · ");
                 self.transcript.push_notice(&format!(
-                    "{commands} — keys: pgup/pgdn or wheel history · shift+drag to copy text"
+                    "{commands} — keys: ctrl-p model · pgup/pgdn or wheel history · \
+                     shift+drag to copy text · ctrl-c quit"
                 ));
             }
             "model" => {

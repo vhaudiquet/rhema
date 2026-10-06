@@ -500,36 +500,27 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    let line = match app.usage {
-        Some(usage) => {
-            // The last turn's input is exactly the context footprint that
-            // produced it.
-            let mut parts = vec![Span::raw(app.config.model.as_deref().unwrap_or("no model"))];
-            let context = format_tokens(Some(u64::from(usage.input_tokens)));
-            match app.current_context_window() {
-                Some(limit) => parts.push(Span::raw(format!(
-                    " · ctx {}/{}",
-                    context,
-                    format_tokens(Some(limit))
-                ))),
-                None => parts.push(Span::raw(format!(" · ctx {context}"))),
-            }
-            if app.session_cost > 0.0 {
-                parts.push(Span::raw(format!(" · session ${:.4}", app.session_cost)));
-            }
-            Line::from(parts)
-        }
-        None => Line::from(format!(
-            "{} · pgup/pgdn or wheel: history · ctrl-p: model · ctrl-c: quit",
-            app.config.model.as_deref().unwrap_or("no model")
-        )),
-    };
-    let mut line = line;
-    if app.chat.scroll > 0 && app.error.is_none() {
-        line.spans
-            .push(Span::raw("  ·  viewing history · pgdn: latest").fg(theme.text3));
+    // Always the same three facts: model, context footprint against the
+    // model's window, and the session's accumulated cost. Key hints live
+    // in /help, not here.
+    let mut parts =
+        vec![Span::raw(app.config.model.as_deref().unwrap_or("no model")).fg(theme.text2)];
+    let used = app.usage.map(|u| u64::from(u.input_tokens)).unwrap_or(0);
+    let mut context = format_tokens(Some(used));
+    if let Some(limit) = app.current_context_window() {
+        context.push_str(&format!("/{}", format_tokens(Some(limit))));
     }
-    frame.render_widget(Paragraph::new(line).fg(theme.text3), area);
+    parts.push(Span::raw(format!(" · {context}")).fg(theme.text3));
+    let cost = if app.session_cost >= 0.01 || app.session_cost == 0.0 {
+        format!("${:.2}", app.session_cost)
+    } else {
+        format!("${:.4}", app.session_cost)
+    };
+    parts.push(Span::raw(format!(" · {cost}")).fg(theme.text3));
+    if app.chat.scroll > 0 && app.error.is_none() {
+        parts.push(Span::raw(" · viewing history").fg(theme.text3));
+    }
+    frame.render_widget(Paragraph::new(Line::from(parts).left_aligned()), area);
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
