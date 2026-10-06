@@ -55,6 +55,18 @@ pub const COMING_SOON: &str = "(coming soon)";
 
 // --- Login ---
 
+/// What Esc means on the login screen: with no session behind it, leaving
+/// the login leaves the app; opened from the chat with `/login`, it goes
+/// back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginPurpose {
+    /// Startup without a usable backend: Esc quits.
+    Initial,
+    /// Opened from the chat via `/login`: Esc returns to the chat, and a
+    /// successful login lands in a picker that also knows the way back.
+    FromChat,
+}
+
 /// Where the login screen stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginStatus {
@@ -82,12 +94,14 @@ pub enum LoginAction {
 /// status.
 #[derive(Debug)]
 pub struct LoginScreen {
-    /// The API key being typed (rendered masked).
+    /// The API key or server URL being typed.
     pub input: String,
     /// Index into [`PROVIDERS`].
     pub selected: usize,
     /// Current status.
     pub status: LoginStatus,
+    /// What Esc does here.
+    pub purpose: LoginPurpose,
 }
 
 impl Default for LoginScreen {
@@ -97,26 +111,40 @@ impl Default for LoginScreen {
 }
 
 impl LoginScreen {
-    /// A fresh login screen: Google selected, empty key, idle.
+    /// A fresh login screen: Google selected, empty key, idle, Esc quits.
     pub fn new() -> Self {
         Self {
             input: String::new(),
             selected: 0,
             status: LoginStatus::Idle,
+            purpose: LoginPurpose::Initial,
+        }
+    }
+
+    /// A login screen opened from the chat: Esc returns there.
+    pub fn for_chat() -> Self {
+        Self {
+            purpose: LoginPurpose::FromChat,
+            ..Self::new()
+        }
+    }
+
+    /// The hint under the input, per the highlighted provider and what Esc
+    /// does.
+    pub fn input_hint(&self) -> String {
+        let base = match self.selected_provider() {
+            Some(LoginProvider::LlamaCpp) => "enter your llama.cpp server URL, then press enter",
+            _ => "enter your Google API key, then press enter",
+        };
+        match self.purpose {
+            LoginPurpose::FromChat => format!("{base} · esc back"),
+            LoginPurpose::Initial => base.to_owned(),
         }
     }
 
     /// The backend the highlighted row configures, when implemented.
     pub fn selected_provider(&self) -> Option<LoginProvider> {
         PROVIDERS.get(self.selected).and_then(|entry| entry.kind)
-    }
-
-    /// The hint under the input, per the highlighted provider.
-    pub fn input_hint(&self) -> &'static str {
-        match self.selected_provider() {
-            Some(LoginProvider::LlamaCpp) => "enter your llama.cpp server URL, then press enter",
-            _ => "enter your Google API key, then press enter",
-        }
     }
 
     /// The input's label, per the highlighted provider.

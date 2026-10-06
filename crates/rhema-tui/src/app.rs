@@ -15,8 +15,8 @@ use rhema_provider_google::GeminiModel;
 use crate::approval::ApprovalAnswerer;
 use crate::events::{FetchWhy, UiEvent};
 use crate::screens::{
-    ChatAction, ChatState, LoginAction, LoginScreen, LoginStatus, PickerAction, PickerPurpose,
-    PickerScreen, PickerStatus,
+    ChatAction, ChatState, LoginAction, LoginPurpose, LoginScreen, LoginStatus, PickerAction,
+    PickerPurpose, PickerScreen, PickerStatus,
 };
 use crate::store::ConfigStore;
 use crate::transcript::Transcript;
@@ -280,9 +280,28 @@ impl App {
     fn handle_command(&mut self, command: &str) {
         match command {
             "help" => self.transcript.push_notice(
-                "commands: /help · /clear (fresh session) · /exit (quit) — keys: \
-                 ctrl-p model · pgup/pgdn or wheel history · shift+drag to copy text",
+                "commands: /help · /model (pick model) · /login (re-login) · \
+                 /clear (fresh session) · /exit (quit) — keys: pgup/pgdn or wheel \
+                 history · shift+drag to copy text",
             ),
+            "model" => {
+                if self.running {
+                    self.transcript
+                        .push_notice("a turn is running — /model waits for it to finish");
+                } else {
+                    self.open_picker();
+                }
+            }
+            "login" => {
+                if self.running {
+                    self.transcript
+                        .push_notice("a turn is running — /login waits for it to finish");
+                } else {
+                    // The session stays right where it is: a successful
+                    // login lands in a picker that rebuilds onto it.
+                    self.screen = Screen::Login(crate::screens::LoginScreen::for_chat());
+                }
+            }
             "clear" => {
                 if let Some(agent) = self.agent.as_mut() {
                     agent.session_mut().history.clear();
@@ -338,7 +357,16 @@ impl App {
             }
             Routed::Picker(PickerAction::Retry) => self.retry_fetch(),
             Routed::Login(LoginAction::Quit) => {
-                self.should_quit = true;
+                // With a session behind the login, Esc means "back".
+                let from_chat = matches!(
+                    &self.screen,
+                    Screen::Login(login) if login.purpose == LoginPurpose::FromChat
+                );
+                if from_chat {
+                    self.screen = Screen::Chat;
+                } else {
+                    self.should_quit = true;
+                }
                 Vec::new()
             }
             Routed::Picker(PickerAction::None) | Routed::Login(LoginAction::None) => Vec::new(),
@@ -499,6 +527,9 @@ impl App {
                 let Screen::Login(login) = &mut self.screen else {
                     return;
                 };
+                // A login opened from the chat lands in a picker that also
+                // knows the way back.
+                let from_chat = login.purpose == LoginPurpose::FromChat;
                 match result {
                     Ok(models) => {
                         match &backend {
@@ -526,8 +557,12 @@ impl App {
                             self.choose_model(&id);
                             return;
                         }
-                        self.screen =
-                            Screen::Picker(PickerScreen::new(models, PickerPurpose::Initial));
+                        let purpose = if from_chat {
+                            PickerPurpose::FromChat
+                        } else {
+                            PickerPurpose::Initial
+                        };
+                        self.screen = Screen::Picker(PickerScreen::new(models, purpose));
                     }
                     Err(message) => login.on_validated(&Err(message)),
                 }
@@ -1162,6 +1197,69 @@ mod tests {
         let mut h = harness(None, None, Session::default());
         h.app.on_key(ctrl('c'));
         assert!(h.app.should_quit);
+    }
+
+    #[test]
+    fn slash_model_opens_the_picker_and_esc_returns_to_the_chat() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.handle_command("model");
+        match &h.app.screen {
+            Screen::Picker(picker) => {
+                assert_eq!(picker.purpose, PickerPurpose::FromChat);
+            }
+            _ => panic!("expected the picker"),
+        }
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(matches!(h.app.screen, Screen::Chat));
+    }
+
+    #[test]
+    fn slash_login_opens_the_login_and_esc_returns_without_quitting() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.handle_command("login");
+        match &h.app.screen {
+            Screen::Login(login) => {
+                assert_eq!(login.purpose, LoginPurpose::FromChat);
+            }
+            _ => panic!("expected the login screen"),
+        }
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(!h.app.should_quit, "esc goes back, not out");
+    }
+
+    #[test]
+    fn slash_login_success_chains_into_a_picker_that_knows_the_way_back() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.handle_command("login");
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::Google {
+                    api_key: "k".into(),
+                },
+            },
+            result: Ok(models()),
+        });
+        match &h.app.screen {
+            Screen::Picker(picker) => {
+                assert_eq!(picker.purpose, PickerPurpose::FromChat);
+            }
+            _ => panic!("expected the picker"),
+        }
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(matches!(h.app.screen, Screen::Chat));
+    }
+
+    #[test]
+    fn slash_model_during_a_turn_declines_with_a_notice() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.running = true;
+        h.app.handle_command("model");
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("waits for it to finish")
+        ));
     }
 
     #[test]
