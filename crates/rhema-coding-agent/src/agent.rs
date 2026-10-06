@@ -43,7 +43,9 @@ pub fn default_system(workspace: &Path) -> String {
         "You are a coding agent working in the workspace {}. \
 Inspect before you edit: read files and list directories before changing them. \
 Prefer small diffs over rewrites. Tool errors are recoverable: report what \
-failed and adapt. Tool paths stay inside the workspace.",
+failed and adapt. Tool paths stay inside the workspace. \
+Format responses in strict CommonMark: blank lines between paragraphs and \
+around lists, headings, and code fences.",
         workspace.display()
     )
 }

@@ -85,6 +85,10 @@ impl MarkdownRenderer {
                 self.flush_line();
                 self.separate();
             }
+            Event::End(TagEnd::Paragraph) => {
+                self.flush_line();
+                self.separate();
+            }
             Event::Start(Tag::CodeBlock(_)) => {
                 self.flush_line();
                 self.separate();
@@ -96,10 +100,14 @@ impl MarkdownRenderer {
                 self.separate();
             }
             Event::Start(Tag::List(start)) => {
+                self.flush_line();
+                self.separate();
                 self.list_depth += 1;
                 self.ordered_counter = start;
             }
             Event::End(TagEnd::List(_)) => {
+                self.flush_line();
+                self.separate();
                 self.list_depth = self.list_depth.saturating_sub(1);
                 if self.list_depth == 0 {
                     self.ordered_counter = None;
@@ -243,6 +251,20 @@ mod tests {
     }
 
     #[test]
+    fn consecutive_paragraphs_get_a_blank_row_between_them() {
+        let lines = render_markdown("first paragraph\n\nsecond paragraph");
+        let rendered = plain(&lines);
+        assert_eq!(rendered, ["first paragraph", "", "second paragraph"]);
+    }
+
+    #[test]
+    fn lists_are_separated_from_the_surrounding_text() {
+        let lines = render_markdown("intro:\n\n- one\n- two\n\noutro");
+        let rendered = plain(&lines);
+        assert_eq!(rendered, ["intro:", "", "• one", "• two", "", "outro"]);
+    }
+
+    #[test]
     fn headings_render_bold_and_separated() {
         let lines = render_markdown("# Title\n\nbody");
         let rendered = plain(&lines);
@@ -275,9 +297,7 @@ mod tests {
         let source = "- one\n- two\n  - nested";
         let lines = render_markdown(source);
         let rendered = plain(&lines);
-        assert_eq!(rendered[0], "• one");
-        assert_eq!(rendered[1], "• two");
-        assert_eq!(rendered[2], "  • nested");
+        assert_eq!(rendered, ["• one", "• two", "", "  • nested"]);
     }
 
     #[test]
