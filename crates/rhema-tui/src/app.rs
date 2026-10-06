@@ -182,6 +182,30 @@ impl App {
     }
 
     /// Handles one keypress; returns the effects to perform.
+    /// Runs a chat slash command. Only meaningful while idle: the submit
+    /// path routes here before any turn could start.
+    fn handle_command(&mut self, command: &str) {
+        match command {
+            "help" => self.transcript.push_notice(
+                "commands: /help · /clear (fresh session) · /exit (quit) — keys: \
+                 ctrl-p model · pgup/pgdn or wheel history · shift+drag to copy text",
+            ),
+            "clear" => {
+                if let Some(agent) = self.agent.as_mut() {
+                    agent.session_mut().history.clear();
+                }
+                self.transcript = Transcript::new();
+                self.usage = None;
+                self.error = None;
+                self.transcript.push_notice("conversation cleared");
+            }
+            "exit" | "quit" => self.should_quit = true,
+            other => self
+                .transcript
+                .push_notice(&format!("unknown command /{other} — /help lists commands")),
+        }
+    }
+
     /// One mouse-wheel tick: scrolls the transcript while in the chat
     /// screen; the other screens navigate by keyboard.
     pub fn on_mouse_scroll(&mut self, up: bool) {
@@ -270,6 +294,11 @@ impl App {
                 if self.running || text.trim().is_empty() {
                     // The input is kept, so typing during a turn is not
                     // lost.
+                    Vec::new()
+                } else if let Some(command) = text.strip_prefix('/') {
+                    self.chat.input.clear();
+                    self.chat.cursor = 0;
+                    self.handle_command(command.trim());
                     Vec::new()
                 } else {
                     self.chat.input.clear();
@@ -827,6 +856,49 @@ mod tests {
     fn ctrl_c_quits_from_any_screen() {
         let mut h = harness(None, None, Session::default());
         h.app.on_key(ctrl('c'));
+        assert!(h.app.should_quit);
+    }
+
+    #[test]
+    fn slash_help_prints_commands_without_calling_the_model() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_key(key(KeyCode::Char('/')));
+        for c in "help".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(h.app.on_key(key(KeyCode::Enter)), Vec::new());
+        assert!(!h.app.running, "no turn starts");
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("/clear")
+        ));
+    }
+
+    #[test]
+    fn slash_clear_forges_a_fresh_session() {
+        let session = Session {
+            history: vec![Message::text(Role::User, "earlier")],
+            driver_state: serde_json::Value::Null,
+        };
+        let mut h = harness(Some("k"), Some("m-a"), session);
+        h.app.handle_command("clear");
+        assert!(h.app.agent.unwrap().session().history.is_empty());
+        assert!(
+            h.app.transcript.lines().len() == 1,
+            "only the notice remains"
+        );
+    }
+
+    #[test]
+    fn slash_exit_quits_and_unknown_commands_get_a_notice() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.handle_command("nope");
+        assert!(!h.app.should_quit);
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("unknown command /nope")
+        ));
+        h.app.handle_command("exit");
         assert!(h.app.should_quit);
     }
 }

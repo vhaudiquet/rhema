@@ -70,7 +70,7 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(vec![Span::styled("✳ rhema", Style::default().fg(accent()))]),
+            Line::from(Span::raw("rhema").bold()),
             Line::from(
                 format!(
                     "{model} · {} · /help for commands",
@@ -436,8 +436,13 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
+    // The prompt stays visible even with the placeholder up, so the box
+    // always reads as an input.
     let content = if visible.is_empty() && !app.running {
-        Line::from(Span::raw("ask anything · /help for commands").dim())
+        Line::from(vec![
+            Span::raw(prompt).dim(),
+            Span::raw("ask anything · /help for commands").dim(),
+        ])
     } else {
         Line::from(vec![Span::raw(prompt).dim(), Span::raw(visible)])
     };

@@ -51,8 +51,11 @@ modal (y/N), and the status line shows token usage per turn.
 
 Keys: `enter` sends · `ctrl-p` re-opens the model picker (the session is
 kept across a model switch) · `esc` declines a pending approval, or asks to
-quit when idle · `ctrl-c` quits immediately. Flags: `--workspace`,
-`--resume`/`--save` (session checkpointing), `--max-steps`, `--no-confirm`.
+quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`
+(fresh session), `/exit`. The transcript word-wraps and scrolls (`pgup`/
+`pgdn` or mouse wheel; terminal text selection works for copy-paste).
+Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
+`--max-steps`, `--no-confirm`.
 
 ## The rhema CLI
 
