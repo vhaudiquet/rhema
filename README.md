@@ -31,6 +31,27 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   (`read_file`, `list_dir`, `write_file`, `run_command`), per-turn approval
   gating, session save/resume
 - `rhema-cli` — the `rhema` binary: a terminal REPL over the coding agent
+- `rhema-tui` — the `rhema-tui` binary: a full-screen terminal UI with
+  login, model picker, and live chat
+
+## The rhema TUI
+
+```sh
+cargo run --bin rhema-tui
+```
+
+First launch opens the login screen: pick a provider (Google Gemini today;
+Anthropic/OpenAI are marked coming soon), paste an API key — it is validated
+with a real model-list call and stored in `~/.config/rhema/config.json` with
+`0600` permissions. Then pick a model from the live list (chat-capable
+models with their token limits, `/` filters the list). After that you land
+in chat: responses stream in, `write_file`/`run_command` pop up an approval
+modal (y/N), and the status line shows token usage per turn.
+
+Keys: `enter` sends · `ctrl-p` re-opens the model picker (the session is
+kept across a model switch) · `esc` declines a pending approval, or asks to
+quit when idle · `ctrl-c` quits immediately. Flags: `--workspace`,
+`--resume`/`--save` (session checkpointing), `--max-steps`, `--no-confirm`.
 
 ## The rhema CLI
 
@@ -52,9 +73,7 @@ rhema [OPTIONS] [PROMPT]
 ```
 
 The API key resolves from `GEMINI_API_KEY`, then `GOOGLE_API_KEY`, then the
-key stored in `~/.config/rhema/config.json` (what the TUI login writes).
-
-The model sees four tools, all scoped inside the workspace: `read_file`,
+key stored in `~/.config/rhema/config.json` (what the TUI login writes).The model sees four tools, all scoped inside the workspace: `read_file`,
 `list_dir`, `write_file`, and `run_command` (`bash -c`, capped output, 120 s
 timeout). The two side-effecting ones ask `allow? [y/N]` first unless
 `--no-confirm` is set. With `--save`, the session is checkpointed after every
