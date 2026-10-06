@@ -179,6 +179,16 @@ impl App {
     }
 
     /// Handles one keypress; returns the effects to perform.
+    /// One mouse-wheel tick: scrolls the transcript while in the chat
+    /// screen; the other screens navigate by keyboard.
+    pub fn on_mouse_scroll(&mut self, up: bool) {
+        if matches!(self.screen, Screen::Chat) {
+            self.chat.scroll_by(if up { 3 } else { -3 });
+        }
+    }
+
+    /// Routes one keypress to the current screen, then the app-level
+    /// handling (modals, quit, effects).
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {
         // Ctrl-C quits immediately, from any screen, modal or not.
         if key.modifiers.contains(KeyModifiers::CONTROL)

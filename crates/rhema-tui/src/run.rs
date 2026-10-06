@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::event::{Event, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
@@ -74,7 +75,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     };
 
     enable_raw_mode().context("the rhema-tui binary needs a terminal; pipe output through a pty or use the rhema CLI instead")?;
-    crossterm::execute!(stdout(), EnterAlternateScreen)
+    crossterm::execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)
         .context("cannot enter the alternate screen")?;
     install_panic_hook();
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))
@@ -91,7 +92,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 /// ignored so a restore attempt never panics (it runs in the panic hook).
 fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(stdout(), LeaveAlternateScreen);
+    let _ = crossterm::execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
     use std::io::Write;
     let _ = stdout().flush();
 }
@@ -142,6 +143,11 @@ async fn event_loop(
                         dispatch(app, tx, effect);
                     }
                 }
+                Event::Mouse(mouse) => match mouse.kind {
+                    crossterm::event::MouseEventKind::ScrollUp => app.on_mouse_scroll(true),
+                    crossterm::event::MouseEventKind::ScrollDown => app.on_mouse_scroll(false),
+                    _ => {}
+                },
                 _ => {}
             }
         }

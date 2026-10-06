@@ -341,21 +341,38 @@ pub enum ChatAction {
 }
 
 /// The chat screen's input-box state: text, cursor (character index), and
-/// the transcript scroll offset (lines kept above the bottom).
+/// the transcript scroll offset (rows kept above the bottom).
+///
+/// The transcript word-wraps, so scroll counts *rendered rows*, not
+/// logical lines; render clamps it to the content height.
 #[derive(Debug, Default)]
 pub struct ChatState {
     /// The input being typed.
     pub input: String,
     /// Cursor position as a character index into `input`.
     pub cursor: usize,
-    /// Transcript scroll: lines scrolled up beyond the bottom.
+    /// Transcript scroll: rendered rows scrolled up beyond the bottom
+    /// (0 follows the latest line).
     pub scroll: usize,
 }
 
 impl ChatState {
+    /// Rows per PageUp/PageDown press.
+    pub const SCROLL_STEP: usize = 20;
+
     /// A fresh input box.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Scrolls the transcript by `rows` (positive looks back); used by the
+    /// mouse wheel as well as the page keys.
+    pub fn scroll_by(&mut self, rows: isize) {
+        if rows >= 0 {
+            self.scroll = self.scroll.saturating_add(rows as usize);
+        } else {
+            self.scroll = self.scroll.saturating_sub((-rows) as usize);
+        }
     }
 
     /// Byte offset of the cursor inside `input` (a char boundary).
@@ -415,14 +432,18 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_add(10);
+                self.scroll = self.scroll.saturating_add(Self::SCROLL_STEP);
                 ChatAction::None
             }
             KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_sub(10);
+                self.scroll = self.scroll.saturating_sub(Self::SCROLL_STEP);
                 ChatAction::None
             }
-            KeyCode::Enter => ChatAction::Submit(self.input.clone()),
+            KeyCode::Enter => {
+                // A new prompt goes to the live tail; stop pinning history.
+                self.scroll = 0;
+                ChatAction::Submit(self.input.clone())
+            }
             _ => ChatAction::None,
         }
     }
@@ -721,10 +742,17 @@ mod tests {
     fn chat_scroll_moves_with_page_keys_and_never_goes_negative() {
         let mut chat = ChatState::new();
         chat.handle_key(key(KeyCode::PageUp));
-        assert_eq!(chat.scroll, 10);
+        chat.handle_key(key(KeyCode::PageUp));
+        assert_eq!(chat.scroll, 2 * ChatState::SCROLL_STEP);
+        chat.scroll_by(-3);
+        assert_eq!(chat.scroll, 2 * ChatState::SCROLL_STEP - 3);
+        chat.handle_key(key(KeyCode::PageDown));
         chat.handle_key(key(KeyCode::PageDown));
         chat.handle_key(key(KeyCode::PageDown));
         assert_eq!(chat.scroll, 0);
+        chat.scroll_by(5);
+        chat.handle_key(key(KeyCode::Enter));
+        assert_eq!(chat.scroll, 0, "submitting follows the latest line");
     }
 
     #[test]

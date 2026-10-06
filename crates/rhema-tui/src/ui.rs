@@ -6,6 +6,7 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Screen};
 use crate::screens::{COMING_SOON, PROVIDERS, PickerScreen, PickerStatus};
@@ -187,11 +188,92 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines: Vec<Line> = app.transcript.lines().iter().map(render_line).collect();
+    // Wrapping is done here rather than by Paragraph so the row count is
+    // exact: the scroll offset is expressed in rendered rows.
+    let width = inner.width as usize;
+    let wrapped: Vec<Line> = app
+        .transcript
+        .lines()
+        .iter()
+        .flat_map(|line| wrap_line(&render_line(line), width))
+        .collect();
     let visible = inner.height as usize;
-    let max_top = lines.len().saturating_sub(visible);
+    let max_top = wrapped.len().saturating_sub(visible);
     let top = max_top.saturating_sub(app.chat.scroll.min(max_top));
-    frame.render_widget(Paragraph::new(lines).scroll((top as u16, 0)), inner);
+    frame.render_widget(Paragraph::new(wrapped).scroll((top as u16, 0)), inner);
+}
+
+/// Greedy word wrap over styled spans. A word wider than `width` is
+/// hard-split at the display-width boundary, so the returned row count is
+/// exact for the given width — the transcript scroll math depends on it.
+fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+    if width == 0 {
+        let owned: Vec<Span<'static>> = line
+            .spans
+            .iter()
+            .map(|span| Span::styled(span.content.to_string(), span.style))
+            .collect();
+        return vec![Line::from(owned)];
+    }
+    // Flatten the spans to styled runs: maximal word and whitespace runs.
+    let mut runs: Vec<(Style, String)> = Vec::new();
+    for span in &line.spans {
+        let mut current = String::new();
+        let mut current_space = None;
+        for ch in span.content.chars() {
+            let space = ch.is_whitespace();
+            if Some(space) != current_space && !current.is_empty() {
+                runs.push((span.style, std::mem::take(&mut current)));
+            }
+            current_space = Some(space);
+            current.push(ch);
+        }
+        if !current.is_empty() {
+            runs.push((span.style, current));
+        }
+    }
+
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut row_width = 0usize;
+    for (style, run) in runs {
+        if run.chars().all(char::is_whitespace) {
+            if row_width == 0 {
+                continue; // no leading whitespace on a row
+            }
+            let run_width = run.width();
+            if row_width + run_width <= width {
+                row_width += run_width;
+                rows.last_mut().unwrap().push(Span::styled(run, style));
+            } else {
+                // Overflowing whitespace is dropped; the next word breaks.
+                row_width = width;
+            }
+            continue;
+        }
+        // Hard-split a word into display-width pieces.
+        let mut pieces: Vec<(String, usize)> = Vec::new();
+        let mut piece = String::new();
+        let mut piece_width = 0usize;
+        for ch in run.chars() {
+            let char_width = ch.width().unwrap_or(0);
+            if piece_width + char_width > width && !piece.is_empty() {
+                pieces.push((std::mem::take(&mut piece), piece_width));
+                piece_width = 0;
+            }
+            piece.push(ch);
+            piece_width += char_width;
+        }
+        pieces.push((piece, piece_width));
+        for (index, (piece, piece_width)) in pieces.into_iter().enumerate() {
+            if index > 0 || row_width + piece_width > width {
+                rows.push(Vec::new());
+                row_width = 0;
+            }
+            rows.last_mut().unwrap().push(Span::styled(piece, style));
+            row_width += piece_width;
+        }
+    }
+    rows.into_iter().map(Line::from).collect()
 }
 
 fn render_line(line: &transcript::Line) -> Line<'static> {
@@ -219,7 +301,7 @@ fn render_line(line: &transcript::Line) -> Line<'static> {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let line = if let Some(error) = &app.error {
+    let mut line = if let Some(error) = &app.error {
         Line::from(error.clone()).red().bold()
     } else if app.running {
         Line::from("thinking…").dim().italic()
@@ -233,6 +315,10 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             None => Line::from("type a prompt · enter sends · ctrl-p model · esc quit").dim(),
         }
     };
+    if app.chat.scroll > 0 && app.error.is_none() {
+        line.spans
+            .push(Span::raw("  ·  viewing history · pgdn: latest").dim());
+    }
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -397,5 +483,117 @@ mod tests {
                 .any(|row| row.contains("filter:") && row.contains("❯")),
             "the footer row never carries the marker: {rows:?}"
         );
+    }
+
+    /// A word wider than the row is hard-split: no row exceeds the width
+    /// and the pieces stay in order.
+    #[test]
+    fn wrap_hard_splits_oversized_words() {
+        let word = "x".repeat(100);
+        let line = Line::from(Span::raw(word.clone()));
+        let rows = wrap_line(&line, 30);
+        assert!(rows.len() >= 4, "100 chars at width 30 need 4 rows");
+        let joined: String = rows
+            .iter()
+            .flat_map(|row| row.iter().map(|span| span.content.clone()))
+            .collect();
+        assert_eq!(joined, word);
+        for row in &rows {
+            let row_width: usize = row.iter().map(|span| span.content.width()).sum();
+            assert!(row_width <= 30, "row exceeds width: {row:?}");
+        }
+    }
+
+    /// A sentence wraps at word boundaries, in order, each row within the
+    /// width.
+    #[test]
+    fn wrap_breaks_at_word_boundaries_in_order() {
+        let text = "alpha beta gamma delta epsilon zeta eta theta iota kappa".to_owned();
+        let line = Line::from(Span::raw(text.clone()));
+        let rows = wrap_line(&line, 20);
+        let joined = rows
+            .iter()
+            .flat_map(|row| row.iter().map(|span| span.content.to_string()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let expected = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            joined.split_whitespace().collect::<Vec<_>>().join(" "),
+            expected
+        );
+        for row in &rows {
+            let row_width: usize = row.iter().map(|span| span.content.width()).sum();
+            assert!(row_width <= 20, "row exceeds width: {row:?}");
+        }
+        assert!(
+            rows[0].iter().any(|span| span.content.contains("alpha")),
+            "the first word stays on the first row"
+        );
+        assert!(
+            rows.last()
+                .unwrap()
+                .iter()
+                .any(|span| span.content.contains("kappa")),
+            "the last word lands on the last row"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "mock"))]
+mod scroll_tests {
+    use super::render;
+    use crate::app::{App, AppSetup, RunOptions};
+    use crate::store::MemoryStore;
+    use ratatui::{Terminal, backend::TestBackend};
+    use rhema_core::MockProvider;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    fn chat_app() -> App {
+        let config = rhema_config::Config {
+            google_api_key: Some("k".into()),
+            model: Some("m".into()),
+        };
+        App::new(AppSetup {
+            store: Arc::new(MemoryStore::default()),
+            config,
+            api_key: Some("k".into()),
+            provider: Some(Arc::new(MockProvider::new(Vec::new()))),
+            session: rhema_core::Session::default(),
+            options: RunOptions {
+                workspace: PathBuf::from("."),
+                max_steps: 4,
+                no_confirm: false,
+                save: None,
+            },
+        })
+        .unwrap()
+    }
+
+    fn screen_text(app: &App) -> String {
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn long_lines_wrap_and_scroll_reaches_the_top() {
+        let mut app = chat_app();
+        let long = format!("{} end-marker", "word ".repeat(200));
+        app.transcript.push_user(&long);
+
+        // At the tail, the last word is visible.
+        let text = screen_text(&app);
+        assert!(text.contains("end-marker"), "{text}");
+
+        // Scrolled far back, the first words are visible.
+        app.chat.scroll = 1000;
+        let text = screen_text(&app);
+        assert!(text.contains("word word word"), "{text}");
+        assert!(!text.contains("end-marker"), "{text}");
     }
 }

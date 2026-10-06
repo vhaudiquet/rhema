@@ -25,6 +25,8 @@ rhema-provider-google = { path = "../rhema-provider-google" }
 # builds on so the event types unify.
 ratatui = "0.30"
 crossterm = "0.29"
+# Display width for the transcript word wrap (same crate ratatui uses)
+unicode-width = "0.2"
 # Argument wiring and binary error reporting
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"
