@@ -10,11 +10,13 @@
 #![deny(missing_docs)]
 
 pub mod message;
+pub mod output;
 pub mod request;
 pub mod session;
 pub mod tool;
 
 pub use message::{Content, Message, Role};
+pub use output::{ModelOutput, Step, StopReason, Usage};
 pub use request::{ChatParams, ModelRequest, ToolSpec};
 pub use session::Session;
 pub use tool::{ToolCall, ToolContext, ToolResolver, ToolResult};
