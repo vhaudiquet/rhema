@@ -17,6 +17,7 @@ fn accent() -> Color {
 use crate::app::{App, Screen};
 use crate::screens::{COMING_SOON, PROVIDERS, PickerScreen, PickerStatus};
 use crate::transcript::{self, pretty_args, truncate_chars};
+use rhema_provider_google::GeminiModel;
 
 /// Renders one frame.
 pub fn render(app: &App, frame: &mut Frame) {
@@ -185,26 +186,7 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
     let filtered = picker.filtered();
     let rows: Vec<ListItem> = filtered
         .iter()
-        .map(|model| {
-            ListItem::new(Line::from(vec![
-                Span::raw(model.id.clone()).bold(),
-                Span::raw("  "),
-                Span::raw(model.display_name.clone()),
-                Span::raw("  "),
-                Span::raw(format!(
-                    "in {} / out {}",
-                    model
-                        .input_token_limit
-                        .map(|limit| limit.to_string())
-                        .unwrap_or_else(|| "?".into()),
-                    model
-                        .output_token_limit
-                        .map(|limit| limit.to_string())
-                        .unwrap_or_else(|| "?".into())
-                ))
-                .dim(),
-            ]))
-        })
+        .map(|model| ListItem::new(model_row(picker.provider, model)))
         .collect();
     let mut state = ListState::default();
     state.select(Some(picker.selected));
@@ -272,6 +254,39 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let max_top = wrapped.len().saturating_sub(visible);
     let top = max_top.saturating_sub(app.chat.scroll.min(max_top));
     frame.render_widget(Paragraph::new(wrapped).scroll((top as u16, 0)), inner);
+}
+
+/// One picker row: `provider/` dim, id bright, then display name, price,
+/// and context window dim.
+fn model_row(provider: &str, model: &GeminiModel) -> Line<'static> {
+    let mut details = String::new();
+    if let Some(pricing) = model.pricing() {
+        details.push_str(&format!(
+            "${:.2}/M in · ${:.2}/M out · ",
+            pricing.input_per_mtok, pricing.output_per_mtok
+        ));
+    }
+    details.push_str(&format!("{} ctx", format_tokens(model.input_token_limit)));
+    Line::from(vec![
+        Span::raw(format!("{provider}/")).dim(),
+        Span::raw(model.id.clone()).bold(),
+        Span::raw("  "),
+        Span::raw(model.display_name.clone()),
+        Span::raw("  "),
+        Span::raw(details).dim(),
+    ])
+}
+
+/// Humanizes a token count: 1_048_576 → "1.0M", 131_072 → "131k", none →
+/// "?".
+fn format_tokens(limit: Option<u64>) -> String {
+    match limit {
+        None => "?".to_owned(),
+        Some(limit) if limit >= 1_000_000 => {
+            format!("{:.1}M", limit as f64 / 1_000_000.0)
+        }
+        Some(limit) => format!("{}k", limit / 1_000),
+    }
 }
 
 /// Greedy word wrap over styled spans. A word wider than `width` is
@@ -542,10 +557,10 @@ mod tests {
                     .collect()
             })
             .collect();
-        let marker_row = rows.iter().find(|row| row.contains("❯ model-a"));
+        let marker_row = rows.iter().find(|row| row.contains("❯ google/model-a"));
         assert!(marker_row.is_some(), "selected row is marked: {rows:?}");
         assert!(
-            !rows.iter().any(|row| row.contains("❯ model-b")),
+            !rows.iter().any(|row| row.contains("❯ google/model-b")),
             "only the selected row is marked: {rows:?}"
         );
     }
@@ -570,7 +585,7 @@ mod tests {
             })
             .collect();
         assert!(
-            rows.iter().any(|row| row.contains("❯ model-19")),
+            rows.iter().any(|row| row.contains("❯ google/model-19")),
             "the bottom selection is marked: {rows:?}"
         );
         assert!(

@@ -199,12 +199,14 @@ pub enum PickerAction {
     Retry,
 }
 
-/// The model picker: chat-capable models sorted by id, a type-to-filter
+/// The model picker: text chat models sorted by id, a type-to-filter
 /// prompt, and one highlighted row.
 #[derive(Debug)]
 pub struct PickerScreen {
-    /// The models to pick from, sorted by id.
+    /// The models to pick from (text chat only), sorted by id.
     pub models: Vec<GeminiModel>,
+    /// The provider the models come from; the row prefix.
+    pub provider: &'static str,
     /// The filter text; printable keys extend it without any prefix.
     pub filter: String,
     /// Index into the filtered list of the highlighted row.
@@ -216,12 +218,14 @@ pub struct PickerScreen {
 }
 
 impl PickerScreen {
-    /// A picker over `models` (sorted by id), initially unfiltered.
-    pub fn new(models: Vec<GeminiModel>, purpose: PickerPurpose) -> Self {
-        let mut models = models;
+    /// A picker over `models` (sorted by id, non-text models dropped),
+    /// initially unfiltered.
+    pub fn new(mut models: Vec<GeminiModel>, purpose: PickerPurpose) -> Self {
+        models.retain(|model| model.supports_chat() && model.is_text());
         models.sort_by(|a, b| a.id.cmp(&b.id));
         Self {
             models,
+            provider: "google",
             filter: String::new(),
             selected: 0,
             status: PickerStatus::Ready,
@@ -229,8 +233,11 @@ impl PickerScreen {
         }
     }
 
-    /// Replaces the model list (re-sorted) and clamps the selection.
+    /// Replaces the model list (scoped and re-sorted) and clamps the
+    /// selection.
     pub fn set_models(&mut self, models: Vec<GeminiModel>) {
+        let mut models = models;
+        models.retain(|model| model.supports_chat() && model.is_text());
         self.models = models;
         self.models.sort_by(|a, b| a.id.cmp(&b.id));
         self.clamp_selection();
@@ -543,7 +550,9 @@ mod tests {
             vec![
                 model("gemini-3.8-pro", "Gemini 3.8 Pro", true),
                 model("gemini-3.8-flash", "Gemini 3.8 Flash", true),
+                // Non-text families are dropped by the picker itself.
                 model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", true),
+                model("veo-3.1-generate-preview", "Veo 3.1", true),
             ],
             PickerPurpose::Initial,
         )
@@ -553,10 +562,16 @@ mod tests {
     fn picker_sorts_by_id() {
         let picker = picker();
         let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            ["gemini-3.8-flash", "gemini-3.8-flash-tts", "gemini-3.8-pro"]
-        );
+        assert_eq!(ids, ["gemini-3.8-flash", "gemini-3.8-pro"]);
+    }
+
+    #[test]
+    fn non_text_models_are_dropped_from_the_list() {
+        let picker = picker();
+        let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(!ids.contains(&"gemini-3.8-flash-tts"));
+        assert!(!ids.contains(&"veo-3.1-generate-preview"));
+        assert_eq!(picker.provider, "google");
     }
 
     #[test]
@@ -564,7 +579,7 @@ mod tests {
         let mut picker = picker();
         picker.filter = "FLASH".into();
         let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
-        assert_eq!(ids, ["gemini-3.8-flash", "gemini-3.8-flash-tts"]);
+        assert_eq!(ids, ["gemini-3.8-flash"]);
 
         picker.filter = "3.8 pro".into();
         let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
@@ -590,12 +605,12 @@ mod tests {
     #[test]
     fn typing_filters_and_enter_chooses_the_highlighted_model() {
         let mut picker = picker();
-        for c in "tts".chars() {
+        for c in "pro".chars() {
             picker.handle_key(key(KeyCode::Char(c)));
         }
         assert_eq!(
             picker.handle_key(key(KeyCode::Enter)),
-            PickerAction::Choose("gemini-3.8-flash-tts".into())
+            PickerAction::Choose("gemini-3.8-pro".into())
         );
     }
 
@@ -626,7 +641,7 @@ mod tests {
         assert_eq!(picker.filter, "t");
         picker.handle_key(key(KeyCode::Backspace));
         assert_eq!(picker.filter, "");
-        assert_eq!(picker.filtered().len(), 3);
+        assert_eq!(picker.filtered().len(), 2);
     }
 
     #[test]
