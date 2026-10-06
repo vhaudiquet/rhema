@@ -12,15 +12,55 @@ Spec: [SPEC.md](SPEC.md).
 
 ## Status
 
-v1: `rhema-core`, the step engine plus its seams.
+v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 
-- `Agent::step` — the one-exchange primitive, exact semantics in SPEC.md §4
-- `Session` — caller-owned, fully serializable; checkpointable at any step boundary
-- `ModelProvider` — the only model seam; real HTTP adapters are later crates
-- `ToolResolver` — the capability seam; one primitive, not a registry
-- `Event` / `EventSink` — streaming deltas and step lifecycle events
-- `run_turn` — the provided coding-agent driver (~15 lines, not the primitive)
-- `MockProvider` — scripted offline provider, behind the `mock` feature
+- `rhema-core` — the step engine and its seams:
+  - `Agent::step` — the one-exchange primitive, exact semantics in SPEC.md §4
+  - `Session` — caller-owned, fully serializable; checkpointable at any step boundary
+  - `ModelProvider` — the only model seam
+  - `ToolResolver` — the capability seam; one primitive, not a registry
+  - `Event` / `EventSink` — streaming deltas and step lifecycle events
+  - `run_turn` — the provided coding-agent driver (~15 lines, not the primitive)
+  - `MockProvider` — scripted offline provider, behind the `mock` feature
+- `rhema-provider-google` — Gemini adapter: streaming SSE, native function
+  calling, `GoogleProvider::new(api_key)` implements `ModelProvider`
+- `rhema-coding-agent` — the coding-agent driver: built-in workspace tools
+  (`read_file`, `list_dir`, `write_file`, `run_command`), per-turn approval
+  gating, session save/resume
+- `rhema-cli` — the `rhema` binary: a terminal REPL over the coding agent
+
+## The rhema CLI
+
+```sh
+export GEMINI_API_KEY=...        # or GOOGLE_API_KEY
+cargo run --bin rhema            # REPL in the current directory
+```
+
+```
+rhema [OPTIONS] [PROMPT]
+
+  [PROMPT]               one-shot: a single turn, then exit
+  -m, --model <MODEL>    model name [default: gemini-2.5-flash]
+  -w, --workspace <DIR>  workspace root for tools [default: .]
+      --resume <PATH>    resume a saved session file
+      --save <PATH>      checkpoint the session after every turn
+      --no-confirm       approve gated tool calls without asking
+      --max-steps <N>    max steps per turn [default: 16]
+```
+
+The model sees four tools, all scoped inside the workspace: `read_file`,
+`list_dir`, `write_file`, and `run_command` (`bash -c`, capped output, 120 s
+timeout). The two side-effecting ones ask `allow? [y/N]` first unless
+`--no-confirm` is set. With `--save`, the session is checkpointed after every
+turn and `--resume` continues it later. A failed turn prints one error line
+and the REPL keeps going.
+
+The provider has offline tests via a mock HTTP server; the live round-trip
+against the real API is deliberately `#[ignore]`d:
+
+```sh
+cargo test -p rhema-provider-google --all-features -- --ignored
+```
 
 ## Usage
 
@@ -100,6 +140,6 @@ and checkpoints through serde — expressible entirely outside crate 1.
 ## Roadmap
 
 - Crate 2: RSD `SessionManager` — dispatch, leases, inbox, revisions, SQLite
-- Provider crates: `rhema-provider-google` (Gemini, first target),
-  `rhema-provider-anthropic`, `rhema-provider-openai`
+  (see [specs/resource-scoped-dispatch.md](specs/resource-scoped-dispatch.md))
+- Provider crates: `rhema-provider-anthropic`, `rhema-provider-openai-compatible`
 - Later: `rhema-tui`, compaction, provider fixtures via cassettes
