@@ -6,16 +6,13 @@
 //! or a model switch must render the same lines the live stream produced
 //! (within the summary/truncation rules).
 
-use std::collections::HashMap;
-
 use rhema_core::{Content, Message, Role};
 
 use crate::events::OwnedEvent;
 
 /// Width at which a tool-result summary line is cut.
-pub const SUMMARY_WIDTH: usize = 120;
+pub const COMMAND_WIDTH: usize = 48;
 /// Width at which a tool-call argument echo is cut.
-pub const ARGS_WIDTH: usize = 60;
 /// Lines of pretty-printed JSON shown in the approval modal before cutting.
 pub const ARGS_MAX_LINES: usize = 12;
 /// Characters of pretty-printed JSON shown in the approval modal before
@@ -29,31 +26,26 @@ pub enum Line {
     User(String),
     /// Assistant text; streamed deltas merge into these lines.
     Assistant(String),
-    /// A tool invocation, rendered `name(args)` on one line.
+    /// A tool invocation and, once it resolved, its outcome — one line.
     ToolCall {
+        /// The call's correlation id, matching the result event.
+        id: String,
         /// The tool's name.
         name: String,
-        /// The accumulated raw JSON argument text, truncated at render
+        /// The accumulated raw JSON argument text; described at render
         /// time.
         args: String,
-    },
-    /// A tool result summary.
-    ToolResult {
-        /// Whether the call succeeded.
-        ok: bool,
-        /// First line of the result payload, truncated.
-        summary: String,
+        /// `None` while the call runs, then the outcome.
+        ok: Option<bool>,
     },
     /// A UI notice (model switched, turn declined, ...).
     Notice(String),
 }
 
-/// The transcript: lines in stream order plus the call-id to tool-name map
-/// the result lines need.
+/// The transcript: lines in stream order.
 #[derive(Debug, Default, Clone)]
 pub struct Transcript {
     lines: Vec<Line>,
-    calls: HashMap<String, String>,
 }
 
 impl Transcript {
@@ -86,13 +78,15 @@ impl Transcript {
                         match content {
                             Content::Text(text) => transcript.append_assistant(text),
                             Content::ToolCall(call) => {
-                                transcript.calls.insert(call.id.clone(), call.name.clone());
                                 transcript.lines.push(Line::ToolCall {
+                                    id: call.id.clone(),
                                     name: call.name.clone(),
                                     args: call.args.to_string(),
+                                    ok: None,
                                 });
                             }
-                            // Results arrive as Tool-role messages.
+                            // Results live in Tool-role messages, never in
+                            // assistant content.
                             Content::ToolResult(_) => {}
                         }
                     }
@@ -100,10 +94,15 @@ impl Transcript {
                 Role::Tool => {
                     for content in &message.content {
                         if let Content::ToolResult(result) = content {
-                            transcript.lines.push(Line::ToolResult {
-                                ok: !result.is_error,
-                                summary: summarize(&result.content),
-                            });
+                            if let Some(Line::ToolCall { ok, .. }) =
+                                transcript.lines.iter_mut().rev().find(|line| {
+                                    matches!(line, Line::ToolCall {
+                                        id: line_id, ok: None, ..
+                                    } if *line_id == result.id)
+                                })
+                            {
+                                *ok = Some(!result.is_error);
+                            }
                         }
                     }
                 }
@@ -139,10 +138,11 @@ impl Transcript {
             OwnedEvent::StepStart { .. } => {}
             OwnedEvent::TextDelta(delta) => self.append_assistant(delta),
             OwnedEvent::ToolCallStart { id, name } => {
-                self.calls.insert(id.clone(), name.clone());
                 self.lines.push(Line::ToolCall {
+                    id: id.clone(),
                     name: name.clone(),
                     args: String::new(),
+                    ok: None,
                 });
             }
             OwnedEvent::ToolCallArgsDelta(delta) => {
@@ -150,13 +150,34 @@ impl Transcript {
                     args.push_str(delta);
                 }
             }
-            OwnedEvent::ToolResult {
-                content, is_error, ..
-            } => {
-                self.lines.push(Line::ToolResult {
-                    ok: !*is_error,
-                    summary: summarize(content),
+            OwnedEvent::ToolResult { id, is_error, .. } => {
+                // Calls resolve sequentially, but match by id so a late
+                // result cannot mark the wrong line; without a match, the
+                // oldest unresolved call takes it.
+                let has_call = self.lines.iter().rev().any(|line| {
+                    matches!(
+                        line,
+                        Line::ToolCall { id: line_id, ok: None, .. }
+                            if *line_id == *id
+                    )
                 });
+                let target = if has_call {
+                    self.lines.iter_mut().rev().find(|line| {
+                        matches!(
+                            line,
+                            Line::ToolCall { id: line_id, ok: None, .. }
+                                if *line_id == *id
+                        )
+                    })
+                } else {
+                    self.lines
+                        .iter_mut()
+                        .rev()
+                        .find(|line| matches!(line, Line::ToolCall { ok: None, .. }))
+                };
+                if let Some(Line::ToolCall { ok, .. }) = target {
+                    *ok = Some(!*is_error);
+                }
             }
             OwnedEvent::StepEnd { .. } => {}
         }
@@ -182,9 +203,33 @@ impl Transcript {
     }
 }
 
-/// First line of a tool result, cut to [`SUMMARY_WIDTH`] columns.
-pub fn summarize(content: &str) -> String {
-    truncate_chars(content.lines().next().unwrap_or(""), SUMMARY_WIDTH)
+/// A human description of a tool call for its transcript line: the built-in
+/// tools map to intent plus the argument that matters; unknown tools fall
+/// back to their name. Called at render time, so a streaming call's
+/// description fills in as its arguments arrive.
+pub fn describe(name: &str, args: &str) -> String {
+    let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+    let arg = |key: &str| parsed.get(key).and_then(|value| value.as_str());
+    match name {
+        "read_file" => match arg("path") {
+            Some(path) => format!("Read file `{path}`"),
+            None => "Read a file".to_owned(),
+        },
+        "list_dir" => {
+            format!("List directory `{}`", arg("path").unwrap_or("."))
+        }
+        "write_file" => match arg("path") {
+            Some(path) => format!("Write file `{path}`"),
+            None => "Write a file".to_owned(),
+        },
+        "run_command" => match arg("command") {
+            Some(command) => {
+                format!("Run `{}`", truncate_chars(command, COMMAND_WIDTH))
+            }
+            None => "Run a command".to_owned(),
+        },
+        other => other.to_owned(),
+    }
 }
 
 /// Cuts `text` to at most `max` characters, appending `…` when cut; never
@@ -274,16 +319,12 @@ mod tests {
         });
         assert_eq!(
             transcript.lines(),
-            &[
-                Line::ToolCall {
-                    name: "write_file".into(),
-                    args: "{\"path".into(),
-                },
-                Line::ToolResult {
-                    ok: true,
-                    summary: "wrote notes.txt (3 bytes)".into(),
-                },
-            ]
+            &[Line::ToolCall {
+                id: "c1".into(),
+                name: "write_file".into(),
+                args: "{\"path".into(),
+                ok: Some(true),
+            }]
         );
     }
 
@@ -306,12 +347,10 @@ mod tests {
             &[
                 Line::Assistant("before".into()),
                 Line::ToolCall {
+                    id: "c1".into(),
                     name: "list_dir".into(),
                     args: String::new(),
-                },
-                Line::ToolResult {
-                    ok: true,
-                    summary: "dir: src".into(),
+                    ok: Some(true),
                 },
                 Line::Assistant("after".into()),
             ]
@@ -385,20 +424,42 @@ mod tests {
             is_error: true,
         });
         assert_eq!(
-            transcript.lines()[1],
-            Line::ToolResult {
-                ok: false,
-                summary: "exit code 1".into(),
+            transcript.lines()[0],
+            Line::ToolCall {
+                id: "c1".into(),
+                name: "run_command".into(),
+                args: String::new(),
+                ok: Some(false),
             }
         );
     }
 
     #[test]
-    fn summarize_takes_the_first_line_and_cuts_with_an_ellipsis() {
-        assert_eq!(summarize("exit code 0\n--- stdout ---"), "exit code 0");
-        let cut = summarize(&"x".repeat(300));
-        assert_eq!(cut.chars().count(), SUMMARY_WIDTH);
-        assert!(cut.ends_with('\u{2026}'));
+    fn describe_maps_the_builtin_tools_to_intent() {
+        assert_eq!(describe("list_dir", "{}"), "List directory `.`");
+        assert_eq!(
+            describe("read_file", r#"{"path": "README.md"}"#),
+            "Read file `README.md`"
+        );
+        assert_eq!(
+            describe("write_file", r#"{"path": "src/lib.rs"}"#),
+            "Write file `src/lib.rs`"
+        );
+        assert_eq!(
+            describe("run_command", r#"{"command": "cargo test"}"#),
+            "Run `cargo test`"
+        );
+    }
+
+    #[test]
+    fn describe_falls_back_for_unknown_tools_and_missing_args() {
+        assert_eq!(describe("mystery", "{}"), "mystery");
+        assert_eq!(describe("read_file", "not json"), "Read a file");
+        let long = "x".repeat(60);
+        assert_eq!(
+            describe("run_command", &format!(r#"{{"command": "{long}"}}"#)),
+            format!("Run `{}`", truncate_chars(&long, COMMAND_WIDTH))
+        );
     }
 
     #[test]

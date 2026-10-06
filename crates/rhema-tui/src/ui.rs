@@ -16,7 +16,7 @@ fn accent() -> Color {
 
 use crate::app::{App, Screen};
 use crate::screens::{COMING_SOON, PROVIDERS, PickerScreen, PickerStatus};
-use crate::transcript::{self, pretty_args, truncate_chars};
+use crate::transcript::{self, pretty_args};
 use rhema_provider_google::GeminiModel;
 
 /// Renders one frame.
@@ -392,18 +392,16 @@ fn render_line(line: &transcript::Line) -> Line<'static> {
             Line::from(vec![Span::raw("❯ ").dim(), Span::raw(text.clone())])
         }
         transcript::Line::Assistant(text) => Line::from(Span::raw(text.clone())),
-        transcript::Line::ToolCall { name, args } => Line::from(
-            Span::raw(format!(
-                "⏺ {}({})",
-                name,
-                truncate_chars(args, transcript::ARGS_WIDTH)
-            ))
-            .cyan(),
-        ),
-        transcript::Line::ToolResult { ok, summary } => {
-            let mark = if *ok { "✓" } else { "✗" };
-            let line = Line::from(Span::raw(format!("  {mark} {summary}")));
-            if *ok { line.green() } else { line.red() }
+        transcript::Line::ToolCall { name, args, ok, .. } => {
+            let mut spans = vec![Span::raw("⌁ ").dim()];
+            match ok {
+                Some(true) => spans.push(Span::raw("✓ ").green()),
+                Some(false) => spans.push(Span::raw("✗ ").red()),
+                // Still running: keep the mark column aligned.
+                None => spans.push(Span::raw("  ")),
+            }
+            spans.push(Span::raw(transcript::describe(name, args)));
+            Line::from(spans)
         }
         transcript::Line::Notice(text) => Line::from(Span::raw(text.clone()).dim().italic()),
     }
