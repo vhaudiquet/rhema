@@ -47,8 +47,9 @@ with a real model-list call and stored in `~/.config/rhema/config.json` with
 models only, with pay-as-you-go pricing and context window — just type
 to filter, arrows to move).
 After that you land
-in chat: responses stream in, `write_file`/`run_command` pop up an approval
-modal (y/N), and the status line shows token usage per turn.
+in chat: responses stream in as rendered markdown (headings, bold,
+code in the palette's cyan), `write_file`/`run_command` pop up an
+approval modal (y/N), and the status line shows token usage per turn.
 
 Keys: `enter` sends · `ctrl-p` re-opens the model picker (the session is
 kept across a model switch) · `esc` declines a pending approval, or asks to

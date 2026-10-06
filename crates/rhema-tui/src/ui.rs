@@ -9,9 +9,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// The one accent hue of the chat screen: markers, the running indicator,
-/// and nothing else.
+/// and nothing else. Warm amber per the design palette (#f59e0b).
 fn accent() -> Color {
-    Color::Rgb(235, 161, 106)
+    Color::Rgb(245, 158, 11)
 }
 
 use crate::app::{App, Screen};
@@ -232,30 +232,23 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     // Wrapping is done here rather than by Paragraph so the row count is
     // exact: the scroll offset is expressed in rendered rows.
     let width = inner.width as usize;
-    // The bullet marks the first row of each assistant response; blank
-    // lines inside a response do not restart it.
-    let mut in_response = false;
+    // Consecutive assistant lines form one markdown response and render
+    // through the parser; everything else renders as-is. The bullet marks
+    // the first row of each response.
     let mut lines: Vec<Line> = Vec::new();
+    let mut group: Vec<String> = Vec::new();
+    let mut marked = false;
     for line in app.transcript.lines() {
         match line {
-            transcript::Line::Assistant(text) if text.is_empty() => {
-                lines.push(Line::from(""));
-            }
-            transcript::Line::Assistant(text) => {
-                let mut spans = Vec::new();
-                if !in_response {
-                    in_response = true;
-                    spans.push(Span::styled("● ", Style::default().fg(accent())));
-                }
-                spans.push(Span::raw(text.clone()));
-                lines.push(Line::from(spans));
-            }
+            transcript::Line::Assistant(text) => group.push(text.clone()),
             other => {
-                in_response = false;
+                flush_response_group(&mut lines, &mut group, &mut marked);
+                marked = false;
                 lines.push(render_line(other));
             }
         }
     }
+    flush_response_group(&mut lines, &mut group, &mut marked);
     let wrapped: Vec<Line> = lines
         .iter()
         .flat_map(|line| wrap_line(line, width))
@@ -368,6 +361,29 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
         }
     }
     rows.into_iter().map(Line::from).collect()
+}
+
+/// Renders one accumulated assistant response as markdown into `lines`,
+/// marking its first row. An empty group is a no-op.
+fn flush_response_group(
+    lines: &mut Vec<Line<'static>>,
+    group: &mut Vec<String>,
+    marked: &mut bool,
+) {
+    if group.is_empty() {
+        return;
+    }
+    let source = group.join("\n");
+    group.clear();
+    let rendered = crate::markdown::render_markdown(&source);
+    for (index, mut line) in rendered.into_iter().enumerate() {
+        if index == 0 && !*marked {
+            *marked = true;
+            line.spans
+                .insert(0, Span::styled("● ", Style::default().fg(accent())));
+        }
+        lines.push(line);
+    }
 }
 
 fn render_line(line: &transcript::Line) -> Line<'static> {

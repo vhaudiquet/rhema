@@ -30,6 +30,7 @@ pub mod app;
 pub mod approval;
 pub mod args;
 pub mod events;
+pub mod markdown;
 pub mod run;
 pub mod screens;
 pub mod store;
