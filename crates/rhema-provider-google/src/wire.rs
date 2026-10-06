@@ -576,6 +576,89 @@ fn stop_reason(finish_reason: Option<&str>, parts: &[NormalizedPart]) -> StopRea
     }
 }
 
+// --- ListModels: wire -> normalized ---
+
+/// One model from the ListModels API, normalized for consumers: no
+/// `models/` prefix, no wire-only fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeminiModel {
+    /// Model id without the `models/` prefix (e.g. `gemini-3.8-flash`).
+    pub id: String,
+    /// Human-readable name (e.g. `Gemini 3.8 Flash`).
+    pub display_name: String,
+    /// What the model is for, from the API.
+    pub description: String,
+    /// Prompt ceiling in tokens, when advertised.
+    pub input_token_limit: Option<u64>,
+    /// Output ceiling in tokens, when advertised.
+    pub output_token_limit: Option<u64>,
+    /// The API's `supportedGenerationMethods`, verbatim.
+    pub generation_methods: Vec<String>,
+}
+
+impl GeminiModel {
+    /// Whether the model can be used with `generateContent`.
+    pub fn supports_chat(&self) -> bool {
+        self.generation_methods
+            .iter()
+            .any(|m| m == "generateContent")
+    }
+}
+
+/// One page of the ListModels response.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireModelsPage {
+    /// The models on this page.
+    #[serde(default)]
+    pub models: Vec<WireModel>,
+    /// Token to fetch the next page, when there is one.
+    #[serde(default)]
+    pub next_page_token: Option<String>,
+}
+
+/// A wire `Model` object; fields documented as optional come through with
+/// `#[serde(default)]`.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireModel {
+    /// Resource name, `models/{model}`.
+    #[serde(default)]
+    pub name: String,
+    /// Human-readable name.
+    #[serde(default)]
+    pub display_name: String,
+    /// What the model is for.
+    #[serde(default)]
+    pub description: String,
+    /// Prompt ceiling in tokens, when advertised.
+    #[serde(default)]
+    pub input_token_limit: Option<u64>,
+    /// Output ceiling in tokens, when advertised.
+    #[serde(default)]
+    pub output_token_limit: Option<u64>,
+    /// The API's `supportedGenerationMethods`.
+    #[serde(default)]
+    pub supported_generation_methods: Vec<String>,
+}
+
+impl From<WireModel> for GeminiModel {
+    fn from(wire: WireModel) -> Self {
+        Self {
+            id: wire
+                .name
+                .strip_prefix("models/")
+                .unwrap_or(&wire.name)
+                .to_owned(),
+            display_name: wire.display_name,
+            description: wire.description,
+            input_token_limit: wire.input_token_limit,
+            output_token_limit: wire.output_token_limit,
+            generation_methods: wire.supported_generation_methods,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,5 +1086,39 @@ mod tests {
 
         let unshaped: WireErrorBody = serde_json::from_str("not even json").unwrap_or_default();
         assert_eq!(unshaped.message("not even json"), "not even json");
+    }
+
+    #[test]
+    fn wire_model_normalizes_and_filters_chat_capability() {
+        let wire: WireModel = serde_json::from_str(
+            r#"{
+                "name": "models/gemini-3.8-flash",
+                "displayName": "Gemini 3.8 Flash",
+                "description": "the current flash",
+                "inputTokenLimit": 1048576,
+                "supportedGenerationMethods": ["generateContent", "countTokens"]
+            }"#,
+        )
+        .unwrap();
+        let model: GeminiModel = wire.into();
+        assert_eq!(model.id, "gemini-3.8-flash");
+        assert_eq!(model.display_name, "Gemini 3.8 Flash");
+        assert_eq!(model.input_token_limit, Some(1_048_576));
+        assert_eq!(model.output_token_limit, None);
+        assert!(model.supports_chat());
+
+        let tts: GeminiModel = serde_json::from_str::<WireModel>(
+            r#"{
+                "name": "models/gemini-3.8-flash-tts",
+                "supportedGenerationMethods": ["generateContent", "generateAudio"]
+            }"#,
+        )
+        .unwrap()
+        .into();
+        assert_eq!(tts.id, "gemini-3.8-flash-tts");
+        assert!(
+            tts.supports_chat(),
+            "tts models still expose generateContent"
+        );
     }
 }

@@ -24,7 +24,7 @@
 //!     system: Some("be terse".into()),
 //!     messages: vec![Message::text(Role::User, "reply with exactly: ok")],
 //!     tools: vec![],
-//!     params: ChatParams::new("gemini-2.5-flash"),
+//!     params: ChatParams::new("gemini-3.8-flash"),
 //! };
 //! let mut sink = Print;
 //! let output = provider.complete(request, &mut sink).await?;
@@ -50,4 +50,6 @@ pub mod wire;
 
 pub use provider::{DEFAULT_BASE_URL, GoogleProvider};
 pub use stream::SseDecoder;
-pub use wire::{ChunkAssembler, GenerateContentRequest, GenerateContentResponse, NormalizedPart};
+pub use wire::{
+    ChunkAssembler, GeminiModel, GenerateContentRequest, GenerateContentResponse, NormalizedPart,
+};

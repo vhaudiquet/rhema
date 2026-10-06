@@ -19,7 +19,9 @@ use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 
 use crate::stream::SseDecoder;
-use crate::wire::{ChunkAssembler, GenerateContentResponse, WireErrorBody};
+use crate::wire::{
+    ChunkAssembler, GeminiModel, GenerateContentResponse, WireErrorBody, WireModelsPage,
+};
 
 /// The production Generative Language API base (v1beta).
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
@@ -47,6 +49,45 @@ impl GoogleProvider {
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into().trim_end_matches('/').to_owned();
         self
+    }
+
+    /// Every model the key can see, following pagination until the list is
+    /// exhausted. `models/` is stripped from `GeminiModel::id`.
+    pub async fn list_models(&self) -> Result<Vec<GeminiModel>, ProviderError> {
+        let mut models = Vec::new();
+        let mut page_token: Option<String> = None;
+        loop {
+            let mut url = format!("{}/models?pageSize=1000", self.base_url);
+            if let Some(token) = &page_token {
+                url.push_str(&format!("&pageToken={token}"));
+            }
+            let response = self
+                .http
+                .get(&url)
+                .header("x-goog-api-key", &self.api_key)
+                .send()
+                .await
+                .map_err(network_error)?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await.unwrap_or_default();
+                let parsed: WireErrorBody = serde_json::from_str(&text).unwrap_or_default();
+                return Err(ProviderError::Api(format!(
+                    "gemini api error (HTTP {}): {}",
+                    status.as_u16(),
+                    parsed.message(&text)
+                )));
+            }
+            let page: WireModelsPage = response
+                .json()
+                .await
+                .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
+            models.extend(page.models.into_iter().map(Into::into));
+            match page.next_page_token {
+                Some(token) => page_token = Some(token),
+                None => return Ok(models),
+            }
+        }
     }
 }
 

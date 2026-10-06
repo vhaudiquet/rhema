@@ -10,12 +10,32 @@
 use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, Role,
 };
-use rhema_provider_google::GoogleProvider;
+use rhema_provider_google::{GeminiModel, GoogleProvider};
 
 struct NullSink;
 
 impl EventSink for NullSink {
     fn emit(&mut self, _event: Event<'_>) {}
+}
+
+#[tokio::test]
+#[ignore = "hits the live Gemini API; set GEMINI_API_KEY and run with `cargo test -p rhema-provider-google --all-features -- --ignored`"]
+async fn live_gemini_lists_chat_capable_models() {
+    let key = std::env::var("GEMINI_API_KEY")
+        .unwrap_or_else(|_| panic!("set GEMINI_API_KEY to run the live test"));
+
+    let models = GoogleProvider::new(key)
+        .list_models()
+        .await
+        .expect("the live ListModels call succeeds");
+    let chat: Vec<&GeminiModel> = models
+        .iter()
+        .filter(|model| model.supports_chat())
+        .collect();
+    assert!(
+        chat.iter().any(|model| model.id.starts_with("gemini-")),
+        "expected at least one chat-capable gemini model, got {chat:?}"
+    );
 }
 
 #[tokio::test]
@@ -29,7 +49,7 @@ async fn live_gemini_answers_a_trivial_prompt() {
         system: None,
         messages: vec![Message::text(Role::User, "Reply with exactly: ok")],
         tools: vec![],
-        params: ChatParams::new("gemini-2.5-flash"),
+        params: ChatParams::new("gemini-3.8-flash"),
     };
     let mut sink = NullSink;
     let out = provider

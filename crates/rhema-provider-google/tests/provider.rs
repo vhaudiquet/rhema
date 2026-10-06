@@ -197,3 +197,57 @@ async fn keep_alive_comments_in_the_stream_are_ignored() {
     assert_eq!(out.stop_reason, StopReason::EndTurn);
     assert_eq!(sink.0, vec!["TextDelta(\"ok\")".to_owned()]);
 }
+
+// The page-token mock mounts first: a request carrying `pageToken` matches
+// both mounts, and wiremock serves the first match.
+#[tokio::test]
+async fn list_models_follows_pagination_and_strips_the_prefix() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(query_param("pageToken", "next-1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {
+                    "name": "models/gemini-3.8-flash",
+                    "displayName": "Gemini 3.8 Flash",
+                    "supportedGenerationMethods": ["generateContent", "countTokens"]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("x-goog-api-key", "test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [
+                {
+                    "name": "models/gemini-3.7-flash",
+                    "displayName": "Gemini 3.7 Flash",
+                    "inputTokenLimit": 1000000,
+                    "supportedGenerationMethods": ["generateContent"]
+                },
+                {
+                    "name": "models/text-embedding-1",
+                    "supportedGenerationMethods": ["embedContent"]
+                }
+            ],
+            "nextPageToken": "next-1"
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let models = provider.list_models().await.expect("pages assemble");
+
+    let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["gemini-3.7-flash", "text-embedding-1", "gemini-3.8-flash"]
+    );
+    assert_eq!(models[0].display_name, "Gemini 3.7 Flash");
+    assert_eq!(models[0].input_token_limit, Some(1_000_000));
+    assert!(models[0].supports_chat());
+    assert!(!models[1].supports_chat());
+}
