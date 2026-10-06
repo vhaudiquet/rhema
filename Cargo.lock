@@ -1006,6 +1006,7 @@ dependencies = [
  "rhema-coding-agent",
  "rhema-core",
  "rhema-provider-google",
+ "serde_json",
  "tokio",
 ]
 
