@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+# Scripted MockProvider for offline tests; mirrors rhema-core's feature.
+mock = ["rhema-core/mock"]
+
 [dependencies]
 rhema-core = { path = "../rhema-core" }
 serde = { workspace = true }
