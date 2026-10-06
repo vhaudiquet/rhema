@@ -25,6 +25,8 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 - `rhema-provider-google` — Gemini adapter: streaming SSE, native function
   calling, live model listing; `GoogleProvider::new(api_key)` implements
   `ModelProvider`
+- `rhema-provider-llama-cpp` — llama.cpp `llama-server` adapter (OpenAI-
+  compatible streaming chat completions): server URL, optional bearer key
 - `rhema-config` — the XDG config file: stored API key (0600) and
   last-used model; env vars always win over the stored key
 - `rhema-coding-agent` — the coding-agent driver: built-in workspace tools
@@ -79,7 +81,13 @@ rhema [OPTIONS] [PROMPT]
 ```
 
 The API key resolves from `GEMINI_API_KEY`, then `GOOGLE_API_KEY`, then the
-key stored in `~/.config/rhema/config.json` (what the TUI login writes).The model sees four tools, all scoped inside the workspace: `read_file`,
+key stored in `~/.config/rhema/config.yaml` (what the TUI login writes).
+
+Local models work too: `rhema --provider llama-cpp` talks to a
+[llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` at
+`http://localhost:8080` — override with `--llama-url`, `LLAMA_CPP_URL`, or
+the stored config; add a bearer key with `LLAMA_CPP_API_KEY` if your server
+asks for one. No Google key needed on this path.The model sees four tools, all scoped inside the workspace: `read_file`,
 `list_dir`, `write_file`, and `run_command` (`bash -c`, capped output, 120 s
 timeout). The two side-effecting ones ask `allow? [y/N]` first unless
 `--no-confirm` is set. With `--save`, the session is checkpointed after every

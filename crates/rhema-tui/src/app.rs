@@ -558,6 +558,7 @@ mod tests {
         let config = Config {
             google_api_key: api_key.map(str::to_owned),
             model: model.map(str::to_owned),
+            ..Config::default()
         };
         let store = Arc::new(MemoryStore::new(config.clone()));
         let provider: Option<Arc<dyn ModelProvider>> =

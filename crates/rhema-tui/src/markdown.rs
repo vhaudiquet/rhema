@@ -68,8 +68,6 @@ struct MarkdownRenderer {
     style: InlineStyle,
     /// Nesting depth of lists, for indentation.
     list_depth: usize,
-    /// Marker for the next list item ("• " or "3. ").
-    item_marker: Option<String>,
     /// Counter of the running ordered list; `None` in unordered lists.
     ordered_counter: Option<u64>,
     /// Inside a fenced code block: rows carry the block background.

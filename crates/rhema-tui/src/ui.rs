@@ -699,6 +699,7 @@ mod scroll_tests {
         let config = rhema_config::Config {
             google_api_key: Some("k".into()),
             model: Some("m".into()),
+            ..rhema_config::Config::default()
         };
         App::new(AppSetup {
             store: Arc::new(MemoryStore::default()),
