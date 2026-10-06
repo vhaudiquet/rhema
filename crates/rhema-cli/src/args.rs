@@ -5,21 +5,22 @@ use std::path::PathBuf;
 use clap::Parser;
 use rhema_coding_agent::CodingAgentConfig;
 
-/// `rhema` — terminal UI for the rhema coding agent.
+/// `rhema` — terminal REPL for the rhema coding agent. The full-screen TUI lives in `rhema-tui`.
 #[derive(Debug, Parser)]
 #[command(
     name = "rhema",
     version,
-    about = "Terminal UI for the rhema coding agent"
+    about = "Terminal REPL for the rhema coding agent"
 )]
 pub struct Args {
     /// One-shot: run a single turn with this prompt and exit. Omit for the
     /// interactive REPL.
     pub prompt: Option<String>,
 
-    /// Model name.
-    #[arg(short = 'm', long, default_value = "gemini-2.5-flash")]
-    pub model: String,
+    /// Model name. Defaults to the stored choice in the rhema config, then
+    /// to `gemini-3.8-flash`.
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
 
     /// Workspace root for tools.
     #[arg(short = 'w', long, default_value = ".")]
@@ -53,7 +54,7 @@ mod tests {
     #[test]
     fn defaults_match_the_spec() {
         let args = parse(&[]);
-        assert_eq!(args.model, "gemini-2.5-flash");
+        assert_eq!(args.model, None);
         assert_eq!(args.workspace, PathBuf::from("."));
         assert_eq!(args.resume, None);
         assert_eq!(args.save, None);
@@ -82,7 +83,7 @@ mod tests {
             "--max-steps",
             "4",
         ]);
-        assert_eq!(args.model, "gemini-2.5-pro");
+        assert_eq!(args.model, Some("gemini-2.5-pro".into()));
         assert_eq!(args.workspace, PathBuf::from("/tmp/ws"));
         assert_eq!(args.resume, Some(PathBuf::from("s.json")));
         assert_eq!(args.save, Some(PathBuf::from("s.json")));

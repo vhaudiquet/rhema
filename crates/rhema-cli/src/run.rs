@@ -60,22 +60,50 @@ pub fn classify(line: &str) -> Input {
     }
 }
 
-/// Reads the Gemini API key from the environment, `GEMINI_API_KEY` first.
-/// The key is never accepted as a CLI flag — shells keep history.
+/// The model used when neither `--model` nor the stored config names one.
+/// Google closed `gemini-2.5-flash` to new users; the error's own
+/// recommendation is the default here.
+pub const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+
+/// Resolves the API key: `GEMINI_API_KEY`, then `GOOGLE_API_KEY`, then the
+/// key stored by the TUI login in the rhema config. The key is never
+/// accepted as a CLI flag — shells keep history.
 pub fn resolve_api_key() -> anyhow::Result<String> {
     let from = |name: &str| std::env::var(name).ok();
-    pick_key(from("GEMINI_API_KEY"), from("GOOGLE_API_KEY"))
+    let stored = stored_config().google_api_key;
+    pick_key(from("GEMINI_API_KEY"), from("GOOGLE_API_KEY"), stored)
+}
+
+/// Loads the rhema config; a broken file warns and behaves as empty rather
+/// than bricking the CLI.
+fn stored_config() -> rhema_config::Config {
+    match rhema_config::Config::load() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("warning: ignoring unreadable rhema config: {err}");
+            rhema_config::Config::default()
+        }
+    }
 }
 
 /// Pure core of [`resolve_api_key`], so the fallback order is testable
 /// without mutating process state. A whitespace-only value counts as
 /// missing.
-fn pick_key(gemini: Option<String>, google: Option<String>) -> anyhow::Result<String> {
+fn pick_key(
+    gemini: Option<String>,
+    google: Option<String>,
+    stored: Option<String>,
+) -> anyhow::Result<String> {
     gemini
         .or(google)
+        .or(stored)
         .map(|key| key.trim().to_owned())
         .filter(|key| !key.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("missing API key: set GEMINI_API_KEY (or GOOGLE_API_KEY)"))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "missing API key: set GEMINI_API_KEY (or GOOGLE_API_KEY), or run rhema-tui once to log in"
+            )
+        })
 }
 
 /// Runs the CLI: validates options, builds the provider and agent, then
@@ -96,9 +124,14 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     let provider: Arc<dyn ModelProvider> = Arc::new(GoogleProvider::new(api_key));
+    let model = args
+        .model
+        .clone()
+        .or_else(|| stored_config().model)
+        .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
     let config = CodingAgentConfig {
         max_turn_steps: args.max_steps,
-        ..CodingAgentConfig::new(args.model, &args.workspace)
+        ..CodingAgentConfig::new(model, &args.workspace)
     };
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
@@ -228,14 +261,20 @@ mod tests {
     }
 
     #[test]
-    fn the_key_prefers_gemini_then_google_then_errors() {
-        assert_eq!(pick_key(Some("a".into()), None).unwrap(), "a");
-        assert_eq!(pick_key(None, Some("b".into())).unwrap(), "b");
-        assert_eq!(pick_key(Some("a".into()), Some("b".into())).unwrap(), "a");
-        let err = pick_key(None, None).unwrap_err().to_string();
+    fn the_key_prefers_gemini_then_google_then_stored_then_errors() {
+        assert_eq!(pick_key(Some("a".into()), None, None).unwrap(), "a");
+        assert_eq!(pick_key(None, Some("b".into()), None).unwrap(), "b");
+        assert_eq!(pick_key(None, None, Some("c".into())).unwrap(), "c");
+        assert_eq!(
+            pick_key(Some("a".into()), Some("b".into()), Some("c".into())).unwrap(),
+            "a"
+        );
+        let err = pick_key(None, None, None).unwrap_err().to_string();
         assert!(err.contains("GEMINI_API_KEY"), "{err}");
         // A whitespace-only value does not count as present.
-        let err = pick_key(Some("  ".into()), None).unwrap_err().to_string();
+        let err = pick_key(Some("  ".into()), None, None)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("GEMINI_API_KEY"), "{err}");
     }
 
