@@ -105,7 +105,11 @@ not because ZeroClaw is otherwise the model to follow.
 **Decided:** the SessionManager contract counts as core-required, not
 optional — the interactive loop depends on it unconditionally, so in
 practice its reference implementation ships bundled with core even though it
-lives in its own module crate.
+lives in its own module crate. What must be singular is the *contract*, not
+the shipping order: the v1 step-engine crate (see `../SPEC.md`) deliberately
+lands before any SessionManager exists, with the loop's driver standing in
+until the SessionManager module lands — a sequencing choice, not a
+contradiction.
 
 **Open:** whether a second implementation of a contract can be registered
 alongside the default, and how conflicts are resolved if two are present.
