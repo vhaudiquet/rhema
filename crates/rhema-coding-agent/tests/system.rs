@@ -1,0 +1,102 @@
+//! The system prompt stamped into requests: the default names the
+//! workspace; `CodingAgentConfig::system` replaces it wholesale.
+
+use std::sync::{Arc, Mutex, PoisonError};
+
+use rhema_coding_agent::{AllowAll, CodingAgent, CodingAgentConfig, default_system};
+use rhema_core::{
+    Event, EventSink, Message, ModelOutput, ModelProvider, ProviderError, Role, StopReason, Usage,
+    async_trait,
+};
+
+struct NullSink;
+
+impl EventSink for NullSink {
+    fn emit(&mut self, _event: Event<'_>) {}
+}
+
+/// Records the `system` field of every request; answers with a fixed
+/// end-turn output.
+struct SystemRecorder {
+    reply: ModelOutput,
+    systems: Mutex<Vec<Option<String>>>,
+}
+
+impl SystemRecorder {
+    fn systems(&self) -> Vec<Option<String>> {
+        self.systems
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+#[async_trait]
+impl ModelProvider for SystemRecorder {
+    async fn complete(
+        &self,
+        req: rhema_core::ModelRequest,
+        _sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        self.systems
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(req.system);
+        Ok(self.reply.clone())
+    }
+}
+
+fn recorder() -> Arc<SystemRecorder> {
+    Arc::new(SystemRecorder {
+        reply: ModelOutput {
+            message: Message::text(Role::Assistant, "ok"),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        },
+        systems: Mutex::new(Vec::new()),
+    })
+}
+
+#[tokio::test]
+async fn the_default_system_prompt_names_the_canonical_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(root.path()).unwrap();
+    let provider = recorder();
+    let mut agent = CodingAgent::new(
+        provider.clone(),
+        CodingAgentConfig::new("mock-model", root.path()),
+    )
+    .unwrap();
+    let mut sink = NullSink;
+
+    agent
+        .turn("hi", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    let systems = provider.systems();
+    assert_eq!(systems.len(), 1);
+    assert_eq!(
+        systems[0].as_deref(),
+        Some(default_system(&workspace).as_str())
+    );
+}
+
+#[tokio::test]
+async fn config_system_replaces_the_default() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = recorder();
+    let config = CodingAgentConfig {
+        system: Some("custom prompt".into()),
+        ..CodingAgentConfig::new("mock-model", root.path())
+    };
+    let mut agent = CodingAgent::new(provider.clone(), config).unwrap();
+    let mut sink = NullSink;
+
+    agent
+        .turn("hi", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    assert_eq!(provider.systems(), vec![Some("custom prompt".to_string())]);
+}
