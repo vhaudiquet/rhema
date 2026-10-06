@@ -53,6 +53,33 @@ pub const PROVIDERS: &[ProviderEntry] = &[
 /// Outcome marker for non-selectable providers.
 pub const COMING_SOON: &str = "(coming soon)";
 
+// --- Slash commands ---
+
+/// Every chat command: the name (with the slash) and what it does. This
+/// table is the single source of truth for the completion palette, the
+/// `/help` notice, and nothing else needs to list them.
+pub const COMMANDS: &[(&str, &str)] = &[
+    ("/help", "commands and keys"),
+    ("/model", "pick the model"),
+    ("/login", "re-login: provider, key, or server"),
+    ("/clear", "fresh session"),
+    ("/exit", "quit"),
+];
+
+/// The commands whose names start with the slash token in `input`, in
+/// table order. `/` alone matches everything; an input that is not a
+/// command at all matches nothing.
+pub fn filtered_commands(input: &str) -> Vec<&'static (&'static str, &'static str)> {
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+    let needle = input.to_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|(name, _)| name.starts_with(&needle))
+        .collect()
+}
+
 // --- Login ---
 
 /// What Esc means on the login screen: with no session behind it, leaving
@@ -437,6 +464,9 @@ pub struct ChatState {
     /// Transcript scroll: rendered rows scrolled up beyond the bottom
     /// (0 follows the latest line).
     pub scroll: usize,
+    /// Highlighted row of the command palette while a slash input filters
+    /// it; meaningless otherwise.
+    pub palette_index: usize,
 }
 
 impl ChatState {
@@ -477,6 +507,7 @@ impl ChatState {
             KeyCode::Char(c) => {
                 self.input.insert(self.byte_offset(), c);
                 self.cursor += 1;
+                self.palette_index = 0;
                 ChatAction::None
             }
             KeyCode::Backspace => {
@@ -485,6 +516,7 @@ impl ChatState {
                     self.cursor -= 1;
                     let start = self.byte_offset();
                     self.input.replace_range(start..end, "");
+                    self.palette_index = 0;
                 }
                 ChatAction::None
             }
@@ -512,6 +544,29 @@ impl ChatState {
             }
             KeyCode::End => {
                 self.cursor = self.input.chars().count();
+                ChatAction::None
+            }
+            // The command palette owns the vertical arrows while a slash
+            // input filters it.
+            KeyCode::Up | KeyCode::Down
+                if self.input.starts_with('/') && !filtered_commands(&self.input).is_empty() =>
+            {
+                let count = filtered_commands(&self.input).len();
+                if key.code == KeyCode::Down {
+                    self.palette_index = (self.palette_index + 1).min(count - 1);
+                } else {
+                    self.palette_index = self.palette_index.saturating_sub(1);
+                }
+                ChatAction::None
+            }
+            KeyCode::Tab if self.input.starts_with('/') => {
+                let candidates = filtered_commands(&self.input);
+                if let Some((command, _)) =
+                    candidates.get(self.palette_index.min(candidates.len().saturating_sub(1)))
+                {
+                    self.input = (*command).to_owned();
+                    self.cursor = self.input.chars().count();
+                }
                 ChatAction::None
             }
             KeyCode::PageUp => {
@@ -557,8 +612,11 @@ mod tests {
         }
     }
 
-    // --- Login ---
+    // --- Slash commands ---
 
+    /// Every chat command: the name (with the slash) and what it does. This
+    /// table is the single source of truth for the completion palette, the
+    /// `/help` notice, and nothing else needs to list them.
     #[test]
     fn login_buffers_typing_and_masks_it() {
         let mut login = LoginScreen::new();
@@ -846,6 +904,52 @@ mod tests {
         chat.scroll_by(5);
         chat.handle_key(key(KeyCode::Enter));
         assert_eq!(chat.scroll, 0, "submitting follows the latest line");
+    }
+
+    #[test]
+    fn slash_input_filters_the_command_palette() {
+        let mut chat = ChatState::new();
+        for c in "/".chars() {
+            chat.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(crate::screens::filtered_commands("/").len(), COMMANDS.len());
+        for c in "cl".chars() {
+            chat.handle_key(key(KeyCode::Char(c)));
+        }
+        let names: Vec<&str> = crate::screens::filtered_commands("/cl")
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        assert_eq!(names, ["/clear"]);
+        // Not a command at all: nothing matches, nothing to complete.
+        assert!(crate::screens::filtered_commands("/zzz").is_empty());
+    }
+
+    #[test]
+    fn arrows_navigate_the_palette_and_tab_completes() {
+        let mut chat = ChatState::new();
+        for c in "/".chars() {
+            chat.handle_key(key(KeyCode::Char(c)));
+        }
+        chat.handle_key(key(KeyCode::Down));
+        chat.handle_key(key(KeyCode::Down));
+        assert_eq!(chat.palette_index, 2);
+        chat.handle_key(key(KeyCode::Up));
+        assert_eq!(chat.palette_index, 1);
+        chat.handle_key(key(KeyCode::Tab));
+        assert_eq!(chat.input, "/model");
+        assert_eq!(chat.cursor, "/model".chars().count());
+    }
+
+    #[test]
+    fn editing_the_input_resets_the_palette_selection() {
+        let mut chat = ChatState::new();
+        for c in "/".chars() {
+            chat.handle_key(key(KeyCode::Char(c)));
+        }
+        chat.handle_key(key(KeyCode::Down));
+        chat.handle_key(key(KeyCode::Backspace));
+        assert_eq!(chat.palette_index, 0);
     }
 
     #[test]

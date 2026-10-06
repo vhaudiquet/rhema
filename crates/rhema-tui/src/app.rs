@@ -279,11 +279,16 @@ impl App {
     /// path routes here before any turn could start.
     fn handle_command(&mut self, command: &str) {
         match command {
-            "help" => self.transcript.push_notice(
-                "commands: /help · /model (pick model) · /login (re-login) · \
-                 /clear (fresh session) · /exit (quit) — keys: pgup/pgdn or wheel \
-                 history · shift+drag to copy text",
-            ),
+            "help" => {
+                let commands = crate::screens::COMMANDS
+                    .iter()
+                    .map(|(name, description)| format!("{name} ({description})"))
+                    .collect::<Vec<_>>()
+                    .join(" · ");
+                self.transcript.push_notice(&format!(
+                    "{commands} — keys: pgup/pgdn or wheel history · shift+drag to copy text"
+                ));
+            }
             "model" => {
                 if self.running {
                     self.transcript
@@ -398,6 +403,13 @@ impl App {
             if key.code == KeyCode::Char('p') && !self.running {
                 return self.open_picker();
             }
+            return Vec::new();
+        }
+        // Esc while entering a command cancels the entry instead of the
+        // chat-level meanings (quit confirm / decline).
+        if key.code == KeyCode::Esc && self.chat.input.starts_with('/') {
+            self.chat.input.clear();
+            self.chat.cursor = 0;
             return Vec::new();
         }
         if key.code == KeyCode::Esc {
@@ -1249,6 +1261,17 @@ mod tests {
         }
         h.app.on_key(key(KeyCode::Esc));
         assert!(matches!(h.app.screen, Screen::Chat));
+    }
+
+    #[test]
+    fn esc_while_entering_a_command_clears_it_without_quit_confirm() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        for c in "/clear".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(h.app.chat.input.is_empty());
+        assert!(!h.app.confirm_quit, "esc cancels the command, not the app");
     }
 
     #[test]
