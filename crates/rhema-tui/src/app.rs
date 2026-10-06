@@ -656,7 +656,7 @@ mod tests {
             Screen::Picker(picker) => assert_eq!(picker.purpose, PickerPurpose::FromChat),
             _ => panic!("expected the picker"),
         }
-        h.app.on_key(key(KeyCode::Char('j')));
+        h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Enter));
 
         assert!(matches!(h.app.screen, Screen::Chat));

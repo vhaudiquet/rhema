@@ -3,7 +3,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::Stylize;
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 
@@ -128,6 +128,12 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
         return;
     }
 
+    // The list and the footer must not share a row: a scrolled-to-bottom
+    // list draws its highlight on the last inner row, exactly where the
+    // footer paints.
+    let [list_area, footer_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
+
     let filtered = picker.filtered();
     let rows: Vec<ListItem> = filtered
         .iter()
@@ -154,32 +160,26 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
         .collect();
     let mut state = ListState::default();
     state.select(Some(picker.selected));
-    frame.render_stateful_widget(List::new(rows), inner, &mut state);
-
-    let footer = if picker.filtering {
-        Line::from(vec![
-            Span::raw("filter: "),
-            Span::raw(picker.filter.clone()).bold(),
-            Span::raw("▌").bold(),
-            Span::raw("  "),
-            Span::raw("enter picks, esc clears").dim(),
-        ])
-    } else {
-        Line::from(vec![
-            Span::raw(format!("{} models", filtered.len())).dim(),
-            Span::raw("  "),
-            Span::raw("/ filter · enter choose · esc quit").dim(),
-        ])
-    };
-    frame.render_widget(
-        Paragraph::new(footer),
-        Rect {
-            x: area.x + 1,
-            y: area.bottom().saturating_sub(2),
-            width: area.width.saturating_sub(2),
-            height: 1,
-        },
+    // Without an explicit highlight the selection is invisible: ListState
+    // only offsets the scroll, the marker and style are opt-in.
+    frame.render_stateful_widget(
+        List::new(rows)
+            .highlight_symbol("❯ ")
+            .highlight_style(Style::default().bg(Color::DarkGray)),
+        list_area,
+        &mut state,
     );
+
+    let footer = Line::from(vec![
+        Span::raw("filter: "),
+        Span::raw(picker.filter.clone()).bold(),
+        Span::raw("▌").bold(),
+        Span::raw("  "),
+        Span::raw(format!("{} models", filtered.len())).dim(),
+        Span::raw("  "),
+        Span::raw("type to filter · enter choose · esc clear/quit").dim(),
+    ]);
+    frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
 fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
@@ -319,4 +319,83 @@ fn render_confirm_quit(frame: &mut Frame) {
         ])),
         inner,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::screens::{PickerPurpose, PickerScreen};
+    use ratatui::{Terminal, backend::TestBackend};
+    use rhema_provider_google::GeminiModel;
+
+    fn model(id: &str) -> GeminiModel {
+        GeminiModel {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            description: String::new(),
+            input_token_limit: None,
+            output_token_limit: None,
+            generation_methods: vec!["generateContent".to_owned()],
+        }
+    }
+
+    /// The selection must be visible: the highlighted row carries the
+    /// marker, the others do not.
+    #[test]
+    fn the_selected_picker_row_shows_the_marker() {
+        let picker = PickerScreen::new(
+            vec![model("model-a"), model("model-b")],
+            PickerPurpose::Initial,
+        );
+        assert_eq!(picker.selected, 0);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| render_picker(frame, &picker))
+            .unwrap();
+        let rows: Vec<String> = (0..12)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        let marker_row = rows.iter().find(|row| row.contains("❯ model-a"));
+        assert!(marker_row.is_some(), "selected row is marked: {rows:?}");
+        assert!(
+            !rows.iter().any(|row| row.contains("❯ model-b")),
+            "only the selected row is marked: {rows:?}"
+        );
+    }
+
+    /// A selection scrolled to the bottom of a long list must land on the
+    /// last model row, never on the footer row underneath the list.
+    #[test]
+    fn the_marker_never_lands_on_the_footer_row() {
+        let models: Vec<GeminiModel> = (0..20).map(|i| model(&format!("model-{i:02}"))).collect();
+        let mut picker = PickerScreen::new(models, PickerPurpose::Initial);
+        picker.selected = 19;
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| render_picker(frame, &picker))
+            .unwrap();
+        let rows: Vec<String> = (0..12)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        assert!(
+            rows.iter().any(|row| row.contains("❯ model-19")),
+            "the bottom selection is marked: {rows:?}"
+        );
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("filter:") && row.contains("❯")),
+            "the footer row never carries the marker: {rows:?}"
+        );
+    }
 }

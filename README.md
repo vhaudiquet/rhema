@@ -44,7 +44,8 @@ First launch opens the login screen: pick a provider (Google Gemini today;
 Anthropic/OpenAI are marked coming soon), paste an API key — it is validated
 with a real model-list call and stored in `~/.config/rhema/config.json` with
 `0600` permissions. Then pick a model from the live list (chat-capable
-models with their token limits, `/` filters the list). After that you land
+models with their token limits — just type to filter, arrows to move).
+After that you land
 in chat: responses stream in, `write_file`/`run_command` pop up an approval
 modal (y/N), and the status line shows token usage per turn.
 

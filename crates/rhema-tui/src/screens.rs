@@ -199,16 +199,14 @@ pub enum PickerAction {
     Retry,
 }
 
-/// The model picker: chat-capable models sorted by id, an optional filter
+/// The model picker: chat-capable models sorted by id, a type-to-filter
 /// prompt, and one highlighted row.
 #[derive(Debug)]
 pub struct PickerScreen {
     /// The models to pick from, sorted by id.
     pub models: Vec<GeminiModel>,
-    /// The filter text from the `/` prompt.
+    /// The filter text; printable keys extend it without any prefix.
     pub filter: String,
-    /// Whether the filter prompt is open.
-    pub filtering: bool,
     /// Index into the filtered list of the highlighted row.
     pub selected: usize,
     /// Current status.
@@ -225,7 +223,6 @@ impl PickerScreen {
         Self {
             models,
             filter: String::new(),
-            filtering: false,
             selected: 0,
             status: PickerStatus::Ready,
             purpose,
@@ -262,73 +259,59 @@ impl PickerScreen {
         }
     }
 
-    /// Handles one keypress.
+    /// Handles one keypress. Typing filters by default: printable keys
+    /// extend the filter, arrows navigate, enter picks. Esc clears a
+    /// non-empty filter first and only then quits or returns to the chat.
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return PickerAction::None;
         }
-        if self.filtering {
-            return self.handle_filter_key(key);
+        if self.status == PickerStatus::Ready {
+            match key.code {
+                KeyCode::Char(c) => {
+                    self.filter.push(c);
+                    self.clamp_selection();
+                    return PickerAction::None;
+                }
+                KeyCode::Backspace => {
+                    self.filter.pop();
+                    self.clamp_selection();
+                    return PickerAction::None;
+                }
+                KeyCode::Up => {
+                    self.selected = self.selected.saturating_sub(1);
+                    return PickerAction::None;
+                }
+                KeyCode::Down => {
+                    self.selected =
+                        (self.selected + 1).min(self.filtered().len().saturating_sub(1));
+                    return PickerAction::None;
+                }
+                KeyCode::Enter => return self.choose(),
+                KeyCode::Esc => {
+                    if !self.filter.is_empty() {
+                        self.filter.clear();
+                        self.clamp_selection();
+                        return PickerAction::None;
+                    }
+                    return match self.purpose {
+                        PickerPurpose::Initial => PickerAction::Quit,
+                        PickerPurpose::FromChat => PickerAction::BackToChat,
+                    };
+                }
+                _ => return PickerAction::None,
+            }
         }
+        // Loading or failed: only retry and leave are meaningful.
         match key.code {
-            KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
-                PickerAction::None
+            KeyCode::Char('r') if matches!(self.status, PickerStatus::Error(_)) => {
+                self.status = PickerStatus::Loading;
+                PickerAction::Retry
             }
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = (self.selected + 1).min(self.filtered().len().saturating_sub(1));
-                PickerAction::None
-            }
-            KeyCode::Char('/') if self.status == PickerStatus::Ready => {
-                self.filtering = true;
-                PickerAction::None
-            }
-            KeyCode::Enter => self.choose(),
             KeyCode::Esc => match self.purpose {
                 PickerPurpose::Initial => PickerAction::Quit,
                 PickerPurpose::FromChat => PickerAction::BackToChat,
             },
-            KeyCode::Char('r') => match self.status {
-                PickerStatus::Error(_) => {
-                    self.status = PickerStatus::Loading;
-                    PickerAction::Retry
-                }
-                _ => PickerAction::None,
-            },
-            _ => PickerAction::None,
-        }
-    }
-
-    /// Keys while the filter prompt is open: typing extends the filter,
-    /// Esc closes it, Enter picks the highlighted model. j/k are filter
-    /// text here; navigation is arrows-only while filtering.
-    fn handle_filter_key(&mut self, key: KeyEvent) -> PickerAction {
-        match key.code {
-            KeyCode::Char(c) => {
-                self.filter.push(c);
-                self.clamp_selection();
-                PickerAction::None
-            }
-            KeyCode::Backspace => {
-                self.filter.pop();
-                self.clamp_selection();
-                PickerAction::None
-            }
-            KeyCode::Esc => {
-                self.filter.clear();
-                self.filtering = false;
-                self.clamp_selection();
-                PickerAction::None
-            }
-            KeyCode::Enter => self.choose(),
-            KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                PickerAction::None
-            }
-            KeyCode::Down => {
-                self.selected = (self.selected + 1).min(self.filtered().len().saturating_sub(1));
-                PickerAction::None
-            }
             _ => PickerAction::None,
         }
     }
@@ -571,27 +554,21 @@ mod tests {
     }
 
     #[test]
-    fn picker_slash_opens_the_filter_prompt_and_typing_filters() {
+    fn typing_filters_without_any_prefix() {
         let mut picker = picker();
         assert_eq!(
-            picker.handle_key(key(KeyCode::Char('/'))),
+            picker.handle_key(key(KeyCode::Char('p'))),
             PickerAction::None
         );
-        assert!(picker.filtering);
-        picker.handle_key(key(KeyCode::Char('p')));
         picker.handle_key(key(KeyCode::Char('R')));
         assert_eq!(picker.filter, "pR");
         let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["gemini-3.8-pro"]);
-        picker.handle_key(key(KeyCode::Esc));
-        assert!(!picker.filtering);
-        assert_eq!(picker.filter, "");
     }
 
     #[test]
-    fn picker_enter_while_filtering_chooses_the_highlighted_model() {
+    fn typing_filters_and_enter_chooses_the_highlighted_model() {
         let mut picker = picker();
-        picker.handle_key(key(KeyCode::Char('/')));
         for c in "tts".chars() {
             picker.handle_key(key(KeyCode::Char(c)));
         }
@@ -602,17 +579,42 @@ mod tests {
     }
 
     #[test]
-    fn picker_navigation_clamps_to_the_list() {
+    fn arrows_navigate_while_typing_and_clamp_to_the_list() {
         let mut picker = picker();
-        for _ in 0..10 {
-            picker.handle_key(key(KeyCode::Char('j')));
+        for c in "gemini".chars() {
+            picker.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(picker.selected, 2);
+        for _ in 0..10 {
+            picker.handle_key(key(KeyCode::Down));
+        }
+        let count = picker.filtered().len();
+        assert_eq!(picker.selected, count - 1);
         picker.handle_key(key(KeyCode::Up));
-        assert_eq!(picker.selected, 1);
-        picker.handle_key(key(KeyCode::Char('k')));
-        picker.handle_key(key(KeyCode::Char('k')));
-        assert_eq!(picker.selected, 0);
+        assert_eq!(picker.selected, count - 2);
+        picker.handle_key(key(KeyCode::Up));
+        picker.handle_key(key(KeyCode::Up));
+        assert_eq!(picker.selected, 0, "up clamps at the top");
+    }
+
+    #[test]
+    fn backspace_undoes_the_filter() {
+        let mut picker = picker();
+        picker.handle_key(key(KeyCode::Char('t')));
+        picker.handle_key(key(KeyCode::Char('t')));
+        picker.handle_key(key(KeyCode::Backspace));
+        assert_eq!(picker.filter, "t");
+        picker.handle_key(key(KeyCode::Backspace));
+        assert_eq!(picker.filter, "");
+        assert_eq!(picker.filtered().len(), 3);
+    }
+
+    #[test]
+    fn esc_clears_a_non_empty_filter_before_quitting() {
+        let mut picker = picker();
+        picker.handle_key(key(KeyCode::Char('t')));
+        assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::None);
+        assert_eq!(picker.filter, "");
+        assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::Quit);
     }
 
     #[test]
@@ -660,7 +662,6 @@ mod tests {
     #[test]
     fn picker_backspace_shrinks_the_filter() {
         let mut picker = picker();
-        picker.handle_key(key(KeyCode::Char('/')));
         picker.handle_key(key(KeyCode::Char('a')));
         picker.handle_key(key(KeyCode::Char('b')));
         picker.handle_key(key(KeyCode::Backspace));
