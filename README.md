@@ -53,6 +53,11 @@ in chat: responses stream in as rendered markdown (headings, bold,
 code in the palette's cyan), `write_file`/`run_command` pop up an
 approval modal (y/N), and the status line shows token usage per turn.
 
+The TUI paints the Jadeite design system — jade-tinted dark ground,
+one green accent, status colors reserved for meaning. `--theme light`
+switches to the light token set for light terminals; dark is the
+design's primary.
+
 Keys: `enter` sends · `ctrl-p` re-opens the model picker (the session is
 kept across a model switch) · `esc` declines a pending approval, or asks to
 quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`

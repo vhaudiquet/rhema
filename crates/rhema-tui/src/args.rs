@@ -4,7 +4,16 @@
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{Parser, ValueEnum};
+
+/// Which Jadeite theme paints the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ThemeKind {
+    /// The primary dark theme.
+    Dark,
+    /// The light theme, for light terminals.
+    Light,
+}
 use rhema_coding_agent::CodingAgentConfig;
 
 /// `rhema-tui` — the full-screen terminal UI for the rhema coding agent.
@@ -34,6 +43,11 @@ pub struct Args {
     /// Approve all gated tool calls without asking.
     #[arg(long)]
     pub no_confirm: bool,
+
+    /// Color theme. Dark is the design's primary; light exists for
+    /// light-terminal users.
+    #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
+    pub theme: ThemeKind,
 }
 
 #[cfg(test)]

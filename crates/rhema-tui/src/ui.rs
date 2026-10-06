@@ -1,18 +1,13 @@
 //! Rendering only: maps the app state onto ratatui widgets. No logic —
 //! every decision lives in [`crate::app`] and [`crate::screens`].
 
+use crate::palette::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Style, Stylize};
+use ratatui::style::{Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-
-/// The one accent hue of the chat screen: markers, the running indicator,
-/// and nothing else. Warm amber per the design palette (#f59e0b).
-fn accent() -> Color {
-    Color::Rgb(245, 158, 11)
-}
 
 use crate::app::{App, Screen};
 use crate::screens::{COMING_SOON, PROVIDERS, PickerScreen, PickerStatus};
@@ -21,9 +16,16 @@ use rhema_provider_google::GeminiModel;
 
 /// Renders one frame.
 pub fn render(app: &App, frame: &mut Frame) {
+    let theme = app.theme;
+    // The canvas: Jadeite's ground, painted, so the app reads the same on
+    // any terminal.
+    frame.render_widget(
+        Block::default().style(Style::default().bg(theme.ground).fg(theme.text)),
+        frame.area(),
+    );
     match &app.screen {
-        Screen::Login(login) => render_login(frame, login),
-        Screen::Picker(picker) => render_picker(frame, picker),
+        Screen::Login(login) => render_login(frame, login, theme),
+        Screen::Picker(picker) => render_picker(frame, picker, theme),
         Screen::Chat => {
             // An error wraps, so the status strip grows to its wrapped
             // height; every other strip is fixed.
@@ -49,15 +51,15 @@ pub fn render(app: &App, frame: &mut Frame) {
                 Constraint::Length(1),
             ])
             .areas(frame.area());
-            render_header(frame, app, header_area);
-            render_transcript(frame, app, transcript_area);
-            render_status(frame, app, status_area);
-            render_input(frame, app, input_area);
-            render_footer(frame, app, footer_area);
+            render_header(frame, app, header_area, theme);
+            render_transcript(frame, app, transcript_area, theme);
+            render_status(frame, app, status_area, theme);
+            render_input(frame, app, input_area, theme);
+            render_footer(frame, app, footer_area, theme);
             if let Some(call) = &app.pending_approval {
-                render_approval_modal(frame, call);
+                render_approval_modal(frame, call, theme);
             } else if app.confirm_quit {
-                render_confirm_quit(frame);
+                render_confirm_quit(frame, theme);
             }
         }
     }
@@ -65,12 +67,13 @@ pub fn render(app: &App, frame: &mut Frame) {
 
 /// The compact header box: the app mark, then model and workspace as the
 /// dim context line.
-fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+fn render_header(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let model = app.config.model.as_deref().unwrap_or("no model");
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.surface))
         .padding(Padding::horizontal(1));
     frame.render_widget(block, area);
     let inner = Rect {
@@ -81,15 +84,19 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::raw("rhema").bold()),
+            Line::from(vec![
+                Span::raw("ῥ ").fg(theme.accent_text).bold(),
+                Span::raw("rhema").bold(),
+            ]),
             Line::from(
-                format!(
+                Span::raw(format!(
                     "{model} · {} · /help for commands",
                     app.options.workspace.display()
-                )
-                .dim(),
+                ))
+                .fg(theme.text3),
             ),
-        ]),
+        ])
+        .style(Style::default().bg(theme.surface).fg(theme.text)),
         inner,
     );
 }
@@ -104,11 +111,14 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
-fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen) {
+fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &Theme) {
     let area = centered(58, 13, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.surface).fg(theme.text))
         .title(" rhema — sign in ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -132,9 +142,9 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen) {
             if entry.selectable {
                 spans.push(Span::raw(entry.name).bold());
             } else {
-                spans.push(Span::raw(entry.name).dim());
+                spans.push(Span::raw(entry.name).fg(theme.text3));
                 spans.push(Span::raw("  "));
-                spans.push(Span::raw(COMING_SOON).dim());
+                spans.push(Span::raw(COMING_SOON).fg(theme.text3));
             }
             ListItem::new(Line::from(spans))
         })
@@ -153,31 +163,34 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen) {
 
     let status = match &login.status {
         crate::screens::LoginStatus::Idle => {
-            Line::from("enter your Google API key, then press enter").dim()
+            Line::from("enter your Google API key, then press enter").fg(theme.text3)
         }
-        crate::screens::LoginStatus::Validating => Line::from("validating key…").dim(),
+        crate::screens::LoginStatus::Validating => Line::from("validating key…").fg(theme.text3),
         crate::screens::LoginStatus::Error(message) => Line::from(message.clone()).red(),
     };
     frame.render_widget(Paragraph::new(status), status_area);
 }
 
-fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
+fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
     let area = frame.area();
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.surface).fg(theme.text))
         .title(" select a model ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     if picker.status != PickerStatus::Ready {
         let message = match &picker.status {
-            PickerStatus::Loading => Line::from("loading models…").dim(),
+            PickerStatus::Loading => Line::from("loading models…").fg(theme.text3),
             // The body below renders only in the Ready state.
             PickerStatus::Ready => Line::from(""),
             PickerStatus::Error(message) => Line::from(vec![
                 Span::raw(message.clone()).red(),
                 Span::raw("  "),
-                Span::raw("press r to retry").dim(),
+                Span::raw("press r to retry").fg(theme.text3),
             ]),
         };
         frame.render_widget(
@@ -196,7 +209,7 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
     let filtered = picker.filtered();
     let rows: Vec<ListItem> = filtered
         .iter()
-        .map(|model| ListItem::new(model_row(picker.provider, model)))
+        .map(|model| ListItem::new(model_row(picker.provider, model, theme)))
         .collect();
     let mut state = ListState::default();
     state.select(Some(picker.selected));
@@ -205,7 +218,8 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
     frame.render_stateful_widget(
         List::new(rows)
             .highlight_symbol("❯ ")
-            .highlight_style(Style::default().bg(Color::DarkGray)),
+            .highlight_style(Style::default().bg(theme.elevated))
+            .style(Style::default().bg(theme.surface).fg(theme.text)),
         list_area,
         &mut state,
     );
@@ -215,14 +229,14 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
         Span::raw(picker.filter.clone()).bold(),
         Span::raw("▌").bold(),
         Span::raw("  "),
-        Span::raw(format!("{} models", filtered.len())).dim(),
+        Span::raw(format!("{} models", filtered.len())).fg(theme.text3),
         Span::raw("  "),
-        Span::raw("type to filter · enter choose · esc clear/quit").dim(),
+        Span::raw("type to filter · enter choose · esc clear/quit").fg(theme.text3),
     ]);
     frame.render_widget(Paragraph::new(footer), footer_area);
 }
 
-fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
+fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let inner = Rect {
         x: area.x + 1,
         width: area.width.saturating_sub(2),
@@ -242,13 +256,13 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
         match line {
             transcript::Line::Assistant(text) => group.push(text.clone()),
             other => {
-                flush_response_group(&mut lines, &mut group, &mut marked);
+                flush_response_group(&mut lines, &mut group, &mut marked, app.theme);
                 marked = false;
-                lines.push(render_line(other));
+                lines.push(render_line(other, theme));
             }
         }
     }
-    flush_response_group(&mut lines, &mut group, &mut marked);
+    flush_response_group(&mut lines, &mut group, &mut marked, app.theme);
     let wrapped: Vec<Line> = lines
         .iter()
         .flat_map(|line| wrap_line(line, width))
@@ -256,12 +270,17 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let visible = inner.height as usize;
     let max_top = wrapped.len().saturating_sub(visible);
     let top = max_top.saturating_sub(app.chat.scroll.min(max_top));
-    frame.render_widget(Paragraph::new(wrapped).scroll((top as u16, 0)), inner);
+    frame.render_widget(
+        Paragraph::new(wrapped)
+            .scroll((top as u16, 0))
+            .style(Style::default().bg(theme.sunken).fg(theme.text)),
+        inner,
+    );
 }
 
 /// One picker row: `provider/` dim, id bright, then display name, price,
 /// and context window dim.
-fn model_row(provider: &str, model: &GeminiModel) -> Line<'static> {
+fn model_row(provider: &str, model: &GeminiModel, theme: &Theme) -> Line<'static> {
     let mut details = String::new();
     if let Some(pricing) = model.pricing() {
         details.push_str(&format!(
@@ -271,10 +290,10 @@ fn model_row(provider: &str, model: &GeminiModel) -> Line<'static> {
     }
     details.push_str(&format!("{} ctx", format_tokens(model.input_token_limit)));
     Line::from(vec![
-        Span::raw(format!("{provider}/")).dim(),
+        Span::raw(format!("{provider}/")).fg(theme.text3),
         Span::raw(model.id.clone()).bold(),
         Span::raw("  "),
-        Span::raw(details).dim(),
+        Span::raw(details).fg(theme.text3),
     ])
 }
 
@@ -369,50 +388,56 @@ fn flush_response_group(
     lines: &mut Vec<Line<'static>>,
     group: &mut Vec<String>,
     marked: &mut bool,
+    theme: &Theme,
 ) {
     if group.is_empty() {
         return;
     }
     let source = group.join("\n");
     group.clear();
-    let rendered = crate::markdown::render_markdown(&source);
+    let rendered = crate::markdown::render_markdown(&source, theme);
     for (index, mut line) in rendered.into_iter().enumerate() {
         if index == 0 && !*marked {
             *marked = true;
-            line.spans
-                .insert(0, Span::styled("● ", Style::default().fg(accent())));
+            line.spans.insert(
+                0,
+                Span::styled("● ", Style::default().fg(theme.accent_text)),
+            );
         }
         lines.push(line);
     }
 }
 
-fn render_line(line: &transcript::Line) -> Line<'static> {
+fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
     match line {
-        transcript::Line::User(text) => {
-            Line::from(vec![Span::raw("❯ ").dim(), Span::raw(text.clone())])
-        }
+        transcript::Line::User(text) => Line::from(vec![
+            Span::raw("❯ ").fg(theme.text3),
+            Span::raw(text.clone()),
+        ]),
         transcript::Line::Assistant(text) => Line::from(Span::raw(text.clone())),
         transcript::Line::ToolCall { name, args, ok, .. } => {
-            let mut spans = vec![Span::raw("⌁ ").dim()];
+            let mut spans = vec![Span::raw("⌁ ").fg(theme.text3)];
             match ok {
-                Some(true) => spans.push(Span::raw("✓ ").green()),
-                Some(false) => spans.push(Span::raw("✗ ").red()),
+                Some(true) => spans.push(Span::raw("✓ ").fg(theme.ok)),
+                Some(false) => spans.push(Span::raw("✗ ").fg(theme.error)),
                 // Still running: keep the mark column aligned.
                 None => spans.push(Span::raw("  ")),
             }
             spans.push(Span::raw(transcript::describe(name, args)));
             Line::from(spans)
         }
-        transcript::Line::Notice(text) => Line::from(Span::raw(text.clone()).dim().italic()),
+        transcript::Line::Notice(text) => {
+            Line::from(Span::raw(text.clone()).fg(theme.info).italic())
+        }
     }
 }
 
-fn render_status(frame: &mut Frame, app: &App, area: Rect) {
+fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let width = area.width as usize;
     let mut lines: Vec<Line> = if let Some(error) = &app.error {
         wrap_line(&Line::from(error.clone()), width)
             .into_iter()
-            .map(|line| line.style(Style::default().fg(Color::Red).bold()))
+            .map(|line| line.style(Style::default().fg(theme.error).bold()))
             .collect()
     } else if app.running {
         let elapsed = app
@@ -420,9 +445,9 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             .map(|started| format!(" · {}s", started.elapsed().as_secs()))
             .unwrap_or_default();
         vec![Line::from(vec![
-            Span::styled("✳ thinking", Style::default().fg(accent())),
-            Span::raw(elapsed).dim(),
-            Span::raw(" · esc declines pending tools").dim(),
+            Span::styled("✳ thinking", Style::default().fg(theme.running)),
+            Span::raw(elapsed).fg(theme.text3),
+            Span::raw(" · esc declines pending tools").fg(theme.text3),
         ])]
     } else {
         vec![Line::from("")]
@@ -432,25 +457,27 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect) {
             .last_mut()
             .unwrap()
             .spans
-            .push(Span::raw("  ·  viewing history · pgdn: latest").dim());
+            .push(Span::raw("  ·  viewing history · pgdn: latest").fg(theme.text3));
     }
     frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// The dim telemetry strip under the input: last turn's tokens, and the
 /// history-pinned indicator.
-fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let line = match app.usage {
         Some(usage) => Line::from(format!(
             "tokens: {} in / {} out ({} cached)",
             usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
         ))
-        .dim(),
-        None => Line::from("pgup/pgdn or wheel: history · ctrl-p: model · ctrl-c: quit").dim(),
+        .fg(theme.text3),
+        None => {
+            Line::from("pgup/pgdn or wheel: history · ctrl-p: model · ctrl-c: quit").fg(theme.text3)
+        }
     };
     let line = if app.chat.scroll > 0 && app.error.is_none() {
         let mut spans = line.spans;
-        spans.push(Span::raw("  ·  viewing history · pgdn: latest").dim());
+        spans.push(Span::raw("  ·  viewing history · pgdn: latest").fg(theme.text3));
         Line::from(spans)
     } else {
         line
@@ -458,15 +485,19 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(line), area);
 }
 
-fn render_input(frame: &mut Frame, app: &App, area: Rect) {
+fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+    // The input is the one interactive element, so it earns the accent;
+    // while a turn runs it calms to a hairline.
+    let border = if app.running {
+        theme.border_strong
+    } else {
+        theme.accent
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(if app.running {
-            Color::DarkGray
-        } else {
-            accent()
-        }));
+        .border_style(Style::default().fg(border))
+        .style(Style::default().bg(theme.surface));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -488,11 +519,11 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     // always reads as an input.
     let content = if visible.is_empty() && !app.running {
         Line::from(vec![
-            Span::raw(prompt).dim(),
-            Span::raw("ask anything · /help for commands").dim(),
+            Span::raw(prompt).fg(theme.text3),
+            Span::raw("ask anything · /help for commands").fg(theme.text3),
         ])
     } else {
-        Line::from(vec![Span::raw(prompt).dim(), Span::raw(visible)])
+        Line::from(vec![Span::raw(prompt).fg(theme.text3), Span::raw(visible)])
     };
     frame.render_widget(Paragraph::new(content), inner);
     if !app.running {
@@ -503,14 +534,14 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall) {
+fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall, theme: &Theme) {
     let area = centered(64, 12, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .title(" approve tool call ")
-        .yellow();
+        .border_style(Style::default().fg(theme.warn));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -526,17 +557,19 @@ fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall) {
         body_area,
     );
     frame.render_widget(
-        Paragraph::new(Line::from("y allow · anything else declines").dim()),
+        Paragraph::new(Line::from("y allow · anything else declines").fg(theme.text3)),
         footer_area,
     );
 }
 
-fn render_confirm_quit(frame: &mut Frame) {
+fn render_confirm_quit(frame: &mut Frame, theme: &Theme) {
     let area = centered(34, 3, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border_strong))
+        .style(Style::default().bg(theme.surface).fg(theme.text))
         .title(" quit rhema? ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -554,6 +587,7 @@ fn render_confirm_quit(frame: &mut Frame) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::DARK;
     use crate::screens::{PickerPurpose, PickerScreen};
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_provider_google::GeminiModel;
@@ -581,7 +615,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
-            .draw(|frame| render_picker(frame, &picker))
+            .draw(|frame| render_picker(frame, &picker, &DARK))
             .unwrap();
         let rows: Vec<String> = (0..12)
             .map(|y| {
@@ -608,7 +642,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
-            .draw(|frame| render_picker(frame, &picker))
+            .draw(|frame| render_picker(frame, &picker, &DARK))
             .unwrap();
         let rows: Vec<String> = (0..12)
             .map(|y| {
@@ -687,6 +721,8 @@ mod tests {
 mod scroll_tests {
     use super::render;
     use crate::app::{App, AppSetup, RunOptions};
+    use crate::args::ThemeKind;
+    use crate::palette::DARK;
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_core::MockProvider;
@@ -706,6 +742,7 @@ mod scroll_tests {
             provider: Some(Arc::new(MockProvider::new(Vec::new()))),
             session: rhema_core::Session::default(),
             options: RunOptions {
+                theme: ThemeKind::Dark,
                 workspace: PathBuf::from("."),
                 max_steps: 4,
                 no_confirm: false,

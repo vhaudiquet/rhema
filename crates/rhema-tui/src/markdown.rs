@@ -7,24 +7,17 @@
 //! cyan, code blocks on slate, quotes and rules dim; no syntax highlighting
 //! inside code blocks (syntect later if wanted).
 
+use crate::palette::Theme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
-/// Electric cyan for code, per the design palette (#38bdf8).
-fn code_color() -> Color {
-    Color::Rgb(56, 189, 248)
-}
-
-/// Slate code-block background (#161b22).
-fn code_block_bg() -> Color {
-    Color::Rgb(22, 27, 34)
-}
-
 /// Renders one assistant response (its full markdown source) into styled
-/// lines. Plain text passes through untouched.
-pub fn render_markdown(source: &str) -> Vec<Line<'static>> {
-    let mut renderer = MarkdownRenderer::default();
+/// lines. Plain text passes through untouched. Code reads in the accent's
+/// text tone on a surface well — the transcript well is sunken, so code
+/// steps one tier up.
+pub fn render_markdown(source: &str, theme: &Theme) -> Vec<Line<'static>> {
+    let mut renderer = MarkdownRenderer::new(theme);
     for event in Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH) {
         renderer.push(event);
     }
@@ -41,7 +34,7 @@ struct InlineStyle {
 }
 
 impl InlineStyle {
-    fn apply(self, text: String) -> Span<'static> {
+    fn apply(self, text: String, theme: &Theme) -> Span<'static> {
         let mut style = Style::default();
         if self.bold {
             style = style.add_modifier(Modifier::BOLD);
@@ -53,15 +46,14 @@ impl InlineStyle {
             style = style.add_modifier(Modifier::CROSSED_OUT);
         }
         if self.link {
-            style = style.fg(code_color()).underlined();
+            style = style.fg(theme.accent_text).underlined();
         }
         Span::styled(text, style)
     }
 }
 
 /// Accumulates parser events into lines.
-#[derive(Default)]
-struct MarkdownRenderer {
+struct MarkdownRenderer<'a> {
     lines: Vec<Line<'static>>,
     /// Spans of the line being built.
     spans: Vec<Span<'static>>,
@@ -74,9 +66,24 @@ struct MarkdownRenderer {
     in_code_block: bool,
     /// Inside a block quote: every line carries the rail.
     in_block_quote: bool,
+    /// The design tokens; colors never come from literals (rule 1).
+    theme: &'a Theme,
 }
 
-impl MarkdownRenderer {
+impl<'a> MarkdownRenderer<'a> {
+    fn new(theme: &'a Theme) -> Self {
+        Self {
+            lines: Vec::new(),
+            spans: Vec::new(),
+            style: InlineStyle::default(),
+            list_depth: 0,
+            ordered_counter: None,
+            in_code_block: false,
+            in_block_quote: false,
+            theme,
+        }
+    }
+
     fn push(&mut self, event: Event<'_>) {
         match event {
             Event::Start(Tag::Heading { .. }) => {
@@ -132,7 +139,7 @@ impl MarkdownRenderer {
                 self.flush_line();
                 self.separate();
                 self.in_block_quote = true;
-                self.spans.push(Span::raw("│ ").dim());
+                self.spans.push(Span::raw("│ ").fg(self.theme.text3));
             }
             Event::End(TagEnd::BlockQuote(_)) => {
                 self.flush_line();
@@ -149,7 +156,7 @@ impl MarkdownRenderer {
             Event::End(TagEnd::Link) => self.style.link = false,
             Event::Code(code) => self.spans.push(Span::styled(
                 code.to_string(),
-                Style::default().fg(code_color()),
+                Style::default().fg(self.theme.accent_text),
             )),
             Event::Text(text) => {
                 if self.in_code_block {
@@ -161,25 +168,27 @@ impl MarkdownRenderer {
                         if !row.is_empty() {
                             self.spans.push(
                                 Span::raw(row.to_owned())
-                                    .fg(code_color())
-                                    .bg(code_block_bg()),
+                                    .fg(self.theme.accent_text)
+                                    .bg(self.theme.surface),
                             );
                         }
                     }
                 } else {
-                    self.spans.push(self.style.apply(text.to_string()));
+                    self.spans
+                        .push(self.style.apply(text.to_string(), self.theme));
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
                 self.flush_line();
                 if self.in_block_quote {
-                    self.spans.push(Span::raw("│ ").dim());
+                    self.spans.push(Span::raw("│ ").fg(self.theme.text3));
                 }
             }
             Event::Rule => {
                 self.flush_line();
                 self.separate();
-                self.lines.push(Line::from(Span::raw("────────").dim()));
+                self.lines
+                    .push(Line::from(Span::raw("────────").fg(self.theme.text3)));
                 self.separate();
             }
             Event::Html(html) | Event::InlineHtml(html) => {
@@ -221,6 +230,11 @@ impl MarkdownRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::palette::DARK;
+
+    fn render_markdown_d(source: &str) -> Vec<Line<'static>> {
+        render_markdown(source, &crate::palette::DARK)
+    }
 
     fn plain(lines: &[Line<'static>]) -> Vec<String> {
         lines
@@ -236,13 +250,13 @@ mod tests {
 
     #[test]
     fn plain_text_passes_through_without_artifacts() {
-        let lines = render_markdown("just words\nacross lines");
+        let lines = render_markdown_d("just words\nacross lines");
         assert_eq!(plain(&lines), ["just words", "across lines"]);
     }
 
     #[test]
     fn emphasis_and_code_render_styled_without_markers() {
-        let lines = render_markdown("a **bold** and *soft* and `code` bit");
+        let lines = render_markdown_d("a **bold** and *soft* and `code` bit");
         assert_eq!(lines.len(), 1);
         let spans: Vec<(String, Style)> = lines[0]
             .spans
@@ -260,12 +274,12 @@ mod tests {
             )
         );
         let code = spans.iter().find(|(text, _)| text == "code").unwrap();
-        assert_eq!(code.1.fg, Some(code_color()));
+        assert_eq!(code.1.fg, Some(DARK.accent_text));
     }
 
     #[test]
     fn block_quote_lines_all_carry_the_rail_and_separate() {
-        let lines = render_markdown("before\n\n> quoted one\n> quoted two\n\nafter");
+        let lines = render_markdown_d("before\n\n> quoted one\n> quoted two\n\nafter");
         let rendered = plain(&lines);
         assert_eq!(
             rendered,
@@ -275,21 +289,21 @@ mod tests {
 
     #[test]
     fn consecutive_paragraphs_get_a_blank_row_between_them() {
-        let lines = render_markdown("first paragraph\n\nsecond paragraph");
+        let lines = render_markdown_d("first paragraph\n\nsecond paragraph");
         let rendered = plain(&lines);
         assert_eq!(rendered, ["first paragraph", "", "second paragraph"]);
     }
 
     #[test]
     fn lists_are_separated_from_the_surrounding_text() {
-        let lines = render_markdown("intro:\n\n- one\n- two\n\noutro");
+        let lines = render_markdown_d("intro:\n\n- one\n- two\n\noutro");
         let rendered = plain(&lines);
         assert_eq!(rendered, ["intro:", "", "• one", "• two", "", "outro"]);
     }
 
     #[test]
     fn headings_render_bold_and_separated() {
-        let lines = render_markdown("# Title\n\nbody");
+        let lines = render_markdown_d("# Title\n\nbody");
         let rendered = plain(&lines);
         assert_eq!(rendered[0], "Title");
         assert!(
@@ -304,13 +318,13 @@ mod tests {
     #[test]
     fn code_blocks_keep_shape_and_gain_the_background() {
         let source = "```rust\nfn main() {\n    done();\n}\n```";
-        let lines = render_markdown(source);
+        let lines = render_markdown_d(source);
         let rendered = plain(&lines);
         assert_eq!(rendered[0], "fn main() {");
         assert_eq!(rendered[1], "    done();");
         assert_eq!(
             lines[0].spans[0].style.bg,
-            Some(code_block_bg()),
+            Some(DARK.surface),
             "code rows carry the slate background"
         );
     }
@@ -318,14 +332,14 @@ mod tests {
     #[test]
     fn lists_render_bullets_with_indent() {
         let source = "- one\n- two\n  - nested";
-        let lines = render_markdown(source);
+        let lines = render_markdown_d(source);
         let rendered = plain(&lines);
         assert_eq!(rendered, ["• one", "• two", "", "  • nested"]);
     }
 
     #[test]
     fn ordered_lists_keep_their_numbers() {
-        let lines = render_markdown("1. first\n2. second");
+        let lines = render_markdown_d("1. first\n2. second");
         let rendered = plain(&lines);
         assert_eq!(rendered[0], "1. first");
         assert_eq!(rendered[1], "2. second");

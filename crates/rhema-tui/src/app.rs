@@ -43,6 +43,8 @@ pub struct AppSetup {
 /// The startup flags that outlive the screens.
 #[derive(Debug, Clone)]
 pub struct RunOptions {
+    /// Which Jadeite theme paints the screen.
+    pub theme: crate::args::ThemeKind,
     /// Workspace root for tools.
     pub workspace: PathBuf,
     /// Max steps per turn.
@@ -112,6 +114,8 @@ pub struct App {
     pub decline_all: bool,
     /// Set by the runner to end the event loop.
     pub should_quit: bool,
+    /// The resolved design tokens every render pass reads.
+    pub theme: &'static crate::palette::Theme,
     /// The chat input state.
     pub chat: ChatState,
     answers: Option<ApprovalAnswerer>,
@@ -149,6 +153,11 @@ impl App {
             (None, _) => Screen::Login(LoginScreen::new()),
         };
         Ok(Self {
+            // Read before `options` moves into the struct.
+            theme: match setup.options.theme {
+                crate::args::ThemeKind::Dark => &crate::palette::DARK,
+                crate::args::ThemeKind::Light => &crate::palette::LIGHT,
+            },
             store: setup.store,
             config: setup.config,
             api_key: setup.api_key,
@@ -570,6 +579,7 @@ mod tests {
             provider,
             session,
             options: RunOptions {
+                theme: crate::args::ThemeKind::Dark,
                 workspace: PathBuf::from("."),
                 max_steps: 4,
                 no_confirm: false,

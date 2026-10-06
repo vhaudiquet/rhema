@@ -56,6 +56,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         None => Session::default(),
     };
     let options = RunOptions {
+        theme: args.theme,
         workspace: args.workspace,
         max_steps: args.max_steps,
         no_confirm: args.no_confirm,
