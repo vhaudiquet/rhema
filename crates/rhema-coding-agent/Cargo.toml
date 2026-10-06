@@ -1,0 +1,21 @@
+[package]
+name = "rhema-coding-agent"
+description = "The coding-agent driver on top of rhema-core: built-in tools, turn loop, session persistence"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# Subprocess execution for the command tool
+tokio = { workspace = true, features = ["process", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"

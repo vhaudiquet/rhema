@@ -1,0 +1,24 @@
+[package]
+name = "rhema-provider-google"
+description = "Google Gemini adapter for the rhema ModelProvider seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# HTTP + SSE streaming against the Generative Language API
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# In-process HTTP mock for offline SSE tests
+wiremock = "0.6"
+tempfile = "3"

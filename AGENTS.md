@@ -46,6 +46,9 @@ Rules:
     (`src/engine.rs`)
   - `mock` — `MockProvider` (`src/mock.rs`, `mock` feature)
   - `tests` — integration suites under `crates/rhema-core/tests/`
+  - `google` — the Gemini provider adapter (`crates/rhema-provider-google/`)
+  - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
+  - `rhema` — the CLI binary and terminal UI (`crates/rhema-cli/`)
   - `deps` — dependency additions/bumps (manifests, lockfile)
 - Omit the scope entirely for repo-wide changes that do not belong to
   a single component (root config, README.md, SPEC.md).
