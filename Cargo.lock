@@ -1973,6 +1973,7 @@ dependencies = [
  "rhema-config",
  "rhema-core",
  "rhema-provider-google",
+ "rhema-provider-llama-cpp",
  "serde_json",
  "tempfile",
  "tokio",

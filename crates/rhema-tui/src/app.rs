@@ -28,16 +28,92 @@ pub struct AppSetup {
     pub store: Arc<dyn ConfigStore>,
     /// The loaded config (login and model choices persist here).
     pub config: Config,
-    /// The resolved Google API key (`env` first, stored second), `None`
-    /// when the login screen must run.
-    pub api_key: Option<String>,
-    /// The provider behind the resolved key; `Some` exactly when
-    /// `api_key` is.
-    pub provider: Option<Arc<dyn ModelProvider>>,
+    /// The resolved backend, `None` when the login screen must run first.
+    pub backend: Option<Backend>,
     /// The starting session: empty, or resumed from `--resume`.
     pub session: Session,
     /// The startup flags.
     pub options: RunOptions,
+}
+
+/// The model backend a session runs on: which provider, and whatever
+/// credentials or endpoints it needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Backend {
+    /// Google Gemini, by API key.
+    Google {
+        /// The resolved key (`env` first, stored second).
+        api_key: String,
+    },
+    /// A llama.cpp server (`llama-server`, possibly behind a router) by
+    /// URL, with an optional bearer key.
+    LlamaCpp {
+        /// Server base URL.
+        url: String,
+        /// Bearer key, when the server asks for one.
+        api_key: Option<String>,
+    },
+}
+
+impl Backend {
+    /// The provider implementation for this backend.
+    pub fn provider(&self) -> Arc<dyn ModelProvider> {
+        match self {
+            Backend::Google { api_key } => {
+                Arc::new(rhema_provider_google::GoogleProvider::new(api_key.clone()))
+            }
+            Backend::LlamaCpp { url, api_key } => {
+                let mut provider = rhema_provider_llama_cpp::LlamaCppProvider::new(url.clone());
+                if let Some(key) = api_key {
+                    provider = provider.with_api_key(key.clone());
+                }
+                Arc::new(provider)
+            }
+        }
+    }
+
+    /// The config `provider` string this backend persists.
+    pub fn config_name(&self) -> &'static str {
+        match self {
+            Backend::Google { .. } => "google",
+            Backend::LlamaCpp { .. } => "llama-cpp",
+        }
+    }
+
+    /// The models the backend offers, normalized to the picker's row type.
+    pub async fn list_models(&self) -> Result<Vec<GeminiModel>, String> {
+        match self {
+            Backend::Google { api_key } => {
+                rhema_provider_google::GoogleProvider::new(api_key.clone())
+                    .list_models()
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            Backend::LlamaCpp { url, api_key } => {
+                let mut provider = rhema_provider_llama_cpp::LlamaCppProvider::new(url.clone());
+                if let Some(key) = api_key {
+                    provider = provider.with_api_key(key.clone());
+                }
+                let ids = provider
+                    .list_models()
+                    .await
+                    .map_err(|err| err.to_string())?;
+                // llama.cpp reports ids only; the picker row degrades to
+                // the bare model name.
+                Ok(ids
+                    .into_iter()
+                    .map(|id| GeminiModel {
+                        display_name: id.clone(),
+                        id,
+                        description: String::new(),
+                        input_token_limit: None,
+                        output_token_limit: None,
+                        generation_methods: vec!["generateContent".to_owned()],
+                    })
+                    .collect())
+            }
+        }
+    }
 }
 
 /// The startup flags that outlive the screens.
@@ -80,9 +156,9 @@ pub struct App {
     pub store: Arc<dyn ConfigStore>,
     /// The config as currently held; mutations persist through `store`.
     pub config: Config,
-    /// The resolved API key, updated after a successful login.
-    pub api_key: Option<String>,
-    /// The provider behind `api_key`.
+    /// The backend resolved at login (or startup), if any.
+    pub backend: Option<Backend>,
+    /// The provider behind the backend.
     pub provider: Option<Arc<dyn ModelProvider>>,
     /// The startup flags.
     pub options: RunOptions,
@@ -135,9 +211,13 @@ impl App {
         let session = setup.session;
         let transcript = Transcript::from_history(&session.history);
         let mut agent = None;
-        let screen = match (&setup.api_key, &setup.config.model) {
+        let screen = match (&setup.backend, &setup.config.model) {
             (Some(_), Some(_)) => {
-                let provider = setup.provider.clone().ok_or(AgentError::MissingProvider)?;
+                let provider = setup
+                    .backend
+                    .as_ref()
+                    .map(Backend::provider)
+                    .ok_or(AgentError::MissingProvider)?;
                 let agent_config = agent_config(&setup.options, setup.config.model.clone());
                 agent = Some(CodingAgent::from_session(
                     provider,
@@ -160,8 +240,8 @@ impl App {
             },
             store: setup.store,
             config: setup.config,
-            api_key: setup.api_key,
-            provider: setup.provider,
+            provider: setup.backend.as_ref().map(Backend::provider),
+            backend: setup.backend,
             options: setup.options,
             session,
             screen,
@@ -183,7 +263,7 @@ impl App {
 
     /// Effects the runner must perform once, before the first draw.
     pub fn initial_effects(&self) -> Vec<Effect> {
-        if self.api_key.is_some() {
+        if self.backend.is_some() {
             vec![Effect::FetchModels(FetchWhy::Bootstrap)]
         } else {
             Vec::new()
@@ -239,7 +319,7 @@ impl App {
             Screen::Chat => Routed::Chat(self.chat.handle_key(key)),
         };
         match routed {
-            Routed::Login(LoginAction::Validate) => self.validate_key(),
+            Routed::Login(LoginAction::Validate) => self.validate_login(),
             Routed::Picker(PickerAction::Choose(id)) => {
                 self.choose_model(&id);
                 Vec::new()
@@ -324,14 +404,30 @@ impl App {
         }
     }
 
-    /// The login screen validated a key: fetch the models; the fetch is
-    /// the validation.
-    fn validate_key(&mut self) -> Vec<Effect> {
-        let key = match &self.screen {
-            Screen::Login(login) => login.input.clone(),
-            _ => return Vec::new(),
+    /// The login screen validated a provider's input: fetch the models;
+    /// the fetch is the validation (a wrong key or a dead server both
+    /// surface as the fetch's error).
+    fn validate_login(&mut self) -> Vec<Effect> {
+        let Screen::Login(login) = &self.screen else {
+            return Vec::new();
         };
-        vec![Effect::FetchModels(FetchWhy::Login { api_key: key })]
+        let backend = match login.selected_provider() {
+            Some(crate::screens::LoginProvider::LlamaCpp) => {
+                let url = if login.input.trim().is_empty() {
+                    self.config.llama_cpp_url()
+                } else {
+                    login.input.trim().to_owned()
+                };
+                Backend::LlamaCpp {
+                    url,
+                    api_key: self.config.llama_cpp_api_key(),
+                }
+            }
+            _ => Backend::Google {
+                api_key: login.input.clone(),
+            },
+        };
+        vec![Effect::FetchModels(FetchWhy::Login { backend })]
     }
 
     /// Retry a failed model fetch, per the picker's purpose.
@@ -395,19 +491,37 @@ impl App {
     /// or the cache.
     fn on_models_loaded(&mut self, why: FetchWhy, result: Result<Vec<GeminiModel>, String>) {
         match why {
-            FetchWhy::Login { api_key } => {
+            FetchWhy::Login { backend } => {
                 let Screen::Login(login) = &mut self.screen else {
                     return;
                 };
                 match result {
                     Ok(models) => {
-                        self.config.google_api_key = Some(api_key.clone());
+                        match &backend {
+                            Backend::Google { api_key } => {
+                                self.config.google_api_key = Some(api_key.clone());
+                            }
+                            Backend::LlamaCpp { url, api_key } => {
+                                self.config.provider = Some("llama-cpp".to_owned());
+                                self.config.llama_cpp_url = Some(url.clone());
+                                self.config.llama_cpp_api_key = api_key.clone();
+                            }
+                        }
                         if let Err(err) = self.store.save(&self.config) {
                             login.status = LoginStatus::Error(format!("cannot save config: {err}"));
                             return;
                         }
-                        self.api_key = Some(api_key);
+                        self.backend = Some(backend.clone());
+                        self.provider = Some(backend.provider());
                         self.models = models.clone();
+                        // A single-model server (plain llama-server rather
+                        // than a router) has nothing to pick: take it and
+                        // go straight to chat.
+                        if models.len() == 1 {
+                            let id = models[0].id.clone();
+                            self.choose_model(&id);
+                            return;
+                        }
                         self.screen =
                             Screen::Picker(PickerScreen::new(models, PickerPurpose::Initial));
                     }
@@ -548,6 +662,18 @@ mod tests {
         vec![model("m-b"), model("m-a")]
     }
 
+    /// A llama.cpp row: an id with none of the metadata Google reports.
+    fn llama_model(id: &str) -> GeminiModel {
+        GeminiModel {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            description: String::new(),
+            input_token_limit: None,
+            output_token_limit: None,
+            generation_methods: vec!["generateContent".to_owned()],
+        }
+    }
+
     fn test_call() -> ToolCall {
         ToolCall {
             id: "c1".into(),
@@ -570,13 +696,14 @@ mod tests {
             ..Config::default()
         };
         let store = Arc::new(MemoryStore::new(config.clone()));
-        let provider: Option<Arc<dyn ModelProvider>> =
-            api_key.map(|key| Arc::new(GoogleProvider::new(key.to_owned())) as _);
+        let backend: Option<Backend> = api_key.map(|key| Backend::Google {
+            api_key: key.to_owned(),
+        });
+        let provider: Option<Arc<dyn ModelProvider>> = backend.as_ref().map(Backend::provider);
         let app = App::new(AppSetup {
             store: store.clone(),
             config,
-            api_key: api_key.map(str::to_owned),
-            provider,
+            backend,
             session,
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
@@ -639,12 +766,16 @@ mod tests {
         assert_eq!(
             effects,
             vec![Effect::FetchModels(FetchWhy::Login {
-                api_key: "secret".into()
+                backend: Backend::Google {
+                    api_key: "secret".into()
+                },
             })]
         );
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Login {
-                api_key: "secret".into(),
+                backend: Backend::Google {
+                    api_key: "secret".into(),
+                },
             },
             result: Ok(models()),
         });
@@ -656,7 +787,85 @@ mod tests {
             h.store.load().unwrap().google_api_key.as_deref(),
             Some("secret")
         );
-        assert_eq!(h.app.api_key.as_deref(), Some("secret"));
+        assert!(matches!(
+            h.app.backend,
+            Some(Backend::Google { ref api_key }) if api_key == "secret"
+        ));
+    }
+
+    #[test]
+    fn llama_login_validates_by_server_url_and_persists_the_provider() {
+        let mut h = harness(None, None, Session::default());
+        // Move to the llama.cpp row, then type the URL (unmasked input).
+        h.app.on_key(key(KeyCode::Down));
+        match &h.app.screen {
+            Screen::Login(login) => {
+                assert_eq!(
+                    login.selected_provider(),
+                    Some(crate::screens::LoginProvider::LlamaCpp)
+                );
+                assert_eq!(login.input_label(), "server URL: ");
+            }
+            _ => panic!("expected the login screen"),
+        }
+        for c in "http://box:8080".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::LlamaCpp {
+                    url: "http://box:8080".into(),
+                    api_key: None,
+                },
+            })]
+        );
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::LlamaCpp {
+                    url: "http://box:8080".into(),
+                    api_key: None,
+                },
+            },
+            result: Ok(vec![llama_model("qwen3-8b"), llama_model("qwen3-32b")]),
+        });
+        // Router mode: several models land in the picker with no metadata.
+        match &h.app.screen {
+            Screen::Picker(picker) => {
+                assert_eq!(picker.models.len(), 2);
+                let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+                assert_eq!(ids, ["qwen3-32b", "qwen3-8b"]);
+                assert!(picker.models[0].input_token_limit.is_none());
+            }
+            _ => panic!("expected the picker after a successful llama login"),
+        }
+        let config = h.store.load().unwrap();
+        assert_eq!(config.provider.as_deref(), Some("llama-cpp"));
+        assert_eq!(config.llama_cpp_url.as_deref(), Some("http://box:8080"));
+    }
+
+    #[test]
+    fn a_single_model_server_auto_selects_and_skips_the_picker() {
+        let mut h = harness(None, None, Session::default());
+        h.app.on_key(key(KeyCode::Down));
+        for c in "http://localhost:8080".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::LlamaCpp {
+                    url: "http://localhost:8080".into(),
+                    api_key: None,
+                },
+            },
+            result: Ok(vec![llama_model("qwen3-8b")]),
+        });
+        // Exactly one model: no picker, straight to chat on that model.
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(h.app.agent.is_some());
+        assert_eq!(h.store.load().unwrap().model.as_deref(), Some("qwen3-8b"));
     }
 
     #[test]
@@ -668,7 +877,9 @@ mod tests {
         h.app.on_key(key(KeyCode::Enter));
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Login {
-                api_key: "bad-key".into(),
+                backend: Backend::Google {
+                    api_key: "bad-key".into(),
+                },
             },
             result: Err("gemini api error (HTTP 403): denied".into()),
         });

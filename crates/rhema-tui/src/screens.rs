@@ -5,14 +5,25 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_provider_google::GeminiModel;
 
-/// The provider rows shown at login. Only Google is selectable; the rest
-/// render with a "(coming soon)" marker and refuse selection.
+/// Which backend a login provider row configures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginProvider {
+    /// Google Gemini, by API key.
+    Google,
+    /// A llama.cpp server, by URL.
+    LlamaCpp,
+}
+
+/// The provider rows shown at login. Unimplemented providers render with a
+/// "(coming soon)" marker and refuse selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderEntry {
     /// Display name.
     pub name: &'static str,
     /// Whether the row can be chosen.
     pub selectable: bool,
+    /// The backend this row configures, when implemented.
+    pub kind: Option<LoginProvider>,
 }
 
 /// The login provider list, in display order.
@@ -20,14 +31,22 @@ pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "Google Gemini",
         selectable: true,
+        kind: Some(LoginProvider::Google),
+    },
+    ProviderEntry {
+        name: "llama.cpp (local server)",
+        selectable: true,
+        kind: Some(LoginProvider::LlamaCpp),
     },
     ProviderEntry {
         name: "Anthropic",
         selectable: false,
+        kind: None,
     },
     ProviderEntry {
         name: "OpenAI",
         selectable: false,
+        kind: None,
     },
 ];
 
@@ -87,10 +106,34 @@ impl LoginScreen {
         }
     }
 
-    /// The masked echo of the input: one bullet per character, no key
-    /// material ever rendered.
+    /// The backend the highlighted row configures, when implemented.
+    pub fn selected_provider(&self) -> Option<LoginProvider> {
+        PROVIDERS.get(self.selected).and_then(|entry| entry.kind)
+    }
+
+    /// The hint under the input, per the highlighted provider.
+    pub fn input_hint(&self) -> &'static str {
+        match self.selected_provider() {
+            Some(LoginProvider::LlamaCpp) => "enter your llama.cpp server URL, then press enter",
+            _ => "enter your Google API key, then press enter",
+        }
+    }
+
+    /// The input's label, per the highlighted provider.
+    pub fn input_label(&self) -> &'static str {
+        match self.selected_provider() {
+            Some(LoginProvider::LlamaCpp) => "server URL: ",
+            _ => "API key: ",
+        }
+    }
+
+    /// The rendered echo of the input: API keys mask to bullets (no key
+    /// material ever rendered); a server URL is not secret, so it shows.
     pub fn masked_input(&self) -> String {
-        "\u{2022}".repeat(self.input.chars().count())
+        match self.selected_provider() {
+            Some(LoginProvider::Google) => "\u{2022}".repeat(self.input.chars().count()),
+            _ => self.input.clone(),
+        }
     }
 
     /// Handles one keypress.
@@ -545,8 +588,9 @@ mod tests {
         login.handle_key(key(KeyCode::Up));
         assert_eq!(login.selected, 0);
         assert!(PROVIDERS[0].selectable);
-        assert!(!PROVIDERS[1].selectable);
+        assert!(PROVIDERS[1].selectable, "llama.cpp is selectable");
         assert!(!PROVIDERS[2].selectable);
+        assert!(!PROVIDERS[3].selectable);
     }
 
     // --- Picker ---

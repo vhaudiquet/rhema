@@ -13,12 +13,12 @@ use rhema_provider_google::GeminiModel;
 /// Why the runner fetched the model list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchWhy {
-    /// The login screen validated an entered key; the fetch is the
-    /// validation (`Login` carries the key, the screen's input is masked
-    /// and not stored anywhere else).
+    /// The login screen validated a provider's input; the fetch is the
+    /// validation (`Login` carries the backend the screen assembled —
+    /// key or server URL — and nothing else stores it mid-flight).
     Login {
-        /// The API key being validated.
-        api_key: String,
+        /// The backend being validated.
+        backend: crate::app::Backend,
     },
     /// Startup with a resolvable key; populates the picker (and the Ctrl-P
     /// cache) without blocking the first paint.

@@ -56,17 +56,15 @@ pub fn spawn_turn(
 }
 
 /// Spawns the model-list fetch for `why` on a tokio task. The fetch doubles
-/// as login validation: a bad key yields the provider's error text.
+/// as login validation: a wrong key or a dead server yields the provider's
+/// error text.
 pub fn spawn_model_fetch(
-    api_key: String,
+    backend: crate::app::Backend,
     why: FetchWhy,
     events: UnboundedSender<UiEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let result = GoogleProvider::new(api_key)
-            .list_models()
-            .await
-            .map_err(|err| err.to_string());
+        let result = backend.list_models().await;
         let _ = events.send(UiEvent::ModelsLoaded { why, result });
     })
 }

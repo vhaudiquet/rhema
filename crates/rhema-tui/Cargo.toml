@@ -21,6 +21,7 @@ rhema-core = { path = "../rhema-core" }
 rhema-config = { path = "../rhema-config" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
 rhema-provider-google = { path = "../rhema-provider-google" }
+rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
 # Full-screen rendering; the crossterm version must stay the one ratatui
 # builds on so the event types unify.
 ratatui = "0.30"

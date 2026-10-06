@@ -155,16 +155,14 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw("API key: "),
+            Span::raw(login.input_label()),
             Span::raw(login.masked_input()).bold(),
         ])),
         input_area,
     );
 
     let status = match &login.status {
-        crate::screens::LoginStatus::Idle => {
-            Line::from("enter your Google API key, then press enter").fg(theme.text3)
-        }
+        crate::screens::LoginStatus::Idle => Line::from(login.input_hint()).fg(theme.text3),
         crate::screens::LoginStatus::Validating => Line::from("validating key…").fg(theme.text3),
         crate::screens::LoginStatus::Error(message) => Line::from(message.clone()).red(),
     };
@@ -738,8 +736,9 @@ mod scroll_tests {
         App::new(AppSetup {
             store: Arc::new(MemoryStore::default()),
             config,
-            api_key: Some("k".into()),
-            provider: Some(Arc::new(MockProvider::new(Vec::new()))),
+            backend: Some(crate::app::Backend::Google {
+                api_key: "k".into(),
+            }),
             session: rhema_core::Session::default(),
             options: RunOptions {
                 theme: ThemeKind::Dark,

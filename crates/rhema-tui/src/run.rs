@@ -24,9 +24,10 @@ use rhema_core::{ModelProvider, Session};
 use rhema_provider_google::GoogleProvider;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
+use crate::app::Backend;
 use crate::app::{App, AppSetup, Effect, RunOptions};
 use crate::approval::TuiApproval;
-use crate::args::Args;
+use crate::args::{Args, ProviderChoice};
 use crate::store::{ConfigStore, DiskStore};
 use crate::turn::{spawn_model_fetch, spawn_turn};
 use crate::{events::UiEvent, ui};
@@ -46,10 +47,25 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         eprintln!("warning: ignoring unreadable rhema config: {err}");
         Config::default()
     });
-    let api_key = config.google_api_key();
-    let provider: Option<Arc<dyn ModelProvider>> = api_key
-        .as_ref()
-        .map(|key| Arc::new(GoogleProvider::new(key.clone())) as Arc<dyn ModelProvider>);
+    // The stored provider choice decides which backend the TUI runs on;
+    // a missing Google key leaves the backend unresolved so the login
+    // screen runs.
+    let provider_choice = args
+        .provider
+        .unwrap_or_else(|| ProviderChoice::from_stored(config.provider.as_deref()));
+    let backend = match provider_choice {
+        ProviderChoice::Google => config
+            .google_api_key()
+            .map(|api_key| Backend::Google { api_key }),
+        ProviderChoice::LlamaCpp => Some(Backend::LlamaCpp {
+            url: args
+                .llama_url
+                .clone()
+                .unwrap_or_else(|| config.llama_cpp_url()),
+            api_key: config.llama_cpp_api_key(),
+        }),
+    };
+    let provider: Option<Arc<dyn ModelProvider>> = backend.as_ref().map(Backend::provider);
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
             .with_context(|| format!("cannot resume session: {}", path.display()))?,
@@ -66,8 +82,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         let app = App::new(AppSetup {
             store,
             config,
-            api_key,
-            provider,
+            backend,
             session,
             options,
         })?;
@@ -160,11 +175,14 @@ async fn event_loop(
 fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
     match effect {
         Effect::FetchModels(why) => {
-            let api_key = match &why {
-                crate::events::FetchWhy::Login { api_key } => api_key.clone(),
-                _ => app.api_key.clone().unwrap_or_default(),
+            let backend = match &why {
+                crate::events::FetchWhy::Login { backend } => Some(backend.clone()),
+                _ => app.backend.clone(),
             };
-            spawn_model_fetch(api_key, why, tx.clone());
+            let Some(backend) = backend else {
+                return;
+            };
+            spawn_model_fetch(backend, why, tx.clone());
         }
         Effect::StartTurn(input) => {
             let Some(agent) = app.agent.take() else {

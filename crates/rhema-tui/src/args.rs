@@ -1,10 +1,11 @@
 //! The command-line surface, parsed with clap's derive API. Deliberately
-//! narrower than the rhema CLI: the model is owned by the picker and the
-//! API key by the login screen, so neither is accepted as a flag.
+//! narrower than the rhema CLI: the model is owned by the picker and
+//! credentials by the login screen, so neither is accepted as a flag.
 
 use std::path::PathBuf;
 
 use clap::{Parser, ValueEnum};
+use rhema_coding_agent::CodingAgentConfig;
 
 /// Which Jadeite theme paints the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -14,7 +15,27 @@ pub enum ThemeKind {
     /// The light theme, for light terminals.
     Light,
 }
-use rhema_coding_agent::CodingAgentConfig;
+
+/// Which model backend serves turns. Defaults to the stored choice, then
+/// google.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ProviderChoice {
+    /// Google Gemini, by API key.
+    Google,
+    /// A llama.cpp server by URL.
+    LlamaCpp,
+}
+
+impl ProviderChoice {
+    /// Parses a stored config value; unknown spellings fall back to
+    /// google.
+    pub fn from_stored(value: Option<&str>) -> Self {
+        match value {
+            Some("llama-cpp") | Some("llama_cpp") | Some("llamacpp") => Self::LlamaCpp,
+            _ => Self::Google,
+        }
+    }
+}
 
 /// `rhema-tui` — the full-screen terminal UI for the rhema coding agent.
 #[derive(Debug, Parser)]
@@ -24,6 +45,16 @@ use rhema_coding_agent::CodingAgentConfig;
     about = "Full-screen terminal UI for the rhema coding agent"
 )]
 pub struct Args {
+    /// Model backend for turns. Defaults to the stored choice, then
+    /// google.
+    #[arg(long, value_enum)]
+    pub provider: Option<ProviderChoice>,
+
+    /// llama.cpp server base URL (provider llama-cpp). Defaults to the
+    /// stored URL, then http://localhost:8080.
+    #[arg(long)]
+    pub llama_url: Option<String>,
+
     /// Workspace root for tools.
     #[arg(long, default_value = ".")]
     pub workspace: PathBuf,
@@ -65,16 +96,23 @@ mod tests {
     #[test]
     fn defaults_match_the_spec() {
         let args = parse(&[]);
+        assert_eq!(args.provider, None);
+        assert_eq!(args.llama_url, None);
         assert_eq!(args.workspace, PathBuf::from("."));
         assert_eq!(args.resume, None);
         assert_eq!(args.save, None);
         assert_eq!(args.max_steps, CodingAgentConfig::DEFAULT_MAX_TURN_STEPS);
         assert!(!args.no_confirm);
+        assert_eq!(args.theme, ThemeKind::Dark);
     }
 
     #[test]
     fn flags_parse() {
         let args = parse(&[
+            "--provider",
+            "llama-cpp",
+            "--llama-url",
+            "http://box:8080",
             "--workspace",
             "/tmp/ws",
             "--resume",
@@ -84,12 +122,34 @@ mod tests {
             "--max-steps",
             "4",
             "--no-confirm",
+            "--theme",
+            "light",
         ]);
+        assert_eq!(args.provider, Some(ProviderChoice::LlamaCpp));
+        assert_eq!(args.llama_url.as_deref(), Some("http://box:8080"));
         assert_eq!(args.workspace, PathBuf::from("/tmp/ws"));
         assert_eq!(args.resume, Some(PathBuf::from("s.json")));
         assert_eq!(args.save, Some(PathBuf::from("s.json")));
         assert_eq!(args.max_steps, 4);
         assert!(args.no_confirm);
+        assert_eq!(args.theme, ThemeKind::Light);
+    }
+
+    #[test]
+    fn stored_provider_spellings_map() {
+        assert_eq!(
+            ProviderChoice::from_stored(Some("llama_cpp")),
+            ProviderChoice::LlamaCpp
+        );
+        assert_eq!(
+            ProviderChoice::from_stored(Some("google")),
+            ProviderChoice::Google
+        );
+        assert_eq!(ProviderChoice::from_stored(None), ProviderChoice::Google);
+        assert_eq!(
+            ProviderChoice::from_stored(Some("nonsense")),
+            ProviderChoice::Google
+        );
     }
 
     #[test]

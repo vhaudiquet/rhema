@@ -42,13 +42,14 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 cargo run --bin rhema-tui
 ```
 
-First launch opens the login screen: pick a provider (Google Gemini today;
-Anthropic/OpenAI are marked coming soon), paste an API key — it is validated
-with a real model-list call and stored in `~/.config/rhema/config.json` with
+First launch opens the login screen: pick a provider — Google Gemini by
+API key, or a llama.cpp `llama-server` by URL (optional bearer key;
+Anthropic/OpenAI are marked coming soon). The input is validated with a
+real model-list call and stored in `~/.config/rhema/config.yaml` with
 `0600` permissions. Then pick a model from the live list (text chat
-models only, with pay-as-you-go pricing and context window — just type
-to filter, arrows to move).
-After that you land
+models only — Google rows carry pricing and context window; just type
+to filter, arrows to move). A server exposing exactly one model
+auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
 code in the palette's cyan), `write_file`/`run_command` pop up an
 approval modal (y/N), and the status line shows token usage per turn.
@@ -58,6 +59,8 @@ one green accent, status colors reserved for meaning. `--theme light`
 switches to the light token set for light terminals; dark is the
 design's primary.
 
+`--provider llama-cpp --llama-url http://box:8080` starts on the llama.cpp
+backend without logging in; `ctrl-p` still lists that server's models.
 Keys: `enter` sends · `ctrl-p` re-opens the model picker (the session is
 kept across a model switch) · `esc` declines a pending approval, or asks to
 quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`
