@@ -11,8 +11,10 @@
 
 pub mod message;
 pub mod request;
+pub mod session;
 pub mod tool;
 
 pub use message::{Content, Message, Role};
 pub use request::{ChatParams, ModelRequest, ToolSpec};
+pub use session::Session;
 pub use tool::{ToolCall, ToolContext, ToolResolver, ToolResult};
