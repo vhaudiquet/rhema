@@ -459,17 +459,20 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
     let visible = candidates.len().min(6) as u16;
     let area = Rect {
         x: input_area.x,
-        y: input_area.y.saturating_sub(visible),
+        y: input_area.y.saturating_sub(visible + 2),
         width: input_area.width,
-        height: visible,
+        height: visible + 2,
     };
     // Clear erases the transcript beneath; the well tone is painted back
-    // so the rows sit on the shared background.
+    // so the rows sit on the shared background, framed by a hairline.
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme.sunken)),
-        area,
-    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
 
     let selected = app.chat.palette_index.min(candidates.len() - 1);
     let rows: Vec<Line> = candidates
@@ -488,7 +491,7 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
             ])
         })
         .collect();
-    frame.render_widget(Paragraph::new(rows), area);
+    frame.render_widget(Paragraph::new(rows), inner);
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
