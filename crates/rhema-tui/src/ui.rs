@@ -8,6 +8,12 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+/// The one accent hue of the chat screen: markers, the running indicator,
+/// and nothing else.
+fn accent() -> Color {
+    Color::Rgb(235, 161, 106)
+}
+
 use crate::app::{App, Screen};
 use crate::screens::{COMING_SOON, PROVIDERS, PickerScreen, PickerStatus};
 use crate::transcript::{self, pretty_args, truncate_chars};
@@ -18,15 +24,25 @@ pub fn render(app: &App, frame: &mut Frame) {
         Screen::Login(login) => render_login(frame, login),
         Screen::Picker(picker) => render_picker(frame, picker),
         Screen::Chat => {
-            let [transcript_area, status_area, input_area] = Layout::vertical([
+            let [
+                header_area,
+                transcript_area,
+                status_area,
+                input_area,
+                footer_area,
+            ] = Layout::vertical([
+                Constraint::Length(4),
                 Constraint::Min(0),
                 Constraint::Length(1),
                 Constraint::Length(3),
+                Constraint::Length(1),
             ])
             .areas(frame.area());
+            render_header(frame, app, header_area);
             render_transcript(frame, app, transcript_area);
             render_status(frame, app, status_area);
             render_input(frame, app, input_area);
+            render_footer(frame, app, footer_area);
             if let Some(call) = &app.pending_approval {
                 render_approval_modal(frame, call);
             } else if app.confirm_quit {
@@ -34,6 +50,37 @@ pub fn render(app: &App, frame: &mut Frame) {
             }
         }
     }
+}
+
+/// The compact header box: the app mark, then model and workspace as the
+/// dim context line.
+fn render_header(frame: &mut Frame, app: &App, area: Rect) {
+    let model = app.config.model.as_deref().unwrap_or("no model");
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .padding(Padding::horizontal(1));
+    frame.render_widget(block, area);
+    let inner = Rect {
+        x: area.x + 2,
+        y: area.y + 1,
+        width: area.width.saturating_sub(4),
+        height: 2,
+    };
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![Span::styled("✳ rhema", Style::default().fg(accent()))]),
+            Line::from(
+                format!(
+                    "{model} · {} · /help for commands",
+                    app.options.workspace.display()
+                )
+                .dim(),
+            ),
+        ]),
+        inner,
+    );
 }
 
 /// A centered box clipped to `area`.
@@ -184,18 +231,42 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen) {
 }
 
 fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
-    let block = Block::default().borders(Borders::ALL).title(" rhema ");
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
+    let inner = Rect {
+        x: area.x + 1,
+        width: area.width.saturating_sub(2),
+        ..area
+    };
 
     // Wrapping is done here rather than by Paragraph so the row count is
     // exact: the scroll offset is expressed in rendered rows.
     let width = inner.width as usize;
-    let wrapped: Vec<Line> = app
-        .transcript
-        .lines()
+    // The bullet marks the first row of each assistant response; blank
+    // lines inside a response do not restart it.
+    let mut in_response = false;
+    let mut lines: Vec<Line> = Vec::new();
+    for line in app.transcript.lines() {
+        match line {
+            transcript::Line::Assistant(text) if text.is_empty() => {
+                lines.push(Line::from(""));
+            }
+            transcript::Line::Assistant(text) => {
+                let mut spans = Vec::new();
+                if !in_response {
+                    in_response = true;
+                    spans.push(Span::styled("● ", Style::default().fg(accent())));
+                }
+                spans.push(Span::raw(text.clone()));
+                lines.push(Line::from(spans));
+            }
+            other => {
+                in_response = false;
+                lines.push(render_line(other));
+            }
+        }
+    }
+    let wrapped: Vec<Line> = lines
         .iter()
-        .flat_map(|line| wrap_line(&render_line(line), width))
+        .flat_map(|line| wrap_line(line, width))
         .collect();
     let visible = inner.height as usize;
     let max_top = wrapped.len().saturating_sub(visible);
@@ -278,10 +349,9 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
 
 fn render_line(line: &transcript::Line) -> Line<'static> {
     match line {
-        transcript::Line::User(text) => Line::from(vec![
-            Span::raw("❯ ").green().bold(),
-            Span::raw(text.clone()),
-        ]),
+        transcript::Line::User(text) => {
+            Line::from(vec![Span::raw("❯ ").dim(), Span::raw(text.clone())])
+        }
         transcript::Line::Assistant(text) => Line::from(Span::raw(text.clone())),
         transcript::Line::ToolCall { name, args } => Line::from(
             Span::raw(format!(
@@ -301,34 +371,54 @@ fn render_line(line: &transcript::Line) -> Line<'static> {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let mut line = if let Some(error) = &app.error {
+    let line = if let Some(error) = &app.error {
         Line::from(error.clone()).red().bold()
     } else if app.running {
-        Line::from("thinking…").dim().italic()
+        let elapsed = app
+            .turn_started
+            .map(|started| format!(" · {}s", started.elapsed().as_secs()))
+            .unwrap_or_default();
+        Line::from(vec![
+            Span::styled("✳ thinking", Style::default().fg(accent())),
+            Span::raw(elapsed).dim(),
+            Span::raw(" · esc declines pending tools").dim(),
+        ])
     } else {
-        match app.usage {
-            Some(usage) => Line::from(format!(
-                "tokens: {} in / {} out ({} cached)",
-                usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
-            ))
-            .dim(),
-            None => Line::from("type a prompt · enter sends · ctrl-p model · esc quit").dim(),
-        }
+        Line::from("")
     };
-    if app.chat.scroll > 0 && app.error.is_none() {
-        line.spans
-            .push(Span::raw("  ·  viewing history · pgdn: latest").dim());
-    }
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// The dim telemetry strip under the input: last turn's tokens, and the
+/// history-pinned indicator.
+fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
+    let line = match app.usage {
+        Some(usage) => Line::from(format!(
+            "tokens: {} in / {} out ({} cached)",
+            usage.input_tokens, usage.output_tokens, usage.cached_input_tokens
+        ))
+        .dim(),
+        None => Line::from("pgup/pgdn or wheel: history · ctrl-p: model · ctrl-c: quit").dim(),
+    };
+    let line = if app.chat.scroll > 0 && app.error.is_none() {
+        let mut spans = line.spans;
+        spans.push(Span::raw("  ·  viewing history · pgdn: latest").dim());
+        Line::from(spans)
+    } else {
+        line
+    };
     frame.render_widget(Paragraph::new(line), area);
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.running {
-        " input (thinking…) "
-    } else {
-        " input "
-    };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(if app.running {
+            Color::DarkGray
+        } else {
+            accent()
+        }));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -346,13 +436,12 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect) {
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(prompt).green(),
-            Span::raw(visible),
-        ])),
-        inner,
-    );
+    let content = if visible.is_empty() && !app.running {
+        Line::from(Span::raw("ask anything · /help for commands").dim())
+    } else {
+        Line::from(vec![Span::raw(prompt).dim(), Span::raw(visible)])
+    };
+    frame.render_widget(Paragraph::new(content), inner);
     if !app.running {
         frame.set_cursor_position(Position {
             x: inner.x + prompt.chars().count() as u16 + (app.chat.cursor - start) as u16,
@@ -366,6 +455,7 @@ fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall) {
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(" approve tool call ")
         .yellow();
     let inner = block.inner(area);
@@ -393,6 +483,7 @@ fn render_confirm_quit(frame: &mut Frame) {
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .title(" quit rhema? ");
     let inner = block.inner(area);
     frame.render_widget(block, area);

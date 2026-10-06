@@ -94,6 +94,8 @@ pub struct App {
     pub agent: Option<CodingAgent>,
     /// Whether a turn is in flight.
     pub running: bool,
+    /// When the current turn started, for the elapsed-time indicator.
+    pub turn_started: Option<std::time::Instant>,
     /// The chat transcript.
     pub transcript: Transcript,
     /// Token accounting of the last finished turn.
@@ -157,6 +159,7 @@ impl App {
             models: Vec::new(),
             agent,
             running: false,
+            turn_started: None,
             transcript,
             usage: None,
             error: None,
@@ -273,6 +276,7 @@ impl App {
                     self.chat.cursor = 0;
                     self.transcript.push_user(&text);
                     self.running = true;
+                    self.turn_started = Some(std::time::Instant::now());
                     self.error = None;
                     self.decline_all = false;
                     vec![Effect::StartTurn(text)]
@@ -452,6 +456,7 @@ impl App {
     fn end_turn(&mut self, agent: Box<CodingAgent>, result: Result<ModelOutput, String>) {
         self.agent = Some(*agent);
         self.running = false;
+        self.turn_started = None;
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
