@@ -523,12 +523,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .map(|line| line.style(Style::default().fg(theme.error).bold()))
             .collect()
     } else if app.running {
-        // A square rotating through its quadrants, animated off the
-        // running turn's clock — no timer machinery of its own.
-        const SPINNER: [char; 4] = ['▖', '▘', '▝', '▗'];
+        // Braille dots cycling through the classic spinner, animated off
+        // the running turn's clock — no timer machinery of its own.
+        const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let frame = app
             .turn_started
-            .map(|started| (started.elapsed().as_millis() / 120) as usize % SPINNER.len())
+            .map(|started| (started.elapsed().as_millis() / 80) as usize % SPINNER.len())
             .unwrap_or(0);
         let elapsed = app
             .turn_started
