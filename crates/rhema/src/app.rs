@@ -774,7 +774,10 @@ impl App {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
-        let profile = self.options.profile.as_deref();
+        // The write follows the session's profile, not the startup flag:
+        // after a mid-session /profile the pick must land where effective()
+        // reads it back from — profiles never inherit each other's model.
+        let profile = self.session_profile.as_deref();
         self.config
             .set_for_profile(profile, |settings| settings.model = Some(id.to_owned()));
         if let Err(err) = self.store.save(&self.config) {
@@ -1499,6 +1502,35 @@ mod tests {
                 .lines()
                 .contains(&Line::Notice("switched to profile work".into()))
         );
+    }
+
+    #[test]
+    fn model_choice_lands_in_the_session_profile() {
+        // Started with no --profile (so personal), then switched to work:
+        // the pick must follow the session, not the startup flag.
+        let mut h = harness(Some("k"), None, Session::default());
+        h.app.config.profiles.insert(
+            "work".to_owned(),
+            rhema_config::Profile {
+                provider: Some("openrouter".into()),
+                openrouter_api_key: Some("work-key".into()),
+                ..rhema_config::Profile::default()
+            },
+        );
+        crate::commands::dispatch(&mut h.app, "/profile work");
+        crate::commands::dispatch(&mut h.app, "/model");
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Refresh,
+            result: Ok(models()),
+        });
+        // Enter picks the first row (the picker sorts by id): "m-a".
+        h.app.on_key(key(KeyCode::Enter));
+        // The pick persists into work's section; personal's stays empty.
+        let stored = h.store.load().unwrap();
+        assert_eq!(stored.effective(Some("work")).model.as_deref(), Some("m-a"));
+        assert_eq!(stored.effective(Some("personal")).model, None);
+        // The rebuilt session reads the same section back.
+        assert_eq!(h.app.effective().model.as_deref(), Some("m-a"));
     }
 
     #[test]
