@@ -85,16 +85,24 @@ pub fn save_session(
         }
         n += 1;
     };
+    write_session(&path, session)?;
+    Ok(Some(path))
+}
+
+/// Writes `session` to `path` — the in-place update a resumed session
+/// gets on exit, so continuing it never grows a second entry.
+pub fn write_session(path: &Path, session: &Session) -> io::Result<()> {
     let json = serde_json::to_string_pretty(session)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    std::fs::write(&path, json)?;
-    Ok(Some(path))
+    std::fs::write(path, json)
 }
 
 /// The saved sessions for `workspace`, newest first. A missing directory
 /// is an empty list — nothing saved yet, not an error. A file whose JSON
 /// no longer parses still lists (with no snippet): the resume attempt
-/// surfaces the corruption, the listing does not hide it.
+/// surfaces the corruption, the listing does not hide it. The timestamp
+/// is the file's modification time, so an updated session's row moves to
+/// the top instead of wearing its original save date.
 pub fn list_sessions(base: &Path, workspace: &Path) -> io::Result<Vec<SavedSession>> {
     let dir = base.join(encode_workspace(workspace));
     let mut out = Vec::new();
@@ -105,7 +113,11 @@ pub fn list_sessions(base: &Path, workspace: &Path) -> io::Result<Vec<SavedSessi
     };
     for entry in entries {
         let path = entry?.path();
-        let Some(saved_at) = name_millis(&path) else {
+        // The name stays the list filter (stray files never show); the
+        // mtime is the truth about when the session was last live.
+        let name_at = name_millis(&path);
+        let saved_at = file_millis(&path)?.or(name_at);
+        let Some(saved_at) = saved_at else {
             continue;
         };
         let snippet = CodingAgent::load_session_from(&path)
@@ -121,6 +133,16 @@ pub fn list_sessions(base: &Path, workspace: &Path) -> io::Result<Vec<SavedSessi
     }
     out.sort_by(|a, b| b.saved_at.cmp(&a.saved_at).then(b.path.cmp(&a.path)));
     Ok(out)
+}
+
+/// The file's modification time in millis; `None` when it cannot be read.
+fn file_millis(path: &Path) -> io::Result<Option<u64>> {
+    Ok(std::fs::File::open(path)?
+        .metadata()?
+        .modified()
+        .ok()
+        .and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+        .map(|since| since.as_millis() as u64))
 }
 
 /// The millis field of a session file name; `None` for anything else,
@@ -258,6 +280,39 @@ mod tests {
         let listed = list_sessions(&base, workspace).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].snippet, None);
+    }
+
+    #[test]
+    fn an_update_in_place_keeps_one_entry_and_refreshes_its_age() {
+        let (_dir, base) = temp_base();
+        let workspace = Path::new("/home/u/proj");
+        let path = save_session(&base, workspace, &session_with("prompt"))
+            .unwrap()
+            .unwrap();
+        // The file was last live an hour ago...
+        let old = SystemTime::now() - std::time::Duration::from_secs(3_600);
+        std::fs::File::open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+
+        // ...then the resumed session continued and exits: the same file
+        // is rewritten, and the list still shows exactly one entry whose
+        // age reads from the rewrite, not the creation.
+        write_session(&path, &session_with("prompt and more")).unwrap();
+        let listed = list_sessions(&base, workspace).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, path);
+        assert!(
+            listed[0].saved_at >= now_millis() - 60_000,
+            "the age follows the update: {}",
+            listed[0].saved_at
+        );
+        assert_eq!(
+            listed[0].snippet.as_deref(),
+            Some("prompt and more"),
+            "the row previews the continued session"
+        );
     }
 
     #[test]

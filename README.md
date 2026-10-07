@@ -101,9 +101,9 @@ Leaving the TUI saves the conversation under
 files are plain session JSON, the same format `--resume <file>` and
 `--save <file>` take. `/resume` lists the saved sessions for the
 current directory (newest first, with their age and opening prompt)
-and enter continues one; a session with nothing said saves nothing,
-and the save is per-exit, so one conversation can hold several
-checkpoints.
+and enter continues one; a resumed session keeps writing to its own
+file, so continuing never grows a second entry. A session with
+nothing said saves nothing.
 
 Pipeable one-shot mode — plain text on stdout, tool events on stderr,
 non-zero exit on failure:

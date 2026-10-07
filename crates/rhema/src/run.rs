@@ -297,10 +297,15 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     restore_terminal();
     // Best-effort save for /resume, after the terminal is back: an empty
     // session saves nothing, and a failed save warns without failing the
-    // exit.
-    if let Some(session) = app.export_session() {
-        let saved = sessions::base_dir()
-            .and_then(|base| sessions::save_session(&base, &workspace, &session));
+    // exit. A resumed session writes back to its own file, so continuing
+    // it never grows a second entry.
+    if let Some((session, origin)) = app.export_session() {
+        let saved = match origin {
+            Some(path) => sessions::write_session(&path, &session),
+            None => sessions::base_dir()
+                .and_then(|base| sessions::save_session(&base, &workspace, &session))
+                .map(|_| ()),
+        };
         if let Err(err) = saved {
             eprintln!("warning: the session was not saved for /resume: {err}");
         }

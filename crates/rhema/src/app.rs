@@ -237,6 +237,9 @@ pub struct App {
     /// The cancel flag of the running turn; `None` while idle. The runner
     /// creates the pair at submit and the task watches the receiver.
     pub turn_cancel: Option<tokio::sync::watch::Sender<bool>>,
+    /// The file this session was resumed from, if any: the exit save
+    /// updates it in place instead of growing a second entry in /resume.
+    pub resumed_from: Option<PathBuf>,
     /// Set by the runner to end the event loop.
     pub should_quit: bool,
     /// The resolved design tokens every render pass reads.
@@ -339,6 +342,7 @@ impl App {
             confirm_quit: false,
             decline_all: false,
             turn_cancel: None,
+            resumed_from: None,
             should_quit: false,
             chat: ChatState::new(),
             answers: None,
@@ -401,6 +405,8 @@ impl App {
     }
 
     /// Drops the conversation: a fresh transcript and a fresh session.
+    /// The resumed origin drops with it — what is typed after /clear is
+    /// a new conversation, not a continuation of the loaded file.
     pub fn clear_session(&mut self) {
         if let Some(agent) = self.agent.as_mut() {
             agent.session_mut().history.clear();
@@ -408,13 +414,15 @@ impl App {
         self.transcript = Transcript::new();
         self.usage = None;
         self.error = None;
+        self.resumed_from = None;
         self.transcript.push_notice("conversation cleared");
     }
 
-    /// The session to save for /resume: the live one, when its history
-    /// holds anything. A session of notices alone (a switch, a decline)
-    /// has nothing resumable and saves nothing.
-    pub fn export_session(&self) -> Option<Session> {
+    /// The session to save for /resume, and the file it belongs to: the
+    /// live session when its history holds anything, writing back to the
+    /// origin when this session was resumed. A session of notices alone
+    /// (a switch, a decline) has nothing resumable and saves nothing.
+    pub fn export_session(&self) -> Option<(Session, Option<PathBuf>)> {
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -422,7 +430,7 @@ impl App {
         if session.history.is_empty() {
             None
         } else {
-            Some(session)
+            Some((session, self.resumed_from.clone()))
         }
     }
 
@@ -554,6 +562,7 @@ impl App {
         let messages = session.history.len();
         self.session = session;
         self.agent = Some(agent);
+        self.resumed_from = Some(path.to_path_buf());
         self.transcript = Transcript::from_history(&self.session.history);
         self.usage = None;
         self.session_cost = 0.0;
@@ -1862,14 +1871,15 @@ mod tests {
         h.app.push_notice("switched to profile work");
         assert_eq!(h.app.export_session(), None);
 
-        // One prompt in: the live session exports.
+        // One prompt in: the live session exports, with no origin file.
         let mut h = harness(Some("k"), None, Session::default());
         h.app
             .session
             .history
             .push(Message::text(Role::User, "fix it"));
-        let exported = h.app.export_session().expect("a spoken session exports");
+        let (exported, origin) = h.app.export_session().expect("a spoken session exports");
         assert_eq!(exported.history.len(), 1);
+        assert_eq!(origin, None);
     }
 
     #[test]
@@ -1929,6 +1939,12 @@ mod tests {
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.starts_with("resumed ")
         ));
+        // The session is now bound to the file it came from: exiting
+        // updates it in place instead of listing it twice.
+        assert_eq!(h.app.resumed_from.as_deref(), Some(older.as_path()));
+        let (exported, origin) = h.app.export_session().expect("a spoken session exports");
+        assert_eq!(origin.as_deref(), Some(older.as_path()));
+        assert_eq!(exported.history.len(), 1);
         // The file the picker named is what got loaded.
         assert!(older.is_file() && newer.is_file());
     }
