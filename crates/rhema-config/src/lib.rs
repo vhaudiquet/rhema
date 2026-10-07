@@ -186,6 +186,12 @@ impl Config {
         Ok(Self::dir()?.join("skills"))
     }
 
+    /// The system prompt file (`<dir>/SYSTEM.md`), the editable base
+    /// prompt seeded with the built-in default on first run.
+    pub fn system_prompt_path() -> Result<PathBuf, ConfigError> {
+        Ok(Self::dir()?.join("SYSTEM.md"))
+    }
+
     /// Loads the config; a missing file is the default config, not an
     /// error.
     pub fn load() -> Result<Config, ConfigError> {
