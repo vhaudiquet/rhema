@@ -43,6 +43,29 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 cargo run --bin rhema          # full-screen TUI (or `cargo install`d rhema)
 ```
 
+### Profiles
+
+Config supports named profiles for contexts like work and personal. A
+profile overrides the top-level settings field-wise, so it only needs the
+fields where it differs:
+
+```yaml
+profile: personal            # used when --profile is not given
+default:
+  provider: google
+  google_api_key: ...
+profiles:
+  work:
+    provider: openrouter
+    openrouter_api_key: ...
+    model: anthropic/claude-sonnet-4
+```
+
+`rhema --profile work` runs the TUI or a headless one-shot under that
+profile's provider, keys, and model; logins and model picks while it runs
+write back into that profile's section. The `default:` section is what
+legacy configs already have, so existing setups keep working unchanged.
+
 First launch opens the login screen: pick a provider — Google Gemini by
 API key, or a llama.cpp `llama-server` by URL (optional bearer key;
 Anthropic/OpenAI are marked coming soon). The input is validated with a

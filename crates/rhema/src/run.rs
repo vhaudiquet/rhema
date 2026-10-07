@@ -139,13 +139,14 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
             Config::default()
         }
     };
+    let effective = config.effective(args.profile.as_deref());
     let provider_choice = args
         .provider
-        .unwrap_or_else(|| ProviderChoice::from_stored(config.provider.as_deref()));
+        .unwrap_or_else(|| ProviderChoice::from_stored(effective.provider.as_deref()));
     // No login screen exists headless: a missing credential is an error
     // naming the fix.
     let backend = match provider_choice {
-        ProviderChoice::Google => config
+        ProviderChoice::Google => effective
             .google_api_key()
             .map(|api_key| Backend::Google { api_key })
             .ok_or_else(|| {
@@ -157,17 +158,17 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
             url: args
                 .llama_url
                 .clone()
-                .unwrap_or_else(|| config.llama_cpp_url()),
-            api_key: config.llama_cpp_api_key(),
+                .unwrap_or_else(|| effective.llama_cpp_url()),
+            api_key: effective.llama_cpp_api_key(),
         },
         ProviderChoice::OpenRouter => Backend::OpenRouter {
-            api_key: config
+            api_key: effective
                 .openrouter_api_key()
                 .ok_or_else(|| anyhow::anyhow!("missing API key: set OPENROUTER_API_KEY"))?,
         },
     };
     let model = args.model.clone().unwrap_or_else(|| {
-        config
+        effective
             .model
             .clone()
             .unwrap_or_else(|| match provider_choice {
@@ -220,21 +221,22 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // The stored provider choice decides which backend the TUI runs on;
     // a missing Google key leaves the backend unresolved so the login
     // screen runs.
+    let effective = config.effective(args.profile.as_deref());
     let provider_choice = args
         .provider
-        .unwrap_or_else(|| ProviderChoice::from_stored(config.provider.as_deref()));
+        .unwrap_or_else(|| ProviderChoice::from_stored(effective.provider.as_deref()));
     let backend = match provider_choice {
-        ProviderChoice::Google => config
+        ProviderChoice::Google => effective
             .google_api_key()
             .map(|api_key| Backend::Google { api_key }),
         ProviderChoice::LlamaCpp => Some(Backend::LlamaCpp {
             url: args
                 .llama_url
                 .clone()
-                .unwrap_or_else(|| config.llama_cpp_url()),
-            api_key: config.llama_cpp_api_key(),
+                .unwrap_or_else(|| effective.llama_cpp_url()),
+            api_key: effective.llama_cpp_api_key(),
         }),
-        ProviderChoice::OpenRouter => config
+        ProviderChoice::OpenRouter => effective
             .openrouter_api_key()
             .map(|api_key| Backend::OpenRouter { api_key }),
     };
@@ -245,6 +247,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     };
     let options = RunOptions {
         theme: args.theme,
+        profile: args.profile.clone(),
         workspace: args.workspace,
         max_steps: args.max_steps,
         no_confirm: args.no_confirm,

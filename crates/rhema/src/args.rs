@@ -60,6 +60,11 @@ pub struct Args {
     #[arg(short = 'm', long)]
     pub model: Option<String>,
 
+    /// Which config profile to use (e.g. work, personal). Defaults to the
+    /// stored active profile, then the top-level settings.
+    #[arg(long)]
+    pub profile: Option<String>,
+
     /// Model backend for turns. Defaults to the stored choice, then
     /// google.
     #[arg(long, value_enum)]

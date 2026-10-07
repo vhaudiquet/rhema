@@ -495,8 +495,9 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // Always the same three facts: model, context footprint against the
     // model's window, and the session's accumulated cost. Key hints live
     // in /help, not here.
+    let effective = app.effective();
     let mut parts =
-        vec![Span::raw(app.config.model.as_deref().unwrap_or("no model")).fg(theme.text2)];
+        vec![Span::raw(effective.model.as_deref().unwrap_or("no model")).fg(theme.text2)];
     let used = app.usage.map(|u| u64::from(u.input_tokens)).unwrap_or(0);
     let mut context = format_tokens(Some(used));
     if let Some(limit) = app.current_context_window() {
@@ -762,8 +763,11 @@ mod scroll_tests {
 
     fn chat_app() -> App {
         let config = rhema_config::Config {
-            google_api_key: Some("k".into()),
-            model: Some("m".into()),
+            default: rhema_config::Profile {
+                google_api_key: Some("k".into()),
+                model: Some("m".into()),
+                ..rhema_config::Profile::default()
+            },
             ..rhema_config::Config::default()
         };
         App::new(AppSetup {
@@ -775,6 +779,7 @@ mod scroll_tests {
             session: rhema_core::Session::default(),
             options: RunOptions {
                 theme: ThemeKind::Dark,
+                profile: None,
                 workspace: PathBuf::from("."),
                 max_steps: 4,
                 no_confirm: false,

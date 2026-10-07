@@ -11,8 +11,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 /// Why a config operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -32,11 +34,13 @@ pub enum ConfigError {
     Json(#[from] serde_json::Error),
 }
 
-/// The persisted settings.
+/// One named set of provider settings. A profile overrides the top-level
+/// section field-wise, so a profile only needs the fields where it
+/// differs (typically the key and the model).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
-pub struct Config {
-    /// Which provider serves turns: `google` (default) or `llama-cpp`.
+pub struct Profile {
+    /// Which provider serves turns: `google`, `llama-cpp`, or `openrouter`.
     pub provider: Option<String>,
     /// The Google API key entered at login, when one is stored.
     pub google_api_key: Option<String>,
@@ -50,7 +54,107 @@ pub struct Config {
     pub openrouter_api_key: Option<String>,
 }
 
+impl Profile {
+    /// The Google API key to use: `GEMINI_API_KEY`, then `GOOGLE_API_KEY`,
+    /// then the stored key. Whitespace-only values count as unset.
+    pub fn google_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+            self.google_api_key.clone(),
+        )
+    }
+
+    /// The llama.cpp server URL to use: `LLAMA_CPP_URL`, then the stored
+    /// URL, then `http://localhost:8080`.
+    pub fn llama_cpp_url(&self) -> String {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["LLAMA_CPP_URL"],
+            self.llama_cpp_url.clone(),
+        )
+        .unwrap_or_else(|| "http://localhost:8080".to_owned())
+    }
+
+    /// The llama.cpp bearer key to use: `LLAMA_CPP_API_KEY`, then the
+    /// stored key; `None` when the server is open.
+    pub fn llama_cpp_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["LLAMA_CPP_API_KEY"],
+            self.llama_cpp_api_key.clone(),
+        )
+    }
+
+    /// The OpenRouter key to use: `OPENROUTER_API_KEY`, then the stored
+    /// key.
+    pub fn openrouter_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["OPENROUTER_API_KEY"],
+            self.openrouter_api_key.clone(),
+        )
+    }
+}
+
+/// The persisted settings: a fallback section plus named profiles for
+/// contexts like work and personal.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct Config {
+    /// The profile used when `--profile` does not name one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Named profiles; each overrides the top-level section field-wise.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, Profile>,
+    /// The top-level fallback section — also what legacy config files
+    /// deserialize into.
+    #[serde(flatten)]
+    pub default: Profile,
+}
+
 impl Config {
+    /// The settings that apply for `flag` (or the stored active profile):
+    /// the named profile's fields win, the top-level section fills the
+    /// gaps.
+    pub fn effective(&self, flag: Option<&str>) -> Profile {
+        let chosen = flag.or(self.profile.as_deref());
+        match chosen.and_then(|name| self.profiles.get(name)) {
+            Some(profile) => Profile {
+                provider: profile.provider.clone().or(self.default.provider.clone()),
+                google_api_key: profile
+                    .google_api_key
+                    .clone()
+                    .or(self.default.google_api_key.clone()),
+                model: profile.model.clone().or(self.default.model.clone()),
+                llama_cpp_url: profile
+                    .llama_cpp_url
+                    .clone()
+                    .or(self.default.llama_cpp_url.clone()),
+                llama_cpp_api_key: profile
+                    .llama_cpp_api_key
+                    .clone()
+                    .or(self.default.llama_cpp_api_key.clone()),
+                openrouter_api_key: profile
+                    .openrouter_api_key
+                    .clone()
+                    .or(self.default.openrouter_api_key.clone()),
+            },
+            None => self.default.clone(),
+        }
+    }
+
+    /// Mutates the section that writes land in for `flag` (or the stored
+    /// active profile): the named profile when it exists or is new, else
+    /// the top-level section.
+    pub fn set_for_profile(&mut self, flag: Option<&str>, apply: impl FnOnce(&mut Profile)) {
+        match flag.or(self.profile.as_deref()) {
+            Some(name) => apply(self.profiles.entry(name.to_owned()).or_default()),
+            None => apply(&mut self.default),
+        }
+    }
+
     /// The config directory (`<config-base>/rhema`).
     pub fn dir() -> Result<PathBuf, ConfigError> {
         match std::env::var("XDG_CONFIG_HOME") {
@@ -128,48 +232,6 @@ impl Config {
         file.write_all(yaml.as_bytes())?;
         Ok(())
     }
-
-    /// The Google API key to use: `GEMINI_API_KEY`, then `GOOGLE_API_KEY`,
-    /// then the stored key. Whitespace-only values count as unset.
-    pub fn google_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-            self.google_api_key.clone(),
-        )
-    }
-
-    /// The llama.cpp server URL to use: `LLAMA_CPP_URL`, then the stored
-    /// URL, then `http://localhost:8080`. Whitespace-only values count as
-    /// unset.
-    pub fn llama_cpp_url(&self) -> String {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["LLAMA_CPP_URL"],
-            self.llama_cpp_url.clone(),
-        )
-        .unwrap_or_else(|| "http://localhost:8080".to_owned())
-    }
-
-    /// The llama.cpp bearer key to use: `LLAMA_CPP_API_KEY`, then the
-    /// stored key; `None` when the server is open.
-    pub fn llama_cpp_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["LLAMA_CPP_API_KEY"],
-            self.llama_cpp_api_key.clone(),
-        )
-    }
-
-    /// The OpenRouter key to use: `OPENROUTER_API_KEY`, then the stored
-    /// key.
-    pub fn openrouter_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["OPENROUTER_API_KEY"],
-            self.openrouter_api_key.clone(),
-        )
-    }
 }
 
 trait OpenOptionsExt0600 {
@@ -241,12 +303,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         let config = Config {
-            provider: Some("llama-cpp".into()),
-            google_api_key: Some("key-123".into()),
-            model: Some("gemini-3.8-flash".into()),
-            llama_cpp_url: Some("http://localhost:8080".into()),
-            llama_cpp_api_key: None,
-            openrouter_api_key: None,
+            default: Profile {
+                provider: Some("llama-cpp".into()),
+                google_api_key: Some("key-123".into()),
+                model: Some("gemini-3.8-flash".into()),
+                llama_cpp_url: Some("http://localhost:8080".into()),
+                llama_cpp_api_key: None,
+                openrouter_api_key: None,
+            },
+            ..Config::default()
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -275,8 +340,64 @@ mod tests {
         .unwrap();
         let yaml = dir.path().join("config.yaml");
         let config = Config::load_from(&yaml).unwrap();
-        assert_eq!(config.google_api_key.as_deref(), Some("json-key"));
-        assert_eq!(config.model.as_deref(), Some("m"));
+        assert_eq!(config.default.google_api_key.as_deref(), Some("json-key"));
+        assert_eq!(config.default.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn profiles_override_the_default_section_field_wise() {
+        let config = Config {
+            profile: Some("work".into()),
+            default: Profile {
+                provider: Some("google".into()),
+                google_api_key: Some("personal-key".into()),
+                model: Some("personal-model".into()),
+                ..Profile::default()
+            },
+            profiles: BTreeMap::from([(
+                "work".to_owned(),
+                Profile {
+                    provider: Some("openrouter".into()),
+                    google_api_key: Some("work-key".into()),
+                    ..Profile::default()
+                },
+            )]),
+        };
+        let work = config.effective(Some("work"));
+        // The profile wins where it speaks; the default fills the rest.
+        assert_eq!(work.provider.as_deref(), Some("openrouter"));
+        assert_eq!(work.google_api_key.as_deref(), Some("work-key"));
+        assert_eq!(work.model.as_deref(), Some("personal-model"));
+
+        // No flag: the stored active profile applies.
+        let active = config.effective(None);
+        assert_eq!(active.provider.as_deref(), Some("openrouter"));
+
+        // An unknown flag: the default section stands in.
+        let fallback = config.effective(Some("other"));
+        assert_eq!(fallback.provider.as_deref(), Some("google"));
+    }
+
+    #[test]
+    fn set_for_profile_writes_the_named_section_or_the_default() {
+        let mut config = Config {
+            profile: Some("work".into()),
+            ..Config::default()
+        };
+        config.set_for_profile(Some("work"), |p| p.google_api_key = Some("work-key".into()));
+        // The active profile receives unflagged writes too.
+        config.set_for_profile(None, |p| p.model = Some("m".into()));
+        assert_eq!(
+            config.profiles["work"].google_api_key.as_deref(),
+            Some("work-key")
+        );
+        assert_eq!(config.profiles["work"].model.as_deref(), Some("m"));
+        // The default section is untouched by profile writes.
+        assert_eq!(config.default.google_api_key, None);
+        // Without an active profile, writes land at the top level.
+        config.profile = None;
+        config.set_for_profile(None, |p| p.model = Some("top".into()));
+        assert_eq!(config.default.model.as_deref(), Some("top"));
     }
 
     #[test]

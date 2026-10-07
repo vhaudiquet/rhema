@@ -137,6 +137,8 @@ impl Backend {
 pub struct RunOptions {
     /// Which Jadeite theme paints the screen.
     pub theme: crate::args::ThemeKind,
+    /// The config profile this session runs under.
+    pub profile: Option<String>,
     /// Workspace root for tools.
     pub workspace: PathBuf,
     /// Max steps per turn.
@@ -229,15 +231,20 @@ impl App {
     pub fn new(setup: AppSetup) -> Result<Self, CodingAgentError> {
         let session = setup.session;
         let transcript = Transcript::from_history(&session.history);
+        // The settings that apply to this session's profile are computed
+        // on demand (they change when the model switches or a login lands).
         let mut agent = None;
-        let screen = match (&setup.backend, &setup.config.model) {
+        // Startup reads straight off the config: App::effective exists on
+        // the struct, which does not exist yet.
+        let effective = setup.config.effective(setup.options.profile.as_deref());
+        let screen = match (&setup.backend, &effective.model) {
             (Some(_), Some(_)) => {
                 let provider = setup
                     .backend
                     .as_ref()
                     .map(Backend::provider)
                     .ok_or(AgentError::MissingProvider)?;
-                let agent_config = agent_config(&setup.options, setup.config.model.clone());
+                let agent_config = agent_config(&setup.options, effective.model.clone());
                 agent = Some(CodingAgent::from_session(
                     provider,
                     agent_config,
@@ -483,13 +490,13 @@ impl App {
         let backend = match login.selected_provider() {
             crate::screens::LoginProvider::LlamaCpp => {
                 let url = if login.input.trim().is_empty() {
-                    self.config.llama_cpp_url()
+                    self.effective().llama_cpp_url()
                 } else {
                     login.input.trim().to_owned()
                 };
                 Backend::LlamaCpp {
                     url,
-                    api_key: self.config.llama_cpp_api_key(),
+                    api_key: self.effective().llama_cpp_api_key(),
                 }
             }
             crate::screens::LoginProvider::OpenRouter => Backend::OpenRouter {
@@ -579,20 +586,23 @@ impl App {
                 let from_chat = login.purpose == LoginPurpose::FromChat;
                 match result {
                     Ok(models) => {
-                        match &backend {
-                            Backend::Google { api_key } => {
-                                self.config.google_api_key = Some(api_key.clone());
-                            }
-                            Backend::LlamaCpp { url, api_key } => {
-                                self.config.provider = Some("llama-cpp".to_owned());
-                                self.config.llama_cpp_url = Some(url.clone());
-                                self.config.llama_cpp_api_key = api_key.clone();
-                            }
-                            Backend::OpenRouter { api_key } => {
-                                self.config.provider = Some("openrouter".to_owned());
-                                self.config.openrouter_api_key = Some(api_key.clone());
-                            }
-                        }
+                        let profile = self.options.profile.as_deref();
+                        self.config
+                            .set_for_profile(profile, |settings| match &backend {
+                                Backend::Google { api_key } => {
+                                    settings.provider = Some("google".to_owned());
+                                    settings.google_api_key = Some(api_key.clone());
+                                }
+                                Backend::LlamaCpp { url, api_key } => {
+                                    settings.provider = Some("llama-cpp".to_owned());
+                                    settings.llama_cpp_url = Some(url.clone());
+                                    settings.llama_cpp_api_key = api_key.clone();
+                                }
+                                Backend::OpenRouter { api_key } => {
+                                    settings.provider = Some("openrouter".to_owned());
+                                    settings.openrouter_api_key = Some(api_key.clone());
+                                }
+                            });
                         if let Err(err) = self.store.save(&self.config) {
                             login.status = LoginStatus::Error(format!("cannot save config: {err}"));
                             return;
@@ -654,7 +664,9 @@ impl App {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
-        self.config.model = Some(id.to_owned());
+        let profile = self.options.profile.as_deref();
+        self.config
+            .set_for_profile(profile, |settings| settings.model = Some(id.to_owned()));
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
             return;
@@ -681,7 +693,7 @@ impl App {
             .provider
             .clone()
             .ok_or(CodingAgentError::Agent(AgentError::MissingProvider))?;
-        let agent_config = agent_config(&self.options, self.config.model.clone());
+        let agent_config = agent_config(&self.options, self.effective().model.clone());
         Ok(CodingAgent::from_session(provider, agent_config, session)?)
     }
 
@@ -728,10 +740,18 @@ impl App {
         }
     }
 
+    /// The settings that apply to this session's profile: field-wise, the
+    /// named profile (or the one chosen at startup) over the top-level
+    /// section. Computed on demand — it changes mid-session.
+    pub fn effective(&self) -> rhema_config::Profile {
+        self.config.effective(self.options.profile.as_deref())
+    }
+
     /// The pricing of the model the session currently runs on, when it is
     /// one this crate prices.
     fn current_model_pricing(&self) -> Option<rhema_provider_google::Pricing> {
-        let model = self.config.model.as_deref()?;
+        let effective = self.effective();
+        let model = effective.model.as_deref()?;
         self.models
             .iter()
             .find(|entry| entry.id == model)
@@ -740,7 +760,8 @@ impl App {
 
     /// The context window of the current model, when known.
     pub fn current_context_window(&self) -> Option<u64> {
-        let model = self.config.model.as_deref()?;
+        let effective = self.effective();
+        let model = effective.model.as_deref()?;
         self.models
             .iter()
             .find(|entry| entry.id == model)
@@ -827,8 +848,11 @@ mod tests {
 
     fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
         let config = Config {
-            google_api_key: api_key.map(str::to_owned),
-            model: model.map(str::to_owned),
+            default: rhema_config::Profile {
+                google_api_key: api_key.map(str::to_owned),
+                model: model.map(str::to_owned),
+                ..rhema_config::Profile::default()
+            },
             ..Config::default()
         };
         let store = Arc::new(MemoryStore::new(config.clone()));
@@ -842,6 +866,7 @@ mod tests {
             session,
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
+                profile: None,
                 workspace: PathBuf::from("."),
                 max_steps: 4,
                 no_confirm: false,
@@ -919,7 +944,7 @@ mod tests {
             _ => panic!("expected the picker after a successful login"),
         }
         assert_eq!(
-            h.store.load().unwrap().google_api_key.as_deref(),
+            h.store.load().unwrap().default.google_api_key.as_deref(),
             Some("secret")
         );
         assert!(matches!(
@@ -978,8 +1003,11 @@ mod tests {
             _ => panic!("expected the picker after a successful llama login"),
         }
         let config = h.store.load().unwrap();
-        assert_eq!(config.provider.as_deref(), Some("llama-cpp"));
-        assert_eq!(config.llama_cpp_url.as_deref(), Some("http://box:8080"));
+        assert_eq!(config.default.provider.as_deref(), Some("llama-cpp"));
+        assert_eq!(
+            config.default.llama_cpp_url.as_deref(),
+            Some("http://box:8080")
+        );
     }
 
     #[test]
@@ -1040,7 +1068,10 @@ mod tests {
         // Exactly one model: no picker, straight to chat on that model.
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(h.app.agent.is_some());
-        assert_eq!(h.store.load().unwrap().model.as_deref(), Some("qwen3-8b"));
+        assert_eq!(
+            h.store.load().unwrap().default.model.as_deref(),
+            Some("qwen3-8b")
+        );
     }
 
     #[test]
@@ -1065,7 +1096,7 @@ mod tests {
             ),
             _ => panic!("a failed login must stay on the login screen"),
         }
-        assert!(h.store.load().unwrap().google_api_key.is_none());
+        assert!(h.store.load().unwrap().default.google_api_key.is_none());
     }
 
     #[test]
@@ -1079,7 +1110,10 @@ mod tests {
         assert!(effects.is_empty());
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(h.app.agent.is_some());
-        assert_eq!(h.store.load().unwrap().model.as_deref(), Some("m-a"));
+        assert_eq!(
+            h.store.load().unwrap().default.model.as_deref(),
+            Some("m-a")
+        );
     }
 
     #[test]
@@ -1108,7 +1142,10 @@ mod tests {
             agent.session().history,
             vec![Message::text(Role::User, "earlier work")]
         );
-        assert_eq!(h.store.load().unwrap().model.as_deref(), Some("m-b"));
+        assert_eq!(
+            h.store.load().unwrap().default.model.as_deref(),
+            Some("m-b")
+        );
         assert!(
             h.app
                 .transcript
