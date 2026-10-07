@@ -25,7 +25,6 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Backend;
 use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
-use crate::approval::TuiApproval;
 use crate::args::{Args, ProviderChoice};
 use crate::sessions;
 use crate::store::{ConfigStore, DiskStore};
@@ -109,8 +108,6 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 /// The headless one-shot: resolve the backend, run one turn, print the
 /// reply to stdout and everything else to stderr. Built for pipes.
 async fn run_headless(args: Args) -> anyhow::Result<()> {
-    use rhema_coding_agent::DenyAll;
-
     let prompt = match args.print.as_deref() {
         Some("-") => {
             use std::io::Read;
@@ -198,13 +195,9 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
         None => Session::default(),
     };
     let mut agent = CodingAgent::from_session(backend.provider(), agent_config, session)?;
-    // Fail-safe: nobody is present to approve, so gated tools are declined
-    // unless --no-confirm opts in.
-    let approval: Arc<dyn Approval> = if args.no_confirm {
-        Arc::new(rhema_coding_agent::AllowAll)
-    } else {
-        Arc::new(DenyAll)
-    };
+    // Auto-approved for now: the Approval seam is where command
+    // allowlists will land.
+    let approval: Arc<dyn Approval> = Arc::new(rhema_coding_agent::AllowAll);
 
     let mut sink = HeadlessSink;
     let output = agent.turn(prompt, &mut sink, approval).await?;
@@ -269,7 +262,6 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         profile: Some(profile),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
-        no_confirm: args.no_confirm,
         save: args.save,
     };
     let (mut app, mut effects) = {
@@ -399,17 +391,13 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             app.turn_cancel = Some(cancel);
-            let (approval, answers) = if app.options.no_confirm {
-                (Arc::new(AllowAll) as Arc<dyn Approval>, None)
-            } else {
-                let (hook, answerer) = TuiApproval::pair(tx.clone());
-                (Arc::new(hook) as Arc<dyn Approval>, Some(answerer))
-            };
-            app.begin_turn(answers);
+            // Auto-approved for now: the Approval seam — and the modal
+            // wired through it — is where command allowlists will land.
+            app.begin_turn(None);
             spawn_turn(
                 agent,
                 input,
-                approval,
+                Arc::new(AllowAll),
                 app.options.save.clone(),
                 cancelled,
                 tx.clone(),

@@ -32,8 +32,9 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 - `rhema-config` — the XDG config file: stored API key (0600) and
   last-used model; env vars always win over the stored key
 - `rhema-coding-agent` — the coding-agent driver: one built-in tool
-  (`bash`, running commands via `bash -c` in the workspace), per-turn
-  approval gating, session save/resume
+  (`bash`, running commands via `bash -c` in the workspace), an
+  approval seam (auto-approved for now; allowlists planned), session
+  save/resume
 - `rhema` — the frontend binary: a full-screen terminal UI when attached
   to a terminal, a pipeable one-shot runner when not
 
@@ -111,8 +112,8 @@ auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
 code in the palette's cyan); every tool call is a shell command,
 shown as `$ command [exit-code]` — green at zero, red otherwise —
-and pops up an approval modal (y/N; esc cancels the whole turn);
-the status line shows token usage per turn.
+and runs auto-approved for now (esc cancels the whole turn); the
+status line shows token usage per turn.
 
 ### Sessions
 
@@ -131,12 +132,11 @@ non-zero exit on failure:
 ```sh
 rhema -p "summarize this diff"            # one turn, then exit
 git diff | rhema --print -                # prompt from stdin
-rhema -p "run the tests" --no-confirm     # allow gated tools unattended
 ```
 
 Headless backends resolve from config and environment only (there is no
-login prompt): log in once interactively, or set the key env vars. Gated
-tools are declined unattended unless `--no-confirm`.
+login prompt): log in once interactively, or set the key env vars. Tool
+calls run auto-approved for now; command allowlists are planned.
 
 The TUI paints the Jadeite design system — jade-tinted dark ground,
 one green accent, status colors reserved for meaning. `--theme light`
@@ -146,12 +146,12 @@ design's primary.
 `--provider llama-cpp --llama-url http://box:8080` starts on the llama.cpp
 backend without logging in; `ctrl-p` still lists that server's models.
 Keys: `enter` sends · `ctrl-p` re-opens the model picker (the session is
-kept across a model switch) · `esc` declines a pending approval, or asks to
+kept across a model switch) · `esc` cancels the running turn, or asks to
 quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`
 (fresh session), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
-`--max-steps`, `--no-confirm`.
+`--max-steps`.
 
 ## Usage
 

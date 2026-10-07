@@ -92,10 +92,6 @@ pub struct Args {
     #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
     pub max_steps: u32,
 
-    /// Approve all gated tool calls without asking.
-    #[arg(long)]
-    pub no_confirm: bool,
-
     /// Color theme. Dark is the design's primary; light exists for
     /// light-terminal users.
     #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
@@ -123,7 +119,6 @@ mod tests {
         assert_eq!(args.resume, None);
         assert_eq!(args.save, None);
         assert_eq!(args.max_steps, CodingAgentConfig::DEFAULT_MAX_TURN_STEPS);
-        assert!(!args.no_confirm);
         assert_eq!(args.theme, ThemeKind::Dark);
     }
 
@@ -142,7 +137,6 @@ mod tests {
             "s.json",
             "--max-steps",
             "4",
-            "--no-confirm",
             "--theme",
             "light",
         ]);
@@ -152,7 +146,6 @@ mod tests {
         assert_eq!(args.resume, Some(PathBuf::from("s.json")));
         assert_eq!(args.save, Some(PathBuf::from("s.json")));
         assert_eq!(args.max_steps, 4);
-        assert!(args.no_confirm);
         assert_eq!(args.theme, ThemeKind::Light);
     }
 

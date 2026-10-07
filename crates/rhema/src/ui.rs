@@ -1017,7 +1017,6 @@ mod scroll_tests {
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
-                no_confirm: false,
                 save: None,
             },
         })

@@ -164,7 +164,6 @@ pub struct RunOptions {
     /// Max steps per turn.
     pub max_steps: u32,
     /// Approve all gated tool calls without asking.
-    pub no_confirm: bool,
     /// Checkpoint the session after every turn.
     pub save: Option<PathBuf>,
 }
@@ -986,8 +985,7 @@ impl App {
         self.answers = answers;
     }
 
-    /// Answers the modal, if the approval hook is listening (with
-    /// `--no-confirm` there is none).
+    /// Answers the modal, if the approval hook is listening.
     fn answer_approval(&mut self, approved: bool) {
         self.send_answer(approved);
         self.pending_approval = None;
@@ -1261,7 +1259,6 @@ mod tests {
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
-                no_confirm: false,
                 save: None,
             },
         })
@@ -1931,7 +1928,6 @@ mod tests {
                 profile: Some(profile),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
-                no_confirm: false,
                 save: None,
             },
         })
