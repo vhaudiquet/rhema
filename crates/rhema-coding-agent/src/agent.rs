@@ -70,10 +70,15 @@ impl CodingAgent {
         config: CodingAgentConfig,
     ) -> Result<Self, AgentError> {
         let tools = Arc::new(CodingTools::new(config.workspace.clone()));
-        let system = config
-            .system
-            .clone()
-            .unwrap_or_else(|| default_system(tools.workspace()));
+        let system = config.system.clone().unwrap_or_else(|| {
+            // The global skills directory may not exist (no HOME) — as
+            // normal as an empty one.
+            let global = rhema_config::Config::skills_dir().ok();
+            let skills = crate::skills::discover(global.as_deref(), tools.workspace());
+            let mut system = default_system(tools.workspace());
+            system.push_str(&crate::skills::prompt_section(&skills));
+            system
+        });
         let agent = Agent::builder()
             .provider(provider)
             .resolver(tools.clone())
