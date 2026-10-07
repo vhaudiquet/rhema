@@ -8,17 +8,17 @@
 //! inside code blocks (syntect later if wanted).
 
 use crate::palette::Theme;
-use crate::transcript::truncate_chars;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 
 /// Renders one assistant response (its full markdown source) into styled
-/// lines. Plain text passes through untouched. Code reads in the accent's
-/// text tone on a surface well — the transcript well is sunken, so code
-/// steps one tier up.
-pub fn render_markdown(source: &str, theme: &Theme) -> Vec<Line<'static>> {
-    let mut renderer = MarkdownRenderer::new(theme);
+/// lines at `width` columns — tables lay their columns out against it.
+/// Plain text passes through untouched. Code reads in the accent's text
+/// tone on a surface well — the transcript well is sunken, so code steps
+/// one tier up.
+pub fn render_markdown(source: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    let mut renderer = MarkdownRenderer::new(theme, width);
     for event in Parser::new_ext(
         source,
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
@@ -79,10 +79,12 @@ struct MarkdownRenderer<'a> {
     table_cell: Option<String>,
     /// The design tokens; colors never come from literals (rule 1).
     theme: &'a Theme,
+    /// The columns tables lay out against — the transcript's width.
+    width: usize,
 }
 
 impl<'a> MarkdownRenderer<'a> {
-    fn new(theme: &'a Theme) -> Self {
+    fn new(theme: &'a Theme, width: usize) -> Self {
         Self {
             lines: Vec::new(),
             spans: Vec::new(),
@@ -96,6 +98,7 @@ impl<'a> MarkdownRenderer<'a> {
             table_row: Vec::new(),
             table_cell: None,
             theme,
+            width,
         }
     }
 
@@ -201,7 +204,7 @@ impl<'a> MarkdownRenderer<'a> {
                 self.in_table = false;
                 let rows = std::mem::take(&mut self.table_rows);
                 let header = self.table_header.take().unwrap_or_default();
-                for line in render_table(&header, &rows) {
+                for line in render_table(&header, &rows, self.width) {
                     self.lines.push(line);
                 }
                 self.separate();
@@ -296,13 +299,56 @@ impl<'a> MarkdownRenderer<'a> {
     }
 }
 
-/// Cells wider than this cut with an ellipsis; the terminal's own wrap
-/// pass handles rows wider than the screen.
-const TABLE_CELL_WIDTH: usize = 32;
-
 /// A table as aligned plain columns: a bold header, a rule under it,
 /// cells left-aligned and cut to their column.
-fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
+/// Space between table columns.
+const TABLE_COLUMN_GAP: usize = 2;
+
+/// Greedy word wrap of one cell into its column, hard-splitting words
+/// longer than the column. Cells are plain text, so this works on
+/// strings instead of styled rows.
+fn wrap_cell(cell: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    let mut row = String::new();
+    for word in cell.split_whitespace() {
+        let mut word = word;
+        loop {
+            if word.chars().count() > width {
+                // A word longer than the whole column hard-splits.
+                let cut = word
+                    .char_indices()
+                    .nth(width)
+                    .map(|(index, _)| index)
+                    .unwrap_or(word.len());
+                if !row.is_empty() {
+                    rows.push(std::mem::take(&mut row));
+                }
+                rows.push(word[..cut].to_owned());
+                word = &word[cut..];
+                continue;
+            }
+            if row.is_empty() {
+                // The hard-split above guarantees a bare word fits.
+                row.push_str(word);
+            } else if row.chars().count() + 1 + word.chars().count() <= width {
+                row.push(' ');
+                row.push_str(word);
+            } else {
+                rows.push(std::mem::take(&mut row));
+                continue;
+            }
+            break;
+        }
+    }
+    rows.push(row);
+    rows
+}
+
+/// A table laid out at the terminal's width: columns fit their content
+/// when there is room, share what remains when there is not, and cell
+/// content wraps onto continuation rows — model output is never cut.
+fn render_table(header: &[String], rows: &[Vec<String>], width: usize) -> Vec<Line<'static>> {
     let cols = header
         .len()
         .max(rows.iter().map(|row| row.len()).max().unwrap_or(0));
@@ -312,36 +358,74 @@ fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
     fn cell_at(row: &[String], col: usize) -> &str {
         row.get(col).map(String::as_str).unwrap_or("")
     }
-    let widths: Vec<usize> = (0..cols)
+    let natural: Vec<usize> = (0..cols)
         .map(|col| {
             std::iter::once(header)
                 .chain(rows.iter().map(Vec::as_slice))
                 .map(|row| cell_at(row, col).chars().count())
                 .max()
                 .unwrap_or(0)
-                .min(TABLE_CELL_WIDTH)
         })
         .collect();
-    let render_row = |row: &[String], style: Style| {
-        let mut spans = Vec::new();
-        for (col, width) in widths.iter().enumerate() {
-            let cell = truncate_chars(cell_at(row, col), *width);
-            let text = if col + 1 == cols {
-                cell
-            } else {
-                format!("{cell:<width$}")
-            };
-            spans.push(Span::styled(text, style));
-            if col + 1 < cols {
-                spans.push(Span::raw("  "));
+    // Fit-then-share: a column takes its natural width while that stays
+    // within an even share of the space; unsatisfied columns split what
+    // remains, and wrap their cells.
+    let available = width
+        .saturating_sub(TABLE_COLUMN_GAP * (cols - 1))
+        .max(cols);
+    let mut widths = vec![0usize; cols];
+    let mut budget = available;
+    let mut pending: Vec<usize> = (0..cols).collect();
+    while !pending.is_empty() {
+        let share = budget / pending.len();
+        let satisfied: Vec<usize> = pending
+            .iter()
+            .copied()
+            .filter(|col| natural[*col] <= share)
+            .collect();
+        if satisfied.is_empty() {
+            for col in &pending {
+                widths[*col] = share.max(1);
             }
+            break;
         }
-        Line::from(spans)
-    };
-    let mut lines = vec![render_row(
+        for col in satisfied {
+            widths[col] = natural[col];
+            budget -= natural[col];
+            pending.retain(|pending_col| *pending_col != col);
+        }
+    }
+
+    fn emit(row: &[String], style: Style, widths: &[usize], lines: &mut Vec<Line<'static>>) {
+        let cells: Vec<Vec<String>> = (0..widths.len())
+            .map(|col| wrap_cell(cell_at(row, col), widths[col]))
+            .collect();
+        let height = cells.iter().map(Vec::len).max().unwrap_or(1);
+        for line_index in 0..height {
+            let mut spans = Vec::new();
+            for (col, cell) in cells.iter().enumerate() {
+                let text = cell.get(line_index).cloned().unwrap_or_default();
+                if col + 1 == widths.len() {
+                    spans.push(Span::styled(text, style));
+                } else {
+                    spans.push(Span::styled(
+                        format!("{text:<width$}", width = widths[col]),
+                        style,
+                    ));
+                    spans.push(Span::raw(" ".repeat(TABLE_COLUMN_GAP)));
+                }
+            }
+            lines.push(Line::from(spans));
+        }
+    }
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    emit(
         header,
         Style::default().add_modifier(Modifier::BOLD),
-    )];
+        &widths,
+        &mut lines,
+    );
     lines.push(Line::from(Span::raw(
         widths
             .iter()
@@ -350,7 +434,7 @@ fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
             .join("  "),
     )));
     for row in rows {
-        lines.push(render_row(row, Style::default()));
+        emit(row, Style::default(), &widths, &mut lines);
     }
     lines
 }
@@ -361,7 +445,7 @@ mod tests {
     use crate::palette::DARK;
 
     fn render_markdown_d(source: &str) -> Vec<Line<'static>> {
-        render_markdown(source, &crate::palette::DARK)
+        render_markdown(source, &crate::palette::DARK, 80)
     }
 
     fn plain(lines: &[Line<'static>]) -> Vec<String> {
@@ -502,7 +586,7 @@ mod tests {
     }
 
     #[test]
-    fn table_headers_are_bold_and_long_cells_cut() {
+    fn table_headers_are_bold_and_wide_content_wraps_never_cuts() {
         let long = "x".repeat(40);
         let source = format!("| head | h2 |\n|---|---|\n| {long} | v |");
         let lines = render_markdown_d(&source);
@@ -513,24 +597,13 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::BOLD)
         );
-        let header: String = lines[0]
-            .spans
+        let all: String = lines
             .iter()
-            .map(|span| span.content.to_string())
+            .flat_map(|line| line.spans.iter().map(|span| span.content.to_string()))
             .collect();
-        assert_eq!(
-            header,
-            format!("head{}h2", " ".repeat(30)),
-            "the column is as wide as the cut cell"
-        );
-        // The long cell cuts at the column width, sharing its rule.
-        let body: String = lines[2]
-            .spans
-            .iter()
-            .map(|span| span.content.to_string())
-            .collect();
-        assert!(body.contains('…'), "{body}");
-        assert!(body.ends_with("v"), "{body}");
+        // Nothing is lost: every x renders, and no ellipsis ever appears.
+        assert_eq!(all.matches('x').count(), 40, "{all}");
+        assert!(!all.contains('…'), "model output is never cut: {all}");
     }
 
     #[test]

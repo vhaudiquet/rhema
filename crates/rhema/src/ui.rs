@@ -412,7 +412,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
             }
             other => {
                 let had_response = !group.is_empty();
-                flush_response_group(&mut lines, &mut group, &mut marked, app.theme);
+                flush_response_group(&mut lines, &mut group, &mut marked, app.theme, width);
                 marked = false;
                 let is_tool = matches!(other, transcript::Line::ToolCall { .. });
                 if had_response {
@@ -451,7 +451,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
             }
         }
     }
-    flush_response_group(&mut lines, &mut group, &mut marked, app.theme);
+    flush_response_group(&mut lines, &mut group, &mut marked, app.theme, width);
     let wrapped: Vec<Line> = lines
         .iter()
         .flat_map(|line| wrap_line(line, width))
@@ -583,13 +583,14 @@ fn flush_response_group(
     group: &mut Vec<String>,
     marked: &mut bool,
     theme: &Theme,
+    width: usize,
 ) {
     if group.is_empty() {
         return;
     }
     let source = group.join("\n");
     group.clear();
-    let rendered = crate::markdown::render_markdown(&source, theme);
+    let rendered = crate::markdown::render_markdown(&source, theme, width);
     for (index, mut line) in rendered.into_iter().enumerate() {
         if index == 0 && !*marked {
             *marked = true;
