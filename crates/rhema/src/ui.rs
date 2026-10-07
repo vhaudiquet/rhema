@@ -1520,6 +1520,23 @@ mod scroll_tests {
     }
 
     #[test]
+    fn an_empty_session_never_enters_viewing_history() {
+        let mut app = chat_app();
+        app.chat.scroll = 3;
+
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        // Nothing to scroll to: the offset clamps away on the draw.
+        assert_eq!(app.chat.scroll, 0);
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(!screen.contains("viewing history"), "{screen}");
+    }
+
+    #[test]
     fn a_long_prompt_wraps_and_shows_its_tail() {
         let mut app = chat_app();
         let long = format!("{}end", "word ".repeat(30));
