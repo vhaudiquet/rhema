@@ -63,7 +63,7 @@ async fn bash_runs_in_the_workspace_and_returns_output_with_the_code() {
     assert!(
         result
             .content
-            .contains(&root.path().to_string_lossy().as_ref()),
+            .contains(root.path().to_string_lossy().as_ref()),
         "runs in the workspace: {}",
         result.content
     );
