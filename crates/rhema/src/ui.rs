@@ -382,6 +382,8 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
         Line::from(vec![
             Span::raw("ῥ ").fg(theme.accent_text).bold(),
             Span::raw("rhema").bold(),
+            // The TUI's name, lighter than the brand mark.
+            Span::raw(" code").fg(theme.accent_text),
         ]),
         Line::from(""),
     ];
