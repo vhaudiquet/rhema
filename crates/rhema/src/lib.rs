@@ -31,6 +31,7 @@
 pub mod app;
 pub mod approval;
 pub mod args;
+pub mod commands;
 pub mod events;
 pub mod markdown;
 pub mod palette;

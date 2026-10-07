@@ -288,18 +288,24 @@ impl App {
                         .unwrap_or("google"),
                 )
             }),
-            (None, _) => Screen::Login(
-                LoginScreen::new()
-                    .select_stored_provider(effective.provider.as_deref())
-                    .with_profile(
-                        setup
-                            .options
-                            .profile
-                            .as_deref()
-                            .map(str::to_owned)
-                            .or_else(|| setup.config.profile.clone()),
-                    ),
-            ),
+            (None, _) => {
+                let profile_name = setup
+                    .options
+                    .profile
+                    .clone()
+                    .or_else(|| setup.config.profile.clone());
+                let stored = profile_name
+                    .as_deref()
+                    .and_then(|name| setup.config.profiles.get(name))
+                    .cloned()
+                    .unwrap_or_default();
+                Screen::Login(
+                    LoginScreen::new()
+                        .select_stored_provider(effective.provider.as_deref())
+                        .with_profile(profile_name)
+                        .with_stored(stored),
+                )
+            }
         };
         Ok(Self {
             // Read before `options` moves into the struct.
@@ -346,7 +352,69 @@ impl App {
     /// that profile's settings, rebuilds the agent carrying the session
     /// over, persists the choice, and notices. A profile without usable
     /// credentials is declined in-band.
-    fn switch_profile(&mut self, name: &str) {
+    /// Opens the profile picker over the config's profiles.
+    pub fn open_profile_picker(&mut self) -> Vec<Effect> {
+        if self.config.profiles.is_empty() {
+            self.push_notice("no profiles defined in the config");
+            return Vec::new();
+        }
+        self.screen = Screen::Profile(crate::screens::ProfileScreen::new(
+            &self.config.profiles,
+            self.session_profile.as_deref(),
+        ));
+        Vec::new()
+    }
+
+    /// In-band decline for a slash input no table row matches.
+    pub fn unknown_command(&mut self, name: &str) {
+        self.transcript
+            .push_notice(&format!("unknown command {name} — /help lists commands"));
+    }
+
+    /// A notice into the transcript, styled by the transcript itself.
+    pub fn push_notice(&mut self, text: &str) {
+        self.transcript.push_notice(text);
+    }
+
+    /// Opens the login screen bound to the session's profile, preselecting
+    /// its stored provider. The session stays where it is: a successful
+    /// login lands in a picker that rebuilds onto it.
+    pub fn open_login(&mut self) {
+        let effective = self.effective();
+        let profile_name = self
+            .session_profile
+            .clone()
+            .or_else(|| self.options.profile.clone())
+            .or_else(|| self.config.profile.clone());
+        let stored = profile_name
+            .as_deref()
+            .and_then(|name| self.config.profiles.get(name))
+            .cloned()
+            .unwrap_or_default();
+        self.screen = Screen::Login(
+            crate::screens::LoginScreen::for_chat()
+                .select_stored_provider(effective.provider.as_deref())
+                .with_profile(profile_name)
+                .with_stored(stored),
+        );
+    }
+
+    /// Drops the conversation: a fresh transcript and a fresh session.
+    pub fn clear_session(&mut self) {
+        if let Some(agent) = self.agent.as_mut() {
+            agent.session_mut().history.clear();
+        }
+        self.transcript = Transcript::new();
+        self.usage = None;
+        self.error = None;
+        self.transcript.push_notice("conversation cleared");
+    }
+
+    /// Switches the session to a profile: re-resolves the backend from
+    /// that profile's settings, rebuilds the agent carrying the session
+    /// over, persists the choice, and notices. A profile without usable
+    /// credentials is declined in-band.
+    pub fn switch_profile(&mut self, name: &str) {
         if self.running {
             self.transcript
                 .push_notice("a turn is running — /profile waits for it to finish");
@@ -397,79 +465,6 @@ impl App {
 
     /// Runs a chat slash command. Only meaningful while idle: the submit
     /// path routes here before any turn could start.
-    fn handle_command(&mut self, command: &str) {
-        match command {
-            "help" => {
-                let commands = crate::screens::COMMANDS
-                    .iter()
-                    .map(|(name, description)| format!("{name} ({description})"))
-                    .collect::<Vec<_>>()
-                    .join(" · ");
-                self.transcript.push_notice(&format!(
-                    "{commands} — keys: ctrl-p model · pgup/pgdn or wheel history · \
-                     shift+drag to copy text · ctrl-c quit"
-                ));
-            }
-            "model" => {
-                if self.running {
-                    self.transcript
-                        .push_notice("a turn is running — /model waits for it to finish");
-                } else {
-                    self.open_picker();
-                }
-            }
-            command if command.starts_with("profile") => {
-                let arg = command.strip_prefix("profile").unwrap_or("").trim();
-                if self.running {
-                    self.transcript
-                        .push_notice("a turn is running — /profile waits for it to finish");
-                } else if arg.is_empty() {
-                    if self.config.profiles.is_empty() {
-                        self.transcript
-                            .push_notice("no profiles defined in the config");
-                    } else {
-                        self.screen = Screen::Profile(crate::screens::ProfileScreen::new(
-                            &self.config.profiles,
-                            self.session_profile.as_deref(),
-                        ));
-                    }
-                } else {
-                    self.switch_profile(arg);
-                }
-            }
-            "login" => {
-                if self.running {
-                    self.transcript
-                        .push_notice("a turn is running — /login waits for it to finish");
-                } else {
-                    // The session stays right where it is: a successful
-                    // login lands in a picker that rebuilds onto it.
-                    let effective = self.effective();
-                    self.screen = Screen::Login(
-                        crate::screens::LoginScreen::for_chat()
-                            .select_stored_provider(effective.provider.as_deref())
-                            .with_profile(self.options.profile.clone()),
-                    );
-                }
-            }
-            "clear" => {
-                if let Some(agent) = self.agent.as_mut() {
-                    agent.session_mut().history.clear();
-                }
-                self.transcript = Transcript::new();
-                self.usage = None;
-                self.error = None;
-                self.transcript.push_notice("conversation cleared");
-            }
-            "exit" | "quit" => self.should_quit = true,
-            other => self
-                .transcript
-                .push_notice(&format!("unknown command /{other} — /help lists commands")),
-        }
-    }
-
-    /// One mouse-wheel tick: scrolls the transcript while in the chat
-    /// screen; the other screens navigate by keyboard.
     pub fn on_mouse_scroll(&mut self, up: bool) {
         if matches!(self.screen, Screen::Chat) {
             self.chat.scroll_by(if up { 3 } else { -3 });
@@ -584,11 +579,10 @@ impl App {
                     // The input is kept, so typing during a turn is not
                     // lost.
                     Vec::new()
-                } else if let Some(command) = text.strip_prefix('/') {
+                } else if text.trim().starts_with('/') {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
-                    self.handle_command(command.trim());
-                    Vec::new()
+                    return crate::commands::dispatch(self, text.trim());
                 } else {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
@@ -648,7 +642,7 @@ impl App {
 
     /// Ctrl-P mid-session: open the picker over the cached models,
     /// fetching first when the cache is empty.
-    fn open_picker(&mut self) -> Vec<Effect> {
+    pub fn open_picker(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
         let mut status = PickerStatus::Ready;
         if self.models.is_empty() {
@@ -1459,7 +1453,7 @@ mod tests {
                 ..rhema_config::Profile::default()
             },
         );
-        h.app.handle_command("profile work");
+        crate::commands::dispatch(&mut h.app, "/profile work");
         assert_eq!(h.app.session_profile.as_deref(), Some("work"));
         assert!(matches!(h.app.screen, Screen::Chat), "stays in the chat");
         match &h.app.backend {
@@ -1487,7 +1481,7 @@ mod tests {
                 ..rhema_config::Profile::default()
             },
         );
-        h.app.handle_command("profile work");
+        crate::commands::dispatch(&mut h.app, "/profile work");
         // No key: the session stays put and the reason is in the transcript.
         assert!(h.app.session_profile.is_none());
         assert!(matches!(h.app.screen, Screen::Chat));
@@ -1500,7 +1494,7 @@ mod tests {
     #[test]
     fn slash_profile_alone_opens_the_picker() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.handle_command("profile");
+        crate::commands::dispatch(&mut h.app, "/profile");
         match &h.app.screen {
             Screen::Profile(profile) => assert_eq!(profile.entries.len(), 2),
             _ => panic!("expected the profile picker"),
@@ -1510,7 +1504,7 @@ mod tests {
     #[test]
     fn slash_model_opens_the_picker_and_esc_returns_to_the_chat() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.handle_command("model");
+        crate::commands::dispatch(&mut h.app, "/model");
         match &h.app.screen {
             Screen::Picker(picker) => {
                 assert_eq!(picker.purpose, PickerPurpose::FromChat);
@@ -1524,7 +1518,7 @@ mod tests {
     #[test]
     fn slash_login_opens_the_login_and_esc_returns_without_quitting() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.handle_command("login");
+        crate::commands::dispatch(&mut h.app, "/login");
         match &h.app.screen {
             Screen::Login(login) => {
                 assert_eq!(login.purpose, LoginPurpose::FromChat);
@@ -1539,7 +1533,7 @@ mod tests {
     #[test]
     fn slash_login_success_chains_into_a_picker_that_knows_the_way_back() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.handle_command("login");
+        crate::commands::dispatch(&mut h.app, "/login");
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Login {
                 backend: Backend::Google {
@@ -1573,7 +1567,7 @@ mod tests {
     fn slash_model_during_a_turn_declines_with_a_notice() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.running = true;
-        h.app.handle_command("model");
+        crate::commands::dispatch(&mut h.app, "/model");
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(matches!(
             h.app.transcript.lines().last(),
@@ -1603,7 +1597,7 @@ mod tests {
             driver_state: serde_json::Value::Null,
         };
         let mut h = harness(Some("k"), Some("m-a"), session);
-        h.app.handle_command("clear");
+        crate::commands::dispatch(&mut h.app, "/clear");
         assert!(h.app.agent.unwrap().session().history.is_empty());
         assert!(
             h.app.transcript.lines().len() == 1,
@@ -1614,13 +1608,13 @@ mod tests {
     #[test]
     fn slash_exit_quits_and_unknown_commands_get_a_notice() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.handle_command("nope");
+        crate::commands::dispatch(&mut h.app, "/nope");
         assert!(!h.app.should_quit);
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("unknown command /nope")
         ));
-        h.app.handle_command("exit");
+        crate::commands::dispatch(&mut h.app, "/exit");
         assert!(h.app.should_quit);
     }
 }

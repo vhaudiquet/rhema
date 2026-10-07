@@ -145,6 +145,7 @@ impl ProfileScreen {
 pub const COMMANDS: &[(&str, &str)] = &[
     ("/help", "commands and keys"),
     ("/model", "pick the model"),
+    ("/profile", "switch profile (work, personal)"),
     ("/login", "re-login: provider, key, or server"),
     ("/clear", "fresh session"),
     ("/exit", "quit"),
@@ -215,6 +216,9 @@ pub struct LoginScreen {
     pub purpose: LoginPurpose,
     /// The profile this login writes into, shown in the title.
     pub profile: Option<String>,
+    /// The stored settings of that profile: what each provider row
+    /// reports as registered.
+    pub stored: rhema_config::Profile,
 }
 
 impl Default for LoginScreen {
@@ -232,7 +236,14 @@ impl LoginScreen {
             status: LoginStatus::Idle,
             purpose: LoginPurpose::Initial,
             profile: None,
+            stored: rhema_config::Profile::default(),
         }
+    }
+
+    /// Carries the stored settings of the profile this login writes into,
+    /// so provider rows can show what is already registered.
+    pub fn with_stored(self, stored: rhema_config::Profile) -> Self {
+        Self { stored, ..self }
     }
 
     /// Names the profile this login writes into, for the title.
@@ -1009,6 +1020,14 @@ mod tests {
         chat.scroll_by(5);
         chat.handle_key(key(KeyCode::Enter));
         assert_eq!(chat.scroll, 0, "submitting follows the latest line");
+    }
+
+    #[test]
+    fn the_command_table_lists_every_slash_command() {
+        let names: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
+        assert!(names.contains(&"/profile"));
+        assert!(names.contains(&"/model"));
+        assert!(names.contains(&"/login"));
     }
 
     #[test]

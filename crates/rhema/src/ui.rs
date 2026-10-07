@@ -103,7 +103,26 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
             } else {
                 Style::default().fg(theme.text2)
             };
-            ListItem::new(Line::from(Span::styled(entry.name.to_string(), name_style)))
+            // What this profile already has registered for the provider,
+            // so the same provider can hold different keys per profile.
+            let registered = match entry.kind {
+                crate::screens::LoginProvider::Google => login.stored.google_api_key.is_some(),
+                crate::screens::LoginProvider::LlamaCpp => {
+                    login.stored.llama_cpp_url.is_some() || login.stored.llama_cpp_api_key.is_some()
+                }
+                crate::screens::LoginProvider::OpenRouter => {
+                    login.stored.openrouter_api_key.is_some()
+                }
+            };
+            let state = if registered {
+                Span::styled("  key stored", Style::default().fg(theme.text3))
+            } else {
+                Span::styled("  no key", Style::default().fg(theme.text3))
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(entry.name.to_string(), name_style),
+                state,
+            ]))
         })
         .collect();
     frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
@@ -879,6 +898,26 @@ mod scroll_tests {
         (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn login_rows_report_the_stored_key_state() {
+        let mut login = crate::screens::LoginScreen::new();
+        login.stored.google_api_key = Some("g".into());
+        login.stored.openrouter_api_key = Some("o".into());
+
+        let backend = TestBackend::new(60, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render_login(frame, &login, &crate::palette::DARK))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(screen.contains("Google Gemini"), "{screen}");
+        assert!(screen.contains("key stored"), "{screen}");
+        assert!(screen.contains("no key"), "{screen}");
     }
 
     #[test]

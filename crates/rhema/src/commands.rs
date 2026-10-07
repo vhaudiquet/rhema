@@ -1,0 +1,213 @@
+//! The slash-command table: the single source of truth for what commands
+//! exist, what they say, and what they do.
+//!
+//! ARCHITECTURE: every command is one row of [`COMMANDS`] — name,
+//! description, argument kind, and handler function, in one place. The
+//! palette, `/help`, the parser, and the dispatcher all read this table,
+//! so a command cannot exist outside it: a handler without a row is dead
+//! code (fails the `-D warnings` build), and a row without a handler does
+//! not compile. Adding a command means adding exactly one row.
+
+use crate::app::{App, Effect};
+
+/// How the text after a command's name is interpreted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Argument {
+    /// No argument; one present is an error.
+    None,
+    /// An optional free-form word (e.g. a profile name).
+    Optional,
+}
+
+/// One row of the command table.
+#[derive(Debug, Clone, Copy)]
+pub struct CommandSpec {
+    /// The name as typed, with the slash.
+    pub name: &'static str,
+    /// What it does, shown in the palette and `/help`.
+    pub description: &'static str,
+    /// How the argument after the name is handled.
+    pub argument: Argument,
+    /// The implementation.
+    pub handler: fn(&mut App, Option<&str>) -> Vec<Effect>,
+}
+
+/// Every command, in palette order. Aliases are separate rows sharing a
+/// handler (`/exit`, `/quit`).
+pub const COMMANDS: &[CommandSpec] = &[
+    CommandSpec {
+        name: "/help",
+        description: "commands and keys",
+        argument: Argument::None,
+        handler: help,
+    },
+    CommandSpec {
+        name: "/model",
+        description: "pick the model",
+        argument: Argument::None,
+        handler: model,
+    },
+    CommandSpec {
+        name: "/profile",
+        description: "switch profile (work, personal)",
+        argument: Argument::Optional,
+        handler: profile,
+    },
+    CommandSpec {
+        name: "/login",
+        description: "re-login: provider, key, or server",
+        argument: Argument::None,
+        handler: login,
+    },
+    CommandSpec {
+        name: "/clear",
+        description: "fresh session",
+        argument: Argument::None,
+        handler: clear,
+    },
+    CommandSpec {
+        name: "/exit",
+        description: "quit",
+        argument: Argument::None,
+        handler: exit,
+    },
+    CommandSpec {
+        name: "/quit",
+        description: "quit",
+        argument: Argument::None,
+        handler: exit,
+    },
+];
+
+/// The outcome of parsing one chat input. Deliberately not `Eq`: the
+/// command variant carries the row, and function pointers compare by
+/// identity, not meaning.
+#[derive(Debug, Clone)]
+pub enum Parsed {
+    /// Not a slash input — a prompt for the model.
+    Prompt(String),
+    /// A table command, with its argument when one was typed.
+    Command {
+        /// The row this input resolved to.
+        spec: &'static CommandSpec,
+        /// The argument after the name, when present.
+        argument: Option<String>,
+    },
+    /// A slash input no row matches; the caller declines it in-band.
+    Unknown(String),
+}
+
+/// Splits a slash input into the command name and the argument after it.
+fn split(input: &str) -> (&str, Option<&str>) {
+    let body = &input[1..];
+    match body.split_once(' ') {
+        Some((name, argument)) => (name, Some(argument.trim())),
+        None => (body, None),
+    }
+}
+
+/// Parses one chat input through the table.
+pub fn parse(input: &str) -> Parsed {
+    if !input.starts_with('/') {
+        return Parsed::Prompt(input.to_owned());
+    }
+    let (name, argument) = split(input);
+    match COMMANDS
+        .iter()
+        .find(|spec| spec.name == format!("/{name}").as_str())
+    {
+        Some(spec) => match (spec.argument, argument) {
+            (Argument::None, Some(_)) => Parsed::Unknown(input.to_owned()),
+            (Argument::Optional, argument) => Parsed::Command {
+                spec,
+                argument: argument.map(|a| a.to_owned()).filter(|a| !a.is_empty()),
+            },
+            (Argument::None, None) => Parsed::Command {
+                spec,
+                argument: None,
+            },
+        },
+        None => Parsed::Unknown(input.to_owned()),
+    }
+}
+
+/// The palette's candidates for an input: the table rows whose name starts
+/// with the typed token.
+pub fn candidates(input: &str) -> Vec<&'static CommandSpec> {
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+    let needle = input.to_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|spec| spec.name.starts_with(&needle))
+        .collect()
+}
+
+/// Runs the parsed command through its row's handler. Unknown inputs are
+/// declined in-band; prompts never reach here (the chat submit path keeps
+/// them).
+pub fn dispatch(app: &mut App, input: &str) -> Vec<Effect> {
+    match parse(input) {
+        Parsed::Command { spec, argument } => (spec.handler)(app, argument.as_deref()),
+        Parsed::Unknown(name) => {
+            app.unknown_command(&name);
+            Vec::new()
+        }
+        Parsed::Prompt(_) => Vec::new(),
+    }
+}
+
+// --- Handlers ---
+// Private on purpose: an unregistered handler is dead code and fails the
+// `-D warnings` build, which is what keeps the table complete.
+
+fn help(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    let commands = COMMANDS
+        .iter()
+        .map(|spec| format!("{} ({})", spec.name, spec.description))
+        .collect::<Vec<_>>()
+        .join(" · ");
+    app.push_notice(&format!(
+        "{commands} — keys: ctrl-p model · pgup/pgdn or wheel history · \
+         shift+drag to copy text · ctrl-c quit"
+    ));
+    Vec::new()
+}
+
+fn model(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    if app.running {
+        app.push_notice("a turn is running — /model waits for it to finish");
+        return Vec::new();
+    }
+    app.open_picker()
+}
+
+fn profile(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
+    match argument {
+        Some(name) => {
+            app.switch_profile(name);
+            Vec::new()
+        }
+        None => app.open_profile_picker(),
+    }
+}
+
+fn login(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    if app.running {
+        app.push_notice("a turn is running — /login waits for it to finish");
+        return Vec::new();
+    }
+    app.open_login();
+    Vec::new()
+}
+
+fn clear(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    app.clear_session();
+    Vec::new()
+}
+
+fn exit(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    app.should_quit = true;
+    Vec::new()
+}
