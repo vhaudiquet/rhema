@@ -238,10 +238,9 @@ pub struct App {
     /// The cancel flag of the running turn; `None` while idle. The runner
     /// creates the pair at submit and the task watches the receiver.
     pub turn_cancel: Option<tokio::sync::watch::Sender<bool>>,
-    /// The command executing while a turn runs — the tool's name and its
-    /// raw argument text, described at render time. `None` while the
-    /// model itself is streaming: thinking.
-    pub processing: Option<(String, String)>,
+    /// A command is executing while the turn runs; `false` while the
+    /// model itself is streaming — thinking.
+    pub processing: bool,
     /// The file this session was resumed from, if any: the exit save
     /// updates it in place instead of growing a second entry in /resume.
     pub resumed_from: Option<PathBuf>,
@@ -347,7 +346,7 @@ impl App {
             confirm_quit: false,
             decline_all: false,
             turn_cancel: None,
-            processing: None,
+            processing: false,
             resumed_from: None,
             should_quit: false,
             chat: ChatState::new(),
@@ -1000,7 +999,7 @@ impl App {
     /// start in the thinking phase.
     pub fn begin_turn(&mut self, answers: Option<ApprovalAnswerer>) {
         self.answers = answers;
-        self.processing = None;
+        self.processing = false;
     }
 
     /// Tracks which phase a running turn is in, from the engine's own
@@ -1009,15 +1008,10 @@ impl App {
     /// label never flickers between back-to-back commands.
     fn track_phase(&mut self, owned: &OwnedEvent) {
         match owned {
-            OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => self.processing = None,
-            OwnedEvent::ToolCallStart { name, .. } => {
-                self.processing = Some((name.clone(), String::new()));
-            }
-            OwnedEvent::ToolCallArgsDelta(delta) => {
-                if let Some((_, args)) = &mut self.processing {
-                    args.push_str(delta);
-                }
-            }
+            OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => self.processing = false,
+            // A tool call means a command runs. Its arguments often never
+            // stream as deltas, so the label stays phase-only.
+            OwnedEvent::ToolCallStart { .. } => self.processing = true,
             _ => {}
         }
     }
@@ -1054,7 +1048,7 @@ impl App {
         self.running = false;
         self.turn_started = None;
         self.turn_cancel = None;
-        self.processing = None;
+        self.processing = false;
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -1070,7 +1064,7 @@ impl App {
         self.running = false;
         self.turn_started = None;
         self.turn_cancel = None;
-        self.processing = None;
+        self.processing = false;
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -1647,29 +1641,14 @@ mod tests {
         // The step begins: thinking.
         h.app
             .on_event(UiEvent::Engine(OwnedEvent::StepStart { iteration: 0 }));
-        assert_eq!(h.app.processing, None);
+        assert!(!h.app.processing);
 
-        // A tool call arrives and its arguments stream in: running it.
+        // A tool call arrives: running it.
         h.app.on_event(UiEvent::Engine(OwnedEvent::ToolCallStart {
             id: "c1".into(),
             name: "bash".into(),
         }));
-        h.app
-            .on_event(UiEvent::Engine(OwnedEvent::ToolCallArgsDelta(
-                "{\"command\":\"git sta".into(),
-            )));
-        h.app
-            .on_event(UiEvent::Engine(OwnedEvent::ToolCallArgsDelta(
-                "tus\"}".into(),
-            )));
-        assert_eq!(
-            h.app
-                .processing
-                .as_ref()
-                .and_then(|(_, args)| serde_json::from_str::<serde_json::Value>(args).ok())
-                .and_then(|args| args["command"].as_str().map(str::to_owned)),
-            Some("git status".into())
-        );
+        assert!(h.app.processing);
 
         // The result lands: still running, until the next step or the end.
         h.app.on_event(UiEvent::Engine(OwnedEvent::ToolResult {
@@ -1678,7 +1657,7 @@ mod tests {
             is_error: false,
             code: Some(0),
         }));
-        assert!(h.app.processing.is_some());
+        assert!(h.app.processing);
 
         // The turn ends: idle, no phase.
         let agent = CodingAgent::new(
@@ -1689,7 +1668,7 @@ mod tests {
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
         });
-        assert_eq!(h.app.processing, None);
+        assert!(!h.app.processing);
     }
 
     #[test]

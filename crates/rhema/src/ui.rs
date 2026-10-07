@@ -632,28 +632,25 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .map(|started| format!(" · {}s", started.elapsed().as_secs()))
             .unwrap_or_default();
         // Two phases, two colors: the model streaming is thinking; a
-        // command executing names itself.
-        match &app.processing {
-            Some((name, args)) => {
-                let command = transcript::truncate_chars(&transcript::describe(name, args), 24);
-                vec![Line::from(vec![
-                    Span::styled(SPINNER[frame].to_string(), Style::default().fg(theme.info)),
-                    Span::raw(" running ").fg(theme.info),
-                    Span::raw(command).fg(theme.text2),
-                    Span::raw(elapsed).fg(theme.text3),
-                    Span::raw(" · esc cancels").fg(theme.text3),
-                ])]
-            }
-            None => vec![Line::from(vec![
+        // command executing is running.
+        let phase = if app.processing {
+            Line::from(vec![
+                Span::styled(SPINNER[frame].to_string(), Style::default().fg(theme.info)),
+                Span::raw(" running").fg(theme.info),
+            ])
+        } else {
+            Line::from(vec![
                 Span::styled(
                     SPINNER[frame].to_string(),
                     Style::default().fg(theme.running),
                 ),
                 Span::raw(" thinking").fg(theme.running),
-                Span::raw(elapsed).fg(theme.text3),
-                Span::raw(" · esc cancels").fg(theme.text3),
-            ])],
-        }
+            ])
+        };
+        let mut line = phase;
+        line.spans.push(Span::raw(elapsed).fg(theme.text3));
+        line.spans.push(Span::raw(" · esc cancels").fg(theme.text3));
+        vec![line]
     } else {
         vec![Line::from("")]
     };
@@ -1255,14 +1252,13 @@ mod scroll_tests {
                 .collect::<String>()
         };
 
-        app.processing = None;
+        app.processing = false;
         let screen = draw(&app);
         assert!(screen.contains("thinking"), "{screen}");
 
-        app.processing = Some(("bash".into(), "{\"command\":\"git status\"}".into()));
+        app.processing = true;
         let screen = draw(&app);
         assert!(screen.contains("running"), "{screen}");
-        assert!(screen.contains("git status"), "{screen}");
         assert!(!screen.contains("thinking"), "{screen}");
     }
 
