@@ -424,8 +424,11 @@ impl App {
 
     /// Switches the session to a profile: re-resolves the backend from
     /// that profile's settings, rebuilds the agent carrying the session
-    /// over, persists the choice, and notices. A profile without usable
-    /// credentials is declined in-band.
+    /// over, and notices. The choice is per-session, never persisted. A
+    /// profile without usable credentials still switches — the session's
+    /// identity is what moves — but the old provider goes with the old
+    /// profile: turns wait for /login rather than leaking the previous
+    /// profile's key.
     pub fn switch_profile(&mut self, name: &str) {
         if self.running {
             self.transcript
@@ -438,15 +441,25 @@ impl App {
             return;
         }
         let effective = self.config.effective(Some(name));
-        let Some(backend) = Backend::from_profile(&effective) else {
-            self.transcript.push_notice(&format!(
-                "profile {name} has no API key — /login to add one"
-            ));
-            return;
-        };
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
+        };
+        let Some(backend) = Backend::from_profile(&effective) else {
+            // Per-session, never persisted: parallel instances keep
+            // their own profile. The agent drops with the provider: a
+            // turn here would run on the profile just left.
+            self.session_profile = Some(name.to_owned());
+            self.backend = None;
+            self.provider = None;
+            self.agent = None;
+            self.models.clear();
+            self.session = session;
+            self.screen = Screen::Chat;
+            self.transcript.push_notice(&format!(
+                "switched to profile {name} — no API key, /login to add one"
+            ));
+            return;
         };
         let agent_config = agent_config(&self.options, effective.model.clone());
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
@@ -676,6 +689,12 @@ impl App {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
                     crate::commands::dispatch(self, text.trim())
+                } else if self.provider.is_none() {
+                    // The text stays: it is the prompt for once the
+                    // profile has its key.
+                    self.transcript
+                        .push_notice("this profile has no API key — /login to add one");
+                    Vec::new()
                 } else {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
@@ -736,6 +755,13 @@ impl App {
     /// Ctrl-P mid-session: open the picker over the cached models,
     /// fetching first when the cache is empty.
     pub fn open_picker(&mut self) -> Vec<Effect> {
+        // No backend, no list to show: the runner would silently drop
+        // the fetch and the picker would spin on Loading forever.
+        if self.backend.is_none() {
+            self.transcript
+                .push_notice("no provider on this profile — /login first");
+            return Vec::new();
+        }
         let mut effects = Vec::new();
         let mut status = PickerStatus::Ready;
         if self.models.is_empty() {
@@ -1841,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_profile_without_credentials_is_declined_in_band() {
+    fn slash_profile_without_credentials_still_switches() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.config.profiles.insert(
             "work".to_owned(),
@@ -1851,13 +1877,41 @@ mod tests {
             },
         );
         crate::commands::dispatch(&mut h.app, "/profile work");
-        // No key: the session stays put and the reason is in the transcript.
-        assert_eq!(h.app.session_profile.as_deref(), Some("personal"));
+        // The identity moves even without a key...
+        assert_eq!(h.app.session_profile.as_deref(), Some("work"));
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("no API key")
         ));
+        // ...but the old provider goes with the old profile: no backend,
+        // no agent, no model list.
+        assert!(h.app.backend.is_none());
+        assert!(h.app.provider.is_none());
+        assert!(h.app.agent.is_none());
+        assert_eq!(h.app.effective().model, None, "reads work's section");
+
+        // A prompt on a keyless profile is declined in-band and the text
+        // stays for later.
+        h.app.chat.input = "hello".to_owned();
+        h.app.chat.cursor = 5;
+        assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(h.app.chat.input == "hello", "the prompt is kept");
+        assert!(!h.app.running, "no fake turn starts");
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("/login")
+        ));
+
+        // /model is declined too: there is no backend to fetch from.
+        crate::commands::dispatch(&mut h.app, "/model");
+        assert!(matches!(h.app.screen, Screen::Chat), "no picker opens");
+
+        // And the way back rebuilds on the kept session.
+        crate::commands::dispatch(&mut h.app, "/profile personal");
+        assert!(h.app.backend.is_some());
+        assert!(h.app.agent.is_some());
+        assert_eq!(h.app.session_profile.as_deref(), Some("personal"));
     }
 
     #[test]

@@ -75,7 +75,8 @@ provider can hold different keys per profile.
 Inside the TUI, `/profile` switches mid-session: it lists the profiles
 (each in its configured color, with its provider, model, and credential
 state), and switching rebuilds the agent while keeping the conversation.
-Profiles without a usable key are declined in-band with a hint to /login.
+A profile without a usable key still switches — prompts wait until
+`/login` adds one, and the old profile's key is never borrowed.
 A profile can also set `color: "#RRGGBB"` to choose the tone its name
 wears in the footer and picker; unset, personal wears the jade accent and
 work the info blue.
