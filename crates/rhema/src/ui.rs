@@ -712,11 +712,14 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    // Always the same three facts: model, context footprint against the
-    // model's window, and the session's accumulated cost. Key hints live
-    // in /help, not here.
+    // The mark, then always the same three facts: model, context footprint
+    // against the model's window, and the session's accumulated cost. Key
+    // hints live in /help, not here.
     let effective = app.effective();
-    let mut parts = Vec::new();
+    let mut parts = vec![
+        Span::raw(" ῥ").fg(theme.accent_text),
+        Span::raw(" · ").fg(theme.text3),
+    ];
     if let Some((name, color)) = app.active_profile() {
         parts.push(Span::raw(name).fg(color));
         parts.push(Span::raw(" · ").fg(theme.text3));
