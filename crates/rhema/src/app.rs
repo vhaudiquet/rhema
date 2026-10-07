@@ -15,7 +15,7 @@ use rhema_core::{
 use rhema_provider_google::GeminiModel;
 
 use crate::approval::ApprovalAnswerer;
-use crate::events::{FetchWhy, UiEvent};
+use crate::events::{FetchWhy, OwnedEvent, UiEvent};
 use crate::screens::{
     ChatAction, ChatState, LoginAction, LoginPurpose, LoginScreen, LoginStatus, PickerAction,
     PickerPurpose, PickerScreen, PickerStatus, ProfileAction, ProfileScreen,
@@ -238,6 +238,10 @@ pub struct App {
     /// The cancel flag of the running turn; `None` while idle. The runner
     /// creates the pair at submit and the task watches the receiver.
     pub turn_cancel: Option<tokio::sync::watch::Sender<bool>>,
+    /// The command executing while a turn runs — the tool's name and its
+    /// raw argument text, described at render time. `None` while the
+    /// model itself is streaming: thinking.
+    pub processing: Option<(String, String)>,
     /// The file this session was resumed from, if any: the exit save
     /// updates it in place instead of growing a second entry in /resume.
     pub resumed_from: Option<PathBuf>,
@@ -343,6 +347,7 @@ impl App {
             confirm_quit: false,
             decline_all: false,
             turn_cancel: None,
+            processing: None,
             resumed_from: None,
             should_quit: false,
             chat: ChatState::new(),
@@ -832,6 +837,7 @@ impl App {
     pub fn on_event(&mut self, event: UiEvent) -> Vec<Effect> {
         match event {
             UiEvent::Engine(owned) => {
+                self.track_phase(&owned);
                 self.transcript.apply(&owned);
                 Vec::new()
             }
@@ -988,9 +994,30 @@ impl App {
         Ok(CodingAgent::from_session(provider, agent_config, session)?)
     }
 
-    /// The runner accepted a turn: wire the approval answer channel.
+    /// The runner accepted a turn: wire the approval answer channel and
+    /// start in the thinking phase.
     pub fn begin_turn(&mut self, answers: Option<ApprovalAnswerer>) {
         self.answers = answers;
+        self.processing = None;
+    }
+
+    /// Tracks which phase a running turn is in, from the engine's own
+    /// events: streaming is thinking, a tool call is processing. A result
+    /// leaves the phase alone — the next call or step moves it, so the
+    /// label never flickers between back-to-back commands.
+    fn track_phase(&mut self, owned: &OwnedEvent) {
+        match owned {
+            OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => self.processing = None,
+            OwnedEvent::ToolCallStart { name, .. } => {
+                self.processing = Some((name.clone(), String::new()));
+            }
+            OwnedEvent::ToolCallArgsDelta(delta) => {
+                if let Some((_, args)) = &mut self.processing {
+                    args.push_str(delta);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Answers the modal, if the approval hook is listening.
@@ -1025,6 +1052,7 @@ impl App {
         self.running = false;
         self.turn_started = None;
         self.turn_cancel = None;
+        self.processing = None;
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -1040,6 +1068,7 @@ impl App {
         self.running = false;
         self.turn_started = None;
         self.turn_cancel = None;
+        self.processing = None;
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -1605,6 +1634,60 @@ mod tests {
             cached_input_tokens: 0,
         });
         assert_eq!(h.app.context_used(), 500);
+    }
+
+    #[test]
+    fn the_status_tracks_thinking_versus_running() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.running = true;
+        h.app.begin_turn(None);
+
+        // The step begins: thinking.
+        h.app
+            .on_event(UiEvent::Engine(OwnedEvent::StepStart { iteration: 0 }));
+        assert_eq!(h.app.processing, None);
+
+        // A tool call arrives and its arguments stream in: running it.
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolCallStart {
+            id: "c1".into(),
+            name: "bash".into(),
+        }));
+        h.app
+            .on_event(UiEvent::Engine(OwnedEvent::ToolCallArgsDelta(
+                "{\"command\":\"git sta".into(),
+            )));
+        h.app
+            .on_event(UiEvent::Engine(OwnedEvent::ToolCallArgsDelta(
+                "tus\"}".into(),
+            )));
+        assert_eq!(
+            h.app
+                .processing
+                .as_ref()
+                .and_then(|(_, args)| serde_json::from_str::<serde_json::Value>(args).ok())
+                .and_then(|args| args["command"].as_str().map(str::to_owned)),
+            Some("git status".into())
+        );
+
+        // The result lands: still running, until the next step or the end.
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolResult {
+            id: "c1".into(),
+            content: "on main".into(),
+            is_error: false,
+            code: Some(0),
+        }));
+        assert!(h.app.processing.is_some());
+
+        // The turn ends: idle, no phase.
+        let agent = CodingAgent::new(
+            Arc::new(GoogleProvider::new("k".to_owned())),
+            CodingAgentConfig::new("m-a", PathBuf::from(".")),
+        )
+        .unwrap();
+        h.app.on_event(UiEvent::TurnCancelled {
+            agent: Box::new(agent),
+        });
+        assert_eq!(h.app.processing, None);
     }
 
     #[test]

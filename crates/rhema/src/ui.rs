@@ -627,15 +627,29 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .turn_started
             .map(|started| format!(" · {}s", started.elapsed().as_secs()))
             .unwrap_or_default();
-        vec![Line::from(vec![
-            Span::styled(
-                SPINNER[frame].to_string(),
-                Style::default().fg(theme.running),
-            ),
-            Span::raw(" thinking").fg(theme.running),
-            Span::raw(elapsed).fg(theme.text3),
-            Span::raw(" · esc cancels").fg(theme.text3),
-        ])]
+        // Two phases, two colors: the model streaming is thinking; a
+        // command executing names itself.
+        match &app.processing {
+            Some((name, args)) => {
+                let command = transcript::truncate_chars(&transcript::describe(name, args), 24);
+                vec![Line::from(vec![
+                    Span::styled(SPINNER[frame].to_string(), Style::default().fg(theme.info)),
+                    Span::raw(" running ").fg(theme.info),
+                    Span::raw(command).fg(theme.text2),
+                    Span::raw(elapsed).fg(theme.text3),
+                    Span::raw(" · esc cancels").fg(theme.text3),
+                ])]
+            }
+            None => vec![Line::from(vec![
+                Span::styled(
+                    SPINNER[frame].to_string(),
+                    Style::default().fg(theme.running),
+                ),
+                Span::raw(" thinking").fg(theme.running),
+                Span::raw(elapsed).fg(theme.text3),
+                Span::raw(" · esc cancels").fg(theme.text3),
+            ])],
+        }
     } else {
         vec![Line::from("")]
     };
@@ -1188,6 +1202,33 @@ mod scroll_tests {
         let text = screen_text(&app);
         assert!(text.contains("word word word"), "{text}");
         assert!(!text.contains("end-marker"), "{text}");
+    }
+
+    #[test]
+    fn the_status_line_names_the_phase() {
+        let mut app = chat_app();
+        app.running = true;
+        let draw = |app: &App| {
+            let backend = TestBackend::new(80, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+
+        app.processing = None;
+        let screen = draw(&app);
+        assert!(screen.contains("thinking"), "{screen}");
+
+        app.processing = Some(("bash".into(), "{\"command\":\"git status\"}".into()));
+        let screen = draw(&app);
+        assert!(screen.contains("running"), "{screen}");
+        assert!(screen.contains("git status"), "{screen}");
+        assert!(!screen.contains("thinking"), "{screen}");
     }
 
     #[test]
