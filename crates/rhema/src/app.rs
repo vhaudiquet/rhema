@@ -1733,12 +1733,14 @@ mod tests {
         h.app.running = true;
         h.app.on_event(UiEvent::TurnFinished {
             agent: make_agent(),
-            result: Err("turn exceeded the maximum number of iterations (4)".into()),
+            result: Err("stopped after 4 steps without finishing — send a follow-up to keep going, or raise the step limit".into()),
         });
         assert!(!h.app.running);
         assert_eq!(
             h.app.error.as_deref(),
-            Some("turn exceeded the maximum number of iterations (4)")
+            Some(
+                "stopped after 4 steps without finishing — send a follow-up to keep going, or raise the step limit"
+            )
         );
     }
 
