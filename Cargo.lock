@@ -1880,11 +1880,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhema-cli"
+name = "rhema"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
+ "pulldown-cmark",
+ "ratatui",
  "rhema-coding-agent",
  "rhema-config",
  "rhema-core",
@@ -1892,7 +1895,9 @@ dependencies = [
  "rhema-provider-llama-cpp",
  "rhema-provider-openrouter",
  "serde_json",
+ "tempfile",
  "tokio",
+ "unicode-width",
 ]
 
 [[package]]
@@ -1974,27 +1979,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "wiremock",
-]
-
-[[package]]
-name = "rhema-tui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "pulldown-cmark",
- "ratatui",
- "rhema-coding-agent",
- "rhema-config",
- "rhema-core",
- "rhema-provider-google",
- "rhema-provider-llama-cpp",
- "rhema-provider-openrouter",
- "serde_json",
- "tempfile",
- "tokio",
- "unicode-width",
 ]
 
 [[package]]

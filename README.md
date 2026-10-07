@@ -34,14 +34,13 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 - `rhema-coding-agent` — the coding-agent driver: built-in workspace tools
   (`read_file`, `list_dir`, `write_file`, `run_command`), per-turn approval
   gating, session save/resume
-- `rhema-cli` — the `rhema` binary: a terminal REPL over the coding agent
-- `rhema-tui` — the `rhema-tui` binary: a full-screen terminal UI with
-  login, model picker, and live chat
+- `rhema` — the frontend binary: a full-screen terminal UI when attached
+  to a terminal, a pipeable one-shot runner when not
 
-## The rhema TUI
+## The frontend: `rhema`
 
 ```sh
-cargo run --bin rhema-tui
+cargo run --bin rhema          # full-screen TUI (or `cargo install`d rhema)
 ```
 
 First launch opens the login screen: pick a provider — Google Gemini by
@@ -55,6 +54,19 @@ auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
 code in the palette's cyan), `write_file`/`run_command` pop up an
 approval modal (y/N), and the status line shows token usage per turn.
+
+Pipeable one-shot mode — plain text on stdout, tool events on stderr,
+non-zero exit on failure:
+
+```sh
+rhema -p "summarize this diff"            # one turn, then exit
+git diff | rhema --print -                # prompt from stdin
+rhema -p "run the tests" --no-confirm     # allow gated tools unattended
+```
+
+Headless backends resolve from config and environment only (there is no
+login prompt): log in once interactively, or set the key env vars. Gated
+tools are declined unattended unless `--no-confirm`.
 
 The TUI paints the Jadeite design system — jade-tinted dark ground,
 one green accent, status colors reserved for meaning. `--theme light`
@@ -70,49 +82,6 @@ quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
 `--max-steps`, `--no-confirm`.
-
-## The rhema CLI
-
-```sh
-export GEMINI_API_KEY=...        # or GOOGLE_API_KEY
-cargo run --bin rhema            # REPL in the current directory
-```
-
-```
-rhema [OPTIONS] [PROMPT]
-
-  [PROMPT]               one-shot: a single turn, then exit
-  -m, --model <MODEL>    model name [default: stored choice, then gemini-3.8-flash]
-  -w, --workspace <DIR>  workspace root for tools [default: .]
-      --resume <PATH>    resume a saved session file
-      --save <PATH>      checkpoint the session after every turn
-      --no-confirm       approve gated tool calls without asking
-      --max-steps <N>    max steps per turn [default: 16]
-```
-
-The API key resolves from `GEMINI_API_KEY`, then `GOOGLE_API_KEY`, then the
-key stored in `~/.config/rhema/config.yaml` (what the TUI login writes).
-
-`rhema --provider openrouter` runs on OpenRouter with `OPENROUTER_API_KEY`
-(stored in the config after a TUI login — its picker rows carry each
-model's real pricing and context length). Local models work too:
-`rhema --provider llama-cpp` talks to a
-[llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server` at
-`http://localhost:8080` — override with `--llama-url`, `LLAMA_CPP_URL`, or
-the stored config; add a bearer key with `LLAMA_CPP_API_KEY` if your server
-asks for one. No Google key needed on this path.The model sees four tools, all scoped inside the workspace: `read_file`,
-`list_dir`, `write_file`, and `run_command` (`bash -c`, capped output, 120 s
-timeout). The two side-effecting ones ask `allow? [y/N]` first unless
-`--no-confirm` is set. With `--save`, the session is checkpointed after every
-turn and `--resume` continues it later. A failed turn prints one error line
-and the REPL keeps going.
-
-The provider has offline tests via a mock HTTP server; the live round-trip
-against the real API is deliberately `#[ignore]`d:
-
-```sh
-cargo test -p rhema-provider-google --all-features -- --ignored
-```
 
 ## Usage
 
@@ -194,4 +163,4 @@ and checkpoints through serde — expressible entirely outside crate 1.
 - Crate 2: RSD `SessionManager` — dispatch, leases, inbox, revisions, SQLite
   (see [specs/resource-scoped-dispatch.md](specs/resource-scoped-dispatch.md))
 - Provider crates: `rhema-provider-anthropic`, `rhema-provider-openai-compatible`
-- Later: `rhema-tui`, compaction, provider fixtures via cassettes
+- Later: compaction, provider fixtures via cassettes

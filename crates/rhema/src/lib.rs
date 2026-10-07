@@ -1,4 +1,6 @@
-//! rhema-tui — the full-screen terminal UI for the rhema coding agent.
+//! rhema — the frontend for the rhema coding agent: a full-screen
+//! terminal UI when attached to a terminal, a pipeable one-shot runner
+//! when not.
 //!
 //! A leaf consumer: all logic lives in the libraries, this crate is screens
 //! and event plumbing only. `main.rs` is binary wiring; everything else

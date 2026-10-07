@@ -8,7 +8,7 @@
 //! panic hook (restore is idempotent enough: failures are ignored), so a
 //! panic never leaves the user inside the alternate screen.
 
-use std::io::stdout;
+use std::io::{IsTerminal, stdout};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rhema_coding_agent::{AllowAll, Approval, CodingAgent};
 use rhema_config::Config;
-use rhema_core::Session;
+use rhema_core::{Event as ModelEvent, EventSink, Session};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Backend;
@@ -35,10 +35,181 @@ use crate::{events::UiEvent, ui};
 /// channel and redraws.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
+/// The model used headless when neither `--model` nor the stored config
+/// names one.
+const DEFAULT_MODEL: &str = "gemini-3.8-flash";
+/// The model string sent to a llama.cpp server when none is set. The
+/// server typically ignores it, but OpenAI-shaped APIs require the field.
+const DEFAULT_LLAMA_MODEL: &str = "local";
+
+/// The headless event sink: reply text streams raw to stdout (so pipes
+/// capture exactly the reply), tool traffic goes to stderr.
+struct HeadlessSink;
+
+impl EventSink for HeadlessSink {
+    fn emit(&mut self, event: ModelEvent<'_>) {
+        use std::io::Write;
+        match event {
+            ModelEvent::TextDelta(delta) => {
+                print!("{delta}");
+                let _ = std::io::stdout().flush();
+            }
+            ModelEvent::ToolCallStart { name, .. } => {
+                eprintln!("⌁ {name}");
+            }
+            ModelEvent::ToolResult {
+                content, is_error, ..
+            } => {
+                let mark = if is_error { "✗" } else { "✓" };
+                eprintln!("  {mark} {}", first_line(content));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// First line of a tool result, cut for the headless stderr stream.
+fn first_line(content: &str) -> String {
+    let line = content.lines().next().unwrap_or("");
+    let mut cut = line.chars().take(72).collect::<String>();
+    if line.chars().count() > 72 {
+        cut.push('…');
+    }
+    cut
+}
+
+/// Humanizes a token count: 1_048_576 → "1.0M", 131_072 → "131k".
+fn format_tokens(limit: u32) -> String {
+    let limit = u64::from(limit);
+    if limit >= 1_000_000 {
+        format!("{:.1}M", limit as f64 / 1_000_000.0)
+    } else if limit >= 10_000 {
+        format!("{}k", limit / 1_000)
+    } else {
+        format!("{limit}")
+    }
+}
+
+/// Runs the frontend: headless one-shot when a prompt or a pipe asks for
+/// it, the full-screen TUI otherwise.
+pub async fn run(args: Args) -> anyhow::Result<()> {
+    use std::io::IsTerminal;
+    let headless = args.print.is_some()
+        || args.print == Some("-".to_owned())
+        || !std::io::stdout().is_terminal();
+    // A piped stdin is a prompt source, not a REPL: without a prompt and
+    // without a terminal there is nothing interactive to do.
+    if headless {
+        return run_headless(args).await;
+    }
+    run_tui(args).await
+}
+
+/// The headless one-shot: resolve the backend, run one turn, print the
+/// reply to stdout and everything else to stderr. Built for pipes.
+async fn run_headless(args: Args) -> anyhow::Result<()> {
+    use rhema_coding_agent::DenyAll;
+
+    let prompt = match args.print.as_deref() {
+        Some("-") => {
+            use std::io::Read;
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            text
+        }
+        Some(text) => text.to_owned(),
+        None if !std::io::stdin().is_terminal() => {
+            use std::io::Read;
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            text
+        }
+        None => anyhow::bail!(
+            "no prompt: pass --print \"text\" (or --print - with the prompt on stdin)"
+        ),
+    };
+    if prompt.trim().is_empty() {
+        anyhow::bail!("empty prompt");
+    }
+
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(err) => {
+            eprintln!("warning: ignoring unreadable rhema config: {err}");
+            Config::default()
+        }
+    };
+    let provider_choice = args
+        .provider
+        .unwrap_or_else(|| ProviderChoice::from_stored(config.provider.as_deref()));
+    // No login screen exists headless: a missing credential is an error
+    // naming the fix.
+    let backend = match provider_choice {
+        ProviderChoice::Google => config
+            .google_api_key()
+            .map(|api_key| Backend::Google { api_key })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing API key: set GEMINI_API_KEY (or log in once interactively)"
+                )
+            })?,
+        ProviderChoice::LlamaCpp => Backend::LlamaCpp {
+            url: args
+                .llama_url
+                .clone()
+                .unwrap_or_else(|| config.llama_cpp_url()),
+            api_key: config.llama_cpp_api_key(),
+        },
+        ProviderChoice::OpenRouter => Backend::OpenRouter {
+            api_key: config
+                .openrouter_api_key()
+                .ok_or_else(|| anyhow::anyhow!("missing API key: set OPENROUTER_API_KEY"))?,
+        },
+    };
+    let model = args.model.clone().unwrap_or_else(|| {
+        config
+            .model
+            .clone()
+            .unwrap_or_else(|| match provider_choice {
+                ProviderChoice::LlamaCpp => DEFAULT_LLAMA_MODEL.to_owned(),
+                ProviderChoice::Google | ProviderChoice::OpenRouter => DEFAULT_MODEL.to_owned(),
+            })
+    });
+
+    let workspace =
+        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
+    let agent_config = rhema_coding_agent::CodingAgentConfig {
+        max_turn_steps: args.max_steps,
+        ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
+    };
+    let session = match &args.resume {
+        Some(path) => CodingAgent::load_session_from(path)
+            .with_context(|| format!("cannot resume session: {}", path.display()))?,
+        None => Session::default(),
+    };
+    let mut agent = CodingAgent::from_session(backend.provider(), agent_config, session)?;
+    // Fail-safe: nobody is present to approve, so gated tools are declined
+    // unless --no-confirm opts in.
+    let approval: Arc<dyn Approval> = if args.no_confirm {
+        Arc::new(rhema_coding_agent::AllowAll)
+    } else {
+        Arc::new(DenyAll)
+    };
+
+    let mut sink = HeadlessSink;
+    let output = agent.turn(prompt, &mut sink, approval).await?;
+    eprintln!(
+        "· {} · ctx {}",
+        model,
+        format_tokens(output.usage.input_tokens)
+    );
+    Ok(())
+}
+
 /// Runs the TUI: resolves credentials, sets up the terminal, and runs the
 /// event loop until the app quits. The terminal is restored on every exit
 /// path, including panics.
-pub async fn run(args: Args) -> anyhow::Result<()> {
+async fn run_tui(args: Args) -> anyhow::Result<()> {
     // Credential and session resolution happens BEFORE the terminal setup,
     // so early failures print as plain errors on a normal terminal.
     let store: Arc<dyn ConfigStore> = Arc::new(DiskStore);

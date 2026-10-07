@@ -1,6 +1,6 @@
 [package]
-name = "rhema-tui"
-description = "Full-screen terminal UI for the rhema coding agent"
+name = "rhema"
+description = "The rhema frontend: terminal UI and pipeable one-shot runner"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,7 @@ license.workspace = true
 authors.workspace = true
 
 [[bin]]
-name = "rhema-tui"
+name = "rhema"
 path = "src/main.rs"
 
 [features]

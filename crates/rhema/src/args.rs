@@ -40,14 +40,26 @@ impl ProviderChoice {
     }
 }
 
-/// `rhema-tui` — the full-screen terminal UI for the rhema coding agent.
+/// `rhema` — the rhema frontend: a full-screen terminal UI when attached
+/// to a terminal, a pipeable one-shot runner otherwise.
 #[derive(Debug, Parser)]
 #[command(
-    name = "rhema-tui",
+    name = "rhema",
     version,
     about = "Full-screen terminal UI for the rhema coding agent"
 )]
 pub struct Args {
+    /// Run one prompt headless — no full-screen UI, plain text on stdout,
+    /// tool events on stderr, exit 0 on success. `-` reads the prompt from
+    /// stdin, so pipelines work: `git diff | rhema --print -`.
+    #[arg(short = 'p', long)]
+    pub print: Option<String>,
+
+    /// Model name. Defaults to the stored choice, then the backend's
+    /// default.
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+
     /// Model backend for turns. Defaults to the stored choice, then
     /// google.
     #[arg(long, value_enum)]
@@ -89,11 +101,11 @@ mod tests {
     use super::*;
 
     fn parse(args: &[&str]) -> Args {
-        Args::parse_from(std::iter::once("rhema-tui").chain(args.iter().copied()))
+        Args::parse_from(std::iter::once("rhema").chain(args.iter().copied()))
     }
 
     fn try_parse(args: &[&str]) -> Result<Args, clap::Error> {
-        Args::try_parse_from(std::iter::once("rhema-tui").chain(args.iter().copied()))
+        Args::try_parse_from(std::iter::once("rhema").chain(args.iter().copied()))
     }
 
     #[test]
@@ -156,11 +168,17 @@ mod tests {
     }
 
     #[test]
-    fn no_model_or_api_key_flag_exists() {
-        // The picker owns the model and the login owns the key; both flags
-        // must be rejected rather than silently ignored.
-        assert!(try_parse(&["--model", "x"]).is_err());
+    fn no_api_key_flag_exists() {
+        // The login owns the key: interactive or headless, it is never a
+        // flag (shells keep history).
         assert!(try_parse(&["--api-key", "x"]).is_err());
-        assert!(try_parse(&["-m", "x"]).is_err());
+    }
+
+    #[test]
+    fn the_print_flag_parses_forms() {
+        let args = parse(&["--print", "fix the tests"]);
+        assert_eq!(args.print.as_deref(), Some("fix the tests"));
+        let args = parse(&["-p", "-"]);
+        assert_eq!(args.print.as_deref(), Some("-"));
     }
 }

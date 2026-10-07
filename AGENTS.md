@@ -51,8 +51,8 @@ Rules:
   - `openrouter` — the OpenRouter adapter (`crates/rhema-provider-openrouter/`)
   - `config` — stored settings and credentials (`crates/rhema-config/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
-  - `rhema` — the CLI binary and terminal UI (`crates/rhema-cli/`)
-  - `tui` — the full-screen terminal UI (`crates/rhema-tui/`)
+  - `rhema` — the frontend binary: terminal UI and headless one-shot
+    (`crates/rhema/`)
   - `deps` — dependency additions/bumps (manifests, lockfile)
 - Omit the scope entirely for repo-wide changes that do not belong to
   a single component (root config, README.md, SPEC.md).

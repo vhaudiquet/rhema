@@ -24,3 +24,15 @@ impl Approval for AllowAll {
         true
     }
 }
+
+/// Rejects every gated call: the headless default, where nobody is
+/// present to approve. Pair with an explicit opt-in to run tools
+/// unattended.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DenyAll;
+
+impl Approval for DenyAll {
+    fn approve(&self, _call: &ToolCall) -> bool {
+        false
+    }
+}
