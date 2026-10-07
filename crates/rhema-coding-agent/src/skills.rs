@@ -92,9 +92,7 @@ pub fn prompt_section(skills: &[Skill]) -> String {
         return String::new();
     }
     let mut out = String::from(
-        "\nSkills pair a trigger with a file of instructions. When a \
-         trigger applies to the task at hand, read the file first (cat) \
-         and follow it:\nname / trigger / file\n",
+        "\nSkills (name / trigger / file):\n",
     );
     for skill in skills {
         out.push_str(&format!(
