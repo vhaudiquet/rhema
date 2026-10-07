@@ -110,7 +110,7 @@ models only — Google rows carry pricing and context window; just type
 to filter, arrows to move). A server exposing exactly one model
 auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
-code in the palette's cyan); every tool call is a shell command,
+code in the palette's cyan, aligned tables); every tool call is a shell command,
 shown as `$ command [exit-code]` — green at zero, red otherwise —
 and runs auto-approved for now (esc cancels the whole turn); the
 status line shows token usage per turn.

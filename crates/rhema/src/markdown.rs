@@ -8,6 +8,7 @@
 //! inside code blocks (syntect later if wanted).
 
 use crate::palette::Theme;
+use crate::transcript::truncate_chars;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -18,7 +19,10 @@ use ratatui::text::{Line, Span};
 /// steps one tier up.
 pub fn render_markdown(source: &str, theme: &Theme) -> Vec<Line<'static>> {
     let mut renderer = MarkdownRenderer::new(theme);
-    for event in Parser::new_ext(source, Options::ENABLE_STRIKETHROUGH) {
+    for event in Parser::new_ext(
+        source,
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TABLES,
+    ) {
         renderer.push(event);
     }
     renderer.finish()
@@ -66,6 +70,13 @@ struct MarkdownRenderer<'a> {
     in_code_block: bool,
     /// Inside a block quote: every line carries the rail.
     in_block_quote: bool,
+    /// Inside a markdown table: cells collect as plain text, the whole
+    /// table renders aligned at its end.
+    in_table: bool,
+    table_header: Option<Vec<String>>,
+    table_rows: Vec<Vec<String>>,
+    table_row: Vec<String>,
+    table_cell: Option<String>,
     /// The design tokens; colors never come from literals (rule 1).
     theme: &'a Theme,
 }
@@ -79,6 +90,11 @@ impl<'a> MarkdownRenderer<'a> {
             counters: Vec::new(),
             in_code_block: false,
             in_block_quote: false,
+            in_table: false,
+            table_header: None,
+            table_rows: Vec::new(),
+            table_row: Vec::new(),
+            table_cell: None,
             theme,
         }
     }
@@ -157,6 +173,39 @@ impl<'a> MarkdownRenderer<'a> {
                 self.in_block_quote = false;
                 self.separate();
             }
+            Event::Start(Tag::Table(_)) => {
+                self.flush_line();
+                self.separate();
+                self.in_table = true;
+                self.table_rows.clear();
+                self.table_header = None;
+            }
+            Event::Start(Tag::TableHead) => self.table_row.clear(),
+            Event::End(TagEnd::TableHead) => {
+                self.table_header = Some(std::mem::take(&mut self.table_row));
+            }
+            Event::Start(Tag::TableRow) => self.table_row.clear(),
+            Event::End(TagEnd::TableRow) => {
+                let row = std::mem::take(&mut self.table_row);
+                if !row.is_empty() {
+                    self.table_rows.push(row);
+                }
+            }
+            Event::Start(Tag::TableCell) => self.table_cell = Some(String::new()),
+            Event::End(TagEnd::TableCell) => {
+                if let Some(cell) = self.table_cell.take() {
+                    self.table_row.push(cell);
+                }
+            }
+            Event::End(TagEnd::Table) => {
+                self.in_table = false;
+                let rows = std::mem::take(&mut self.table_rows);
+                let header = self.table_header.take().unwrap_or_default();
+                for line in render_table(&header, &rows) {
+                    self.lines.push(line);
+                }
+                self.separate();
+            }
             Event::Start(Tag::Strong) => self.style.bold = true,
             Event::End(TagEnd::Strong) => self.style.bold = false,
             Event::Start(Tag::Emphasis) => self.style.italic = true,
@@ -165,12 +214,17 @@ impl<'a> MarkdownRenderer<'a> {
             Event::End(TagEnd::Strikethrough) => self.style.strikethrough = false,
             Event::Start(Tag::Link { .. }) => self.style.link = true,
             Event::End(TagEnd::Link) => self.style.link = false,
-            Event::Code(code) => self.spans.push(Span::styled(
-                code.to_string(),
-                Style::default().fg(self.theme.accent_text),
-            )),
+            Event::Code(code) => match &mut self.table_cell {
+                Some(cell) => cell.push_str(&code),
+                None => self.spans.push(Span::styled(
+                    code.to_string(),
+                    Style::default().fg(self.theme.accent_text),
+                )),
+            },
             Event::Text(text) => {
-                if self.in_code_block {
+                if let Some(cell) = &mut self.table_cell {
+                    cell.push_str(&text);
+                } else if self.in_code_block {
                     // One parser Text event per source line inside a fence.
                     for (i, row) in text.split('\n').enumerate() {
                         if i > 0 {
@@ -190,9 +244,13 @@ impl<'a> MarkdownRenderer<'a> {
                 }
             }
             Event::SoftBreak | Event::HardBreak => {
-                self.flush_line();
-                if self.in_block_quote {
-                    self.spans.push(Span::raw("│ ").fg(self.theme.text3));
+                if let Some(cell) = &mut self.table_cell {
+                    cell.push(' ');
+                } else {
+                    self.flush_line();
+                    if self.in_block_quote {
+                        self.spans.push(Span::raw("│ ").fg(self.theme.text3));
+                    }
                 }
             }
             Event::Rule => {
@@ -236,6 +294,65 @@ impl<'a> MarkdownRenderer<'a> {
         }
         self.lines
     }
+}
+
+/// Cells wider than this cut with an ellipsis; the terminal's own wrap
+/// pass handles rows wider than the screen.
+const TABLE_CELL_WIDTH: usize = 32;
+
+/// A table as aligned plain columns: a bold header, a rule under it,
+/// cells left-aligned and cut to their column.
+fn render_table(header: &[String], rows: &[Vec<String>]) -> Vec<Line<'static>> {
+    let cols = header
+        .len()
+        .max(rows.iter().map(|row| row.len()).max().unwrap_or(0));
+    if cols == 0 {
+        return Vec::new();
+    }
+    fn cell_at(row: &[String], col: usize) -> &str {
+        row.get(col).map(String::as_str).unwrap_or("")
+    }
+    let widths: Vec<usize> = (0..cols)
+        .map(|col| {
+            std::iter::once(header)
+                .chain(rows.iter().map(Vec::as_slice))
+                .map(|row| cell_at(row, col).chars().count())
+                .max()
+                .unwrap_or(0)
+                .min(TABLE_CELL_WIDTH)
+        })
+        .collect();
+    let render_row = |row: &[String], style: Style| {
+        let mut spans = Vec::new();
+        for (col, width) in widths.iter().enumerate() {
+            let cell = truncate_chars(cell_at(row, col), *width);
+            let text = if col + 1 == cols {
+                cell
+            } else {
+                format!("{cell:<width$}")
+            };
+            spans.push(Span::styled(text, style));
+            if col + 1 < cols {
+                spans.push(Span::raw("  "));
+            }
+        }
+        Line::from(spans)
+    };
+    let mut lines = vec![render_row(
+        header,
+        Style::default().add_modifier(Modifier::BOLD),
+    )];
+    lines.push(Line::from(Span::raw(
+        widths
+            .iter()
+            .map(|width| "─".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("  "),
+    )));
+    for row in rows {
+        lines.push(render_row(row, Style::default()));
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -362,6 +479,66 @@ mod tests {
         let lines = render_markdown_d(source);
         let rendered = plain(&lines);
         assert_eq!(rendered, ["1. one", "  ◦ sub", "2. two"]);
+    }
+
+    #[test]
+    fn tables_render_as_aligned_columns_with_a_header_rule() {
+        let source = "intro:\n\n| a | bb |\n|---|---|\n| 1 | 2 |\n| 33 | 4 |\n\noutro";
+        let lines = render_markdown_d(source);
+        let rendered = plain(&lines);
+        assert_eq!(
+            rendered,
+            [
+                "intro:",
+                "",
+                "a   bb",
+                "──  ──",
+                "1   2",
+                "33  4",
+                "",
+                "outro",
+            ]
+        );
+    }
+
+    #[test]
+    fn table_headers_are_bold_and_long_cells_cut() {
+        let long = "x".repeat(40);
+        let source = format!("| head | h2 |\n|---|---|\n| {long} | v |");
+        let lines = render_markdown_d(&source);
+        // The header leads, bold.
+        assert!(
+            lines[0].spans[0]
+                .style
+                .add_modifier
+                .contains(Modifier::BOLD)
+        );
+        let header: String = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(
+            header,
+            format!("head{}h2", " ".repeat(30)),
+            "the column is as wide as the cut cell"
+        );
+        // The long cell cuts at the column width, sharing its rule.
+        let body: String = lines[2]
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(body.contains('…'), "{body}");
+        assert!(body.ends_with("v"), "{body}");
+    }
+
+    #[test]
+    fn table_cells_capture_inline_markup_as_plain_text() {
+        let source = "| c |\n|---|\n| `code` and **bold** |";
+        let lines = render_markdown_d(source);
+        let rendered = plain(&lines);
+        assert_eq!(rendered[2], "code and bold");
     }
 
     #[test]
