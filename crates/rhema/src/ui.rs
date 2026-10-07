@@ -39,7 +39,11 @@ pub fn render(app: &App, frame: &mut Frame) {
                 })
                 .unwrap_or(1)
                 .max(1);
-            let input_rows = input_rows(&app.chat.input, frame.area().width);
+            let input_rows = input_rows(
+                &app.chat.input,
+                app.chat.attachments.len(),
+                frame.area().width,
+            );
             let [transcript_area, status_area, input_area, footer_area] = Layout::vertical([
                 Constraint::Min(0),
                 Constraint::Length(status_rows),
@@ -781,6 +785,20 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let width = inner.width.saturating_sub(2) as usize;
     let prompt = "❯ ";
+    // Attachment chips come first, one row each: an icon and the size,
+    // never the pasted wall of text.
+    let mut rows: Vec<Line> = app
+        .chat
+        .attachments
+        .iter()
+        .map(|paste| {
+            Line::from(vec![
+                Span::raw("▣ ").fg(theme.info),
+                Span::raw(format!("pasted {} lines", paste.lines().count())).fg(theme.info),
+            ])
+        })
+        .collect();
+    let chips = rows.len();
     let logical: Vec<&str> = if app.chat.input.is_empty() {
         vec![""]
     } else {
@@ -789,15 +807,16 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // The cursor's logical line, so a box taller than the cap keeps the
     // cursor's line in the shown window.
     let cursor_line = app.chat.cursor_line_index();
-    let first = if logical.len() > INPUT_MAX_CONTENT_ROWS {
-        cursor_line.min(logical.len() - INPUT_MAX_CONTENT_ROWS)
+    // The text window fills whatever rows the chips left, at least one.
+    let remaining = INPUT_MAX_CONTENT_ROWS.saturating_sub(chips).max(1);
+    let first = if logical.len() > remaining {
+        cursor_line.min(logical.len() - remaining)
     } else {
         0
     };
-    let window: Vec<&str> = logical[first..].to_vec();
+    let window: Vec<&str> = logical[first..first + remaining.min(logical.len() - first)].to_vec();
 
     // The prompt marks the first shown row; continuation rows sit flush.
-    let mut rows: Vec<Line> = Vec::new();
     for (index, row) in window.iter().enumerate() {
         let marker = if index == 0 { prompt } else { "  " };
         if index == 0 && first == 0 && row.is_empty() && !app.running {
@@ -821,7 +840,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         // The prompt and the continuation indent are both two cells.
         frame.set_cursor_position(Position {
             x: inner.x + 2 + column as u16,
-            y: inner.y + (cursor_line - first) as u16,
+            y: inner.y + chips as u16 + (cursor_line - first) as u16,
         });
     }
 }
@@ -832,9 +851,9 @@ const INPUT_MAX_CONTENT_ROWS: usize = 8;
 
 /// The input box's total height: borders plus the wrapped content lines,
 /// growing with the text up to the cap. An empty input is one row.
-fn input_rows(input: &str, width: u16) -> u16 {
+fn input_rows(input: &str, attachments: usize, width: u16) -> u16 {
     let width = width.saturating_sub(2).max(1) as usize;
-    let rows: usize = if input.is_empty() {
+    let text_rows: usize = if input.is_empty() {
         1
     } else {
         input
@@ -842,7 +861,8 @@ fn input_rows(input: &str, width: u16) -> u16 {
             .map(|line| wrap_line(&Line::from(line), width).len())
             .sum()
     };
-    (rows.min(INPUT_MAX_CONTENT_ROWS) + 2) as u16
+    let content = attachments + text_rows;
+    (content.clamp(1, INPUT_MAX_CONTENT_ROWS) + 2) as u16
 }
 
 fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall, theme: &Theme) {
@@ -1205,6 +1225,21 @@ mod scroll_tests {
     }
 
     #[test]
+    fn a_long_paste_renders_as_one_chip() {
+        let mut app = chat_app();
+        app.chat.paste("l1\nl2\nl3\nl4\nl5");
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(screen.contains("▣ pasted 5 lines"), "{screen}");
+        assert!(!screen.contains("l1"), "the body stays hidden: {screen}");
+    }
+
+    #[test]
     fn the_status_line_names_the_phase() {
         let mut app = chat_app();
         app.running = true;
@@ -1233,11 +1268,12 @@ mod scroll_tests {
 
     #[test]
     fn the_input_box_grows_and_caps() {
-        assert_eq!(input_rows("", 40), 3, "empty: one content row");
-        assert_eq!(input_rows("one line", 40), 3);
-        assert_eq!(input_rows("a\nb\nc", 40), 5, "one row per line");
+        assert_eq!(input_rows("", 0, 40), 3, "empty: one content row");
+        assert_eq!(input_rows("one line", 0, 40), 3);
+        assert_eq!(input_rows("a\nb\nc", 0, 40), 5, "one row per line");
+        assert_eq!(input_rows("a", 2, 40), 5, "chips take rows");
         let wall = "x\n".repeat(20);
-        assert_eq!(input_rows(&wall, 40), 10, "the cap holds");
+        assert_eq!(input_rows(&wall, 0, 40), 10, "the cap holds");
     }
 
     #[test]

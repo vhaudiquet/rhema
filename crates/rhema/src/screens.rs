@@ -734,6 +734,8 @@ pub enum ChatAction {
 pub struct ChatState {
     /// The input being typed.
     pub input: String,
+    /// Pastes too long to show inline: rendered as chips, sent in full.
+    pub attachments: Vec<String>,
     /// Cursor position as a character index into `input`.
     pub cursor: usize,
     /// Transcript scroll: rendered rows scrolled up beyond the bottom
@@ -748,6 +750,9 @@ impl ChatState {
     /// Rows per PageUp/PageDown press — one mouse-wheel tick, so both
     /// controls step the history identically.
     pub const SCROLL_STEP: usize = 3;
+    /// A paste at or under this many lines joins the input inline;
+    /// longer ones become attachments.
+    pub const PASTE_INLINE_LINES: usize = 3;
 
     /// A fresh input box.
     pub fn new() -> Self {
@@ -768,6 +773,29 @@ impl ChatState {
     /// of submitting.
     pub fn insert_newline(&mut self) {
         self.insert_str("\n");
+    }
+
+    /// A paste landed. Short enough, it joins the input inline; longer,
+    /// it becomes an attachment — one chip in the box, full content on
+    /// submit.
+    pub fn paste(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        if normalized.lines().count() > Self::PASTE_INLINE_LINES {
+            self.attachments.push(normalized);
+        } else {
+            self.insert_str(&normalized);
+        }
+    }
+
+    /// The text a submit sends: the typed input with every attachment's
+    /// full content appended.
+    fn submission(&self) -> String {
+        let mut full = self.input.clone();
+        for paste in &self.attachments {
+            full.push_str("\n\n");
+            full.push_str(paste);
+        }
+        full
     }
 
     /// Inserts `text` at the cursor, newlines and all — the bracketed
@@ -868,9 +896,13 @@ impl ChatState {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return ChatAction::None;
         }
-        // Alt-Enter: the other newline key, for terminals that report
-        // the modifier on enter.
-        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::ALT) {
+        // Shift-enter reports as a distinct key only under the kitty
+        // keyboard protocol; alt-enter and ctrl-j are the universal
+        // newline keys.
+        if key.code == KeyCode::Enter
+            && (key.modifiers.contains(KeyModifiers::ALT)
+                || key.modifiers.contains(KeyModifiers::SHIFT))
+        {
             self.insert_newline();
             return ChatAction::None;
         }
@@ -882,7 +914,10 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::Backspace => {
-                if self.cursor > 0 {
+                if self.input.is_empty() && !self.attachments.is_empty() {
+                    // The input has nothing to erase: a chip leaves.
+                    self.attachments.pop();
+                } else if self.cursor > 0 {
                     let end = self.byte_offset();
                     self.cursor -= 1;
                     let start = self.byte_offset();
@@ -960,9 +995,11 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::Enter => {
-                // A new prompt goes to the live tail; stop pinning history.
+                // A new prompt goes to the live tail; stop pinning
+                // history. The input is NOT cleared: the app clears when
+                // it accepts the submit, so a declined one keeps it.
                 self.scroll = 0;
-                ChatAction::Submit(self.input.clone())
+                ChatAction::Submit(self.submission())
             }
             _ => ChatAction::None,
         }
@@ -1346,6 +1383,52 @@ mod tests {
         assert_eq!(chat.cursor_column(), 0);
         chat.handle_key(key(KeyCode::End));
         assert_eq!(chat.cursor_column(), 4);
+    }
+
+    #[test]
+    fn a_long_paste_becomes_an_attachment_sent_in_full() {
+        let mut chat = ChatState::new();
+        let long = "l1\nl2\nl3\nl4";
+        chat.paste(long);
+        assert_eq!(chat.attachments, vec![long.to_owned()]);
+        assert_eq!(chat.input, "", "the box shows a chip, not the text");
+
+        // Enter offers the typed input plus the attachment's content;
+        // clearing happens app-side when the submit is accepted.
+        chat.insert_str("look at this");
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Submit(format!("look at this\n\n{long}"))
+        );
+        assert_eq!(chat.input, "look at this", "declined keeps the text");
+        assert_eq!(chat.attachments.len(), 1);
+    }
+
+    #[test]
+    fn a_short_paste_joins_the_input_inline() {
+        let mut chat = ChatState::new();
+        chat.paste("l1\nl2\nl3");
+        assert!(chat.attachments.is_empty());
+        assert_eq!(chat.input, "l1\nl2\nl3");
+    }
+
+    #[test]
+    fn backspace_on_an_empty_input_pops_the_last_attachment() {
+        let mut chat = ChatState::new();
+        chat.paste("l1\nl2\nl3\nl4");
+        chat.paste("l1\nl2\nl3\nl4\nl5");
+        chat.handle_key(key(KeyCode::Backspace));
+        assert_eq!(chat.attachments.len(), 1);
+        chat.handle_key(key(KeyCode::Backspace));
+        assert!(chat.attachments.is_empty());
+    }
+
+    #[test]
+    fn shift_enter_adds_a_line() {
+        let mut chat = ChatState::new();
+        chat.insert_str("x");
+        chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        assert_eq!(chat.input, "x\n");
     }
 
     #[test]

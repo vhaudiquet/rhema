@@ -14,9 +14,10 @@ use std::time::Duration;
 
 use anyhow::Context;
 use crossterm::event::{
-    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
+    KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
-use crossterm::event::{Event, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -279,8 +280,12 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     };
 
     enable_raw_mode().context("the rhema-tui binary needs a terminal; pipe output through a pty or use the rhema CLI instead")?;
+    // Shift-enter reports as a key only under the kitty keyboard
+    // protocol; terminals without it ignore the push, and newlines keep
+    // working through alt-enter and ctrl-j.
     crossterm::execute!(
         stdout(),
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
         EnterAlternateScreen,
         EnableMouseCapture,
         EnableBracketedPaste
@@ -318,6 +323,7 @@ fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = crossterm::execute!(
         stdout(),
+        PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen

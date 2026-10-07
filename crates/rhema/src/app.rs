@@ -601,7 +601,7 @@ impl App {
     /// pasting multi-line text must not fire submits.
     pub fn on_paste(&mut self, text: &str) {
         if matches!(self.screen, Screen::Chat) {
-            self.chat.insert_str(text);
+            self.chat.paste(text);
         }
     }
 
@@ -739,6 +739,7 @@ impl App {
                 } else if text.trim().starts_with('/') {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
+                    self.chat.attachments.clear();
                     crate::commands::dispatch(self, text.trim())
                 } else if self.provider.is_none() {
                     // The text stays: it is the prompt for once the
@@ -749,6 +750,7 @@ impl App {
                 } else {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
+                    self.chat.attachments.clear();
                     self.transcript.push_user(&text);
                     self.running = true;
                     self.turn_started = Some(std::time::Instant::now());

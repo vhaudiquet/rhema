@@ -145,10 +145,12 @@ design's primary.
 
 `--provider llama-cpp --llama-url http://box:8080` starts on the llama.cpp
 backend without logging in; `ctrl-p` still lists that server's models.
-Keys: `enter` sends · `alt-enter` or `ctrl-j` adds a line (the box grows
-with the text; pasting multi-line text is safe) · `ctrl-p` re-opens the
-model picker (the session is kept across a model switch) · `esc` cancels
-the running turn, or asks to quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`
+Keys: `enter` sends · `shift-enter` (kitty-protocol terminals),
+`alt-enter`, or `ctrl-j` adds a line — the box grows with the text ·
+a paste longer than three lines attaches: one chip in the box, full
+content sent on submit · `ctrl-p` re-opens the model picker (the
+session is kept across a model switch) · `esc` cancels the running
+turn, or asks to quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`
 (fresh session), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
