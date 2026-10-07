@@ -15,7 +15,7 @@ use crate::transcript::{self, pretty_args};
 use rhema_provider_google::GeminiModel;
 
 /// Renders one frame.
-pub fn render(app: &App, frame: &mut Frame) {
+pub fn render(app: &mut App, frame: &mut Frame) {
     let theme = app.theme;
     // The canvas: one background everywhere, the model output's. Nothing
     // in the chat screen sits on a different panel.
@@ -365,7 +365,7 @@ fn render_resume_picker(frame: &mut Frame, screen: &crate::screens::ResumeScreen
     );
 }
 
-fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
+fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let inner = Rect {
         x: area.x + 1,
         width: area.width.saturating_sub(2),
@@ -438,7 +438,11 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         .collect();
     let visible = inner.height as usize;
     let max_top = wrapped.len().saturating_sub(visible);
-    let top = max_top.saturating_sub(app.chat.scroll.min(max_top));
+    // PgUp has no content bound at press time, so the offset can sit
+    // above the top; clamping here keeps PgDn answering immediately
+    // instead of burning the surplus first.
+    app.chat.scroll = app.chat.scroll.min(max_top);
+    let top = max_top - app.chat.scroll;
     frame.render_widget(
         Paragraph::new(wrapped)
             .scroll((top as u16, 0))
@@ -1100,7 +1104,7 @@ mod scroll_tests {
         .unwrap()
     }
 
-    fn screen_text(app: &App) -> String {
+    fn screen_text(app: &mut App) -> String {
         let backend = TestBackend::new(40, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(app, frame)).unwrap();
@@ -1140,7 +1144,7 @@ mod scroll_tests {
 
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let row_text = |y: u16| {
             (0..buffer.area.width)
@@ -1204,7 +1208,7 @@ mod scroll_tests {
 
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
@@ -1223,14 +1227,20 @@ mod scroll_tests {
         app.transcript.push_user(&long);
 
         // At the tail, the last word is visible.
-        let text = screen_text(&app);
+        let text = screen_text(&mut app);
         assert!(text.contains("end-marker"), "{text}");
 
-        // Scrolled far back, the first words are visible.
+        // Scrolled far back — far past the top, even — the draw clamps
+        // the offset to the content, and the first words are visible.
         app.chat.scroll = 1000;
-        let text = screen_text(&app);
+        let text = screen_text(&mut app);
         assert!(text.contains("word word word"), "{text}");
         assert!(!text.contains("end-marker"), "{text}");
+        // The clamp is stable: redrawing does not move it further.
+        let clamped = app.chat.scroll;
+        let text = screen_text(&mut app);
+        assert_eq!(app.chat.scroll, clamped);
+        assert!(text.contains("word word word"), "{text}");
     }
 
     #[test]
@@ -1239,7 +1249,7 @@ mod scroll_tests {
         app.chat.paste("l1\nl2\nl3\nl4\nl5");
         let backend = TestBackend::new(40, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
@@ -1252,7 +1262,7 @@ mod scroll_tests {
     fn the_status_line_names_the_phase() {
         let mut app = chat_app();
         app.running = true;
-        let draw = |app: &App| {
+        let draw = |app: &mut App| {
             let backend = TestBackend::new(80, 12);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|frame| render(app, frame)).unwrap();
@@ -1265,11 +1275,11 @@ mod scroll_tests {
         };
 
         app.processing = false;
-        let screen = draw(&app);
+        let screen = draw(&mut app);
         assert!(screen.contains("thinking"), "{screen}");
 
         app.processing = true;
-        let screen = draw(&app);
+        let screen = draw(&mut app);
         assert!(screen.contains("running"), "{screen}");
         assert!(!screen.contains("thinking"), "{screen}");
     }
@@ -1285,12 +1295,35 @@ mod scroll_tests {
     }
 
     #[test]
+    fn overscroll_clamps_so_pgdown_answers_at_once() {
+        let mut app = chat_app();
+        // Content taller than the viewport: there is a real range.
+        app.transcript
+            .push_user(&format!("{} end", "word ".repeat(200)));
+
+        // Way past the top: the first draw pulls the offset back into
+        // the content's range.
+        app.chat.scroll = 50;
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let clamped = app.chat.scroll;
+        assert!(clamped > 0 && clamped < 50, "clamped in-range: {clamped}");
+
+        // One PageDown now moves the visible window by the whole tick —
+        // no stranded surplus to burn first.
+        app.chat.scroll_by(-3);
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        assert_eq!(app.chat.scroll, clamped - 3);
+    }
+
+    #[test]
     fn a_multi_line_input_renders_every_line_and_caps_at_the_tail() {
         let mut app = chat_app();
         app.chat.insert_str("alpha\nbeta\ngamma");
         let backend = TestBackend::new(40, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
@@ -1303,7 +1336,7 @@ mod scroll_tests {
         app.chat.insert_str(&"more\n".repeat(12));
         let backend = TestBackend::new(40, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
@@ -1338,7 +1371,7 @@ mod scroll_tests {
 
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let row_text = |y: u16| {
             (0..buffer.area.width)
@@ -1383,7 +1416,7 @@ mod scroll_tests {
 
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let row_text = |y: u16| {
             (0..buffer.area.width)
@@ -1411,7 +1444,7 @@ mod scroll_tests {
 
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| render(&app, frame)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
         let buffer = terminal.backend().buffer();
         let row_text = |y: u16| {
             (0..buffer.area.width)
