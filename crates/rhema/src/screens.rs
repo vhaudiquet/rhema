@@ -745,8 +745,9 @@ pub struct ChatState {
 }
 
 impl ChatState {
-    /// Rows per PageUp/PageDown press.
-    pub const SCROLL_STEP: usize = 20;
+    /// Rows per PageUp/PageDown press — one mouse-wheel tick, so both
+    /// controls step the history identically.
+    pub const SCROLL_STEP: usize = 3;
 
     /// A fresh input box.
     pub fn new() -> Self {

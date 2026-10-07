@@ -563,11 +563,12 @@ impl App {
             .push_notice(&format!("resumed {messages} messages"));
     }
 
-    /// Runs a chat slash command. Only meaningful while idle: the submit
-    /// path routes here before any turn could start.
+    /// Scroll the history with the wheel: the same step as PageUp/PageDown
+    /// (one wheel tick), so both controls move in lockstep.
     pub fn on_mouse_scroll(&mut self, up: bool) {
         if matches!(self.screen, Screen::Chat) {
-            self.chat.scroll_by(if up { 3 } else { -3 });
+            let step = crate::screens::ChatState::SCROLL_STEP as isize;
+            self.chat.scroll_by(if up { step } else { -step });
         }
     }
 
@@ -1507,6 +1508,20 @@ mod tests {
         h.app.on_key(key(KeyCode::Esc));
         h.app.on_key(key(KeyCode::Char('y')));
         assert!(h.app.should_quit);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_same_step_as_the_page_keys() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_mouse_scroll(true);
+        assert_eq!(h.app.chat.scroll, crate::screens::ChatState::SCROLL_STEP);
+        h.app.on_key(key(KeyCode::PageUp));
+        assert_eq!(
+            h.app.chat.scroll,
+            2 * crate::screens::ChatState::SCROLL_STEP
+        );
+        h.app.on_mouse_scroll(false);
+        assert_eq!(h.app.chat.scroll, crate::screens::ChatState::SCROLL_STEP);
     }
 
     #[test]
