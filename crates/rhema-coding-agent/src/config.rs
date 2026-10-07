@@ -9,10 +9,15 @@ pub struct CodingAgentConfig {
     /// Model identifier, passed through to
     /// [`ChatParams`](rhema_core::ChatParams).
     pub model: String,
-    /// System prompt stamped into every request. `None` uses
-    /// [`default_system`](crate::default_system); setting it *replaces* the
-    /// default, it does not append.
+    /// System prompt stamped into every request. `None` uses the base
+    /// prompt — [`base_system`](Self::base_system) when set, the
+    /// built-in default otherwise; setting it *replaces* everything, it
+    /// does not append.
     pub system: Option<String>,
+    /// The base prompt from the user's `SYSTEM.md`, `{workspace}`
+    /// placeholder included. The skills table appends after it; `None`
+    /// uses the built-in [`default_system`](crate::default_system).
+    pub base_system: Option<String>,
     /// Root all tools are scoped to; paths that escape it are rejected
     /// in-band to the model.
     pub workspace: PathBuf,
@@ -33,6 +38,7 @@ impl CodingAgentConfig {
         Self {
             model: model.into(),
             system: None,
+            base_system: None,
             workspace: workspace.into(),
             max_turn_steps: Self::DEFAULT_MAX_TURN_STEPS,
         }

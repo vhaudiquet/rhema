@@ -36,19 +36,15 @@ pub enum CodingAgentError {
     WorkspaceEscape(std::path::PathBuf),
 }
 
-/// The default system prompt: identity, the workspace, and the editing
-/// discipline. `CodingAgentConfig::system` replaces it wholesale.
+/// The built-in base prompt, kept as data next to the code and read in
+/// whole: `{workspace}` is the placeholder a session's workspace path
+/// replaces. This is also what seeds a user's `SYSTEM.md` on first run.
+pub const DEFAULT_SYSTEM_MD: &str = include_str!("../SYSTEM.md");
+
+/// The default base prompt for a workspace: [`DEFAULT_SYSTEM_MD`] with
+/// the placeholder filled.
 pub fn default_system(workspace: &Path) -> String {
-    format!(
-        "You are a coding agent working in the workspace {}. \
-Inspect before you edit: read files and list directories with shell \
-commands before changing them. Prefer small diffs over rewrites. Tool \
-errors are recoverable: report what failed and adapt. Commands start \
-in the workspace root. \
-Format responses in strict CommonMark: blank lines between paragraphs and \
-around lists, headings, and code fences.",
-        workspace.display()
-    )
+    DEFAULT_SYSTEM_MD.replace("{workspace}", &workspace.display().to_string())
 }
 
 /// A coding agent: drives [`run_turn`] over the built-in tools, one turn at
@@ -71,13 +67,18 @@ impl CodingAgent {
     ) -> Result<Self, AgentError> {
         let tools = Arc::new(CodingTools::new(config.workspace.clone()));
         let system = config.system.clone().unwrap_or_else(|| {
+            // An explicit base from the user's SYSTEM.md replaces the
+            // built-in default; the skills table appends either way.
+            let base = config
+                .base_system
+                .clone()
+                .unwrap_or_else(|| default_system(tools.workspace()))
+                .replace("{workspace}", &tools.workspace().display().to_string());
             // The global skills directory may not exist (no HOME) — as
             // normal as an empty one.
             let global = rhema_config::Config::skills_dir().ok();
             let skills = crate::skills::discover(global.as_deref(), tools.workspace());
-            let mut system = default_system(tools.workspace());
-            system.push_str(&crate::skills::prompt_section(&skills));
-            system
+            base + &crate::skills::prompt_section(&skills)
         });
         let agent = Agent::builder()
             .provider(provider)

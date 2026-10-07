@@ -86,6 +86,36 @@ async fn the_default_system_prompt_names_the_canonical_workspace() {
 }
 
 #[tokio::test]
+async fn a_base_system_prompt_replaces_the_default_and_fills_the_workspace() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(root.path()).unwrap();
+    let provider = recorder();
+    let config = CodingAgentConfig {
+        base_system: Some("BASE in {workspace}.".into()),
+        ..CodingAgentConfig::new("mock-model", root.path())
+    };
+    let mut agent = CodingAgent::new(provider.clone(), config).unwrap();
+    let mut sink = NullSink;
+
+    agent
+        .turn("hi", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    let systems = provider.systems();
+    assert_eq!(systems.len(), 1);
+    let system = systems[0].as_deref().expect("one system prompt recorded");
+    assert!(
+        system.starts_with(&format!("BASE in {}.", workspace.display())),
+        "{system}"
+    );
+    assert!(
+        !system.contains("{workspace}"),
+        "the placeholder filled: {system}"
+    );
+}
+
+#[tokio::test]
 async fn config_system_replaces_the_default() {
     let root = tempfile::tempdir().unwrap();
     let provider = recorder();

@@ -34,7 +34,7 @@ pub mod config;
 pub mod skills;
 pub mod tools;
 
-pub use agent::{CodingAgent, CodingAgentError, default_system};
+pub use agent::{CodingAgent, CodingAgentError, DEFAULT_SYSTEM_MD, default_system};
 pub use approval::{AllowAll, Approval, DenyAll};
 pub use config::CodingAgentConfig;
 pub use skills::Skill;
