@@ -99,6 +99,17 @@ impl Profile {
             self.openrouter_api_key.clone(),
         )
     }
+
+    /// Whether this profile can build a backend: it names a provider and
+    /// carries the credential that provider needs (a llama.cpp server
+    /// works keyless; google and openrouter need a key, env included).
+    pub fn has_credentials(&self) -> bool {
+        match self.provider.as_deref() {
+            Some("llama-cpp") => true,
+            Some("openrouter") => self.openrouter_api_key().is_some(),
+            _ => self.google_api_key().is_some(),
+        }
+    }
 }
 
 /// The persisted settings: a fallback section plus named profiles.

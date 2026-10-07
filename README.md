@@ -63,8 +63,17 @@ profiles:
 
 `rhema --profile work` runs the TUI or a headless one-shot under that
 profile's provider, keys, and model; logins and model picks while it runs
-write back into that profile's section. The `default:` section is what
-legacy configs already have, so existing setups keep working unchanged.
+write back into that profile's section — the same provider can hold
+different keys per profile. The `default:` section is what legacy configs
+already have, so existing setups keep working unchanged.
+
+Inside the TUI, `/profile` switches mid-session: it lists the profiles
+(each in its configured color, with its provider, model, and credential
+state), and switching rebuilds the agent while keeping the conversation.
+Profiles without a usable key are declined in-band with a hint to /login.
+A profile can also set `color: "#RRGGBB"` to choose the tone its name
+wears in the footer and picker; unset, personal wears the jade accent and
+work the info blue.
 
 First launch opens the login screen: pick a provider — Google Gemini by
 API key, or a llama.cpp `llama-server` by URL (optional bearer key;

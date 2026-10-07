@@ -16,7 +16,7 @@ use crate::approval::ApprovalAnswerer;
 use crate::events::{FetchWhy, UiEvent};
 use crate::screens::{
     ChatAction, ChatState, LoginAction, LoginPurpose, LoginScreen, LoginStatus, PickerAction,
-    PickerPurpose, PickerScreen, PickerStatus,
+    PickerPurpose, PickerScreen, PickerStatus, ProfileAction, ProfileScreen,
 };
 use crate::store::ConfigStore;
 use crate::transcript::Transcript;
@@ -89,6 +89,24 @@ impl Backend {
         }
     }
 
+    /// Builds the backend a profile's settings call for; `None` when the
+    /// profile has no usable credentials (a keyless google or openrouter
+    /// profile cannot serve turns).
+    pub fn from_profile(profile: &rhema_config::Profile) -> Option<Backend> {
+        match profile.provider.as_deref().unwrap_or("google") {
+            "llama-cpp" => Some(Backend::LlamaCpp {
+                url: profile.llama_cpp_url(),
+                api_key: profile.llama_cpp_api_key(),
+            }),
+            "openrouter" => profile
+                .openrouter_api_key()
+                .map(|api_key| Backend::OpenRouter { api_key }),
+            _ => profile
+                .google_api_key()
+                .map(|api_key| Backend::Google { api_key }),
+        }
+    }
+
     /// The models the backend offers, normalized to the picker's row type.
     pub async fn list_models(&self) -> Result<Vec<GeminiModel>, String> {
         match self {
@@ -155,6 +173,8 @@ pub enum Screen {
     Login(LoginScreen),
     /// Choose a model.
     Picker(PickerScreen),
+    /// Switch the profile the session runs under.
+    Profile(ProfileScreen),
     /// The conversation.
     Chat,
 }
@@ -180,6 +200,9 @@ pub struct App {
     pub provider: Option<Arc<dyn ModelProvider>>,
     /// The startup flags.
     pub options: RunOptions,
+    /// The profile this session runs under: the `--profile` flag over the
+    /// stored active profile. `/profile` switches it mid-session.
+    pub session_profile: Option<String>,
     /// The starting session, used when the first agent is built.
     pub session: Session,
     /// The current screen.
@@ -222,6 +245,7 @@ pub struct App {
 enum Routed {
     Login(LoginAction),
     Picker(PickerAction),
+    Profile(ProfileAction),
     Chat(ChatAction),
 }
 
@@ -287,6 +311,7 @@ impl App {
             config: setup.config,
             provider: setup.backend.as_ref().map(Backend::provider),
             backend: setup.backend,
+            session_profile: setup.options.profile.clone(),
             options: setup.options,
             session,
             screen,
@@ -317,6 +342,59 @@ impl App {
     }
 
     /// Handles one keypress; returns the effects to perform.
+    /// Switches the session to a profile: re-resolves the backend from
+    /// that profile's settings, rebuilds the agent carrying the session
+    /// over, persists the choice, and notices. A profile without usable
+    /// credentials is declined in-band.
+    fn switch_profile(&mut self, name: &str) {
+        if self.running {
+            self.transcript
+                .push_notice("a turn is running — /profile waits for it to finish");
+            return;
+        }
+        if self.session_profile.as_deref() == Some(name) {
+            self.transcript
+                .push_notice(&format!("already on profile {name}"));
+            return;
+        }
+        let effective = self.config.effective(Some(name));
+        let Some(backend) = Backend::from_profile(&effective) else {
+            self.transcript.push_notice(&format!(
+                "profile {name} has no API key — /login to add one"
+            ));
+            return;
+        };
+        let session = match &self.agent {
+            Some(agent) => agent.session().clone(),
+            None => self.session.clone(),
+        };
+        let agent_config = agent_config(&self.options, effective.model.clone());
+        match CodingAgent::from_session(backend.provider(), agent_config, session) {
+            Ok(agent) => {
+                self.session_profile = Some(name.to_owned());
+                self.config.profile = Some(name.to_owned());
+                if let Err(err) = self.store.save(&self.config) {
+                    self.error = Some(format!("cannot save config: {err}"));
+                    return;
+                }
+                self.backend = Some(backend.clone());
+                self.provider = Some(backend.provider());
+                self.models.clear();
+                self.agent = Some(agent);
+                self.screen = Screen::Chat;
+                if effective.model.is_none() {
+                    self.transcript.push_notice(&format!(
+                        "switched to profile {name} — /model to pick a model"
+                    ));
+                } else {
+                    self.transcript
+                        .push_notice(&format!("switched to profile {name}"));
+                }
+            }
+            Err(err) => self.error = Some(err.to_string()),
+        }
+    }
+
     /// Runs a chat slash command. Only meaningful while idle: the submit
     /// path routes here before any turn could start.
     fn handle_command(&mut self, command: &str) {
@@ -338,6 +416,25 @@ impl App {
                         .push_notice("a turn is running — /model waits for it to finish");
                 } else {
                     self.open_picker();
+                }
+            }
+            command if command.starts_with("profile") => {
+                let arg = command.strip_prefix("profile").unwrap_or("").trim();
+                if self.running {
+                    self.transcript
+                        .push_notice("a turn is running — /profile waits for it to finish");
+                } else if arg.is_empty() {
+                    if self.config.profiles.is_empty() {
+                        self.transcript
+                            .push_notice("no profiles defined in the config");
+                    } else {
+                        self.screen = Screen::Profile(crate::screens::ProfileScreen::new(
+                            &self.config.profiles,
+                            self.session_profile.as_deref(),
+                        ));
+                    }
+                } else {
+                    self.switch_profile(arg);
                 }
             }
             "login" => {
@@ -392,6 +489,7 @@ impl App {
         let routed = match &mut self.screen {
             Screen::Login(login) => Routed::Login(login.handle_key(key)),
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
+            Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
             Screen::Chat => Routed::Chat(self.chat.handle_key(key)),
         };
         match routed {
@@ -405,6 +503,14 @@ impl App {
                 Vec::new()
             }
             Routed::Picker(PickerAction::BackToChat) => {
+                self.screen = Screen::Chat;
+                Vec::new()
+            }
+            Routed::Profile(ProfileAction::Switch(name)) => {
+                self.switch_profile(&name);
+                Vec::new()
+            }
+            Routed::Profile(ProfileAction::BackToChat) => {
                 self.screen = Screen::Chat;
                 Vec::new()
             }
@@ -422,7 +528,9 @@ impl App {
                 }
                 Vec::new()
             }
-            Routed::Picker(PickerAction::None) | Routed::Login(LoginAction::None) => Vec::new(),
+            Routed::Picker(PickerAction::None)
+            | Routed::Profile(ProfileAction::None)
+            | Routed::Login(LoginAction::None) => Vec::new(),
             Routed::Chat(chat_action) => self.on_chat_key(key, chat_action),
         }
     }
@@ -760,7 +868,7 @@ impl App {
     /// named profile (or the one chosen at startup) over the top-level
     /// section. Computed on demand — it changes mid-session.
     pub fn effective(&self) -> rhema_config::Profile {
-        self.config.effective(self.options.profile.as_deref())
+        self.config.effective(self.session_profile.as_deref())
     }
 
     /// The active profile's name and display color: the `--profile` flag
@@ -1337,6 +1445,66 @@ mod tests {
         let mut h = harness(None, None, Session::default());
         h.app.on_key(ctrl('c'));
         assert!(h.app.should_quit);
+    }
+
+    #[test]
+    fn slash_profile_with_a_name_switches_the_backend_and_persists() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.config.profiles.insert(
+            "work".to_owned(),
+            rhema_config::Profile {
+                provider: Some("openrouter".into()),
+                openrouter_api_key: Some("work-key".into()),
+                model: Some("work-model".into()),
+                ..rhema_config::Profile::default()
+            },
+        );
+        h.app.handle_command("profile work");
+        assert_eq!(h.app.session_profile.as_deref(), Some("work"));
+        assert!(matches!(h.app.screen, Screen::Chat), "stays in the chat");
+        match &h.app.backend {
+            Some(Backend::OpenRouter { api_key }) => assert_eq!(api_key, "work-key"),
+            other => panic!("expected the openrouter backend, got {other:?}"),
+        }
+        let stored = h.store.load().unwrap();
+        assert_eq!(stored.profile.as_deref(), Some("work"));
+        assert!(stored.effective(None).model.as_deref() == Some("work-model"));
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .contains(&Line::Notice("switched to profile work".into()))
+        );
+    }
+
+    #[test]
+    fn slash_profile_without_credentials_is_declined_in_band() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.config.profiles.insert(
+            "work".to_owned(),
+            rhema_config::Profile {
+                provider: Some("openrouter".into()),
+                ..rhema_config::Profile::default()
+            },
+        );
+        h.app.handle_command("profile work");
+        // No key: the session stays put and the reason is in the transcript.
+        assert!(h.app.session_profile.is_none());
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("no API key")
+        ));
+    }
+
+    #[test]
+    fn slash_profile_alone_opens_the_picker() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.handle_command("profile");
+        match &h.app.screen {
+            Screen::Profile(profile) => assert_eq!(profile.entries.len(), 2),
+            _ => panic!("expected the profile picker"),
+        }
     }
 
     #[test]

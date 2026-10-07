@@ -26,6 +26,7 @@ pub fn render(app: &App, frame: &mut Frame) {
     match &app.screen {
         Screen::Login(login) => render_login(frame, login, theme),
         Screen::Picker(picker) => render_picker(frame, picker, theme),
+        Screen::Profile(profile) => render_profile_picker(frame, profile, theme),
         Screen::Chat => {
             // An error wraps, so the status strip grows to its wrapped
             // height; every other strip is fixed.
@@ -186,6 +187,79 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
         Span::raw("type to filter · enter choose · esc clear/quit").fg(theme.text3),
     ]);
     frame.render_widget(Paragraph::new(footer), footer_area);
+}
+
+/// The profile picker: same frame as the model picker, rows in the
+/// profile's own color, bold selected, the session's active profile
+/// marked.
+fn render_profile_picker(frame: &mut Frame, screen: &crate::screens::ProfileScreen, theme: &Theme) {
+    let area = frame.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken).fg(theme.text))
+        .title(" select a profile ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows: Vec<ListItem> = screen
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let color = row
+                .color
+                .as_deref()
+                .and_then(crate::palette::parse_hex_color)
+                .unwrap_or_else(|| crate::palette::default_profile_color(&row.name, theme));
+            let selected = index == screen.selected;
+            let name_style = if selected {
+                Style::default().fg(color).bold()
+            } else {
+                Style::default().fg(color)
+            };
+            let mut spans = vec![Span::styled(row.name.clone(), name_style)];
+            let mut detail = String::new();
+            if let Some(provider) = &row.provider {
+                detail.push_str(provider);
+            } else {
+                detail.push_str("no provider");
+            }
+            if let Some(model) = &row.model {
+                detail.push_str(&format!(" · {model}"));
+            }
+            if !row.usable {
+                detail.push_str(" · no API key");
+            }
+            if row.active {
+                detail.push_str(" · active");
+            }
+            spans.push(Span::raw("  ").fg(theme.text3));
+            spans.push(Span::styled(detail, Style::default().fg(theme.text3)));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(screen.selected));
+    frame.render_stateful_widget(
+        List::new(rows)
+            .highlight_symbol("❯ ")
+            .highlight_style(Style::default().bg(theme.elevated)),
+        inner,
+        &mut state,
+    );
+
+    let footer = Line::from(Span::raw("enter switch · esc back").fg(theme.text3));
+    frame.render_widget(
+        Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+    );
 }
 
 fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
