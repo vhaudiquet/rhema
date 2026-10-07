@@ -331,9 +331,10 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     ];
     // Consecutive assistant lines form one markdown response and render
     // through the parser; everything else renders as-is. The bullet marks
-    // the first row of each response. A run of tool lines is one visual
-    // block: a blank row separates it from whatever follows, so the reply
-    // does not blur into the ⌁ wall.
+    // the first row of each response. Blocks read apart: a run of tool
+    // lines ends with a blank row before whatever follows, and a prompt
+    // gets a blank row above it when a response precedes — never both at
+    // once, so no double spacing.
     let mut group: Vec<String> = Vec::new();
     let mut marked = false;
     let mut in_tool_run = false;
@@ -347,9 +348,13 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 group.push(text.clone());
             }
             other => {
+                let had_response = !group.is_empty();
                 flush_response_group(&mut lines, &mut group, &mut marked, app.theme);
                 marked = false;
                 let is_tool = matches!(other, transcript::Line::ToolCall { .. });
+                if matches!(other, transcript::Line::User(_)) && had_response {
+                    lines.push(Line::from(""));
+                }
                 if in_tool_run && !is_tool {
                     lines.push(Line::from(""));
                 }
@@ -1109,5 +1114,37 @@ mod scroll_tests {
             .expect("reply row visible");
         // Exactly one blank row between the ⌁ line and the response.
         assert_eq!(reply_row, tool_row + 2, "one blank row in between");
+    }
+
+    #[test]
+    fn a_blank_row_separates_a_reply_from_the_next_prompt() {
+        let mut app = chat_app();
+        app.transcript.push_user("alpha");
+        app.transcript
+            .apply(&crate::events::OwnedEvent::TextDelta("beta reply".into()));
+        app.transcript.push_user("gamma");
+
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let alpha_row = (0..buffer.area.height)
+            .find(|y| row_text(*y).contains("alpha"))
+            .expect("first prompt visible");
+        let beta_row = (alpha_row..buffer.area.height)
+            .find(|y| row_text(*y).contains("beta reply"))
+            .expect("reply visible");
+        let gamma_row = (beta_row..buffer.area.height)
+            .find(|y| row_text(*y).contains("gamma"))
+            .expect("second prompt visible");
+        // The reply hugs its prompt above it, but the next prompt opens
+        // its own block: one blank row below the reply.
+        assert_eq!(beta_row, alpha_row + 1, "reply follows its prompt");
+        assert_eq!(gamma_row, beta_row + 2, "one blank row in between");
     }
 }
