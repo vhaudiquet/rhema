@@ -150,7 +150,7 @@ Keys: `enter` sends · `shift-enter` (kitty-protocol terminals),
 a paste longer than three lines attaches: one chip in the box, full
 content sent on submit · `ctrl-p` re-opens the model picker (the
 session is kept across a model switch) · `esc` cancels the running
-turn, or asks to quit when idle · `ctrl-c` quits immediately. Commands: `/help`, `/clear`
+turn, or asks to quit when idle · `ctrl-c` or `ctrl-d` quit immediately. Commands: `/help`, `/clear`
 (fresh session), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),

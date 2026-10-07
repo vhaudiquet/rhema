@@ -616,9 +616,13 @@ impl App {
     /// Routes one keypress to the current screen, then the app-level
     /// handling (modals, quit, effects).
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        // Ctrl-C quits immediately, from any screen, modal or not.
+        // Ctrl-C and Ctrl-D (EOF) quit immediately, from any screen,
+        // modal or not.
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
+            && matches!(
+                key.code,
+                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('d') | KeyCode::Char('D')
+            )
         {
             self.should_quit = true;
             return Vec::new();
@@ -1870,9 +1874,13 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_quits_from_any_screen() {
+    fn ctrl_c_and_ctrl_d_quit_from_any_screen() {
         let mut h = harness(None, None, Session::default());
         h.app.on_key(ctrl('c'));
+        assert!(h.app.should_quit);
+
+        let mut h = harness(None, None, Session::default());
+        h.app.on_key(ctrl('d'));
         assert!(h.app.should_quit);
     }
 

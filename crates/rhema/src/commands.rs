@@ -182,7 +182,7 @@ fn help(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
         .join(" · ");
     app.push_notice(&format!(
         "{commands} — keys: ctrl-p model · pgup/pgdn or wheel history · \
-         shift+drag to copy text · ctrl-c quit"
+         shift+drag to copy text · ctrl-c or ctrl-d quit"
     ));
     Vec::new()
 }
