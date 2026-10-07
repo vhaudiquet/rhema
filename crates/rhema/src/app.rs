@@ -3,7 +3,6 @@
 //! or spawn turns are returned to the runner (`crate::run`), which owns
 //! the runtime and the terminal.
 
-use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -295,17 +294,10 @@ impl App {
                     .profile
                     .clone()
                     .unwrap_or_else(|| "personal".to_owned());
-                let stored = setup
-                    .config
-                    .profiles
-                    .get(&profile_name)
-                    .cloned()
-                    .unwrap_or_default();
                 Screen::Login(
                     LoginScreen::new()
-                        .select_stored_provider(effective.provider.as_deref())
-                        .with_profile(Some(profile_name))
-                        .with_stored(stored),
+                        .with_registry(&setup.config.profiles, &profile_name)
+                        .select_stored_provider(effective.provider.as_deref()),
                 )
             }
         };
@@ -394,17 +386,10 @@ impl App {
             .clone()
             .or_else(|| self.options.profile.clone())
             .unwrap_or_else(|| "personal".to_owned());
-        let stored = self
-            .config
-            .profiles
-            .get(&profile_name)
-            .cloned()
-            .unwrap_or_default();
         self.screen = Screen::Login(
             crate::screens::LoginScreen::for_chat()
-                .select_stored_provider(effective.provider.as_deref())
-                .with_profile(Some(profile_name))
-                .with_stored(stored),
+                .with_registry(&self.config.profiles, &profile_name)
+                .select_stored_provider(effective.provider.as_deref()),
         );
     }
 
@@ -708,11 +693,11 @@ impl App {
                 // A login opened from the chat lands in a picker that also
                 // knows the way back.
                 let from_chat = login.purpose == LoginPurpose::FromChat;
+                let tab = login.profile.clone();
                 match result {
                     Ok(models) => {
-                        let profile = self.options.profile.as_deref();
                         self.config
-                            .set_for_profile(profile, |settings| match &backend {
+                            .set_for_profile(Some(&tab), |settings| match &backend {
                                 Backend::Google { api_key } => {
                                     settings.provider = Some("google".to_owned());
                                     settings.google_api_key = Some(api_key.clone());
@@ -731,6 +716,7 @@ impl App {
                             login.status = LoginStatus::Error(format!("cannot save config: {err}"));
                             return;
                         }
+                        self.session_profile = Some(tab);
                         self.backend = Some(backend.clone());
                         self.provider = Some(backend.provider());
                         self.models = models.clone();
@@ -928,6 +914,7 @@ mod tests {
     use rhema_coding_agent::{Approval, CodingAgentConfig};
     use rhema_core::{Message, Role, Session, StopReason, ToolCall, Usage};
     use rhema_provider_google::{GeminiModel, GoogleProvider};
+    use std::collections::BTreeMap;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
@@ -1061,6 +1048,8 @@ mod tests {
     #[test]
     fn login_success_persists_the_key_and_opens_the_picker() {
         let mut h = harness(None, None, Session::default());
+        // Enter on the provider list descends into the credential stage.
+        h.app.on_key(key(KeyCode::Enter));
         for c in "secret".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -1115,6 +1104,8 @@ mod tests {
             }
             _ => panic!("expected the login screen"),
         }
+        // Enter descends into the credential stage for the chosen provider.
+        h.app.on_key(key(KeyCode::Enter));
         for c in "http://box:8080".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -1442,6 +1433,43 @@ mod tests {
         let mut h = harness(None, None, Session::default());
         h.app.on_key(ctrl('c'));
         assert!(h.app.should_quit);
+    }
+
+    #[test]
+    fn login_success_writes_into_the_selected_tab_profile() {
+        let mut h = harness(None, None, Session::default());
+        // Give the config a second profile so the login has a work tab.
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), rhema_config::Profile::default());
+        // Re-open the login so its registry picks up the new profile.
+        crate::commands::dispatch(&mut h.app, "/login");
+        // Tab to the work profile on the login screen (Right cycles tabs).
+        h.app.on_key(key(KeyCode::Right));
+        match &h.app.screen {
+            Screen::Login(login) => assert_eq!(login.profile, "work"),
+            _ => panic!("expected the login screen"),
+        }
+        for c in "work-key".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::OpenRouter {
+                    api_key: "work-key".into(),
+                },
+            },
+            result: Ok(models()),
+        });
+        // The session now runs on work, and the key landed in its section.
+        assert_eq!(h.app.session_profile.as_deref(), Some("work"));
+        let stored = h.store.load().unwrap();
+        assert_eq!(
+            stored.effective(Some("work")).openrouter_api_key.as_deref(),
+            Some("work-key")
+        );
     }
 
     #[test]

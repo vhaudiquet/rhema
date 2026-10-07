@@ -70,12 +70,9 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &Theme) {
-    let area = centered(58, 8, frame.area());
+    let area = centered(58, 9, frame.area());
     frame.render_widget(Clear, area);
-    let title = match &login.profile {
-        Some(profile) => format!(" rhema — sign in ({profile}) "),
-        None => " rhema — sign in ".to_owned(),
-    };
+    let title = format!(" rhema — sign in ({}) ", login.profile);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -85,55 +82,86 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [providers_area, input_area, status_area] = Layout::vertical([
+    let [tabs_area, providers_area, input_area, status_area] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(PROVIDERS.len() as u16),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
 
-    // The selection lives in the text, like the command palette: bold
-    // marks the current provider, the background stays shared.
-    let rows: Vec<ListItem> = PROVIDERS
+    // The profile tabs: the selected tab in accent, others secondary.
+    let names = login.tab_names();
+    let tabs: Vec<Span> = names
         .iter()
         .enumerate()
-        .map(|(index, entry)| {
-            let name_style = if index == login.selected {
-                Style::default().fg(theme.text).bold()
+        .flat_map(|(index, name)| {
+            let style = if *name == login.profile {
+                Style::default().fg(theme.accent_text).bold()
             } else {
-                Style::default().fg(theme.text2)
+                Style::default().fg(theme.text3)
             };
-            // What this profile already has registered for the provider,
-            // so the same provider can hold different keys per profile.
-            let registered = match entry.kind {
-                crate::screens::LoginProvider::Google => login.stored.google_api_key.is_some(),
-                crate::screens::LoginProvider::LlamaCpp => {
-                    login.stored.llama_cpp_url.is_some() || login.stored.llama_cpp_api_key.is_some()
-                }
-                crate::screens::LoginProvider::OpenRouter => {
-                    login.stored.openrouter_api_key.is_some()
-                }
-            };
-            let state = if registered {
-                Span::styled("  key stored", Style::default().fg(theme.text3))
+            let separator = if index + 1 == names.len() {
+                Vec::new()
             } else {
-                Span::styled("  no key", Style::default().fg(theme.text3))
+                vec![Span::raw(" | ").fg(theme.border_strong)]
             };
-            ListItem::new(Line::from(vec![
-                Span::styled(entry.name.to_string(), name_style),
-                state,
-            ]))
+            let mut spans = vec![Span::styled(name.clone(), style)];
+            spans.extend(separator);
+            spans
         })
         .collect();
-    frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
+    frame.render_widget(Paragraph::new(Line::from(tabs)), tabs_area);
 
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw(login.input_label()).fg(theme.text3),
-            Span::raw(login.masked_input()).bold(),
-        ])),
-        input_area,
-    );
+    match login.stage {
+        crate::screens::LoginStage::SelectProvider => {
+            // oh-my-pi style: every provider row, connected ones marked
+            // with a green "logged in" tag.
+            let rows: Vec<ListItem> = PROVIDERS
+                .iter()
+                .map(|entry| {
+                    let selected = entry.kind == login.selected_provider();
+                    let name_style = if selected {
+                        Style::default().fg(theme.text).bold()
+                    } else {
+                        Style::default().fg(theme.text2)
+                    };
+                    let registered = match entry.kind {
+                        crate::screens::LoginProvider::Google => {
+                            login.stored.google_api_key.is_some()
+                        }
+                        crate::screens::LoginProvider::LlamaCpp => {
+                            login.stored.llama_cpp_url.is_some()
+                                || login.stored.llama_cpp_api_key.is_some()
+                        }
+                        crate::screens::LoginProvider::OpenRouter => {
+                            login.stored.openrouter_api_key.is_some()
+                        }
+                    };
+                    let mut spans = vec![Span::styled(entry.name.to_string(), name_style)];
+                    if registered {
+                        let what = match entry.kind {
+                            crate::screens::LoginProvider::LlamaCpp => "server",
+                            _ => "api key",
+                        };
+                        spans.push(Span::raw("  ● ").fg(theme.ok));
+                        spans.push(Span::raw(format!("logged in ({what})")).fg(theme.text3));
+                    }
+                    ListItem::new(Line::from(spans))
+                })
+                .collect();
+            frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
+        }
+        crate::screens::LoginStage::EnterCredential => {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw(login.input_label()).fg(theme.text3),
+                    Span::raw(login.masked_input()).bold(),
+                ])),
+                input_area,
+            );
+        }
+    }
 
     let status = match &login.status {
         crate::screens::LoginStatus::Idle => Line::from(login.input_hint()).fg(theme.text3),
@@ -923,9 +951,11 @@ mod scroll_tests {
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
+        // Connected providers carry the logged-in tag; llama.cpp has
+        // nothing registered in this profile, so its row stays bare.
         assert!(screen.contains("Google Gemini"), "{screen}");
-        assert!(screen.contains("key stored"), "{screen}");
-        assert!(screen.contains("no key"), "{screen}");
+        assert_eq!(screen.matches("logged in (api key)").count(), 2);
+        assert!(!screen.contains("logged in (server)"), "{screen}");
     }
 
     #[test]

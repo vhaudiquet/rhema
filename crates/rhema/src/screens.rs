@@ -179,6 +179,15 @@ pub enum LoginPurpose {
     FromChat,
 }
 
+/// Which half of the two-stage login is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginStage {
+    /// The provider list: arrows to choose, enter to continue.
+    SelectProvider,
+    /// The credential input for the chosen provider.
+    EnterCredential,
+}
+
 /// Where the login screen stands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoginStatus {
@@ -202,20 +211,24 @@ pub enum LoginAction {
     Quit,
 }
 
-/// The login screen: provider list, masked API-key input, validation
-/// status.
+/// The login screen: profile tabs, provider list, masked API-key input,
+/// validation status.
 #[derive(Debug)]
 pub struct LoginScreen {
-    /// The API key or server URL being typed.
-    pub input: String,
-    /// Index into [`PROVIDERS`].
+    /// Which half of the two-stage login is showing.
+    pub stage: LoginStage,
+    /// Index into [`PROVIDERS`] — the highlighted provider row.
     pub selected: usize,
+    /// The API key or server URL being typed (credential stage).
+    pub input: String,
     /// Current status.
     pub status: LoginStatus,
     /// What Esc does here.
     pub purpose: LoginPurpose,
-    /// The profile this login writes into, shown in the title.
-    pub profile: Option<String>,
+    /// The registry of profiles; the tabs cycle through its keys.
+    pub profiles: BTreeMap<String, rhema_config::Profile>,
+    /// The profile this login writes into — the selected tab.
+    pub profile: String,
     /// The stored settings of that profile: what each provider row
     /// reports as registered.
     pub stored: rhema_config::Profile,
@@ -233,22 +246,40 @@ impl LoginScreen {
         Self {
             input: String::new(),
             selected: 0,
+            stage: LoginStage::SelectProvider,
             status: LoginStatus::Idle,
             purpose: LoginPurpose::Initial,
-            profile: None,
+            profiles: BTreeMap::new(),
+            profile: "personal".to_owned(),
             stored: rhema_config::Profile::default(),
         }
     }
 
-    /// Carries the stored settings of the profile this login writes into,
-    /// so provider rows can show what is already registered.
-    pub fn with_stored(self, stored: rhema_config::Profile) -> Self {
-        Self { stored, ..self }
+    /// Sets the profile registry (the tabs) and carries the stored
+    /// settings of the initially selected tab.
+    pub fn with_registry(
+        self,
+        profiles: &BTreeMap<String, rhema_config::Profile>,
+        initial: &str,
+    ) -> Self {
+        let stored = profiles.get(initial).cloned().unwrap_or_default();
+        Self {
+            profiles: profiles.clone(),
+            profile: initial.to_owned(),
+            stored,
+            ..self
+        }
     }
 
-    /// Names the profile this login writes into, for the title.
-    pub fn with_profile(self, profile: Option<String>) -> Self {
-        Self { profile, ..self }
+    /// The names of the profile tabs, sorted.
+    pub fn tab_names(&self) -> Vec<String> {
+        self.profiles.keys().cloned().collect()
+    }
+
+    /// Switches to a profile tab and carries its stored settings.
+    pub fn select_profile(&mut self, name: &str) {
+        self.profile = name.to_owned();
+        self.stored = self.profiles.get(name).cloned().unwrap_or_default();
     }
 
     /// Preselects the provider row matching the stored settings' provider
@@ -281,15 +312,19 @@ impl LoginScreen {
     /// The hint under the input, per the highlighted provider and what Esc
     /// does.
     pub fn input_hint(&self) -> String {
-        let base = match self.selected_provider() {
-            LoginProvider::LlamaCpp => "enter your llama.cpp server URL, then press enter",
-            LoginProvider::Google | LoginProvider::OpenRouter => {
-                "enter your API key, then press enter"
+        let base = match self.stage {
+            LoginStage::SelectProvider => "arrows choose · enter to log in".to_owned(),
+            LoginStage::EnterCredential => {
+                let what = match self.selected_provider() {
+                    LoginProvider::LlamaCpp => "the server URL",
+                    _ => "the API key",
+                };
+                format!("enter {what}, then press enter")
             }
         };
         match self.purpose {
             LoginPurpose::FromChat => format!("{base} · esc back"),
-            LoginPurpose::Initial => base.to_owned(),
+            LoginPurpose::Initial => base,
         }
     }
 
@@ -322,6 +357,38 @@ impl LoginScreen {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return LoginAction::None;
         }
+        match self.stage {
+            LoginStage::SelectProvider => self.handle_provider_key(key),
+            LoginStage::EnterCredential => self.handle_credential_key(key),
+        }
+    }
+
+    /// Keys on the provider list: arrows choose, enter descends into the
+    /// credential input, esc leaves the login.
+    fn handle_provider_key(&mut self, key: KeyEvent) -> LoginAction {
+        match key.code {
+            KeyCode::Up | KeyCode::Down => {
+                self.move_selection(key.code == KeyCode::Down);
+                LoginAction::None
+            }
+            KeyCode::Enter => {
+                self.input.clear();
+                self.status = LoginStatus::Idle;
+                self.stage = LoginStage::EnterCredential;
+                LoginAction::None
+            }
+            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                self.cycle_profile_tab(key.code == KeyCode::Right || key.code == KeyCode::Tab);
+                LoginAction::None
+            }
+            KeyCode::Esc => LoginAction::Quit,
+            _ => LoginAction::None,
+        }
+    }
+
+    /// Keys while typing the credential: enter validates, esc returns to
+    /// the provider list.
+    fn handle_credential_key(&mut self, key: KeyEvent) -> LoginAction {
         match key.code {
             KeyCode::Char(c) => {
                 self.input.push(c);
@@ -331,17 +398,35 @@ impl LoginScreen {
                 self.input.pop();
                 LoginAction::None
             }
-            KeyCode::Up | KeyCode::Down => {
-                self.move_selection(key.code == KeyCode::Down);
+            KeyCode::Enter => self.submit(),
+            KeyCode::Esc => {
+                self.input.clear();
+                self.status = LoginStatus::Idle;
+                self.stage = LoginStage::SelectProvider;
                 LoginAction::None
             }
-            KeyCode::Enter => self.submit(),
-            KeyCode::Esc => LoginAction::Quit,
             _ => LoginAction::None,
         }
     }
 
     /// Moves the selection around the provider list, wrapping.
+    /// Cycles the profile tab.
+    fn cycle_profile_tab(&mut self, forward: bool) {
+        let names: Vec<String> = self.profiles.keys().cloned().collect();
+        if names.is_empty() {
+            return;
+        }
+        let current = names
+            .iter()
+            .position(|name| *name == self.profile)
+            .unwrap_or(0);
+        let count = names.len() as isize;
+        let step = if forward { 1 } else { -1 };
+        let next = (current as isize + step).rem_euclid(count) as usize;
+        self.select_profile(&names[next]);
+    }
+
+    /// Moves the selection among the providers, wrapping.
     fn move_selection(&mut self, down: bool) {
         let count = PROVIDERS.len() as isize;
         let step = if down { 1 } else { -1 };
@@ -736,6 +821,8 @@ mod tests {
     #[test]
     fn login_buffers_typing_and_masks_it() {
         let mut login = LoginScreen::new();
+        // Pick a provider first: enter descends into the credential stage.
+        login.handle_key(key(KeyCode::Enter));
         for c in "sk-abc".chars() {
             login.handle_key(key(KeyCode::Char(c)));
         }
@@ -750,8 +837,9 @@ mod tests {
     }
 
     #[test]
-    fn login_enter_with_a_blank_input_does_nothing() {
+    fn login_enter_with_a_blank_credential_does_nothing() {
         let mut login = LoginScreen::new();
+        login.stage = LoginStage::EnterCredential;
         assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
         assert_eq!(login.status, LoginStatus::Idle);
         login.input = "   ".into();
@@ -761,6 +849,7 @@ mod tests {
     #[test]
     fn login_enter_validates_and_locks_until_the_outcome() {
         let mut login = LoginScreen::new();
+        login.stage = LoginStage::EnterCredential;
         login.input = " key ".into();
         assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::Validate);
         assert_eq!(login.status, LoginStatus::Validating);
@@ -772,6 +861,7 @@ mod tests {
     #[test]
     fn login_error_renders_inline_and_allows_retry() {
         let mut login = LoginScreen::new();
+        login.stage = LoginStage::EnterCredential;
         login.input = "bad-key".into();
         login.status = LoginStatus::Validating;
         login.on_validated(&Err("gemini api error (HTTP 403): denied".into()));
@@ -781,6 +871,38 @@ mod tests {
         );
         // Error state accepts Enter again (retry).
         assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::Validate);
+    }
+
+    #[test]
+    fn tab_keys_cycle_the_profile_tabs_and_carry_the_stored_section() {
+        let mut login = LoginScreen::new().with_registry(
+            &BTreeMap::from([
+                (
+                    "personal".to_owned(),
+                    rhema_config::Profile {
+                        google_api_key: Some("p-key".into()),
+                        ..rhema_config::Profile::default()
+                    },
+                ),
+                (
+                    "work".to_owned(),
+                    rhema_config::Profile {
+                        openrouter_api_key: Some("w-key".into()),
+                        ..rhema_config::Profile::default()
+                    },
+                ),
+            ]),
+            "personal",
+        );
+        assert_eq!(login.profile, "personal");
+        assert_eq!(login.stored.google_api_key.as_deref(), Some("p-key"));
+
+        login.handle_key(key(KeyCode::Tab));
+        assert_eq!(login.profile, "work");
+        assert_eq!(login.stored.openrouter_api_key.as_deref(), Some("w-key"));
+
+        login.handle_key(key(KeyCode::Left));
+        assert_eq!(login.profile, "personal");
     }
 
     #[test]
