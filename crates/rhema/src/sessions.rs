@@ -52,6 +52,15 @@ pub fn base_dir() -> io::Result<PathBuf> {
     Ok(cache.join("rhema").join("sessions"))
 }
 
+/// Milliseconds since the epoch; 0 when the clock sits behind the epoch,
+/// which only muddles ordering, never correctness.
+pub fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// Writes `session` under `base` for `workspace`, returning the file it
 /// landed in. A session with no history is not written: there is nothing
 /// to resume, and /clear should not leave a husk behind.
@@ -65,10 +74,7 @@ pub fn save_session(
     }
     let dir = base.join(encode_workspace(workspace));
     std::fs::create_dir_all(&dir)?;
-    let millis = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|since| since.as_millis() as u64)
-        .unwrap_or(0);
+    let millis = now_millis();
     // Same-millisecond saves pick the next free suffix; names sort by
     // time because the millis field is fixed-width.
     let mut n = 0u32;

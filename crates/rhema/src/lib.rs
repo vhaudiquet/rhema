@@ -50,6 +50,9 @@ pub use args::Args;
 pub use events::{FetchWhy, OwnedEvent, UiEvent};
 pub use palette::{DARK, LIGHT, Theme, parse_hex_color};
 pub use run::run;
-pub use screens::{ChatAction, ChatState, LoginAction, LoginScreen, PickerAction, PickerScreen};
+pub use screens::{
+    ChatAction, ChatState, LoginAction, LoginScreen, PickerAction, PickerScreen, ResumeAction,
+    ResumeScreen,
+};
 pub use store::{ConfigStore, DiskStore, MemoryStore};
 pub use transcript::{Line, Transcript};

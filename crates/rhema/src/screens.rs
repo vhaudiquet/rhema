@@ -137,6 +137,91 @@ impl ProfileScreen {
     }
 }
 
+// --- Resume ---
+
+/// One row of the resume picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeRow {
+    /// The saved session's file; loading it is the app's job.
+    pub path: std::path::PathBuf,
+    /// The row's age, computed at construction ("3m ago").
+    pub age: String,
+    /// The session's opening prompt, cut for the row; `None` when the
+    /// file could not be read for a preview.
+    pub snippet: Option<String>,
+}
+
+/// What one resume-picker keypress means.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeAction {
+    /// Nothing to do.
+    None,
+    /// Load the saved session at this path.
+    Pick(std::path::PathBuf),
+    /// Return to the chat.
+    BackToChat,
+}
+
+/// The resume picker: one highlighted row, arrows to move, enter to
+/// load, esc back to the chat. Sessions for one workspace only, newest
+/// first — the listing decided that before the screen existed.
+#[derive(Debug)]
+pub struct ResumeScreen {
+    /// The rows, newest first.
+    pub entries: Vec<ResumeRow>,
+    /// Index of the highlighted row.
+    pub selected: usize,
+}
+
+impl ResumeScreen {
+    /// A picker over the saved sessions; `now` (millis) fixes the age
+    /// labels.
+    pub fn new(entries: Vec<crate::sessions::SavedSession>, now: u64) -> Self {
+        let entries = entries
+            .into_iter()
+            .map(|saved| ResumeRow {
+                path: saved.path,
+                age: crate::sessions::ago(saved.saved_at, now),
+                snippet: saved.snippet,
+            })
+            .collect();
+        Self {
+            entries,
+            selected: 0,
+        }
+    }
+
+    /// Handles one keypress.
+    pub fn handle_key(&mut self, key: KeyEvent) -> ResumeAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return ResumeAction::None;
+        }
+        match key.code {
+            KeyCode::Down => {
+                if !self.entries.is_empty() {
+                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                }
+                ResumeAction::None
+            }
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                ResumeAction::None
+            }
+            KeyCode::Enter => self.pick(),
+            KeyCode::Esc => ResumeAction::BackToChat,
+            _ => ResumeAction::None,
+        }
+    }
+
+    /// Enter: load the highlighted session.
+    fn pick(&mut self) -> ResumeAction {
+        match self.entries.get(self.selected) {
+            Some(row) => ResumeAction::Pick(row.path.clone()),
+            None => ResumeAction::None,
+        }
+    }
+}
+
 // --- Slash commands ---
 
 /// The commands whose names start with the slash token in `input`, in

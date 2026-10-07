@@ -27,6 +27,7 @@ pub fn render(app: &App, frame: &mut Frame) {
         Screen::Login(login) => render_login(frame, login, theme),
         Screen::Picker(picker) => render_picker(frame, picker, theme),
         Screen::Profile(profile) => render_profile_picker(frame, profile, theme),
+        Screen::Resume(resume) => render_resume_picker(frame, resume, theme),
         Screen::Chat => {
             // An error wraps, so the status strip grows to its wrapped
             // height; every other strip is fixed.
@@ -298,6 +299,56 @@ fn render_profile_picker(frame: &mut Frame, screen: &crate::screens::ProfileScre
     );
 
     let footer = Line::from(Span::raw("enter switch · esc back").fg(theme.text3));
+    frame.render_widget(
+        Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
+
+fn render_resume_picker(frame: &mut Frame, screen: &crate::screens::ResumeScreen, theme: &Theme) {
+    let area = frame.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken).fg(theme.text))
+        .title(" resume a session ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows: Vec<ListItem> = screen
+        .entries
+        .iter()
+        .map(|row| {
+            let snippet = row
+                .snippet
+                .clone()
+                .unwrap_or_else(|| "(no preview)".to_owned());
+            ListItem::new(Line::from(vec![
+                Span::styled(snippet, Style::default().fg(theme.text)),
+                Span::styled(
+                    format!("  ·  {}", row.age),
+                    Style::default().fg(theme.text3),
+                ),
+            ]))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(screen.selected));
+    frame.render_stateful_widget(
+        List::new(rows)
+            .highlight_symbol("❯ ")
+            .highlight_style(Style::default().bg(theme.elevated)),
+        inner,
+        &mut state,
+    );
+
+    let footer = Line::from(Span::raw("enter resume · esc back").fg(theme.text3));
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
         Rect {
@@ -1007,8 +1058,8 @@ mod scroll_tests {
             if let Some(pos) = row.find("pick the model") {
                 columns.push(("pick the model", pos));
             }
-            if let Some(pos) = row.find("quit") {
-                columns.push(("quit", pos));
+            if let Some(pos) = row.find("fresh session") {
+                columns.push(("fresh session", pos));
             }
         }
         assert_eq!(columns.len(), 3, "all three commands visible: {columns:?}");

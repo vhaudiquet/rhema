@@ -92,6 +92,17 @@ in chat: responses stream in as rendered markdown (headings, bold,
 code in the palette's cyan), `write_file`/`run_command` pop up an
 approval modal (y/N), and the status line shows token usage per turn.
 
+### Sessions
+
+Leaving the TUI saves the conversation under
+`~/.cache/rhema/sessions/`, grouped by the workspace it ran in —
+files are plain session JSON, the same format `--resume <file>` and
+`--save <file>` take. `/resume` lists the saved sessions for the
+current directory (newest first, with their age and opening prompt)
+and enter continues one; a session with nothing said saves nothing,
+and the save is per-exit, so one conversation can hold several
+checkpoints.
+
 Pipeable one-shot mode — plain text on stdout, tool events on stderr,
 non-zero exit on failure:
 

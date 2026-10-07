@@ -3,7 +3,7 @@
 //! or spawn turns are returned to the runner (`crate::run`), which owns
 //! the runtime and the terminal.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -175,6 +175,8 @@ pub enum Screen {
     Picker(PickerScreen),
     /// Switch the profile the session runs under.
     Profile(ProfileScreen),
+    /// Pick a saved session of this workspace to continue.
+    Resume(crate::screens::ResumeScreen),
     /// The conversation.
     Chat,
 }
@@ -246,6 +248,7 @@ enum Routed {
     Login(LoginAction),
     Picker(PickerAction),
     Profile(ProfileAction),
+    Resume(crate::screens::ResumeAction),
     Chat(ChatAction),
 }
 
@@ -469,6 +472,80 @@ impl App {
         }
     }
 
+    /// Opens the resume picker over the sessions saved for this
+    /// workspace. An empty history of saves is a notice, not a screen.
+    pub fn open_resume(&mut self) -> Vec<Effect> {
+        match crate::sessions::base_dir() {
+            Ok(base) => self.open_resume_from(&base),
+            Err(err) => {
+                self.push_notice(&format!("cannot locate the session cache: {err}"));
+                Vec::new()
+            }
+        }
+    }
+
+    /// [`App::open_resume`] against an explicit base, so tests drive real
+    /// directories instead of the environment.
+    pub fn open_resume_from(&mut self, base: &Path) -> Vec<Effect> {
+        if self.running {
+            self.transcript
+                .push_notice("a turn is running — /resume waits for it to finish");
+            return Vec::new();
+        }
+        let workspace = std::fs::canonicalize(&self.options.workspace)
+            .unwrap_or_else(|_| self.options.workspace.clone());
+        match crate::sessions::list_sessions(base, &workspace) {
+            Ok(entries) if entries.is_empty() => {
+                self.transcript
+                    .push_notice("no saved sessions for this directory");
+            }
+            Ok(entries) => {
+                self.screen = Screen::Resume(crate::screens::ResumeScreen::new(
+                    entries,
+                    crate::sessions::now_millis(),
+                ));
+            }
+            Err(err) => self.error = Some(format!("cannot list saved sessions: {err}")),
+        }
+        Vec::new()
+    }
+
+    /// Loads a saved session: rebuilds the agent on it, re-derives the
+    /// transcript from its history, and lands in the chat. The current
+    /// conversation is replaced — it keeps its own saved file from its
+    /// own exit.
+    pub fn resume_session(&mut self, path: &Path) {
+        if self.running {
+            self.transcript
+                .push_notice("a turn is running — /resume waits for it to finish");
+            return;
+        }
+        let session = match CodingAgent::load_session_from(&path.to_path_buf()) {
+            Ok(session) => session,
+            Err(err) => {
+                self.error = Some(format!("cannot load session: {err}"));
+                return;
+            }
+        };
+        let agent = match self.build_agent(session.clone()) {
+            Ok(agent) => agent,
+            Err(err) => {
+                self.error = Some(err.to_string());
+                return;
+            }
+        };
+        let messages = session.history.len();
+        self.session = session;
+        self.agent = Some(agent);
+        self.transcript = Transcript::from_history(&self.session.history);
+        self.usage = None;
+        self.session_cost = 0.0;
+        self.chat.scroll = 0;
+        self.screen = Screen::Chat;
+        self.transcript
+            .push_notice(&format!("resumed {messages} messages"));
+    }
+
     /// Runs a chat slash command. Only meaningful while idle: the submit
     /// path routes here before any turn could start.
     pub fn on_mouse_scroll(&mut self, up: bool) {
@@ -491,6 +568,7 @@ impl App {
             Screen::Login(login) => Routed::Login(login.handle_key(key)),
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
             Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
+            Screen::Resume(resume) => Routed::Resume(resume.handle_key(key)),
             Screen::Chat => Routed::Chat(self.chat.handle_key(key)),
         };
         match routed {
@@ -515,6 +593,14 @@ impl App {
                 self.screen = Screen::Chat;
                 Vec::new()
             }
+            Routed::Resume(crate::screens::ResumeAction::Pick(path)) => {
+                self.resume_session(&path);
+                Vec::new()
+            }
+            Routed::Resume(crate::screens::ResumeAction::BackToChat) => {
+                self.screen = Screen::Chat;
+                Vec::new()
+            }
             Routed::Picker(PickerAction::Retry) => self.retry_fetch(),
             Routed::Login(LoginAction::Quit) => {
                 // With a session behind the login, Esc means "back".
@@ -531,6 +617,7 @@ impl App {
             }
             Routed::Picker(PickerAction::None)
             | Routed::Profile(ProfileAction::None)
+            | Routed::Resume(crate::screens::ResumeAction::None)
             | Routed::Login(LoginAction::None) => Vec::new(),
             Routed::Chat(chat_action) => self.on_chat_key(key, chat_action),
         }
@@ -1643,6 +1730,85 @@ mod tests {
             .push(Message::text(Role::User, "fix it"));
         let exported = h.app.export_session().expect("a spoken session exports");
         assert_eq!(exported.history.len(), 1);
+    }
+
+    #[test]
+    fn slash_resume_opens_a_picker_and_picking_resumes() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        // Two saved sessions for this workspace, newest first.
+        let base = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(&h.app.options.workspace).unwrap();
+        let older =
+            crate::sessions::save_session(base.path(), &workspace, &session_of("the older prompt"))
+                .unwrap()
+                .unwrap();
+        let newer =
+            crate::sessions::save_session(base.path(), &workspace, &session_of("the newer prompt"))
+                .unwrap()
+                .unwrap();
+        // Speak one line first: resuming replaces it.
+        h.app.transcript.push_user("current talk");
+
+        // The picker over the temp base; the dispatch path resolves its
+        // own base from the environment, which a test cannot own.
+        h.app.open_resume_from(base.path());
+        match &h.app.screen {
+            Screen::Resume(resume) => {
+                assert_eq!(resume.entries.len(), 2);
+                assert_eq!(resume.entries[0].path, newer, "newest first");
+                assert_eq!(
+                    resume.entries[0].snippet.as_deref(),
+                    Some("the newer prompt")
+                );
+            }
+            _other => panic!("expected the resume picker"),
+        }
+
+        // Down moves to the older session; enter loads it.
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert_eq!(
+            h.app
+                .session
+                .history
+                .first()
+                .and_then(|m| match m.content.first() {
+                    Some(rhema_core::Content::Text(text)) => Some(text.as_str()),
+                    _ => None,
+                }),
+            Some("the older prompt"),
+            "the older session is the live one"
+        );
+        assert!(h.app.agent.is_some());
+        assert_eq!(
+            h.app.transcript.lines().first(),
+            Some(&Line::User("the older prompt".into()))
+        );
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.starts_with("resumed ")
+        ));
+        // The file the picker named is what got loaded.
+        assert!(older.is_file() && newer.is_file());
+    }
+
+    #[test]
+    fn slash_resume_with_nothing_saved_is_a_notice() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let base = tempfile::tempdir().unwrap();
+        h.app.open_resume_from(base.path());
+        assert!(matches!(h.app.screen, Screen::Chat), "no picker opens");
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("no saved sessions")
+        ));
+    }
+
+    fn session_of(prompt: &str) -> Session {
+        let mut session = Session::default();
+        session.history.push(Message::text(Role::User, prompt));
+        session
     }
 
     #[test]

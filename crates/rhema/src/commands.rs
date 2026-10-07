@@ -66,6 +66,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: clear,
     },
     CommandSpec {
+        name: "/resume",
+        description: "continue a saved session",
+        argument: Argument::None,
+        handler: resume,
+    },
+    CommandSpec {
         name: "/exit",
         description: "quit",
         argument: Argument::None,
@@ -181,6 +187,14 @@ fn model(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
         return Vec::new();
     }
     app.open_picker()
+}
+
+fn resume(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    if app.running {
+        app.push_notice("a turn is running — /resume waits for it to finish");
+        return Vec::new();
+    }
+    app.open_resume()
 }
 
 fn profile(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
