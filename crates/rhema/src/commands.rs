@@ -66,6 +66,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: clear,
     },
     CommandSpec {
+        name: "/new",
+        description: "fresh session",
+        argument: Argument::None,
+        handler: clear,
+    },
+    CommandSpec {
         name: "/resume",
         description: "continue a saved session",
         argument: Argument::None,

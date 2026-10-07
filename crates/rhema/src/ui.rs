@@ -1272,7 +1272,7 @@ mod scroll_tests {
                 columns.push(("fresh session", pos));
             }
         }
-        assert_eq!(columns.len(), 3, "all three commands visible: {columns:?}");
+        assert_eq!(columns.len(), 4, "all four rows visible: {columns:?}");
         assert!(
             columns.iter().all(|(_, pos)| *pos == columns[0].1),
             "descriptions misaligned: {columns:?}"

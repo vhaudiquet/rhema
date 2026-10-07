@@ -2142,6 +2142,28 @@ mod tests {
     }
 
     #[test]
+    fn slash_new_starts_a_fresh_session() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .session
+            .history
+            .push(Message::text(Role::User, "talk"));
+        h.app.transcript.push_user("talk");
+        h.app.resumed_from = Some(PathBuf::from("/tmp/old.json"));
+
+        crate::commands::dispatch(&mut h.app, "/new");
+
+        // A fresh session: no history to save, no resume binding, the
+        // transcript down to the notice.
+        assert_eq!(h.app.export_session(), None);
+        assert_eq!(h.app.resumed_from, None);
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("cleared")
+        ));
+    }
+
+    #[test]
     fn slash_skills_lists_what_discovery_finds() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         let global = tempfile::tempdir().unwrap();
