@@ -511,6 +511,22 @@ fn format_tokens(limit: Option<u64>) -> String {
 /// hard-split at the display-width boundary, so the returned row count is
 /// exact for the given width — the transcript scroll math depends on it.
 fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
+    // A line that already fits passes through verbatim: re-tokenizing
+    // would collapse the whitespace runs that table padding and indents
+    // depend on.
+    let total: usize = line
+        .spans
+        .iter()
+        .map(|span| span.content.chars().count())
+        .sum();
+    if total <= width && width > 0 {
+        let owned: Vec<Span<'static>> = line
+            .spans
+            .iter()
+            .map(|span| Span::styled(span.content.to_string(), span.style))
+            .collect();
+        return vec![Line::from(owned)];
+    }
     if width == 0 {
         let owned: Vec<Span<'static>> = line
             .spans
@@ -1187,9 +1203,11 @@ mod tests {
 
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
-    use super::{input_rows, render};
+    use super::{input_rows, render, wrap_line};
     use crate::app::{App, AppSetup, RunOptions};
     use crate::args::ThemeKind;
+    use crate::events::OwnedEvent;
+    use ratatui::text::Line;
     use std::collections::BTreeMap;
 
     use crate::store::MemoryStore;
@@ -1577,6 +1595,49 @@ mod scroll_tests {
             rows.contains(&" ⋮ beta".to_owned()) && rows.contains(&" ⋮ gamma".to_owned()),
             "continuation lines keep their break: {rows:?}"
         );
+    }
+
+    #[test]
+    fn lines_that_fit_pass_through_without_space_normalization() {
+        let line = Line::from("a     b");
+        let rows = wrap_line(&line, 10);
+        assert_eq!(rows.len(), 1);
+        let text: String = rows[0]
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(text, "a     b", "the space run survives");
+    }
+
+    #[test]
+    fn table_wraps_keep_their_columns_aligned() {
+        let mut app = chat_app();
+        app.transcript.push_user("what skills");
+        // A trigger long enough to wrap inside its column at this
+        // terminal width: continuation rows must stay inside the
+        // column, not fall back to the row start.
+        app.transcript.apply(&OwnedEvent::TextDelta(
+            "name | trigger\n--- | ---\ncommit-message | How to write a good commit message and keep it tidy".into(),
+        ));
+
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let continuation = (0..buffer.area.height)
+            .map(row_text)
+            .find(|row| row.contains("keep it tidy"))
+            .expect("the wrapped cell visible");
+        // The continuation sits inside the trigger column, indented past
+        // the name column's width.
+        let indent = continuation.find("keep").unwrap();
+        assert!(indent > 14, "indented under its column: {continuation}");
     }
 
     #[test]
