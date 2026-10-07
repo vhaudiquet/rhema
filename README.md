@@ -82,6 +82,15 @@ A profile can also set `color: "#RRGGBB"` to choose the tone its name
 wears in the footer and picker; unset, personal wears the jade accent and
 work the info blue.
 
+### The system prompt
+
+On first run rhema seeds `~/.config/rhema/SYSTEM.md` with the
+built-in base prompt (`{workspace}` stands for the session's
+workspace). Edit the file and every new session picks it up; delete
+it and the next start re-seeds the default. The skills table
+appends after it, and the file replaces only the base — it does not
+remove skills.
+
 ### Skills
 
 A skill is a folder with a `SKILL.md` whose YAML frontmatter carries a

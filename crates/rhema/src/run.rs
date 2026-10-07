@@ -21,7 +21,7 @@ use crossterm::event::{
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rhema_coding_agent::{AllowAll, Approval, CodingAgent};
+use rhema_coding_agent::{AllowAll, Approval, CodingAgent, DEFAULT_SYSTEM_MD};
 use rhema_config::Config;
 use rhema_core::{Event as ModelEvent, EventSink, Session};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -90,6 +90,21 @@ fn format_tokens(limit: u32) -> String {
         format!("{}k", limit / 1_000)
     } else {
         format!("{limit}")
+    }
+}
+
+/// The user's SYSTEM.md as the base prompt, seeding the built-in
+/// default next to their config on first run so there is something to
+/// edit. `None` falls back to the built-in default.
+fn resolve_base_system(path: Option<&std::path::Path>) -> Option<String> {
+    let path = path?;
+    match std::fs::read_to_string(path) {
+        Ok(raw) => Some(raw),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let _ = std::fs::write(path, DEFAULT_SYSTEM_MD);
+            None
+        }
+        Err(_) => None,
     }
 }
 
@@ -190,6 +205,7 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
         std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
     let agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
+        base_system: resolve_base_system(Config::system_prompt_path().ok().as_deref()),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
     };
     let session = match &args.resume {
@@ -260,11 +276,13 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // group by it, so a relative "." must not become a "." directory.
     let workspace =
         std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
+    let agent_base = resolve_base_system(Config::system_prompt_path().ok().as_deref());
     let options = RunOptions {
         theme: args.theme,
         profile: Some(profile),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
+        base_system: agent_base,
         save: args.save,
     };
     let (mut app, mut effects) = {

@@ -163,6 +163,9 @@ pub struct RunOptions {
     pub workspace: PathBuf,
     /// Max steps per turn.
     pub max_steps: u32,
+    /// The base prompt from the user's SYSTEM.md, when their file
+    /// exists; `None` uses the built-in default.
+    pub base_system: Option<String>,
     /// Approve all gated tool calls without asking.
     /// Checkpoint the session after every turn.
     pub save: Option<PathBuf>,
@@ -1156,6 +1159,7 @@ impl App {
 fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfig {
     CodingAgentConfig {
         max_turn_steps: options.max_steps,
+        base_system: options.base_system.clone(),
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
     }
 }
@@ -1296,6 +1300,7 @@ mod tests {
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
+                base_system: None,
                 save: None,
             },
         })
@@ -2017,6 +2022,7 @@ mod tests {
                 profile: Some(profile),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
+                base_system: None,
                 save: None,
             },
         })
