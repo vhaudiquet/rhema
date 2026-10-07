@@ -573,7 +573,7 @@ impl App {
                 } else if text.trim().starts_with('/') {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
-                    return crate::commands::dispatch(self, text.trim());
+                    crate::commands::dispatch(self, text.trim())
                 } else {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
