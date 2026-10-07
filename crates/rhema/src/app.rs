@@ -404,6 +404,21 @@ impl App {
         self.transcript.push_notice("conversation cleared");
     }
 
+    /// The session to save for /resume: the live one, when its history
+    /// holds anything. A session of notices alone (a switch, a decline)
+    /// has nothing resumable and saves nothing.
+    pub fn export_session(&self) -> Option<Session> {
+        let session = match &self.agent {
+            Some(agent) => agent.session().clone(),
+            None => self.session.clone(),
+        };
+        if session.history.is_empty() {
+            None
+        } else {
+            Some(session)
+        }
+    }
+
     /// Switches the session to a profile: re-resolves the backend from
     /// that profile's settings, rebuilds the agent carrying the session
     /// over, persists the choice, and notices. A profile without usable
@@ -1606,6 +1621,28 @@ mod tests {
         assert_eq!(app.session_profile.as_deref(), Some("work"));
         // The session reads work's section, so the footer shows its model.
         assert_eq!(app.effective().model.as_deref(), Some("work-model"));
+    }
+
+    #[test]
+    fn export_skips_a_session_with_nothing_to_resume() {
+        // A fresh session saves nothing: there is no conversation.
+        let h = harness(None, None, Session::default());
+        assert_eq!(h.app.export_session(), None);
+
+        // A session of notices alone (a switch, a decline) saves nothing
+        // either: the history, not the transcript, decides.
+        let mut h = harness(None, None, Session::default());
+        h.app.push_notice("switched to profile work");
+        assert_eq!(h.app.export_session(), None);
+
+        // One prompt in: the live session exports.
+        let mut h = harness(Some("k"), None, Session::default());
+        h.app
+            .session
+            .history
+            .push(Message::text(Role::User, "fix it"));
+        let exported = h.app.export_session().expect("a spoken session exports");
+        assert_eq!(exported.history.len(), 1);
     }
 
     #[test]

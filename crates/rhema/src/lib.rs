@@ -20,6 +20,7 @@
 //! - [`approval`] — the synchronous approval bridge
 //! - [`transcript`] — chat transcript lines from history and events
 //! - [`screens`] — login, model picker, chat input: pure state
+//! - [`sessions`] — saved conversations for /resume, grouped by workspace
 //! - [`app`] — the state machine routing keys and events
 //! - [`turn`] — the tokio tasks (turn, model fetch)
 //! - [`ui`] — ratatui rendering
@@ -37,6 +38,7 @@ pub mod markdown;
 pub mod palette;
 pub mod run;
 pub mod screens;
+pub mod sessions;
 pub mod store;
 pub mod transcript;
 pub mod turn;

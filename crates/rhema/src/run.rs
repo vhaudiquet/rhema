@@ -27,6 +27,7 @@ use crate::app::Backend;
 use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
 use crate::approval::TuiApproval;
 use crate::args::{Args, ProviderChoice};
+use crate::sessions;
 use crate::store::{ConfigStore, DiskStore};
 use crate::turn::{spawn_model_fetch, spawn_turn};
 use crate::{events::UiEvent, ui};
@@ -259,10 +260,14 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             .with_context(|| format!("cannot resume session: {}", path.display()))?,
         None => Session::default(),
     };
+    // The real path, before anything moves into the app: saved sessions
+    // group by it, so a relative "." must not become a "." directory.
+    let workspace =
+        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
     let options = RunOptions {
         theme: args.theme,
         profile: Some(profile),
-        workspace: args.workspace,
+        workspace: workspace.clone(),
         max_steps: args.max_steps,
         no_confirm: args.no_confirm,
         save: args.save,
@@ -290,6 +295,16 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     let outcome = event_loop(&mut terminal, &mut app, &tx, &mut rx, &mut effects).await;
 
     restore_terminal();
+    // Best-effort save for /resume, after the terminal is back: an empty
+    // session saves nothing, and a failed save warns without failing the
+    // exit.
+    if let Some(session) = app.export_session() {
+        let saved = sessions::base_dir()
+            .and_then(|base| sessions::save_session(&base, &workspace, &session));
+        if let Err(err) = saved {
+            eprintln!("warning: the session was not saved for /resume: {err}");
+        }
+    }
     outcome
 }
 
