@@ -331,15 +331,29 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     ];
     // Consecutive assistant lines form one markdown response and render
     // through the parser; everything else renders as-is. The bullet marks
-    // the first row of each response.
+    // the first row of each response. A run of tool lines is one visual
+    // block: a blank row separates it from whatever follows, so the reply
+    // does not blur into the ⌁ wall.
     let mut group: Vec<String> = Vec::new();
     let mut marked = false;
+    let mut in_tool_run = false;
     for line in app.transcript.lines() {
         match line {
-            transcript::Line::Assistant(text) => group.push(text.clone()),
+            transcript::Line::Assistant(text) => {
+                if in_tool_run {
+                    lines.push(Line::from(""));
+                    in_tool_run = false;
+                }
+                group.push(text.clone());
+            }
             other => {
                 flush_response_group(&mut lines, &mut group, &mut marked, app.theme);
                 marked = false;
+                let is_tool = matches!(other, transcript::Line::ToolCall { .. });
+                if in_tool_run && !is_tool {
+                    lines.push(Line::from(""));
+                }
+                in_tool_run = is_tool;
                 lines.push(render_line(other, theme));
             }
         }
@@ -1057,5 +1071,43 @@ mod scroll_tests {
         let text = screen_text(&app);
         assert!(text.contains("word word word"), "{text}");
         assert!(!text.contains("end-marker"), "{text}");
+    }
+
+    #[test]
+    fn a_blank_row_separates_a_tool_run_from_the_reply() {
+        let mut app = chat_app();
+        app.transcript.push_user("investigate");
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolCallStart {
+                id: "c1".into(),
+                name: "list_dir".into(),
+            });
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolResult {
+                id: "c1".into(),
+                content: "dir: src".into(),
+                is_error: false,
+            });
+        app.transcript.apply(&crate::events::OwnedEvent::TextDelta(
+            "I've gone through it.".into(),
+        ));
+
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let tool_row = (0..buffer.area.height)
+            .find(|y| row_text(*y).contains("List directory"))
+            .expect("tool row visible");
+        let reply_row = (tool_row..buffer.area.height)
+            .find(|y| row_text(*y).contains("gone through"))
+            .expect("reply row visible");
+        // Exactly one blank row between the ⌁ line and the response.
+        assert_eq!(reply_row, tool_row + 2, "one blank row in between");
     }
 }
