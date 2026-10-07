@@ -81,6 +81,25 @@ A profile can also set `color: "#RRGGBB"` to choose the tone its name
 wears in the footer and picker; unset, personal wears the jade accent and
 work the info blue.
 
+### Skills
+
+A skill is a folder with a `SKILL.md` whose YAML frontmatter carries a
+`description` — its trigger:
+
+```yaml
+---
+description: apply when writing a commit message
+---
+Inspect the diff, then write the message as ...
+```
+
+Skills live globally under `~/.config/rhema/skills/<name>/SKILL.md`
+and per-workspace under `<workspace>/.rhema/skills/`; project skills
+shadow global ones by folder name. rhema presents only a name /
+trigger / file table in the system prompt — when a trigger applies,
+the model loads the body itself with the shell (`cat`), so skills
+need no special tool. `/skills` lists what was discovered.
+
 First launch opens the login screen: pick a provider — Google Gemini by
 API key, or a llama.cpp `llama-server` by URL (optional bearer key;
 Anthropic/OpenAI are marked coming soon). The input is validated with a

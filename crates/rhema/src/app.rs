@@ -499,6 +499,25 @@ impl App {
         }
     }
 
+    /// Lists the discovered skills in the transcript: what the model's
+    /// system prompt carries, for the human who wrote them.
+    pub fn show_skills(&mut self, global: Option<&Path>, workspace: &Path) {
+        let skills = rhema_coding_agent::skills::discover(global, workspace);
+        if skills.is_empty() {
+            self.transcript.push_notice(
+                "no skills — a skill is <dir>/SKILL.md with a `description` \
+                 frontmatter, under the config directory or .rhema/skills",
+            );
+            return;
+        }
+        let rows: Vec<String> = skills
+            .iter()
+            .map(|skill| format!("{} — {}", skill.name, skill.description))
+            .collect();
+        self.transcript
+            .push_notice(&format!("skills: {}", rows.join(" · ")));
+    }
+
     /// Opens the resume picker over the sessions saved for this
     /// workspace. An empty history of saves is a notice, not a screen.
     pub fn open_resume(&mut self) -> Vec<Effect> {
@@ -2029,6 +2048,35 @@ mod tests {
         let mut session = Session::default();
         session.history.push(Message::text(Role::User, prompt));
         session
+    }
+
+    #[test]
+    fn slash_skills_lists_what_discovery_finds() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let global = tempfile::tempdir().unwrap();
+        let folder = global.path().join("commit-message");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            "---\ndescription: apply when writing a commit\n---\nbody",
+        )
+        .unwrap();
+
+        h.app
+            .show_skills(Some(global.path()), Path::new("/nowhere"));
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text))
+                if text.contains("commit-message — apply when writing a commit")
+        ));
+
+        // No skills anywhere: the notice names the fix instead.
+        let empty = tempfile::tempdir().unwrap();
+        h.app.show_skills(Some(empty.path()), Path::new("/nowhere"));
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("no skills")
+        ));
     }
 
     #[test]

@@ -72,6 +72,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: resume,
     },
     CommandSpec {
+        name: "/skills",
+        description: "list discovered skills",
+        argument: Argument::None,
+        handler: skills,
+    },
+    CommandSpec {
         name: "/exit",
         description: "quit",
         argument: Argument::None,
@@ -195,6 +201,14 @@ fn resume(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
         return Vec::new();
     }
     app.open_resume()
+}
+
+fn skills(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    let global = rhema_config::Config::skills_dir().ok();
+    let workspace = std::fs::canonicalize(&app.options.workspace)
+        .unwrap_or_else(|_| app.options.workspace.clone());
+    app.show_skills(global.as_deref(), &workspace);
+    Vec::new()
 }
 
 fn profile(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
