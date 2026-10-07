@@ -287,7 +287,7 @@ mod mock_tests {
 
         let call = |id: &str| ToolCall {
             id: id.into(),
-            name: "run_command".into(),
+            name: "bash".into(),
             args: serde_json::json!({ "command": "x" }),
             provider_data: serde_json::Value::Null,
         };

@@ -1206,9 +1206,8 @@ mod tests {
     fn test_call() -> ToolCall {
         ToolCall {
             id: "c1".into(),
-            name: "write_file".into(),
-            args: serde_json::json!({ "path": "x" }),
-
+            name: "bash".into(),
+            args: serde_json::json!({ "command": "ls" }),
             provider_data: serde_json::Value::Null,
         }
     }

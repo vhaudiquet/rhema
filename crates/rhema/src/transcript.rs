@@ -37,6 +37,8 @@ pub enum Line {
         args: String,
         /// `None` while the call runs, then the outcome.
         ok: Option<bool>,
+        /// The process exit code of command tools; `None` otherwise.
+        code: Option<i32>,
     },
     /// A UI notice (model switched, turn declined, ...).
     Notice(String),
@@ -83,6 +85,7 @@ impl Transcript {
                                     name: call.name.clone(),
                                     args: call.args.to_string(),
                                     ok: None,
+                                    code: None,
                                 });
                             }
                             // Results live in Tool-role messages, never in
@@ -94,7 +97,7 @@ impl Transcript {
                 Role::Tool => {
                     for content in &message.content {
                         if let Content::ToolResult(result) = content {
-                            if let Some(Line::ToolCall { ok, .. }) =
+                            if let Some(Line::ToolCall { ok, code, .. }) =
                                 transcript.lines.iter_mut().rev().find(|line| {
                                     matches!(line, Line::ToolCall {
                                         id: line_id, ok: None, ..
@@ -102,6 +105,7 @@ impl Transcript {
                                 })
                             {
                                 *ok = Some(!result.is_error);
+                                *code = result.code;
                             }
                         }
                     }
@@ -143,6 +147,7 @@ impl Transcript {
                     name: name.clone(),
                     args: String::new(),
                     ok: None,
+                    code: None,
                 });
             }
             OwnedEvent::ToolCallArgsDelta(delta) => {
@@ -150,7 +155,7 @@ impl Transcript {
                     args.push_str(delta);
                 }
             }
-            OwnedEvent::ToolResult { id, is_error, .. } => {
+            OwnedEvent::ToolResult { id, is_error, code, .. } => {
                 // Calls resolve sequentially, but match by id so a late
                 // result cannot mark the wrong line; without a match, the
                 // oldest unresolved call takes it.
@@ -175,8 +180,9 @@ impl Transcript {
                         .rev()
                         .find(|line| matches!(line, Line::ToolCall { ok: None, .. }))
                 };
-                if let Some(Line::ToolCall { ok, .. }) = target {
+                if let Some(Line::ToolCall { ok, code: line_code, .. }) = target {
                     *ok = Some(!*is_error);
+                    *line_code = *code;
                 }
             }
             OwnedEvent::StepEnd { .. } => {}
@@ -211,22 +217,11 @@ pub fn describe(name: &str, args: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
     let arg = |key: &str| parsed.get(key).and_then(|value| value.as_str());
     match name {
-        "read_file" => match arg("path") {
-            Some(path) => format!("Read file `{path}`"),
-            None => "Read a file".to_owned(),
-        },
-        "list_dir" => {
-            format!("List directory `{}`", arg("path").unwrap_or("."))
-        }
-        "write_file" => match arg("path") {
-            Some(path) => format!("Write file `{path}`"),
-            None => "Write a file".to_owned(),
-        },
-        "run_command" => match arg("command") {
-            Some(command) => {
-                format!("Run `{}`", truncate_chars(command, COMMAND_WIDTH))
-            }
-            None => "Run a command".to_owned(),
+        // The shell command renders bare: the `$ ` prefix in the
+        // transcript already says what it is.
+        "bash" | "run_command" => match arg("command") {
+            Some(command) => truncate_chars(command, COMMAND_WIDTH),
+            None => "(no command)".to_owned(),
         },
         other => other.to_owned(),
     }
@@ -274,7 +269,7 @@ mod tests {
         rhema_core::ToolCall {
             id: id.into(),
             name: name.into(),
-            args: json!({ "path": "notes.txt" }),
+            args: json!({ "command": "cat notes.txt" }),
             provider_data: serde_json::Value::Null,
         }
     }
@@ -308,22 +303,24 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.apply(&OwnedEvent::ToolCallStart {
             id: "c1".into(),
-            name: "write_file".into(),
+            name: "bash".into(),
         });
-        transcript.apply(&OwnedEvent::ToolCallArgsDelta("{\"pat".into()));
-        transcript.apply(&OwnedEvent::ToolCallArgsDelta("h".into()));
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta("{\"comm".into()));
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta("and".into()));
         transcript.apply(&OwnedEvent::ToolResult {
             id: "c1".into(),
             content: "wrote notes.txt (3 bytes)\nsecond line".into(),
             is_error: false,
+            code: Some(0),
         });
         assert_eq!(
             transcript.lines(),
             &[Line::ToolCall {
                 id: "c1".into(),
-                name: "write_file".into(),
-                args: "{\"path".into(),
+                name: "bash".into(),
+                args: "{\"command".into(),
                 ok: Some(true),
+                code: Some(0),
             }]
         );
     }
@@ -334,12 +331,13 @@ mod tests {
         transcript.apply(&OwnedEvent::TextDelta("before".into()));
         transcript.apply(&OwnedEvent::ToolCallStart {
             id: "c1".into(),
-            name: "list_dir".into(),
+            name: "bash".into(),
         });
         transcript.apply(&OwnedEvent::ToolResult {
             id: "c1".into(),
-            content: "dir: src".into(),
+            content: "src".into(),
             is_error: false,
+            code: Some(0),
         });
         transcript.apply(&OwnedEvent::TextDelta("after".into()));
         assert_eq!(
@@ -348,9 +346,10 @@ mod tests {
                 Line::Assistant("before".into()),
                 Line::ToolCall {
                     id: "c1".into(),
-                    name: "list_dir".into(),
+                    name: "bash".into(),
                     args: String::new(),
                     ok: Some(true),
+                    code: Some(0),
                 },
                 Line::Assistant("after".into()),
             ]
@@ -379,15 +378,16 @@ mod tests {
         streamed.apply(&OwnedEvent::TextDelta("on it".into()));
         streamed.apply(&OwnedEvent::ToolCallStart {
             id: "c1".into(),
-            name: "read_file".into(),
+            name: "bash".into(),
         });
         streamed.apply(&OwnedEvent::ToolCallArgsDelta(
-            "{\"path\":\"notes.txt\"}".into(),
+            "{\"command\":\"cat notes.txt\"}".into(),
         ));
         streamed.apply(&OwnedEvent::ToolResult {
             id: "c1".into(),
             content: "file body".into(),
             is_error: false,
+            code: Some(0),
         });
 
         let history = vec![
@@ -396,15 +396,14 @@ mod tests {
                 role: Role::Assistant,
                 content: vec![
                     Content::Text("on it".into()),
-                    Content::ToolCall(call("c1", "read_file")),
+                    Content::ToolCall(call("c1", "bash")),
                 ],
             },
             Message {
                 role: Role::Tool,
-                content: vec![Content::ToolResult(rhema_core::ToolResult::success(
-                    "c1",
-                    "file body",
-                ))],
+                content: vec![Content::ToolResult(
+                    rhema_core::ToolResult::success("c1", "file body").with_code(0),
+                )],
             },
         ];
         let rebuilt = Transcript::from_history(&history);
@@ -416,50 +415,41 @@ mod tests {
         let mut transcript = Transcript::new();
         transcript.apply(&OwnedEvent::ToolCallStart {
             id: "c1".into(),
-            name: "run_command".into(),
+            name: "bash".into(),
         });
         transcript.apply(&OwnedEvent::ToolResult {
             id: "c1".into(),
             content: "exit code 1".into(),
             is_error: true,
+            code: Some(1),
         });
         assert_eq!(
             transcript.lines()[0],
             Line::ToolCall {
                 id: "c1".into(),
-                name: "run_command".into(),
+                name: "bash".into(),
                 args: String::new(),
                 ok: Some(false),
+                code: Some(1),
             }
         );
     }
 
     #[test]
-    fn describe_maps_the_builtin_tools_to_intent() {
-        assert_eq!(describe("list_dir", "{}"), "List directory `.`");
+    fn describe_shows_the_bash_command_bare() {
+        assert_eq!(describe("bash", r#"{"command": "git status"}"#), "git status");
+        assert_eq!(describe("bash", "{}"), "(no command)");
+        assert_eq!(describe("bash", "not json"), "(no command)");
+        let long = "x".repeat(60);
         assert_eq!(
-            describe("read_file", r#"{"path": "README.md"}"#),
-            "Read file `README.md`"
-        );
-        assert_eq!(
-            describe("write_file", r#"{"path": "src/lib.rs"}"#),
-            "Write file `src/lib.rs`"
-        );
-        assert_eq!(
-            describe("run_command", r#"{"command": "cargo test"}"#),
-            "Run `cargo test`"
+            describe("bash", &format!(r#"{{"command": "{long}"}}"#)),
+            truncate_chars(&long, COMMAND_WIDTH)
         );
     }
 
     #[test]
-    fn describe_falls_back_for_unknown_tools_and_missing_args() {
+    fn describe_falls_back_for_unknown_tools() {
         assert_eq!(describe("mystery", "{}"), "mystery");
-        assert_eq!(describe("read_file", "not json"), "Read a file");
-        let long = "x".repeat(60);
-        assert_eq!(
-            describe("run_command", &format!(r#"{{"command": "{long}"}}"#)),
-            format!("Run `{}`", truncate_chars(&long, COMMAND_WIDTH))
-        );
     }
 
     #[test]

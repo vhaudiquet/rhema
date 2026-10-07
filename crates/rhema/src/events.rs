@@ -61,6 +61,8 @@ pub enum OwnedEvent {
         content: String,
         /// Whether the call failed.
         is_error: bool,
+        /// The process exit code of command tools; `None` otherwise.
+        code: Option<i32>,
     },
     /// See [`Event::StepEnd`].
     StepEnd {
@@ -87,10 +89,12 @@ impl From<&Event<'_>> for OwnedEvent {
                 id,
                 content,
                 is_error,
+                code,
             } => Self::ToolResult {
                 id: (*id).to_owned(),
                 content: (*content).to_owned(),
                 is_error: *is_error,
+                code: *code,
             },
             Event::StepEnd { usage, stop_reason } => Self::StepEnd {
                 usage: *usage,

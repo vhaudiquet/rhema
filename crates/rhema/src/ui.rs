@@ -568,7 +568,25 @@ fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
             Span::raw(text.clone()),
         ]),
         transcript::Line::Assistant(text) => Line::from(Span::raw(text.clone())),
-        transcript::Line::ToolCall { name, args, ok, .. } => {
+        transcript::Line::ToolCall { name, args, ok, code, .. } => {
+            // A shell call reads as a transcript of what ran: `$ cmd`,
+            // with the exit code trailing in brackets — green for zero,
+            // red for anything else.
+            if name == "bash" {
+                let mut spans = vec![Span::raw("$ ").fg(theme.text3)];
+                spans.push(Span::raw(transcript::describe(name, args)));
+                match code {
+                    Some(0) => spans.push(Span::raw(" [0]").fg(theme.ok)),
+                    Some(n) => spans.push(Span::raw(format!(" [{n}]")).fg(theme.error)),
+                    // No exit code: still running, or rejected without
+                    // reaching a shell.
+                    None if *ok == Some(false) => {
+                        spans.push(Span::raw(" ✗").fg(theme.error))
+                    }
+                    None => {},
+                }
+                return Line::from(spans);
+            }
             let mut spans = vec![Span::raw("⌁ ").fg(theme.text3)];
             match ok {
                 Some(true) => spans.push(Span::raw("✓ ").fg(theme.ok)),
@@ -1139,13 +1157,18 @@ mod scroll_tests {
         app.transcript
             .apply(&crate::events::OwnedEvent::ToolCallStart {
                 id: "c1".into(),
-                name: "list_dir".into(),
+                name: "bash".into(),
             });
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolCallArgsDelta(
+                "{\"command\":\"git status\"}".into(),
+            ));
         app.transcript
             .apply(&crate::events::OwnedEvent::ToolResult {
                 id: "c1".into(),
-                content: "dir: src".into(),
+                content: "on main".into(),
                 is_error: false,
+                code: Some(0),
             });
         app.transcript.apply(&crate::events::OwnedEvent::TextDelta(
             "I've gone through it.".into(),
@@ -1161,7 +1184,7 @@ mod scroll_tests {
                 .collect::<String>()
         };
         let tool_row = (0..buffer.area.height)
-            .find(|y| row_text(*y).contains("List directory"))
+            .find(|y| row_text(*y).contains("$ git status [0]"))
             .expect("tool row visible");
         let reply_row = (tool_row..buffer.area.height)
             .find(|y| row_text(*y).contains("gone through"))
