@@ -155,7 +155,9 @@ impl Transcript {
                     args.push_str(delta);
                 }
             }
-            OwnedEvent::ToolResult { id, is_error, code, .. } => {
+            OwnedEvent::ToolResult {
+                id, is_error, code, ..
+            } => {
                 // Calls resolve sequentially, but match by id so a late
                 // result cannot mark the wrong line; without a match, the
                 // oldest unresolved call takes it.
@@ -180,7 +182,12 @@ impl Transcript {
                         .rev()
                         .find(|line| matches!(line, Line::ToolCall { ok: None, .. }))
                 };
-                if let Some(Line::ToolCall { ok, code: line_code, .. }) = target {
+                if let Some(Line::ToolCall {
+                    ok,
+                    code: line_code,
+                    ..
+                }) = target
+                {
                     *ok = Some(!*is_error);
                     *line_code = *code;
                 }
@@ -437,7 +444,10 @@ mod tests {
 
     #[test]
     fn describe_shows_the_bash_command_bare() {
-        assert_eq!(describe("bash", r#"{"command": "git status"}"#), "git status");
+        assert_eq!(
+            describe("bash", r#"{"command": "git status"}"#),
+            "git status"
+        );
         assert_eq!(describe("bash", "{}"), "(no command)");
         assert_eq!(describe("bash", "not json"), "(no command)");
         let long = "x".repeat(60);

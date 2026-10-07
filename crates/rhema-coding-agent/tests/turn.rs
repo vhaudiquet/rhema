@@ -53,8 +53,8 @@ async fn a_turn_writes_the_file_and_keeps_the_history_shape() {
     let provider = Arc::new(MockProvider::new(vec![
         tool_use_output(tool_call(
             "call_1",
-            "write_file",
-            json!({ "path": "notes.txt", "content": "hello" }),
+            "bash",
+            json!({ "command": "printf hello > notes.txt" }),
         )),
         end_turn_output("wrote notes.txt"),
     ]));
@@ -89,8 +89,8 @@ async fn a_second_turn_continues_the_same_session() {
     let provider = Arc::new(MockProvider::new(vec![
         tool_use_output(tool_call(
             "call_1",
-            "write_file",
-            json!({ "path": "a.txt", "content": "a" }),
+            "bash",
+            json!({ "command": "printf a > a.txt" }),
         )),
         end_turn_output("done one"),
         end_turn_output("done two"),

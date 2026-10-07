@@ -1,6 +1,6 @@
-//! The built-in tools against a real tempdir workspace: round-trips,
-//! workspace escapes, approval gating, and command execution. No mock
-//! needed — the resolver runs directly.
+//! The built-in tool against a real tempdir workspace: execution, exit
+//! codes, output caps, approval gating, and cancellation. No mock needed —
+//! the resolver runs directly.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -23,7 +23,6 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
         id: id.into(),
         name: name.into(),
         args,
-
         provider_data: serde_json::Value::Null,
     }
 }
@@ -46,7 +45,7 @@ impl Approval for DenyAll {
 }
 
 #[tokio::test]
-async fn read_list_write_round_trip_in_a_workspace() {
+async fn bash_runs_in_the_workspace_and_returns_output_with_the_code() {
     let root = tempfile::tempdir().unwrap();
     let tools = CodingTools::new(root.path());
     tools.install_approval(Arc::new(AllowAll));
@@ -55,192 +54,58 @@ async fn read_list_write_round_trip_in_a_workspace() {
     let result = resolve(
         &tools,
         &ctx,
-        "write_file",
-        json!({ "path": "src/main.rs", "content": "fn main() {}\n" }),
-    )
-    .await;
-    assert!(!result.is_error, "{}", result.content);
-    assert_eq!(
-        std::fs::read_to_string(root.path().join("src/main.rs")).unwrap(),
-        "fn main() {}\n"
-    );
-    assert!(result.content.contains("13 bytes"), "{}", result.content);
-
-    let result = resolve(&tools, &ctx, "read_file", json!({ "path": "src/main.rs" })).await;
-    assert!(!result.is_error);
-    assert_eq!(result.content, "fn main() {}\n");
-
-    std::fs::write(root.path().join("README.md"), "# rhema\n").unwrap();
-    let result = resolve(&tools, &ctx, "list_dir", json!({})).await;
-    assert!(!result.is_error);
-    assert_eq!(
-        result.content.lines().collect::<Vec<_>>(),
-        vec!["dir: src", "file: README.md (8 bytes)"]
-    );
-}
-
-#[tokio::test]
-async fn reading_a_missing_file_is_an_in_band_error() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    let ctx = ctx(root.path());
-
-    let result = resolve(&tools, &ctx, "read_file", json!({ "path": "nope.txt" })).await;
-    assert!(result.is_error);
-    assert!(result.content.contains("read failed"), "{}", result.content);
-}
-
-#[tokio::test]
-async fn absolute_paths_outside_the_workspace_are_rejected() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    let ctx = ctx(root.path());
-
-    let result = resolve(
-        &tools,
-        &ctx,
-        "read_file",
-        json!({ "path": "/etc/hostname" }),
-    )
-    .await;
-    assert!(result.is_error);
-    assert!(
-        result.content.contains("workspace escape"),
-        "{}",
-        result.content
-    );
-}
-
-#[tokio::test]
-async fn traversal_outside_the_workspace_is_rejected() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    let ctx = ctx(root.path());
-
-    let result = resolve(
-        &tools,
-        &ctx,
-        "read_file",
-        json!({ "path": "../../etc/hostname" }),
-    )
-    .await;
-    assert!(result.is_error);
-    assert!(
-        result.content.contains("workspace escape"),
-        "{}",
-        result.content
-    );
-}
-
-#[tokio::test]
-async fn a_writing_escape_is_rejected_without_creating_the_file() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    tools.install_approval(Arc::new(AllowAll));
-    let ctx = ctx(root.path());
-
-    let result = resolve(
-        &tools,
-        &ctx,
-        "write_file",
-        json!({ "path": "../escape.txt", "content": "x" }),
-    )
-    .await;
-    assert!(result.is_error);
-    let escaped = root
-        .path()
-        .canonicalize()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("escape.txt");
-    assert!(!escaped.exists());
-}
-
-#[tokio::test]
-async fn a_rejected_write_file_never_touches_the_disk() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    tools.install_approval(Arc::new(DenyAll));
-    let ctx = ctx(root.path());
-
-    let result = resolve(
-        &tools,
-        &ctx,
-        "write_file",
-        json!({ "path": "notes.txt", "content": "hi" }),
-    )
-    .await;
-    assert!(result.is_error);
-    assert_eq!(result.content, "rejected by user approval");
-    assert!(!root.path().join("notes.txt").exists());
-}
-
-#[tokio::test]
-async fn a_rejected_run_command_never_executes() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    tools.install_approval(Arc::new(DenyAll));
-    let ctx = ctx(root.path());
-
-    let result = resolve(
-        &tools,
-        &ctx,
-        "run_command",
-        json!({ "command": "touch marker" }),
-    )
-    .await;
-    assert!(result.is_error);
-    assert_eq!(result.content, "rejected by user approval");
-    assert!(!root.path().join("marker").exists());
-}
-
-#[tokio::test]
-async fn gated_tools_reject_without_an_installed_hook() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    let ctx = ctx(root.path());
-
-    let result = resolve(
-        &tools,
-        &ctx,
-        "write_file",
-        json!({ "path": "notes.txt", "content": "hi" }),
-    )
-    .await;
-    assert!(result.is_error);
-    assert!(!root.path().join("notes.txt").exists());
-}
-
-#[tokio::test]
-async fn run_command_returns_output_and_exit_status() {
-    let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
-    tools.install_approval(Arc::new(AllowAll));
-    let ctx = ctx(root.path());
-
-    let result = resolve(
-        &tools,
-        &ctx,
-        "run_command",
-        json!({ "command": "echo hello" }),
+        "bash",
+        json!({ "command": "pwd && echo hello" }),
     )
     .await;
     assert!(!result.is_error);
     assert!(result.content.contains("hello"), "{}", result.content);
-    assert!(result.content.contains("exit code 0"), "{}", result.content);
+    assert!(
+        result
+            .content
+            .contains(&root.path().to_string_lossy().as_ref()),
+        "runs in the workspace: {}",
+        result.content
+    );
+    assert_eq!(result.code, Some(0));
 }
 
 #[tokio::test]
-async fn a_failing_command_is_an_in_band_error_with_the_status() {
+async fn a_failing_command_is_an_in_band_error_with_the_code() {
     let root = tempfile::tempdir().unwrap();
     let tools = CodingTools::new(root.path());
     tools.install_approval(Arc::new(AllowAll));
     let ctx = ctx(root.path());
 
-    let result = resolve(&tools, &ctx, "run_command", json!({ "command": "exit 3" })).await;
+    let result = resolve(&tools, &ctx, "bash", json!({ "command": "exit 3" })).await;
     assert!(result.is_error);
     assert!(result.content.contains("exit code 3"), "{}", result.content);
+    assert_eq!(result.code, Some(3));
+}
+
+#[tokio::test]
+async fn a_rejected_call_never_executes() {
+    let root = tempfile::tempdir().unwrap();
+    let tools = CodingTools::new(root.path());
+    tools.install_approval(Arc::new(DenyAll));
+    let ctx = ctx(root.path());
+
+    let result = resolve(&tools, &ctx, "bash", json!({ "command": "touch marker" })).await;
+    assert!(result.is_error);
+    assert_eq!(result.content, "rejected by user approval");
+    assert_eq!(result.code, None, "nothing ran, no exit code");
+    assert!(!root.path().join("marker").exists());
+}
+
+#[tokio::test]
+async fn the_tool_rejects_without_an_installed_hook() {
+    let root = tempfile::tempdir().unwrap();
+    let tools = CodingTools::new(root.path());
+    let ctx = ctx(root.path());
+
+    let result = resolve(&tools, &ctx, "bash", json!({ "command": "true" })).await;
+    assert!(result.is_error);
+    assert_eq!(result.content, "rejected by user approval");
 }
 
 #[tokio::test]
@@ -265,23 +130,39 @@ async fn a_cancelled_context_rejects_every_call() {
         cancelled: cancelled.clone(),
     };
 
-    let result = resolve(&tools, &ctx, "read_file", json!({ "path": "any.txt" })).await;
+    let result = resolve(&tools, &ctx, "bash", json!({ "command": "true" })).await;
     assert!(result.is_error);
     assert_eq!(result.content, "cancelled");
     assert!(cancelled.load(Ordering::Relaxed));
 }
 
 #[tokio::test]
-async fn read_file_truncates_large_content() {
+async fn large_output_is_truncated_with_a_notice() {
     let root = tempfile::tempdir().unwrap();
     let tools = CodingTools::new(root.path());
+    tools.install_approval(Arc::new(AllowAll));
     let ctx = ctx(root.path());
 
-    let big = "a".repeat(150 * 1024);
-    std::fs::write(root.path().join("big.txt"), &big).unwrap();
-    let result = resolve(&tools, &ctx, "read_file", json!({ "path": "big.txt" })).await;
+    let result = resolve(
+        &tools,
+        &ctx,
+        "bash",
+        json!({ "command": "yes | head -c 64k" }),
+    )
+    .await;
     assert!(!result.is_error);
-    assert!(result.content.len() < big.len());
-    assert!(result.content.ends_with("[truncated]"));
-    assert!(result.content.starts_with(&"a".repeat(1024)));
+    assert!(result.content.contains("[truncated]"), "{}", result.content);
+    assert!(result.content.len() < 64 * 1024);
+}
+
+#[tokio::test]
+async fn a_missing_argument_is_an_in_band_error() {
+    let root = tempfile::tempdir().unwrap();
+    let tools = CodingTools::new(root.path());
+    tools.install_approval(Arc::new(AllowAll));
+    let ctx = ctx(root.path());
+
+    let result = resolve(&tools, &ctx, "bash", json!({})).await;
+    assert!(result.is_error);
+    assert_eq!(result.content, "missing required argument: command");
 }

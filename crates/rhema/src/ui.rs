@@ -568,7 +568,13 @@ fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
             Span::raw(text.clone()),
         ]),
         transcript::Line::Assistant(text) => Line::from(Span::raw(text.clone())),
-        transcript::Line::ToolCall { name, args, ok, code, .. } => {
+        transcript::Line::ToolCall {
+            name,
+            args,
+            ok,
+            code,
+            ..
+        } => {
             // A shell call reads as a transcript of what ran: `$ cmd`,
             // with the exit code trailing in brackets — green for zero,
             // red for anything else.
@@ -580,10 +586,8 @@ fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
                     Some(n) => spans.push(Span::raw(format!(" [{n}]")).fg(theme.error)),
                     // No exit code: still running, or rejected without
                     // reaching a shell.
-                    None if *ok == Some(false) => {
-                        spans.push(Span::raw(" ✗").fg(theme.error))
-                    }
-                    None => {},
+                    None if *ok == Some(false) => spans.push(Span::raw(" ✗").fg(theme.error)),
+                    None => {}
                 }
                 return Line::from(spans);
             }

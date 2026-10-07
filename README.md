@@ -31,9 +31,9 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   per-model pricing and context lengths, streaming completions by API key
 - `rhema-config` — the XDG config file: stored API key (0600) and
   last-used model; env vars always win over the stored key
-- `rhema-coding-agent` — the coding-agent driver: built-in workspace tools
-  (`read_file`, `list_dir`, `write_file`, `run_command`), per-turn approval
-  gating, session save/resume
+- `rhema-coding-agent` — the coding-agent driver: one built-in tool
+  (`bash`, running commands via `bash -c` in the workspace), per-turn
+  approval gating, session save/resume
 - `rhema` — the frontend binary: a full-screen terminal UI when attached
   to a terminal, a pipeable one-shot runner when not
 
@@ -90,9 +90,10 @@ models only — Google rows carry pricing and context window; just type
 to filter, arrows to move). A server exposing exactly one model
 auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
-code in the palette's cyan), `write_file`/`run_command` pop up an
-approval modal (y/N; esc cancels the whole turn), and the status
-line shows token usage per turn.
+code in the palette's cyan); every tool call is a shell command,
+shown as `$ command [exit-code]` — green at zero, red otherwise —
+and pops up an approval modal (y/N; esc cancels the whole turn);
+the status line shows token usage per turn.
 
 ### Sessions
 
