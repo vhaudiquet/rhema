@@ -9,7 +9,9 @@ use std::sync::Arc;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig, CodingAgentError};
 use rhema_config::Config;
-use rhema_core::{AgentError, ModelOutput, ModelProvider, Session, ToolCall, Usage};
+use rhema_core::{
+    AgentError, Content, Message, ModelOutput, ModelProvider, Session, ToolCall, Usage,
+};
 use rhema_provider_google::GeminiModel;
 
 use crate::approval::ApprovalAnswerer;
@@ -1073,6 +1075,26 @@ impl App {
             .find(|entry| entry.id == model)
             .and_then(|entry| entry.input_token_limit)
     }
+
+    /// The context footprint the footer shows: the last turn's reported
+    /// input tokens when one exists, otherwise an estimate over the
+    /// loaded history — a resumed session has already spent context
+    /// before its first turn here, and an empty one estimates to zero.
+    pub fn context_used(&self) -> u64 {
+        match self.usage {
+            Some(usage) => u64::from(usage.input_tokens),
+            None => estimate_history_tokens(&self.live_session().history),
+        }
+    }
+
+    /// The session the conversation currently lives in: the agent's when
+    /// one is built, the bare one otherwise.
+    fn live_session(&self) -> &Session {
+        match &self.agent {
+            Some(agent) => agent.session(),
+            None => &self.session,
+        }
+    }
 }
 
 /// The coding-agent config implied by the startup flags and the chosen
@@ -1082,6 +1104,23 @@ fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfi
         max_turn_steps: options.max_steps,
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
     }
+}
+
+/// A rough token estimate over a history: about four characters per
+/// token, counted across text, tool arguments, and tool results. There
+/// is no tokenizer this side of the wire, and the footer is a gauge,
+/// not an invoice.
+fn estimate_history_tokens(history: &[Message]) -> u64 {
+    let chars: usize = history
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .map(|content| match content {
+            Content::Text(text) => text.len(),
+            Content::ToolCall(call) => call.args.to_string().len(),
+            Content::ToolResult(result) => result.content.len(),
+        })
+        .sum();
+    (chars as u64) / 4
 }
 
 /// The profile a session runs on when no `--profile` names one: the
@@ -1517,6 +1556,32 @@ mod tests {
         h.app.on_key(key(KeyCode::Esc));
         h.app.on_key(key(KeyCode::Char('y')));
         assert!(h.app.should_quit);
+    }
+
+    #[test]
+    fn the_context_footprint_estimates_a_loaded_history() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        // No reported usage and no history: zero, as before.
+        assert_eq!(h.app.context_used(), 0);
+
+        // A resumed history has already spent context: eight characters
+        // estimate to two tokens. The agent owns the live history.
+        h.app
+            .agent
+            .as_mut()
+            .unwrap()
+            .session_mut()
+            .history
+            .push(Message::text(Role::User, "12345678"));
+        assert_eq!(h.app.context_used(), 2);
+
+        // A reported turn wins over the estimate.
+        h.app.usage = Some(Usage {
+            input_tokens: 500,
+            output_tokens: 3,
+            cached_input_tokens: 0,
+        });
+        assert_eq!(h.app.context_used(), 500);
     }
 
     #[test]

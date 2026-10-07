@@ -704,7 +704,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         (_, None) => parts.push(Span::raw("no model — use /model").fg(theme.text3)),
         (_, Some(model)) => parts.push(Span::raw(model.clone()).fg(theme.text2)),
     }
-    let used = app.usage.map(|u| u64::from(u.input_tokens)).unwrap_or(0);
+    let used = app.context_used();
     let mut context = format_tokens(Some(used));
     if let Some(limit) = app.current_context_window() {
         context.push_str(&format!("/{}", format_tokens(Some(limit))));
