@@ -180,6 +180,12 @@ impl Config {
         Ok(Self::dir()?.join("config.yaml"))
     }
 
+    /// The global skills directory (`<dir>/skills`), where user-wide
+    /// skills live; a workspace can add more under its own root.
+    pub fn skills_dir() -> Result<PathBuf, ConfigError> {
+        Ok(Self::dir()?.join("skills"))
+    }
+
     /// Loads the config; a missing file is the default config, not an
     /// error.
     pub fn load() -> Result<Config, ConfigError> {

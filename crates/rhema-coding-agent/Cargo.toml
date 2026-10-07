@@ -12,9 +12,11 @@ authors.workspace = true
 mock = ["rhema-core/mock"]
 
 [dependencies]
+rhema-config = { path = "../rhema-config" }
 rhema-core = { path = "../rhema-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 # Subprocess execution for the command tool

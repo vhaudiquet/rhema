@@ -1906,9 +1906,11 @@ name = "rhema-coding-agent"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "rhema-config",
  "rhema-core",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
