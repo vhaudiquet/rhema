@@ -610,7 +610,7 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
     let name_width = candidates
         .iter()
         .take(visible as usize)
-        .map(|(name, _)| name.width())
+        .map(|spec| spec.name.width())
         .max()
         .unwrap_or(0)
         + 3;
@@ -618,7 +618,7 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
         .iter()
         .take(visible as usize)
         .enumerate()
-        .map(|(index, (name, description))| {
+        .map(|(index, spec)| {
             // The selection lives in the text, not the row: bold marks it,
             // the background stays shared.
             let name_style = if index == selected {
@@ -627,8 +627,11 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
                 Style::default().fg(theme.accent_text)
             };
             Line::from(vec![
-                Span::styled(format!("{name:<name_width$}"), name_style),
-                Span::styled(description.to_string(), Style::default().fg(theme.text3)),
+                Span::styled(format!("{:<name_width$}", spec.name), name_style),
+                Span::styled(
+                    spec.description.to_string(),
+                    Style::default().fg(theme.text3),
+                ),
             ])
         })
         .collect();

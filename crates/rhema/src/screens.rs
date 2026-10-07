@@ -139,29 +139,19 @@ impl ProfileScreen {
 
 // --- Slash commands ---
 
-/// Every chat command: the name (with the slash) and what it does. This
-/// table is the single source of truth for the completion palette, the
-/// `/help` notice, and nothing else needs to list them.
-pub const COMMANDS: &[(&str, &str)] = &[
-    ("/help", "commands and keys"),
-    ("/model", "pick the model"),
-    ("/profile", "switch profile (work, personal)"),
-    ("/login", "re-login: provider, key, or server"),
-    ("/clear", "fresh session"),
-    ("/exit", "quit"),
-];
-
 /// The commands whose names start with the slash token in `input`, in
 /// table order. `/` alone matches everything; an input that is not a
-/// command at all matches nothing.
-pub fn filtered_commands(input: &str) -> Vec<&'static (&'static str, &'static str)> {
+/// command at all matches nothing. Reads the command table — the single
+/// source of truth — so a row exists for the palette the moment it
+/// dispatches.
+pub fn filtered_commands(input: &str) -> Vec<&'static crate::commands::CommandSpec> {
     if !input.starts_with('/') {
         return Vec::new();
     }
     let needle = input.to_lowercase();
-    COMMANDS
+    crate::commands::COMMANDS
         .iter()
-        .filter(|(name, _)| name.starts_with(&needle))
+        .filter(|spec| spec.name.starts_with(&needle))
         .collect()
 }
 
@@ -761,10 +751,10 @@ impl ChatState {
             }
             KeyCode::Tab if self.input.starts_with('/') => {
                 let candidates = filtered_commands(&self.input);
-                if let Some((command, _)) =
+                if let Some(spec) =
                     candidates.get(self.palette_index.min(candidates.len().saturating_sub(1)))
                 {
-                    self.input = (*command).to_owned();
+                    self.input = spec.name.to_owned();
                     self.cursor = self.input.chars().count();
                 }
                 ChatAction::None
@@ -1146,7 +1136,10 @@ mod tests {
 
     #[test]
     fn the_command_table_lists_every_slash_command() {
-        let names: Vec<&str> = COMMANDS.iter().map(|(name, _)| *name).collect();
+        let names: Vec<&str> = crate::commands::COMMANDS
+            .iter()
+            .map(|spec| spec.name)
+            .collect();
         assert!(names.contains(&"/profile"));
         assert!(names.contains(&"/model"));
         assert!(names.contains(&"/login"));
@@ -1158,13 +1151,16 @@ mod tests {
         for c in "/".chars() {
             chat.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(crate::screens::filtered_commands("/").len(), COMMANDS.len());
+        assert_eq!(
+            crate::screens::filtered_commands("/").len(),
+            crate::commands::COMMANDS.len()
+        );
         for c in "cl".chars() {
             chat.handle_key(key(KeyCode::Char(c)));
         }
         let names: Vec<&str> = crate::screens::filtered_commands("/cl")
             .iter()
-            .map(|(name, _)| *name)
+            .map(|spec| spec.name)
             .collect();
         assert_eq!(names, ["/clear"]);
         // Not a command at all: nothing matches, nothing to complete.
