@@ -645,6 +645,7 @@ mod tests {
             input_token_limit: None,
             output_token_limit: None,
             generation_methods: vec!["generateContent".to_owned()],
+            pricing: None,
         }
     }
 

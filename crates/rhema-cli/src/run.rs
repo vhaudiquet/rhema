@@ -9,6 +9,7 @@ use rhema_coding_agent::{AllowAll, Approval, CodingAgent, CodingAgentConfig};
 use rhema_core::{ModelProvider, Session};
 use rhema_provider_google::GoogleProvider;
 use rhema_provider_llama_cpp::LlamaCppProvider;
+use rhema_provider_openrouter::OpenRouterProvider;
 
 use crate::approval::ConsoleApproval;
 use crate::args::{Args, ProviderChoice};
@@ -124,6 +125,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     let api_key = match provider_choice {
         ProviderChoice::Google => resolve_api_key()?,
         ProviderChoice::LlamaCpp => String::new(),
+        ProviderChoice::OpenRouter => config.openrouter_api_key().ok_or_else(|| {
+            anyhow::anyhow!("missing API key: set OPENROUTER_API_KEY (or store it in the config)")
+        })?,
     };
 
     if let (Some(resume), Some(save)) = (&args.resume, &args.save) {
@@ -148,6 +152,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             }
             Arc::new(llamacpp)
         }
+        ProviderChoice::OpenRouter => Arc::new(OpenRouterProvider::new(
+            config.openrouter_api_key().unwrap_or_default(),
+        )),
         ProviderChoice::Google => Arc::new(GoogleProvider::new(api_key)),
     };
     let model = args.model.clone().unwrap_or_else(|| {
@@ -156,7 +163,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             .clone()
             .unwrap_or_else(|| match provider_choice {
                 ProviderChoice::LlamaCpp => DEFAULT_LLAMA_MODEL.to_owned(),
-                ProviderChoice::Google => DEFAULT_MODEL.to_owned(),
+                ProviderChoice::Google | ProviderChoice::OpenRouter => DEFAULT_MODEL.to_owned(),
             })
     });
     let config = CodingAgentConfig {

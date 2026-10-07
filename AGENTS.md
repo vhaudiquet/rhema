@@ -48,6 +48,7 @@ Rules:
   - `tests` — integration suites under `crates/rhema-core/tests/`
   - `google` — the Gemini provider adapter (`crates/rhema-provider-google/`)
   - `llama-cpp` — the llama.cpp server adapter (`crates/rhema-provider-llama-cpp/`)
+  - `openrouter` — the OpenRouter adapter (`crates/rhema-provider-openrouter/`)
   - `config` — stored settings and credentials (`crates/rhema-config/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema` — the CLI binary and terminal UI (`crates/rhema-cli/`)

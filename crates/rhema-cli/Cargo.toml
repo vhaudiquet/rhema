@@ -17,6 +17,7 @@ rhema-config = { path = "../rhema-config" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
 rhema-provider-google = { path = "../rhema-provider-google" }
 rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
 # Argument wiring and binary error reporting
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"

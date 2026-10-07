@@ -53,6 +53,11 @@ pub enum Backend {
         /// Bearer key, when the server asks for one.
         api_key: Option<String>,
     },
+    /// OpenRouter, by API key.
+    OpenRouter {
+        /// The resolved key (`env` first, stored second).
+        api_key: String,
+    },
 }
 
 impl Backend {
@@ -69,6 +74,9 @@ impl Backend {
                 }
                 Arc::new(provider)
             }
+            Backend::OpenRouter { api_key } => Arc::new(
+                rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone()),
+            ),
         }
     }
 
@@ -77,6 +85,7 @@ impl Backend {
         match self {
             Backend::Google { .. } => "google",
             Backend::LlamaCpp { .. } => "llama-cpp",
+            Backend::OpenRouter { .. } => "openrouter",
         }
     }
 
@@ -85,6 +94,12 @@ impl Backend {
         match self {
             Backend::Google { api_key } => {
                 rhema_provider_google::GoogleProvider::new(api_key.clone())
+                    .list_models()
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            Backend::OpenRouter { api_key } => {
+                rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone())
                     .list_models()
                     .await
                     .map_err(|err| err.to_string())
@@ -109,6 +124,7 @@ impl Backend {
                         input_token_limit: model.context_length,
                         output_token_limit: None,
                         generation_methods: vec!["generateContent".to_owned()],
+                        pricing: None,
                     })
                     .collect())
             }
@@ -569,6 +585,10 @@ impl App {
                                 self.config.llama_cpp_url = Some(url.clone());
                                 self.config.llama_cpp_api_key = api_key.clone();
                             }
+                            Backend::OpenRouter { api_key } => {
+                                self.config.provider = Some("openrouter".to_owned());
+                                self.config.openrouter_api_key = Some(api_key.clone());
+                            }
                         }
                         if let Err(err) = self.store.save(&self.config) {
                             login.status = LoginStatus::Error(format!("cannot save config: {err}"));
@@ -761,6 +781,7 @@ mod tests {
             input_token_limit: Some(1_048_576),
             output_token_limit: Some(65_536),
             generation_methods: vec!["generateContent".into()],
+            pricing: None,
         }
     }
 
@@ -782,6 +803,7 @@ mod tests {
             input_token_limit: None,
             output_token_limit: None,
             generation_methods: vec!["generateContent".to_owned()],
+            pricing: None,
         }
     }
 

@@ -46,6 +46,8 @@ pub struct Config {
     pub llama_cpp_url: Option<String>,
     /// Optional bearer key for the llama.cpp server, when it asks for one.
     pub llama_cpp_api_key: Option<String>,
+    /// The OpenRouter API key entered at login, when one is stored.
+    pub openrouter_api_key: Option<String>,
 }
 
 impl Config {
@@ -158,6 +160,16 @@ impl Config {
             self.llama_cpp_api_key.clone(),
         )
     }
+
+    /// The OpenRouter key to use: `OPENROUTER_API_KEY`, then the stored
+    /// key.
+    pub fn openrouter_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["OPENROUTER_API_KEY"],
+            self.openrouter_api_key.clone(),
+        )
+    }
 }
 
 trait OpenOptionsExt0600 {
@@ -234,6 +246,7 @@ mod tests {
             model: Some("gemini-3.8-flash".into()),
             llama_cpp_url: Some("http://localhost:8080".into()),
             llama_cpp_api_key: None,
+            openrouter_api_key: None,
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();

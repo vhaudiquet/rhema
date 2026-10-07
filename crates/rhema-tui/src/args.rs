@@ -24,6 +24,8 @@ pub enum ProviderChoice {
     Google,
     /// A llama.cpp server by URL.
     LlamaCpp,
+    /// OpenRouter, by API key.
+    OpenRouter,
 }
 
 impl ProviderChoice {
@@ -32,6 +34,7 @@ impl ProviderChoice {
     pub fn from_stored(value: Option<&str>) -> Self {
         match value {
             Some("llama-cpp") | Some("llama_cpp") | Some("llamacpp") => Self::LlamaCpp,
+            Some("openrouter") => Self::OpenRouter,
             _ => Self::Google,
         }
     }

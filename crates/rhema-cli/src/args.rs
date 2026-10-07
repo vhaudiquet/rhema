@@ -13,6 +13,8 @@ pub enum ProviderChoice {
     /// A llama.cpp server (`llama-server`) speaking the OpenAI-compatible
     /// chat completions API.
     LlamaCpp,
+    /// OpenRouter (openrouter.ai), by API key.
+    OpenRouter,
 }
 
 impl ProviderChoice {
@@ -21,6 +23,7 @@ impl ProviderChoice {
     pub fn from_stored(value: Option<&str>) -> Self {
         match value {
             Some("llama-cpp") | Some("llama_cpp") | Some("llamacpp") => Self::LlamaCpp,
+            Some("openrouter") => Self::OpenRouter,
             _ => Self::Google,
         }
     }

@@ -63,6 +63,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
                 .unwrap_or_else(|| config.llama_cpp_url()),
             api_key: config.llama_cpp_api_key(),
         }),
+        ProviderChoice::OpenRouter => config
+            .openrouter_api_key()
+            .map(|api_key| Backend::OpenRouter { api_key }),
     };
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)

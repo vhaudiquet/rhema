@@ -12,6 +12,8 @@ pub enum LoginProvider {
     Google,
     /// A llama.cpp server, by URL.
     LlamaCpp,
+    /// OpenRouter, by API key.
+    OpenRouter,
 }
 
 /// The provider rows shown at login. Unimplemented providers render with a
@@ -37,6 +39,11 @@ pub const PROVIDERS: &[ProviderEntry] = &[
         name: "llama.cpp (local server)",
         selectable: true,
         kind: Some(LoginProvider::LlamaCpp),
+    },
+    ProviderEntry {
+        name: "OpenRouter",
+        selectable: true,
+        kind: Some(LoginProvider::OpenRouter),
     },
     ProviderEntry {
         name: "Anthropic",
@@ -186,8 +193,8 @@ impl LoginScreen {
     /// material ever rendered); a server URL is not secret, so it shows.
     pub fn masked_input(&self) -> String {
         match self.selected_provider() {
-            Some(LoginProvider::Google) => "\u{2022}".repeat(self.input.chars().count()),
-            _ => self.input.clone(),
+            Some(LoginProvider::LlamaCpp) => self.input.clone(),
+            _ => "\u{2022}".repeat(self.input.chars().count()),
         }
     }
 
@@ -613,6 +620,7 @@ mod tests {
             } else {
                 vec!["generateAudio".into()]
             },
+            pricing: None,
         }
     }
 
@@ -679,8 +687,9 @@ mod tests {
         assert_eq!(login.selected, 0);
         assert!(PROVIDERS[0].selectable);
         assert!(PROVIDERS[1].selectable, "llama.cpp is selectable");
-        assert!(!PROVIDERS[2].selectable);
+        assert!(PROVIDERS[2].selectable, "OpenRouter is selectable");
         assert!(!PROVIDERS[3].selectable);
+        assert!(!PROVIDERS[4].selectable);
     }
 
     // --- Picker ---
