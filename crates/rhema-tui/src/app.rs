@@ -481,7 +481,7 @@ impl App {
             return Vec::new();
         };
         let backend = match login.selected_provider() {
-            Some(crate::screens::LoginProvider::LlamaCpp) => {
+            crate::screens::LoginProvider::LlamaCpp => {
                 let url = if login.input.trim().is_empty() {
                     self.config.llama_cpp_url()
                 } else {
@@ -492,7 +492,10 @@ impl App {
                     api_key: self.config.llama_cpp_api_key(),
                 }
             }
-            _ => Backend::Google {
+            crate::screens::LoginProvider::OpenRouter => Backend::OpenRouter {
+                api_key: login.input.clone(),
+            },
+            crate::screens::LoginProvider::Google => Backend::Google {
                 api_key: login.input.clone(),
             },
         };
@@ -934,7 +937,7 @@ mod tests {
             Screen::Login(login) => {
                 assert_eq!(
                     login.selected_provider(),
-                    Some(crate::screens::LoginProvider::LlamaCpp)
+                    crate::screens::LoginProvider::LlamaCpp
                 );
                 assert_eq!(login.input_label(), "server URL: ");
             }

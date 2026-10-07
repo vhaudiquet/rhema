@@ -16,49 +16,31 @@ pub enum LoginProvider {
     OpenRouter,
 }
 
-/// The provider rows shown at login. Unimplemented providers render with a
-/// "(coming soon)" marker and refuse selection.
+/// The provider rows shown at login. Every row configures an implemented
+/// backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderEntry {
     /// Display name.
     pub name: &'static str,
-    /// Whether the row can be chosen.
-    pub selectable: bool,
-    /// The backend this row configures, when implemented.
-    pub kind: Option<LoginProvider>,
+    /// The backend this row configures.
+    pub kind: LoginProvider,
 }
 
 /// The login provider list, in display order.
 pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "Google Gemini",
-        selectable: true,
-        kind: Some(LoginProvider::Google),
+        kind: LoginProvider::Google,
     },
     ProviderEntry {
         name: "llama.cpp (local server)",
-        selectable: true,
-        kind: Some(LoginProvider::LlamaCpp),
+        kind: LoginProvider::LlamaCpp,
     },
     ProviderEntry {
         name: "OpenRouter",
-        selectable: true,
-        kind: Some(LoginProvider::OpenRouter),
-    },
-    ProviderEntry {
-        name: "Anthropic",
-        selectable: false,
-        kind: None,
-    },
-    ProviderEntry {
-        name: "OpenAI",
-        selectable: false,
-        kind: None,
+        kind: LoginProvider::OpenRouter,
     },
 ];
-
-/// Outcome marker for non-selectable providers.
-pub const COMING_SOON: &str = "(coming soon)";
 
 // --- Slash commands ---
 
@@ -167,8 +149,10 @@ impl LoginScreen {
     /// does.
     pub fn input_hint(&self) -> String {
         let base = match self.selected_provider() {
-            Some(LoginProvider::LlamaCpp) => "enter your llama.cpp server URL, then press enter",
-            _ => "enter your Google API key, then press enter",
+            LoginProvider::LlamaCpp => "enter your llama.cpp server URL, then press enter",
+            LoginProvider::Google | LoginProvider::OpenRouter => {
+                "enter your API key, then press enter"
+            }
         };
         match self.purpose {
             LoginPurpose::FromChat => format!("{base} · esc back"),
@@ -176,16 +160,16 @@ impl LoginScreen {
         }
     }
 
-    /// The backend the highlighted row configures, when implemented.
-    pub fn selected_provider(&self) -> Option<LoginProvider> {
-        PROVIDERS.get(self.selected).and_then(|entry| entry.kind)
+    /// The backend the highlighted row configures.
+    pub fn selected_provider(&self) -> LoginProvider {
+        PROVIDERS[self.selected.min(PROVIDERS.len() - 1)].kind
     }
 
     /// The input's label, per the highlighted provider.
     pub fn input_label(&self) -> &'static str {
         match self.selected_provider() {
-            Some(LoginProvider::LlamaCpp) => "server URL: ",
-            _ => "API key: ",
+            LoginProvider::LlamaCpp => "server URL: ",
+            LoginProvider::Google | LoginProvider::OpenRouter => "API key: ",
         }
     }
 
@@ -193,8 +177,10 @@ impl LoginScreen {
     /// material ever rendered); a server URL is not secret, so it shows.
     pub fn masked_input(&self) -> String {
         match self.selected_provider() {
-            Some(LoginProvider::LlamaCpp) => self.input.clone(),
-            _ => "\u{2022}".repeat(self.input.chars().count()),
+            LoginProvider::LlamaCpp => self.input.clone(),
+            LoginProvider::Google | LoginProvider::OpenRouter => {
+                "\u{2022}".repeat(self.input.chars().count())
+            }
         }
     }
 
@@ -222,26 +208,11 @@ impl LoginScreen {
         }
     }
 
-    /// Moves the selection among the selectable providers; with a single
-    /// selectable row the selection cannot move (the list is fixed).
+    /// Moves the selection around the provider list, wrapping.
     fn move_selection(&mut self, down: bool) {
-        let selectable: Vec<usize> = PROVIDERS
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| entry.selectable)
-            .map(|(index, _)| index)
-            .collect();
-        if selectable.is_empty() {
-            return;
-        }
-        let position = selectable
-            .iter()
-            .position(|&index| index == self.selected)
-            .unwrap_or(0);
-        let count = selectable.len() as isize;
+        let count = PROVIDERS.len() as isize;
         let step = if down { 1 } else { -1 };
-        let next = (position as isize + step).rem_euclid(count) as usize;
-        self.selected = selectable[next];
+        self.selected = ((self.selected as isize + step).rem_euclid(count)) as usize;
     }
 
     /// Enter: validate the key, unless a validation is already in flight
@@ -680,16 +651,14 @@ mod tests {
     }
 
     #[test]
-    fn login_selection_stays_on_the_only_selectable_provider() {
+    fn login_selection_wraps_across_the_providers() {
         let mut login = LoginScreen::new();
         login.handle_key(key(KeyCode::Down));
+        login.handle_key(key(KeyCode::Down));
+        login.handle_key(key(KeyCode::Down));
+        assert_eq!(login.selected, 0, "down wraps at the end");
         login.handle_key(key(KeyCode::Up));
-        assert_eq!(login.selected, 0);
-        assert!(PROVIDERS[0].selectable);
-        assert!(PROVIDERS[1].selectable, "llama.cpp is selectable");
-        assert!(PROVIDERS[2].selectable, "OpenRouter is selectable");
-        assert!(!PROVIDERS[3].selectable);
-        assert!(!PROVIDERS[4].selectable);
+        assert_eq!(login.selected, PROVIDERS.len() - 1, "up wraps at the start");
     }
 
     // --- Picker ---

@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Screen};
-use crate::screens::{COMING_SOON, PROVIDERS, PickerScreen, PickerStatus};
+use crate::screens::{PROVIDERS, PickerScreen, PickerStatus};
 use crate::transcript::{self, pretty_args};
 use rhema_provider_google::GeminiModel;
 
@@ -69,13 +69,13 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &Theme) {
-    let area = centered(58, 13, frame.area());
+    let area = centered(58, 8, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.surface).fg(theme.text))
+        .style(Style::default().bg(theme.sunken).fg(theme.text))
         .title(" rhema — sign in ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -87,32 +87,25 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
     ])
     .areas(inner);
 
+    // The selection lives in the text, like the command palette: bold
+    // marks the current provider, the background stays shared.
     let rows: Vec<ListItem> = PROVIDERS
         .iter()
         .enumerate()
         .map(|(index, entry)| {
-            let mut spans: Vec<Span> = if index == login.selected {
-                vec![Span::raw("❯ ")]
+            let name_style = if index == login.selected {
+                Style::default().fg(theme.text).bold()
             } else {
-                vec![Span::raw("  ")]
+                Style::default().fg(theme.text2)
             };
-            if entry.selectable {
-                spans.push(Span::raw(entry.name).bold());
-            } else {
-                spans.push(Span::raw(entry.name).fg(theme.text3));
-                spans.push(Span::raw("  "));
-                spans.push(Span::raw(COMING_SOON).fg(theme.text3));
-            }
-            ListItem::new(Line::from(spans))
+            ListItem::new(Line::from(Span::styled(entry.name.to_string(), name_style)))
         })
         .collect();
-    let mut state = ListState::default();
-    state.select(Some(login.selected));
-    frame.render_stateful_widget(List::new(rows), providers_area, &mut state);
+    frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::raw(login.input_label()),
+            Span::raw(login.input_label()).fg(theme.text3),
             Span::raw(login.masked_input()).bold(),
         ])),
         input_area,
@@ -120,8 +113,8 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
 
     let status = match &login.status {
         crate::screens::LoginStatus::Idle => Line::from(login.input_hint()).fg(theme.text3),
-        crate::screens::LoginStatus::Validating => Line::from("validating key…").fg(theme.text3),
-        crate::screens::LoginStatus::Error(message) => Line::from(message.clone()).red(),
+        crate::screens::LoginStatus::Validating => Line::from("validating…").fg(theme.text3),
+        crate::screens::LoginStatus::Error(message) => Line::from(message.clone()).fg(theme.error),
     };
     frame.render_widget(Paragraph::new(status), status_area);
 }
