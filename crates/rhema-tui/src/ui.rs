@@ -203,19 +203,12 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let width = inner.width as usize;
     // The banner is the conversation's first content, not chrome: it
     // scrolls away with the history and shares the transcript background.
+    // One mark, one word — the model and keys live in the footer and /help.
     let mut lines: Vec<Line> = vec![
         Line::from(vec![
             Span::raw("ῥ ").fg(theme.accent_text).bold(),
             Span::raw("rhema").bold(),
         ]),
-        Line::from(
-            Span::raw(format!(
-                "{} · {} · /help for commands",
-                app.config.model.as_deref().unwrap_or("no model"),
-                app.options.workspace.display()
-            ))
-            .fg(theme.text3),
-        ),
         Line::from(""),
     ];
     // Consecutive assistant lines form one markdown response and render
