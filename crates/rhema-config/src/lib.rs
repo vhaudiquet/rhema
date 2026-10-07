@@ -1,13 +1,12 @@
-//! Persistent rhema settings: named profiles for contexts like work and
-//! personal, plus a fallback section that legacy config files already
-//! deserialize into.
+//! Persistent rhema settings: the registry of named profiles.
 //!
-//! The file lives at `$XDG_CONFIG_HOME/rhema/config.yaml`, falling back to
-//! `$HOME/.config/rhema/config.json`, written with `0600` permissions since
-//! it holds credentials. A legacy `config.json` is read when no YAML file
-//! exists but never written. Environment variables (`GEMINI_API_KEY`,
-//! `GOOGLE_API_KEY`) always win over a stored key — a stored key is the
-//! fallback, not the override.
+//! The file lives at `$XDG_CONFIG_HOME/rhema/config.yaml`, written with
+//! `0600` permissions since it holds credentials. Which profile a session
+//! runs under is chosen per invocation (`--profile`) or per session
+//! (`/profile`) — it is deliberately not stored, so parallel instances
+//! (work and personal side by side) never fight over one global switch.
+//! Environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`) always win
+//! over a stored key — a stored key is the fallback, not the override.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -32,9 +31,8 @@ pub enum ConfigError {
     Yaml(#[from] serde_yaml::Error),
 }
 
-/// One named set of provider settings. A profile overrides the top-level
-/// section field-wise, so a profile only needs the fields where it
-/// differs (typically the key and the model).
+/// One named set of provider settings. Profiles are isolated: work never
+/// inherits personal's model or keys, and vice versa.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Profile {
@@ -109,31 +107,17 @@ impl Profile {
     }
 }
 
-/// The persisted settings: the active profile name plus named profiles.
+/// The persisted settings: the registry of named profiles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Config {
-    /// The profile used when `--profile` does not name one.
-    #[serde(
-        default = "default_active_profile",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub profile: Option<String>,
-    /// Named profiles; each overrides the top-level section field-wise.
+    /// Named profiles; each stands alone. Fresh setups ship `personal`
+    /// and `work`.
     #[serde(
         default = "default_profiles",
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub profiles: BTreeMap<String, Profile>,
-    /// The top-level fallback section — also what legacy config files
-    /// deserialize into.
-    #[serde(flatten)]
-    pub default: Profile,
-}
-
-/// The active profile on fresh setups and files that omit the key.
-fn default_active_profile() -> Option<String> {
-    Some("personal".to_owned())
 }
 
 /// The profiles on fresh setups and files that omit the key.
@@ -145,42 +129,37 @@ fn default_profiles() -> BTreeMap<String, Profile> {
 }
 
 impl Default for Config {
-    /// Fresh setups ship with the two everyday profiles and `personal`
-    /// active. Loaded files missing the keys get the same treatment via
-    /// the field-level serde defaults.
+    /// Fresh setups ship with the two everyday profiles. Loaded files
+    /// missing the key get the same treatment via the field-level serde
+    /// default.
     fn default() -> Self {
         Self {
-            profile: default_active_profile(),
             profiles: default_profiles(),
-            default: Profile::default(),
         }
     }
 }
 
 impl Config {
-    /// The settings that apply for `flag` (or the stored active profile).
+    /// The settings that apply for `flag` (or `personal` when absent).
     ///
-    /// ISOLATION: a profile that exists in the map is authoritative — its
-    /// section alone applies, with no field-wise fallback to the top-level
-    /// section. Work must never inherit personal's model or keys. The
-    /// top-level section applies only when the named profile has no entry
-    /// (configs from before profiles existed).
+    /// ISOLATION: a profile's section is authoritative — work never
+    /// inherits personal's model or keys. An unknown name resolves to an
+    /// empty profile; the caller decides how to present that (the TUI
+    /// says "no provider — use /login").
     pub fn effective(&self, flag: Option<&str>) -> Profile {
-        let chosen = flag.or(self.profile.as_deref());
-        match chosen.and_then(|name| self.profiles.get(name)) {
-            Some(profile) => profile.clone(),
-            None => self.default.clone(),
-        }
+        self.profiles
+            .get(flag.unwrap_or("personal"))
+            .cloned()
+            .unwrap_or_default()
     }
 
-    /// Mutates the section that writes land in for `flag` (or the stored
-    /// active profile): the named profile when it exists or is new, else
-    /// the top-level section.
+    /// Mutates the section that writes land in for `flag` (or `personal`
+    /// when absent): the named profile, created when new.
     pub fn set_for_profile(&mut self, flag: Option<&str>, apply: impl FnOnce(&mut Profile)) {
-        match flag.or(self.profile.as_deref()) {
-            Some(name) => apply(self.profiles.entry(name.to_owned()).or_default()),
-            None => apply(&mut self.default),
-        }
+        let name = flag
+            .map(str::to_owned)
+            .unwrap_or_else(|| "personal".to_owned());
+        apply(self.profiles.entry(name).or_default());
     }
 
     /// The config directory (`<config-base>/rhema`).
@@ -202,7 +181,7 @@ impl Config {
     }
 
     /// Loads the config; a missing file is the default config, not an
-    /// error. Falls back to the legacy JSON file when no YAML exists.
+    /// error.
     pub fn load() -> Result<Config, ConfigError> {
         match Self::path() {
             Ok(path) => Self::load_from(&path),
@@ -318,16 +297,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         let config = Config {
-            default: Profile {
-                provider: Some("llama-cpp".into()),
-                google_api_key: Some("key-123".into()),
-                model: Some("gemini-3.8-flash".into()),
-                llama_cpp_url: Some("http://localhost:8080".into()),
-                llama_cpp_api_key: None,
-                openrouter_api_key: None,
-                color: None,
-            },
-            ..Config::default()
+            profiles: BTreeMap::from([(
+                "personal".to_owned(),
+                Profile {
+                    provider: Some("llama-cpp".into()),
+                    google_api_key: Some("key-123".into()),
+                    model: Some("gemini-3.8-flash".into()),
+                    llama_cpp_url: Some("http://localhost:8080".into()),
+                    llama_cpp_api_key: None,
+                    openrouter_api_key: None,
+                    color: None,
+                },
+            )]),
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -354,78 +335,69 @@ mod tests {
     #[test]
     fn fresh_setups_ship_personal_and_work_profiles() {
         let config = Config::default();
-        assert_eq!(config.profile.as_deref(), Some("personal"));
         assert!(config.profiles.contains_key("personal"));
         assert!(config.profiles.contains_key("work"));
-        // A loaded file missing the keys gets the same seeding.
+        // A loaded file missing the key gets the same seeding.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "model: m\n").unwrap();
         let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.profile.as_deref(), Some("personal"));
         assert!(loaded.profiles.contains_key("work"));
-        assert_eq!(loaded.default.model.as_deref(), Some("m"));
+        // The stray top-level key is ignored: profiles are the only shape.
+        assert!(loaded.profiles["personal"].model.is_none());
     }
 
     #[test]
-    fn profiles_are_isolated_from_the_default_section_and_each_other() {
+    fn profiles_are_isolated_from_each_other() {
         let config = Config {
-            profile: Some("work".into()),
-            default: Profile {
-                provider: Some("google".into()),
-                google_api_key: Some("personal-key".into()),
-                model: Some("personal-model".into()),
-                ..Profile::default()
-            },
-            profiles: BTreeMap::from([(
-                "work".to_owned(),
-                Profile {
-                    provider: Some("openrouter".into()),
-                    google_api_key: Some("work-key".into()),
-                    color: Some("#8FA6B8".into()),
-                    ..Profile::default()
-                },
-            )]),
+            profiles: BTreeMap::from([
+                (
+                    "personal".to_owned(),
+                    Profile {
+                        provider: Some("google".into()),
+                        google_api_key: Some("personal-key".into()),
+                        model: Some("personal-model".into()),
+                        ..Profile::default()
+                    },
+                ),
+                (
+                    "work".to_owned(),
+                    Profile {
+                        provider: Some("openrouter".into()),
+                        google_api_key: Some("work-key".into()),
+                        color: Some("#8FA6B8".into()),
+                        ..Profile::default()
+                    },
+                ),
+            ]),
         };
-        // The profile stands alone: personal's model and keys never leak
-        // into it.
         let work = config.effective(Some("work"));
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
         assert_eq!(work.google_api_key.as_deref(), Some("work-key"));
         assert_eq!(work.model, None);
         assert_eq!(work.color.as_deref(), Some("#8FA6B8"));
 
-        // No flag: the stored active profile applies.
-        let active = config.effective(None);
-        assert_eq!(active.provider.as_deref(), Some("openrouter"));
+        // personal's fields never leak into work, and vice versa.
+        let personal = config.effective(Some("personal"));
+        assert_eq!(personal.google_api_key.as_deref(), Some("personal-key"));
+        assert_eq!(personal.model.as_deref(), Some("personal-model"));
 
-        // An unknown name: the top-level section stands in (legacy
-        // configs live there).
-        let fallback = config.effective(Some("other"));
-        assert_eq!(fallback.provider.as_deref(), Some("google"));
-        assert_eq!(fallback.model.as_deref(), Some("personal-model"));
-        assert_eq!(fallback.color, None);
+        // An unknown name resolves to an empty profile: nothing leaks in.
+        assert_eq!(config.effective(Some("other")), Profile::default());
     }
 
     #[test]
-    fn set_for_profile_writes_the_named_section_or_the_default() {
-        let mut config = Config {
-            profile: Some("work".into()),
-            ..Config::default()
-        };
+    fn set_for_profile_writes_the_named_section() {
+        let mut config = Config::default();
         config.set_for_profile(Some("work"), |p| p.google_api_key = Some("work-key".into()));
-        // The active profile receives unflagged writes too.
+        // Unflagged writes land on personal, the default profile.
         config.set_for_profile(None, |p| p.model = Some("m".into()));
         assert_eq!(
             config.profiles["work"].google_api_key.as_deref(),
             Some("work-key")
         );
-        assert_eq!(config.profiles["work"].model.as_deref(), Some("m"));
-        // The default section is untouched by profile writes.
-        assert_eq!(config.default.google_api_key, None);
-        // Without an active profile, writes land at the top level.
-        config.profile = None;
-        config.set_for_profile(None, |p| p.model = Some("top".into()));
-        assert_eq!(config.default.model.as_deref(), Some("top"));
+        assert_eq!(config.profiles["personal"].model.as_deref(), Some("m"));
+        // work's section is untouched by personal's writes.
+        assert_eq!(config.profiles["work"].model, None);
     }
 }

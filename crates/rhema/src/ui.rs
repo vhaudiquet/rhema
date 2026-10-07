@@ -870,7 +870,6 @@ mod scroll_tests {
 
     fn chat_app() -> App {
         let config = rhema_config::Config {
-            profile: Some("personal".into()),
             profiles: BTreeMap::from([(
                 "personal".to_owned(),
                 rhema_config::Profile {
@@ -879,7 +878,6 @@ mod scroll_tests {
                     ..rhema_config::Profile::default()
                 },
             )]),
-            ..rhema_config::Config::default()
         };
         App::new(AppSetup {
             store: Arc::new(MemoryStore::default()),
@@ -973,13 +971,13 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // chat_app's stored config has no explicit profile: the seeded
-        // default applies.
+        // chat_app runs the personal profile: the seeded default tone.
         let (name, color) = app.active_profile().expect("seeded profile");
         assert_eq!(name, "personal");
         assert_eq!(color, crate::palette::DARK.accent_text);
 
         // A configured color wins; unknown names read secondary.
+        app.session_profile = Some("work".into());
         app.config.profiles.insert(
             "work".to_owned(),
             rhema_config::Profile {
@@ -987,7 +985,6 @@ mod scroll_tests {
                 ..rhema_config::Profile::default()
             },
         );
-        app.options.profile = Some("work".into());
         let (name, color) = app.active_profile().expect("configured profile");
         assert_eq!(name, "work");
         assert_eq!(color, ratatui::style::Color::Rgb(0xD9, 0xA6, 0x43));
@@ -996,7 +993,7 @@ mod scroll_tests {
     #[test]
     fn the_footer_admits_when_a_profile_has_no_provider() {
         let mut app = chat_app();
-        app.config.profile = Some("work".into());
+        app.session_profile = Some("work".into());
         app.config
             .profiles
             .insert("work".to_owned(), rhema_config::Profile::default());

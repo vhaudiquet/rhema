@@ -294,16 +294,17 @@ impl App {
                     .options
                     .profile
                     .clone()
-                    .or_else(|| setup.config.profile.clone());
-                let stored = profile_name
-                    .as_deref()
-                    .and_then(|name| setup.config.profiles.get(name))
+                    .unwrap_or_else(|| "personal".to_owned());
+                let stored = setup
+                    .config
+                    .profiles
+                    .get(&profile_name)
                     .cloned()
                     .unwrap_or_default();
                 Screen::Login(
                     LoginScreen::new()
                         .select_stored_provider(effective.provider.as_deref())
-                        .with_profile(profile_name)
+                        .with_profile(Some(profile_name))
                         .with_stored(stored),
                 )
             }
@@ -318,7 +319,13 @@ impl App {
             config: setup.config,
             provider: setup.backend.as_ref().map(Backend::provider),
             backend: setup.backend,
-            session_profile: setup.options.profile.clone(),
+            session_profile: Some(
+                setup
+                    .options
+                    .profile
+                    .clone()
+                    .unwrap_or_else(|| "personal".to_owned()),
+            ),
             options: setup.options,
             session,
             screen,
@@ -386,16 +393,17 @@ impl App {
             .session_profile
             .clone()
             .or_else(|| self.options.profile.clone())
-            .or_else(|| self.config.profile.clone());
-        let stored = profile_name
-            .as_deref()
-            .and_then(|name| self.config.profiles.get(name))
+            .unwrap_or_else(|| "personal".to_owned());
+        let stored = self
+            .config
+            .profiles
+            .get(&profile_name)
             .cloned()
             .unwrap_or_default();
         self.screen = Screen::Login(
             crate::screens::LoginScreen::for_chat()
                 .select_stored_provider(effective.provider.as_deref())
-                .with_profile(profile_name)
+                .with_profile(Some(profile_name))
                 .with_stored(stored),
         );
     }
@@ -440,12 +448,9 @@ impl App {
         let agent_config = agent_config(&self.options, effective.model.clone());
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
             Ok(agent) => {
+                // Per-session, never persisted: parallel instances keep
+                // their own profile.
                 self.session_profile = Some(name.to_owned());
-                self.config.profile = Some(name.to_owned());
-                if let Err(err) = self.store.save(&self.config) {
-                    self.error = Some(format!("cannot save config: {err}"));
-                    return;
-                }
                 self.backend = Some(backend.clone());
                 self.provider = Some(backend.provider());
                 self.models.clear();
@@ -870,11 +875,7 @@ impl App {
     /// over the stored active profile, colored by its config (a `#RRGGBB`
     /// string) or by a name-based theme tone.
     pub fn active_profile(&self) -> Option<(String, ratatui::style::Color)> {
-        let name = self
-            .options
-            .profile
-            .clone()
-            .or_else(|| self.config.profile.clone())?;
+        let name = self.session_profile.clone()?;
         let custom = self
             .config
             .profiles
@@ -987,7 +988,6 @@ mod tests {
 
     fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
         let config = Config {
-            profile: Some("personal".into()),
             profiles: BTreeMap::from([(
                 "personal".to_owned(),
                 rhema_config::Profile {
@@ -996,7 +996,6 @@ mod tests {
                     ..rhema_config::Profile::default()
                 },
             )]),
-            ..Config::default()
         };
         let store = Arc::new(MemoryStore::new(config.clone()));
         let backend: Option<Backend> = api_key.map(|key| Backend::Google {
@@ -1243,7 +1242,6 @@ mod tests {
             _ => panic!("a failed login must stay on the login screen"),
         }
         let stored = h.store.load().unwrap();
-        assert!(stored.default.google_api_key.is_none());
         assert!(
             stored
                 .profiles
@@ -1447,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_profile_with_a_name_switches_the_backend_and_persists() {
+    fn slash_profile_with_a_name_switches_the_backend() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.config.profiles.insert(
             "work".to_owned(),
@@ -1465,9 +1463,8 @@ mod tests {
             Some(Backend::OpenRouter { api_key }) => assert_eq!(api_key, "work-key"),
             other => panic!("expected the openrouter backend, got {other:?}"),
         }
-        let stored = h.store.load().unwrap();
-        assert_eq!(stored.profile.as_deref(), Some("work"));
-        assert!(stored.effective(None).model.as_deref() == Some("work-model"));
+        // The switch is per-session, never persisted to disk.
+        assert!(h.store.load().unwrap().profiles.contains_key("personal"));
         assert!(
             h.app
                 .transcript

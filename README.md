@@ -50,22 +50,24 @@ profile overrides the top-level settings field-wise, so it only needs the
 fields where it differs:
 
 ```yaml
-profile: personal            # used when --profile is not given
-default:
-  provider: google
-  google_api_key: ...
 profiles:
+  personal:
+    provider: google
+    google_api_key: ...
   work:
     provider: openrouter
     openrouter_api_key: ...
     model: anthropic/claude-sonnet-4
 ```
 
-`rhema --profile work` runs the TUI or a headless one-shot under that
-profile's provider, keys, and model; logins and model picks while it runs
-write back into that profile's section — the same provider can hold
-different keys per profile. The `default:` section is what legacy configs
-already have, so existing setups keep working unchanged.
+Without `--profile`, sessions run on `personal`.
+
+Profiles are isolated: work never sees personal's keys or model. The
+selection is per-instance, never stored — `rhema --profile work` in one
+terminal and plain `rhema` in another run side by side, and `/profile`
+switches a running TUI without touching the other instance. Logins and
+model picks write into the session's profile section, so the same
+provider can hold different keys per profile.
 
 Inside the TUI, `/profile` switches mid-session: it lists the profiles
 (each in its configured color, with its provider, model, and credential
