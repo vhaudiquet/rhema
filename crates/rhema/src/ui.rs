@@ -611,7 +611,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             ),
             Span::raw(" thinking").fg(theme.running),
             Span::raw(elapsed).fg(theme.text3),
-            Span::raw(" · esc declines pending tools").fg(theme.text3),
+            Span::raw(" · esc cancels").fg(theme.text3),
         ])]
     } else {
         vec![Line::from("")]

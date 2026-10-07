@@ -91,7 +91,8 @@ to filter, arrows to move). A server exposing exactly one model
 auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
 code in the palette's cyan), `write_file`/`run_command` pop up an
-approval modal (y/N), and the status line shows token usage per turn.
+approval modal (y/N; esc cancels the whole turn), and the status
+line shows token usage per turn.
 
 ### Sessions
 

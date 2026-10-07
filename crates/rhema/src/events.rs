@@ -124,4 +124,11 @@ pub enum UiEvent {
         /// The final output, or the error text of the failed turn.
         result: Result<ModelOutput, String>,
     },
+    /// The turn was cancelled from the keyboard and hands the agent back.
+    /// Whatever committed before the drop stays in the history; dangling
+    /// tool calls are already repaired with failure results.
+    TurnCancelled {
+        /// The agent, with the partial turn's committed messages.
+        agent: Box<CodingAgent>,
+    },
 }

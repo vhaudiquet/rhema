@@ -392,6 +392,8 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
             let Some(agent) = app.agent.take() else {
                 return;
             };
+            let (cancel, cancelled) = tokio::sync::watch::channel(false);
+            app.turn_cancel = Some(cancel);
             let (approval, answers) = if app.options.no_confirm {
                 (Arc::new(AllowAll) as Arc<dyn Approval>, None)
             } else {
@@ -399,7 +401,14 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
                 (Arc::new(hook) as Arc<dyn Approval>, Some(answerer))
             };
             app.begin_turn(answers);
-            spawn_turn(agent, input, approval, app.options.save.clone(), tx.clone());
+            spawn_turn(
+                agent,
+                input,
+                approval,
+                app.options.save.clone(),
+                cancelled,
+                tx.clone(),
+            );
         }
     }
 }

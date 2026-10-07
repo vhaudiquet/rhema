@@ -231,9 +231,12 @@ pub struct App {
     pub pending_approval: Option<ToolCall>,
     /// The quit confirmation overlay is up.
     pub confirm_quit: bool,
-    /// Every future approval request is declined without a modal (Esc
-    /// during a running turn; the turn must finish in place).
+    /// Every future approval request is declined without a modal (the
+    /// turn is being cancelled; nothing more may ask).
     pub decline_all: bool,
+    /// The cancel flag of the running turn; `None` while idle. The runner
+    /// creates the pair at submit and the task watches the receiver.
+    pub turn_cancel: Option<tokio::sync::watch::Sender<bool>>,
     /// Set by the runner to end the event loop.
     pub should_quit: bool,
     /// The resolved design tokens every render pass reads.
@@ -335,6 +338,7 @@ impl App {
             pending_approval: None,
             confirm_quit: false,
             decline_all: false,
+            turn_cancel: None,
             should_quit: false,
             chat: ChatState::new(),
             answers: None,
@@ -638,11 +642,19 @@ impl App {
 
     /// Chat keys that are the app's, not the input box's.
     fn on_chat_key(&mut self, key: KeyEvent, action: ChatAction) -> Vec<Effect> {
+        // Esc during a running turn cancels the turn, from anywhere —
+        // approval modal included: the pending answer is released, the
+        // rest declined, and the task drops the turn at its next await.
+        // The y/N modal keys keep answering single calls.
+        if self.running && key.code == KeyCode::Esc {
+            self.cancel_turn();
+            return Vec::new();
+        }
         // The approval modal takes every key while it is up.
         if self.pending_approval.is_some() {
             match key.code {
                 KeyCode::Char('y' | 'Y') => self.answer_approval(true),
-                KeyCode::Char('n' | 'N') | KeyCode::Esc => self.answer_approval(false),
+                KeyCode::Char('n' | 'N') => self.answer_approval(false),
                 _ => {}
             }
             return Vec::new();
@@ -670,11 +682,7 @@ impl App {
             return Vec::new();
         }
         if key.code == KeyCode::Esc {
-            if self.running {
-                // Decline everything pending or upcoming; the turn must
-                // finish in place (the engine has no cancel primitive).
-                self.decline_all = true;
-            } else {
+            if !self.running {
                 self.confirm_quit = true;
             }
             return Vec::new();
@@ -805,6 +813,10 @@ impl App {
             }
             UiEvent::TurnFinished { agent, result } => {
                 self.end_turn(agent, result);
+                Vec::new()
+            }
+            UiEvent::TurnCancelled { agent } => {
+                self.cancel_finished(agent);
                 Vec::new()
             }
         }
@@ -956,6 +968,32 @@ impl App {
         }
     }
 
+    /// Cancels the running turn from the keyboard. The approval bridge
+    /// blocks its thread on the answer, so a pending modal is released
+    /// first; upcoming approvals are declined; then the flag flips and
+    /// the turn task drops the future at its current await. The agent
+    /// comes back in a `TurnCancelled`.
+    fn cancel_turn(&mut self) {
+        self.answer_approval(false);
+        self.decline_all = true;
+        if let Some(cancel) = &self.turn_cancel {
+            let _ = cancel.send(true);
+        }
+    }
+
+    /// The turn task was cancelled from the keyboard: take the agent
+    /// back, drop the turn's state, and mark the cutoff in the transcript.
+    fn cancel_finished(&mut self, agent: Box<CodingAgent>) {
+        self.agent = Some(*agent);
+        self.running = false;
+        self.turn_started = None;
+        self.turn_cancel = None;
+        self.decline_all = false;
+        self.pending_approval = None;
+        self.answers = None;
+        self.transcript.push_notice("turn cancelled");
+    }
+
     /// The turn task finished: take the agent back, record the usage or
     /// the error, and drop any stale modal (the turn cannot finish while
     /// an approval is unanswered, so a leftover modal means the answer
@@ -964,6 +1002,7 @@ impl App {
         self.agent = Some(*agent);
         self.running = false;
         self.turn_started = None;
+        self.turn_cancel = None;
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -1471,15 +1510,75 @@ mod tests {
     }
 
     #[test]
-    fn esc_when_running_declines_pending_and_upcoming_approvals() {
+    fn esc_when_running_cancels_the_turn_and_flags_the_channel() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        h.app.turn_cancel = Some(cancel);
         h.app.running = true;
         h.app.on_key(key(KeyCode::Esc));
-        assert!(h.app.decline_all);
-        h.app
-            .on_event(UiEvent::ApprovalRequested { call: test_call() });
-        assert!(h.app.pending_approval.is_none(), "auto-declined, no modal");
-        assert!(!h.app.should_quit, "the turn must finish in place");
+        assert!(h.app.decline_all, "upcoming approvals decline");
+        assert!(!h.app.should_quit, "esc is not quit mid-turn");
+        assert!(*cancelled.borrow(), "the turn task sees the flag");
+
+        // The task's event closes the turn out.
+        let agent = CodingAgent::new(
+            Arc::new(GoogleProvider::new("k".to_owned())),
+            CodingAgentConfig::new("m-a", PathBuf::from(".")),
+        )
+        .unwrap();
+        h.app.on_event(UiEvent::TurnCancelled {
+            agent: Box::new(agent),
+        });
+        assert!(!h.app.running);
+        assert!(h.app.turn_cancel.is_none());
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("cancelled")
+        ));
+    }
+
+    #[test]
+    fn esc_with_a_pending_modal_cancels_and_releases_the_blocked_call() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (hook, answers) = TuiApproval::pair(tx);
+        let handle = std::thread::spawn(move || hook.approve(&test_call()));
+        h.app.begin_turn(Some(answers));
+        let (cancel, cancelled) = tokio::sync::watch::channel(false);
+        h.app.turn_cancel = Some(cancel);
+        h.app.running = true;
+
+        let event = rx.blocking_recv().expect("the parked call requested");
+        h.app.on_event(event);
+        assert!(h.app.pending_approval.is_some());
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(!handle.join().unwrap(), "the parked call was declined");
+        assert!(
+            *cancelled.borrow(),
+            "the turn was cancelled, not just declined"
+        );
+        assert!(h.app.pending_approval.is_none());
+    }
+
+    #[test]
+    fn the_cancelled_event_hands_the_agent_back_with_a_notice() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.running = true;
+        let agent = CodingAgent::new(
+            Arc::new(GoogleProvider::new("k".to_owned())),
+            CodingAgentConfig::new("m-a", PathBuf::from(".")),
+        )
+        .unwrap();
+        h.app.on_event(UiEvent::TurnCancelled {
+            agent: Box::new(agent),
+        });
+        assert!(!h.app.running);
+        assert!(h.app.agent.is_some());
+        assert!(h.app.turn_cancel.is_none());
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("cancelled")
+        ));
     }
 
     #[test]
