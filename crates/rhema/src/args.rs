@@ -60,8 +60,9 @@ pub struct Args {
     #[arg(short = 'm', long)]
     pub model: Option<String>,
 
-    /// Which config profile to use (e.g. work, personal). Defaults to the
-    /// stored active profile, then the top-level settings.
+    /// Which config profile to use (e.g. work, personal). Without it the
+    /// session starts on the default profile, or the first one holding
+    /// usable credentials.
     #[arg(long)]
     pub profile: Option<String>,
 

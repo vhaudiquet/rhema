@@ -907,6 +907,32 @@ fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfi
     }
 }
 
+/// The profile a session runs on when no `--profile` names one: the
+/// default profile while it can serve turns, otherwise the first stored
+/// profile that can (the registry's order) — a logged-in profile must
+/// not open the login screen. Isolation still holds: this only picks
+/// the section up front, and nothing reads across profiles afterwards.
+/// An explicit flag never reaches here.
+pub(crate) fn startup_profile(config: &rhema_config::Config) -> String {
+    let default = "personal";
+    let ready = |name: &str| {
+        config
+            .profiles
+            .get(name)
+            .map(|profile| Backend::from_profile(profile).is_some())
+            .unwrap_or(false)
+    };
+    if ready(default) {
+        return default.to_owned();
+    }
+    config
+        .profiles
+        .keys()
+        .find(|name| ready(name))
+        .cloned()
+        .unwrap_or_else(|| default.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1502,6 +1528,84 @@ mod tests {
                 .lines()
                 .contains(&Line::Notice("switched to profile work".into()))
         );
+    }
+
+    #[test]
+    fn startup_without_a_flag_starts_on_a_ready_profile() {
+        let work_ready = rhema_config::Profile {
+            provider: Some("openrouter".into()),
+            openrouter_api_key: Some("work-key".into()),
+            model: Some("work-model".into()),
+            ..rhema_config::Profile::default()
+        };
+        // personal is empty, work is logged in: the session starts on
+        // work instead of the login screen.
+        let config = Config {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), rhema_config::Profile::default()),
+                ("work".to_owned(), work_ready.clone()),
+            ]),
+        };
+        assert_eq!(startup_profile(&config), "work");
+        // personal can serve turns: the default stands.
+        let config = Config {
+            profiles: BTreeMap::from([
+                (
+                    "personal".to_owned(),
+                    rhema_config::Profile {
+                        google_api_key: Some("k".into()),
+                        ..rhema_config::Profile::default()
+                    },
+                ),
+                ("work".to_owned(), work_ready),
+            ]),
+        };
+        assert_eq!(startup_profile(&config), "personal");
+        // Nothing can: the default stands and the login screen opens on
+        // it.
+        assert_eq!(startup_profile(&Config::default()), "personal");
+    }
+
+    #[test]
+    fn a_logged_in_profile_opens_the_chat_without_the_login_screen() {
+        // The run_tui glue: resolve the no-flag profile, build the
+        // backend from its section, and hand both to App::new. personal
+        // is empty, work is ready with a model.
+        let config = Config {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), rhema_config::Profile::default()),
+                (
+                    "work".to_owned(),
+                    rhema_config::Profile {
+                        provider: Some("openrouter".into()),
+                        openrouter_api_key: Some("work-key".into()),
+                        model: Some("work-model".into()),
+                        ..rhema_config::Profile::default()
+                    },
+                ),
+            ]),
+        };
+        let profile = startup_profile(&config);
+        let backend = Backend::from_profile(&config.effective(Some(&profile)));
+        let app = App::new(AppSetup {
+            store: Arc::new(MemoryStore::new(config.clone())),
+            config,
+            backend,
+            session: Session::default(),
+            options: RunOptions {
+                theme: crate::args::ThemeKind::Dark,
+                profile: Some(profile),
+                workspace: PathBuf::from("."),
+                max_steps: 4,
+                no_confirm: false,
+                save: None,
+            },
+        })
+        .unwrap();
+        assert!(matches!(app.screen, Screen::Chat), "no login screen");
+        assert_eq!(app.session_profile.as_deref(), Some("work"));
+        // The session reads work's section, so the footer shows its model.
+        assert_eq!(app.effective().model.as_deref(), Some("work-model"));
     }
 
     #[test]

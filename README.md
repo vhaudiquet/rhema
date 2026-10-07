@@ -60,7 +60,10 @@ profiles:
     model: anthropic/claude-sonnet-4
 ```
 
-Without `--profile`, sessions run on `personal`.
+Without `--profile`, sessions run on `personal` — or, when personal has
+no usable credentials, on the first profile that does, so a logged-in
+work profile opens straight into the chat instead of the login screen.
+An explicit `--profile` name is always honored as given.
 
 Profiles are isolated: work never sees personal's keys or model. The
 selection is per-instance, never stored — `rhema --profile work` in one

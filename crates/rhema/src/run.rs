@@ -24,7 +24,7 @@ use rhema_core::{Event as ModelEvent, EventSink, Session};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Backend;
-use crate::app::{App, AppSetup, Effect, RunOptions};
+use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
 use crate::approval::TuiApproval;
 use crate::args::{Args, ProviderChoice};
 use crate::store::{ConfigStore, DiskStore};
@@ -139,7 +139,15 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
             Config::default()
         }
     };
-    let effective = config.effective(args.profile.as_deref());
+    // Same profile resolution as the TUI: an explicit --profile is
+    // honored as named, an absent one starts on a profile that can serve
+    // turns. No login screen exists headless: when nothing is usable the
+    // backend errors below, naming the fix.
+    let profile = args
+        .profile
+        .clone()
+        .unwrap_or_else(|| startup_profile(&config));
+    let effective = config.effective(Some(&profile));
     let provider_choice = args
         .provider
         .unwrap_or_else(|| ProviderChoice::from_stored(effective.provider.as_deref()));
@@ -218,10 +226,16 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         eprintln!("warning: ignoring unreadable rhema config: {err}");
         Config::default()
     });
-    // The stored provider choice decides which backend the TUI runs on;
-    // a missing Google key leaves the backend unresolved so the login
-    // screen runs.
-    let effective = config.effective(args.profile.as_deref());
+    // Without an explicit --profile the session starts on the default
+    // profile, or the first one that can serve turns — a logged-in
+    // profile never opens the login screen. The stored provider choice
+    // then decides which backend runs; a missing key still leaves the
+    // backend unresolved so the login screen runs.
+    let profile = args
+        .profile
+        .clone()
+        .unwrap_or_else(|| startup_profile(&config));
+    let effective = config.effective(Some(&profile));
     let provider_choice = args
         .provider
         .unwrap_or_else(|| ProviderChoice::from_stored(effective.provider.as_deref()));
@@ -247,7 +261,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     };
     let options = RunOptions {
         theme: args.theme,
-        profile: args.profile.clone(),
+        profile: Some(profile),
         workspace: args.workspace,
         max_steps: args.max_steps,
         no_confirm: args.no_confirm,
