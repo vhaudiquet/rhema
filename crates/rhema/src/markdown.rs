@@ -58,10 +58,10 @@ struct MarkdownRenderer<'a> {
     /// Spans of the line being built.
     spans: Vec<Span<'static>>,
     style: InlineStyle,
-    /// Nesting depth of lists, for indentation.
-    list_depth: usize,
-    /// Counter of the running ordered list; `None` in unordered lists.
-    ordered_counter: Option<u64>,
+    /// Per-level list state: the running number of ordered lists, `None`
+    /// for unordered ones. A stack, because a nested list must not
+    /// clobber its parent's counter; its length is the nesting depth.
+    counters: Vec<Option<u64>>,
     /// Inside a fenced code block: rows carry the block background.
     in_code_block: bool,
     /// Inside a block quote: every line carries the rail.
@@ -76,8 +76,7 @@ impl<'a> MarkdownRenderer<'a> {
             lines: Vec::new(),
             spans: Vec::new(),
             style: InlineStyle::default(),
-            list_depth: 0,
-            ordered_counter: None,
+            counters: Vec::new(),
             in_code_block: false,
             in_block_quote: false,
             theme,
@@ -110,27 +109,39 @@ impl<'a> MarkdownRenderer<'a> {
             }
             Event::Start(Tag::List(start)) => {
                 self.flush_line();
-                self.separate();
-                self.list_depth += 1;
-                self.ordered_counter = start;
+                // A top-level list steps away from the text before it; a
+                // sublist hugs its parent item — the blank row is what
+                // made nesting read as same-level items.
+                if self.counters.is_empty() {
+                    self.separate();
+                }
+                self.counters.push(start);
             }
             Event::End(TagEnd::List(_)) => {
                 self.flush_line();
-                self.separate();
-                self.list_depth = self.list_depth.saturating_sub(1);
-                if self.list_depth == 0 {
-                    self.ordered_counter = None;
+                self.counters.pop();
+                if self.counters.is_empty() {
+                    self.separate();
                 }
             }
             Event::Start(Tag::Item) => {
                 self.flush_line();
-                let indent = "  ".repeat(self.list_depth.saturating_sub(1));
-                let marker = match &mut self.ordered_counter {
-                    Some(counter) => {
+                let depth = self.counters.len();
+                let indent = "  ".repeat(depth.saturating_sub(1));
+                let marker = match self.counters.last_mut() {
+                    Some(Some(counter)) => {
                         let marker = format!("{counter}. ");
                         *counter += 1;
                         marker
                     }
+                    // Unordered markers differ per depth, so the eye
+                    // pairs every subitem with its parent.
+                    Some(None) => match depth {
+                        1 => "• ",
+                        2 => "◦ ",
+                        _ => "▪ ",
+                    }
+                    .to_owned(),
                     None => "• ".to_owned(),
                 };
                 self.spans.push(Span::raw(format!("{indent}{marker}")));
@@ -330,11 +341,27 @@ mod tests {
     }
 
     #[test]
-    fn lists_render_bullets_with_indent() {
+    fn sublists_hug_their_parent_and_take_a_deeper_marker() {
         let source = "- one\n- two\n  - nested";
         let lines = render_markdown_d(source);
         let rendered = plain(&lines);
-        assert_eq!(rendered, ["• one", "• two", "", "  • nested"]);
+        assert_eq!(rendered, ["• one", "• two", "  ◦ nested"]);
+    }
+
+    #[test]
+    fn the_ordered_counter_survives_a_nested_list() {
+        let source = "- item\n  1. a\n  2. b\n- item2";
+        let lines = render_markdown_d(source);
+        let rendered = plain(&lines);
+        assert_eq!(rendered, ["• item", "  1. a", "  2. b", "• item2"]);
+    }
+
+    #[test]
+    fn ordered_items_keep_numbering_across_a_nested_unordered_list() {
+        let source = "1. one\n   - sub\n2. two";
+        let lines = render_markdown_d(source);
+        let rendered = plain(&lines);
+        assert_eq!(rendered, ["1. one", "  ◦ sub", "2. two"]);
     }
 
     #[test]
