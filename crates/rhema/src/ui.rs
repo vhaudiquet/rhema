@@ -71,12 +71,16 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &Theme) {
     let area = centered(58, 8, frame.area());
     frame.render_widget(Clear, area);
+    let title = match &login.profile {
+        Some(profile) => format!(" rhema — sign in ({profile}) "),
+        None => " rhema — sign in ".to_owned(),
+    };
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.sunken).fg(theme.text))
-        .title(" rhema — sign in ");
+        .title(title);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -496,8 +500,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // model's window, and the session's accumulated cost. Key hints live
     // in /help, not here.
     let effective = app.effective();
-    let mut parts =
-        vec![Span::raw(effective.model.as_deref().unwrap_or("no model")).fg(theme.text2)];
+    let mut parts = Vec::new();
+    if let Some((name, color)) = app.active_profile() {
+        parts.push(Span::raw(name).fg(color));
+        parts.push(Span::raw(" · ").fg(theme.text3));
+    }
+    parts.push(Span::raw(effective.model.as_deref().unwrap_or("no model")).fg(theme.text2));
     let used = app.usage.map(|u| u64::from(u.input_tokens)).unwrap_or(0);
     let mut context = format_tokens(Some(used));
     if let Some(limit) = app.current_context_window() {
@@ -835,6 +843,31 @@ mod scroll_tests {
             columns.iter().all(|(_, pos)| *pos == columns[0].1),
             "descriptions misaligned: {columns:?}"
         );
+    }
+
+    #[test]
+    fn the_footer_names_the_active_profile_in_its_color() {
+        let mut app = chat_app();
+        app.chat.input = "/".to_owned();
+        app.chat.cursor = 1;
+        // chat_app's stored config has no explicit profile: the seeded
+        // default applies.
+        let (name, color) = app.active_profile().expect("seeded profile");
+        assert_eq!(name, "personal");
+        assert_eq!(color, crate::palette::DARK.accent_text);
+
+        // A configured color wins; unknown names read secondary.
+        app.config.profiles.insert(
+            "work".to_owned(),
+            rhema_config::Profile {
+                color: Some("#D9A643".into()),
+                ..rhema_config::Profile::default()
+            },
+        );
+        app.options.profile = Some("work".into());
+        let (name, color) = app.active_profile().expect("configured profile");
+        assert_eq!(name, "work");
+        assert_eq!(color, ratatui::style::Color::Rgb(0xD9, 0xA6, 0x43));
     }
 
     #[test]

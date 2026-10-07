@@ -48,6 +48,33 @@ pub struct Theme {
     pub info: Color,
 }
 
+/// Parses a `#RRGGBB` or `RRGGBB` config color. Config colors are user
+/// data, not component literals — rule 1 governs code, not profiles.
+pub fn parse_hex_color(text: &str) -> Option<Color> {
+    let hex = text.trim().strip_prefix('#').unwrap_or(text.trim());
+    if hex.len() != 6 {
+        return None;
+    }
+    u32::from_str_radix(hex, 16).ok().map(|value| {
+        Color::Rgb(
+            (value >> 16) as u8,
+            ((value >> 8) & 0xFF) as u8,
+            (value & 0xFF) as u8,
+        )
+    })
+}
+
+/// The color a profile name wears when its config sets none: the two
+/// seeded profiles get distinct everyday tones, anything else reads
+/// secondary.
+pub fn default_profile_color(name: &str, theme: &Theme) -> Color {
+    match name {
+        "personal" => theme.accent_text,
+        "work" => theme.info,
+        _ => theme.text2,
+    }
+}
+
 /// The dark theme: the default.
 pub const DARK: Theme = Theme {
     ground: Color::Rgb(0x0F, 0x14, 0x13),

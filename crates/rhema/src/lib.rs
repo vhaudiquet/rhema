@@ -45,7 +45,7 @@ pub use app::{App, AppSetup, Effect, RunOptions, Screen};
 pub use approval::{ApprovalAnswerer, TuiApproval};
 pub use args::Args;
 pub use events::{FetchWhy, OwnedEvent, UiEvent};
-pub use palette::{DARK, LIGHT, Theme};
+pub use palette::{DARK, LIGHT, Theme, parse_hex_color};
 pub use run::run;
 pub use screens::{ChatAction, ChatState, LoginAction, LoginScreen, PickerAction, PickerScreen};
 pub use store::{ConfigStore, DiskStore, MemoryStore};

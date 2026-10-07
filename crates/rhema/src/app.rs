@@ -264,7 +264,18 @@ impl App {
                         .unwrap_or("google"),
                 )
             }),
-            (None, _) => Screen::Login(LoginScreen::new()),
+            (None, _) => Screen::Login(
+                LoginScreen::new()
+                    .select_stored_provider(effective.provider.as_deref())
+                    .with_profile(
+                        setup
+                            .options
+                            .profile
+                            .as_deref()
+                            .map(str::to_owned)
+                            .or_else(|| setup.config.profile.clone()),
+                    ),
+            ),
         };
         Ok(Self {
             // Read before `options` moves into the struct.
@@ -336,7 +347,12 @@ impl App {
                 } else {
                     // The session stays right where it is: a successful
                     // login lands in a picker that rebuilds onto it.
-                    self.screen = Screen::Login(crate::screens::LoginScreen::for_chat());
+                    let effective = self.effective();
+                    self.screen = Screen::Login(
+                        crate::screens::LoginScreen::for_chat()
+                            .select_stored_provider(effective.provider.as_deref())
+                            .with_profile(self.options.profile.clone()),
+                    );
                 }
             }
             "clear" => {
@@ -747,6 +763,26 @@ impl App {
         self.config.effective(self.options.profile.as_deref())
     }
 
+    /// The active profile's name and display color: the `--profile` flag
+    /// over the stored active profile, colored by its config (a `#RRGGBB`
+    /// string) or by a name-based theme tone.
+    pub fn active_profile(&self) -> Option<(String, ratatui::style::Color)> {
+        let name = self
+            .options
+            .profile
+            .clone()
+            .or_else(|| self.config.profile.clone())?;
+        let custom = self
+            .config
+            .profiles
+            .get(&name)
+            .and_then(|profile| profile.color.as_deref())
+            .and_then(crate::palette::parse_hex_color);
+        let color =
+            custom.unwrap_or_else(|| crate::palette::default_profile_color(&name, self.theme));
+        Some((name, color))
+    }
+
     /// The pricing of the model the session currently runs on, when it is
     /// one this crate prices.
     fn current_model_pricing(&self) -> Option<rhema_provider_google::Pricing> {
@@ -944,7 +980,12 @@ mod tests {
             _ => panic!("expected the picker after a successful login"),
         }
         assert_eq!(
-            h.store.load().unwrap().default.google_api_key.as_deref(),
+            h.store
+                .load()
+                .unwrap()
+                .effective(None)
+                .google_api_key
+                .as_deref(),
             Some("secret")
         );
         assert!(matches!(
@@ -1003,11 +1044,9 @@ mod tests {
             _ => panic!("expected the picker after a successful llama login"),
         }
         let config = h.store.load().unwrap();
-        assert_eq!(config.default.provider.as_deref(), Some("llama-cpp"));
-        assert_eq!(
-            config.default.llama_cpp_url.as_deref(),
-            Some("http://box:8080")
-        );
+        let effective = config.effective(None);
+        assert_eq!(effective.provider.as_deref(), Some("llama-cpp"));
+        assert_eq!(effective.llama_cpp_url.as_deref(), Some("http://box:8080"));
     }
 
     #[test]
@@ -1069,7 +1108,7 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(h.app.agent.is_some());
         assert_eq!(
-            h.store.load().unwrap().default.model.as_deref(),
+            h.store.load().unwrap().effective(None).model.as_deref(),
             Some("qwen3-8b")
         );
     }
@@ -1096,7 +1135,14 @@ mod tests {
             ),
             _ => panic!("a failed login must stay on the login screen"),
         }
-        assert!(h.store.load().unwrap().default.google_api_key.is_none());
+        let stored = h.store.load().unwrap();
+        assert!(stored.default.google_api_key.is_none());
+        assert!(
+            stored
+                .profiles
+                .values()
+                .all(|profile| profile.google_api_key.is_none())
+        );
     }
 
     #[test]
@@ -1111,7 +1157,7 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(h.app.agent.is_some());
         assert_eq!(
-            h.store.load().unwrap().default.model.as_deref(),
+            h.store.load().unwrap().effective(None).model.as_deref(),
             Some("m-a")
         );
     }
@@ -1143,7 +1189,7 @@ mod tests {
             vec![Message::text(Role::User, "earlier work")]
         );
         assert_eq!(
-            h.store.load().unwrap().default.model.as_deref(),
+            h.store.load().unwrap().effective(None).model.as_deref(),
             Some("m-b")
         );
         assert!(

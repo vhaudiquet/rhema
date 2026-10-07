@@ -118,6 +118,8 @@ pub struct LoginScreen {
     pub status: LoginStatus,
     /// What Esc does here.
     pub purpose: LoginPurpose,
+    /// The profile this login writes into, shown in the title.
+    pub profile: Option<String>,
 }
 
 impl Default for LoginScreen {
@@ -134,7 +136,32 @@ impl LoginScreen {
             selected: 0,
             status: LoginStatus::Idle,
             purpose: LoginPurpose::Initial,
+            profile: None,
         }
+    }
+
+    /// Names the profile this login writes into, for the title.
+    pub fn with_profile(self, profile: Option<String>) -> Self {
+        Self { profile, ..self }
+    }
+
+    /// Preselects the provider row matching the stored settings' provider
+    /// string, so a profile's login opens on its own row. Unmatched
+    /// spellings keep Google selected.
+    pub fn select_stored_provider(self, provider: Option<&str>) -> Self {
+        let selected = PROVIDERS
+            .iter()
+            .position(|entry| match entry.kind {
+                LoginProvider::Google => provider == Some("google"),
+                LoginProvider::LlamaCpp => {
+                    provider == Some("llama-cpp")
+                        || provider == Some("llama_cpp")
+                        || provider == Some("llamacpp")
+                }
+                LoginProvider::OpenRouter => provider == Some("openrouter"),
+            })
+            .unwrap_or(0);
+        Self { selected, ..self }
     }
 
     /// A login screen opened from the chat: Esc returns there.

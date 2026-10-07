@@ -1,5 +1,6 @@
-//! Persistent rhema settings: the config file backs login (stored provider
-//! keys), provider selection, and the last-used model choice.
+//! Persistent rhema settings: named profiles for contexts like work and
+//! personal, plus a fallback section that legacy config files already
+//! deserialize into.
 //!
 //! The file lives at `$XDG_CONFIG_HOME/rhema/config.yaml`, falling back to
 //! `$HOME/.config/rhema/config.json`, written with `0600` permissions since
@@ -52,6 +53,9 @@ pub struct Profile {
     pub llama_cpp_api_key: Option<String>,
     /// The OpenRouter API key entered at login, when one is stored.
     pub openrouter_api_key: Option<String>,
+    /// The color this profile's name wears in the UI, as `#RRGGBB`.
+    /// Unset means the UI picks a tone from the theme by profile name.
+    pub color: Option<String>,
 }
 
 impl Profile {
@@ -97,21 +101,52 @@ impl Profile {
     }
 }
 
-/// The persisted settings: a fallback section plus named profiles for
-/// contexts like work and personal.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+/// The persisted settings: a fallback section plus named profiles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Config {
     /// The profile used when `--profile` does not name one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default = "default_active_profile",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub profile: Option<String>,
     /// Named profiles; each overrides the top-level section field-wise.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(
+        default = "default_profiles",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
     pub profiles: BTreeMap<String, Profile>,
     /// The top-level fallback section — also what legacy config files
     /// deserialize into.
     #[serde(flatten)]
     pub default: Profile,
+}
+
+/// The active profile on fresh setups and files that omit the key.
+fn default_active_profile() -> Option<String> {
+    Some("personal".to_owned())
+}
+
+/// The profiles on fresh setups and files that omit the key.
+fn default_profiles() -> BTreeMap<String, Profile> {
+    BTreeMap::from([
+        ("personal".to_owned(), Profile::default()),
+        ("work".to_owned(), Profile::default()),
+    ])
+}
+
+impl Default for Config {
+    /// Fresh setups ship with the two everyday profiles and `personal`
+    /// active. Loaded files missing the keys get the same treatment via
+    /// the field-level serde defaults.
+    fn default() -> Self {
+        Self {
+            profile: default_active_profile(),
+            profiles: default_profiles(),
+            default: Profile::default(),
+        }
+    }
 }
 
 impl Config {
@@ -140,6 +175,7 @@ impl Config {
                     .openrouter_api_key
                     .clone()
                     .or(self.default.openrouter_api_key.clone()),
+                color: profile.color.clone().or(self.default.color.clone()),
             },
             None => self.default.clone(),
         }
@@ -183,8 +219,8 @@ impl Config {
         }
     }
 
-    /// Persists the config, creating the directory; the file is written with
-    /// `0600` permissions on Unix because it holds credentials.
+    /// Persists the config, creating the directory; the file is written
+    /// with `0600` permissions on Unix because it holds credentials.
     pub fn save(&self) -> Result<(), ConfigError> {
         let dir = Self::dir()?;
         std::fs::create_dir_all(&dir)?;
@@ -310,6 +346,7 @@ mod tests {
                 llama_cpp_url: Some("http://localhost:8080".into()),
                 llama_cpp_api_key: None,
                 openrouter_api_key: None,
+                color: None,
             },
             ..Config::default()
         };
@@ -345,6 +382,29 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_file_loads_as_the_default_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.yaml");
+        assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+    }
+
+    #[test]
+    fn fresh_setups_ship_personal_and_work_profiles() {
+        let config = Config::default();
+        assert_eq!(config.profile.as_deref(), Some("personal"));
+        assert!(config.profiles.contains_key("personal"));
+        assert!(config.profiles.contains_key("work"));
+        // A loaded file missing the keys gets the same seeding.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "model: m\n").unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.profile.as_deref(), Some("personal"));
+        assert!(loaded.profiles.contains_key("work"));
+        assert_eq!(loaded.default.model.as_deref(), Some("m"));
+    }
+
+    #[test]
     fn profiles_override_the_default_section_field_wise() {
         let config = Config {
             profile: Some("work".into()),
@@ -359,6 +419,7 @@ mod tests {
                 Profile {
                     provider: Some("openrouter".into()),
                     google_api_key: Some("work-key".into()),
+                    color: Some("#8FA6B8".into()),
                     ..Profile::default()
                 },
             )]),
@@ -368,6 +429,7 @@ mod tests {
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
         assert_eq!(work.google_api_key.as_deref(), Some("work-key"));
         assert_eq!(work.model.as_deref(), Some("personal-model"));
+        assert_eq!(work.color.as_deref(), Some("#8FA6B8"));
 
         // No flag: the stored active profile applies.
         let active = config.effective(None);
@@ -376,6 +438,7 @@ mod tests {
         // An unknown flag: the default section stands in.
         let fallback = config.effective(Some("other"));
         assert_eq!(fallback.provider.as_deref(), Some("google"));
+        assert_eq!(fallback.color, None);
     }
 
     #[test]
@@ -398,12 +461,5 @@ mod tests {
         config.profile = None;
         config.set_for_profile(None, |p| p.model = Some("top".into()));
         assert_eq!(config.default.model.as_deref(), Some("top"));
-    }
-
-    #[test]
-    fn a_missing_file_loads_as_the_default_config() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("does-not-exist.yaml");
-        assert_eq!(Config::load_from(&path).unwrap(), Config::default());
     }
 }
