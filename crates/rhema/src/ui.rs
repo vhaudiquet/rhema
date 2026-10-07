@@ -863,48 +863,78 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         })
         .collect();
     let chips = rows.len();
-    let logical: Vec<&str> = if app.chat.input.is_empty() {
-        vec![""]
-    } else {
-        app.chat.input.split('\n').collect()
-    };
-    // The cursor's logical line, so a box taller than the cap keeps the
-    // cursor's line in the shown window.
+    // The text wraps into visual rows — the same wrap math the height
+    // counts — with the marker riding on each logical line's first row.
+    // The cursor maps onto those rows exactly, so the box windows by
+    // what the user sees.
     let cursor_line = app.chat.cursor_line_index();
-    // The text window fills whatever rows the chips left, at least one.
+    let cursor_column = app.chat.cursor_column();
+    let mut text_rows: Vec<Line> = Vec::new();
+    let mut markers: Vec<bool> = Vec::new();
+    let mut cursor_at: Option<(usize, usize)> = None;
+    for (li, line) in app.chat.input.split('\n').enumerate() {
+        let marker = if li == 0 { prompt } else { "  " };
+        let wrapped = wrap_line(
+            &Line::from(vec![
+                Span::raw(marker).fg(theme.text3),
+                Span::raw(line.to_owned()),
+            ]),
+            width,
+        );
+        let lens: Vec<usize> = wrapped
+            .iter()
+            .map(|row| {
+                row.spans
+                    .iter()
+                    .map(|span| span.content.chars().count())
+                    .sum()
+            })
+            .collect();
+        for (ri, row) in wrapped.into_iter().enumerate() {
+            if li == cursor_line && cursor_at.is_none() {
+                let before: usize = lens[..ri].iter().sum();
+                if cursor_column <= before + lens[ri] {
+                    cursor_at = Some((text_rows.len(), (cursor_column - before).min(lens[ri])));
+                }
+            }
+            text_rows.push(row);
+            markers.push(ri == 0);
+        }
+    }
+    // The window fills whatever rows the chips left, anchored so the
+    // cursor's row stays visible; with no cursor (a running turn) the
+    // tail shows.
     let remaining = INPUT_MAX_CONTENT_ROWS.saturating_sub(chips).max(1);
-    let first = if logical.len() > remaining {
-        cursor_line.min(logical.len() - remaining)
+    let total = text_rows.len();
+    let (cursor_row, _cursor_col) = cursor_at.unwrap_or((total.saturating_sub(1), 0));
+    let first = if total > remaining {
+        cursor_row.min(total - remaining)
     } else {
         0
     };
-    let window: Vec<&str> = logical[first..first + remaining.min(logical.len() - first)].to_vec();
-
-    // The prompt marks the first shown row; continuation rows sit flush.
-    for (index, row) in window.iter().enumerate() {
-        let marker = if index == 0 { prompt } else { "  " };
-        if index == 0 && first == 0 && row.is_empty() && !app.running {
-            // The placeholder keeps the box reading as an input.
-            rows.push(Line::from(vec![
-                Span::raw(prompt).fg(theme.text3),
-                Span::raw("ask anything · /help for commands").fg(theme.text3),
-            ]));
-        } else {
-            rows.push(Line::from(vec![
-                Span::raw(marker).fg(theme.text3),
-                Span::raw((*row).to_owned()),
-            ]));
+    if text_rows.is_empty() {
+        // The placeholder keeps the box reading as an input.
+        rows.push(Line::from(vec![
+            Span::raw(prompt).fg(theme.text3),
+            Span::raw("ask anything · /help for commands").fg(theme.text3),
+        ]));
+    } else {
+        for row in text_rows[first..first + remaining.min(total - first)]
+            .iter()
+            .cloned()
+        {
+            rows.push(row);
         }
     }
     frame.render_widget(Paragraph::new(rows), inner);
     if !app.running {
-        // Column within the line, clamped to the row: a line that wraps
-        // parks the cursor on its row's end instead of wandering.
-        let column = app.chat.cursor_column().min(width.saturating_sub(1));
-        // The prompt and the continuation indent are both two cells.
+        let (cursor_row, cursor_col) = cursor_at.unwrap_or((0, 0));
+        // The prompt and the continuation indent are both two cells,
+        // and only each logical line's first row carries one.
+        let marker = u16::from(markers[cursor_row]);
         frame.set_cursor_position(Position {
-            x: inner.x + 2 + column as u16,
-            y: inner.y + chips as u16 + (cursor_line - first) as u16,
+            x: inner.x + marker * 2 + cursor_col as u16,
+            y: inner.y + chips as u16 + (cursor_row - first) as u16,
         });
     }
 }
@@ -922,7 +952,17 @@ fn input_rows(input: &str, attachments: usize, width: u16) -> u16 {
     } else {
         input
             .split('\n')
-            .map(|line| wrap_line(&Line::from(line), width).len())
+            .enumerate()
+            .map(|(li, line)| {
+                // The marker narrows a line's first row, exactly as the
+                // render wraps it.
+                let marker = if li == 0 { "❯ " } else { "  " };
+                wrap_line(
+                    &Line::from(vec![Span::raw(marker), Span::raw(line.to_owned())]),
+                    width,
+                )
+                .len()
+            })
             .sum()
     };
     let content = attachments + text_rows;
@@ -1437,6 +1477,25 @@ mod scroll_tests {
             .expect("reply row visible");
         // Exactly one blank row between the ⌁ line and the response.
         assert_eq!(reply_row, tool_row + 2, "one blank row in between");
+    }
+
+    #[test]
+    fn a_long_prompt_wraps_and_shows_its_tail() {
+        let mut app = chat_app();
+        let long = format!("{}end", "word ".repeat(30));
+        app.chat.insert_str(&long);
+
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        // The whole prompt is visible, tail included — nothing clips.
+        assert!(screen.contains("end"), "{screen}");
+        // The box grew to the wrapped height: six-ish rows of content.
+        assert!(input_rows(&long, 0, 40) > 3, "one wrapped line, taller box");
     }
 
     #[test]
