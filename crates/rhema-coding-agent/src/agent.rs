@@ -38,7 +38,7 @@ pub enum CodingAgentError {
 
 /// The built-in base prompt, kept as data next to the code and read in
 /// whole: `{workspace}` is the placeholder a session's workspace path
-/// replaces. This is also what seeds a user's `SYSTEM.md` on first run.
+/// replaces.
 pub const DEFAULT_SYSTEM_MD: &str = include_str!("../SYSTEM.md");
 
 /// The default base prompt for a workspace: [`DEFAULT_SYSTEM_MD`] with

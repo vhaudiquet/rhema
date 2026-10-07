@@ -21,7 +21,7 @@ use crossterm::event::{
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use rhema_coding_agent::{AllowAll, Approval, CodingAgent, DEFAULT_SYSTEM_MD};
+use rhema_coding_agent::{AllowAll, Approval, CodingAgent};
 use rhema_config::Config;
 use rhema_core::{Event as ModelEvent, EventSink, Session};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -93,19 +93,12 @@ fn format_tokens(limit: u32) -> String {
     }
 }
 
-/// The user's SYSTEM.md as the base prompt, seeding the built-in
-/// default next to their config on first run so there is something to
-/// edit. `None` falls back to the built-in default.
+/// The user's SYSTEM.md as the base prompt when the file exists;
+/// `None` falls back to the built-in default. Nothing is ever written:
+/// the file is an opt-in override, not a created one.
 fn resolve_base_system(path: Option<&std::path::Path>) -> Option<String> {
     let path = path?;
-    match std::fs::read_to_string(path) {
-        Ok(raw) => Some(raw),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            let _ = std::fs::write(path, DEFAULT_SYSTEM_MD);
-            None
-        }
-        Err(_) => None,
-    }
+    std::fs::read_to_string(path).ok()
 }
 
 /// Runs the frontend: headless one-shot when a prompt or a pipe asks for

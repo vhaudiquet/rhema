@@ -91,9 +91,7 @@ pub fn prompt_section(skills: &[Skill]) -> String {
     if skills.is_empty() {
         return String::new();
     }
-    let mut out = String::from(
-        "\nSkills (name / trigger / file):\n",
-    );
+    let mut out = String::from("\nSkills (name / trigger / file):\n");
     for skill in skills {
         out.push_str(&format!(
             "{} / {} / {}\n",

@@ -84,12 +84,11 @@ work the info blue.
 
 ### The system prompt
 
-On first run rhema seeds `~/.config/rhema/SYSTEM.md` with the
-built-in base prompt (`{workspace}` stands for the session's
-workspace). Edit the file and every new session picks it up; delete
-it and the next start re-seeds the default. The skills table
-appends after it, and the file replaces only the base — it does not
-remove skills.
+If `~/.config/rhema/SYSTEM.md` exists, it is the base prompt every
+session starts from — `{workspace}` stands for the session's
+workspace. Without the file, rhema uses its built-in default;
+nothing is ever written. The skills table appends after either, and
+the file replaces only the base — it does not remove skills.
 
 ### Skills
 
