@@ -124,6 +124,7 @@ impl Agent {
                     id: &result.id,
                     content: &result.content,
                     is_error: result.is_error,
+                    code: result.code,
                 });
                 session.history.push(Message {
                     role: Role::Tool,

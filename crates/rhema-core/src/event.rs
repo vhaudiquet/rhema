@@ -36,6 +36,8 @@ pub enum Event<'a> {
         content: &'a str,
         /// Whether the call failed.
         is_error: bool,
+        /// The process exit code of command-like tools; `None` otherwise.
+        code: Option<i32>,
     },
     /// The step ends.
     StepEnd {

@@ -46,6 +46,7 @@ enum Recorded {
         id: String,
         content: String,
         is_error: bool,
+        code: Option<i32>,
     },
     StepEnd {
         usage: Usage,
@@ -67,10 +68,12 @@ impl From<Event<'_>> for Recorded {
                 id,
                 content,
                 is_error,
+                code,
             } => Self::ToolResult {
                 id: id.to_owned(),
                 content: content.to_owned(),
                 is_error,
+                code,
             },
             Event::StepEnd { usage, stop_reason } => Self::StepEnd {
                 usage,
@@ -175,6 +178,7 @@ async fn step_dispatches_the_tool_once_and_appends_the_result() {
                 id: "call_1".into(),
                 content: r#"{"text":"hi"}"#.into(),
                 is_error: false,
+                code: None,
             },
             Recorded::StepEnd {
                 usage: Usage::default(),
@@ -282,6 +286,7 @@ async fn an_unknown_tool_name_is_an_in_band_error() {
             id: "call_1".into(),
             content: "unknown tool: nope".into(),
             is_error: true,
+            code: None,
         }
     );
 }

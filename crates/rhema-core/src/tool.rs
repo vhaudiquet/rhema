@@ -42,6 +42,11 @@ pub struct ToolResult {
     pub content: String,
     /// Whether the call failed; the model reacts to this in-band.
     pub is_error: bool,
+    /// The process exit code of command-like tools; `None` for everything
+    /// else. UI-facing metadata — the model reads the status from
+    /// `content`.
+    #[serde(default)]
+    pub code: Option<i32>,
 }
 
 impl ToolResult {
@@ -51,6 +56,7 @@ impl ToolResult {
             id: id.into(),
             content: content.into(),
             is_error: false,
+            code: None,
         }
     }
 
@@ -60,7 +66,14 @@ impl ToolResult {
             id: id.into(),
             content: content.into(),
             is_error: true,
+            code: None,
         }
+    }
+
+    /// Attaches the process exit code, for command results.
+    pub fn with_code(mut self, code: i32) -> Self {
+        self.code = Some(code);
+        self
     }
 }
 
@@ -97,4 +110,17 @@ pub trait ToolResolver: Send + Sync {
     /// implementations must not panic and must not abort on unknown names
     /// or bad arguments — return [`ToolResult::failure`] instead.
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_result_without_a_code_field_loads_from_an_old_history() {
+        let raw = r#"{"id":"c1","content":"ok","is_error":false}"#;
+        let result: ToolResult = serde_json::from_str(raw).unwrap();
+        assert_eq!(result.code, None);
+        assert_eq!(result.with_code(3).code, Some(3));
+    }
 }
