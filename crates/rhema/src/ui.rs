@@ -424,7 +424,15 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
                     lines.push(Line::from(""));
                 }
                 in_tool_run = is_tool;
-                lines.push(render_line(other, theme));
+                if let transcript::Line::ToolCall { args, ok, code, .. } = other {
+                    if name_is_bash(other) {
+                        lines.push(tool_row(args, *ok, *code, width, theme));
+                    } else {
+                        lines.push(render_line(other, theme));
+                    }
+                } else {
+                    lines.push(render_line(other, theme));
+                }
                 if matches!(other, transcript::Line::User(_)) {
                     lines.push(Line::from(""));
                 }
@@ -626,6 +634,49 @@ fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
             Line::from(Span::raw(text.clone()).fg(theme.info).italic())
         }
     }
+}
+
+/// Whether a tool line is the live shell tool.
+fn name_is_bash(line: &transcript::Line) -> bool {
+    matches!(line, transcript::Line::ToolCall { name, .. } if name == "bash")
+}
+
+/// One tool-call row, built at the terminal's width: `$ command` with
+/// the exit code flush right. The command ellipsizes to what fits; a
+/// call still running or rejected before a shell has no code to show.
+fn tool_row(
+    args: &str,
+    ok: Option<bool>,
+    code: Option<i32>,
+    width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let command = transcript::describe("bash", args);
+    let prefix_width = 2; // "$ "
+    let suffix: Option<(String, ratatui::style::Color)> = match code {
+        Some(0) => Some(("[0]".to_owned(), theme.ok)),
+        Some(n) => Some((format!("[{n}]"), theme.error)),
+        // Rejected without reaching a shell: no code exists.
+        None if ok == Some(false) => Some(("✗".to_owned(), theme.error)),
+        None => None,
+    };
+    let suffix_width = suffix
+        .as_ref()
+        .map_or(0, |(text, _)| text.chars().count() + 1);
+    let command = transcript::truncate_chars(
+        &command,
+        width.saturating_sub(prefix_width + suffix_width + 1),
+    );
+    let mut spans = vec![Span::raw("$ ").fg(theme.text3)];
+    spans.push(Span::raw(command.clone()));
+    if let Some((text, color)) = suffix {
+        let gap = width
+            .saturating_sub(prefix_width + command.chars().count() + suffix_width)
+            .max(1);
+        spans.push(Span::raw(" ".repeat(gap)));
+        spans.push(Span::styled(text, Style::default().fg(color)));
+    }
+    Line::from(spans)
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -1379,13 +1430,51 @@ mod scroll_tests {
                 .collect::<String>()
         };
         let tool_row = (0..buffer.area.height)
-            .find(|y| row_text(*y).contains("$ git status [0]"))
+            .find(|y| row_text(*y).contains("$ git status"))
             .expect("tool row visible");
         let reply_row = (tool_row..buffer.area.height)
             .find(|y| row_text(*y).contains("gone through"))
             .expect("reply row visible");
         // Exactly one blank row between the ⌁ line and the response.
         assert_eq!(reply_row, tool_row + 2, "one blank row in between");
+    }
+
+    #[test]
+    fn a_tool_row_cuts_at_the_width_and_right_aligns_the_code() {
+        let mut app = chat_app();
+        app.transcript.push_user("investigate");
+        let long = "x".repeat(100);
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolCallStart {
+                id: "c1".into(),
+                name: "bash".into(),
+            });
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolCallArgsDelta(format!(
+                "{{\"command\":\"{long}\"}}"
+            )));
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolResult {
+                id: "c1".into(),
+                content: "ok".into(),
+                is_error: false,
+                code: Some(0),
+            });
+
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let row = (0..buffer.area.height)
+            .map(row_text)
+            .find(|row| row.trim_start().starts_with("$ ") && row.contains('…'))
+            .expect("the command cut to the row");
+        assert!(row.trim_end().ends_with("[0]"), "code at the end: {row}");
     }
 
     #[test]
@@ -1424,10 +1513,10 @@ mod scroll_tests {
                 .collect::<String>()
         };
         let first = (0..buffer.area.height)
-            .find(|y| row_text(*y).contains("$ git status [0]"))
+            .find(|y| row_text(*y).contains("$ git status"))
             .expect("first tool row visible");
         let second = (first..buffer.area.height)
-            .find(|y| row_text(*y).contains("$ git log [0]"))
+            .find(|y| row_text(*y).contains("$ git log"))
             .expect("second tool row visible");
         // Tool lines sit tight: the model's empty text parts between
         // calls render as nothing.

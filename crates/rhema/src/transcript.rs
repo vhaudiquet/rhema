@@ -10,8 +10,6 @@ use rhema_core::{Content, Message, Role};
 
 use crate::events::OwnedEvent;
 
-/// Width at which a tool-result summary line is cut.
-pub const COMMAND_WIDTH: usize = 48;
 /// Width at which a tool-call argument echo is cut.
 /// Lines of pretty-printed JSON shown in the approval modal before cutting.
 pub const ARGS_MAX_LINES: usize = 12;
@@ -224,10 +222,10 @@ pub fn describe(name: &str, args: &str) -> String {
     let parsed: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
     let arg = |key: &str| parsed.get(key).and_then(|value| value.as_str());
     match name {
-        // The shell command renders bare: the `$ ` prefix in the
-        // transcript already says what it is.
+        // The shell command renders bare and in full: the transcript
+        // cuts it at the terminal's width, not at an arbitrary count.
         "bash" | "run_command" => match arg("command") {
-            Some(command) => truncate_chars(command, COMMAND_WIDTH),
+            Some(command) => command.to_owned(),
             None => "(no command)".to_owned(),
         },
         other => other.to_owned(),
@@ -453,7 +451,8 @@ mod tests {
         let long = "x".repeat(60);
         assert_eq!(
             describe("bash", &format!(r#"{{"command": "{long}"}}"#)),
-            truncate_chars(&long, COMMAND_WIDTH)
+            long,
+            "the command passes through uncut; the row cuts it"
         );
     }
 
