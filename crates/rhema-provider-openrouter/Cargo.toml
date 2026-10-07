@@ -1,0 +1,24 @@
+[package]
+name = "rhema-provider-openrouter"
+description = "OpenRouter adapter for the rhema ModelProvider seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core" }
+# The shared normalized model row (`GeminiModel`) and `Pricing`
+rhema-provider-google = { path = "../rhema-provider-google" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# HTTP + SSE streaming against OpenRouter's OpenAI-compatible API
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# In-process HTTP mock for offline SSE tests
+wiremock = "0.6"

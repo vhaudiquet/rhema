@@ -602,8 +602,9 @@ fn stop_reason(finish_reason: Option<&str>, parts: &[NormalizedPart]) -> StopRea
 // --- ListModels: wire -> normalized ---
 
 /// One model from the ListModels API, normalized for consumers: no
-/// `models/` prefix, no wire-only fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// `models/` prefix, no wire-only fields. Not `Eq`: the per-instance price
+/// is floating point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GeminiModel {
     /// Model id without the `models/` prefix (e.g. `gemini-3.8-flash`).
     pub id: String,
@@ -617,6 +618,12 @@ pub struct GeminiModel {
     pub output_token_limit: Option<u64>,
     /// The API's `supportedGenerationMethods`, verbatim.
     pub generation_methods: Vec<String>,
+    /// Per-MTok price carried by the source listing itself, when it has one
+    /// (Google's ListModels never does; sibling adapters reusing this
+    /// normalized row may). [`GeminiModel::pricing`] prefers it over the
+    /// curated table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing: Option<crate::pricing::Pricing>,
 }
 
 impl GeminiModel {
@@ -701,6 +708,9 @@ impl From<WireModel> for GeminiModel {
             input_token_limit: wire.input_token_limit,
             output_token_limit: wire.output_token_limit,
             generation_methods: wire.supported_generation_methods,
+            // ListModels carries no pricing; `GeminiModel::pricing` falls
+            // back to the curated table.
+            pricing: None,
         }
     }
 }

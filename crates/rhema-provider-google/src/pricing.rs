@@ -7,9 +7,10 @@
 //! when they do; unknown models simply show no cost.
 
 use crate::wire::GeminiModel;
+use serde::{Deserialize, Serialize};
 
 /// Input and output price, USD per 1M tokens.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Pricing {
     /// Price per 1M input tokens.
     pub input_per_mtok: f64,
@@ -123,9 +124,10 @@ pub fn model_pricing(id: &str) -> Option<Pricing> {
 }
 
 impl GeminiModel {
-    /// The model's price, when this crate knows it.
+    /// The model's price, when this crate knows it: a pricing carried by the
+    /// model row itself wins, the curated table by id falls back.
     pub fn pricing(&self) -> Option<Pricing> {
-        model_pricing(&self.id)
+        self.pricing.or_else(|| model_pricing(&self.id))
     }
 }
 
@@ -152,5 +154,31 @@ mod tests {
     fn unknown_models_have_no_price() {
         assert_eq!(model_pricing("gemma-4-26b-a4b-it"), None);
         assert_eq!(model_pricing("antigravity-preview-05-2026"), None);
+    }
+
+    #[test]
+    fn instance_pricing_wins_and_the_table_falls_back() {
+        // A listed id with no instance pricing still prices from the table.
+        let from_table = GeminiModel {
+            id: "gemini-3.8-flash".into(),
+            display_name: "Gemini 3.8 Flash".into(),
+            description: String::new(),
+            input_token_limit: None,
+            output_token_limit: None,
+            generation_methods: vec![],
+            pricing: None,
+        };
+        assert_eq!(from_table.pricing(), model_pricing("gemini-3.8-flash"));
+
+        // An instance price beats the table, even for a listed id.
+        let instance = Pricing {
+            input_per_mtok: 9.0,
+            output_per_mtok: 9.0,
+        };
+        let priced = GeminiModel {
+            pricing: Some(instance),
+            ..from_table
+        };
+        assert_eq!(priced.pricing(), Some(instance));
     }
 }
