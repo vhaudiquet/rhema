@@ -1880,7 +1880,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhema"
+name = "rhema-code"
 version = "0.1.0"
 dependencies = [
  "anyhow",
