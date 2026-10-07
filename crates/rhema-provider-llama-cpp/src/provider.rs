@@ -18,7 +18,7 @@ use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 
 use crate::stream::SseDecoder;
-use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody, WireModelsPage};
+use crate::wire::{ChatCompletionChunk, ChunkAssembler, LlamaModel, WireErrorBody};
 
 /// The `llama-server` default listen address.
 pub const DEFAULT_BASE_URL: &str = "http://localhost:8080";
@@ -41,7 +41,15 @@ impl LlamaCppProvider {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             api_key: None,
-            http: reqwest::Client::new(),
+            // A dead server must fail fast: connects cap at 10s, and a
+            // stream that stops producing bytes for 90s is dead too.
+            // Streaming calls get no total timeout — generations can run
+            // for minutes.
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .read_timeout(std::time::Duration::from_secs(90))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
     }
 
@@ -54,11 +62,17 @@ impl LlamaCppProvider {
 
     /// The models the server can serve (`GET /v1/models` → `data[].id`;
     /// llama.cpp lists the one loaded model).
-    pub async fn list_models(&self) -> Result<Vec<String>, ProviderError> {
+    /// The models the server offers, with the context windows it reports.
+    /// A single-model server also gets its context from `/props`; in router
+    /// mode, models that are loaded and still silent about their context
+    /// are asked per model (bounded — never for unloaded entries, which
+    /// some servers would autoload just to answer).
+    pub async fn list_models(&self) -> Result<Vec<LlamaModel>, ProviderError> {
         let response = self
             .http
             .get(format!("{}/v1/models", self.base_url))
             .authorized(&self.api_key)
+            .timeout(std::time::Duration::from_secs(20))
             .send()
             .await
             .map_err(network_error)?;
@@ -67,12 +81,75 @@ impl LlamaCppProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(api_error(status, &text));
         }
-        let page: WireModelsPage = response
+        let page: serde_json::Value = response
             .json()
             .await
             .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
-        Ok(page.data.into_iter().map(|model| model.id).collect())
+        let mut models = crate::wire::normalize_models(&page);
+
+        if models.len() == 1 && models[0].context_length.is_none() {
+            if let Some(n_ctx) = self.props(None).await? {
+                models[0].context_length = Some(n_ctx);
+            }
+        } else {
+            let silent: Vec<String> = models
+                .iter()
+                .filter(|model| model.loaded == Some(true) && model.context_length.is_none())
+                .take(8)
+                .map(|model| model.id.clone())
+                .collect();
+            for id in silent {
+                if let Some(n_ctx) = self.props(Some(&id)).await? {
+                    if let Some(model) = models.iter_mut().find(|model| model.id == id) {
+                        model.context_length = Some(n_ctx);
+                    }
+                }
+            }
+        }
+        Ok(models)
     }
+
+    /// The server's runtime properties, optionally for one model. `n_ctx`
+    /// sits at the top level on single-model servers; the router proxies
+    /// per-model queries to the instance.
+    async fn props(&self, model: Option<&str>) -> Result<Option<u64>, ProviderError> {
+        let mut url = format!("{}/props", self.base_url);
+        if let Some(model) = model {
+            url.push_str(&format!("?model={}", urlencode(model)));
+        }
+        let response = self
+            .http
+            .get(url)
+            .authorized(&self.api_key)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Ok(None);
+        }
+        let props: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|err| ProviderError::Api(format!("malformed props: {err}")))?;
+        Ok(crate::wire::context_from_props(&props))
+    }
+}
+
+/// Percent-encodes a model id for a query string. Ids are names, but
+/// routers have been seen serving ids with slashes and spaces.
+fn urlencode(model: &str) -> String {
+    let mut encoded = String::new();
+    for byte in model.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
 }
 
 /// Attaches the bearer header when a key is configured.

@@ -5,9 +5,9 @@ use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, ToolSpec, Usage,
 };
-use rhema_provider_llama_cpp::LlamaCppProvider;
+use rhema_provider_llama_cpp::{LlamaCppProvider, LlamaModel};
 use serde_json::{Value, json};
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 struct Collector(Vec<String>);
@@ -359,7 +359,80 @@ async fn list_models_parses_the_data_ids() {
 
     let provider = LlamaCppProvider::new(server.uri());
     let models = provider.list_models().await.expect("models parse");
-    assert_eq!(models, vec!["qwen2.5-coder-7b".to_owned()]);
+    // The meta context comes through the listing; no /props call is needed.
+    assert_eq!(
+        models,
+        vec![LlamaModel {
+            id: "qwen2.5-coder-7b".into(),
+            context_length: Some(32768),
+            loaded: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_single_model_server_gets_its_context_from_props() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [{ "id": "m" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/props"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "n_ctx": 8192,
+            "default_generation_settings": { "n_ctx": 8192 }
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = LlamaCppProvider::new(server.uri());
+    let models = provider.list_models().await.expect("models parse");
+    assert_eq!(
+        models,
+        vec![LlamaModel {
+            id: "m".into(),
+            context_length: Some(8192),
+            loaded: None,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn router_mode_queries_props_only_for_loaded_models() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "object": "list",
+            "data": [
+                { "id": "loaded-model", "status": { "value": "loaded" } },
+                { "id": "idle-model", "status": { "value": "idle" } }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/props"))
+        .and(query_param("model", "loaded-model"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "n_ctx": 16384 })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = LlamaCppProvider::new(server.uri());
+    let models = provider.list_models().await.expect("models parse");
+    let by_id: std::collections::HashMap<_, _> = models
+        .iter()
+        .map(|model| (model.id.as_str(), model.context_length))
+        .collect();
+    assert_eq!(by_id["loaded-model"], Some(16384));
+    // Unloaded entries are never asked: asking could trigger an autoload.
+    assert_eq!(by_id["idle-model"], None);
 }
 
 #[tokio::test]
@@ -376,5 +449,12 @@ async fn trailing_slashes_in_the_base_url_are_trimmed() {
 
     let provider = LlamaCppProvider::new(format!("{}/", server.uri()));
     let models = provider.list_models().await.expect("models parse");
-    assert_eq!(models, vec!["m".to_owned()]);
+    assert_eq!(
+        models,
+        vec![LlamaModel {
+            id: "m".into(),
+            context_length: None,
+            loaded: None,
+        }]
+    );
 }

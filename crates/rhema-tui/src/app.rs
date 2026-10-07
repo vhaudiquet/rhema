@@ -94,19 +94,19 @@ impl Backend {
                 if let Some(key) = api_key {
                     provider = provider.with_api_key(key.clone());
                 }
-                let ids = provider
+                let models = provider
                     .list_models()
                     .await
                     .map_err(|err| err.to_string())?;
-                // llama.cpp reports ids only; the picker row degrades to
-                // the bare model name.
-                Ok(ids
+                Ok(models
                     .into_iter()
-                    .map(|id| GeminiModel {
-                        display_name: id.clone(),
-                        id,
+                    .map(|model| GeminiModel {
+                        display_name: model.id.clone(),
+                        // The server's own context report, so picker rows
+                        // and the footer carry a real window.
+                        id: model.id,
                         description: String::new(),
-                        input_token_limit: None,
+                        input_token_limit: model.context_length,
                         output_token_limit: None,
                         generation_methods: vec!["generateContent".to_owned()],
                     })

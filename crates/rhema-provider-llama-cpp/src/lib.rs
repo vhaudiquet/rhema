@@ -50,4 +50,7 @@ pub mod wire;
 
 pub use provider::{DEFAULT_BASE_URL, LlamaCppProvider};
 pub use stream::SseDecoder;
-pub use wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler};
+pub use wire::{
+    ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler, LlamaModel, context_from_props,
+    normalize_models,
+};
