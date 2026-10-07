@@ -387,16 +387,23 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     ];
     // Consecutive assistant lines form one markdown response and render
     // through the parser; everything else renders as-is. The bullet marks
-    // the first row of each response. Blocks read apart: a run of tool
-    // lines ends with a blank row before whatever follows, and a prompt
-    // gets a blank row above it when a response precedes — never both at
-    // once, so no double spacing.
+    // the first row of each response. Blocks read apart: a prompt and a
+    // response each get a blank row after them, a tool run ends with a
+    // blank row before whatever follows — but tool lines sit tight
+    // against each other, and the model's empty text parts between calls
+    // neither end a run nor open a reply.
     let mut group: Vec<String> = Vec::new();
     let mut marked = false;
     let mut in_tool_run = false;
     for line in app.transcript.lines() {
         match line {
             transcript::Line::Assistant(text) => {
+                // A whitespace-only line with no response behind it is
+                // noise — models emit empty text parts between tool
+                // calls. Paragraph breaks inside a response keep theirs.
+                if group.is_empty() && text.trim().is_empty() {
+                    continue;
+                }
                 if in_tool_run {
                     lines.push(Line::from(""));
                     in_tool_run = false;
@@ -408,7 +415,9 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 flush_response_group(&mut lines, &mut group, &mut marked, app.theme);
                 marked = false;
                 let is_tool = matches!(other, transcript::Line::ToolCall { .. });
-                if matches!(other, transcript::Line::User(_)) && had_response {
+                if had_response {
+                    // A response ends: whatever follows — its tool run
+                    // or the next block — starts below a blank row.
                     lines.push(Line::from(""));
                 }
                 if in_tool_run && !is_tool {
@@ -416,6 +425,9 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 }
                 in_tool_run = is_tool;
                 lines.push(render_line(other, theme));
+                if matches!(other, transcript::Line::User(_)) {
+                    lines.push(Line::from(""));
+                }
             }
         }
     }
@@ -1344,6 +1356,52 @@ mod scroll_tests {
     }
 
     #[test]
+    fn empty_assistant_noise_between_tools_stays_tight() {
+        let mut app = chat_app();
+        app.transcript.push_user("investigate");
+        for (id, command) in [("c1", "git status"), ("c2", "git log")] {
+            app.transcript
+                .apply(&crate::events::OwnedEvent::ToolCallStart {
+                    id: id.into(),
+                    name: "bash".into(),
+                });
+            app.transcript
+                .apply(&crate::events::OwnedEvent::ToolCallArgsDelta(format!(
+                    "{{\"command\":\"{command}\"}}"
+                )));
+            app.transcript
+                .apply(&crate::events::OwnedEvent::ToolResult {
+                    id: id.into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    code: Some(0),
+                });
+            // Models emit empty text parts between calls.
+            app.transcript
+                .apply(&crate::events::OwnedEvent::TextDelta("\n".into()));
+        }
+
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let first = (0..buffer.area.height)
+            .find(|y| row_text(*y).contains("$ git status [0]"))
+            .expect("first tool row visible");
+        let second = (first..buffer.area.height)
+            .find(|y| row_text(*y).contains("$ git log [0]"))
+            .expect("second tool row visible");
+        // Tool lines sit tight: the model's empty text parts between
+        // calls render as nothing.
+        assert_eq!(second, first + 1, "no blank row between the calls");
+    }
+
+    #[test]
     fn a_blank_row_separates_a_reply_from_the_next_prompt() {
         let mut app = chat_app();
         app.transcript.push_user("alpha");
@@ -1369,9 +1427,9 @@ mod scroll_tests {
         let gamma_row = (beta_row..buffer.area.height)
             .find(|y| row_text(*y).contains("gamma"))
             .expect("second prompt visible");
-        // The reply hugs its prompt above it, but the next prompt opens
-        // its own block: one blank row below the reply.
-        assert_eq!(beta_row, alpha_row + 1, "reply follows its prompt");
-        assert_eq!(gamma_row, beta_row + 2, "one blank row in between");
+        // Every block breathes: one blank row after the prompt, one
+        // after the reply.
+        assert_eq!(beta_row, alpha_row + 2, "a blank row after the prompt");
+        assert_eq!(gamma_row, beta_row + 2, "one blank row after the reply");
     }
 }
