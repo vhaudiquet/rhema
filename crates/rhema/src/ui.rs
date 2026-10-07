@@ -773,24 +773,35 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let selected = app.chat.palette_index.min(candidates.len() - 1);
+    // The window follows the selection: more commands than rows scroll
+    // the list once the highlight passes the bottom, instead of hiding
+    // it.
+    let count = candidates.len();
+    let visible = visible as usize;
+    let first = if count > visible {
+        (app.chat.palette_index + 1)
+            .saturating_sub(visible)
+            .clamp(0, count - visible)
+    } else {
+        0
+    };
+    let selected = app.chat.palette_index.min(count - 1);
     // Descriptions align in a column: every name is padded to the longest
     // visible name plus a three-space gap.
-    let name_width = candidates
+    let shown = &candidates[first..first + visible];
+    let name_width = shown
         .iter()
-        .take(visible as usize)
         .map(|spec| spec.name.width())
         .max()
         .unwrap_or(0)
         + 3;
-    let rows: Vec<Line> = candidates
+    let rows: Vec<Line> = shown
         .iter()
-        .take(visible as usize)
         .enumerate()
         .map(|(index, spec)| {
             // The selection lives in the text, not the row: bold marks it,
             // the background stays shared.
-            let name_style = if index == selected {
+            let name_style = if first + index == selected {
                 Style::default().fg(theme.accent_text).bold()
             } else {
                 Style::default().fg(theme.accent_text)
@@ -1387,6 +1398,46 @@ mod scroll_tests {
         let screen = draw(&mut app);
         assert!(screen.contains("running"), "{screen}");
         assert!(!screen.contains("thinking"), "{screen}");
+    }
+
+    #[test]
+    fn the_palette_window_scrolls_with_the_selection() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        fn key(code: KeyCode) -> crossterm::event::KeyEvent {
+            crossterm::event::KeyEvent::new(code, KeyModifiers::empty())
+        }
+        let mut app = chat_app();
+        app.chat.input = "/".to_owned();
+        app.chat.cursor = 1;
+        // Ten commands, six visible rows: six downs put the selection on
+        // the seventh row, and the window must have followed it.
+        for _ in 0..6 {
+            app.chat.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(app.chat.palette_index, 6);
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(
+            screen.contains("/resume"),
+            "the selection is shown: {screen}"
+        );
+        assert!(!screen.contains("/help"), "the head scrolled out: {screen}");
+
+        // And back to the top restores it.
+        app.chat.palette_index = 0;
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(screen.contains("/help"), "{screen}");
     }
 
     #[test]
