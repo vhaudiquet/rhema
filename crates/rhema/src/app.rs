@@ -3,6 +3,7 @@
 //! or spawn turns are returned to the runner (`crate::run`), which owns
 //! the runtime and the terminal.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -986,11 +987,15 @@ mod tests {
 
     fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
         let config = Config {
-            default: rhema_config::Profile {
-                google_api_key: api_key.map(str::to_owned),
-                model: model.map(str::to_owned),
-                ..rhema_config::Profile::default()
-            },
+            profile: Some("personal".into()),
+            profiles: BTreeMap::from([(
+                "personal".to_owned(),
+                rhema_config::Profile {
+                    google_api_key: api_key.map(str::to_owned),
+                    model: model.map(str::to_owned),
+                    ..rhema_config::Profile::default()
+                },
+            )]),
             ..Config::default()
         };
         let store = Arc::new(MemoryStore::new(config.clone()));
@@ -1004,7 +1009,7 @@ mod tests {
             session,
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
-                profile: None,
+                profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
                 no_confirm: false,
@@ -1483,7 +1488,7 @@ mod tests {
         );
         crate::commands::dispatch(&mut h.app, "/profile work");
         // No key: the session stays put and the reason is in the transcript.
-        assert!(h.app.session_profile.is_none());
+        assert_eq!(h.app.session_profile.as_deref(), Some("personal"));
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(matches!(
             h.app.transcript.lines().last(),
@@ -1496,7 +1501,10 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/profile");
         match &h.app.screen {
-            Screen::Profile(profile) => assert_eq!(profile.entries.len(), 2),
+            Screen::Profile(profile) => {
+                assert_eq!(profile.entries.len(), 1);
+                assert_eq!(profile.entries[0].name, "personal");
+            }
             _ => panic!("expected the profile picker"),
         }
     }

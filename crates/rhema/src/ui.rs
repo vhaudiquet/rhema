@@ -598,7 +598,11 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         parts.push(Span::raw(name).fg(color));
         parts.push(Span::raw(" · ").fg(theme.text3));
     }
-    parts.push(Span::raw(effective.model.as_deref().unwrap_or("no model")).fg(theme.text2));
+    match (&effective.provider, &effective.model) {
+        (None, _) => parts.push(Span::raw("no provider — use /login").fg(theme.text3)),
+        (_, None) => parts.push(Span::raw("no model — use /model").fg(theme.text3)),
+        (_, Some(model)) => parts.push(Span::raw(model.clone()).fg(theme.text2)),
+    }
     let used = app.usage.map(|u| u64::from(u.input_tokens)).unwrap_or(0);
     let mut context = format_tokens(Some(used));
     if let Some(limit) = app.current_context_window() {
@@ -857,6 +861,8 @@ mod scroll_tests {
     use super::render;
     use crate::app::{App, AppSetup, RunOptions};
     use crate::args::ThemeKind;
+    use std::collections::BTreeMap;
+
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
     use std::path::PathBuf;
@@ -864,11 +870,15 @@ mod scroll_tests {
 
     fn chat_app() -> App {
         let config = rhema_config::Config {
-            default: rhema_config::Profile {
-                google_api_key: Some("k".into()),
-                model: Some("m".into()),
-                ..rhema_config::Profile::default()
-            },
+            profile: Some("personal".into()),
+            profiles: BTreeMap::from([(
+                "personal".to_owned(),
+                rhema_config::Profile {
+                    google_api_key: Some("k".into()),
+                    model: Some("m".into()),
+                    ..rhema_config::Profile::default()
+                },
+            )]),
             ..rhema_config::Config::default()
         };
         App::new(AppSetup {
@@ -880,7 +890,7 @@ mod scroll_tests {
             session: rhema_core::Session::default(),
             options: RunOptions {
                 theme: ThemeKind::Dark,
-                profile: None,
+                profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
                 no_confirm: false,
@@ -981,6 +991,28 @@ mod scroll_tests {
         let (name, color) = app.active_profile().expect("configured profile");
         assert_eq!(name, "work");
         assert_eq!(color, ratatui::style::Color::Rgb(0xD9, 0xA6, 0x43));
+    }
+
+    #[test]
+    fn the_footer_admits_when_a_profile_has_no_provider() {
+        let mut app = chat_app();
+        app.config.profile = Some("work".into());
+        app.config
+            .profiles
+            .insert("work".to_owned(), rhema_config::Profile::default());
+
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(screen.contains("no provider — use /login"), "{screen}");
+        assert!(
+            !screen.contains("Qwen"),
+            "another profile's model must not leak: {screen}"
+        );
     }
 
     #[test]

@@ -30,9 +30,6 @@ pub enum ConfigError {
     /// The YAML file is not valid or not the expected shape.
     #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
-    /// The legacy JSON file is not valid or not the expected shape.
-    #[error(transparent)]
-    Json(#[from] serde_json::Error),
 }
 
 /// One named set of provider settings. A profile overrides the top-level
@@ -112,7 +109,7 @@ impl Profile {
     }
 }
 
-/// The persisted settings: a fallback section plus named profiles.
+/// The persisted settings: the active profile name plus named profiles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Config {
@@ -161,33 +158,17 @@ impl Default for Config {
 }
 
 impl Config {
-    /// The settings that apply for `flag` (or the stored active profile):
-    /// the named profile's fields win, the top-level section fills the
-    /// gaps.
+    /// The settings that apply for `flag` (or the stored active profile).
+    ///
+    /// ISOLATION: a profile that exists in the map is authoritative — its
+    /// section alone applies, with no field-wise fallback to the top-level
+    /// section. Work must never inherit personal's model or keys. The
+    /// top-level section applies only when the named profile has no entry
+    /// (configs from before profiles existed).
     pub fn effective(&self, flag: Option<&str>) -> Profile {
         let chosen = flag.or(self.profile.as_deref());
         match chosen.and_then(|name| self.profiles.get(name)) {
-            Some(profile) => Profile {
-                provider: profile.provider.clone().or(self.default.provider.clone()),
-                google_api_key: profile
-                    .google_api_key
-                    .clone()
-                    .or(self.default.google_api_key.clone()),
-                model: profile.model.clone().or(self.default.model.clone()),
-                llama_cpp_url: profile
-                    .llama_cpp_url
-                    .clone()
-                    .or(self.default.llama_cpp_url.clone()),
-                llama_cpp_api_key: profile
-                    .llama_cpp_api_key
-                    .clone()
-                    .or(self.default.llama_cpp_api_key.clone()),
-                openrouter_api_key: profile
-                    .openrouter_api_key
-                    .clone()
-                    .or(self.default.openrouter_api_key.clone()),
-                color: profile.color.clone().or(self.default.color.clone()),
-            },
+            Some(profile) => profile.clone(),
             None => self.default.clone(),
         }
     }
@@ -239,29 +220,16 @@ impl Config {
     }
 
     /// [`Config::load`] against an explicit file (missing file is the
-    /// default config). A `.json` file parses as the legacy format.
+    /// default config).
     pub fn load_from(path: &impl AsRef<Path>) -> Result<Config, ConfigError> {
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
-            // No YAML yet: a legacy JSON file beside it still counts.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let legacy = path
-                    .as_ref()
-                    .parent()
-                    .map(|dir| dir.join("config.json"))
-                    .unwrap_or_else(|| path.as_ref().to_path_buf());
-                if legacy != path.as_ref() {
-                    return Self::load_from(&legacy);
-                }
                 return Ok(Config::default());
             }
             Err(err) => return Err(err.into()),
         };
-        if path.as_ref().extension().is_some_and(|ext| ext == "json") {
-            Ok(serde_json::from_str(&raw)?)
-        } else {
-            Ok(serde_yaml::from_str(&raw)?)
-        }
+        Ok(serde_yaml::from_str(&raw)?)
     }
 
     /// [`Config::save`] to an explicit file, with the same `0600` handling.
@@ -377,22 +345,6 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_yaml_falls_back_to_a_legacy_json_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let legacy = dir.path().join("config.json");
-        std::fs::write(
-            &legacy,
-            r#"{"google_api_key": "json-key", "model": "m", "llama_cpp_url": null,
-                "llama_cpp_api_key": null, "provider": null}"#,
-        )
-        .unwrap();
-        let yaml = dir.path().join("config.yaml");
-        let config = Config::load_from(&yaml).unwrap();
-        assert_eq!(config.default.google_api_key.as_deref(), Some("json-key"));
-        assert_eq!(config.default.model.as_deref(), Some("m"));
-    }
-
-    #[test]
     fn a_missing_file_loads_as_the_default_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.yaml");
@@ -416,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn profiles_override_the_default_section_field_wise() {
+    fn profiles_are_isolated_from_the_default_section_and_each_other() {
         let config = Config {
             profile: Some("work".into()),
             default: Profile {
@@ -435,20 +387,23 @@ mod tests {
                 },
             )]),
         };
+        // The profile stands alone: personal's model and keys never leak
+        // into it.
         let work = config.effective(Some("work"));
-        // The profile wins where it speaks; the default fills the rest.
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
         assert_eq!(work.google_api_key.as_deref(), Some("work-key"));
-        assert_eq!(work.model.as_deref(), Some("personal-model"));
+        assert_eq!(work.model, None);
         assert_eq!(work.color.as_deref(), Some("#8FA6B8"));
 
         // No flag: the stored active profile applies.
         let active = config.effective(None);
         assert_eq!(active.provider.as_deref(), Some("openrouter"));
 
-        // An unknown flag: the default section stands in.
+        // An unknown name: the top-level section stands in (legacy
+        // configs live there).
         let fallback = config.effective(Some("other"));
         assert_eq!(fallback.provider.as_deref(), Some("google"));
+        assert_eq!(fallback.model.as_deref(), Some("personal-model"));
         assert_eq!(fallback.color, None);
     }
 
