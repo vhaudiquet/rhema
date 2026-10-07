@@ -424,7 +424,19 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
                     lines.push(Line::from(""));
                 }
                 in_tool_run = is_tool;
-                if let transcript::Line::ToolCall { args, ok, code, .. } = other {
+                if let transcript::Line::User(text) = other {
+                    // A multi-line prompt renders as the lines it is:
+                    // a raw \n inside one row's spans would vanish.
+                    for (index, segment) in text.split('\n').enumerate() {
+                        // The wrap pass normalizes whitespace runs, so
+                        // the continuation marker is a glyph, not spaces.
+                        let marker = if index == 0 { "❯ " } else { "⋮ " };
+                        lines.push(Line::from(vec![
+                            Span::raw(marker).fg(theme.text3),
+                            Span::raw(segment.to_owned()),
+                        ]));
+                    }
+                } else if let transcript::Line::ToolCall { args, ok, code, .. } = other {
                     if name_is_bash(other) {
                         lines.push(tool_row(args, *ok, *code, width, theme));
                     } else {
@@ -1477,6 +1489,34 @@ mod scroll_tests {
             .expect("reply row visible");
         // Exactly one blank row between the ⌁ line and the response.
         assert_eq!(reply_row, tool_row + 2, "one blank row in between");
+    }
+
+    #[test]
+    fn a_multi_line_prompt_keeps_its_lines() {
+        let mut app = chat_app();
+        app.transcript.push_user("alpha\nbeta\ngamma");
+
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let rows: Vec<String> = (0..buffer.area.height)
+            .map(row_text)
+            .map(|row| row.trim_end().to_owned())
+            .collect();
+        assert!(
+            rows.contains(&" ❯ alpha".to_owned()),
+            "first line keeps the prompt: {rows:?}"
+        );
+        assert!(
+            rows.contains(&" ⋮ beta".to_owned()) && rows.contains(&" ⋮ gamma".to_owned()),
+            "continuation lines keep their break: {rows:?}"
+        );
     }
 
     #[test]
