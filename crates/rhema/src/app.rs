@@ -592,6 +592,14 @@ impl App {
             .push_notice(&format!("resumed {messages} messages"));
     }
 
+    /// A bracketed paste landed: into the input, newlines included —
+    /// pasting multi-line text must not fire submits.
+    pub fn on_paste(&mut self, text: &str) {
+        if matches!(self.screen, Screen::Chat) {
+            self.chat.insert_str(text);
+        }
+    }
+
     /// Scroll the history with the wheel: the same step as PageUp/PageDown
     /// (one wheel tick), so both controls move in lockstep.
     pub fn on_mouse_scroll(&mut self, up: bool) {
@@ -1597,6 +1605,13 @@ mod tests {
             cached_input_tokens: 0,
         });
         assert_eq!(h.app.context_used(), 500);
+    }
+
+    #[test]
+    fn paste_lands_in_the_input_with_newlines() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_paste("a\r\nb");
+        assert_eq!(h.app.chat.input, "a\nb");
     }
 
     #[test]

@@ -764,6 +764,89 @@ impl ChatState {
         }
     }
 
+    /// Inserts a newline at the cursor: the input grows a line instead
+    /// of submitting.
+    pub fn insert_newline(&mut self) {
+        self.insert_str("\n");
+    }
+
+    /// Inserts `text` at the cursor, newlines and all — the bracketed
+    /// paste path. Carriage returns normalize to newlines, since a
+    /// terminal paste may carry either.
+    pub fn insert_str(&mut self, text: &str) {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let count = normalized.chars().count();
+        self.input.insert_str(self.byte_offset(), &normalized);
+        self.cursor += count;
+        self.palette_index = 0;
+    }
+
+    /// The cursor's logical line index, 0-based — the input window's
+    /// anchor.
+    pub fn cursor_line_index(&self) -> usize {
+        self.input
+            .chars()
+            .take(self.cursor)
+            .filter(|c| *c == '\n')
+            .count()
+    }
+
+    /// The cursor's column within its logical line.
+    pub fn cursor_column(&self) -> usize {
+        let (start, _) = self.cursor_line();
+        self.cursor - start
+    }
+
+    /// The cursor's logical line as `(start, char_len)`, newline
+    /// characters excluded from the length.
+    fn cursor_line(&self) -> (usize, usize) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let pos = self.cursor.min(chars.len());
+        let mut start = 0;
+        for (index, c) in chars.iter().enumerate() {
+            if index == pos {
+                break;
+            }
+            if *c == '\n' {
+                start = index + 1;
+            }
+        }
+        let end = chars[pos..]
+            .iter()
+            .position(|c| *c == '\n')
+            .map(|offset| pos + offset)
+            .unwrap_or(chars.len());
+        (start, end - start)
+    }
+
+    /// Moves the cursor one logical line up or down, keeping the column
+    /// where the target line is long enough.
+    fn move_vertical(&mut self, up: bool) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut bounds: Vec<(usize, usize)> = Vec::new();
+        let mut start = 0;
+        for (index, c) in chars.iter().enumerate() {
+            if *c == '\n' {
+                bounds.push((start, index - start));
+                start = index + 1;
+            }
+        }
+        bounds.push((start, chars.len() - start));
+        let line = bounds
+            .iter()
+            .position(|(s, l)| self.cursor >= *s && self.cursor <= s + l)
+            .unwrap_or(bounds.len() - 1);
+        let target = if up {
+            line.checked_sub(1)
+        } else {
+            (line + 1 < bounds.len()).then_some(line + 1)
+        };
+        if let Some(t) = target {
+            let (start, len) = bounds[t];
+            self.cursor = start + (self.cursor - bounds[line].0).min(len);
+        }
+    }
+
     /// Byte offset of the cursor inside `input` (a char boundary).
     fn byte_offset(&self) -> usize {
         self.input
@@ -776,7 +859,19 @@ impl ChatState {
     /// Handles one keypress. Ctrl combos are the app's (quit, model
     /// picker); Esc is the app's (approval decline / quit confirm).
     pub fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
+        // Ctrl-J is readline's historical newline: it inserts even
+        // though plain control combos are inert.
+        if key.code == KeyCode::Char('j') && key.modifiers == KeyModifiers::CONTROL {
+            self.insert_newline();
+            return ChatAction::None;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return ChatAction::None;
+        }
+        // Alt-Enter: the other newline key, for terminals that report
+        // the modifier on enter.
+        if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::ALT) {
+            self.insert_newline();
             return ChatAction::None;
         }
         match key.code {
@@ -815,11 +910,13 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::Home => {
-                self.cursor = 0;
+                let (start, _) = self.cursor_line();
+                self.cursor = start;
                 ChatAction::None
             }
             KeyCode::End => {
-                self.cursor = self.input.chars().count();
+                let (start, len) = self.cursor_line();
+                self.cursor = start + len;
                 ChatAction::None
             }
             // The command palette owns the vertical arrows while a slash
@@ -833,6 +930,15 @@ impl ChatState {
                 } else {
                     self.palette_index = self.palette_index.saturating_sub(1);
                 }
+                ChatAction::None
+            }
+            // A multi-line input hands the vertical arrows to the cursor.
+            KeyCode::Up if self.input.contains('\n') => {
+                self.move_vertical(true);
+                ChatAction::None
+            }
+            KeyCode::Down if self.input.contains('\n') => {
+                self.move_vertical(false);
                 ChatAction::None
             }
             KeyCode::Tab if self.input.starts_with('/') => {
@@ -1192,6 +1298,61 @@ mod tests {
         // it accepts the submit (a rejected submit — empty or mid-turn —
         // must not lose typed text).
         assert_eq!(chat.input, "fix it");
+    }
+
+    #[test]
+    fn alt_enter_and_ctrl_j_add_lines_plain_enter_submits() {
+        fn ctrl(c: char) -> KeyEvent {
+            KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+        }
+        let mut chat = ChatState::new();
+        chat.insert_str("x");
+        chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        assert_eq!(chat.input, "x\n");
+        chat.handle_key(ctrl('j'));
+        assert_eq!(chat.input, "x\n\n");
+        assert_eq!(chat.cursor, 3);
+        // Enter itself still submits the whole multi-line text.
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter)),
+            ChatAction::Submit("x\n\n".into())
+        );
+    }
+
+    #[test]
+    fn a_multi_line_input_moves_the_cursor_between_lines() {
+        let mut chat = ChatState::new();
+        chat.insert_str("alpha\nbeta\ngamma");
+        assert_eq!(chat.cursor_line_index(), 2, "the end is the last line");
+        chat.handle_key(key(KeyCode::Up));
+        assert_eq!(chat.cursor_line_index(), 1);
+        assert_eq!(chat.cursor_column(), 4, "column kept");
+        chat.handle_key(key(KeyCode::Up));
+        assert_eq!(chat.cursor_line_index(), 0);
+        assert_eq!(chat.cursor_column(), 4, "clamped to the shorter line");
+        chat.handle_key(key(KeyCode::Up));
+        assert_eq!(chat.cursor_line_index(), 0, "the top stays");
+        chat.handle_key(key(KeyCode::Down));
+        chat.handle_key(key(KeyCode::Down));
+        assert_eq!(chat.cursor_line_index(), 2);
+    }
+
+    #[test]
+    fn home_and_end_stay_within_the_cursor_line() {
+        let mut chat = ChatState::new();
+        chat.insert_str("alpha\nbeta");
+        chat.handle_key(key(KeyCode::Home));
+        assert_eq!(chat.cursor_line_index(), 1);
+        assert_eq!(chat.cursor_column(), 0);
+        chat.handle_key(key(KeyCode::End));
+        assert_eq!(chat.cursor_column(), 4);
+    }
+
+    #[test]
+    fn paste_normalizes_carriage_returns() {
+        let mut chat = ChatState::new();
+        chat.insert_str("a\r\nb\rc");
+        assert_eq!(chat.input, "a\nb\nc");
     }
 
     #[test]

@@ -39,10 +39,11 @@ pub fn render(app: &App, frame: &mut Frame) {
                 })
                 .unwrap_or(1)
                 .max(1);
+            let input_rows = input_rows(&app.chat.input, frame.area().width);
             let [transcript_area, status_area, input_area, footer_area] = Layout::vertical([
                 Constraint::Min(0),
                 Constraint::Length(status_rows),
-                Constraint::Length(3),
+                Constraint::Length(input_rows),
                 Constraint::Length(1),
             ])
             .areas(frame.area());
@@ -764,37 +765,70 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // Single-line input: a window of the text around the cursor, so the
-    // cursor is always visible.
     let width = inner.width.saturating_sub(2) as usize;
     let prompt = "❯ ";
-    let max_len = width.saturating_sub(prompt.chars().count());
-    let chars: Vec<char> = app.chat.input.chars().collect();
-    let start = app.chat.cursor.saturating_sub(max_len.saturating_sub(1));
-    let visible: String = chars
-        .iter()
-        .skip(start)
-        .take(max_len)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .collect();
-    // The prompt stays visible even with the placeholder up, so the box
-    // always reads as an input.
-    let content = if visible.is_empty() && !app.running {
-        Line::from(vec![
-            Span::raw(prompt).fg(theme.text3),
-            Span::raw("ask anything · /help for commands").fg(theme.text3),
-        ])
+    let logical: Vec<&str> = if app.chat.input.is_empty() {
+        vec![""]
     } else {
-        Line::from(vec![Span::raw(prompt).fg(theme.text3), Span::raw(visible)])
+        app.chat.input.split('\n').collect()
     };
-    frame.render_widget(Paragraph::new(content), inner);
+    // The cursor's logical line, so a box taller than the cap keeps the
+    // cursor's line in the shown window.
+    let cursor_line = app.chat.cursor_line_index();
+    let first = if logical.len() > INPUT_MAX_CONTENT_ROWS {
+        cursor_line.min(logical.len() - INPUT_MAX_CONTENT_ROWS)
+    } else {
+        0
+    };
+    let window: Vec<&str> = logical[first..].to_vec();
+
+    // The prompt marks the first shown row; continuation rows sit flush.
+    let mut rows: Vec<Line> = Vec::new();
+    for (index, row) in window.iter().enumerate() {
+        let marker = if index == 0 { prompt } else { "  " };
+        if index == 0 && first == 0 && row.is_empty() && !app.running {
+            // The placeholder keeps the box reading as an input.
+            rows.push(Line::from(vec![
+                Span::raw(prompt).fg(theme.text3),
+                Span::raw("ask anything · /help for commands").fg(theme.text3),
+            ]));
+        } else {
+            rows.push(Line::from(vec![
+                Span::raw(marker).fg(theme.text3),
+                Span::raw((*row).to_owned()),
+            ]));
+        }
+    }
+    frame.render_widget(Paragraph::new(rows), inner);
     if !app.running {
+        // Column within the line, clamped to the row: a line that wraps
+        // parks the cursor on its row's end instead of wandering.
+        let column = app.chat.cursor_column().min(width.saturating_sub(1));
+        // The prompt and the continuation indent are both two cells.
         frame.set_cursor_position(Position {
-            x: inner.x + prompt.chars().count() as u16 + (app.chat.cursor - start) as u16,
-            y: inner.y,
+            x: inner.x + 2 + column as u16,
+            y: inner.y + (cursor_line - first) as u16,
         });
     }
+}
+
+/// Content rows the input box may grow to; past that, a window keeps the
+/// cursor's line shown.
+const INPUT_MAX_CONTENT_ROWS: usize = 8;
+
+/// The input box's total height: borders plus the wrapped content lines,
+/// growing with the text up to the cap. An empty input is one row.
+fn input_rows(input: &str, width: u16) -> u16 {
+    let width = width.saturating_sub(2).max(1) as usize;
+    let rows: usize = if input.is_empty() {
+        1
+    } else {
+        input
+            .split('\n')
+            .map(|line| wrap_line(&Line::from(line), width).len())
+            .sum()
+    };
+    (rows.min(INPUT_MAX_CONTENT_ROWS) + 2) as u16
 }
 
 fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall, theme: &Theme) {
@@ -984,7 +1018,7 @@ mod tests {
 
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
-    use super::render;
+    use super::{input_rows, render};
     use crate::app::{App, AppSetup, RunOptions};
     use crate::args::ThemeKind;
     use std::collections::BTreeMap;
@@ -1154,6 +1188,43 @@ mod scroll_tests {
         let text = screen_text(&app);
         assert!(text.contains("word word word"), "{text}");
         assert!(!text.contains("end-marker"), "{text}");
+    }
+
+    #[test]
+    fn the_input_box_grows_and_caps() {
+        assert_eq!(input_rows("", 40), 3, "empty: one content row");
+        assert_eq!(input_rows("one line", 40), 3);
+        assert_eq!(input_rows("a\nb\nc", 40), 5, "one row per line");
+        let wall = "x\n".repeat(20);
+        assert_eq!(input_rows(&wall, 40), 10, "the cap holds");
+    }
+
+    #[test]
+    fn a_multi_line_input_renders_every_line_and_caps_at_the_tail() {
+        let mut app = chat_app();
+        app.chat.insert_str("alpha\nbeta\ngamma");
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        for word in ["alpha", "beta", "gamma"] {
+            assert!(screen.contains(word), "{word} visible: {screen}");
+        }
+
+        // A wall of text caps the box and shows the tail by the cursor.
+        app.chat.insert_str(&"more\n".repeat(12));
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(screen.contains("more"), "{screen}");
+        assert!(!screen.contains("alpha"), "the head scrolled out: {screen}");
     }
 
     #[test]

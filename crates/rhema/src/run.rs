@@ -13,7 +13,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
+use crossterm::event::{
+    DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+};
 use crossterm::event::{Event, KeyEventKind};
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
@@ -277,8 +279,13 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     };
 
     enable_raw_mode().context("the rhema-tui binary needs a terminal; pipe output through a pty or use the rhema CLI instead")?;
-    crossterm::execute!(stdout(), EnterAlternateScreen, EnableMouseCapture)
-        .context("cannot enter the alternate screen")?;
+    crossterm::execute!(
+        stdout(),
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        EnableBracketedPaste
+    )
+    .context("cannot enter the alternate screen")?;
     install_panic_hook();
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))
         .context("cannot initialize the terminal backend")?;
@@ -309,7 +316,12 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
 /// ignored so a restore attempt never panics (it runs in the panic hook).
 fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
-    let _ = crossterm::execute!(stdout(), DisableMouseCapture, LeaveAlternateScreen);
+    let _ = crossterm::execute!(
+        stdout(),
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
     use std::io::Write;
     let _ = stdout().flush();
 }
@@ -365,6 +377,7 @@ async fn event_loop(
                     crossterm::event::MouseEventKind::ScrollDown => app.on_mouse_scroll(false),
                     _ => {}
                 },
+                Event::Paste(text) => app.on_paste(&text),
                 _ => {}
             }
         }
