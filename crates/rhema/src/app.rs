@@ -516,12 +516,13 @@ impl App {
             );
             return;
         }
-        let rows: Vec<String> = skills
-            .iter()
-            .map(|skill| format!("{} — {}", skill.name, skill.description))
-            .collect();
-        self.transcript
-            .push_notice(&format!("skills: {}", rows.join(" · ")));
+        let mut table = String::from("name | trigger\n--- | ---\n");
+        for skill in &skills {
+            // A raw pipe would forge table columns.
+            let trigger = skill.description.replace('|', "\\|");
+            table.push_str(&format!("{} | {}\n", skill.name, trigger));
+        }
+        self.transcript.push_markdown(table);
     }
 
     /// Opens the resume picker over the sessions saved for this
@@ -2179,8 +2180,9 @@ mod tests {
             .show_skills(Some(global.path()), Path::new("/nowhere"));
         assert!(matches!(
             h.app.transcript.lines().last(),
-            Some(Line::Notice(text))
-                if text.contains("commit-message — apply when writing a commit")
+            Some(Line::Markdown(table))
+                if table.contains("name | trigger")
+                    && table.contains("commit-message | apply when writing a commit")
         ));
 
         // No skills anywhere: the notice names the fix instead.

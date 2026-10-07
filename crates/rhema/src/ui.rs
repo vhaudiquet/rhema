@@ -424,7 +424,11 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
                     lines.push(Line::from(""));
                 }
                 in_tool_run = is_tool;
-                if let transcript::Line::User(text) = other {
+                if let transcript::Line::Markdown(source) = other {
+                    for line in crate::markdown::render_markdown(source, theme, width) {
+                        lines.push(line);
+                    }
+                } else if let transcript::Line::User(text) = other {
                     // A multi-line prompt renders as the lines it is:
                     // a raw \n inside one row's spans would vanish.
                     for (index, segment) in text.split('\n').enumerate() {
@@ -646,6 +650,9 @@ fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
         transcript::Line::Notice(text) => {
             Line::from(Span::raw(text.clone()).fg(theme.info).italic())
         }
+        // Markdown blocks never reach here: they expand in the
+        // transcript loop.
+        transcript::Line::Markdown(_) => Line::from(""),
     }
 }
 

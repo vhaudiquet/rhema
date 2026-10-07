@@ -40,6 +40,9 @@ pub enum Line {
     },
     /// A UI notice (model switched, turn declined, ...).
     Notice(String),
+    /// A system-generated markdown block: rendered as markdown, but not
+    /// part of the session history — a rebuild drops it, like a notice.
+    Markdown(String),
 }
 
 /// The transcript: lines in stream order.
@@ -132,6 +135,11 @@ impl Transcript {
     /// Adds a UI notice line.
     pub fn push_notice(&mut self, text: &str) {
         self.lines.push(Line::Notice(text.to_owned()));
+    }
+
+    /// Adds a system-generated markdown block.
+    pub fn push_markdown(&mut self, text: String) {
+        self.lines.push(Line::Markdown(text));
     }
 
     /// Folds one streaming event into the lines.
