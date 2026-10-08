@@ -223,7 +223,8 @@ While a model streams its reasoning, the status strip previews its last
 rows (dimmed, three at most) — the block vanishes the moment the reply
 starts, and the trace is never stored in the session.
 Commands: `/help`, `/clear` or
-`/new` (fresh session), `/resume`, `/skills`, `/exit`. The transcript word-wraps and scrolls (`pgup`/
+`/new` (fresh session), `/resume`, `/skills`, `/system` (the system
+prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 The footer's badges are plain-Unicode icons — `✻` names the thinking
 level, and the context gauge (`◔◑◕●`) fills with the window so the fill
