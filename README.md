@@ -119,10 +119,13 @@ work a burnt orange, each tuned per theme.
 ### The system prompt
 
 If `~/.config/rhema/SYSTEM.md` exists, it is the base prompt every
-session starts from — `{workspace}` stands for the session's
-workspace. Without the file, rhema uses its built-in default;
-nothing is ever written. The skills table appends after either, and
-the file replaces only the base — it does not remove skills.
+session starts from, with two placeholders rendered in: `{workspace}`,
+the session's workspace, and `{skills}`, the skills table — empty when
+no skill was found. A file without `{skills}` gets the table appended,
+so a prompt written before the placeholder keeps working. Without the
+file, rhema uses its built-in default, which carries the same
+placeholders; nothing is ever written. Any other `{...}` text is left
+alone — templates are prose, not programs.
 
 ### Skills
 
