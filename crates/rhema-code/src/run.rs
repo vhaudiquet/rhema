@@ -327,9 +327,18 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .map(rhema_core::request::ThinkingEffort::from)
         .or_else(|| config.effective(Some(&profile)).thinking_effort())
         .unwrap_or(rhema_core::request::ThinkingEffort::Default);
+    let icons = args
+        .icons
+        .or_else(|| {
+            config
+                .icons
+                .as_deref()
+                .and_then(crate::icons::Flavor::parse)
+        })
+        .unwrap_or_default();
     let options = RunOptions {
         theme: args.theme,
-        icons: crate::icons::Flavor::Unicode,
+        icons,
         profile: Some(profile),
         workspace: workspace.clone(),
         max_steps: args.max_steps,

@@ -105,6 +105,10 @@ pub struct Args {
     #[arg(long)]
     pub thinking: Option<ThinkingKind>,
 
+    /// The footer's icon flavor: `nerd` needs a Nerd Font installed.
+    #[arg(long)]
+    pub icons: Option<crate::icons::Flavor>,
+
     /// Color theme. Dark is the design's primary; light exists for
     /// light-terminal users.
     #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]

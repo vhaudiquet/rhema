@@ -189,8 +189,14 @@ starts, and the trace is never stored in the session.
 Commands: `/help`, `/clear` or
 `/new` (fresh session), `/resume`, `/skills`, `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
+The footer's badges are plain-Unicode icons — `✻` names the thinking
+level, and the context gauge (`◔◑◕●`) fills with the window so the fill
+is readable at a glance. Terminals carrying a Nerd Font can switch to
+the brain and database glyphs with `--icons nerd` or `icons: nerd` in
+config.yaml.
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
-`--max-steps`, `--thinking low|medium|high` (reasoning effort; mapped
+`--max-steps`, `--icons unicode|nerd`, `--thinking low|medium|high`
+(reasoning effort; mapped
 per provider — `reasoning_effort` on OpenAI-compatible endpoints,
 `reasoning.effort` on OpenRouter, a thinking budget on Anthropic and
 Gemini, and ignored where a provider has no knob). `/thinking` changes

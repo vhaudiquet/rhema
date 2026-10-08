@@ -26,7 +26,7 @@ pub const NERD: Icons = Icons {
 };
 
 /// Which flavor the footer draws with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Flavor {
     /// Plain Unicode; renders everywhere.
     #[default]

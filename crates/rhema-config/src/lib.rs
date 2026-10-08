@@ -160,6 +160,10 @@ pub struct Config {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub profiles: BTreeMap<String, Profile>,
+    /// The footer's icon flavor: `unicode` (the default) or `nerd` for
+    /// Nerd Font glyphs. Anything unparseable reads as the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icons: Option<String>,
     /// The last profile that served each workspace a turn, keyed by the
     /// workspace's absolute path. Startup reopens a directory on its
     /// last-used profile — a per-directory memory, never a global
@@ -184,6 +188,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             profiles: default_profiles(),
+            icons: None,
             last_profile_by_workspace: BTreeMap::new(),
         }
     }
@@ -437,6 +442,7 @@ mod tests {
                     thinking: Some("low".into()),
                 },
             )]),
+            icons: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         Config::save_to(&path, &config).unwrap();
@@ -509,6 +515,7 @@ mod tests {
                     },
                 ),
             ]),
+            icons: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         let work = config.effective(Some("work"));
