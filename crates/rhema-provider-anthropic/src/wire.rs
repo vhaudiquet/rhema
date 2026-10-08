@@ -43,7 +43,10 @@
 //!   message, whose `signature_delta` pieces feed the block's replay
 //!   signature instead; a top-level `error` event fails the stream.
 //! - Usage merges per field: `message_start`'s nested `usage` carries the
-//!   input-token count, `message_delta`'s the final output-token count;
+//!   input-token count, `message_delta`'s the final output-token count.
+//!   The totals normalize to the inclusive convention the other adapters
+//!   use: `input_tokens` counts the uncached input plus the cache-write
+//!   subset (writes bill near the full input price), and
 //!   `cache_read_input_tokens` maps to cached tokens (0 when absent).
 //! - Stop reasons: `end_turn` -> EndTurn, `tool_use` -> ToolUse,
 //!   `max_tokens` -> MaxTokens, `stop_sequence` -> StopSequence, anything
@@ -89,9 +92,10 @@ pub struct MessagesRequest {
     pub model: String,
     /// Output token ceiling; the API rejects calls without one.
     pub max_tokens: u32,
-    /// The folded system prompt, when the request has one.
+    /// The folded system prompt, when the request has one — as a block
+    /// array so its end can carry a cache breakpoint.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub system: Option<String>,
+    pub system: Option<Vec<WireSystemBlock>>,
     /// Conversation turns; roles are only `user` and `assistant`.
     pub messages: Vec<WireMessage>,
     /// Tools offered this step, when any.
@@ -147,6 +151,10 @@ pub enum WireBlock {
     Text {
         /// The text itself; never empty.
         text: String,
+        /// The cache breakpoint marker, when this block ends a cached
+        /// prefix.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<WireCacheControl>,
     },
     /// The model's reasoning replayed from history (assistant turns): an
     /// interleaved-thinking model continues its chain of thought across
@@ -175,7 +183,26 @@ pub enum WireBlock {
         content: String,
         /// Whether the call failed; the model reacts to this in-band.
         is_error: bool,
+        /// The cache breakpoint marker, when this block ends a cached
+        /// prefix.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<WireCacheControl>,
     },
+}
+
+impl WireBlock {
+    /// Marks this block as a cache breakpoint. Assistant blocks are
+    /// never the last block of a request — a turn always ends with the
+    /// user's input or a tool result — so only the user-side variants
+    /// carry the marker.
+    fn mark_ephemeral(&mut self) {
+        match self {
+            WireBlock::Text { cache_control, .. } | WireBlock::ToolResult { cache_control, .. } => {
+                *cache_control = EPHEMERAL;
+            }
+            _ => {}
+        }
+    }
 }
 
 /// A `tools[]` entry.
@@ -187,6 +214,35 @@ pub struct WireTool {
     pub description: String,
     /// The tool's argument schema as full JSON Schema.
     pub input_schema: Value,
+    /// The cache breakpoint marker, when this tool ends the cached tool
+    /// segment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<WireCacheControl>,
+}
+
+/// The `cache_control` block annotation: marks a prefix segment for
+/// Anthropic's prompt cache. `ephemeral` is the only kind the API offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WireCacheControl {
+    /// Always `"ephemeral"`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+}
+
+/// The cache breakpoint every marked segment carries.
+pub const EPHEMERAL: Option<WireCacheControl> = Some(WireCacheControl { kind: "ephemeral" });
+
+/// One block of the `system` prompt array.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WireSystemBlock {
+    /// Always `"text"`.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// The prompt text.
+    pub text: String,
+    /// The cache breakpoint marker, when this block ends a cached prefix.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<WireCacheControl>,
 }
 
 // --- Response wire types (deserialize) ---
@@ -291,6 +347,10 @@ pub struct WireUsage {
     /// Prompt subset served from Anthropic's prompt cache.
     #[serde(default)]
     pub cache_read_input_tokens: Option<u32>,
+    /// Prompt subset written to the cache this request (billed at the
+    /// write rate, near the full input price).
+    #[serde(default)]
+    pub cache_creation_input_tokens: Option<u32>,
 }
 
 /// The `error` object of an `error` event, or of a non-2xx response body:
@@ -406,7 +466,10 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
                 for content in &message.content {
                     match content {
                         Content::Text(text) if !text.is_empty() => {
-                            blocks.push(WireBlock::Text { text: text.clone() });
+                            blocks.push(WireBlock::Text {
+                                text: text.clone(),
+                                cache_control: None,
+                            });
                         }
                         Content::ToolCall(call) => {
                             // The trace that produced the call replays
@@ -453,14 +516,16 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
                             tool_use_id: result.id.clone(),
                             content: result.content.clone(),
                             is_error: result.is_error,
+                            cache_control: None,
                         }),
                         _ => None,
                     })
                     .collect();
                 blocks.extend(message.content.iter().filter_map(|content| match content {
-                    Content::Text(text) if !text.is_empty() => {
-                        Some(WireBlock::Text { text: text.clone() })
-                    }
+                    Content::Text(text) if !text.is_empty() => Some(WireBlock::Text {
+                        text: text.clone(),
+                        cache_control: None,
+                    }),
                     _ => None,
                 }));
                 push_turn(&mut messages, "user", blocks);
@@ -474,13 +539,29 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
         ));
     }
 
+    // The last block of the last turn ends the cached conversation
+    // prefix: each step's request extends the previous step's cached
+    // prefix by exactly this turn's delta, and the marker rides forward
+    // with it.
+    if let Some(last_message) = messages.last_mut() {
+        if let Some(last_block) = last_message.content.last_mut() {
+            last_block.mark_ephemeral();
+        }
+    }
+
     let tools = (!req.tools.is_empty()).then(|| {
+        let count = req.tools.len();
         req.tools
             .iter()
-            .map(|spec| WireTool {
+            .enumerate()
+            .map(|(index, spec)| WireTool {
                 name: spec.name.clone(),
                 description: spec.description.clone(),
                 input_schema: object_schema(&spec.parameters),
+                // The last tool ends the cached tool segment: tools sit
+                // at the head of every prompt, so this breakpoint hits
+                // on every step.
+                cache_control: (index + 1 == count).then_some(EPHEMERAL).flatten(),
             })
             .collect()
     });
@@ -497,7 +578,15 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
     Ok(MessagesRequest {
         model: req.params.model.clone(),
         max_tokens,
-        system: (!system_texts.is_empty()).then(|| system_texts.join("\n\n")),
+        system: (!system_texts.is_empty()).then(|| {
+            vec![WireSystemBlock {
+                kind: "text",
+                text: system_texts.join("\n\n"),
+                // The system prompt is byte-stable for a session's life:
+                // this breakpoint hits on every step after the first.
+                cache_control: EPHEMERAL,
+            }]
+        }),
         messages,
         tools,
         temperature: thinking
@@ -843,7 +932,16 @@ impl ChunkAssembler {
 /// Merges one wire usage frame into the running tally; absent fields keep
 /// the value a previous frame set.
 fn merge_usage(usage: &mut Usage, wire: &WireUsage) {
-    if let Some(input) = wire.input_tokens {
+    // The input total is inclusive: the API's own input_tokens count
+    // excludes both cache subsets, so the write subset folds in (writes
+    // bill near the full input price) and reads stay the cached subset.
+    // That keeps every downstream consumer — the context footprint and
+    // the cost math — on the inclusive convention the other adapters use.
+    let mut input = wire.input_tokens;
+    if let Some(writes) = wire.cache_creation_input_tokens {
+        input = Some(input.unwrap_or(0) + writes);
+    }
+    if let Some(input) = input {
         usage.input_tokens = input;
     }
     if let Some(output) = wire.output_tokens {
@@ -1029,14 +1127,21 @@ mod tests {
         assert_eq!(json["model"], "claude-sonnet-4-5");
         assert_eq!(json["max_tokens"], json!(256));
         assert_eq!(json["temperature"], json!(0.2_f32));
-        assert_eq!(json["system"], "be terse");
+        // The system prompt is a block array whose end is a cache
+        // breakpoint: it is byte-stable for the session's life.
+        assert_eq!(
+            json["system"],
+            json!([{ "type": "text", "text": "be terse",
+                     "cache_control": { "type": "ephemeral" } }])
+        );
         assert_eq!(json["stream"], json!(true));
         assert_eq!(
             json["tools"][0],
             json!({
                 "name": "list_dir",
                 "description": "lists a directory",
-                "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } }
+                "input_schema": { "type": "object", "properties": { "path": { "type": "string" } } },
+                "cache_control": { "type": "ephemeral" }
             })
         );
 
@@ -1045,6 +1150,7 @@ mod tests {
         let messages = json["messages"].as_array().expect("messages array");
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], "user");
+        // History rows carry no breakpoint; only the final block does.
         assert_eq!(
             messages[0]["content"],
             json!([{ "type": "text", "text": "list files" }])
@@ -1062,8 +1168,10 @@ mod tests {
             messages[2]["content"],
             json!([
                 { "type": "tool_result", "tool_use_id": "call_0", "content": "[\"src\"]", "is_error": false },
-                { "type": "text", "text": "thanks" }
-            ])
+                { "type": "text", "text": "thanks",
+                  "cache_control": { "type": "ephemeral" } }
+            ]),
+            "the final block ends the cached prefix"
         );
     }
 
@@ -1096,7 +1204,8 @@ mod tests {
             json!([
                 { "type": "tool_result", "tool_use_id": "call_0", "content": "a", "is_error": false },
                 { "type": "tool_result", "tool_use_id": "call_1", "content": "b", "is_error": true },
-                { "type": "text", "text": "thanks" }
+                { "type": "text", "text": "thanks",
+                  "cache_control": { "type": "ephemeral" } }
             ])
         );
     }
@@ -1122,7 +1231,8 @@ mod tests {
             json["messages"][0]["content"],
             json!([
                 { "type": "tool_result", "tool_use_id": "call_9", "content": "boom", "is_error": true },
-                { "type": "text", "text": "and then" }
+                { "type": "text", "text": "and then",
+                  "cache_control": { "type": "ephemeral" } }
             ])
         );
     }
@@ -1141,7 +1251,12 @@ mod tests {
 
         let json = serde_json::to_value(request_body(&req).expect("request maps"))
             .expect("body serializes");
-        assert_eq!(json["system"], "a\n\nb");
+        // Folded system turns land in one marked block array.
+        assert_eq!(
+            json["system"],
+            json!([{ "type": "text", "text": "a\n\nb",
+                     "cache_control": { "type": "ephemeral" } }])
+        );
         assert_eq!(json["messages"].as_array().expect("messages").len(), 1);
         assert!(json.get("tools").is_none());
     }

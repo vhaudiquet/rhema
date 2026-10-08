@@ -115,7 +115,8 @@ async fn streams_sse_into_events_and_an_assembled_output() {
     assert!(body.get("system").is_none());
     assert_eq!(
         body["messages"][0],
-        json!({ "role": "user", "content": [{ "type": "text", "text": "hi" }] })
+        json!({ "role": "user", "content": [{ "type": "text", "text": "hi",
+                 "cache_control": { "type": "ephemeral" } }] })
     );
     // The key is a header, never part of the URL.
     assert!(!server.uri().contains("test-key"));
@@ -267,7 +268,11 @@ async fn history_with_tool_results_maps_to_the_messages_json() {
         .expect("request recording is on");
     assert_eq!(received.len(), 1);
     let body: Value = serde_json::from_slice(&received[0].body).expect("json body");
-    assert_eq!(body["system"], "be terse");
+    assert_eq!(
+        body["system"],
+        json!([{ "type": "text", "text": "be terse",
+                 "cache_control": { "type": "ephemeral" } }])
+    );
     assert_eq!(body["max_tokens"], json!(256));
     assert_eq!(body["temperature"], json!(0.2));
     assert_eq!(
@@ -278,7 +283,8 @@ async fn history_with_tool_results_maps_to_the_messages_json() {
             "input_schema": {
                 "type": "object",
                 "properties": { "path": { "type": "string" } }
-            }
+            },
+            "cache_control": { "type": "ephemeral" }
         })
     );
     let messages = body["messages"].as_array().expect("messages");
