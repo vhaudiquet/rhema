@@ -84,7 +84,10 @@ impl CodingAgent {
             .provider(provider)
             .resolver(tools.clone())
             .system(system)
-            .params(ChatParams::new(config.model.clone()))
+            .params(ChatParams {
+                thinking: config.thinking,
+                ..ChatParams::new(config.model.clone())
+            })
             .build()?;
         Ok(Self {
             agent,

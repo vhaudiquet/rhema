@@ -2,6 +2,8 @@
 
 use std::path::PathBuf;
 
+use rhema_core::request::ThinkingEffort;
+
 /// Everything a [`CodingAgent`](crate::CodingAgent) needs besides the
 /// provider.
 #[derive(Debug, Clone)]
@@ -24,6 +26,9 @@ pub struct CodingAgentConfig {
     /// Cap on steps per turn; a turn still requesting tools past it fails
     /// with `AgentError::MaxIterations`.
     pub max_turn_steps: u32,
+    /// How much reasoning the model should do; providers without a knob
+    /// ignore it, and [`ThinkingEffort::Default`] sends nothing.
+    pub thinking: ThinkingEffort,
 }
 
 impl CodingAgentConfig {
@@ -42,6 +47,7 @@ impl CodingAgentConfig {
             base_system: None,
             workspace: workspace.into(),
             max_turn_steps: Self::DEFAULT_MAX_TURN_STEPS,
+            thinking: ThinkingEffort::Default,
         }
     }
 }
