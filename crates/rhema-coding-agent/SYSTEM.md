@@ -10,7 +10,7 @@ fully.
 
 - **Always apply** (case-insensitive): if a skill description contains
   this phrase, load it into your working context now and use its rules for
-  everything in scope.
+  everything in scope. This is mandatory.
 - **Triggers when / Use when**: if a skill's description contains "Triggers
   when" or "Use when", load it as soon as that stated condition matches your
   task.

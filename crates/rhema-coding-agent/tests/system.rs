@@ -200,3 +200,15 @@ async fn config_system_replaces_the_default() {
 
     assert_eq!(provider.systems(), vec![Some("custom prompt".to_string())]);
 }
+
+#[test]
+fn the_agent_exposes_its_rendered_system_prompt() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = recorder();
+    let config = CodingAgentConfig {
+        system: Some("custom prompt".into()),
+        ..CodingAgentConfig::new("mock-model", root.path())
+    };
+    let agent = CodingAgent::new(provider, config).unwrap();
+    assert_eq!(agent.system(), "custom prompt");
+}

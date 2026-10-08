@@ -126,6 +126,11 @@ impl CodingAgent {
         &self.session
     }
 
+    /// The rendered system prompt this agent stamps into every request.
+    pub fn system(&self) -> &str {
+        self.agent.system()
+    }
+
     /// Mutable access between turns; the engine owns the history only
     /// inside a turn.
     pub fn session_mut(&mut self) -> &mut Session {
