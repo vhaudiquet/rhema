@@ -63,7 +63,8 @@ async fn streams_sse_into_events_and_an_assembled_output() {
 
     assert_eq!(
         out.message.content,
-        vec![Content::Text("He".into()), Content::Text("llo".into())]
+        vec![Content::Text("Hello".into())],
+        "chunk boundaries stay out of the assembled message"
     );
     assert_eq!(out.stop_reason, StopReason::EndTurn);
     assert_eq!(
