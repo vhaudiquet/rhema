@@ -121,11 +121,23 @@ work a burnt orange, each tuned per theme.
 If `~/.config/rhema/SYSTEM.md` exists, it is the base prompt every
 session starts from, with two placeholders rendered in: `{workspace}`,
 the session's workspace, and `{skills}`, the skills table — empty when
-no skill was found. A file without `{skills}` gets the table appended,
-so a prompt written before the placeholder keeps working. Without the
-file, rhema uses its built-in default, which carries the same
-placeholders; nothing is ever written. Any other `{...}` text is left
-alone — templates are prose, not programs.
+no skill was found. For a custom layout, a `{#skills} … {/skills}`
+block repeats its body once per skill, filling `{skill.name}`,
+`{skill.description}`, and `{skill.path}`; the whole block vanishes
+when no skill was found, while a heading placed outside it stays even
+then — write lines that stand alone:
+
+```markdown
+{#skills}
+- {skill.name} — {skill.description} (cat {skill.path} to load)
+{/skills}
+```
+
+A file with neither `{skills}` nor the block gets the default table
+appended, so a prompt written before the placeholders keeps working.
+Without the file, rhema uses its built-in default, which carries the
+same placeholders; nothing is ever written. Any other `{...}` text is
+left alone — templates are prose, not programs.
 
 ### Skills
 
