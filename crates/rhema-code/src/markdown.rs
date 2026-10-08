@@ -246,7 +246,22 @@ impl<'a> MarkdownRenderer<'a> {
                         .push(self.style.apply(text.to_string(), self.theme));
                 }
             }
-            Event::SoftBreak | Event::HardBreak => {
+            // A soft break joins the paragraph with a space — models
+            // hard-wrap prose mid-sentence (some streams even pad chunks
+            // with newlines), and slicing every source line into its own
+            // row shreds such output. An explicit hard break still cuts
+            // the row, and quoted lines keep their rail.
+            Event::SoftBreak => {
+                if let Some(cell) = &mut self.table_cell {
+                    cell.push(' ');
+                } else if self.in_block_quote {
+                    self.flush_line();
+                    self.spans.push(Span::raw("│ ").fg(self.theme.text3));
+                } else if !self.spans.is_empty() {
+                    self.spans.push(Span::raw(" "));
+                }
+            }
+            Event::HardBreak => {
                 if let Some(cell) = &mut self.table_cell {
                     cell.push(' ');
                 } else {
@@ -462,8 +477,33 @@ mod tests {
 
     #[test]
     fn plain_text_passes_through_without_artifacts() {
-        let lines = render_markdown_d("just words\nacross lines");
-        assert_eq!(plain(&lines), ["just words", "across lines"]);
+        let lines = render_markdown_d("just words across lines");
+        assert_eq!(plain(&lines), ["just words across lines"]);
+    }
+
+    #[test]
+    fn soft_wrapped_prose_flows_instead_of_slicing() {
+        // The fragmented shape some model streams arrive in.
+        let lines = render_markdown_d(
+            "rebase\n master only\n .\n the rebuild\n (with backup ref\n s everywhere):",
+        );
+        assert_eq!(
+            plain(&lines).len(),
+            1,
+            "one paragraph, one row: {:#?}",
+            plain(&lines)
+        );
+        let joined: String = plain(&lines)[0]
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(joined.contains("backup ref s everywhere"), "{joined}");
+    }
+
+    #[test]
+    fn a_hard_break_still_cuts_the_row() {
+        let lines = render_markdown_d("first  \nsecond");
+        assert_eq!(plain(&lines), ["first", "second"]);
     }
 
     #[test]
