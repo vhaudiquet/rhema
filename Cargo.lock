@@ -1862,6 +1862,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-autonomous-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rhema-core",
+ "rhema-rsd",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-claw"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "rhema-autonomous-agent",
+ "rhema-coding-agent",
+ "rhema-config",
+ "rhema-core",
+ "rhema-forge-agent",
+ "rhema-provider-anthropic",
+ "rhema-provider-google",
+ "rhema-provider-llama-cpp",
+ "rhema-provider-openai-compatible",
+ "rhema-provider-openrouter",
+ "rhema-rsd",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rhema-code"
 version = "0.1.0"
 dependencies = [
