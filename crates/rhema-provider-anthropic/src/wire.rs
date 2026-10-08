@@ -53,7 +53,7 @@ use rhema_core::event::{Event, EventSink};
 use rhema_core::message::{Content, Message, Role};
 use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
-use rhema_core::request::ModelRequest;
+use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
 use rhema_provider_google::GeminiModel;
 use serde::{Deserialize, Serialize};
@@ -89,11 +89,37 @@ pub struct MessagesRequest {
     /// Tools offered this step, when any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<WireTool>>,
-    /// Sampling temperature, when set.
+    /// Sampling temperature, when set — and never set while thinking is
+    /// enabled: the API rejects temperature modifications on thinking
+    /// turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Extended thinking, when the driver named a level: the API's knob
+    /// is a token budget, not a level, so the level maps onto one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<WireThinking>,
     /// Always `true`: the provider only speaks the streaming dialect.
     pub stream: bool,
+}
+
+/// The `thinking` request field: extended thinking with a token budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WireThinking {
+    /// Always `"enabled"`; there is no disabled form — absence is.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// The reasoning token budget.
+    pub budget_tokens: u32,
+}
+
+/// The reasoning budget a thinking level maps onto.
+fn thinking_budget(thinking: ThinkingEffort) -> Option<u32> {
+    match thinking {
+        ThinkingEffort::Default => None,
+        ThinkingEffort::Low => Some(4_096),
+        ThinkingEffort::Medium => Some(16_384),
+        ThinkingEffort::High => Some(32_768),
+    }
 }
 
 /// One turn on the wire.
@@ -408,13 +434,27 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
             .collect()
     });
 
+    // The budget must sit below max_tokens, so a thinking request raises
+    // the ceiling when the driver's own is too tight; and the API
+    // rejects temperature modifications on thinking turns.
+    let thinking = thinking_budget(req.params.thinking).map(|budget| WireThinking {
+        kind: "enabled",
+        budget_tokens: budget,
+    });
+    let max_tokens = req
+        .params
+        .max_tokens
+        .unwrap_or(DEFAULT_MAX_TOKENS)
+        .max(thinking.map_or(0, |t| t.budget_tokens + 4_096));
+
     Ok(MessagesRequest {
         model: req.params.model.clone(),
-        max_tokens: req.params.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+        max_tokens,
         system: (!system_texts.is_empty()).then(|| system_texts.join("\n\n")),
         messages,
         tools,
-        temperature: req.params.temperature,
+        temperature: thinking.is_none().then_some(req.params.temperature).flatten(),
+        thinking,
         stream: true,
     })
 }
@@ -771,6 +811,40 @@ mod tests {
     }
 
     #[test]
+    fn a_named_thinking_effort_maps_to_a_budget() {
+        let mut req = ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: "claude-sonnet-4-5".into(),
+                temperature: Some(0.7),
+                max_tokens: Some(4_096),
+                thinking: ThinkingEffort::High,
+            },
+        };
+        let body =
+            serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 32_768);
+        // The ceiling rises above the budget, and temperature is dropped:
+        // the API rejects temperature modifications on thinking turns.
+        assert!(
+            body["max_tokens"]
+                .as_u64()
+                .is_some_and(|ceiling| ceiling >= 32_768 + 4_096)
+        );
+        assert!(body.get("temperature").is_none());
+
+        // Default sends no thinking object and keeps the temperature.
+        req.params.thinking = ThinkingEffort::Default;
+        let body =
+            serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        assert!(body.get("thinking").is_none(), "{body}");
+        assert_eq!(body["temperature"].as_f64(), Some(0.7f32 as f64));
+    }
+
+    #[test]
     fn request_body_maps_roles_tools_and_params() {
         let req = ModelRequest {
             system: Some("be terse".into()),
@@ -803,6 +877,7 @@ mod tests {
                 json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
             )],
             params: ChatParams {
+                thinking: ThinkingEffort::Default,
                 model: "claude-sonnet-4-5".into(),
                 temperature: Some(0.2),
                 max_tokens: Some(256),

@@ -248,6 +248,7 @@ async fn history_with_tool_results_maps_to_the_messages_json() {
             model: "claude-sonnet-4-5".into(),
             temperature: Some(0.2),
             max_tokens: Some(256),
+            thinking: rhema_core::request::ThinkingEffort::Default,
         },
     };
 
