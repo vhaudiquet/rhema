@@ -29,6 +29,12 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   compatible streaming chat completions): server URL, optional bearer key
 - `rhema-provider-openrouter` — OpenRouter adapter: the full catalog with
   per-model pricing and context lengths, streaming completions by API key
+- `rhema-provider-anthropic` — Anthropic Messages API adapter: streaming
+  SSE, native tool use, live model listing; `AnthropicProvider::new(api_key)`
+  implements `ModelProvider`
+- `rhema-provider-openai-compatible` — any OpenAI-compatible
+  chat-completions server (OpenAI itself, vLLM, LM Studio), addressed by
+  its versioned base URL: streaming, live model listing
 - `rhema-config` — the XDG config file: stored API key (0600) and
   last-used model; env vars always win over the stored key
 - `rhema-coding-agent` — the coding-agent driver: one built-in tool
@@ -110,8 +116,8 @@ the model loads the body itself with the shell (`cat`), so skills
 need no special tool. `/skills` lists what was discovered.
 
 First launch opens the login screen: pick a provider — Google Gemini by
-API key, or a llama.cpp `llama-server` by URL (optional bearer key;
-Anthropic/OpenAI are marked coming soon). The input is validated with a
+API key, a llama.cpp `llama-server` by URL (optional bearer key), or
+OpenRouter, Anthropic, and OpenAI by API key. The input is validated with a
 real model-list call and stored in `~/.config/rhema/config.yaml` with
 `0600` permissions. Then pick a model from the live list (text chat
 models only — Google rows carry pricing and context window; just type
@@ -143,7 +149,9 @@ git diff | rhema --print -                # prompt from stdin
 ```
 
 Headless backends resolve from config and environment only (there is no
-login prompt): log in once interactively, or set the key env vars. Tool
+login prompt): log in once interactively, or set the key env vars —
+`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or
+`OPENAI_API_KEY` for the keyed backends. Tool
 calls run auto-approved for now; command allowlists are planned.
 
 The TUI paints the Jadeite design system — jade-tinted dark ground,
@@ -243,5 +251,5 @@ and checkpoints through serde — expressible entirely outside crate 1.
 
 - Crate 2: RSD `SessionManager` — dispatch, leases, inbox, revisions, SQLite
   (see [specs/resource-scoped-dispatch.md](specs/resource-scoped-dispatch.md))
-- Provider crates: `rhema-provider-anthropic`, `rhema-provider-openai-compatible`
-- Later: compaction, provider fixtures via cassettes
+- Later: compaction, provider fixtures via cassettes, custom base URLs for
+  OpenAI-compatible servers
