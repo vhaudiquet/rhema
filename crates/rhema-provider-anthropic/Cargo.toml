@@ -1,0 +1,25 @@
+[package]
+name = "rhema-provider-anthropic"
+description = "Anthropic Messages API adapter for the rhema ModelProvider seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core" }
+# The shared normalized model row (`GeminiModel`)
+rhema-provider-google = { path = "../rhema-provider-google" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# HTTP + SSE streaming against the Messages API
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# In-process HTTP mock for offline SSE tests
+wiremock = "0.6"
