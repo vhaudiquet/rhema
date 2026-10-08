@@ -48,6 +48,8 @@
 //!   rule as the Gemini adapter.
 //! - `delta.reasoning_content` (thinking models) becomes one
 //!   `ThinkingDelta` per non-empty piece, like Gemini thought parts.
+//! - The thinking effort is a server-side knob on llama.cpp (a launch
+//!   flag, not a request field): no effort parameter is ever sent.
 //! - Errors: a non-2xx body is `{"error": {code, message, type}}`; the
 //!   mapper keeps `error.message` and falls back to the raw body. The
 //!   server can also fail mid-stream with a `data: {"error": ...}` chunk
@@ -764,6 +766,7 @@ mod tests {
                 model: "qwen2.5-coder-7b".into(),
                 temperature: Some(0.2),
                 max_tokens: Some(256),
+                thinking: rhema_core::request::ThinkingEffort::Default,
             },
         };
 
