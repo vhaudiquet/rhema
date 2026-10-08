@@ -62,12 +62,14 @@ Rules:
   - `autonomous-agent` — the resident-agent core tier: sources, the
     lease-driven driver, and the tool registry
     (`crates/rhema-autonomous-agent/`)
-  - `claw` — the resident forge-watching daemon: the first
+  - `claw` — the resident agent daemon: the first
     autonomous-agent consumer (`crates/rhema-claw/`)
   - `config` — stored settings and credentials (`crates/rhema-config/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema-code` — the frontend crate: terminal UI and headless
     one-shot (`crates/rhema-code/`); its binary is `rhema`
+  - `deploy` — the docker image and helm chart under `deploy/`
+  - `web` — the claw's Nuxt UI under `web/`
   - `deps` — dependency additions/bumps (manifests, lockfile)
 - Omit the scope entirely for repo-wide changes that do not belong to
   a single component (root config, README.md, SPEC.md).

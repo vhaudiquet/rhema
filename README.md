@@ -294,6 +294,29 @@ default `web`), maps thinking deltas to `reasoning_content`, and
 streams standard chat-completions chunks — one notion of session, the
 daemon's, behind a wire format every web UI already speaks.
 
+## Deploying the claw
+
+```sh
+docker build -f deploy/docker/claw.Dockerfile -t rhema-claw .
+helm install claw deploy/helm/rhema-claw \
+  --set auth.token=$(openssl rand -hex 24) \
+  --set secret.stringData.ANTHROPIC_API_KEY=... \
+  --set secret.stringData.GITHUB_TOKEN=... \
+  --set config.provider=anthropic --set config.model=claude-sonnet-4-5
+```
+
+The image is the daemon plus `bash` and `git` (the agent's shell is
+load-bearing); the chart runs exactly one replica — the claw is
+single-node by design, one SQLite store, one dispatcher — with the
+store and workspaces on a PVC, `claw.yaml` in a ConfigMap (db and
+workspace paths are pinned to the mounted volume), and credentials or
+the API token in a Secret. `persistence.enabled=false` trades restart
+survival for disposability.
+
+The UI in `web/claw` is one client of the same surface: `npm run dev`
+proxies to a local claw, `npm run build` emits the static bundle an
+ingress serves next to `/v1`.
+
 ## Usage
 
 ```rust
@@ -371,9 +394,10 @@ and checkpoints through serde — expressible entirely outside crate 1.
 
 ## Roadmap
 
-- A web interface on the claw's HTTP surface
+- Grow `web/claw` into the daily driver: thread transcripts, watch
+  editing polish, session lifecycle (archive/delete)
 - Later: an OpenClaw-style multi-channel consumer on the same dispatch
   core (Telegram as tool, not channel), memory wired into the coding
   agent and the resident tier, agent-initiated sub-sessions, compaction,
   provider fixtures via cassettes, custom base URLs for OpenAI-compatible
-  servers
+  servers, session compaction
