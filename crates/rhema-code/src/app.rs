@@ -639,6 +639,12 @@ impl App {
         self.transcript.push_markdown(table);
     }
 
+    /// The system prompt in the transcript, fenced so it reads verbatim.
+    pub fn show_system_prompt(&mut self, prompt: &str) {
+        self.transcript
+            .push_markdown(format!("```markdown\n{prompt}```"));
+    }
+
     /// Opens the resume picker over the sessions saved for this
     /// workspace. An empty history of saves is a notice, not a screen.
     pub fn open_resume(&mut self) -> Vec<Effect> {
@@ -2662,6 +2668,25 @@ mod tests {
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("no skills")
+        ));
+    }
+
+    #[test]
+    fn slash_system_shows_the_prompt_in_a_fenced_block() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+
+        crate::commands::dispatch(&mut h.app, "/system");
+
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Markdown(text))
+                if text.starts_with("```markdown\n") && text.ends_with("```")
+        ));
+        // An argument is declined like any no-argument command.
+        crate::commands::dispatch(&mut h.app, "/system now");
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("unknown")
         ));
     }
 

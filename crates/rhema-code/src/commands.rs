@@ -90,6 +90,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: skills,
     },
     CommandSpec {
+        name: "/system",
+        description: "the system prompt in use",
+        argument: Argument::None,
+        handler: system,
+    },
+    CommandSpec {
         name: "/exit",
         description: "quit",
         argument: Argument::None,
@@ -220,6 +226,16 @@ fn skills(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     let workspace = std::fs::canonicalize(&app.options.workspace)
         .unwrap_or_else(|_| app.options.workspace.clone());
     app.show_skills(global.as_deref(), &workspace);
+    Vec::new()
+}
+
+fn system(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    // The owned copy ends the borrow before the transcript grows.
+    let prompt = app.agent.as_ref().map(|agent| agent.system().to_owned());
+    match prompt {
+        Some(prompt) => app.show_system_prompt(&prompt),
+        None => app.push_notice("no agent yet — /system shows the prompt once one exists"),
+    }
     Vec::new()
 }
 
