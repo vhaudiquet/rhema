@@ -49,6 +49,14 @@ Rules:
   - `google` — the Gemini provider adapter (`crates/rhema-provider-google/`)
   - `llama-cpp` — the llama.cpp server adapter (`crates/rhema-provider-llama-cpp/`)
   - `openrouter` — the OpenRouter adapter (`crates/rhema-provider-openrouter/`)
+  - `anthropic` — the Anthropic Messages adapter
+    (`crates/rhema-provider-anthropic/`)
+  - `openai-compatible` — the generic OpenAI-compatible adapter
+    (`crates/rhema-provider-openai-compatible/`)
+  - `rsd` — resource-scoped dispatch: the dispatcher and its stores
+    (`crates/rhema-rsd/`)
+  - `forge-agent` — the forge-watching bot: GitHub/Gitea/GitLab clients,
+    the watcher, and handler runs (`crates/rhema-forge-agent/`)
   - `config` — stored settings and credentials (`crates/rhema-config/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema-code` — the frontend crate: terminal UI and headless
