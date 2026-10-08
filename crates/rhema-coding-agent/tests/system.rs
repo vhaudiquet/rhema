@@ -116,6 +116,48 @@ async fn a_base_system_prompt_replaces_the_default_and_fills_the_workspace() {
 }
 
 #[tokio::test]
+async fn a_base_system_with_a_skills_slot_places_the_table_there() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(root.path()).unwrap();
+    let folder = root.path().join(".rhema").join("skills").join("local");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("SKILL.md"),
+        "---\ndescription: the local trigger\n---\nbody",
+    )
+    .unwrap();
+    let provider = recorder();
+    let config = CodingAgentConfig {
+        base_system: Some("HEAD\n{skills}\nTAIL {workspace}".into()),
+        ..CodingAgentConfig::new("mock-model", root.path())
+    };
+    let mut agent = CodingAgent::new(provider.clone(), config).unwrap();
+    let mut sink = NullSink;
+
+    agent
+        .turn("hi", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    let systems = provider.systems();
+    let system = systems[0].as_deref().expect("one system prompt recorded");
+    let head = system.find("HEAD").expect("HEAD kept");
+    let table = system
+        .find("Skills (name / trigger / file)")
+        .expect("the skills table present");
+    let tail = system.find("TAIL").expect("TAIL kept");
+    assert!(head < table && table < tail, "{system}");
+    assert!(
+        system.contains("local / the local trigger"),
+        "the workspace skill is in the table: {system}"
+    );
+    assert!(
+        system.contains(&format!("TAIL {}", workspace.display())),
+        "the workspace filled after the table: {system}"
+    );
+}
+
+#[tokio::test]
 async fn config_system_replaces_the_default() {
     let root = tempfile::tempdir().unwrap();
     let provider = recorder();

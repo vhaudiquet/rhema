@@ -16,9 +16,10 @@ pub struct CodingAgentConfig {
     /// built-in default otherwise; setting it *replaces* everything, it
     /// does not append.
     pub system: Option<String>,
-    /// The base prompt from the user's `SYSTEM.md`, `{workspace}`
-    /// placeholder included. The skills table appends after it; `None`
-    /// uses the built-in [`default_system`](crate::default_system).
+    /// The base prompt from the user's `SYSTEM.md` — `{workspace}` and
+    /// `{skills}` placeholders included, rendered by
+    /// [`render_system`](crate::render_system). `None` uses the
+    /// built-in [`default_system`](crate::default_system).
     pub base_system: Option<String>,
     /// Root all tools are scoped to; paths that escape it are rejected
     /// in-band to the model.

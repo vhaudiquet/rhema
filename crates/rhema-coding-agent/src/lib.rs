@@ -11,7 +11,7 @@
 //!
 //! Layout:
 //! - [`approval`] — the `Approval` hook and `AllowAll`
-//! - [`agent`] — `CodingAgent`, `CodingAgentError`, `default_system`
+//! - [`agent`] — `CodingAgent`, `CodingAgentError`, `render_system`
 //! - [`config`] — `CodingAgentConfig`
 //! - [`skills`] — discovery of markdown skills, prompt presentation
 //! - [`tools`] — `CodingTools`, the built-in `ToolResolver`
