@@ -299,7 +299,8 @@ async fn history_with_tool_results_maps_to_the_messages_json() {
             "role": "user",
             "content": [
                 { "type": "tool_result", "tool_use_id": "call_0", "content": "[\"src\"]", "is_error": false },
-                { "type": "text", "text": "thanks" }
+                { "type": "text", "text": "thanks",
+                  "cache_control": { "type": "ephemeral" } }
             ]
         })
     );

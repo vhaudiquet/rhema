@@ -17,8 +17,15 @@
 //!   the user turn.
 //! - `tool_use.input` must be a JSON object: objects pass through, absent
 //!   args become `{}`, anything else is wrapped under [`WRAPPED_ARGS_KEY`].
-//!   Call ids and names round-trip verbatim; `ToolCall::provider_data` is
-//!   ignored — Anthropic is stateless, there is nothing opaque to carry.
+//!   Call ids and names round-trip verbatim.
+//! - Reasoning replay: a streamed thinking block never joins the assembled
+//!   message, but it is the chain of thought that led to the next call, so
+//!   [`ChunkAssembler::finish`] stores its text and signature on that
+//!   call's `ToolCall::provider_data` — only with a signature, which the
+//!   API requires to accept a thinking block back — and [`request_body`]
+//!   prepends the matching `thinking` block ahead of the call, but only
+//!   while thinking stays enabled: the API rejects thinking blocks on
+//!   plain turns.
 //! - `tools[]` entries are `{name, description, input_schema}`;
 //!   `input_schema` is required and must be an object schema, so a
 //!   non-object spec degrades to the empty schema rather than dropping the
@@ -33,7 +40,8 @@
 //!   reason. `ping`, `content_block_stop`, `message_stop`, and unknown
 //!   event kinds carry no rhema-mappable state; `thinking_delta` pieces
 //!   stream as [`Event::ThinkingDelta`] and never reach the assembled
-//!   message; a top-level `error` event fails the stream.
+//!   message, whose `signature_delta` pieces feed the block's replay
+//!   signature instead; a top-level `error` event fails the stream.
 //! - Usage merges per field: `message_start`'s nested `usage` carries the
 //!   input-token count, `message_delta`'s the final output-token count;
 //!   `cache_read_input_tokens` maps to cached tokens (0 when absent).
@@ -139,6 +147,16 @@ pub enum WireBlock {
     Text {
         /// The text itself; never empty.
         text: String,
+    },
+    /// The model's reasoning replayed from history (assistant turns): an
+    /// interleaved-thinking model continues its chain of thought across
+    /// tool calls instead of re-deriving it.
+    Thinking {
+        /// The reasoning text.
+        thinking: String,
+        /// The signature the API issued with the trace; it rejects the
+        /// block without one.
+        signature: String,
     },
     /// A tool invocation requested by the model (assistant turns).
     ToolUse {
@@ -247,6 +265,10 @@ pub struct WireDelta {
     /// message.
     #[serde(default)]
     pub thinking: Option<String>,
+    /// The trace's replay signature, on `signature_delta`: the API only
+    /// accepts a thinking block back with the signature it was issued.
+    #[serde(default)]
+    pub signature: Option<String>,
     /// A piece of a tool call's JSON arguments, on `input_json_delta`.
     #[serde(default)]
     pub partial_json: Option<String>,
@@ -366,6 +388,13 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
     if let Some(system) = req.system.as_deref().filter(|s| !s.trim().is_empty()) {
         system_texts.push(system.to_owned());
     }
+    // Extended thinking is decided before the turns map: the assistant
+    // replay below must know whether the API will accept thinking blocks
+    // back on this request.
+    let thinking = thinking_budget(req.params.thinking).map(|budget| WireThinking {
+        kind: "enabled",
+        budget_tokens: budget,
+    });
     let mut messages: Vec<WireMessage> = Vec::new();
     for message in &req.messages {
         match message.role {
@@ -373,21 +402,43 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
             Role::Assistant => {
                 // History replays keep content order: the model generated
                 // text and calls in this order.
-                let blocks: Vec<WireBlock> = message
-                    .content
-                    .iter()
-                    .filter_map(|content| match content {
+                let mut blocks: Vec<WireBlock> = Vec::new();
+                for content in &message.content {
+                    match content {
                         Content::Text(text) if !text.is_empty() => {
-                            Some(WireBlock::Text { text: text.clone() })
+                            blocks.push(WireBlock::Text { text: text.clone() });
                         }
-                        Content::ToolCall(call) => Some(WireBlock::ToolUse {
-                            id: call.id.clone(),
-                            name: call.name.clone(),
-                            input: object_args(&call.args),
-                        }),
-                        _ => None,
-                    })
-                    .collect();
+                        Content::ToolCall(call) => {
+                            // The trace that produced the call replays
+                            // ahead of it: an interleaved-thinking model
+                            // continues its chain of thought instead of
+                            // re-deriving it. The API rejects thinking
+                            // blocks on plain turns, so the replay rides
+                            // only when a budget is set.
+                            if thinking.is_some() {
+                                if let Some((text, signature)) = call
+                                    .provider_data
+                                    .get("thinking")
+                                    .and_then(Value::as_str)
+                                    .zip(
+                                        call.provider_data.get("signature").and_then(Value::as_str),
+                                    )
+                                {
+                                    blocks.push(WireBlock::Thinking {
+                                        thinking: text.to_owned(),
+                                        signature: signature.to_owned(),
+                                    });
+                                }
+                            }
+                            blocks.push(WireBlock::ToolUse {
+                                id: call.id.clone(),
+                                name: call.name.clone(),
+                                input: object_args(&call.args),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
                 push_turn(&mut messages, "assistant", blocks);
             }
             Role::User | Role::Tool => {
@@ -437,10 +488,6 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
     // The budget must sit below max_tokens, so a thinking request raises
     // the ceiling when the driver's own is too tight; and the API
     // rejects temperature modifications on thinking turns.
-    let thinking = thinking_budget(req.params.thinking).map(|budget| WireThinking {
-        kind: "enabled",
-        budget_tokens: budget,
-    });
     let max_tokens = req
         .params
         .max_tokens
@@ -531,10 +578,14 @@ enum PartialBlock {
         text: String,
     },
     /// The model's reasoning trace, accumulated from `thinking_delta`
-    /// pieces. Streams live and never joins the assembled message.
+    /// pieces. Streams live and never joins the assembled message; the
+    /// finished trace attaches to the next call for replay.
     Thinking {
         /// The accumulated reasoning text.
         text: String,
+        /// The accumulated signature, from `signature_delta` pieces: the
+        /// API only replays a thinking block it signed.
+        signature: String,
     },
     /// A tool call: id and name from `content_block_start`, arguments from
     /// `input_json_delta` pieces.
@@ -636,6 +687,7 @@ impl ChunkAssembler {
                             index,
                             PartialBlock::Thinking {
                                 text: String::new(),
+                                signature: String::new(),
                             },
                         );
                     }
@@ -694,16 +746,35 @@ impl ChunkAssembler {
                         sink.emit(Event::ThinkingDelta(text));
                         // A delta for a block the start event declared
                         // another kind stays that kind; only a trace grows.
-                        if let PartialBlock::Thinking { text: accumulated } =
-                            self.blocks.entry(index).or_insert(PartialBlock::Thinking {
-                                text: String::new(),
-                            })
-                        {
+                        if let PartialBlock::Thinking {
+                            text: accumulated, ..
+                        } = self.blocks.entry(index).or_insert(PartialBlock::Thinking {
+                            text: String::new(),
+                            signature: String::new(),
+                        }) {
                             accumulated.push_str(text);
                         }
                     }
-                    // `signature_delta` and future kinds carry no
-                    // rhema-mappable content.
+                    Some("signature_delta") => {
+                        let Some(signature) =
+                            delta.signature.as_deref().filter(|piece| !piece.is_empty())
+                        else {
+                            return Ok(());
+                        };
+                        // A delta for a block the start event declared
+                        // another kind stays that kind; only a trace grows
+                        // a signature.
+                        if let PartialBlock::Thinking {
+                            signature: accumulated,
+                            ..
+                        } = self.blocks.entry(index).or_insert(PartialBlock::Thinking {
+                            text: String::new(),
+                            signature: String::new(),
+                        }) {
+                            accumulated.push_str(signature);
+                        }
+                    }
+                    // Future kinds carry no rhema-mappable content.
                     _ => {}
                 }
             }
@@ -723,20 +794,41 @@ impl ChunkAssembler {
     /// `Role::Assistant`: blocks in stream order, empty text blocks
     /// dropped; an empty stream yields an empty content list, not an error.
     pub fn finish(self) -> ModelOutput {
-        let content: Vec<Content> = self
-            .blocks
-            .into_iter()
-            .filter_map(|(index, block)| match block {
-                PartialBlock::Text { text } if !text.is_empty() => Some(Content::Text(text)),
-                PartialBlock::Text { .. } | PartialBlock::Thinking { .. } => None,
-                PartialBlock::ToolCall { id, name, json } => Some(Content::ToolCall(ToolCall {
-                    id: id.unwrap_or_else(|| format!("call_{index}")),
-                    name,
-                    args: parse_args(&json),
-                    provider_data: Value::Null,
-                })),
-            })
-            .collect();
+        let mut content: Vec<Content> = Vec::new();
+        // The trace streamed since the last call: the chain of thought that
+        // led to it, replayed on that call. Text never consumes it, and a
+        // call spends it — replay or not — so a later call cannot inherit
+        // it.
+        let mut pending: Option<(String, String)> = None;
+        for (index, block) in self.blocks {
+            match block {
+                PartialBlock::Text { text } if !text.is_empty() => {
+                    content.push(Content::Text(text));
+                }
+                PartialBlock::Text { .. } => {}
+                PartialBlock::Thinking { text, signature } if !text.is_empty() => {
+                    pending = Some((text, signature));
+                }
+                PartialBlock::Thinking { .. } => {}
+                PartialBlock::ToolCall { id, name, json } => {
+                    // The API rejects an unsigned thinking block, so a
+                    // signature-less trace replays as nothing.
+                    let provider_data = pending
+                        .take()
+                        .filter(|(_, signature)| !signature.is_empty())
+                        .map(|(text, signature)| {
+                            serde_json::json!({ "thinking": text, "signature": signature })
+                        })
+                        .unwrap_or(Value::Null);
+                    content.push(Content::ToolCall(ToolCall {
+                        id: id.unwrap_or_else(|| format!("call_{index}")),
+                        name,
+                        args: parse_args(&json),
+                        provider_data,
+                    }));
+                }
+            }
+        }
         ModelOutput {
             message: Message {
                 role: Role::Assistant,
@@ -843,6 +935,52 @@ mod tests {
         let body = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
         assert!(body.get("thinking").is_none(), "{body}");
         assert_eq!(body["temperature"].as_f64(), Some(0.7f32 as f64));
+    }
+
+    #[test]
+    fn assistant_thinking_replays_only_while_thinking_is_enabled() {
+        let make = |thinking| ModelRequest {
+            system: None,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolCall(ToolCall {
+                    id: "toolu_01A".into(),
+                    name: "echo".into(),
+                    args: json!({}),
+                    provider_data: json!({ "thinking": "hmm let me see", "signature": "sig" }),
+                })],
+            }],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: "claude-sonnet-4-5".into(),
+                temperature: None,
+                max_tokens: None,
+                thinking,
+            },
+        };
+
+        // Enabled: the signed trace rides ahead of the call that produced
+        // it, so the model continues where it left off.
+        let body = serde_json::to_value(request_body(&make(ThinkingEffort::Medium)).unwrap())
+            .expect("body serializes");
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                { "type": "thinking", "thinking": "hmm let me see", "signature": "sig" },
+                { "type": "tool_use", "id": "toolu_01A", "name": "echo", "input": {} }
+            ])
+        );
+
+        // Disabled: the API rejects thinking blocks on plain turns, so the
+        // trace is dropped.
+        let body = serde_json::to_value(request_body(&make(ThinkingEffort::Default)).unwrap())
+            .expect("body serializes");
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([
+                { "type": "tool_use", "id": "toolu_01A", "name": "echo", "input": {} }
+            ])
+        );
     }
 
     #[test]
@@ -1303,6 +1441,110 @@ mod tests {
                 "ThinkingDelta(\"let me see\")".to_owned(),
                 "TextDelta(\"answer\")".to_owned(),
             ]
+        );
+    }
+
+    #[test]
+    fn a_signed_thinking_block_rides_the_next_tool_call_for_replay() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm "}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me see"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01A","name":"echo","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+        ] {
+            assembler
+                .push(event(payload), &mut sink)
+                .expect("event feeds");
+        }
+        let out = assembler.finish();
+
+        // The trace never joins the message; it rides the call it led to,
+        // signature and all, ready for replay.
+        assert_eq!(
+            out.message.content,
+            vec![Content::ToolCall(ToolCall {
+                id: "toolu_01A".into(),
+                name: "echo".into(),
+                args: json!({}),
+                provider_data: json!({ "thinking": "hmm let me see", "signature": "sig" }),
+            })]
+        );
+        assert_eq!(out.stop_reason, StopReason::ToolUse);
+    }
+
+    #[test]
+    fn text_keeps_the_trace_pending_and_a_call_spends_it() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"why"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"note"}}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"a","input":{}}}"#,
+            r#"{"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"toolu_2","name":"b","input":{}}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+        ] {
+            assembler
+                .push(event(payload), &mut sink)
+                .expect("event feeds");
+        }
+        let out = assembler.finish();
+
+        // Text never consumes the trace; the first call claims it and a
+        // later call cannot inherit it.
+        assert_eq!(
+            out.message.content,
+            vec![
+                Content::Text("note".into()),
+                Content::ToolCall(ToolCall {
+                    id: "toolu_1".into(),
+                    name: "a".into(),
+                    args: json!({}),
+                    provider_data: json!({ "thinking": "why", "signature": "sig" }),
+                }),
+                Content::ToolCall(ToolCall {
+                    id: "toolu_2".into(),
+                    name: "b".into(),
+                    args: json!({}),
+                    provider_data: Value::Null,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unsigned_thinking_block_is_never_replayed() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"a","input":{}}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+        ] {
+            assembler
+                .push(event(payload), &mut sink)
+                .expect("event feeds");
+        }
+        let out = assembler.finish();
+
+        // The API rejects a thinking block without its signature, so an
+        // unsigned trace rides as nothing rather than breaking the replay.
+        assert_eq!(
+            out.message.content,
+            vec![Content::ToolCall(ToolCall {
+                id: "toolu_1".into(),
+                name: "a".into(),
+                args: json!({}),
+                provider_data: Value::Null,
+            })]
         );
     }
 
