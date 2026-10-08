@@ -1262,8 +1262,16 @@ impl App {
             Ok(output) => {
                 if let Some(pricing) = self.current_model_pricing() {
                     let usage = output.usage;
-                    self.session_cost += usage.input_tokens as f64 / 1_000_000.0
-                        * pricing.input_per_mtok
+                    // Cached prompt tokens bill at a fraction of base
+                    // input everywhere — Anthropic reads ~10%, OpenAI
+                    // 50%, DeepSeek and Gemini ~25%; the cross-provider
+                    // middle stands in where no exact rate is published.
+                    // Cache writes ride the full input bucket.
+                    const CACHED_INPUT_RATE: f64 = 0.25;
+                    let uncached = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
+                    self.session_cost += uncached as f64 / 1_000_000.0 * pricing.input_per_mtok
+                        + usage.cached_input_tokens as f64 / 1_000_000.0
+                            * (pricing.input_per_mtok * CACHED_INPUT_RATE)
                         + usage.output_tokens as f64 / 1_000_000.0 * pricing.output_per_mtok;
                 }
                 self.usage = Some(output.usage);
@@ -1815,12 +1823,13 @@ mod tests {
                 usage: Usage {
                     input_tokens: 1_000_000,
                     output_tokens: 1_000_000,
-                    cached_input_tokens: 0,
+                    cached_input_tokens: 400_000,
                 },
             }),
         });
-        // 1M in at $0.75/M + 1M out at $3.75/M.
-        assert!((h.app.session_cost - 4.50).abs() < 1e-9);
+        // 600k uncached in at $0.75/M + 400k cached in at a quarter of
+        // that + 1M out at $3.75/M.
+        assert!((h.app.session_cost - 4.275).abs() < 1e-9);
     }
 
     #[test]
