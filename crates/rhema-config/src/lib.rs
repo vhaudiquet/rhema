@@ -3,8 +3,11 @@
 //! The file lives at `$XDG_CONFIG_HOME/rhema/config.yaml`, written with
 //! `0600` permissions since it holds credentials. Which profile a session
 //! runs under is chosen per invocation (`--profile`) or per session
-//! (`/profile`) — it is deliberately not stored, so parallel instances
-//! (work and personal side by side) never fight over one global switch.
+//! (`/profile`) — it is never stored as a global switch, so parallel
+//! instances (work and personal side by side) never fight over one
+//! toggle. What is kept, per workspace, is the last profile that served
+//! it a turn — a directory reopens on the profile it last used, never
+//! overriding an explicit flag.
 //! Environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`,
 //! `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) always
 //! win over a stored key — a stored key is the fallback, not the
@@ -147,6 +150,13 @@ pub struct Config {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub profiles: BTreeMap<String, Profile>,
+    /// The last profile that served each workspace a turn, keyed by the
+    /// workspace's absolute path. Startup reopens a directory on its
+    /// last-used profile — a per-directory memory, never a global
+    /// switch, so parallel instances in different directories stay
+    /// independent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_profile_by_workspace: BTreeMap<String, String>,
 }
 
 /// The profiles on fresh setups and files that omit the key.
@@ -164,6 +174,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             profiles: default_profiles(),
+            last_profile_by_workspace: BTreeMap::new(),
         }
     }
 }
@@ -189,6 +200,26 @@ impl Config {
             .map(str::to_owned)
             .unwrap_or_else(|| "personal".to_owned());
         apply(self.profiles.entry(name).or_default());
+    }
+
+    /// The profile `workspace` last served a turn under, when one was
+    /// recorded. The name is returned as stored — the caller decides
+    /// whether that profile still exists and can serve turns.
+    pub fn last_profile_in(&self, workspace: &Path) -> Option<String> {
+        self.last_profile_by_workspace
+            .get(&workspace.to_string_lossy().into_owned())
+            .cloned()
+    }
+
+    /// Records `profile` as the last one `workspace` served a turn
+    /// under. A no-op when the map already holds the name, so a turn per
+    /// keystroke never rewrites the file.
+    pub fn note_profile_in(&mut self, workspace: &Path, profile: &str) {
+        let changed = self.last_profile_in(workspace).as_deref() != Some(profile);
+        if changed {
+            self.last_profile_by_workspace
+                .insert(workspace.to_string_lossy().into_owned(), profile.to_owned());
+        }
     }
 
     /// The config directory (`<config-base>/rhema`).
@@ -395,6 +426,7 @@ mod tests {
                     color: None,
                 },
             )]),
+            last_profile_by_workspace: BTreeMap::new(),
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -457,6 +489,7 @@ mod tests {
                     },
                 ),
             ]),
+            last_profile_by_workspace: BTreeMap::new(),
         };
         let work = config.effective(Some("work"));
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
@@ -486,5 +519,35 @@ mod tests {
         assert_eq!(config.profiles["personal"].model.as_deref(), Some("m"));
         // work's section is untouched by personal's writes.
         assert_eq!(config.profiles["work"].model, None);
+    }
+
+    #[test]
+    fn workspaces_remember_their_last_profile_and_survive_a_round_trip() {
+        let mut config = Config::default();
+        assert_eq!(config.last_profile_in(Path::new("/home/u/proj")), None);
+
+        config.note_profile_in(Path::new("/home/u/proj"), "work");
+        assert_eq!(
+            config.last_profile_in(Path::new("/home/u/proj")).as_deref(),
+            Some("work")
+        );
+        // Another directory stays untouched: the memory is per workspace.
+        assert_eq!(config.last_profile_in(Path::new("/home/u/other")), None);
+
+        config.note_profile_in(Path::new("/home/u/proj"), "personal");
+        assert_eq!(
+            config.last_profile_in(Path::new("/home/u/proj")).as_deref(),
+            Some("personal")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        Config::save_to(&path, &config).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, config);
+        assert_eq!(
+            loaded.last_profile_in(Path::new("/home/u/proj")).as_deref(),
+            Some("personal")
+        );
     }
 }
