@@ -11,8 +11,9 @@
 //!
 //! Layout:
 //! - [`approval`] — the `Approval` hook and `AllowAll`
-//! - [`agent`] — `CodingAgent`, `CodingAgentError`, `render_system`
+//! - [`agent`] — `CodingAgent`, `CodingAgentError`
 //! - [`config`] — `CodingAgentConfig`
+//! - [`prompt`] — the SYSTEM.md template and its renderer
 //! - [`skills`] — discovery of markdown skills, prompt presentation
 //! - [`tools`] — `CodingTools`, the built-in `ToolResolver`
 //!
@@ -31,11 +32,13 @@
 pub mod agent;
 pub mod approval;
 pub mod config;
+pub mod prompt;
 pub mod skills;
 pub mod tools;
 
-pub use agent::{CodingAgent, CodingAgentError, DEFAULT_SYSTEM_MD, default_system};
+pub use agent::{CodingAgent, CodingAgentError};
 pub use approval::{AllowAll, Approval, DenyAll};
 pub use config::CodingAgentConfig;
+pub use prompt::{DEFAULT_SYSTEM_MD, default_system, render_system};
 pub use skills::Skill;
 pub use tools::CodingTools;
