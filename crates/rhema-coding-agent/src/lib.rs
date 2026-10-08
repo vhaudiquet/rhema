@@ -20,11 +20,11 @@
 //! # Skills
 //!
 //! A skill is a folder with a `SKILL.md` whose frontmatter carries a
-//! `description` (the trigger). Only the name / trigger / file table
-//! enters the system prompt; the model reads a body itself through the
-//! bash tool when a trigger applies. Skills live globally under the
-//! config directory and per-workspace under `.rhema/skills`, project
-//! shadowing global.
+//! `description` (the trigger). Only name, trigger, and file enter the
+//! system prompt, through the [`prompt`] module's `{#skills}` block;
+//! the model reads a body itself through the bash tool when a trigger
+//! applies. Skills live globally under the config directory and
+//! per-workspace under `.rhema/skills`, project shadowing global.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]

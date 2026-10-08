@@ -16,8 +16,8 @@ pub struct CodingAgentConfig {
     /// built-in default otherwise; setting it *replaces* everything, it
     /// does not append.
     pub system: Option<String>,
-    /// The base prompt from the user's `SYSTEM.md` — `{workspace}`,
-    /// `{skills}`, and the `{#skills}` block included, rendered by
+    /// The base prompt from the user's `SYSTEM.md` — `{workspace}` and
+    /// the `{#skills}` block included, rendered by
     /// [`render_system`](crate::render_system). `None` uses the
     /// built-in [`default_system`](crate::default_system).
     pub base_system: Option<String>,

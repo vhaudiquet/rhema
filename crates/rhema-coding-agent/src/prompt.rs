@@ -1,11 +1,10 @@
 //! The system-prompt template: one markdown file, rendered with
 //! placeholders.
 //!
-//! Templates are prose, not programs: the renderer substitutes a fixed
-//! set of placeholders, repeats one bounded block, and leaves every
-//! other `{...}` as written. A template naming no skills placeholder
-//! at all gets the default table appended, so prompts written before
-//! `{skills}` keep working.
+//! Templates are prose, not programs: the renderer substitutes
+//! `{workspace}`, repeats the one bounded block, and leaves every other
+//! `{...}` as written. A template without the block simply presents no
+//! skills.
 
 use std::path::Path;
 
@@ -15,27 +14,16 @@ use std::path::Path;
 pub const DEFAULT_SYSTEM_MD: &str = include_str!("../SYSTEM.md");
 
 /// Renders a SYSTEM.md template: `{workspace}` becomes the workspace
-/// path, `{skills}` the skills table
-/// ([`prompt_section`](crate::skills::prompt_section) — empty when no
-/// skill was found, so the model never sees machinery for an empty
-/// set). A `{#skills}…{/skills}` block renders its body once per skill
-/// with `{skill.name}`, `{skill.description}`, and `{skill.path}`
-/// filled, and vanishes entirely when there are none; an unclosed
-/// block stays as written. A template with neither `{skills}` nor a
-/// block gets the table appended, so a prompt written before the
-/// placeholders keeps working. Any other `{...}` text stays as
-/// written: templates are prose, not programs.
+/// path, and a `{#skills}…{/skills}` block renders its body once per
+/// skill with `{skill.name}`, `{skill.description}`, and
+/// `{skill.path}` filled — vanishing entirely when there are none, so
+/// the model never sees machinery for an empty set. An unclosed block
+/// stays as written. Any other `{...}` text stays as written, and a
+/// template without the block presents no skills at all: templates are
+/// prose, not programs.
 pub fn render_system(template: &str, workspace: &Path, skills: &[crate::skills::Skill]) -> String {
-    let section = crate::skills::prompt_section(skills);
-    let rendered = template
-        .replace("{workspace}", &workspace.display().to_string())
-        .replace("{skills}", &section);
+    let rendered = template.replace("{workspace}", &workspace.display().to_string());
     let rendered = render_blocks(&rendered, skills);
-    let rendered = if has_skills_slot(template) {
-        rendered
-    } else {
-        rendered + &section
-    };
     format!("{}\n", rendered.trim_end())
 }
 
@@ -43,12 +31,6 @@ pub fn render_system(template: &str, workspace: &Path, skills: &[crate::skills::
 /// [`DEFAULT_SYSTEM_MD`] through [`render_system`] with an empty table.
 pub fn default_system(workspace: &Path) -> String {
     render_system(DEFAULT_SYSTEM_MD, workspace, &[])
-}
-
-/// Whether the template names a skills placeholder or block on its own
-/// behalf — anything else gets the default table appended.
-fn has_skills_slot(template: &str) -> bool {
-    template.contains("{skills}") || template.contains("{#skills}")
 }
 
 /// Renders every `{#skills}…{/skills}` block: the body once per skill,
@@ -93,39 +75,6 @@ mod tests {
     }
 
     #[test]
-    fn render_puts_the_skills_table_where_the_placeholder_sits() {
-        let out = render_system(
-            "a\n{skills}\nb {workspace}",
-            Path::new("/ws"),
-            &[skill("s", "d")],
-        );
-        assert_eq!(
-            out,
-            "a\n\nSkills (name / trigger / file):\ns / d / /cfg/skills/s/SKILL.md\n\nb /ws\n"
-        );
-    }
-
-    #[test]
-    fn render_without_the_placeholder_appends_the_table() {
-        let out = render_system(
-            "base in {workspace}\n",
-            Path::new("/ws"),
-            &[skill("s", "d")],
-        );
-        assert_eq!(
-            out,
-            "base in /ws\n\nSkills (name / trigger / file):\ns / d / /cfg/skills/s/SKILL.md\n"
-        );
-    }
-
-    #[test]
-    fn render_with_no_skills_leaves_no_machinery_behind() {
-        let out = render_system("a\n{skills}\nb", Path::new("/ws"), &[]);
-        assert_eq!(out, "a\n\nb\n");
-        assert!(!out.contains("Skills"), "{out}");
-    }
-
-    #[test]
     fn the_block_renders_its_body_once_per_skill() {
         let out = render_system(
             "{#skills}- {skill.name}: {skill.description} — cat {skill.path}\n{/skills}",
@@ -146,7 +95,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unclosed_block_stays_as_written_and_still_counts_as_a_slot() {
+    fn an_unclosed_block_stays_as_written() {
         let out = render_system(
             "a {#skills} never closed",
             Path::new("/ws"),
@@ -166,6 +115,16 @@ mod tests {
     }
 
     #[test]
+    fn a_template_without_the_block_presents_no_skills() {
+        let out = render_system(
+            "base in {workspace}\n",
+            Path::new("/ws"),
+            &[skill("s", "d")],
+        );
+        assert_eq!(out, "base in /ws\n");
+    }
+
+    #[test]
     fn the_default_prompt_ends_with_one_newline_and_no_placeholder() {
         let out = default_system(Path::new("/ws"));
         assert!(
@@ -174,5 +133,18 @@ mod tests {
         );
         assert!(!out.contains('{'), "{out}");
         assert!(out.ends_with("workspace root.\n"), "{out}");
+    }
+
+    #[test]
+    fn the_default_prompt_lists_skills_through_its_block() {
+        let out = render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &[skill("s", "d")]);
+        assert!(
+            out.contains("s / d / /cfg/skills/s/SKILL.md"),
+            "the per-skill line renders: {out}"
+        );
+        assert!(
+            !out.contains("Skills ("),
+            "the block carries no heading of its own: {out}"
+        );
     }
 }

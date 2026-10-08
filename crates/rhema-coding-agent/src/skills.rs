@@ -1,11 +1,12 @@
 //! Skills: markdown instruction files the model loads on demand.
 //!
 //! A skill is a folder holding a `SKILL.md` whose YAML frontmatter
-//! carries a `description` — the trigger. Only the table of name /
-//! trigger / file enters the system prompt; the model reads a skill's
-//! body itself with the bash tool (`cat`) when a trigger applies, so
-//! skills need no tool of their own, no approval, and no machinery
-//! beyond discovery. Project skills shadow global ones by folder name.
+//! carries a `description` — the trigger. Only name, trigger, and file
+//! reach the system prompt, through the [`crate::prompt`] template's
+//! `{#skills}` block; the model reads a skill's body itself with the
+//! bash tool (`cat`) when a trigger applies, so skills need no tool of
+//! their own, no approval, and no machinery beyond discovery. Project
+//! skills shadow global ones by folder name.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -82,25 +83,6 @@ fn parse_description(raw: &str) -> Option<String> {
     let front: Frontmatter = serde_yaml::from_str(block).ok()?;
     let description = front.description.trim();
     (!description.is_empty()).then(|| description.to_owned())
-}
-
-/// The system-prompt section presenting the skills: the load-by-cat
-/// instruction, then the table. Empty when there are none — the model
-/// should never see machinery for an empty set.
-pub fn prompt_section(skills: &[Skill]) -> String {
-    if skills.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("\nSkills (name / trigger / file):\n");
-    for skill in skills {
-        out.push_str(&format!(
-            "{} / {} / {}\n",
-            skill.name,
-            skill.description,
-            skill.path.display()
-        ));
-    }
-    out
 }
 
 #[cfg(test)]
@@ -189,28 +171,5 @@ mod tests {
             discover(Some(Path::new("/nowhere")), workspace.path()).is_empty(),
             "no global dir is normal, not an error"
         );
-    }
-
-    #[test]
-    fn the_prompt_section_is_the_table_and_nothing_when_empty() {
-        let skill = Skill {
-            name: "commit-message".into(),
-            description: "apply when writing a commit".into(),
-            path: PathBuf::from("/cfg/skills/commit-message/SKILL.md"),
-        };
-        let section = prompt_section(&[
-            skill.clone(),
-            Skill {
-                name: "z".into(),
-                description: "d".into(),
-                path: skill.path.clone(),
-            },
-        ]);
-        assert!(
-            section.contains("name / trigger / file")
-                && section.contains("commit-message / apply when writing a commit / /cfg/skills/commit-message/SKILL.md"),
-            "{section}"
-        );
-        assert_eq!(prompt_section(&[]), "");
     }
 }

@@ -58,9 +58,9 @@ impl CodingAgent {
         let tools = Arc::new(CodingTools::new(config.workspace.clone()));
         let system = config.system.clone().unwrap_or_else(|| {
             // An explicit base from the user's SYSTEM.md replaces the
-            // built-in default; placeholders render either way — the
-            // skills table lands where `{skills}` sits, or at the end
-            // when the base predates the placeholder.
+            // built-in default; `{workspace}` and the `{#skills}` block
+            // render either way — a base without the block shows no
+            // skills.
             let base = config
                 .base_system
                 .clone()
