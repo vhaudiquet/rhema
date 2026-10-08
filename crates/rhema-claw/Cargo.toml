@@ -1,0 +1,48 @@
+[package]
+name = "rhema-claw"
+description = "The resident forge-watching agent daemon: the first consumer of rhema-autonomous-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[lib]
+name = "rhema_claw"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rhema-claw"
+path = "src/main.rs"
+
+[dependencies]
+rhema-autonomous-agent = { path = "../rhema-autonomous-agent" }
+rhema-coding-agent = { path = "../rhema-coding-agent" }
+rhema-config = { path = "../rhema-config" }
+rhema-core = { path = "../rhema-core" }
+rhema-forge-agent = { path = "../rhema-forge-agent" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
+rhema-provider-google = { path = "../rhema-provider-google" }
+rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
+rhema-rsd = { path = "../rhema-rsd" }
+# Args for the two-flag binary surface
+clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+# Typed public errors
+thiserror = { workspace = true }
+# A daemon: the runtime, the poll sleep, the ctrl-c signal; the driver's
+# concurrent handler runs share it
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+# In-process HTTP mocks for the offline e2e: zero network
+wiremock = "0.6"
+# The scripted provider for turn-level tests; mirrors rhema-code's mock
+# feature without a feature of our own — tests are the only consumer
+rhema-core = { path = "../rhema-core", features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

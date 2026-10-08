@@ -1,0 +1,505 @@
+//! The handler: one dispatch of a forge thread becomes one coding-agent
+//! turn, and the turn's final text becomes the thread's comment reply.
+//!
+//! The deterministic part stays ahead of the model (spec §1, §8): the
+//! watch's forge client is looked up by key, the snapshot is fetched, the
+//! inbox is drained and decoded, the allowlist is resolved — v1 is
+//! permissive, the spec's starting point, pending a real
+//! profile-to-permissions mapping — and only then does the agent run.
+//! One turn per dispatch; the final assistant text posts verbatim.
+//!
+//! Session continuity rides the dispatcher, not the filesystem: the
+//! agent's session JSON is stashed into `ctx.session.core.driver_state`
+//! before the run returns and restored with [`CodingAgent::from_session`]
+//! on the next dispatch of the same key, so a resumed thread keeps its
+//! conversation. Delivery is at-least-once: a re-delivered drained event
+//! re-dispatches, and this handler treats a dispatch as work to do — the
+//! dedup boundary is the dispatcher's, not re-derived here.
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
+use rhema_coding_agent::{AllowAll, CodingAgent, CodingAgentConfig};
+use rhema_core::{Content, Event as ModelEvent, EventSink, Message, ModelProvider, Session};
+use rhema_forge_agent::{
+    EventKind, Forge, ForgeEvent, RepoRef, Snapshot, ThreadState, decode, parse_key,
+};
+use rhema_rsd::{Outcome, ResourceKey};
+
+/// The handler's tool permissions, resolved deterministically before the
+/// agent's first step (spec §8) — never by the model, never mid-run. V1
+/// is permissive, the spec's starting point; a profile-to-permissions
+/// mapping lands here as a per-deployment policy, and a policy that
+/// refuses the shell refuses the run (see [`ClawHandler::dispatch`]).
+fn allowlist() -> rhema_autonomous_agent::Allowlist {
+    rhema_autonomous_agent::Allowlist::permissive()
+}
+
+/// The coding agent over one watch: a provider, a model, a workspace
+/// root, and the forge clients the dispatch keys resolve to.
+pub struct ClawHandler {
+    provider: Arc<dyn ModelProvider>,
+    model: String,
+    workspace_root: PathBuf,
+    forges: HashMap<String, Arc<dyn Forge>>,
+}
+
+impl ClawHandler {
+    /// A handler whose per-thread workspaces live under `workspace_root`
+    /// and whose dispatch keys resolve through `forges` — each entry keyed
+    /// `"github:acme/widgets"` as [`watch_key`] builds it.
+    pub fn new(
+        provider: Arc<dyn ModelProvider>,
+        model: impl Into<String>,
+        workspace_root: impl Into<PathBuf>,
+        forges: HashMap<String, Arc<dyn Forge>>,
+    ) -> Self {
+        Self {
+            provider,
+            model: model.into(),
+            workspace_root: workspace_root.into(),
+            forges,
+        }
+    }
+
+    /// The forge client a dispatch key answers to:
+    /// `"github:acme/widgets#7"` looks up `"github:acme/widgets"`.
+    pub fn watch_forge(&self, key: &ResourceKey) -> Option<Arc<dyn Forge>> {
+        self.forges.get(&watch_key(key)?).cloned()
+    }
+
+    /// One dispatch, failed with a reason on any step. The session stash
+    /// lands before the comment posts, so a failed post still leaves the
+    /// conversation resumable.
+    async fn dispatch(&self, ctx: &mut SessionContext) -> Result<Outcome, String> {
+        // Owned: the key names the run through every step, while `ctx`
+        // itself goes mutable for the inbox drain.
+        let key = ctx.key.as_str().to_owned();
+        let (repo, number) = parse_key(&ctx.key)
+            .ok_or_else(|| format!("resource key {key} is not a forge thread key"))?;
+        let forge = self
+            .watch_forge(&ctx.key)
+            .ok_or_else(|| format!("no watch configured for {key}"))?;
+
+        let snapshot = forge
+            .snapshot(&repo, number)
+            .await
+            .map_err(|err| format!("snapshot of {key} failed: {err}"))?;
+        let events = self.drain_events(ctx, &key).await?;
+
+        // The permission check is load-bearing: this handler's one tool
+        // is the agent's shell, so a policy without it is a run that
+        // could only flail — fail it loudly instead.
+        let permissions = allowlist();
+        if !permissions.allows("bash") {
+            return Err(format!(
+                "tool policy for {key} does not permit the shell; nothing to run"
+            ));
+        }
+
+        let workspace = self.workspace_for(&key, &repo, number)?;
+        let mut agent = self.resume(ctx, &workspace, &key)?;
+
+        let prompt = build_prompt(&key, &snapshot, &events, &workspace);
+        let mut sink = TurnSink;
+        let output = agent
+            .turn(prompt, &mut sink, Arc::new(AllowAll))
+            .await
+            .map_err(|err| format!("turn for {key} failed: {err}"))?;
+
+        // Stash before posting: the turn's work survives a failed comment.
+        ctx.session.core.driver_state = serde_json::to_value(agent.session())
+            .map_err(|err| format!("session for {key} does not serialize: {err}"))?;
+
+        let reply = final_text(&output.message)
+            .ok_or_else(|| format!("the model returned no text to post for {key}"))?;
+        forge
+            .comment(&repo, number, &reply)
+            .await
+            .map_err(|err| format!("comment on {key} failed: {err}"))?;
+        Ok(Outcome::Handled)
+    }
+
+    /// Renews the lease and drains the inbox, decoding every item back
+    /// into its forge event. A payload that does not decode is loud: a
+    /// shape break must surface, not silently shrink the prompt.
+    async fn drain_events(
+        &self,
+        ctx: &mut SessionContext,
+        key: &str,
+    ) -> Result<Vec<ForgeEvent>, String> {
+        let items = ctx
+            .poll_inbox()
+            .await
+            .map_err(|err| format!("inbox poll for {key} failed: {err}"))?;
+        items
+            .iter()
+            .map(decode)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| format!("an inbox item for {key} does not decode: {err}"))
+    }
+
+    /// The agent for this dispatch: the stashed session resumed when the
+    /// key has history, a fresh one otherwise. A stash that does not parse
+    /// fails the run loudly — silently resetting would re-orient the agent
+    /// mid-conversation without anyone knowing.
+    fn resume(
+        &self,
+        ctx: &SessionContext,
+        workspace: &Path,
+        key: &str,
+    ) -> Result<CodingAgent, String> {
+        let config = CodingAgentConfig::new(self.model.clone(), workspace);
+        let agent = match &ctx.session.core.driver_state {
+            // A never-dispatched key carries no stash: start clean.
+            serde_json::Value::Null => CodingAgent::new(self.provider.clone(), config),
+            stashed => {
+                let session: Session = serde_json::from_value(stashed.clone())
+                    .map_err(|err| format!("stashed session for {key} does not parse: {err}"))?;
+                CodingAgent::from_session(self.provider.clone(), config, session)
+            }
+        };
+        agent.map_err(|err| format!("cannot start the coding agent for {key}: {err}"))
+    }
+
+    /// The per-thread workspace: one directory under the root, created on
+    /// demand. The name mapping is not injective (separators collapse);
+    /// thread identity lives in the dispatch key — the directory is only
+    /// scratch space for the agent's tools.
+    fn workspace_for(&self, key: &str, repo: &RepoRef, number: u64) -> Result<PathBuf, String> {
+        let dir = self.workspace_root.join(workspace_name(key, repo, number));
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("cannot create the workspace {dir:?} for {key}: {err}"))?;
+        Ok(dir)
+    }
+}
+
+#[async_trait]
+impl Handler for ClawHandler {
+    async fn handle(&self, ctx: &mut SessionContext) -> Outcome {
+        match self.dispatch(ctx).await {
+            Ok(outcome) => outcome,
+            Err(reason) => Outcome::Failed(reason),
+        }
+    }
+}
+
+/// The watch-table key of a resource key: `"github:acme/widgets#7"` builds
+/// `"github:acme/widgets"`. `None` for a key that is not a forge thread
+/// key at all.
+pub fn watch_key(key: &ResourceKey) -> Option<String> {
+    let (head, _) = key.as_str().rsplit_once('#')?;
+    head.contains(':').then(|| head.to_owned())
+}
+
+/// The watch-table entry for a repo: `{kind}:{owner}/{name}` — the value
+/// [`watch_key`] parses back out of a dispatch key. The pair is the
+/// key-parse-to-watch-lookup seam.
+pub fn watch_entry(kind: &str, repo: &RepoRef) -> String {
+    format!("{kind}:{}", repo.path())
+}
+
+/// The workspace directory name for a thread: kind, repo path, and number
+/// flattened to filesystem-safe characters.
+pub fn workspace_name(key: &str, repo: &RepoRef, number: u64) -> String {
+    let kind = key.split_once(':').map(|(kind, _)| kind).unwrap_or("forge");
+    format!("{kind}-{}-{number}", repo.path())
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+/// The agent's prompt for one dispatch: the thread's standing state, the
+/// new events, and the posting contract. The final assistant message is
+/// the comment — everything else is orientation for the investigation.
+fn build_prompt(key: &str, snapshot: &Snapshot, events: &[ForgeEvent], workspace: &Path) -> String {
+    let mut prompt = format!(
+        "You are responding to new activity on forge thread {key}.\n\n\
+         Thread: {}\nKind: {}; state: {}\nOpened by: {}\nLabels: {}\nOpening body:\n{}\n\n",
+        snapshot.title,
+        if snapshot.is_pr {
+            "pull request"
+        } else {
+            "issue"
+        },
+        state_text(snapshot.state),
+        snapshot.author.as_deref().unwrap_or("unknown"),
+        if snapshot.labels.is_empty() {
+            "none".to_owned()
+        } else {
+            snapshot.labels.join(", ")
+        },
+        snapshot
+            .body
+            .as_deref()
+            .map(str::trim)
+            .filter(|body| !body.is_empty())
+            .unwrap_or("(none)"),
+    );
+    prompt.push_str("New activity to respond to:\n");
+    for event in events {
+        prompt.push_str(&format!(
+            "- {} by {}: {}\n",
+            kind_text(event.kind),
+            event.actor.as_deref().unwrap_or("unknown"),
+            event
+                .body
+                .as_deref()
+                .map(str::trim)
+                .filter(|body| !body.is_empty())
+                .unwrap_or("(no text)"),
+        ));
+    }
+    prompt.push_str(&format!(
+        "\nThe workspace is at {}: investigate there with your shell tools (read\n\
+         code, run tests, reproduce reports) whenever the text alone does not\n\
+         settle it. Your FINAL reply — the message you end the turn on, with\n\
+         no tool calls after it — is posted to the thread verbatim: make it\n\
+         the exact comment text for the thread's participants, with no\n\
+         meta-commentary about this prompt.\n",
+        workspace.display(),
+    ));
+    prompt
+}
+
+/// The thread state, in words.
+fn state_text(state: ThreadState) -> &'static str {
+    match state {
+        ThreadState::Open => "open",
+        ThreadState::Closed => "closed",
+        ThreadState::Merged => "merged",
+    }
+}
+
+/// The event kind, in words.
+fn kind_text(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::Opened => "opened",
+        EventKind::Reopened => "reopened",
+        EventKind::Closed => "closed",
+        EventKind::Merged => "merged",
+        EventKind::Comment => "comment",
+        EventKind::Review => "review",
+    }
+}
+
+/// The text a turn ends on: the assistant message's text parts, joined
+/// and trimmed. `None` when the model stopped on tool calls and never
+/// wrote a reply.
+fn final_text(message: &Message) -> Option<String> {
+    let joined = message
+        .content
+        .iter()
+        .filter_map(|content| match content {
+            Content::Text(text) => Some(text.as_str()),
+            Content::ToolCall(_) | Content::ToolResult(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let trimmed = joined.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+/// The turn's stderr log: tool traffic only. The reply is not streamed —
+/// it is posted to the thread, and a daemon log line per tool call is the
+/// observability a resident run gets.
+struct TurnSink;
+
+impl EventSink for TurnSink {
+    fn emit(&mut self, event: ModelEvent<'_>) {
+        match event {
+            ModelEvent::ToolCallStart { name, .. } => eprintln!("[claw] tool call: {name}"),
+            ModelEvent::ToolResult {
+                content, is_error, ..
+            } => {
+                let mark = if is_error { "failed" } else { "ok" };
+                eprintln!("[claw] tool {mark}: {}", first_line(content));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The first line of a tool result, cut for the stderr stream.
+fn first_line(content: &str) -> String {
+    let line = content.lines().next().unwrap_or("");
+    let mut cut = line.chars().take(72).collect::<String>();
+    if line.chars().count() > 72 {
+        cut.push('…');
+    }
+    cut
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot() -> Snapshot {
+        serde_json::from_value(serde_json::json!({
+            "title": "crash on save",
+            "body": "steps to reproduce…",
+            "state": "open",
+            "is_pr": false,
+            "author": "alice",
+            "labels": ["bug", "cli"],
+            "url": "https://github.com/acme/widgets/issues/7",
+            "raw": {},
+        }))
+        .expect("snapshot fixture parses")
+    }
+
+    fn event(kind: EventKind, actor: &str, body: Option<&str>) -> ForgeEvent {
+        serde_json::from_value(serde_json::json!({
+            "id": "github:comment:8001",
+            "kind": kind,
+            "repo": { "owner": "acme", "name": "widgets" },
+            "number": 7,
+            "is_pr": false,
+            "actor": actor,
+            "body": body,
+            "url": null,
+            "timestamp": "2026-10-03T09:00:00Z",
+            "raw": {},
+        }))
+        .expect("event fixture parses")
+    }
+
+    #[test]
+    fn the_prompt_carries_the_thread_the_events_and_the_contract() {
+        let prompt = build_prompt(
+            "github:acme/widgets#7",
+            &snapshot(),
+            &[event(EventKind::Comment, "dave", Some("any progress?"))],
+            Path::new("/tmp/workspaces/github-acme-widgets-7"),
+        );
+        assert!(prompt.contains("github:acme/widgets#7"), "key: {prompt}");
+        assert!(prompt.contains("crash on save"), "title: {prompt}");
+        assert!(prompt.contains("state: open"), "state: {prompt}");
+        assert!(prompt.contains("Labels: bug, cli"), "labels: {prompt}");
+        assert!(
+            prompt.contains("- comment by dave: any progress?"),
+            "events: {prompt}"
+        );
+        assert!(
+            prompt.contains("posted to the thread verbatim"),
+            "contract: {prompt}"
+        );
+    }
+
+    #[test]
+    fn thread_level_events_carry_no_body_and_the_prompt_says_so() {
+        let prompt = build_prompt(
+            "github:acme/widgets#7",
+            &snapshot(),
+            &[event(EventKind::Opened, "alice", None)],
+            Path::new("/tmp/w"),
+        );
+        assert!(
+            prompt.contains("- opened by alice: (no text)"),
+            "got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_final_text_joins_and_trims_but_not_tool_calls() {
+        let message = Message {
+            role: rhema_core::Role::Assistant,
+            content: vec![
+                Content::Text("on it".into()),
+                Content::Text(" — closing.".into()),
+            ],
+        };
+        assert_eq!(final_text(&message).as_deref(), Some("on it — closing."));
+        let tool_only = Message {
+            role: rhema_core::Role::Assistant,
+            content: vec![Content::ToolCall(rhema_core::ToolCall {
+                id: "call_1".into(),
+                name: "bash".into(),
+                args: serde_json::json!({}),
+                provider_data: serde_json::Value::Null,
+            })],
+        };
+        assert_eq!(final_text(&tool_only), None, "no text, no reply");
+    }
+
+    #[test]
+    fn a_key_resolves_to_its_watch_entry() {
+        use rhema_forge_agent::GitHubForge;
+
+        let key = ResourceKey::from("github:acme/widgets#7");
+        assert_eq!(watch_key(&key).as_deref(), Some("github:acme/widgets"));
+        let mut forges: HashMap<String, Arc<dyn Forge>> = HashMap::new();
+        forges.insert(
+            "github:acme/widgets".to_owned(),
+            Arc::new(GitHubForge::new("tok")) as Arc<dyn Forge>,
+        );
+        let handler = ClawHandler::new(Arc::new(NoopProvider), "m", "/tmp/w", forges);
+        assert!(handler.watch_forge(&key).is_some(), "the watch resolves");
+        assert!(
+            handler
+                .watch_forge(&ResourceKey::from("gitea:acme/widgets#7"))
+                .is_none(),
+            "another forge's key does not"
+        );
+        assert!(
+            handler
+                .watch_forge(&ResourceKey::from("github:nonsense"))
+                .is_none(),
+            "a non-thread key does not"
+        );
+    }
+
+    #[test]
+    fn the_workspace_name_flattens_to_filesystem_safe_characters() {
+        assert_eq!(
+            workspace_name("github:acme/widgets#7", &RepoRef::new("acme", "widgets"), 7),
+            "github-acme-widgets-7"
+        );
+        assert_eq!(
+            workspace_name(
+                "gitlab:group/subgroup/widgets#7",
+                &RepoRef::new("group/subgroup", "widgets"),
+                7
+            ),
+            "gitlab-group-subgroup-widgets-7"
+        );
+    }
+
+    #[test]
+    fn the_table_entry_round_trips_through_the_dispatch_key() {
+        let repo = RepoRef::new("acme", "widgets");
+        let entry = watch_entry("github", &repo);
+        let key = ResourceKey::from(format!("{entry}#7"));
+        assert_eq!(watch_key(&key).as_deref(), Some(entry.as_str()));
+    }
+
+    /// Stands in for the provider in pure-lookup tests; nothing calls it.
+    struct NoopProvider;
+    #[rhema_core::async_trait]
+    impl ModelProvider for NoopProvider {
+        async fn complete(
+            &self,
+            _req: rhema_core::ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<rhema_core::ModelOutput, rhema_core::ProviderError> {
+            Err(rhema_core::ProviderError::Api("never called".into()))
+        }
+    }
+
+    // `allowlist()` pins the v1 policy: permissive. The assertion keeps
+    // the policy a decision someone wrote down, not an accident.
+    #[test]
+    fn the_v1_allowlist_is_permissive() {
+        let allowlist = allowlist();
+        assert!(allowlist.allows("bash"));
+        assert!(allowlist.allows("anything_at_all"));
+    }
+}
