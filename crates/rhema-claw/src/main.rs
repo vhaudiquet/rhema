@@ -33,6 +33,11 @@ struct Args {
     /// cron-friendly shape for ephemeral machines.
     #[arg(long)]
     once: bool,
+
+    /// Answer every turn with canned streamed text: the zero-credential
+    /// debug backend. Requires the `mock` feature.
+    #[arg(long)]
+    mock: bool,
 }
 
 #[tokio::main]
@@ -54,7 +59,11 @@ async fn run(args: Args) -> Result<(), ClawError> {
         None => ClawConfig::default_path()?,
     };
     let config = ClawConfig::load_from(&path)?;
-    let (provider, model) = resolve_backend(&config);
+    let (provider, model) = if args.mock {
+        mock_backend()
+    } else {
+        resolve_backend(&config)
+    };
     eprintln!(
         "[claw] {} seeded watch(es), model {model}, db {}, http {}",
         config.watches.len(),
@@ -82,6 +91,20 @@ async fn run(args: Args) -> Result<(), ClawError> {
         let daemon = Daemon::build(&config, provider, DispatcherConfig::default())?;
         daemon.run().await
     }
+}
+
+/// The `--mock` backend: an endless canned provider behind the `mock`
+/// feature; without it the flag is a loud startup failure naming the fix.
+#[cfg(feature = "mock")]
+fn mock_backend() -> (Arc<dyn ModelProvider>, String) {
+    eprintln!("[claw] mock backend: every turn answers with canned streamed text");
+    (rhema_claw::mock::MockLoop::provider(), "mock".to_owned())
+}
+
+#[cfg(not(feature = "mock"))]
+fn mock_backend() -> (Arc<dyn ModelProvider>, String) {
+    eprintln!("error: --mock needs a mock build: cargo build -p rhema-claw --features mock");
+    std::process::exit(1);
 }
 
 /// The handler's backend, resolved through the stored rhema credentials

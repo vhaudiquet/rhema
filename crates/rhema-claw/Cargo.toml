@@ -15,6 +15,11 @@ path = "src/lib.rs"
 name = "rhema-claw"
 path = "src/main.rs"
 
+[features]
+# The endless canned provider for `--mock` debug runs; nothing ships in
+# a real build.
+mock = ["rhema-core/mock"]
+
 [dependencies]
 rhema-autonomous-agent = { path = "../rhema-autonomous-agent" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }

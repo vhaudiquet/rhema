@@ -40,6 +40,8 @@ pub mod handler;
 pub mod http;
 pub mod hub;
 pub mod interactive;
+#[cfg(feature = "mock")]
+pub mod mock;
 pub mod openai;
 pub mod watch_store;
 pub mod watch_tools;
@@ -50,4 +52,6 @@ pub use forge::ForgeSource;
 pub use handler::ClawHandler;
 pub use hub::{EventHub, TurnEvent};
 pub use interactive::InteractiveHandler;
+#[cfg(feature = "mock")]
+pub use mock::MockLoop;
 pub use watch_store::{ClawStore, WatchRecord, WatchStoreError};
