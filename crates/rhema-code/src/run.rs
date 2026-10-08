@@ -152,7 +152,7 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
         anyhow::bail!("empty prompt");
     }
 
-    let config = match Config::load() {
+    let mut config = match Config::load() {
         Ok(config) => config,
         Err(err) => {
             eprintln!("warning: ignoring unreadable rhema config: {err}");
@@ -160,13 +160,16 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
         }
     };
     // Same profile resolution as the TUI: an explicit --profile is
-    // honored as named, an absent one starts on a profile that can serve
-    // turns. No login screen exists headless: when nothing is usable the
-    // backend errors below, naming the fix.
+    // honored as named, a directory with a remembered profile reopens on
+    // it, an absent one starts on a profile that can serve turns. No
+    // login screen exists headless: when nothing is usable the backend
+    // errors below, naming the fix.
+    let workspace =
+        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
     let profile = args
         .profile
         .clone()
-        .unwrap_or_else(|| startup_profile(&config));
+        .unwrap_or_else(|| startup_profile(&config, &workspace));
     let effective = config.effective(Some(&profile));
     let provider_choice = args
         .provider
@@ -228,6 +231,15 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
         base_system: resolve_base_system(Config::system_prompt_path().ok().as_deref()),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
     };
+    // The workspace remembers the profile that served it, the same
+    // memory the next launch here reads back. Best effort: a failed
+    // write warns without failing the turn.
+    if config.last_profile_in(&workspace).as_deref() != Some(profile.as_str()) {
+        config.note_profile_in(&workspace, &profile);
+        if let Err(err) = config.save() {
+            eprintln!("warning: the profile choice was not remembered: {err}");
+        }
+    }
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
             .with_context(|| format!("cannot resume session: {}", path.display()))?,
@@ -259,15 +271,21 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         eprintln!("warning: ignoring unreadable rhema config: {err}");
         Config::default()
     });
-    // Without an explicit --profile the session starts on the default
-    // profile, or the first one that can serve turns — a logged-in
-    // profile never opens the login screen. The stored provider choice
-    // then decides which backend runs; a missing key still leaves the
-    // backend unresolved so the login screen runs.
+    // Without an explicit --profile the session starts on the profile
+    // this workspace last used, or on the default/first one that can
+    // serve turns — a logged-in profile never opens the login screen.
+    // The stored provider choice then decides which backend runs; a
+    // missing key still leaves the backend unresolved so the login
+    // screen runs.
+    // The real path, before anything moves into the app: the profile
+    // memory and the saved sessions group by it, so a relative "." must
+    // not become a "." directory.
+    let workspace =
+        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
     let profile = args
         .profile
         .clone()
-        .unwrap_or_else(|| startup_profile(&config));
+        .unwrap_or_else(|| startup_profile(&config, &workspace));
     let effective = config.effective(Some(&profile));
     let provider_choice = args
         .provider
@@ -298,10 +316,6 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             .with_context(|| format!("cannot resume session: {}", path.display()))?,
         None => Session::default(),
     };
-    // The real path, before anything moves into the app: saved sessions
-    // group by it, so a relative "." must not become a "." directory.
-    let workspace =
-        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
     let agent_base = resolve_base_system(Config::system_prompt_path().ok().as_deref());
     let options = RunOptions {
         theme: args.theme,
@@ -324,12 +338,21 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     };
 
     enable_raw_mode().context("the rhema-tui binary needs a terminal; pipe output through a pty or use the rhema CLI instead")?;
-    // Shift-enter reports as a key only under the kitty keyboard
-    // protocol; terminals without it ignore the push, and newlines keep
-    // working through alt-enter and ctrl-j.
+    // Shift-enter is a distinct key only when the terminal encodes
+    // every key: under the kitty protocol the disambiguate flag alone
+    // leaves plain shift+key in legacy mode, so shift+enter would stay
+    // an indistinguishable CR. All-keys plus alternate keys make
+    // Ghostty, kitty, and WezTerm report shift-enter as CSI 13;2u and
+    // keep shifted letters correct; terminals without the protocol
+    // ignore the push, and newlines keep working through alt-enter and
+    // ctrl-j.
     crossterm::execute!(
         stdout(),
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+        ),
         EnterAlternateScreen,
         EnableMouseCapture,
         EnableBracketedPaste

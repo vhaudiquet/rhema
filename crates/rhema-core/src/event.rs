@@ -2,11 +2,11 @@
 //! receives them.
 //!
 //! Ownership of events: the [`crate::ModelProvider`] emits streaming deltas
-//! (`TextDelta`, `ToolCallStart`, `ToolCallArgsDelta`) while it streams; the
-//! [`crate::Agent`] emits the lifecycle events (`StepStart`, `ToolResult`,
-//! `StepEnd`). A provider that announces a tool call while streaming it is
-//! not echoed by the engine — the engine only emits `ToolCallStart` for
-//! calls the provider did not announce.
+//! (`ThinkingDelta`, `TextDelta`, `ToolCallStart`, `ToolCallArgsDelta`)
+//! while it streams; the [`crate::Agent`] emits the lifecycle events
+//! (`StepStart`, `ToolResult`, `StepEnd`). A provider that announces a tool
+//! call while streaming it is not echoed by the engine — the engine only
+//! emits `ToolCallStart` for calls the provider did not announce.
 
 /// One streaming or lifecycle event of a step.
 #[derive(Debug, Clone, PartialEq)]
@@ -17,6 +17,10 @@ pub enum Event<'a> {
         /// Zero-based index of this step within the agent.
         iteration: u32,
     },
+    /// A piece of the model's reasoning trace, in stream order. Ephemeral
+    /// by design: never appended to the session history — sinks render it
+    /// live (or drop it), and it is gone when the step ends.
+    ThinkingDelta(&'a str),
     /// A piece of assistant text, in stream order.
     TextDelta(&'a str),
     /// A tool call begins streaming; args follow as deltas.

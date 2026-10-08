@@ -29,20 +29,24 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         Screen::Profile(profile) => render_profile_picker(frame, profile, theme),
         Screen::Resume(resume) => render_resume_picker(frame, resume, theme),
         Screen::Chat => {
-            // An error wraps, so the status strip grows to its wrapped
-            // height; every other strip is fixed.
-            let status_rows = app
-                .error
-                .as_ref()
-                .map(|error| {
+            // An error wraps, so its strip grows to the wrapped height.
+            // Either strip — error or spinner — carries a blank row above
+            // it, so it never sits flush against the transcript's tail;
+            // idle, the strip is just that single row of air between
+            // transcript and input.
+            let status_rows = match &app.error {
+                Some(error) => {
                     wrap_line(&Line::from(error.clone()), frame.area().width as usize).len() as u16
-                })
-                .unwrap_or(1)
-                .max(1);
+                        + 1
+                }
+                None if app.running => 2 + thinking_rows(app, frame.area().width as usize),
+                None => 1,
+            };
             let input_rows = input_rows(
                 &app.chat.input,
-                app.chat.attachments.len(),
+                &app.chat.attachments,
                 frame.area().width,
+                theme,
             );
             let [transcript_area, status_area, input_area, footer_area] = Layout::vertical([
                 Constraint::Min(0),
@@ -504,6 +508,13 @@ fn model_row(provider: &str, model: &GeminiModel, theme: &Theme) -> Line<'static
     ])
 }
 
+/// The model id as the footer shows it: everything after the last `/`,
+/// so an OpenRouter id like `apodex/apodex-1.1-mini:free` reads without
+/// its vendor prefix. Ids without a slash pass through whole.
+fn footer_model(model: &str) -> &str {
+    model.rsplit('/').next().unwrap_or(model)
+}
+
 /// Humanizes a token count: 1_048_576 → "1.0M", 131_072 → "131k", none →
 /// "?".
 fn format_tokens(limit: Option<u64>) -> String {
@@ -728,7 +739,8 @@ fn tool_row(
 fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let width = area.width as usize;
     let mut lines: Vec<Line> = if let Some(error) = &app.error {
-        wrap_line(&Line::from(error.clone()), width)
+        // Wrapped a cell short so the indent below cannot push a wrap.
+        wrap_line(&Line::from(error.clone()), width.saturating_sub(1))
             .into_iter()
             .map(|line| line.style(Style::default().fg(theme.error).bold()))
             .collect()
@@ -736,7 +748,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         // Braille dots cycling through the classic spinner, animated off
         // the running turn's clock — no timer machinery of its own.
         const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let frame = app
+        let spinner = app
             .turn_started
             .map(|started| (started.elapsed().as_millis() / 80) as usize % SPINNER.len())
             .unwrap_or(0);
@@ -748,13 +760,16 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         // command executing is running.
         let phase = if app.processing {
             Line::from(vec![
-                Span::styled(SPINNER[frame].to_string(), Style::default().fg(theme.info)),
+                Span::styled(
+                    SPINNER[spinner].to_string(),
+                    Style::default().fg(theme.info),
+                ),
                 Span::raw(" running").fg(theme.info),
             ])
         } else {
             Line::from(vec![
                 Span::styled(
-                    SPINNER[frame].to_string(),
+                    SPINNER[spinner].to_string(),
                     Style::default().fg(theme.running),
                 ),
                 Span::raw(" thinking").fg(theme.running),
@@ -765,8 +780,24 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         line.spans.push(Span::raw(" · esc cancels").fg(theme.text3));
         vec![line]
     } else {
-        vec![Line::from("")]
+        Vec::new()
     };
+    // The reasoning preview rides under the spinner: the trace's tail,
+    // at most three dim rows — gone the moment real output starts,
+    // because the buffer clears then.
+    if app.running && app.error.is_none() {
+        lines.extend(thinking_preview(app, width, theme));
+    }
+    // Content sits one cell in, on the transcript's left inset, and a
+    // blank row above the strip keeps it off the transcript's tail.
+    for line in &mut lines {
+        line.spans.insert(0, Span::raw(" "));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(""));
+    } else {
+        lines.insert(0, Line::from(""));
+    }
     if app.chat.scroll > 0 && app.error.is_none() {
         lines
             .last_mut()
@@ -775,6 +806,38 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .push(Span::raw("  ·  viewing history · pgdn: latest").fg(theme.text3));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Rows the reasoning preview may show.
+const THINKING_PREVIEW_ROWS: usize = 3;
+
+/// The reasoning preview rows: the tail of the accumulated trace,
+/// wrapped and dim. Empty while the buffer is — the buffer clears the
+/// moment the model's real output starts.
+fn thinking_preview(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    if app.thinking.is_empty() {
+        return Vec::new();
+    }
+    let source = Line::from(Span::raw(app.thinking.clone()));
+    let wrapped = wrap_line(&source, width.saturating_sub(1).max(1));
+    let skip = wrapped.len().saturating_sub(THINKING_PREVIEW_ROWS);
+    wrapped
+        .into_iter()
+        .skip(skip)
+        .map(|line| line.style(Style::default().fg(theme.text3).italic()))
+        .collect()
+}
+
+/// How many rows the preview occupies at `width` — the same wrap the
+/// render applies, so the strip reserves exactly what it draws.
+fn thinking_rows(app: &App, width: usize) -> u16 {
+    if app.thinking.is_empty() {
+        return 0;
+    }
+    let source = Line::from(Span::raw(app.thinking.clone()));
+    wrap_line(&source, width.saturating_sub(1).max(1))
+        .len()
+        .min(THINKING_PREVIEW_ROWS) as u16
 }
 
 /// The dim telemetry strip under the input: last turn's tokens, and the
@@ -867,7 +930,9 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     match (&effective.provider, &effective.model) {
         (None, _) => parts.push(Span::raw("no provider — use /login").fg(theme.text3)),
         (_, None) => parts.push(Span::raw("no model — use /model").fg(theme.text3)),
-        (_, Some(model)) => parts.push(Span::raw(model.clone()).fg(theme.text2)),
+        // The id's vendor prefix is picker detail: a footer reads the
+        // bare model name.
+        (_, Some(model)) => parts.push(Span::raw(footer_model(model).to_owned()).fg(theme.text2)),
     }
     let used = app.context_used();
     let mut context = format_tokens(Some(used));
@@ -906,92 +971,51 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let width = inner.width.saturating_sub(2) as usize;
     let prompt = "❯ ";
-    // Attachment chips come first, one row each: an icon and the size,
-    // never the pasted wall of text.
-    let mut rows: Vec<Line> = app
-        .chat
-        .attachments
-        .iter()
-        .map(|paste| {
-            Line::from(vec![
-                Span::raw("▣ ").fg(theme.info),
-                Span::raw(format!("pasted {} lines", paste.lines().count())).fg(theme.info),
-            ])
-        })
-        .collect();
-    let chips = rows.len();
-    // The text wraps into visual rows — the same wrap math the height
-    // counts — with the marker riding on each logical line's first row.
-    // The cursor maps onto those rows exactly, so the box windows by
-    // what the user sees.
-    let cursor_line = app.chat.cursor_line_index();
-    let cursor_column = app.chat.cursor_column();
-    let mut text_rows: Vec<Line> = Vec::new();
-    let mut markers: Vec<bool> = Vec::new();
+    // The layout is the render's source of truth: text rows and chip
+    // rows interleaved exactly as the anchors sit in the input.
+    let layout = input_layout(&app.chat.input, &app.chat.attachments, width, theme);
+    // The cursor maps onto those rows by consumed source characters —
+    // chips account for their single anchor character.
     let mut cursor_at: Option<(usize, usize)> = None;
-    for (li, line) in app.chat.input.split('\n').enumerate() {
-        let marker = if li == 0 { prompt } else { "  " };
-        let wrapped = wrap_line(
-            &Line::from(vec![
-                Span::raw(marker).fg(theme.text3),
-                Span::raw(line.to_owned()),
-            ]),
-            width,
-        );
-        let lens: Vec<usize> = wrapped
-            .iter()
-            .map(|row| {
-                row.spans
-                    .iter()
-                    .map(|span| span.content.chars().count())
-                    .sum()
-            })
-            .collect();
-        for (ri, row) in wrapped.into_iter().enumerate() {
-            if li == cursor_line && cursor_at.is_none() {
-                let before: usize = lens[..ri].iter().sum();
-                if cursor_column <= before + lens[ri] {
-                    cursor_at = Some((text_rows.len(), (cursor_column - before).min(lens[ri])));
-                }
-            }
-            text_rows.push(row);
-            markers.push(ri == 0);
+    let mut consumed = 0usize;
+    for (index, row) in layout.iter().enumerate() {
+        let cursor = app.chat.cursor;
+        if cursor_at.is_none() && cursor >= consumed && cursor <= consumed + row.source_chars {
+            cursor_at = Some((index, cursor - consumed));
         }
+        consumed += row.source_chars;
     }
-    // The window fills whatever rows the chips left, anchored so the
-    // cursor's row stays visible; with no cursor (a running turn) the
-    // tail shows.
-    let remaining = INPUT_MAX_CONTENT_ROWS.saturating_sub(chips).max(1);
-    let total = text_rows.len();
+    // The window keeps the cursor's row visible; with no cursor (a
+    // running turn) the tail shows.
+    let remaining = INPUT_MAX_CONTENT_ROWS.max(1);
+    let total = layout.len();
     let (cursor_row, _cursor_col) = cursor_at.unwrap_or((total.saturating_sub(1), 0));
     let first = if total > remaining {
         cursor_row.min(total - remaining)
     } else {
         0
     };
-    if text_rows.is_empty() {
+    let rows: Vec<Line> = if layout.is_empty() {
         // The placeholder keeps the box reading as an input.
-        rows.push(Line::from(vec![
+        vec![Line::from(vec![
             Span::raw(prompt).fg(theme.text3),
             Span::raw("ask anything · /help for commands").fg(theme.text3),
-        ]));
+        ])]
     } else {
-        for row in text_rows[first..first + remaining.min(total - first)]
+        layout[first..first + remaining.min(total - first)]
             .iter()
-            .cloned()
-        {
-            rows.push(row);
-        }
-    }
+            .map(|row| row.line.clone())
+            .collect()
+    };
     frame.render_widget(Paragraph::new(rows), inner);
     if !app.running {
         let (cursor_row, cursor_col) = cursor_at.unwrap_or((0, 0));
         // The prompt and the continuation indent are both two cells,
-        // and only each logical line's first row carries one.
-        let marker = u16::from(markers[cursor_row]);
+        // and only rows carrying one shift the cursor by them.
+        let marker = u16::from(layout[cursor_row].marker);
         frame.set_cursor_position(Position {
             x: inner.x + marker * 2 + cursor_col as u16,
-            y: inner.y + chips as u16 + (cursor_row - first) as u16,
+            y: inner.y + (cursor_row - first) as u16,
         });
     }
 }
@@ -1000,30 +1024,94 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 /// cursor's line shown.
 const INPUT_MAX_CONTENT_ROWS: usize = 8;
 
-/// The input box's total height: borders plus the wrapped content lines,
-/// growing with the text up to the cap. An empty input is one row.
-fn input_rows(input: &str, attachments: usize, width: u16) -> u16 {
-    let width = width.saturating_sub(2).max(1) as usize;
-    let text_rows: usize = if input.is_empty() {
-        1
-    } else {
-        input
-            .split('\n')
-            .enumerate()
-            .map(|(li, line)| {
-                // The marker narrows a line's first row, exactly as the
-                // render wraps it.
-                let marker = if li == 0 { "❯ " } else { "  " };
-                wrap_line(
-                    &Line::from(vec![Span::raw(marker), Span::raw(line.to_owned())]),
+/// One visual row of the input box: the rendered line plus the
+/// bookkeeping the cursor mapping and the height math read.
+#[derive(Debug, Clone)]
+struct InputRow {
+    line: Line<'static>,
+    /// Source characters of `input` this row accounts for — a chip row
+    /// accounts for its single anchor character.
+    source_chars: usize,
+    /// Whether the row carries the two-cell logical-line marker.
+    marker: bool,
+}
+
+/// One attachment chip's rendered row: icon, one-based index, line
+/// count, and the erase mark styled dim.
+fn chip_row(paste: &str, index: usize, theme: &Theme) -> Line<'static> {
+    let text = format!("▣{} {}L ✕", index + 1, paste.lines().count());
+    let head = text.strip_suffix('✕').unwrap_or(&text);
+    Line::from(vec![
+        Span::raw(head.to_owned()).fg(theme.info),
+        Span::raw("✕").fg(theme.text3),
+    ])
+}
+
+/// The input box's visual rows: every logical line wraps as before, and
+/// each attachment anchor renders as its own chip row exactly where the
+/// paste landed. Shared by the render and the height math so both
+/// always agree.
+fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme) -> Vec<InputRow> {
+    let mut rows: Vec<InputRow> = Vec::new();
+    let mut anchor = 0usize;
+    for (li, line) in input.split('\n').enumerate() {
+        let pieces: Vec<&str> = line.split(crate::screens::ChatState::MARK).collect();
+        let marks = pieces.len() - 1;
+        for (pi, piece) in pieces.iter().enumerate() {
+            // A bare logical line renders as one marker row; empty
+            // pieces around anchors carry no rows of their own.
+            if !piece.is_empty() || marks == 0 {
+                let lead = if pi == 0 && li == 0 {
+                    "❯ "
+                } else if pi == 0 {
+                    "  "
+                } else {
+                    ""
+                };
+                let wrapped = wrap_line(
+                    &Line::from(vec![
+                        Span::raw(lead).fg(theme.text3),
+                        Span::raw(piece.to_owned()),
+                    ]),
                     width,
-                )
-                .len()
-            })
-            .sum()
-    };
-    let content = attachments + text_rows;
-    (content.clamp(1, INPUT_MAX_CONTENT_ROWS) + 2) as u16
+                );
+                for (ri, row) in wrapped.into_iter().enumerate() {
+                    rows.push(InputRow {
+                        source_chars: row
+                            .spans
+                            .iter()
+                            .map(|span| span.content.chars().count())
+                            .sum(),
+                        marker: ri == 0 && !lead.is_empty(),
+                        line: row,
+                    });
+                }
+            }
+            if pi < marks {
+                rows.push(InputRow {
+                    source_chars: 1,
+                    marker: false,
+                    line: chip_row(
+                        attachments.get(anchor).map(String::as_str).unwrap_or(""),
+                        anchor,
+                        theme,
+                    ),
+                });
+                anchor += 1;
+            }
+        }
+    }
+    rows
+}
+
+/// The input box's total height: borders plus the layout rows, growing
+/// with the text up to the cap. An empty input is one row.
+fn input_rows(input: &str, attachments: &[String], width: u16, theme: &Theme) -> u16 {
+    let width = width.saturating_sub(2).max(1) as usize;
+    (input_layout(input, attachments, width, theme)
+        .len()
+        .clamp(1, INPUT_MAX_CONTENT_ROWS)
+        + 2) as u16
 }
 
 fn render_approval_modal(frame: &mut Frame, call: &rhema_core::ToolCall, theme: &Theme) {
@@ -1176,6 +1264,17 @@ mod tests {
         }
     }
 
+    /// The footer reads the bare model name: an OpenRouter id's vendor
+    /// prefix is cut, plain ids pass through.
+    #[test]
+    fn the_footer_model_cuts_the_vendor_prefix() {
+        assert_eq!(
+            footer_model("apodex/apodex-1.1-mini:free"),
+            "apodex-1.1-mini:free"
+        );
+        assert_eq!(footer_model("gemini-3.8-flash"), "gemini-3.8-flash");
+    }
+
     /// A sentence wraps at word boundaries, in order, each row within the
     /// width.
     #[test]
@@ -1213,13 +1312,15 @@ mod tests {
 
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
-    use super::{input_rows, render, wrap_line};
+    use super::{input_layout, input_rows, render, wrap_line};
     use crate::app::{App, AppSetup, RunOptions};
     use crate::args::ThemeKind;
     use crate::events::OwnedEvent;
+    use crate::palette::DARK;
     use ratatui::text::Line;
     use std::collections::BTreeMap;
 
+    use crate::screens::ChatState;
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
     use std::path::PathBuf;
@@ -1235,6 +1336,7 @@ mod scroll_tests {
                     ..rhema_config::Profile::default()
                 },
             )]),
+            ..Default::default()
         };
         App::new(AppSetup {
             store: Arc::new(MemoryStore::default()),
@@ -1409,7 +1511,7 @@ mod scroll_tests {
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
-        assert!(screen.contains("▣ pasted 5 lines"), "{screen}");
+        assert!(screen.contains("▣1 5L ✕"), "{screen}");
         assert!(!screen.contains("l1"), "the body stays hidden: {screen}");
     }
 
@@ -1437,6 +1539,63 @@ mod scroll_tests {
         let screen = draw(&mut app);
         assert!(screen.contains("running"), "{screen}");
         assert!(!screen.contains("thinking"), "{screen}");
+    }
+
+    #[test]
+    fn the_reasoning_preview_shows_and_vanishes_with_output() {
+        let mut app = chat_app();
+        app.running = true;
+        app.thinking = "reasoning about the tree state".to_owned();
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+
+        let screen = draw(&mut app);
+        assert!(screen.contains("reasoning about"), "{screen}");
+
+        // Cleared buffer, cleared block: the strip is back to the bare
+        // spinner.
+        app.thinking.clear();
+        let screen = draw(&mut app);
+        assert!(!screen.contains("reasoning about"), "{screen}");
+    }
+
+    #[test]
+    fn the_spinner_sits_below_a_blank_row_and_on_the_transcript_inset() {
+        let mut app = chat_app();
+        app.running = true;
+        app.transcript.push_user("look at this");
+
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let spinner_row = (0..buffer.area.height)
+            .find(|y| row_text(*y).contains("thinking"))
+            .expect("spinner visible");
+        assert!(
+            row_text(spinner_row).starts_with(" ⠋"),
+            "indented one cell: {:?}",
+            row_text(spinner_row)
+        );
+        assert!(
+            row_text(spinner_row - 1).trim_end().is_empty(),
+            "a blank row above: {:?}",
+            row_text(spinner_row - 1)
+        );
     }
 
     #[test]
@@ -1481,12 +1640,48 @@ mod scroll_tests {
 
     #[test]
     fn the_input_box_grows_and_caps() {
-        assert_eq!(input_rows("", 0, 40), 3, "empty: one content row");
-        assert_eq!(input_rows("one line", 0, 40), 3);
-        assert_eq!(input_rows("a\nb\nc", 0, 40), 5, "one row per line");
-        assert_eq!(input_rows("a", 2, 40), 5, "chips take rows");
+        let paste = |lines: usize| "x\n".repeat(lines).trim_end().to_owned();
+        assert_eq!(input_rows("", &[], 40, &DARK), 3, "empty: one content row");
+        assert_eq!(input_rows("one line", &[], 40, &DARK), 3);
+        assert_eq!(input_rows("a\nb\nc", &[], 40, &DARK), 5, "one row per line");
+        // Each anchor renders as its own row: two chips between text
+        // cost two rows, wherever they sit.
+        let marked = format!("a{}{}b", ChatState::MARK, ChatState::MARK);
+        assert_eq!(input_rows(&marked, &[paste(4), paste(4)], 40, &DARK), 6);
         let wall = "x\n".repeat(20);
-        assert_eq!(input_rows(&wall, 0, 40), 10, "the cap holds");
+        assert_eq!(input_rows(&wall, &[], 40, &DARK), 10, "the cap holds");
+    }
+
+    #[test]
+    fn attachment_chips_render_where_they_were_pasted() {
+        let paste = "l1\nl2\nl3\nl4\nl5".to_owned();
+        let input = format!("before{} after", ChatState::MARK);
+        let rows = input_layout(&input, &[paste], 40, &DARK);
+        // The chip owns the middle row: text, chip, text — in prompt
+        // order, each chip row accounting for its one anchor character.
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[1].source_chars, 1);
+        let chip: String = rows[1]
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(chip, "▣1 5L ✕");
+        let head: String = rows[0]
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(head.contains("before"), "{head}");
+        let tail: String = rows[2]
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert!(tail.contains("after"), "{tail}");
     }
 
     #[test]
@@ -1687,7 +1882,10 @@ mod scroll_tests {
         // The whole prompt is visible, tail included — nothing clips.
         assert!(screen.contains("end"), "{screen}");
         // The box grew to the wrapped height: six-ish rows of content.
-        assert!(input_rows(&long, 0, 40) > 3, "one wrapped line, taller box");
+        assert!(
+            input_rows(&long, &[], 40, &DARK) > 3,
+            "one wrapped line, taller box"
+        );
     }
 
     #[test]

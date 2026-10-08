@@ -30,9 +30,10 @@
 //!   synthesized `call_{index}` when absent), `content_block_delta` streams
 //!   `text_delta` pieces as `TextDelta` and `input_json_delta` pieces as
 //!   `ToolCallArgsDelta`, and `message_delta` carries the final stop
-//!   reason. `ping`, `content_block_stop`, `message_stop`, thinking deltas,
-//!   and unknown event kinds carry no rhema-mappable state; a top-level
-//!   `error` event fails the stream.
+//!   reason. `ping`, `content_block_stop`, `message_stop`, and unknown
+//!   event kinds carry no rhema-mappable state; `thinking_delta` pieces
+//!   stream as [`Event::ThinkingDelta`] and never reach the assembled
+//!   message; a top-level `error` event fails the stream.
 //! - Usage merges per field: `message_start`'s nested `usage` carries the
 //!   input-token count, `message_delta`'s the final output-token count;
 //!   `cache_read_input_tokens` maps to cached tokens (0 when absent).
@@ -215,6 +216,11 @@ pub struct WireDelta {
     /// A piece of assistant text, on `text_delta`.
     #[serde(default)]
     pub text: Option<String>,
+    /// A piece of the model's reasoning trace, on `thinking_delta`.
+    /// Emitted as [`Event::ThinkingDelta`], never assembled into the
+    /// message.
+    #[serde(default)]
+    pub thinking: Option<String>,
     /// A piece of a tool call's JSON arguments, on `input_json_delta`.
     #[serde(default)]
     pub partial_json: Option<String>,
@@ -481,6 +487,12 @@ enum PartialBlock {
         /// The accumulated text.
         text: String,
     },
+    /// The model's reasoning trace, accumulated from `thinking_delta`
+    /// pieces. Streams live and never joins the assembled message.
+    Thinking {
+        /// The accumulated reasoning text.
+        text: String,
+    },
     /// A tool call: id and name from `content_block_start`, arguments from
     /// `input_json_delta` pieces.
     ToolCall {
@@ -576,8 +588,15 @@ impl ChunkAssembler {
                             },
                         );
                     }
-                    // Thinking and future block kinds carry no
-                    // rhema-mappable content.
+                    "thinking" => {
+                        self.blocks.insert(
+                            index,
+                            PartialBlock::Thinking {
+                                text: String::new(),
+                            },
+                        );
+                    }
+                    // Future block kinds carry no rhema-mappable content.
                     _ => {}
                 }
             }
@@ -598,8 +617,9 @@ impl ChunkAssembler {
                         }) {
                             PartialBlock::Text { text: accumulated } => accumulated.push_str(text),
                             // A delta for a block the start event declared a
-                            // call stays a call; the stray text has no home.
-                            PartialBlock::ToolCall { .. } => {}
+                            // call or a trace stays that kind; the stray text
+                            // has no home.
+                            PartialBlock::ToolCall { .. } | PartialBlock::Thinking { .. } => {}
                         }
                     }
                     Some("input_json_delta") => {
@@ -618,12 +638,29 @@ impl ChunkAssembler {
                         }) {
                             PartialBlock::ToolCall { json, .. } => json.push_str(piece),
                             // A delta for a block the start event declared
-                            // text stays text.
-                            PartialBlock::Text { .. } => {}
+                            // text or a trace stays that kind.
+                            PartialBlock::Text { .. } | PartialBlock::Thinking { .. } => {}
                         }
                     }
-                    // `thinking_delta`/`signature_delta` and future kinds
-                    // carry no rhema-mappable content.
+                    Some("thinking_delta") => {
+                        let Some(text) =
+                            delta.thinking.as_deref().filter(|piece| !piece.is_empty())
+                        else {
+                            return Ok(());
+                        };
+                        sink.emit(Event::ThinkingDelta(text));
+                        // A delta for a block the start event declared
+                        // another kind stays that kind; only a trace grows.
+                        if let PartialBlock::Thinking { text: accumulated } =
+                            self.blocks.entry(index).or_insert(PartialBlock::Thinking {
+                                text: String::new(),
+                            })
+                        {
+                            accumulated.push_str(text);
+                        }
+                    }
+                    // `signature_delta` and future kinds carry no
+                    // rhema-mappable content.
                     _ => {}
                 }
             }
@@ -648,7 +685,7 @@ impl ChunkAssembler {
             .into_iter()
             .filter_map(|(index, block)| match block {
                 PartialBlock::Text { text } if !text.is_empty() => Some(Content::Text(text)),
-                PartialBlock::Text { .. } => None,
+                PartialBlock::Text { .. } | PartialBlock::Thinking { .. } => None,
                 PartialBlock::ToolCall { id, name, json } => Some(Content::ToolCall(ToolCall {
                     id: id.unwrap_or_else(|| format!("call_{index}")),
                     name,
@@ -1141,12 +1178,12 @@ mod tests {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
         for payload in [
-            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":null}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#,
-            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
-            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
-            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
-            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"oracle","x":1}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"oracle_delta","x":"hmm"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"answer"}}"#,
+            r#"{"type":"content_block_stop","index":2}"#,
             r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
             r#"{"type":"future_event"}"#,
         ] {
@@ -1159,6 +1196,38 @@ mod tests {
         assert_eq!(out.message.content, vec![Content::Text("answer".into())]);
         assert_eq!(out.stop_reason, StopReason::EndTurn);
         assert_eq!(sink.0, vec!["TextDelta(\"answer\")".to_owned()]);
+    }
+
+    #[test]
+    fn thinking_deltas_stream_but_never_reach_the_message() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":null}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm "}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me see"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"answer"}}"#,
+            r#"{"type":"content_block_stop","index":1}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+        ] {
+            assembler
+                .push(event(payload), &mut sink)
+                .expect("event feeds");
+        }
+        let out = assembler.finish();
+
+        // The trace streams live but the message carries only the reply.
+        assert_eq!(out.message.content, vec![Content::Text("answer".into())]);
+        assert_eq!(
+            sink.0,
+            vec![
+                "ThinkingDelta(\"hmm \")".to_owned(),
+                "ThinkingDelta(\"let me see\")".to_owned(),
+                "TextDelta(\"answer\")".to_owned(),
+            ]
+        );
     }
 
     #[test]

@@ -70,7 +70,17 @@ pub fn parse_hex_color(text: &str) -> Option<Color> {
 pub fn default_profile_color(name: &str, theme: &Theme) -> Color {
     match name {
         "personal" => theme.accent_text,
-        "work" => theme.info,
+        // Work wears a burnt orange, kin to warn but redder and its own:
+        // softened from the #EB7D34 it grew from so its saturation sits
+        // with the mid-saturation status set, and darkened on the light
+        // theme to stay readable on the near-white ground.
+        "work" => {
+            if *theme == DARK {
+                Color::Rgb(0xE2, 0x85, 0x4A)
+            } else {
+                Color::Rgb(0x9C, 0x52, 0x18)
+            }
+        }
         _ => theme.text2,
     }
 }
@@ -116,3 +126,27 @@ pub const LIGHT: Theme = Theme {
     error: Color::Rgb(0xB3, 0x35, 0x4A),
     info: Color::Rgb(0x4A, 0x60, 0x70),
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_seeded_profiles_wear_distinct_theme_tuned_tones() {
+        // Personal rides the accent.
+        assert_eq!(default_profile_color("personal", &DARK), DARK.accent_text);
+        // Work wears its own orange, per theme: kin to warn but not warn,
+        // deeper on the light ground.
+        assert_eq!(
+            default_profile_color("work", &DARK),
+            Color::Rgb(0xE2, 0x85, 0x4A)
+        );
+        assert_ne!(default_profile_color("work", &DARK), DARK.warn);
+        assert_eq!(
+            default_profile_color("work", &LIGHT),
+            Color::Rgb(0x9C, 0x52, 0x18)
+        );
+        // Anything else reads secondary.
+        assert_eq!(default_profile_color("other", &DARK), DARK.text2);
+    }
+}

@@ -46,8 +46,8 @@
 //!   in the assembled message winning as
 //!   [`StopReason::ToolUse`](rhema_core::StopReason::ToolUse) — the same
 //!   rule as the Gemini adapter.
-//! - `delta.reasoning_content` (thinking models) has no rhema-core
-//!   counterpart and is ignored, like Gemini thought parts.
+//! - `delta.reasoning_content` (thinking models) becomes one
+//!   `ThinkingDelta` per non-empty piece, like Gemini thought parts.
 //! - Errors: a non-2xx body is `{"error": {code, message, type}}`; the
 //!   mapper keeps `error.message` and falls back to the raw body. The
 //!   server can also fail mid-stream with a `data: {"error": ...}` chunk
@@ -196,12 +196,18 @@ pub struct WireChoice {
     pub finish_reason: Option<String>,
 }
 
-/// The `delta` object of a [`WireChoice`].
+/// The `delta` object of a [`WireChoice`]. Fields beyond `content`,
+/// `tool_calls`, and `reasoning_content` are ignored.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct WireDelta {
     /// A piece of assistant text.
     #[serde(default)]
     pub content: Option<String>,
+    /// A piece of the model's reasoning trace, as the server emits it for
+    /// thinking models. Emitted as [`Event::ThinkingDelta`], never
+    /// assembled into the message.
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
     /// Tool-call fragments, keyed by their `index`.
     #[serde(default)]
     pub tool_calls: Option<Vec<WireToolCallDelta>>,
@@ -594,6 +600,9 @@ impl ChunkAssembler {
             let Some(delta) = choice.delta else {
                 continue;
             };
+            if let Some(text) = delta.reasoning_content.filter(|text| !text.is_empty()) {
+                sink.emit(Event::ThinkingDelta(&text));
+            }
             if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
                 sink.emit(Event::TextDelta(&text));
                 self.texts.push(text);
@@ -1109,17 +1118,24 @@ mod tests {
     }
 
     #[test]
-    fn empty_text_deltas_and_reasoning_content_are_ignored() {
+    fn reasoning_content_streams_but_never_reaches_the_message() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
+        // Both fields empty: nothing emits.
         assembler
             .push(
-                chunk(
-                    "{\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning_content\":\"hmm\"}}]}",
-                ),
+                chunk("{\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning_content\":\"\"}}]}"),
                 &mut sink,
             )
             .expect("chunk feeds");
+        // A reasoning piece emits its own delta...
+        assembler
+            .push(
+                chunk("{\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}"),
+                &mut sink,
+            )
+            .expect("chunk feeds");
+        // ...and the reply text follows untouched by it.
         assembler
             .push(
                 chunk(
@@ -1131,7 +1147,13 @@ mod tests {
         let out = assembler.finish();
 
         assert_eq!(out.message.content, vec![Content::Text("ok".into())]);
-        assert_eq!(sink.0, vec!["TextDelta(\"ok\")".to_owned()]);
+        assert_eq!(
+            sink.0,
+            vec![
+                "ThinkingDelta(\"hmm\")".to_owned(),
+                "TextDelta(\"ok\")".to_owned()
+            ]
+        );
     }
 
     #[test]

@@ -36,6 +36,11 @@ pub enum OwnedEvent {
         /// Zero-based step index within the agent.
         iteration: u32,
     },
+    /// See [`Event::ThinkingDelta`].
+    ThinkingDelta(
+        /// The streamed reasoning piece.
+        String,
+    ),
     /// See [`Event::TextDelta`].
     TextDelta(
         /// The streamed text piece.
@@ -79,6 +84,7 @@ impl From<&Event<'_>> for OwnedEvent {
             Event::StepStart { iteration } => Self::StepStart {
                 iteration: *iteration,
             },
+            Event::ThinkingDelta(delta) => Self::ThinkingDelta((*delta).to_owned()),
             Event::TextDelta(delta) => Self::TextDelta((*delta).to_owned()),
             Event::ToolCallStart { id, name } => Self::ToolCallStart {
                 id: (*id).to_owned(),

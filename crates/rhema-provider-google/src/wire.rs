@@ -74,7 +74,8 @@ pub struct WirePart {
     /// Text of a text part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// `true` on internal thought parts, which never map to rhema-core.
+    /// `true` on internal thought parts: they stream as
+    /// [`Event::ThinkingDelta`] and never map into the message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought: Option<bool>,
     /// Present on a function-call part.
@@ -551,6 +552,14 @@ impl ChunkAssembler {
             }
             if let Some(content) = candidate.content {
                 for part in &content.parts {
+                    // Thought parts stream as reasoning deltas and never
+                    // join the assembled message (normalize drops them).
+                    if part.thought == Some(true) {
+                        if let Some(text) = part.text.as_deref().filter(|text| !text.is_empty()) {
+                            sink.emit(Event::ThinkingDelta(text));
+                        }
+                        continue;
+                    }
                     if let Some(normalized) = self.normalizer.normalize(part) {
                         normalized.emit(sink);
                         self.parts.push(normalized);
@@ -1095,7 +1104,7 @@ mod tests {
     }
 
     #[test]
-    fn thought_parts_and_empty_text_are_dropped() {
+    fn thought_parts_stream_but_never_reach_the_message() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
         assembler.push(
@@ -1108,7 +1117,16 @@ mod tests {
         );
         let out = assembler.finish();
 
+        // The thought text streams live; the message carries only the
+        // reply, and the empty part drops.
         assert_eq!(out.message.content, vec![Content::Text("answer".into())]);
+        assert_eq!(
+            sink.0,
+            vec![
+                "ThinkingDelta(\"thinking\")".to_owned(),
+                "TextDelta(\"answer\")".to_owned()
+            ]
+        );
     }
 
     #[test]

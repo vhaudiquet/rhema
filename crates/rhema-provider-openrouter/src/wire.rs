@@ -191,12 +191,18 @@ pub struct WireChoice {
     pub finish_reason: Option<String>,
 }
 
-/// The `delta` object of a [`WireChoice`].
+/// The `delta` object of a [`WireChoice`]. Fields beyond `content`,
+/// `tool_calls`, and `reasoning` are ignored.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub struct WireDelta {
     /// A piece of assistant text.
     #[serde(default)]
     pub content: Option<String>,
+    /// A piece of the routed model's reasoning trace, normalized by
+    /// OpenRouter across providers. Emitted as [`Event::ThinkingDelta`],
+    /// never assembled into the message.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// Tool-call fragments, keyed by their `index`.
     #[serde(default)]
     pub tool_calls: Option<Vec<WireToolCallDelta>>,
@@ -586,6 +592,9 @@ impl ChunkAssembler {
             let Some(delta) = choice.delta else {
                 continue;
             };
+            if let Some(text) = delta.reasoning.filter(|text| !text.is_empty()) {
+                sink.emit(Event::ThinkingDelta(&text));
+            }
             if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
                 sink.emit(Event::TextDelta(&text));
                 self.texts.push(text);

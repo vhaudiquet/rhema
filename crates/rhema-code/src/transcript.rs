@@ -146,6 +146,9 @@ impl Transcript {
     pub fn apply(&mut self, event: &OwnedEvent) {
         match event {
             OwnedEvent::StepStart { .. } => {}
+            // Reasoning is ephemeral: it renders live in the status strip
+            // and never lands in the transcript or the session history.
+            OwnedEvent::ThinkingDelta(_) => {}
             OwnedEvent::TextDelta(delta) => self.append_assistant(delta),
             OwnedEvent::ToolCallStart { id, name } => {
                 self.lines.push(Line::ToolCall {
@@ -367,6 +370,14 @@ mod tests {
                 Line::Assistant("after".into()),
             ]
         );
+    }
+
+    #[test]
+    fn thinking_deltas_never_land_in_the_transcript() {
+        let mut transcript = Transcript::new();
+        transcript.apply(&OwnedEvent::ThinkingDelta("hmm".into()));
+        transcript.apply(&OwnedEvent::TextDelta("answer".into()));
+        assert_eq!(transcript.lines(), &[Line::Assistant("answer".into())]);
     }
 
     #[test]

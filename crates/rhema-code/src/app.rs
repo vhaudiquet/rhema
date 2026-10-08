@@ -290,6 +290,10 @@ pub struct App {
     /// A command is executing while the turn runs; `false` while the
     /// model itself is streaming — thinking.
     pub processing: bool,
+    /// The running turn's reasoning trace, tail only: the status strip
+    /// previews its last rows, and it clears the moment real output
+    /// starts. Never part of the transcript or the session history.
+    pub thinking: String,
     /// The file this session was resumed from, if any: the exit save
     /// updates it in place instead of growing a second entry in /resume.
     pub resumed_from: Option<PathBuf>,
@@ -396,6 +400,7 @@ impl App {
             decline_all: false,
             turn_cancel: None,
             processing: false,
+            thinking: String::new(),
             resumed_from: None,
             should_quit: false,
             chat: ChatState::new(),
@@ -512,9 +517,10 @@ impl App {
             None => self.session.clone(),
         };
         let Some(backend) = Backend::from_profile(&effective) else {
-            // Per-session, never persisted: parallel instances keep
-            // their own profile. The agent drops with the provider: a
-            // turn here would run on the profile just left.
+            // Never recorded: startup re-validates usability, so the
+            // memory naming a keyless profile would only fall through.
+            // The agent drops with the provider: a turn here would run
+            // on the profile just left.
             self.session_profile = Some(name.to_owned());
             self.backend = None;
             self.provider = None;
@@ -530,14 +536,15 @@ impl App {
         let agent_config = agent_config(&self.options, effective.model.clone());
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
             Ok(agent) => {
-                // Per-session, never persisted: parallel instances keep
-                // their own profile.
                 self.session_profile = Some(name.to_owned());
                 self.backend = Some(backend.clone());
                 self.provider = Some(backend.provider());
                 self.models.clear();
                 self.agent = Some(agent);
                 self.screen = Screen::Chat;
+                // An explicit switch is a choice: recorded for this
+                // workspace now, not at the next turn.
+                self.remember_profile();
                 if effective.model.is_none() {
                     self.transcript.push_notice(&format!(
                         "switched to profile {name} — /model to pick a model"
@@ -1068,19 +1075,64 @@ impl App {
     pub fn begin_turn(&mut self, answers: Option<ApprovalAnswerer>) {
         self.answers = answers;
         self.processing = false;
+        self.thinking.clear();
+        self.remember_profile();
+    }
+
+    /// Records the session's profile as the last one this workspace
+    /// chose or ran with — an explicit `/profile` switch or a turn's
+    /// start — so the next launch here opens on it. Written only on
+    /// change; a failure surfaces in the status strip like every other
+    /// config write — neither the switch nor the turn is blocked by it.
+    fn remember_profile(&mut self) {
+        let Some(profile) = self.session_profile.clone() else {
+            return;
+        };
+        let workspace = self.options.workspace.clone();
+        if self.config.last_profile_in(&workspace).as_deref() == Some(profile.as_str()) {
+            return;
+        }
+        self.config.note_profile_in(&workspace, &profile);
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+        }
     }
 
     /// Tracks which phase a running turn is in, from the engine's own
     /// events: streaming is thinking, a tool call is processing. A result
     /// leaves the phase alone — the next call or step moves it, so the
-    /// label never flickers between back-to-back commands.
+    /// label never flickers between back-to-back commands. Reasoning
+    /// deltas fill the preview buffer; real output or a tool call clears
+    /// it — the thinking block vanishes once the answer starts.
     fn track_phase(&mut self, owned: &OwnedEvent) {
         match owned {
-            OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => self.processing = false,
+            OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => {
+                self.processing = false;
+                self.thinking.clear();
+            }
+            OwnedEvent::ThinkingDelta(delta) => self.push_thinking(delta),
             // A tool call means a command runs. Its arguments often never
             // stream as deltas, so the label stays phase-only.
-            OwnedEvent::ToolCallStart { .. } => self.processing = true,
+            OwnedEvent::ToolCallStart { .. } => {
+                self.processing = true;
+                self.thinking.clear();
+            }
             _ => {}
+        }
+    }
+
+    /// Appends one reasoning piece to the preview buffer, keeping only
+    /// the tail: the status strip shows at most a few wrapped rows, so
+    /// older reasoning has no screen to live on.
+    fn push_thinking(&mut self, delta: &str) {
+        const TAIL_CAP: usize = 2048;
+        self.thinking.push_str(delta);
+        if self.thinking.len() > TAIL_CAP {
+            let mut cut = self.thinking.len() - TAIL_CAP;
+            while !self.thinking.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.thinking.drain(..cut);
         }
     }
 
@@ -1117,6 +1169,7 @@ impl App {
         self.turn_started = None;
         self.turn_cancel = None;
         self.processing = false;
+        self.thinking.clear();
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -1133,6 +1186,7 @@ impl App {
         self.turn_started = None;
         self.turn_cancel = None;
         self.processing = false;
+        self.thinking.clear();
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -1243,12 +1297,13 @@ fn estimate_history_tokens(history: &[Message]) -> u64 {
 }
 
 /// The profile a session runs on when no `--profile` names one: the
-/// default profile while it can serve turns, otherwise the first stored
-/// profile that can (the registry's order) — a logged-in profile must
-/// not open the login screen. Isolation still holds: this only picks
-/// the section up front, and nothing reads across profiles afterwards.
-/// An explicit flag never reaches here.
-pub(crate) fn startup_profile(config: &rhema_config::Config) -> String {
+/// profile this workspace last served a turn under while it still can,
+/// else the default profile while it can serve turns, otherwise the
+/// first stored profile that can (the registry's order) — a logged-in
+/// profile must not open the login screen. Isolation still holds: this
+/// only picks the section up front, and nothing reads across profiles
+/// afterwards. An explicit flag never reaches here.
+pub(crate) fn startup_profile(config: &rhema_config::Config, workspace: &Path) -> String {
     let default = "personal";
     let ready = |name: &str| {
         config
@@ -1257,6 +1312,9 @@ pub(crate) fn startup_profile(config: &rhema_config::Config) -> String {
             .map(|profile| Backend::from_profile(profile).is_some())
             .unwrap_or(false)
     };
+    if let Some(last) = config.last_profile_in(workspace).filter(|name| ready(name)) {
+        return last;
+    }
     if ready(default) {
         return default.to_owned();
     }
@@ -1346,6 +1404,7 @@ mod tests {
                     ..rhema_config::Profile::default()
                 },
             )]),
+            ..Default::default()
         };
         let store = Arc::new(MemoryStore::new(config.clone()));
         let backend: Option<Backend> = api_key.map(|key| Backend::Google {
@@ -2086,6 +2145,30 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_previews_and_vanishes_when_output_starts() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .on_event(UiEvent::Engine(OwnedEvent::ThinkingDelta("hmm".into())));
+        h.app
+            .on_event(UiEvent::Engine(OwnedEvent::ThinkingDelta(" deeper".into())));
+        assert_eq!(h.app.thinking, "hmm deeper");
+
+        // Real output clears the buffer: the block vanishes.
+        h.app
+            .on_event(UiEvent::Engine(OwnedEvent::TextDelta("the answer".into())));
+        assert!(h.app.thinking.is_empty());
+
+        // So does a tool call mid-turn.
+        h.app
+            .on_event(UiEvent::Engine(OwnedEvent::ThinkingDelta("again".into())));
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolCallStart {
+            id: "c1".into(),
+            name: "bash".into(),
+        }));
+        assert!(h.app.thinking.is_empty());
+    }
+
+    #[test]
     fn ctrl_c_and_ctrl_d_quit_from_any_screen() {
         let mut h = harness(None, None, Session::default());
         h.app.on_key(ctrl('c'));
@@ -2152,8 +2235,14 @@ mod tests {
             Some(Backend::OpenRouter { api_key }) => assert_eq!(api_key, "work-key"),
             other => panic!("expected the openrouter backend, got {other:?}"),
         }
-        // The switch is per-session, never persisted to disk.
-        assert!(h.store.load().unwrap().profiles.contains_key("personal"));
+        // The profiles' sections are untouched, but the explicit choice
+        // is recorded for this workspace right away.
+        let stored = h.store.load().unwrap();
+        assert!(stored.profiles.contains_key("personal"));
+        assert_eq!(
+            stored.last_profile_in(&h.app.options.workspace).as_deref(),
+            Some("work")
+        );
         assert!(
             h.app
                 .transcript
@@ -2177,8 +2266,9 @@ mod tests {
                 ("personal".to_owned(), rhema_config::Profile::default()),
                 ("work".to_owned(), work_ready.clone()),
             ]),
+            ..Default::default()
         };
-        assert_eq!(startup_profile(&config), "work");
+        assert_eq!(startup_profile(&config, Path::new("/nowhere")), "work");
         // personal can serve turns: the default stands.
         let config = Config {
             profiles: BTreeMap::from([
@@ -2191,11 +2281,65 @@ mod tests {
                 ),
                 ("work".to_owned(), work_ready),
             ]),
+            ..Default::default()
         };
-        assert_eq!(startup_profile(&config), "personal");
+        assert_eq!(startup_profile(&config, Path::new("/nowhere")), "personal");
         // Nothing can: the default stands and the login screen opens on
         // it.
-        assert_eq!(startup_profile(&Config::default()), "personal");
+        assert_eq!(
+            startup_profile(&Config::default(), Path::new("/nowhere")),
+            "personal"
+        );
+    }
+
+    #[test]
+    fn a_workspace_reopens_on_the_profile_it_last_used() {
+        let ready = |key: &str| rhema_config::Profile {
+            google_api_key: Some(key.to_owned()),
+            ..rhema_config::Profile::default()
+        };
+        let mut config = Config {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), ready("k")),
+                ("work".to_owned(), ready("w")),
+            ]),
+            ..Default::default()
+        };
+        // Both profiles can serve turns, and proj last ran on work: the
+        // workspace memory wins over the personal default.
+        config.note_profile_in(Path::new("/proj"), "work");
+        assert_eq!(startup_profile(&config, Path::new("/proj")), "work");
+        // Another directory has no memory: the default stands.
+        assert_eq!(startup_profile(&config, Path::new("/other")), "personal");
+        // A memory naming a profile that can no longer serve turns falls
+        // through to the default — never the login screen by surprise.
+        config
+            .profiles
+            .insert("empty".to_owned(), rhema_config::Profile::default());
+        config.note_profile_in(Path::new("/proj"), "empty");
+        assert_eq!(startup_profile(&config, Path::new("/proj")), "personal");
+    }
+
+    #[test]
+    fn a_turn_records_its_profile_for_the_workspace() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let workspace = h.app.options.workspace.clone();
+        h.app.session_profile = Some("work".to_owned());
+        h.app.begin_turn(None);
+        assert_eq!(
+            h.app.config.last_profile_in(&workspace).as_deref(),
+            Some("work"),
+            "the workspace remembers the profile"
+        );
+        // What the next launch reads is the saved file, not live state.
+        assert_eq!(
+            h.store
+                .load()
+                .unwrap()
+                .last_profile_in(&workspace)
+                .as_deref(),
+            Some("work")
+        );
     }
 
     #[test]
@@ -2216,8 +2360,9 @@ mod tests {
                     },
                 ),
             ]),
+            ..Default::default()
         };
-        let profile = startup_profile(&config);
+        let profile = startup_profile(&config, Path::new("/nowhere"));
         let backend = Backend::from_profile(&config.effective(Some(&profile)));
         let app = App::new(AppSetup {
             store: Arc::new(MemoryStore::new(config.clone())),

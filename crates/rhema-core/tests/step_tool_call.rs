@@ -36,6 +36,7 @@ enum Recorded {
     StepStart {
         iteration: u32,
     },
+    ThinkingDelta(String),
     TextDelta(String),
     ToolCallStart {
         id: String,
@@ -58,6 +59,7 @@ impl From<Event<'_>> for Recorded {
     fn from(event: Event<'_>) -> Self {
         match event {
             Event::StepStart { iteration } => Self::StepStart { iteration },
+            Event::ThinkingDelta(text) => Self::ThinkingDelta(text.to_owned()),
             Event::TextDelta(text) => Self::TextDelta(text.to_owned()),
             Event::ToolCallStart { id, name } => Self::ToolCallStart {
                 id: id.to_owned(),

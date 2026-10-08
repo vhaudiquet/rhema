@@ -750,9 +750,12 @@ pub enum ChatAction {
 /// logical lines; render clamps it to the content height.
 #[derive(Debug, Default)]
 pub struct ChatState {
-    /// The input being typed.
+    /// The input being typed. An [`Self::MARK`] character anchors an
+    /// attachment chip at the position its paste landed.
     pub input: String,
-    /// Pastes too long to show inline: rendered as chips, sent in full.
+    /// Paste payloads, in the order their [`Self::MARK`] anchors appear
+    /// in `input` — a 1:1 pairing the edit paths keep true. Chips render
+    /// at their anchors; submit expands the payloads in place.
     pub attachments: Vec<String>,
     /// Cursor position as a character index into `input`.
     pub cursor: usize,
@@ -771,6 +774,10 @@ impl ChatState {
     /// A paste at or under this many lines joins the input inline;
     /// longer ones become attachments.
     pub const PASTE_INLINE_LINES: usize = 3;
+    /// The object-replacement character: one attachment anchor in
+    /// `input`. It is one cursor step, and backspace or delete on it
+    /// removes the chip and its payload together.
+    pub const MARK: char = '\u{FFFC}';
 
     /// A fresh input box.
     pub fn new() -> Self {
@@ -794,24 +801,49 @@ impl ChatState {
     }
 
     /// A paste landed. Short enough, it joins the input inline; longer,
-    /// it becomes an attachment — one chip in the box, full content on
-    /// submit.
+    /// it becomes an attachment anchored at the cursor — one chip in the
+    /// box at the paste's place, full content on submit.
     pub fn paste(&mut self, text: &str) {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         if normalized.lines().count() > Self::PASTE_INLINE_LINES {
             self.attachments.push(normalized);
+            self.insert_char(Self::MARK);
         } else {
             self.insert_str(&normalized);
         }
     }
 
+    /// Inserts one character at the cursor.
+    fn insert_char(&mut self, c: char) {
+        self.input.insert(self.byte_offset(), c);
+        self.cursor += 1;
+        self.palette_index = 0;
+    }
+
+    /// Removes `input[start..end]` (char offsets) and, with it, the
+    /// payload of every attachment anchor in the range — the 1:1
+    /// mark-to-payload pairing survives any deletion.
+    fn delete_range(&mut self, start: usize, end: usize) {
+        let dropped = self.input[start..end].matches(Self::MARK).count();
+        if dropped > 0 {
+            let first = self.input[..start].matches(Self::MARK).count();
+            self.attachments.drain(first..first + dropped);
+        }
+        self.input.replace_range(start..end, "");
+    }
+
     /// The text a submit sends: the typed input with every attachment's
-    /// full content appended.
+    /// full content expanded at its anchor — the paste lands where it
+    /// was made.
     fn submission(&self) -> String {
-        let mut full = self.input.clone();
-        for paste in &self.attachments {
-            full.push_str("\n\n");
-            full.push_str(paste);
+        let mut full = String::new();
+        let mut payloads = self.attachments.iter();
+        for c in self.input.chars() {
+            if c == Self::MARK {
+                full.push_str(payloads.next().map(String::as_str).unwrap_or_default());
+            } else {
+                full.push(c);
+            }
         }
         full
     }
@@ -926,20 +958,25 @@ impl ChatState {
         }
         match key.code {
             KeyCode::Char(c) => {
+                // A terminal reporting every key but omitting the
+                // shifted-alternate field leaves SHIFT on an unshifted
+                // char; the case is ours to fix then.
+                let c = if key.modifiers.contains(KeyModifiers::SHIFT) {
+                    c.to_ascii_uppercase()
+                } else {
+                    c
+                };
                 self.input.insert(self.byte_offset(), c);
                 self.cursor += 1;
                 self.palette_index = 0;
                 ChatAction::None
             }
             KeyCode::Backspace => {
-                if self.input.is_empty() && !self.attachments.is_empty() {
-                    // The input has nothing to erase: a chip leaves.
-                    self.attachments.pop();
-                } else if self.cursor > 0 {
+                if self.cursor > 0 {
                     let end = self.byte_offset();
                     self.cursor -= 1;
                     let start = self.byte_offset();
-                    self.input.replace_range(start..end, "");
+                    self.delete_range(start, end);
                     self.palette_index = 0;
                 }
                 ChatAction::None
@@ -950,7 +987,7 @@ impl ChatState {
                     self.cursor += 1;
                     let end = self.byte_offset();
                     self.cursor -= 1;
-                    self.input.replace_range(start..end, "");
+                    self.delete_range(start, end);
                 }
                 ChatAction::None
             }
@@ -999,6 +1036,9 @@ impl ChatState {
                 if let Some(spec) =
                     candidates.get(self.palette_index.min(candidates.len().saturating_sub(1)))
                 {
+                    // The input is replaced wholesale: any anchors in it
+                    // go, and their payloads go with them.
+                    self.attachments.clear();
                     self.input = spec.name.to_owned();
                     self.cursor = self.input.chars().count();
                 }
@@ -1427,22 +1467,54 @@ mod tests {
     }
 
     #[test]
-    fn a_long_paste_becomes_an_attachment_sent_in_full() {
+    fn a_long_paste_anchors_at_the_cursor_and_expands_there() {
         let mut chat = ChatState::new();
         let long = "l1\nl2\nl3\nl4";
+        chat.insert_str("look at ");
         chat.paste(long);
         assert_eq!(chat.attachments, vec![long.to_owned()]);
-        assert_eq!(chat.input, "", "the box shows a chip, not the text");
+        assert_eq!(
+            chat.input,
+            format!("look at {}", ChatState::MARK),
+            "the box shows a chip anchored at the paste, not the text"
+        );
 
-        // Enter offers the typed input plus the attachment's content;
-        // clearing happens app-side when the submit is accepted.
-        chat.insert_str("look at this");
+        // Enter expands the attachment at its anchor — where the paste
+        // was made; clearing happens app-side when the submit is
+        // accepted.
+        chat.insert_str(" closely");
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter)),
-            ChatAction::Submit(format!("look at this\n\n{long}"))
+            ChatAction::Submit(format!("look at {long} closely"))
         );
-        assert_eq!(chat.input, "look at this", "declined keeps the text");
+        assert_eq!(
+            chat.input,
+            format!("look at {} closely", ChatState::MARK),
+            "declined keeps the text"
+        );
         assert_eq!(chat.attachments.len(), 1);
+    }
+
+    #[test]
+    fn backspacing_a_chip_removes_its_payload_with_it() {
+        let mut chat = ChatState::new();
+        let first = "l1\nl2\nl3\nl4";
+        let second = "m1\nm2\nm3\nm4\nm5";
+        chat.paste(first);
+        chat.paste(second);
+        assert_eq!(chat.input.chars().count(), 2, "two anchors");
+
+        // Backspace removes the anchor behind the cursor — the last
+        // chip — and its payload alone.
+        chat.handle_key(key(KeyCode::Backspace));
+        assert_eq!(chat.attachments, vec![first.to_owned()]);
+        assert_eq!(chat.input, ChatState::MARK.to_string());
+
+        // Deleting the remaining anchor from before it works the same.
+        chat.handle_key(key(KeyCode::Home));
+        chat.handle_key(key(KeyCode::Delete));
+        assert!(chat.attachments.is_empty());
+        assert_eq!(chat.input, "");
     }
 
     #[test]
@@ -1454,22 +1526,27 @@ mod tests {
     }
 
     #[test]
-    fn backspace_on_an_empty_input_pops_the_last_attachment() {
-        let mut chat = ChatState::new();
-        chat.paste("l1\nl2\nl3\nl4");
-        chat.paste("l1\nl2\nl3\nl4\nl5");
-        chat.handle_key(key(KeyCode::Backspace));
-        assert_eq!(chat.attachments.len(), 1);
-        chat.handle_key(key(KeyCode::Backspace));
-        assert!(chat.attachments.is_empty());
-    }
-
-    #[test]
     fn shift_enter_adds_a_line() {
         let mut chat = ChatState::new();
         chat.insert_str("x");
         chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
         assert_eq!(chat.input, "x\n");
+    }
+
+    #[test]
+    fn a_shifted_letter_capitalizes_even_without_a_shifted_alternate() {
+        let mut chat = ChatState::new();
+        // A terminal reporting every key but not the shifted alternate
+        // delivers the base char with SHIFT still set.
+        chat.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+        assert_eq!(chat.input, "A");
+        // Ghostty & co. send the shifted char with SHIFT cleared
+        // (crossterm's alternate-key path): untouched.
+        chat.handle_key(key(KeyCode::Char('B')));
+        assert_eq!(chat.input, "AB");
+        // Plain lowercase typing stays lowercase.
+        chat.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(chat.input, "ABc");
     }
 
     #[test]
