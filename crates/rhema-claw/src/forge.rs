@@ -1,57 +1,61 @@
 //! The sources: deterministic detection, one [`ForgeSource`] per forge
-//! kind present in the watches.
+//! kind.
 //!
-//! A source owns one forge's watch set: its `detect` pass loops the
-//! kind's repos through a [`Watcher`] — poll, ingest, advance the
-//! per-repo cursor — and never touches the model (spec §1). Cadence
-//! belongs to the daemon's loop; the source is one pass, nothing more.
+//! A source owns one forge's watch set: its `detect` pass reads the
+//! watch table fresh ([`ClawStore::list`]) and loops the kind's repos
+//! through a [`Watcher`] — poll, ingest, advance the per-repo cursor —
+//! and never touches the model (spec §1). Reading the table every pass
+//! is what makes a watch added mid-flight (chat tool, HTTP route) take
+//! effect without a restart. Forge clients are constructed on first use
+//! and cached per `(forge, host, token)`. Cadence belongs to the
+//! daemon's loop; the source is one pass, nothing more.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rhema_autonomous_agent::{Source, SourceError, async_trait};
-use rhema_forge_agent::{
-    Forge, GitHubForge, GitLabForge, GiteaForge, RepoRef, WatchError, Watcher, register_forge,
-};
+use rhema_forge_agent::{Forge, GitHubForge, GitLabForge, GiteaForge, Watcher, register_forge};
 // `forge_key_fn` is public in the watcher module but not re-exported at
 // the crate root, unlike its siblings — reached through the module path.
 use rhema_forge_agent::forge_key_fn;
 use rhema_rsd::{Dispatcher, KeyFn};
 
-use crate::config::Watch;
+use crate::config::{ForgeKind, resolve_token};
+use crate::watch_store::{ClawStore, WatchRecord};
 
-/// One watched repo and the client that polls it: the unit a source's
-/// detect pass loops over.
-#[derive(Clone)]
-pub struct Target {
-    /// The repository coordinates.
-    pub repo: RepoRef,
-    /// The forge client this repo polls through.
-    pub forge: Arc<dyn Forge>,
+/// The cache key of a forge client: everything that changes the client
+/// is the forge kind, its host, and the token it authenticates with.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ClientKey {
+    forge: String,
+    host: Option<String>,
+    token: String,
 }
 
-/// The forge client one watch polls through: the kind's production base
-/// unless the watch names a `host`. Assumes
-/// [`ClawConfig::validate`](crate::ClawConfig::validate) ran — a hostless
-/// gitea watch is a config error caught there, and a tokenless one never
-/// reaches a client.
-pub fn forge_client(watch: &Watch) -> Arc<dyn Forge> {
-    let token = watch.resolve_token().unwrap_or_default();
-    match watch.forge {
-        crate::config::ForgeKind::GitHub => {
-            let mut forge = GitHubForge::new(token);
-            if let Some(host) = &watch.host {
-                forge = forge.with_base_url(host.clone());
+/// The forge client one watch RECORD polls through: the kind's
+/// production base unless the record names a `host`. A blank stored
+/// token falls back to the forge's environment variable — the same
+/// resolution a config watch gets — and a blank everywhere constructs a
+/// client that polls anonymous; the poll fails loudly at the forge, not
+/// silently here.
+pub fn record_client(kind: ForgeKind, host: Option<&str>, token: &str) -> Arc<dyn Forge> {
+    let resolved = resolve_token(|name| std::env::var(name), kind, Some(token)).unwrap_or_default();
+    match kind {
+        ForgeKind::GitHub => {
+            let mut forge = GitHubForge::new(resolved);
+            if let Some(host) = host {
+                forge = forge.with_base_url(host.to_owned());
             }
             Arc::new(forge)
         }
-        crate::config::ForgeKind::Gitea => Arc::new(GiteaForge::new(
-            watch.host.clone().unwrap_or_default(),
-            token,
+        ForgeKind::Gitea => Arc::new(GiteaForge::new(
+            host.unwrap_or_default().to_owned(),
+            resolved,
         )),
-        crate::config::ForgeKind::GitLab => {
-            let mut forge = GitLabForge::new(token);
-            if let Some(host) = &watch.host {
-                forge = forge.with_base_url(host.clone());
+        ForgeKind::GitLab => {
+            let mut forge = GitLabForge::new(resolved);
+            if let Some(host) = host {
+                forge = forge.with_base_url(host.to_owned());
             }
             Arc::new(forge)
         }
@@ -59,29 +63,55 @@ pub fn forge_client(watch: &Watch) -> Arc<dyn Forge> {
 }
 
 /// One forge kind's detectable input stream: every watch of that kind in
-/// the config, polled through per-repo cursors into the dispatcher.
+/// the table, polled through per-repo cursors into the dispatcher.
 pub struct ForgeSource {
     name: String,
     watcher: Watcher,
-    targets: Vec<Target>,
+    store: Arc<ClawStore>,
+    clients: Mutex<HashMap<ClientKey, Arc<dyn Forge>>>,
 }
 
 impl ForgeSource {
     /// Registers `name`'s key function on the dispatcher and returns the
-    /// source polling `targets` under it. One source per kind, registered
-    /// once, before the first detect.
+    /// source polling the watch table's `name` rows under it. One source
+    /// per kind, registered once, before the first detect.
     pub fn new(
         dispatcher: &Arc<Dispatcher>,
         name: impl Into<String>,
-        targets: Vec<Target>,
+        store: Arc<ClawStore>,
     ) -> Self {
         let name = name.into();
         register_forge(dispatcher, &name);
         Self {
             watcher: Watcher::new(dispatcher.clone(), name.clone()),
             name,
-            targets,
+            store,
+            clients: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The client for `record`: from the cache when a watch with the
+    /// same `(forge, host, token)` polled before, constructed otherwise.
+    fn client_for(&self, record: &WatchRecord) -> Arc<dyn Forge> {
+        let key = ClientKey {
+            forge: record.forge.clone(),
+            host: record.host.clone(),
+            token: record.token.clone(),
+        };
+        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        clients
+            .entry(key)
+            .or_insert_with(|| {
+                let Some(kind) = ForgeKind::parse(&record.forge) else {
+                    // Unreachable through the daemon's assembly, which
+                    // only creates sources for known kinds; an unknown
+                    // kind in the table would be skipped in `detect`
+                    // before reaching here.
+                    unreachable!("detect filters unknown forge kinds before client lookup")
+                };
+                record_client(kind, record.host.as_deref(), &record.token)
+            })
+            .clone()
     }
 }
 
@@ -96,21 +126,78 @@ impl Source for ForgeSource {
     }
 
     async fn detect(&self) -> Result<usize, SourceError> {
+        let records = self
+            .store
+            .list()
+            .map_err(|err| SourceError::Backend(format!("watch store: {err}")))?;
         let mut fed = 0;
-        for target in &self.targets {
-            fed += self
-                .watcher
-                .poll(target.forge.as_ref(), &target.repo)
-                .await
-                .map_err(|err| match err {
-                    // The forge call is the source's own backend; a
-                    // dispatcher rejection keeps its own variant.
-                    WatchError::Forge(err) => {
-                        SourceError::Backend(format!("{}: {err}", target.repo.path()))
-                    }
-                    WatchError::Dispatch(err) => err.into(),
-                })?;
+        for record in records {
+            if record.forge != self.name {
+                continue;
+            }
+            let repo = match record.repo_ref() {
+                Ok(repo) => repo,
+                Err(reason) => {
+                    // A malformed row must not starve the kind's other
+                    // watches; say so and move on. New rows cannot be
+                    // malformed (every entry validates), so this guards
+                    // only hand-edited tables.
+                    eprintln!(
+                        "[claw] warning: skipping watch {} {}: {reason}",
+                        record.forge, record.repo
+                    );
+                    continue;
+                }
+            };
+            let client = self.client_for(&record);
+            match self.watcher.poll(client.as_ref(), &repo).await {
+                Ok(count) => fed += count,
+                // One dead watch (a lapsed token, a forge outage) must
+                // not starve the kind's other watches either.
+                Err(err) => eprintln!(
+                    "[claw] warning: watch {} {}: poll failed: {err}",
+                    record.forge, record.repo
+                ),
+            }
         }
         Ok(fed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The client cache pays off when two watches share their
+    /// coordinates: one client, not two.
+    #[tokio::test]
+    async fn same_coordinates_share_one_cached_client() {
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        store
+            .add("github", "acme/widgets", None, "tok")
+            .expect("add");
+        store
+            .add("github", "acme/gadgets", None, "tok")
+            .expect("add");
+        store
+            .add("github", "acme/private", None, "other")
+            .expect("add");
+        let dispatcher = Arc::new(Dispatcher::new(
+            rhema_rsd::DispatcherConfig::default(),
+            Arc::new(rhema_rsd::SystemClock),
+            Arc::new(rhema_rsd::VolatileStore::new()),
+        ));
+        let source = ForgeSource::new(&dispatcher, "github", store);
+
+        let records = source.store.list().expect("list reads");
+        let a = source.client_for(&records[0]);
+        let b = source.client_for(&records[1]);
+        let c = source.client_for(&records[2]);
+        assert!(Arc::ptr_eq(&a, &b), "same (forge, host, token): one client");
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "a different token is a different client"
+        );
+        assert_eq!(source.clients.lock().unwrap().len(), 2);
     }
 }

@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 /// [`ClawConfig::poll_interval_secs`] is unset.
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 
+/// Where the HTTP surface listens when [`ClawConfig::listen`] is unset:
+/// loopback only — the surface is for the machine's resident user.
+pub const DEFAULT_LISTEN: &str = "127.0.0.1:7799";
+
 /// Why a config operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -40,10 +44,6 @@ pub enum ConfigError {
     /// path or workspace root cannot be located.
     #[error("cannot locate the state directory: neither XDG_STATE_HOME nor HOME is set")]
     NoStateHome,
-    /// The watch list is empty: claw guards threads, and this config
-    /// guards none.
-    #[error("no watches configured: claw has nothing to guard")]
-    NoWatches,
     /// One watch is unusable; the daemon refuses to start rather than
     /// poll a half-configured watch set.
     #[error("watch #{index} ({forge} {repo}): {reason}")]
@@ -88,6 +88,18 @@ impl ForgeKind {
             ForgeKind::GitHub => "GITHUB_TOKEN",
             ForgeKind::Gitea => "GITEA_TOKEN",
             ForgeKind::GitLab => "GITLAB_TOKEN",
+        }
+    }
+
+    /// Parses a forge name as the config, the HTTP surface, and the
+    /// watch tools spell it: the source name (`github`, `gitea`,
+    /// `gitlab`). `None` for anything else.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "github" => Some(ForgeKind::GitHub),
+            "gitea" => Some(ForgeKind::Gitea),
+            "gitlab" => Some(ForgeKind::GitLab),
+            _ => None,
         }
     }
 
@@ -183,7 +195,15 @@ pub struct ClawConfig {
     pub provider: Option<String>,
     /// The model identifier; a per-provider default when unset.
     pub model: Option<String>,
-    /// What to watch: at least one entry, each validated at startup.
+    /// The HTTP surface's `host:port`. [`DEFAULT_LISTEN`] when unset.
+    pub listen: Option<String>,
+    /// Bearer token for the `/v1` routes. Unset means the surface is
+    /// open on its interface; set it when the port is reachable from
+    /// anywhere but loopback. `/healthz` stays open either way.
+    pub token: Option<String>,
+    /// What to watch — the optional seed for the persistent watch table.
+    /// Imported once, when the table is still empty; after that the
+    /// table rules, and watches are managed in chat or over HTTP.
     pub watches: Vec<Watch>,
 }
 
@@ -195,6 +215,8 @@ impl Default for ClawConfig {
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             provider: None,
             model: None,
+            listen: None,
+            token: None,
             watches: Vec::new(),
         }
     }
@@ -239,6 +261,12 @@ impl ClawConfig {
             .unwrap_or_else(|| Self::state_dir().map(|dir| dir.join("workspaces")))
     }
 
+    /// The HTTP surface's address: the config's, or
+    /// [`DEFAULT_LISTEN`] when unset.
+    pub fn listen_addr(&self) -> &str {
+        self.listen.as_deref().unwrap_or(DEFAULT_LISTEN)
+    }
+
     /// The model identifier the handler runs: the config's, or the
     /// provider's headless default (the same fallbacks the rhema
     /// frontend's one-shot uses). An unknown provider string reads as
@@ -268,12 +296,12 @@ impl ClawConfig {
         Ok(serde_yaml::from_str(&raw)?)
     }
 
-    /// The startup checks: at least one watch, and every watch resolvable
-    /// (shape, host, token). Loud, before anything polls.
+    /// The startup checks: every seeded watch resolvable (shape, host,
+    /// token). Loud, before anything polls. An empty list is fine now —
+    /// the watch table is seeded from it, and the agent manages its own
+    /// watches from there; a daemon that starts with nothing to guard
+    /// still serves chat.
     pub fn validate(&self) -> Result<(), ConfigError> {
-        if self.watches.is_empty() {
-            return Err(ConfigError::NoWatches);
-        }
         for (index, watch) in self.watches.iter().enumerate() {
             let fail = |reason: String| ConfigError::Watch {
                 index,
@@ -317,6 +345,8 @@ workspace_root: /var/lib/rhema/claw-work
 poll_interval_secs: 30
 provider: anthropic
 model: claude-sonnet-4-5
+listen: 192.168.1.10:7800
+token: sekrit
 watches:
   - forge: github
     repo: acme/widgets
@@ -331,6 +361,8 @@ watches:
         assert_eq!(config.poll_interval_secs, 30);
         assert_eq!(config.provider.as_deref(), Some("anthropic"));
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-5"));
+        assert_eq!(config.listen.as_deref(), Some("192.168.1.10:7800"));
+        assert_eq!(config.token.as_deref(), Some("sekrit"));
         assert_eq!(
             config.db.as_deref(),
             Some(std::path::Path::new("/var/lib/rhema/claw.db"))
@@ -361,6 +393,20 @@ watches:
         assert_eq!(config.model, None);
         assert_eq!(config.db, None);
         assert_eq!(config.workspace_root, None);
+        assert_eq!(config.listen_addr(), DEFAULT_LISTEN);
+        assert_eq!(config.token, None);
+    }
+
+    #[test]
+    fn forge_names_parse_as_the_sources_spell_them() {
+        assert_eq!(ForgeKind::parse("github"), Some(ForgeKind::GitHub));
+        assert_eq!(ForgeKind::parse(" gitea "), Some(ForgeKind::Gitea));
+        assert_eq!(ForgeKind::parse("gitlab"), Some(ForgeKind::GitLab));
+        assert_eq!(ForgeKind::parse("sourcehut"), None);
+        assert_eq!(ForgeKind::parse(""), None);
+        for kind in [ForgeKind::GitHub, ForgeKind::Gitea, ForgeKind::GitLab] {
+            assert_eq!(ForgeKind::parse(kind.name()), Some(kind), "{}", kind.name());
+        }
     }
 
     #[test]
@@ -408,8 +454,9 @@ watches:
             ..ClawConfig::default()
         };
 
-        let err = config(vec![]).validate().expect_err("empty is loud");
-        assert!(matches!(err, ConfigError::NoWatches));
+        // An empty list is a valid starting point now: the table is
+        // seeded from it, and the agent manages watches from chat.
+        config(vec![]).validate().expect("an empty list validates");
 
         let err = config(vec![watch(ForgeKind::GitHub, "acme", None, Some("t"))])
             .validate()

@@ -50,6 +50,8 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
         poll_interval_secs: 60,
         provider: Some("google".to_owned()),
         model: Some("test-model".to_owned()),
+        listen: None,
+        token: None,
         watches: vec![Watch {
             forge: ForgeKind::GitHub,
             repo: "acme/widgets".to_owned(),

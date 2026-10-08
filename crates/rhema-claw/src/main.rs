@@ -56,12 +56,13 @@ async fn run(args: Args) -> Result<(), ClawError> {
     let config = ClawConfig::load_from(&path)?;
     let (provider, model) = resolve_backend(&config);
     eprintln!(
-        "[claw] {} watch(es), model {model}, db {}",
+        "[claw] {} seeded watch(es), model {model}, db {}, http {}",
         config.watches.len(),
         config
             .db_path()
             .map(|db| db.display().to_string())
             .unwrap_or_default(),
+        config.listen_addr(),
     );
 
     if args.once {
@@ -76,6 +77,8 @@ async fn run(args: Args) -> Result<(), ClawError> {
         }
         Ok(())
     } else {
+        // The resident daemon always serves HTTP: the chat surface is
+        // how it is talked to. Only `--once` runs headless.
         let daemon = Daemon::build(&config, provider, DispatcherConfig::default())?;
         daemon.run().await
     }

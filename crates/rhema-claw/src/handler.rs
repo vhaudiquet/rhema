@@ -18,8 +18,11 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
+use crate::config::ForgeKind;
+use crate::forge::record_client;
+use crate::watch_store::ClawStore;
 use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
 use rhema_coding_agent::{AllowAll, CodingAgent, CodingAgentConfig};
 use rhema_core::{Content, Event as ModelEvent, EventSink, Message, ModelProvider, Session};
@@ -38,36 +41,60 @@ fn allowlist() -> rhema_autonomous_agent::Allowlist {
 }
 
 /// The coding agent over one watch: a provider, a model, a workspace
-/// root, and the forge clients the dispatch keys resolve to.
+/// root, and the watch table the dispatch keys resolve through — live,
+/// so a watch added at runtime is answerable without a restart.
 pub struct ClawHandler {
     provider: Arc<dyn ModelProvider>,
     model: String,
     workspace_root: PathBuf,
-    forges: HashMap<String, Arc<dyn Forge>>,
+    watches: Arc<ClawStore>,
+    clients: Mutex<HashMap<String, Arc<dyn Forge>>>,
 }
 
 impl ClawHandler {
     /// A handler whose per-thread workspaces live under `workspace_root`
-    /// and whose dispatch keys resolve through `forges` — each entry keyed
-    /// `"github:acme/widgets"` as [`watch_key`] builds it.
+    /// and whose dispatch keys resolve through `watches` at dispatch time.
     pub fn new(
         provider: Arc<dyn ModelProvider>,
         model: impl Into<String>,
         workspace_root: impl Into<PathBuf>,
-        forges: HashMap<String, Arc<dyn Forge>>,
+        watches: Arc<ClawStore>,
     ) -> Self {
         Self {
             provider,
             model: model.into(),
             workspace_root: workspace_root.into(),
-            forges,
+            watches,
+            clients: Mutex::new(HashMap::new()),
         }
     }
 
-    /// The forge client a dispatch key answers to:
-    /// `"github:acme/widgets#7"` looks up `"github:acme/widgets"`.
-    pub fn watch_forge(&self, key: &ResourceKey) -> Option<Arc<dyn Forge>> {
-        self.forges.get(&watch_key(key)?).cloned()
+    /// The forge client a dispatch key answers to: `"github:acme/widgets#7"`
+    /// resolves its watch record from the table at dispatch time — the
+    /// table is the source of truth, not a boot-time snapshot — and the
+    /// client is cached per `(forge, host, token)` so one poll pool serves
+    /// every thread of a watch.
+    pub fn watch_forge(&self, key: &ResourceKey) -> Result<Arc<dyn Forge>, String> {
+        let watch = watch_key(key)
+            .ok_or_else(|| format!("resource key {key} is not a forge thread key"))?;
+        let (kind, repo) = watch
+            .split_once(':')
+            .ok_or_else(|| format!("watch entry {watch} has no forge kind"))?;
+        let record = self
+            .watches
+            .list()
+            .map_err(|err| format!("watch lookup for {key} failed: {err}"))?
+            .into_iter()
+            .find(|record| record.forge == kind && record.repo == repo)
+            .ok_or_else(|| format!("no watch configured for {key}"))?;
+        let kind = ForgeKind::parse(&record.forge)
+            .ok_or_else(|| format!("watch entry {watch} names an unknown forge"))?;
+        let cache_key = format!("{}|{:?}|{}", record.forge, record.host, record.token);
+        let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(clients
+            .entry(cache_key)
+            .or_insert_with(|| record_client(kind, record.host.as_deref(), &record.token))
+            .clone())
     }
 
     /// One dispatch, failed with a reason on any step. The session stash
@@ -79,9 +106,7 @@ impl ClawHandler {
         let key = ctx.key.as_str().to_owned();
         let (repo, number) = parse_key(&ctx.key)
             .ok_or_else(|| format!("resource key {key} is not a forge thread key"))?;
-        let forge = self
-            .watch_forge(&ctx.key)
-            .ok_or_else(|| format!("no watch configured for {key}"))?;
+        let forge = self.watch_forge(&ctx.key)?;
 
         let snapshot = forge
             .snapshot(&repo, number)
@@ -431,28 +456,28 @@ mod tests {
     }
 
     #[test]
-    fn a_key_resolves_to_its_watch_entry() {
-        use rhema_forge_agent::GitHubForge;
+    fn a_key_resolves_to_its_watch_entry_live_from_the_table() {
+        let watches = Arc::new(ClawStore::in_memory().expect("store opens"));
+        watches
+            .add("github", "acme/widgets", None, "tok")
+            .expect("watch added");
+        let handler = ClawHandler::new(Arc::new(NoopProvider), "m", "/tmp/w", watches);
 
+        // A watch added to the table AFTER the handler was built resolves:
+        // the table is the source of truth, not a boot-time snapshot.
         let key = ResourceKey::from("github:acme/widgets#7");
         assert_eq!(watch_key(&key).as_deref(), Some("github:acme/widgets"));
-        let mut forges: HashMap<String, Arc<dyn Forge>> = HashMap::new();
-        forges.insert(
-            "github:acme/widgets".to_owned(),
-            Arc::new(GitHubForge::new("tok")) as Arc<dyn Forge>,
-        );
-        let handler = ClawHandler::new(Arc::new(NoopProvider), "m", "/tmp/w", forges);
-        assert!(handler.watch_forge(&key).is_some(), "the watch resolves");
+        assert!(handler.watch_forge(&key).is_ok(), "the watch resolves");
         assert!(
             handler
                 .watch_forge(&ResourceKey::from("gitea:acme/widgets#7"))
-                .is_none(),
+                .is_err(),
             "another forge's key does not"
         );
         assert!(
             handler
                 .watch_forge(&ResourceKey::from("github:nonsense"))
-                .is_none(),
+                .is_err(),
             "a non-thread key does not"
         );
     }

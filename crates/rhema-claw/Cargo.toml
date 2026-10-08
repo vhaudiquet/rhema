@@ -1,6 +1,6 @@
 [package]
 name = "rhema-claw"
-description = "The resident forge-watching agent daemon: the first consumer of rhema-autonomous-agent"
+description = "The resident agent daemon: forge watches and the chat HTTP surface, the first consumer of rhema-autonomous-agent"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -35,13 +35,24 @@ serde_yaml = { workspace = true }
 # Typed public errors
 thiserror = { workspace = true }
 # A daemon: the runtime, the poll sleep, the ctrl-c signal; the driver's
-# concurrent handler runs share it
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+# concurrent handler runs share it. `net` is the HTTP listener.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }
+# The chat surface: native routes plus SSE, and the OpenAI shim
+axum = { workspace = true }
+# Broadcast receivers as SSE bodies
+tokio-stream = { workspace = true }
+# The watch table: a second connection to the same SQLite file as the
+# dispatcher's store — the two-connections pattern rhema-rsd's tests use
+rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
 # In-process HTTP mocks for the offline e2e: zero network
 wiremock = "0.6"
+# The HTTP client for the surface tests, SSE bodies included
+reqwest = { version = "0.12", features = ["json", "stream"] }
+# Naming the SSE chunks' type in the surface tests
+bytes = "1"
 # The scripted provider for turn-level tests; mirrors rhema-code's mock
 # feature without a feature of our own — tests are the only consumer
 rhema-core = { path = "../rhema-core", features = ["mock"] }
