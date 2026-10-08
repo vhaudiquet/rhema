@@ -16,6 +16,21 @@ pub struct Pricing {
     pub input_per_mtok: f64,
     /// Price per 1M output tokens.
     pub output_per_mtok: f64,
+    /// Price per 1M input tokens served from the provider's prompt
+    /// cache; `None` when the provider publishes no cached rate.
+    pub cached_input_per_mtok: Option<f64>,
+}
+
+impl Pricing {
+    /// A price pair at Gemini's implicit-cache discount: cached input
+    /// reads at a quarter of base input.
+    fn with_cached_input(input_per_mtok: f64, output_per_mtok: f64) -> Self {
+        Self {
+            input_per_mtok,
+            output_per_mtok,
+            cached_input_per_mtok: Some(input_per_mtok * 0.25),
+        }
+    }
 }
 
 /// The table entry for `id`, or `None` when unknown. A trailing
@@ -26,94 +41,37 @@ pub fn model_pricing(id: &str) -> Option<Pricing> {
         // flash-latest aliases the newest flash family (3.8 today)
         (
             "gemini-flash-latest",
-            Pricing {
-                input_per_mtok: 0.75,
-                output_per_mtok: 3.75,
-            },
+            Pricing::with_cached_input(0.75, 3.75),
         ),
         (
             "gemini-flash-lite-latest",
-            Pricing {
-                input_per_mtok: 0.30,
-                output_per_mtok: 2.50,
-            },
+            Pricing::with_cached_input(0.30, 2.50),
         ),
-        (
-            "gemini-3.8-flash",
-            Pricing {
-                input_per_mtok: 0.75,
-                output_per_mtok: 3.75,
-            },
-        ),
-        (
-            "gemini-3.7-flash",
-            Pricing {
-                input_per_mtok: 0.75,
-                output_per_mtok: 3.75,
-            },
-        ),
-        (
-            "gemini-3.6-flash",
-            Pricing {
-                input_per_mtok: 0.75,
-                output_per_mtok: 3.75,
-            },
-        ),
-        (
-            "gemini-3.5-flash",
-            Pricing {
-                input_per_mtok: 1.50,
-                output_per_mtok: 9.00,
-            },
-        ),
+        ("gemini-3.8-flash", Pricing::with_cached_input(0.75, 3.75)),
+        ("gemini-3.7-flash", Pricing::with_cached_input(0.75, 3.75)),
+        ("gemini-3.6-flash", Pricing::with_cached_input(0.75, 3.75)),
+        ("gemini-3.5-flash", Pricing::with_cached_input(1.50, 9.00)),
         (
             "gemini-3.5-flash-lite",
-            Pricing {
-                input_per_mtok: 0.30,
-                output_per_mtok: 2.50,
-            },
+            Pricing::with_cached_input(0.30, 2.50),
         ),
         (
             "gemini-3.1-flash-lite",
-            Pricing {
-                input_per_mtok: 0.25,
-                output_per_mtok: 1.50,
-            },
+            Pricing::with_cached_input(0.25, 1.50),
         ),
         (
             "gemini-3-flash-preview",
-            Pricing {
-                input_per_mtok: 0.50,
-                output_per_mtok: 3.00,
-            },
+            Pricing::with_cached_input(0.50, 3.00),
         ),
         (
             "gemini-3.1-pro-preview",
-            Pricing {
-                input_per_mtok: 2.00,
-                output_per_mtok: 12.00,
-            },
+            Pricing::with_cached_input(2.00, 12.00),
         ),
-        (
-            "gemini-2.5-pro",
-            Pricing {
-                input_per_mtok: 1.25,
-                output_per_mtok: 10.00,
-            },
-        ),
-        (
-            "gemini-2.5-flash",
-            Pricing {
-                input_per_mtok: 0.30,
-                output_per_mtok: 2.50,
-            },
-        ),
+        ("gemini-2.5-pro", Pricing::with_cached_input(1.25, 10.00)),
+        ("gemini-2.5-flash", Pricing::with_cached_input(0.30, 2.50)),
         (
             "gemini-2.5-flash-lite",
-            Pricing {
-                input_per_mtok: 0.10,
-                output_per_mtok: 0.40,
-            },
+            Pricing::with_cached_input(0.10, 0.40),
         ),
     ];
     let trimmed = id.strip_suffix("-preview").unwrap_or(id);
@@ -174,6 +132,7 @@ mod tests {
         let instance = Pricing {
             input_per_mtok: 9.0,
             output_per_mtok: 9.0,
+            cached_input_per_mtok: Some(2.25),
         };
         let priced = GeminiModel {
             pricing: Some(instance),
