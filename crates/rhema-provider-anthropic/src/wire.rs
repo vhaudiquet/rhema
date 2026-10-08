@@ -453,7 +453,10 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
         system: (!system_texts.is_empty()).then(|| system_texts.join("\n\n")),
         messages,
         tools,
-        temperature: thinking.is_none().then_some(req.params.temperature).flatten(),
+        temperature: thinking
+            .is_none()
+            .then_some(req.params.temperature)
+            .flatten(),
         thinking,
         stream: true,
     })
@@ -823,8 +826,7 @@ mod tests {
                 thinking: ThinkingEffort::High,
             },
         };
-        let body =
-            serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        let body = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 32_768);
         // The ceiling rises above the budget, and temperature is dropped:
@@ -838,8 +840,7 @@ mod tests {
 
         // Default sends no thinking object and keeps the temperature.
         req.params.thinking = ThinkingEffort::Default;
-        let body =
-            serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        let body = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
         assert!(body.get("thinking").is_none(), "{body}");
         assert_eq!(body["temperature"].as_f64(), Some(0.7f32 as f64));
     }

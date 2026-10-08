@@ -453,11 +453,7 @@ mod tests {
             config.profiles["personal"].thinking_effort(),
             Some(ThinkingEffort::Low)
         );
-        config
-            .profiles
-            .get_mut("personal")
-            .unwrap()
-            .thinking = Some("maximum".into());
+        config.profiles.get_mut("personal").unwrap().thinking = Some("maximum".into());
         assert_eq!(config.profiles["personal"].thinking_effort(), None);
 
         #[cfg(unix)]

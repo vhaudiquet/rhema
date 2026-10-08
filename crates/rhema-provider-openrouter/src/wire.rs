@@ -759,7 +759,10 @@ mod tests {
             },
         };
         let body = serde_json::to_string(&request_body(&req)).unwrap();
-        assert!(body.contains("\"reasoning\":{\"effort\":\"high\"}"), "{body}");
+        assert!(
+            body.contains("\"reasoning\":{\"effort\":\"high\"}"),
+            "{body}"
+        );
 
         // Default sends nothing: the routed model's default stands.
         req.params.thinking = ThinkingEffort::Default;
