@@ -27,11 +27,12 @@ pub struct CodingAgentConfig {
 }
 
 impl CodingAgentConfig {
-    /// Default for `max_turn_steps`. Real agentic work regularly runs
-    /// hundreds of steps; the cap exists to end a runaway loop, not to
-    /// ration the model — and every step is a billed model call, so it
-    /// still bounds an unattended turn.
-    pub const DEFAULT_MAX_TURN_STEPS: u32 = 256;
+    /// Default for `max_turn_steps`. Long autonomous sessions — builds,
+    /// rebases, multi-package sweeps — routinely run hundreds of steps on
+    /// cheap models under a watching eye; the cap exists to end a runaway
+    /// loop, not to ration the model. `--max-steps` is the tighter leash
+    /// for unattended turns on expensive models.
+    pub const DEFAULT_MAX_TURN_STEPS: u32 = 2048;
 
     /// Config naming `model`, rooted at `workspace`, defaults elsewhere.
     pub fn new(model: impl Into<String>, workspace: impl Into<PathBuf>) -> Self {
