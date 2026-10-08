@@ -59,6 +59,8 @@ pub struct Profile {
     pub anthropic_api_key: Option<String>,
     /// The OpenAI API key entered at login, when one is stored.
     pub openai_api_key: Option<String>,
+    /// The DeepSeek API key entered at login, when one is stored.
+    pub deepseek_api_key: Option<String>,
     /// The color this profile's name wears in the UI, as `#RRGGBB`.
     /// Unset means the UI picks a tone from the theme by profile name.
     pub color: Option<String>,
@@ -129,6 +131,15 @@ impl Profile {
         )
     }
 
+    /// The DeepSeek key to use: `DEEPSEEK_API_KEY`, then the stored key.
+    pub fn deepseek_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["DEEPSEEK_API_KEY"],
+            self.deepseek_api_key.clone(),
+        )
+    }
+
     /// The profile's thinking level, when set and parseable.
     pub fn thinking_effort(&self) -> Option<ThinkingEffort> {
         ThinkingEffort::parse(self.thinking.as_deref()?)
@@ -144,6 +155,7 @@ impl Profile {
             Some("openrouter") => self.openrouter_api_key().is_some(),
             Some("anthropic") => self.anthropic_api_key().is_some(),
             Some("openai") => self.openai_api_key().is_some(),
+            Some("deepseek") => self.deepseek_api_key().is_some(),
             _ => self.google_api_key().is_some(),
         }
     }
@@ -438,6 +450,7 @@ mod tests {
                     openrouter_api_key: None,
                     anthropic_api_key: Some("sk-ant-123".into()),
                     openai_api_key: None,
+                    deepseek_api_key: Some("sk-dsk-123".into()),
                     color: None,
                     thinking: Some("low".into()),
                 },
@@ -449,6 +462,7 @@ mod tests {
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("google_api_key:"), "yaml on disk: {raw}");
         assert!(raw.contains("anthropic_api_key:"), "yaml on disk: {raw}");
+        assert!(raw.contains("deepseek_api_key:"), "yaml on disk: {raw}");
         assert!(!raw.contains('{'), "not json: {raw}");
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, config);
