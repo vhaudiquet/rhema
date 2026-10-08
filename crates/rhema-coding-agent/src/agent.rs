@@ -34,6 +34,21 @@ pub enum CodingAgentError {
     /// loop.
     #[error("workspace escape: {0}")]
     WorkspaceEscape(std::path::PathBuf),
+    /// The system-prompt template failed to render — bad syntax, unknown
+    /// filter — with the template position when known. The agent refuses
+    /// to start on a prompt it cannot fully render.
+    #[error("system prompt template: {0}")]
+    Template(String),
+}
+
+impl From<minijinja::Error> for CodingAgentError {
+    fn from(err: minijinja::Error) -> Self {
+        let line = err
+            .line()
+            .map(|line| format!(", line {line}"))
+            .unwrap_or_default();
+        Self::Template(format!("{err}{line}"))
+    }
 }
 
 /// A coding agent: drives [`run_turn`] over the built-in tools, one turn at
@@ -50,27 +65,31 @@ impl CodingAgent {
     /// A fresh agent with an empty session. The workspace is canonicalized
     /// for tool scoping; the system prompt defaults to the built-in
     /// template rendered by [`crate::prompt::render_system`] unless
-    /// `config.system` replaces it.
+    /// `config.system` replaces it. A base prompt that fails to render
+    /// fails the construction.
     pub fn new(
         provider: Arc<dyn rhema_core::ModelProvider>,
         config: CodingAgentConfig,
-    ) -> Result<Self, AgentError> {
+    ) -> Result<Self, CodingAgentError> {
         let tools = Arc::new(CodingTools::new(config.workspace.clone()));
-        let system = config.system.clone().unwrap_or_else(|| {
-            // An explicit base from the user's SYSTEM.md replaces the
-            // built-in default; `{workspace}` and the `{#skills}` block
-            // render either way — a base without the block shows no
-            // skills.
-            let base = config
-                .base_system
-                .clone()
-                .unwrap_or_else(|| crate::prompt::DEFAULT_SYSTEM_MD.to_owned());
-            // The global skills directory may not exist (no HOME) — as
-            // normal as an empty one.
-            let global = rhema_config::Config::skills_dir().ok();
-            let skills = crate::skills::discover(global.as_deref(), tools.workspace());
-            crate::prompt::render_system(&base, tools.workspace(), &skills)
-        });
+        let system = match config.system.clone() {
+            // An explicit total replacement is the escape hatch:
+            // verbatim, not templated.
+            Some(system) => system,
+            None => {
+                // An explicit base from the user's SYSTEM.md replaces
+                // the built-in default; a base with no skills section
+                // shows no skills. The global skills directory may not
+                // exist (no HOME) — as normal as an empty one.
+                let global = rhema_config::Config::skills_dir().ok();
+                let skills = crate::skills::discover(global.as_deref(), tools.workspace());
+                let base = config
+                    .base_system
+                    .as_deref()
+                    .unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD);
+                crate::prompt::render_system(base, tools.workspace(), &skills)?
+            }
+        };
         let agent = Agent::builder()
             .provider(provider)
             .resolver(tools.clone())
@@ -96,7 +115,7 @@ impl CodingAgent {
         provider: Arc<dyn rhema_core::ModelProvider>,
         config: CodingAgentConfig,
         session: Session,
-    ) -> Result<Self, AgentError> {
+    ) -> Result<Self, CodingAgentError> {
         let mut agent = Self::new(provider, config)?;
         agent.session = session;
         Ok(agent)

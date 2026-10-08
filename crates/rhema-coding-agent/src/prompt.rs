@@ -1,59 +1,59 @@
-//! The system-prompt template: one markdown file, rendered with
-//! placeholders.
+//! The system-prompt template: one markdown file, rendered by
+//! minijinja.
 //!
-//! Templates are prose, not programs: the renderer substitutes
-//! `{workspace}`, repeats the one bounded block, and leaves every other
-//! `{...}` as written. A template without the block simply presents no
-//! skills.
+//! The template language is Jinja, which prompt templates across the
+//! LLM ecosystem already speak: `{{ workspace }}` names the session's
+//! workspace, `skills` is the discovered skill list, and the template
+//! decides itself where — and whether — that list appears. Rendering is
+//! fallible on purpose: a template error surfaces loudly at agent
+//! construction instead of silently rendering half the prompt, while a
+//! misspelled variable renders empty (minijinja's lenient undefined).
 
 use std::path::Path;
 
+use minijinja::{Environment, Value};
+
 /// The built-in system prompt, kept as data next to the code and read
 /// in whole — the full prompt, visible and editable in one place.
-/// Placeholders: see [`render_system`].
+/// Template syntax: see [`render_system`].
 pub const DEFAULT_SYSTEM_MD: &str = include_str!("../SYSTEM.md");
 
-/// Renders a SYSTEM.md template: `{workspace}` becomes the workspace
-/// path, and a `{#skills}…{/skills}` block renders its body once per
-/// skill with `{skill.name}`, `{skill.description}`, and
-/// `{skill.path}` filled — vanishing entirely when there are none, so
-/// the model never sees machinery for an empty set. An unclosed block
-/// stays as written. Any other `{...}` text stays as written, and a
-/// template without the block presents no skills at all: templates are
-/// prose, not programs.
-pub fn render_system(template: &str, workspace: &Path, skills: &[crate::skills::Skill]) -> String {
-    let rendered = template.replace("{workspace}", &workspace.display().to_string());
-    let rendered = render_blocks(&rendered, skills);
-    format!("{}\n", rendered.trim_end())
+/// Renders a SYSTEM.md template: `{{ workspace }}` becomes the
+/// workspace path, and `skills` holds the discovered skills as `name`,
+/// `description`, and `path` fields for `{% for %}`/`{% if %}`.
+/// Undefined variables render empty; syntax and filter errors return
+/// with template positions.
+pub fn render_system(
+    template: &str,
+    workspace: &Path,
+    skills: &[crate::skills::Skill],
+) -> Result<String, minijinja::Error> {
+    let mut env = Environment::new();
+    // Block tags may sit on their own lines in a markdown template
+    // without blank-line runoff.
+    env.set_syntax(
+        minijinja::syntax::SyntaxConfig::builder()
+            .trim_blocks(true)
+            .lstrip_blocks(true)
+            .build()?,
+    );
+    env.add_template("system", template)?;
+    Ok(env
+        .get_template("system")?
+        .render(minijinja::context! {
+            workspace => workspace.display().to_string(),
+            skills => Value::from(minijinja::value::Serde(skills)),
+        })?
+        .trim_end()
+        .to_owned()
+        + "\n")
 }
 
 /// The built-in prompt for a workspace with no skills:
-/// [`DEFAULT_SYSTEM_MD`] through [`render_system`] with an empty table.
+/// [`DEFAULT_SYSTEM_MD`] through [`render_system`]. Infallible: the
+/// built-in template is validated by tests.
 pub fn default_system(workspace: &Path) -> String {
-    render_system(DEFAULT_SYSTEM_MD, workspace, &[])
-}
-
-/// Renders every `{#skills}…{/skills}` block: the body once per skill,
-/// the per-skill fields filled; the whole block gone when there are no
-/// skills. An unclosed block is prose and stays as written.
-fn render_blocks(template: &str, skills: &[crate::skills::Skill]) -> String {
-    let Some((before, rest)) = template.split_once("{#skills}") else {
-        return template.to_owned();
-    };
-    let Some((body, after)) = rest.split_once("{/skills}") else {
-        return template.to_owned();
-    };
-    let mut out = String::from(before);
-    for skill in skills {
-        out.push_str(
-            &body
-                .replace("{skill.name}", &skill.name)
-                .replace("{skill.description}", &skill.description)
-                .replace("{skill.path}", &skill.path.display().to_string()),
-        );
-    }
-    out.push_str(&render_blocks(after, skills));
-    out
+    render_system(DEFAULT_SYSTEM_MD, workspace, &[]).expect("the built-in template is valid")
 }
 
 #[cfg(test)]
@@ -70,17 +70,23 @@ mod tests {
 
     #[test]
     fn render_fills_the_workspace_and_leaves_other_braces_alone() {
-        let out = render_system("work in {workspace}, keep {mystery}", Path::new("/ws"), &[]);
+        let out = render_system(
+            "work in {{ workspace }}, keep {mystery}",
+            Path::new("/ws"),
+            &[],
+        )
+        .unwrap();
         assert_eq!(out, "work in /ws, keep {mystery}\n");
     }
 
     #[test]
-    fn the_block_renders_its_body_once_per_skill() {
+    fn a_for_loop_renders_its_body_once_per_skill() {
         let out = render_system(
-            "{#skills}- {skill.name}: {skill.description} — cat {skill.path}\n{/skills}",
+            "{% for skill in skills %}- {{ skill.name }}: {{ skill.description }} — cat {{ skill.path }}\n{% endfor %}",
             Path::new("/ws"),
             &[skill("a", "da"), skill("b", "db")],
-        );
+        )
+        .unwrap();
         assert_eq!(
             out,
             "- a: da — cat /cfg/skills/a/SKILL.md\n- b: db — cat /cfg/skills/b/SKILL.md\n"
@@ -88,63 +94,68 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_block_vanishes_whole() {
-        let out = render_system("top\n{#skills}x{/skills}\nend", Path::new("/ws"), &[]);
-        assert_eq!(out, "top\n\nend\n");
-        assert!(!out.contains('x'), "{out}");
+    fn an_if_around_the_skills_section_holds_a_vanishing_heading() {
+        let template = "{% if skills %}Skills (name / trigger / file):\n{% for skill in skills %}{{ skill.name }} / {{ skill.description }} / {{ skill.path }}\n{% endfor %}{% endif %}";
+        let with = render_system(template, Path::new("/ws"), &[skill("s", "d")]).unwrap();
+        assert_eq!(
+            with,
+            "Skills (name / trigger / file):\ns / d / /cfg/skills/s/SKILL.md\n"
+        );
+        let without = render_system(template, Path::new("/ws"), &[]).unwrap();
+        assert_eq!(without, "\n");
     }
 
     #[test]
-    fn an_unclosed_block_stays_as_written() {
+    fn a_misspelled_variable_renders_empty_not_an_error() {
         let out = render_system(
-            "a {#skills} never closed",
+            "{% for skill in skills %}{{ skill.nope }}{{ skill.name }}{% endfor %}",
             Path::new("/ws"),
             &[skill("s", "d")],
-        );
-        assert_eq!(out, "a {#skills} never closed\n");
+        )
+        .unwrap();
+        assert_eq!(out, "s\n");
     }
 
     #[test]
-    fn unknown_field_names_inside_the_block_stay_as_written() {
-        let out = render_system(
-            "{#skills}{skill.nope} {skill.name}{/skills}",
-            Path::new("/ws"),
-            &[skill("s", "d")],
-        );
-        assert_eq!(out, "{skill.nope} s\n");
+    fn a_template_error_surfaces_instead_of_rendering_prose() {
+        let err = render_system("{% if skills %} never closed", Path::new("/ws"), &[])
+            .expect_err("an unclosed block is a loud error, not prose");
+        assert!(err.to_string().contains("system"), "{err}");
     }
 
     #[test]
     fn a_template_without_the_block_presents_no_skills() {
         let out = render_system(
-            "base in {workspace}\n",
+            "base in {{ workspace }}\n",
             Path::new("/ws"),
             &[skill("s", "d")],
-        );
+        )
+        .unwrap();
         assert_eq!(out, "base in /ws\n");
     }
 
+    // The two default-prompt tests below pin the structural contract —
+    // markers resolve, fields reach the model — never the wording: the
+    // prompt prose is the user's to edit without breaking tests.
+
     #[test]
-    fn the_default_prompt_ends_with_one_newline_and_no_placeholder() {
+    fn the_default_prompt_resolves_every_marker_and_ends_with_one_newline() {
         let out = default_system(Path::new("/ws"));
-        assert!(
-            out.starts_with("You are a coding agent working in the workspace /ws."),
-            "{out}"
-        );
-        assert!(!out.contains('{'), "{out}");
-        assert!(out.ends_with("workspace root.\n"), "{out}");
+        assert!(!out.contains("{{") && !out.contains("{%"), "{out}");
+        assert!(out.contains("/ws"), "the workspace named: {out}");
+        assert!(out.ends_with('\n') && !out.ends_with("\n\n"), "{out}");
     }
 
     #[test]
-    fn the_default_prompt_lists_skills_through_its_block() {
-        let out = render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &[skill("s", "d")]);
-        assert!(
-            out.contains("s / d / /cfg/skills/s/SKILL.md"),
-            "the per-skill line renders: {out}"
-        );
-        assert!(
-            !out.contains("Skills ("),
-            "the block carries no heading of its own: {out}"
-        );
+    fn the_default_prompt_presents_each_skill_field_to_the_model() {
+        let out = render_system(
+            DEFAULT_SYSTEM_MD,
+            Path::new("/ws"),
+            &[skill("my-skill", "its trigger text")],
+        )
+        .unwrap();
+        assert!(out.contains("my-skill"), "{out}");
+        assert!(out.contains("its trigger text"), "{out}");
+        assert!(out.contains("/cfg/skills/my-skill/SKILL.md"), "{out}");
     }
 }

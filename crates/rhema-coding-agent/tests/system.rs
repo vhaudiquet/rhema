@@ -3,7 +3,9 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
-use rhema_coding_agent::{AllowAll, CodingAgent, CodingAgentConfig, default_system};
+use rhema_coding_agent::{
+    AllowAll, CodingAgent, CodingAgentConfig, CodingAgentError, default_system,
+};
 use rhema_core::{
     Event, EventSink, Message, ModelOutput, ModelProvider, ProviderError, Role, StopReason, Usage,
     async_trait,
@@ -91,7 +93,7 @@ async fn a_base_system_prompt_replaces_the_default_and_fills_the_workspace() {
     let workspace = std::fs::canonicalize(root.path()).unwrap();
     let provider = recorder();
     let config = CodingAgentConfig {
-        base_system: Some("BASE in {workspace}.".into()),
+        base_system: Some("BASE in {{ workspace }}.".into()),
         ..CodingAgentConfig::new("mock-model", root.path())
     };
     let mut agent = CodingAgent::new(provider.clone(), config).unwrap();
@@ -110,13 +112,13 @@ async fn a_base_system_prompt_replaces_the_default_and_fills_the_workspace() {
         "{system}"
     );
     assert!(
-        !system.contains("{workspace}"),
+        !system.contains("{{ workspace }}"),
         "the placeholder filled: {system}"
     );
 }
 
 #[tokio::test]
-async fn a_base_system_with_a_skill_block_renders_each_skill_through_it() {
+async fn a_base_system_with_a_for_loop_renders_each_skill_through_it() {
     let root = tempfile::tempdir().unwrap();
     let workspace = std::fs::canonicalize(root.path()).unwrap();
     let folder = root.path().join(".rhema").join("skills").join("local");
@@ -129,7 +131,7 @@ async fn a_base_system_with_a_skill_block_renders_each_skill_through_it() {
     let provider = recorder();
     let config = CodingAgentConfig {
         base_system: Some(
-            "{#skills}load {skill.name} from {skill.path} when {skill.description} applies\n{/skills}TAIL {workspace}"
+            "{% for skill in skills %}load {{ skill.name }} from {{ skill.path }} when {{ skill.description }} applies\n{% endfor %}TAIL {{ workspace }}"
                 .into(),
         ),
         ..CodingAgentConfig::new("mock-model", root.path())
@@ -160,9 +162,23 @@ async fn a_base_system_with_a_skill_block_renders_each_skill_through_it() {
         system.contains(&format!("TAIL {}", workspace.display())),
         "{system}"
     );
+}
+
+#[tokio::test]
+async fn a_base_system_that_fails_to_render_fails_the_construction() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = recorder();
+    let config = CodingAgentConfig {
+        base_system: Some("{% if skills %} never closed".into()),
+        ..CodingAgentConfig::new("mock-model", root.path())
+    };
+    let err = match CodingAgent::new(provider, config) {
+        Err(err) => err,
+        Ok(_) => panic!("an unclosed block is a loud error, not a start"),
+    };
     assert!(
-        !system.contains("Skills (name / trigger / file)"),
-        "a block counts as a slot — no default table appended: {system}"
+        matches!(err, CodingAgentError::Template(_)),
+        "the template error surfaces: {err}"
     );
 }
 

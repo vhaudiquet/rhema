@@ -1135,7 +1135,7 @@ impl App {
             .clone()
             .ok_or(CodingAgentError::Agent(AgentError::MissingProvider))?;
         let agent_config = agent_config(&self.options, self.effective().model.clone());
-        Ok(CodingAgent::from_session(provider, agent_config, session)?)
+        CodingAgent::from_session(provider, agent_config, session)
     }
 
     /// The runner accepted a turn: wire the approval answer channel and

@@ -2,8 +2,8 @@
 //!
 //! A skill is a folder holding a `SKILL.md` whose YAML frontmatter
 //! carries a `description` — the trigger. Only name, trigger, and file
-//! reach the system prompt, through the [`crate::prompt`] template's
-//! `{#skills}` block; the model reads a skill's body itself with the
+//! reach the system prompt, as the [`crate::prompt`] template's
+//! `skills` list; the model reads a skill's body itself with the
 //! bash tool (`cat`) when a trigger applies, so skills need no tool of
 //! their own, no approval, and no machinery beyond discovery. Project
 //! skills shadow global ones by folder name.
@@ -11,10 +11,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// One discovered skill.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Skill {
     /// The folder's name.
     pub name: String,
