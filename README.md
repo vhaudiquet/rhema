@@ -57,9 +57,11 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   contract for deterministic model-free detection, the lease-driven
   `Driver` loop (live inbox batches, per-round checkpoints), and a tool
   registry cut into allowlist-filtered resolvers
-- `rhema-claw` — the resident daemon that watches forge repos and
-  answers each dispatch with one coding-agent turn posted as the
-  thread's reply; `--once` for cron-driven ephemeral machines
+- `rhema-claw` — the resident agent daemon: a chat surface over HTTP
+  (native routes with SSE, plus an OpenAI-compatible `/v1/chat/
+completions` shim for stock UIs), watch management by agent tool or
+  HTTP, and forge threads answered with one coding-agent turn posted as
+  the thread's reply; `--once` for cron-driven ephemeral machines
 - `rhema-coding-agent` — the coding-agent driver: one built-in tool
   (`bash`, running commands via `bash -c` in the workspace), an
   approval seam (auto-approved for now; allowlists planned), session
@@ -220,6 +222,63 @@ Gemini, and ignored where a provider has no knob). `/thinking` changes
 the level mid-session and persists it into the profile (`thinking:` in
 config.yaml); the footer names the level whenever one is set.
 
+## The claw: `rhema-claw`
+
+The resident agent. One daemon owns every session in one SQLite store:
+yours (`interactive:<name>`, keyed per chat surface) and every watched
+forge thread's. Talk to it over HTTP; it watches repos, answers forge
+threads with coding-agent turns, and configures its own watches when
+asked in chat (`watch_repo`/`unwatch_repo`/`list_watches` are tools the
+model calls like any other).
+
+```sh
+rhema-claw                     # serve on 127.0.0.1:7799 (config: listen)
+rhema-claw --once              # one detect + one dispatch pass, then exit
+```
+
+```yaml
+# ~/.config/rhema/claw.yaml
+provider: anthropic
+model: claude-sonnet-4-5
+listen: 127.0.0.1:7799
+token: change-me                 # optional; when set, /v1/* requires it
+poll_interval_secs: 120
+watches:                         # a seed: imported while the table is empty
+  - forge: github
+    repo: acme/widgets
+```
+
+The native surface:
+
+```
+GET  /healthz                          GET  /v1/sessions
+POST /v1/sessions/{key}/messages       {"text": "..."}   -> 202
+GET  /v1/sessions/{key}/events         SSE turn events (see below)
+GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{forge}/{repo}
+```
+
+SSE frames are JSON, `data: {..}
+
+`: `thinking_delta`, `text_delta`,
+`tool_start`, `tool_result`, `turn_done` — a chat UI subscribes to
+`/events` once, POSTs messages, and renders the stream per turn; the
+daemon owns the conversation, so the client mirrors replies rather than
+managing history.
+
+Stock OpenAI-speaking UIs point at the shim instead:
+
+```sh
+curl http://127.0.0.1:7799/v1/chat/completions -H 'Content-Type: application/json' -d '{
+  "model": "claw", "user": "web", "stream": true,
+  "messages": [{"role": "user", "content": "what are you watching?"}]
+}'
+```
+
+The shim reads only the last user message (`user` picks the session,
+default `web`), maps thinking deltas to `reasoning_content`, and
+streams standard chat-completions chunks — one notion of session, the
+daemon's, behind a wire format every web UI already speaks.
+
 ## Usage
 
 ```rust
@@ -297,8 +356,7 @@ and checkpoints through serde — expressible entirely outside crate 1.
 
 ## Roadmap
 
-- The claw's interactive surface: watch configuration as agent tools
-  (`watch_repo`/`unwatch`) behind a chat surface into the daemon
+- A web interface on the claw's HTTP surface
 - Later: an OpenClaw-style multi-channel consumer on the same dispatch
   core (Telegram as tool, not channel), memory wired into the coding
   agent and the resident tier, agent-initiated sub-sessions, compaction,
