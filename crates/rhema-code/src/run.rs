@@ -329,6 +329,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .unwrap_or(rhema_core::request::ThinkingEffort::Default);
     let options = RunOptions {
         theme: args.theme,
+        icons: crate::icons::Flavor::Unicode,
         profile: Some(profile),
         workspace: workspace.clone(),
         max_steps: args.max_steps,

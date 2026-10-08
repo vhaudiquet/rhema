@@ -34,6 +34,7 @@ pub mod approval;
 pub mod args;
 pub mod commands;
 pub mod events;
+pub mod icons;
 pub mod markdown;
 pub mod palette;
 pub mod run;

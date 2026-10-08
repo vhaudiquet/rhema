@@ -201,6 +201,8 @@ impl Backend {
 pub struct RunOptions {
     /// Which Jadeite theme paints the screen.
     pub theme: crate::args::ThemeKind,
+    /// Which icon flavor the footer draws with.
+    pub icons: crate::icons::Flavor,
     /// The config profile this session runs under.
     pub profile: Option<String>,
     /// Workspace root for tools.
@@ -303,6 +305,8 @@ pub struct App {
     pub should_quit: bool,
     /// The resolved design tokens every render pass reads.
     pub theme: &'static crate::palette::Theme,
+    /// The resolved footer glyphs every render pass reads.
+    pub icons: &'static crate::icons::Icons,
     /// The chat input state.
     pub chat: ChatState,
     answers: Option<ApprovalAnswerer>,
@@ -375,6 +379,7 @@ impl App {
                 crate::args::ThemeKind::Dark => &crate::palette::DARK,
                 crate::args::ThemeKind::Light => &crate::palette::LIGHT,
             },
+            icons: setup.options.icons.set(),
             store: setup.store,
             config: setup.config,
             provider: setup.backend.as_ref().map(Backend::provider),
@@ -1455,6 +1460,7 @@ mod tests {
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
                 thinking: rhema_core::request::ThinkingEffort::Default,
+                icons: crate::icons::Flavor::Unicode,
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
@@ -2446,6 +2452,7 @@ mod tests {
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
                 thinking: rhema_core::request::ThinkingEffort::Default,
+                icons: crate::icons::Flavor::Unicode,
                 profile: Some(profile),
                 workspace: PathBuf::from("."),
                 max_steps: 4,

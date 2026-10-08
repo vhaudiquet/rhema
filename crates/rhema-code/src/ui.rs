@@ -938,15 +938,28 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // only appears when the level would change the request.
     if app.options.thinking != rhema_core::request::ThinkingEffort::Default {
         parts.push(
-            Span::raw(format!(" · thinking {}", app.options.thinking.as_str())).fg(theme.text3),
+            Span::raw(format!(
+                " · {} {}",
+                app.icons.thinking,
+                app.options.thinking.as_str()
+            ))
+            .fg(theme.text3),
         );
     }
     let used = app.context_used();
     let mut context = format_tokens(Some(used));
-    if let Some(limit) = app.current_context_window() {
+    let limit = app.current_context_window();
+    if let Some(limit) = limit {
         context.push_str(&format!("/{}", format_tokens(Some(limit))));
     }
-    parts.push(Span::raw(format!(" · {context}")).fg(theme.text3));
+    // The gauge is the telemetry: the glyph itself fills with the
+    // window, readable before the numbers are.
+    let fraction = limit
+        .map(|limit| used as f64 / limit as f64)
+        .unwrap_or(0.0)
+        .clamp(0.0, 1.0);
+    parts
+        .push(Span::raw(format!(" · {} {context}", (app.icons.context)(fraction))).fg(theme.text3));
     let cost = if app.session_cost >= 0.01 || app.session_cost == 0.0 {
         format!("${:.2}", app.session_cost)
     } else {
@@ -1345,6 +1358,8 @@ mod scroll_tests {
     use crate::screens::ChatState;
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
+    use rhema_core::Usage;
+    use rhema_provider_google::GeminiModel;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1369,6 +1384,7 @@ mod scroll_tests {
             session: rhema_core::Session::default(),
             options: RunOptions {
                 theme: ThemeKind::Dark,
+                icons: crate::icons::Flavor::Unicode,
                 thinking: rhema_core::request::ThinkingEffort::Default,
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
@@ -1455,7 +1471,7 @@ mod scroll_tests {
     }
 
     #[test]
-    fn the_footer_names_a_named_thinking_effort() {
+    fn the_footer_shows_the_thinking_and_context_icons() {
         let mut app = chat_app();
         let draw = |app: &mut App| {
             let backend = TestBackend::new(80, 12);
@@ -1468,12 +1484,33 @@ mod scroll_tests {
                 })
                 .collect::<String>()
         };
+        assert!(!draw(&mut app).contains("✻ high"), "absent at default");
         assert!(
-            !draw(&mut app).contains("thinking high"),
-            "absent at default"
+            draw(&mut app).contains("◔ 0"),
+            "the empty gauge still shows"
         );
+
+        // A named level rides with the thinking glyph, and the gauge
+        // fills with the window's usage.
         app.options.thinking = rhema_core::request::ThinkingEffort::High;
-        assert!(draw(&mut app).contains("thinking high"));
+        app.models.push(GeminiModel {
+            id: "m".into(),
+            display_name: "m".into(),
+            description: String::new(),
+            input_token_limit: Some(1_048_576),
+            output_token_limit: None,
+            generation_methods: vec!["generateContent".to_owned()],
+            pricing: None,
+        });
+        app.usage = Some(Usage {
+            input_tokens: 131_072,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+        });
+        let screen = draw(&mut app);
+        assert!(screen.contains("✻ high"), "{screen}");
+        // 131_072 of 1_048_576 is ~12%: the emptiest quarter.
+        assert!(screen.contains("◔ 131k/1.0M"), "{screen}");
     }
 
     #[test]
