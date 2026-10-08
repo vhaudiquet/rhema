@@ -26,6 +26,12 @@ pub enum ProviderChoice {
     LlamaCpp,
     /// OpenRouter, by API key.
     OpenRouter,
+    /// Anthropic, by API key.
+    #[value(name = "anthropic")]
+    Anthropic,
+    /// OpenAI, by API key.
+    #[value(name = "openai")]
+    OpenAi,
 }
 
 impl ProviderChoice {
@@ -35,6 +41,8 @@ impl ProviderChoice {
         match value {
             Some("llama-cpp") | Some("llama_cpp") | Some("llamacpp") => Self::LlamaCpp,
             Some("openrouter") => Self::OpenRouter,
+            Some("anthropic") => Self::Anthropic,
+            Some("openai") => Self::OpenAi,
             _ => Self::Google,
         }
     }
@@ -159,11 +167,27 @@ mod tests {
             ProviderChoice::from_stored(Some("google")),
             ProviderChoice::Google
         );
+        assert_eq!(
+            ProviderChoice::from_stored(Some("anthropic")),
+            ProviderChoice::Anthropic
+        );
+        assert_eq!(
+            ProviderChoice::from_stored(Some("openai")),
+            ProviderChoice::OpenAi
+        );
         assert_eq!(ProviderChoice::from_stored(None), ProviderChoice::Google);
         assert_eq!(
             ProviderChoice::from_stored(Some("nonsense")),
             ProviderChoice::Google
         );
+    }
+
+    #[test]
+    fn the_new_providers_parse_as_cli_values_matching_the_stored_names() {
+        let args = parse(&["--provider", "anthropic"]);
+        assert_eq!(args.provider, Some(ProviderChoice::Anthropic));
+        let args = parse(&["--provider", "openai"]);
+        assert_eq!(args.provider, Some(ProviderChoice::OpenAi));
     }
 
     #[test]

@@ -24,8 +24,10 @@ mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
 rhema-core = { path = "../rhema-core" }
 rhema-config = { path = "../rhema-config" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
 rhema-provider-google = { path = "../rhema-provider-google" }
 rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }
 rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
 # Full-screen rendering; the crossterm version must stay the one ratatui
 # builds on so the event types unify.

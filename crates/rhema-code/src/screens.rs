@@ -16,6 +16,10 @@ pub enum LoginProvider {
     LlamaCpp,
     /// OpenRouter, by API key.
     OpenRouter,
+    /// Anthropic, by API key.
+    Anthropic,
+    /// OpenAI, by API key.
+    OpenAi,
 }
 
 /// The provider rows shown at login. Every row configures an implemented
@@ -41,6 +45,14 @@ pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "OpenRouter",
         kind: LoginProvider::OpenRouter,
+    },
+    ProviderEntry {
+        name: "Anthropic",
+        kind: LoginProvider::Anthropic,
+    },
+    ProviderEntry {
+        name: "OpenAI",
+        kind: LoginProvider::OpenAi,
     },
 ];
 
@@ -371,6 +383,8 @@ impl LoginScreen {
                         || provider == Some("llamacpp")
                 }
                 LoginProvider::OpenRouter => provider == Some("openrouter"),
+                LoginProvider::Anthropic => provider == Some("anthropic"),
+                LoginProvider::OpenAi => provider == Some("openai"),
             })
             .unwrap_or(0);
         Self { selected, ..self }
@@ -412,7 +426,10 @@ impl LoginScreen {
     pub fn input_label(&self) -> &'static str {
         match self.selected_provider() {
             LoginProvider::LlamaCpp => "server URL: ",
-            LoginProvider::Google | LoginProvider::OpenRouter => "API key: ",
+            LoginProvider::Google
+            | LoginProvider::OpenRouter
+            | LoginProvider::Anthropic
+            | LoginProvider::OpenAi => "API key: ",
         }
     }
 
@@ -421,9 +438,10 @@ impl LoginScreen {
     pub fn masked_input(&self) -> String {
         match self.selected_provider() {
             LoginProvider::LlamaCpp => self.input.clone(),
-            LoginProvider::Google | LoginProvider::OpenRouter => {
-                "\u{2022}".repeat(self.input.chars().count())
-            }
+            LoginProvider::Google
+            | LoginProvider::OpenRouter
+            | LoginProvider::Anthropic
+            | LoginProvider::OpenAi => "\u{2022}".repeat(self.input.chars().count()),
         }
     }
 
@@ -1127,12 +1145,35 @@ mod tests {
     #[test]
     fn login_selection_wraps_across_the_providers() {
         let mut login = LoginScreen::new();
-        login.handle_key(key(KeyCode::Down));
-        login.handle_key(key(KeyCode::Down));
-        login.handle_key(key(KeyCode::Down));
+        for _ in 0..PROVIDERS.len() {
+            login.handle_key(key(KeyCode::Down));
+        }
         assert_eq!(login.selected, 0, "down wraps at the end");
         login.handle_key(key(KeyCode::Up));
         assert_eq!(login.selected, PROVIDERS.len() - 1, "up wraps at the start");
+    }
+
+    #[test]
+    fn the_new_providers_take_masked_api_keys_and_the_stored_row() {
+        // Anthropic sits two rows past OpenRouter; OpenAI one more.
+        let mut login = LoginScreen::new().select_stored_provider(Some("openrouter"));
+        assert_eq!(login.selected_provider(), LoginProvider::OpenRouter);
+        login = login.select_stored_provider(Some("anthropic"));
+        assert_eq!(login.selected_provider(), LoginProvider::Anthropic);
+        login = login.select_stored_provider(Some("openai"));
+        assert_eq!(login.selected_provider(), LoginProvider::OpenAi);
+
+        login.handle_key(key(KeyCode::Enter));
+        assert_eq!(login.input_label(), "API key: ");
+        for c in "sk-ant-01".chars() {
+            login.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(login.input, "sk-ant-01");
+        assert_eq!(login.masked_input(), "\u{2022}".repeat(9));
+        assert!(
+            !login.masked_input().contains("sk"),
+            "no key material is rendered"
+        );
     }
 
     // --- Picker ---

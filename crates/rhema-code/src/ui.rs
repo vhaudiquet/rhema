@@ -76,7 +76,9 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &Theme) {
-    let area = centered(58, 9, frame.area());
+    // Two border rows plus tabs, one row per provider, input, status.
+    let height = 2 + 1 + PROVIDERS.len() as u16 + 1 + 1;
+    let area = centered(58, height, frame.area());
     frame.render_widget(Clear, area);
     let title = format!(" rhema — sign in ({}) ", login.profile);
     let block = Block::default()
@@ -142,6 +144,12 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
                         }
                         crate::screens::LoginProvider::OpenRouter => {
                             login.stored.openrouter_api_key.is_some()
+                        }
+                        crate::screens::LoginProvider::Anthropic => {
+                            login.stored.anthropic_api_key.is_some()
+                        }
+                        crate::screens::LoginProvider::OpenAi => {
+                            login.stored.openai_api_key.is_some()
                         }
                     };
                     let mut spans = vec![Span::styled(entry.name.to_string(), name_style)];
@@ -1262,8 +1270,9 @@ mod scroll_tests {
         let mut login = crate::screens::LoginScreen::new();
         login.stored.google_api_key = Some("g".into());
         login.stored.openrouter_api_key = Some("o".into());
+        login.stored.anthropic_api_key = Some("a".into());
 
-        let backend = TestBackend::new(60, 10);
+        let backend = TestBackend::new(60, 14);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| crate::ui::render_login(frame, &login, &crate::palette::DARK))
@@ -1272,10 +1281,13 @@ mod scroll_tests {
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
-        // Connected providers carry the logged-in tag; llama.cpp has
-        // nothing registered in this profile, so its row stays bare.
+        // Connected providers carry the logged-in tag; llama.cpp and
+        // OpenAI have nothing registered in this profile, so their rows
+        // stay bare.
         assert!(screen.contains("Google Gemini"), "{screen}");
-        assert_eq!(screen.matches("logged in (api key)").count(), 2);
+        assert!(screen.contains("Anthropic"), "{screen}");
+        assert!(screen.contains("OpenAI"), "{screen}");
+        assert_eq!(screen.matches("logged in (api key)").count(), 3);
         assert!(!screen.contains("logged in (server)"), "{screen}");
     }
 

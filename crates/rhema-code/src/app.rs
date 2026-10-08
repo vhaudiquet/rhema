@@ -60,6 +60,16 @@ pub enum Backend {
         /// The resolved key (`env` first, stored second).
         api_key: String,
     },
+    /// Anthropic, by API key.
+    Anthropic {
+        /// The resolved key (`env` first, stored second).
+        api_key: String,
+    },
+    /// OpenAI, by API key.
+    OpenAi {
+        /// The resolved key (`env` first, stored second).
+        api_key: String,
+    },
 }
 
 impl Backend {
@@ -79,6 +89,16 @@ impl Backend {
             Backend::OpenRouter { api_key } => Arc::new(
                 rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone()),
             ),
+            // The OpenAI backend speaks to OpenAI itself: the adapter's
+            // default base is the only address it gets — custom base
+            // URLs for other compatible servers are a later decision,
+            // not a config field here.
+            Backend::Anthropic { api_key } => Arc::new(
+                rhema_provider_anthropic::AnthropicProvider::new(api_key.clone()),
+            ),
+            Backend::OpenAi { api_key } => Arc::new(
+                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone()),
+            ),
         }
     }
 
@@ -88,12 +108,14 @@ impl Backend {
             Backend::Google { .. } => "google",
             Backend::LlamaCpp { .. } => "llama-cpp",
             Backend::OpenRouter { .. } => "openrouter",
+            Backend::Anthropic { .. } => "anthropic",
+            Backend::OpenAi { .. } => "openai",
         }
     }
 
     /// Builds the backend a profile's settings call for; `None` when the
-    /// profile has no usable credentials (a keyless google or openrouter
-    /// profile cannot serve turns).
+    /// profile has no usable credentials (a keyless google, openrouter,
+    /// anthropic, or openai profile cannot serve turns).
     pub fn from_profile(profile: &rhema_config::Profile) -> Option<Backend> {
         match profile.provider.as_deref().unwrap_or("google") {
             "llama-cpp" => Some(Backend::LlamaCpp {
@@ -103,6 +125,12 @@ impl Backend {
             "openrouter" => profile
                 .openrouter_api_key()
                 .map(|api_key| Backend::OpenRouter { api_key }),
+            "anthropic" => profile
+                .anthropic_api_key()
+                .map(|api_key| Backend::Anthropic { api_key }),
+            "openai" => profile
+                .openai_api_key()
+                .map(|api_key| Backend::OpenAi { api_key }),
             _ => profile
                 .google_api_key()
                 .map(|api_key| Backend::Google { api_key }),
@@ -120,6 +148,22 @@ impl Backend {
             }
             Backend::OpenRouter { api_key } => {
                 rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone())
+                    .list_models()
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            // Each adapter's listing already fills what its endpoint
+            // reports and defaults the rest: Anthropic rows carry id and
+            // display name only, OpenAI-compatible rows add the server's
+            // name/description/context_length when present.
+            Backend::Anthropic { api_key } => {
+                rhema_provider_anthropic::AnthropicProvider::new(api_key.clone())
+                    .list_models()
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            Backend::OpenAi { api_key } => {
+                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
                     .list_models()
                     .await
                     .map_err(|err| err.to_string())
@@ -171,10 +215,12 @@ pub struct RunOptions {
     pub save: Option<PathBuf>,
 }
 
-/// The current screen.
+/// The current screen. The login screen is boxed: it is by far the
+/// largest state (profile registry plus stored section) and `Screen`
+/// sits in the hot keypath.
 pub enum Screen {
     /// No resolvable API key: log in first.
-    Login(LoginScreen),
+    Login(Box<LoginScreen>),
     /// Choose a model.
     Picker(PickerScreen),
     /// Switch the profile the session runs under.
@@ -310,11 +356,11 @@ impl App {
                     .profile
                     .clone()
                     .unwrap_or_else(|| "personal".to_owned());
-                Screen::Login(
+                Screen::Login(Box::new(
                     LoginScreen::new()
                         .with_registry(&setup.config.profiles, &profile_name)
                         .select_stored_provider(effective.provider.as_deref()),
-                )
+                ))
             }
         };
         Ok(Self {
@@ -405,11 +451,11 @@ impl App {
             .clone()
             .or_else(|| self.options.profile.clone())
             .unwrap_or_else(|| "personal".to_owned());
-        self.screen = Screen::Login(
+        self.screen = Screen::Login(Box::new(
             crate::screens::LoginScreen::for_chat()
                 .with_registry(&self.config.profiles, &profile_name)
                 .select_stored_provider(effective.provider.as_deref()),
-        );
+        ));
     }
 
     /// Drops the conversation: a fresh transcript and a fresh session.
@@ -792,6 +838,12 @@ impl App {
             crate::screens::LoginProvider::OpenRouter => Backend::OpenRouter {
                 api_key: login.input.clone(),
             },
+            crate::screens::LoginProvider::Anthropic => Backend::Anthropic {
+                api_key: login.input.clone(),
+            },
+            crate::screens::LoginProvider::OpenAi => Backend::OpenAi {
+                api_key: login.input.clone(),
+            },
             crate::screens::LoginProvider::Google => Backend::Google {
                 api_key: login.input.clone(),
             },
@@ -903,6 +955,14 @@ impl App {
                                 Backend::OpenRouter { api_key } => {
                                     settings.provider = Some("openrouter".to_owned());
                                     settings.openrouter_api_key = Some(api_key.clone());
+                                }
+                                Backend::Anthropic { api_key } => {
+                                    settings.provider = Some("anthropic".to_owned());
+                                    settings.anthropic_api_key = Some(api_key.clone());
+                                }
+                                Backend::OpenAi { api_key } => {
+                                    settings.provider = Some("openai".to_owned());
+                                    settings.openai_api_key = Some(api_key.clone());
                                 }
                             });
                         if let Err(err) = self.store.save(&self.config) {
@@ -1447,6 +1507,152 @@ mod tests {
         let effective = config.effective(None);
         assert_eq!(effective.provider.as_deref(), Some("llama-cpp"));
         assert_eq!(effective.llama_cpp_url.as_deref(), Some("http://box:8080"));
+    }
+
+    #[test]
+    fn anthropic_login_validates_by_key_and_persists_the_provider() {
+        let mut h = harness(None, None, Session::default());
+        // Anthropic is the fourth provider row.
+        for _ in 0..3 {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        match &h.app.screen {
+            Screen::Login(login) => {
+                assert_eq!(
+                    login.selected_provider(),
+                    crate::screens::LoginProvider::Anthropic
+                );
+                assert_eq!(login.input_label(), "API key: ");
+            }
+            _ => panic!("expected the login screen"),
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        for c in "sk-ant-01".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::Anthropic {
+                    api_key: "sk-ant-01".into(),
+                },
+            })]
+        );
+        // The model-list fetch is the validation; success lands in the
+        // picker prefixed `anthropic/`, and the key lands in the profile.
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::Anthropic {
+                    api_key: "sk-ant-01".into(),
+                },
+            },
+            result: Ok(vec![
+                llama_model("claude-sonnet-4-5"),
+                llama_model("claude-opus-4-1"),
+            ]),
+        });
+        match &h.app.screen {
+            Screen::Picker(picker) => {
+                assert_eq!(picker.provider, "anthropic");
+                assert_eq!(picker.models.len(), 2);
+                // The Anthropic listing carries identity only: no
+                // context, no pricing.
+                assert!(picker.models[0].input_token_limit.is_none());
+                assert!(picker.models[0].pricing.is_none());
+            }
+            _ => panic!("expected the picker after a successful anthropic login"),
+        }
+        let config = h.store.load().unwrap();
+        let effective = config.effective(None);
+        assert_eq!(effective.provider.as_deref(), Some("anthropic"));
+        assert_eq!(effective.anthropic_api_key.as_deref(), Some("sk-ant-01"));
+        assert!(matches!(
+            h.app.backend,
+            Some(Backend::Anthropic { ref api_key }) if api_key == "sk-ant-01"
+        ));
+    }
+
+    #[test]
+    fn openai_login_validates_by_key_with_the_default_base() {
+        let mut h = harness(None, None, Session::default());
+        // OpenAI is the fifth provider row.
+        for _ in 0..4 {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        for c in "sk-proj-01".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::OpenAi {
+                    api_key: "sk-proj-01".into(),
+                },
+            })]
+        );
+        // A failed validation stays on the login screen and persists
+        // nothing — same contract as the other keyed providers.
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::OpenAi {
+                    api_key: "sk-proj-01".into(),
+                },
+            },
+            result: Err("openai-compatible api error (HTTP 401): denied".into()),
+        });
+        match &h.app.screen {
+            Screen::Login(login) => assert!(matches!(login.status, LoginStatus::Error(_))),
+            _ => panic!("a failed login must stay on the login screen"),
+        }
+        assert!(h.app.backend.is_none());
+        assert!(
+            h.store
+                .load()
+                .unwrap()
+                .effective(None)
+                .openai_api_key
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn anthropic_and_openai_profiles_build_their_own_backends() {
+        let keyed = |provider: &str, field: &str| rhema_config::Profile {
+            provider: Some(provider.to_owned()),
+            anthropic_api_key: (field == "anthropic").then(|| "k-a".to_owned()),
+            openai_api_key: (field == "openai").then(|| "k-o".to_owned()),
+            ..rhema_config::Profile::default()
+        };
+        let backend = Backend::from_profile(&keyed("anthropic", "anthropic"))
+            .expect("a keyed anthropic profile serves turns");
+        assert_eq!(backend.config_name(), "anthropic");
+        assert!(
+            matches!(backend, Backend::Anthropic { ref api_key } if api_key == "k-a"),
+            "the anthropic profile builds the anthropic backend: {backend:?}"
+        );
+        let backend = Backend::from_profile(&keyed("openai", "openai"))
+            .expect("a keyed openai profile serves turns");
+        assert_eq!(backend.config_name(), "openai");
+        assert!(
+            matches!(backend, Backend::OpenAi { ref api_key } if api_key == "k-o"),
+            "the openai profile builds the openai backend: {backend:?}"
+        );
+        // No key, no backend — a keyless profile cannot serve turns.
+        assert_eq!(
+            Backend::from_profile(&keyed("anthropic", "openai")),
+            None,
+            "an anthropic profile is not served by an openai key"
+        );
+        assert_eq!(
+            Backend::from_profile(&rhema_config::Profile {
+                provider: Some("openai".into()),
+                ..rhema_config::Profile::default()
+            }),
+            None
+        );
     }
 
     #[test]

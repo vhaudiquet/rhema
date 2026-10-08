@@ -44,6 +44,17 @@ const DEFAULT_MODEL: &str = "gemini-3.8-flash";
 /// The model string sent to a llama.cpp server when none is set. The
 /// server typically ignores it, but OpenAI-shaped APIs require the field.
 const DEFAULT_LLAMA_MODEL: &str = "local";
+/// The headless Anthropic model when neither `--model` nor the stored
+/// config names one: the mid-tier Claude the adapter's own docs use as
+/// its example id. This fallback is a safety net, not the normal path —
+/// the login and picker flow always stores a model — so it only has to
+/// be an id the API keeps answering for.
+const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
+/// The headless OpenAI model when neither `--model` nor the stored
+/// config names one, chosen with the same reasoning as
+/// [`DEFAULT_ANTHROPIC_MODEL`]: the GPT-5 family id, current at the time
+/// of writing.
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
 
 /// The headless event sink: reply text streams raw to stdout (so pipes
 /// capture exactly the reply), tool traffic goes to stderr.
@@ -183,6 +194,20 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
                 .openrouter_api_key()
                 .ok_or_else(|| anyhow::anyhow!("missing API key: set OPENROUTER_API_KEY"))?,
         },
+        ProviderChoice::Anthropic => Backend::Anthropic {
+            api_key: effective.anthropic_api_key().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)"
+                )
+            })?,
+        },
+        ProviderChoice::OpenAi => Backend::OpenAi {
+            api_key: effective.openai_api_key().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing API key: set OPENAI_API_KEY (or log in once interactively)"
+                )
+            })?,
+        },
     };
     let model = args.model.clone().unwrap_or_else(|| {
         effective
@@ -190,6 +215,8 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
             .clone()
             .unwrap_or_else(|| match provider_choice {
                 ProviderChoice::LlamaCpp => DEFAULT_LLAMA_MODEL.to_owned(),
+                ProviderChoice::Anthropic => DEFAULT_ANTHROPIC_MODEL.to_owned(),
+                ProviderChoice::OpenAi => DEFAULT_OPENAI_MODEL.to_owned(),
                 ProviderChoice::Google | ProviderChoice::OpenRouter => DEFAULT_MODEL.to_owned(),
             })
     });
@@ -259,6 +286,12 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         ProviderChoice::OpenRouter => effective
             .openrouter_api_key()
             .map(|api_key| Backend::OpenRouter { api_key }),
+        ProviderChoice::Anthropic => effective
+            .anthropic_api_key()
+            .map(|api_key| Backend::Anthropic { api_key }),
+        ProviderChoice::OpenAi => effective
+            .openai_api_key()
+            .map(|api_key| Backend::OpenAi { api_key }),
     };
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
