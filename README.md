@@ -42,6 +42,13 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   checkpoints, leases with TTL and recovery, and a persistent per-key
   `Session` wrapping `rhema_core::Session`; in-memory and SQLite stores
   behind one `Store` contract
+- `rhema-memory` — cross-session agent memory: one record per fact in
+  global or per-workspace scope, behind a `MemoryStore` contract with an
+  in-process and a markdown-file backend, surfaced as
+  `memory_search`/`memory_save`/`memory_forget` tools the model calls
+  itself — never injected context; the search interface hides the
+  ranking method, so a semantic ranker can replace the keyword one
+  without a signature change
 - `rhema-forge-agent` — the forge-watching bot: GitHub, Gitea, and
   GitLab clients normalizing issues/PRs/comments into one event
   vocabulary, a watcher feeding them to the dispatcher, and a bot that
@@ -293,6 +300,7 @@ and checkpoints through serde — expressible entirely outside crate 1.
 - The claw's interactive surface: watch configuration as agent tools
   (`watch_repo`/`unwatch`) behind a chat surface into the daemon
 - Later: an OpenClaw-style multi-channel consumer on the same dispatch
-  core (Telegram as tool, not channel), `memory_search`, agent-initiated
-  sub-sessions, compaction, provider fixtures via cassettes, custom base
-  URLs for OpenAI-compatible servers
+  core (Telegram as tool, not channel), memory wired into the coding
+  agent and the resident tier, agent-initiated sub-sessions, compaction,
+  provider fixtures via cassettes, custom base URLs for OpenAI-compatible
+  servers

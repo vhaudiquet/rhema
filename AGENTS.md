@@ -53,6 +53,8 @@ Rules:
     (`crates/rhema-provider-anthropic/`)
   - `openai-compatible` — the generic OpenAI-compatible adapter
     (`crates/rhema-provider-openai-compatible/`)
+  - `memory` — the agent memory layer: the `MemoryStore` contract, its
+    stores, and the memory tools (`crates/rhema-memory/`)
   - `rsd` — resource-scoped dispatch: the dispatcher and its stores
     (`crates/rhema-rsd/`)
   - `forge-agent` — the forge-watching bot: GitHub/Gitea/GitLab clients,
