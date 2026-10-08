@@ -57,6 +57,11 @@ Rules:
     (`crates/rhema-rsd/`)
   - `forge-agent` — the forge-watching bot: GitHub/Gitea/GitLab clients,
     the watcher, and handler runs (`crates/rhema-forge-agent/`)
+  - `autonomous-agent` — the resident-agent core tier: sources, the
+    lease-driven driver, and the tool registry
+    (`crates/rhema-autonomous-agent/`)
+  - `claw` — the resident forge-watching daemon: the first
+    autonomous-agent consumer (`crates/rhema-claw/`)
   - `config` — stored settings and credentials (`crates/rhema-config/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema-code` — the frontend crate: terminal UI and headless

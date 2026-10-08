@@ -46,6 +46,13 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   GitLab clients normalizing issues/PRs/comments into one event
   vocabulary, a watcher feeding them to the dispatcher, and a bot that
   turns admitted keys into handler runs
+- `rhema-autonomous-agent` — the resident-agent core tier: the `Source`
+  contract for deterministic model-free detection, the lease-driven
+  `Driver` loop (live inbox batches, per-round checkpoints), and a tool
+  registry cut into allowlist-filtered resolvers
+- `rhema-claw` — the resident daemon that watches forge repos and
+  answers each dispatch with one coding-agent turn posted as the
+  thread's reply; `--once` for cron-driven ephemeral machines
 - `rhema-coding-agent` — the coding-agent driver: one built-in tool
   (`bash`, running commands via `bash -c` in the workspace), an
   approval seam (auto-approved for now; allowlists planned), session
@@ -283,8 +290,9 @@ and checkpoints through serde — expressible entirely outside crate 1.
 
 ## Roadmap
 
-- A real handler for the forge bot: the coding agent with GitHub/Gitea/
-  GitLab tools, run as an end-to-end binary over `rhema-rsd`
+- The claw's interactive surface: watch configuration as agent tools
+  (`watch_repo`/`unwatch`) behind a chat surface into the daemon
 - Later: an OpenClaw-style multi-channel consumer on the same dispatch
-  core, compaction, provider fixtures via cassettes, custom base URLs
-  for OpenAI-compatible servers
+  core (Telegram as tool, not channel), `memory_search`, agent-initiated
+  sub-sessions, compaction, provider fixtures via cassettes, custom base
+  URLs for OpenAI-compatible servers
