@@ -26,7 +26,7 @@ use rhema_core::event::{Event, EventSink};
 use rhema_core::message::{Content, Message, Role};
 use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
-use rhema_core::request::ModelRequest;
+use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::{ToolCall, ToolResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -152,6 +152,31 @@ pub struct WireGenerationConfig {
     /// Output token ceiling, when set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u32>,
+    /// Thinking controls, when the driver named a level: the API's knob
+    /// is a token budget, and the thoughts are requested so they stream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_config: Option<WireThinkingConfig>,
+}
+
+/// The `thinkingConfig` request field: a reasoning budget with the
+/// thought summary turned on, so the thinking streams as it happens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireThinkingConfig {
+    /// The reasoning token budget.
+    pub thinking_budget: u32,
+    /// Always `true`: thought summaries stream as [`Event::ThinkingDelta`].
+    pub include_thoughts: bool,
+}
+
+/// The reasoning budget a thinking level maps onto.
+fn thinking_budget(thinking: ThinkingEffort) -> Option<u32> {
+    match thinking {
+        ThinkingEffort::Default => None,
+        ThinkingEffort::Low => Some(4_096),
+        ThinkingEffort::Medium => Some(16_384),
+        ThinkingEffort::High => Some(32_768),
+    }
 }
 
 // --- Response wire types (deserialize) ---
@@ -364,11 +389,19 @@ pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, Provid
                 .collect(),
         }]
     });
-    let generation_config = (req.params.temperature.is_some() || req.params.max_tokens.is_some())
-        .then_some(WireGenerationConfig {
-            temperature: req.params.temperature,
-            max_output_tokens: req.params.max_tokens,
+    let thinking_config =
+        thinking_budget(req.params.thinking).map(|thinking_budget| WireThinkingConfig {
+            thinking_budget,
+            include_thoughts: true,
         });
+    let generation_config = (req.params.temperature.is_some()
+        || req.params.max_tokens.is_some()
+        || thinking_config.is_some())
+    .then_some(WireGenerationConfig {
+        temperature: req.params.temperature,
+        max_output_tokens: req.params.max_tokens,
+        thinking_config,
+    });
 
     Ok(GenerateContentRequest {
         contents,
@@ -840,6 +873,7 @@ mod tests {
                 json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
             )],
             params: ChatParams {
+                thinking: ThinkingEffort::Default,
                 model: "gemini-2.5-flash".into(),
                 temperature: Some(0.2),
                 max_tokens: Some(256),
@@ -1101,6 +1135,32 @@ mod tests {
                 provider_data: serde_json::Value::Null
             })]
         );
+    }
+
+    #[test]
+    fn a_named_thinking_effort_maps_to_a_thinking_budget() {
+        let mut req = ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: "gemini-2.5-flash".into(),
+                temperature: None,
+                max_tokens: None,
+                thinking: ThinkingEffort::High,
+            },
+        };
+        let body =
+            serde_json::to_value(request_body(&req).expect("body builds")).expect("serializes");
+        let thinking = &body["generationConfig"]["thinkingConfig"];
+        assert_eq!(thinking["thinkingBudget"], 32_768);
+        assert_eq!(thinking["includeThoughts"], true);
+
+        // Default sends no thinking config at all.
+        req.params.thinking = ThinkingEffort::Default;
+        let body =
+            serde_json::to_value(request_body(&req).expect("body builds")).expect("serializes");
+        assert!(body.get("generationConfig").is_none(), "{body}");
     }
 
     #[test]
