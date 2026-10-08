@@ -25,6 +25,7 @@
 //!
 //! Layout:
 //! - [`allowlist`] — `Allowlist`: the permissive default and tool-name sets
+//! - [`chain`] — `ResolverChain`: several resolvers behind one seam
 //! - [`registry`] — the `Tool` contract and the allowlist-filtering `ToolRegistry`
 //! - [`source`] — the `Source` contract: deterministic detection into the dispatcher
 //! - [`driver`] — the `Driver`, `Handler`, and `SessionContext`: the lease-driven loop
@@ -33,6 +34,7 @@
 #![deny(missing_docs)]
 
 pub mod allowlist;
+pub mod chain;
 pub mod driver;
 pub mod registry;
 pub mod source;
@@ -41,6 +43,7 @@ pub mod source;
 // without adding the crate themselves.
 pub use allowlist::Allowlist;
 pub use async_trait::async_trait;
+pub use chain::ResolverChain;
 pub use driver::{Driver, Handler, SessionContext};
 pub use registry::{Tool, ToolRegistry};
 pub use source::{Source, SourceError};
