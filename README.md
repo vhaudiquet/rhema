@@ -248,6 +248,12 @@ rhema-claw                     # serve on 127.0.0.1:7799 (config: listen)
 rhema-claw --once              # one detect + one dispatch pass, then exit
 ```
 
+For the debug loop — daemon plus UI against throwaway state, zero
+credentials: `scripts/dev.sh --mock` (canned streamed replies; the UI
+is at `localhost:3000`, the claw at `127.0.0.1:7799`). Drop `--mock`
+and set the provider's key env var (`CLAW_DEV_PROVIDER` picks the
+provider) to debug against a real model.
+
 ```yaml
 # ~/.config/rhema/claw.yaml
 provider: anthropic
