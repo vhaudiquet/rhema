@@ -37,6 +37,8 @@
 //!   adapters send and the one every compatible server accepts. OpenAI's
 //!   newer `max_completion_tokens` is deliberately not used: generic
 //!   servers predate it.
+//! - A named thinking effort rides in `reasoning_effort`; absent, the
+//!   server's default stands.
 //! - Streaming chunks: `delta.content` becomes one `TextDelta` per
 //!   non-empty piece. `delta.tool_calls[]` fragments are keyed by `index`;
 //!   the FIRST fragment of an index emits `ToolCallStart` (the wire id, or a
@@ -73,7 +75,7 @@ use rhema_core::event::{Event, EventSink};
 use rhema_core::message::{Content, Message, Role};
 use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
-use rhema_core::request::ModelRequest;
+use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
 use rhema_provider_google::GeminiModel;
 use serde::{Deserialize, Serialize};
@@ -107,6 +109,10 @@ pub struct ChatCompletionRequest {
     /// Output token ceiling, when set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// How much reasoning the model should do, when the driver named a
+    /// level; absent means the server's default stands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
 }
 
 /// The `stream_options` request field.
@@ -455,6 +461,18 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
         },
         temperature: req.params.temperature,
         max_tokens: req.params.max_tokens,
+        reasoning_effort: reasoning_effort(req.params.thinking),
+    }
+}
+
+/// The OpenAI `reasoning_effort` spelling of a thinking level; `None`
+/// sends nothing and the server's default stands.
+fn reasoning_effort(thinking: ThinkingEffort) -> Option<&'static str> {
+    match thinking {
+        ThinkingEffort::Default => None,
+        ThinkingEffort::Low => Some("low"),
+        ThinkingEffort::Medium => Some("medium"),
+        ThinkingEffort::High => Some("high"),
     }
 }
 
@@ -726,6 +744,7 @@ mod tests {
                 model: "gpt-4o-mini".into(),
                 temperature: Some(0.2),
                 max_tokens: Some(256),
+                thinking: ThinkingEffort::Default,
             },
         };
 
@@ -1108,6 +1127,28 @@ mod tests {
             )
             .expect("chunk feeds");
         assert_eq!(assembler.finish().stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn a_named_thinking_effort_rides_in_reasoning_effort() {
+        let mut req = ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: "gpt-4o-mini".into(),
+                temperature: None,
+                max_tokens: None,
+                thinking: ThinkingEffort::High,
+            },
+        };
+        let body = serde_json::to_string(&request_body(&req)).unwrap();
+        assert!(body.contains("\"reasoning_effort\":\"high\""), "{body}");
+
+        // Default sends nothing: strict endpoints keep their shape.
+        req.params.thinking = ThinkingEffort::Default;
+        let body = serde_json::to_string(&request_body(&req)).unwrap();
+        assert!(!body.contains("reasoning_effort"), "{body}");
     }
 
     #[test]
