@@ -23,9 +23,9 @@
 //!   one per result block, matched by id — whichever rhema message carries
 //!   them. `ToolResult::is_error` has no wire representation; the content
 //!   text alone must tell the model the call failed.
-//! - `ToolCall::provider_data` is ignored: OpenAI-style call ids are plain
-//!   strings that round-trip on the wire, so there is nothing opaque to
-//!   carry.
+//! - `ToolCall::provider_data` carries only the reasoning the call claims
+//!   from the stream; OpenAI-style call ids are plain strings that
+//!   round-trip on the wire, so there is nothing else opaque to carry.
 //! - Tool specs map to `[{type: "function", function: {name, description,
 //!   parameters}}]`, with `parameters` passed through verbatim.
 //! - Every call streams (`stream: true`) with
@@ -57,8 +57,10 @@
 //!   rule as the sibling adapters. The legacy `"function"` reason maps to
 //!   `ToolUse` beside `"tool_calls"`.
 //! - `delta.reasoning_content` becomes one `ThinkingDelta` per non-empty
-//!   piece; other provider-specific delta fields have no rhema-core
-//!   counterpart and are ignored.
+//!   piece; reasoning streamed before a tool call is claimed by that call
+//!   and replayed on assistant messages via `reasoning_content`. Other
+//!   provider-specific delta fields have no rhema-core counterpart and are
+//!   ignored.
 //! - Errors: a non-2xx body is `{"error": {code, message, type}}`; the
 //!   mapper keeps `error.message` and falls back to the raw body. A server
 //!   can also fail mid-stream with a `data: {"error": ...}` chunk (then
@@ -135,6 +137,11 @@ pub struct WireMessage {
     /// The assistant's requested tool calls, when any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<WireToolCall>>,
+    /// The reasoning that led to this assistant turn, replayed verbatim
+    /// from history: DeepSeek-style servers continue the chain of thought
+    /// across tool calls instead of re-deriving it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// The answered call's id, on `role: "tool"` messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -371,6 +378,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
         messages.push(WireMessage {
             role: "system".into(),
             content: Some(system.to_owned()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
         });
@@ -383,6 +391,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                     messages.push(WireMessage {
                         role: "system".into(),
                         content: Some(text),
+                        reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -394,6 +403,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                     messages.push(WireMessage {
                         role: "user".into(),
                         content: Some(text),
+                        reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -417,6 +427,21 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                         _ => None,
                     })
                     .collect();
+                // The reasoning that led to the calls, replayed in order:
+                // the blocks must match what the model generated.
+                let reasoning = message
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        Content::ToolCall(call) => call
+                            .provider_data
+                            .get("reasoning")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        _ => None,
+                    })
+                    .collect::<Vec<String>>()
+                    .join("\n\n");
                 // Servers reject an assistant message with neither content
                 // nor tool_calls.
                 if !text.is_empty() || !calls.is_empty() {
@@ -424,6 +449,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                         role: "assistant".into(),
                         content: (!text.is_empty()).then_some(text),
                         tool_calls: (!calls.is_empty()).then_some(calls),
+                        reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
                         tool_call_id: None,
                     });
                 }
@@ -495,6 +521,7 @@ fn tool_results_of(message: &Message) -> impl Iterator<Item = WireMessage> + '_ 
         Content::ToolResult(result) => Some(WireMessage {
             role: "tool".into(),
             content: Some(result.content.clone()),
+            reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(result.id.clone()),
         }),
@@ -520,6 +547,10 @@ struct PartialCall {
     name: Option<String>,
     arguments: String,
     started: bool,
+    /// The reasoning streamed since the previous call or segment: the
+    /// chain of thought that led to this tool request, replayed so the
+    /// model continues where it left off.
+    reasoning: String,
 }
 
 /// Assembles streamed chunks into the final [`ModelOutput`], emitting
@@ -533,6 +564,9 @@ struct PartialCall {
 #[derive(Debug, Default)]
 pub struct ChunkAssembler {
     texts: Vec<String>,
+    /// The reasoning streamed since the last tool call began; claimed by
+    /// the next call's first fragment.
+    reasoning: String,
     calls: BTreeMap<u32, PartialCall>,
     finish_reason: Option<String>,
     usage: Usage,
@@ -579,6 +613,7 @@ impl ChunkAssembler {
             };
             if let Some(text) = delta.reasoning_content.filter(|text| !text.is_empty()) {
                 sink.emit(Event::ThinkingDelta(&text));
+                self.reasoning.push_str(&text);
             }
             if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
                 sink.emit(Event::TextDelta(&text));
@@ -595,9 +630,13 @@ impl ChunkAssembler {
     /// the call, every fragment with argument text feeds the args deltas.
     fn push_fragment(&mut self, fragment: WireToolCallDelta, sink: &mut dyn EventSink) {
         let index = fragment.index;
+        // Reasoning streamed since the last fragment led to this call —
+        // claimed by its first fragment, appended when interleaved.
+        let pending_reasoning = std::mem::take(&mut self.reasoning);
         let partial = self.calls.entry(index).or_default();
         if !partial.started {
             partial.started = true;
+            partial.reasoning = pending_reasoning;
             let id = fragment
                 .id
                 .filter(|id| !id.is_empty())
@@ -615,6 +654,8 @@ impl ChunkAssembler {
                 id: &id,
                 name: &name,
             });
+        } else if !pending_reasoning.is_empty() {
+            partial.reasoning.push_str(&pending_reasoning);
         }
         if let Some(piece) = fragment
             .function
@@ -635,11 +676,16 @@ impl ChunkAssembler {
         let mut has_calls = false;
         for (index, partial) in self.calls {
             has_calls = true;
+            let provider_data = if partial.reasoning.is_empty() {
+                Value::Null
+            } else {
+                serde_json::json!({ "reasoning": partial.reasoning })
+            };
             content.push(Content::ToolCall(ToolCall {
                 id: partial.id.unwrap_or_else(|| format!("call_{index}")),
                 name: partial.name.unwrap_or_default(),
                 args: parse_args(&partial.arguments),
-                provider_data: Value::Null,
+                provider_data,
             }));
         }
         ModelOutput {
@@ -1187,6 +1233,83 @@ mod tests {
                 "ThinkingDelta(\"hmm\")".to_owned(),
                 "TextDelta(\"ok\")".to_owned()
             ]
+        );
+    }
+
+    #[test]
+    fn assistant_reasoning_replays_from_provider_data() {
+        let reasoning = "I should list the files first";
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolCall(ToolCall {
+                    id: "call_0".into(),
+                    name: "a".into(),
+                    args: json!({}),
+                    provider_data: json!({ "reasoning": reasoning }),
+                })],
+            }],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: "gpt-4o-mini".into(),
+                temperature: None,
+                max_tokens: None,
+                thinking: ThinkingEffort::Default,
+            },
+        };
+        let body = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let assistant = &body["messages"][0];
+        assert_eq!(assistant["role"], "assistant");
+        assert_eq!(assistant["reasoning_content"], reasoning);
+
+        // Without stored reasoning the field stays absent.
+        let plain = ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            tools: Vec::new(),
+            params: req.params.clone(),
+        };
+        let body = serde_json::to_value(request_body(&plain)).expect("body serializes");
+        assert!(
+            body["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m.get("reasoning_content").is_none()),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn reasoning_content_before_a_tool_call_is_kept_for_replay() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            r#"{"choices":[{"delta":{"reasoning_content":"I should list "}}]}"#,
+            r#"{"choices":[{"delta":{"reasoning_content":"the files first"}}]}"#,
+            concat!(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"#,
+                r#""id":"call_0","type":"function","#,
+                r#""function":{"name":"a","arguments":"{}"}}]}}]}"#
+            ),
+        ] {
+            assembler
+                .push(chunk(payload), &mut sink)
+                .expect("chunk feeds");
+        }
+        let out = assembler.finish();
+
+        // The reasoning rides in the call's provider data for replay; it
+        // never joins the message text.
+        assert_eq!(
+            out.message.content,
+            vec![Content::ToolCall(ToolCall {
+                id: "call_0".into(),
+                name: "a".into(),
+                args: json!({}),
+                provider_data: json!({ "reasoning": "I should list the files first" }),
+            })]
         );
     }
 
