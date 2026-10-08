@@ -42,8 +42,11 @@
 //!   content-free choice carrying the same `finish_reason` plus a
 //!   `native_finish_reason` this crate ignores. Last-value-wins turns it
 //!   into a pure accounting frame, not a second terminal event.
-//! - The assembled message lists text parts in stream order, then tool
-//!   calls in ascending index order. A call's arguments are the
+//! - The assembled message carries the streamed text as one part — chunk
+//!   boundaries are transport artifacts, and per-chunk parts would be
+//!   replayed next request joined by blank lines, teaching the model to
+//!   emit `token\n\ntoken` prose — then tool calls in ascending index
+//!   order. A call's arguments are the
 //!   concatenated fragments parsed as JSON; an unparseable payload wraps as
 //!   `{"_openrouter_args_text": <raw>}` — a malformed call must not fail
 //!   the turn. Empty arguments become `{}`.
@@ -609,7 +612,11 @@ struct PartialCall {
 /// [`StopReason::ToolUse`] regardless of the wire value.
 #[derive(Debug, Default)]
 pub struct ChunkAssembler {
-    texts: Vec<String>,
+    /// The assistant text streamed so far. One buffer, not one entry per
+    /// chunk: a chunk boundary is a transport artifact, and a per-chunk
+    /// part list would be replayed next turn as `token\n\ntoken` — the
+    /// model then mimics that shredded format in its own replies.
+    text: String,
     /// The reasoning streamed since the last tool call began; claimed by
     /// the next call's first fragment.
     reasoning: String,
@@ -663,7 +670,7 @@ impl ChunkAssembler {
             }
             if let Some(text) = delta.content.filter(|text| !text.is_empty()) {
                 sink.emit(Event::TextDelta(&text));
-                self.texts.push(text);
+                self.text.push_str(&text);
             }
             for fragment in delta.tool_calls.into_iter().flatten() {
                 self.push_fragment(fragment, sink);
@@ -714,11 +721,14 @@ impl ChunkAssembler {
     }
 
     /// Consumes the assembler into the final output. The message is always
-    /// `Role::Assistant`: text parts in stream order, then tool calls in
-    /// ascending index order; an empty stream yields an empty content list,
-    /// not an error.
+    /// `Role::Assistant`: the streamed text as one part (chunk boundaries
+    /// are transport artifacts), then tool calls in ascending index order;
+    /// an empty stream yields an empty content list, not an error.
     pub fn finish(self) -> ModelOutput {
-        let mut content: Vec<Content> = self.texts.into_iter().map(Content::Text).collect();
+        let mut content: Vec<Content> = Vec::new();
+        if !self.text.is_empty() {
+            content.push(Content::Text(self.text));
+        }
         let mut has_calls = false;
         for (index, partial) in self.calls {
             has_calls = true;
@@ -1061,7 +1071,7 @@ mod tests {
             out.message,
             Message {
                 role: Role::Assistant,
-                content: vec![Content::Text("Hel".into()), Content::Text("lo".into())],
+                content: vec![Content::Text("Hello".into())],
             }
         );
         assert_eq!(out.stop_reason, StopReason::EndTurn);
@@ -1074,6 +1084,36 @@ mod tests {
             }
         );
         assert_eq!(sink.0, vec!["TextDelta(\"Hel\")", "TextDelta(\"lo\")"]);
+    }
+
+    #[test]
+    fn chunk_boundaries_never_reach_the_history_wire() {
+        // The regression: per-chunk text parts replayed next request as
+        // `Hel\n\nlo`, and the model mimicked the shredded format.
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for piece in ["to", " re", " -add"] {
+            assembler
+                .push(
+                    chunk(&format!(
+                        r#"{{"choices":[{{"delta":{{"content":"{piece}"}}}}]}}"#
+                    )),
+                    &mut sink,
+                )
+                .expect("chunk feeds");
+        }
+        let out = assembler.finish();
+
+        let req = ModelRequest {
+            system: None,
+            messages: vec![out.message, Message::text(Role::User, "go on")],
+            tools: Vec::new(),
+            params: ChatParams::new("openai/gpt-4o-mini"),
+        };
+        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let messages = json["messages"].as_array().expect("messages array");
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["content"], "to re -add");
     }
 
     #[test]
