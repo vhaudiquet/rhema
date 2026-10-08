@@ -8,6 +8,7 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+rhema-core = { path = "../rhema-core" }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }

@@ -1904,6 +1904,7 @@ dependencies = [
 name = "rhema-config"
 version = "0.1.0"
 dependencies = [
+ "rhema-core",
  "serde",
  "serde_yaml",
  "tempfile",
