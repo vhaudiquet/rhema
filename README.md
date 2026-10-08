@@ -173,8 +173,10 @@ design's primary.
 
 `--provider llama-cpp --llama-url http://box:8080` starts on the llama.cpp
 backend without logging in; `ctrl-p` still lists that server's models.
-Keys: `enter` sends · `shift-enter` (kitty-protocol terminals),
-`alt-enter`, or `ctrl-j` adds a line — the box grows with the text ·
+Keys: `enter` sends · `shift-enter` (kitty-protocol terminals;
+Ghostty's default xterm-style sequence parses through the vendored
+crossterm), `alt-enter`, or `ctrl-j` adds a line — the box grows with
+the text ·
 a paste longer than three lines attaches: a compact chip in the box at
 the paste's place (icon, index, size, erase mark; `backspace` or
 `delete` removes a chip like any character), expanded in place on

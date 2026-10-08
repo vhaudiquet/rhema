@@ -21,3 +21,10 @@ async-trait = "0.1"
 serde_yaml = "0.9"
 # Test runtime
 tokio = { version = "1", features = ["macros", "rt"] }
+
+# Local crossterm with modifyOtherKeys (CSI 27;…;…~) parsing — Ghostty's
+# default shift+enter sequence, which crossterm 0.29 drops. Backed by the
+# commit on the modify-other-keys branch of ~/Documents/contrib/crossterm;
+# delete this section to return to the crates.io release.
+[patch.crates-io]
+crossterm = { path = "../../contrib/crossterm" }
