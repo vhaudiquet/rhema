@@ -119,25 +119,22 @@ work a burnt orange, each tuned per theme.
 ### The system prompt
 
 If `~/.config/rhema/SYSTEM.md` exists, it is the base prompt every
-session starts from, with two placeholders rendered in: `{workspace}`,
-the session's workspace, and `{skills}`, the skills table — empty when
-no skill was found. For a custom layout, a `{#skills} … {/skills}`
-block repeats its body once per skill, filling `{skill.name}`,
-`{skill.description}`, and `{skill.path}`; the whole block vanishes
-when no skill was found, while a heading placed outside it stays even
-then — write lines that stand alone:
+session starts from, with `{workspace}` rendered in as the session's
+workspace. Its `{#skills} … {/skills}` block repeats its body once per
+skill, filling `{skill.name}`, `{skill.description}`, and
+`{skill.path}`; the whole block vanishes when no skill was found,
+while anything around it stays — so write lines that stand alone:
 
 ```markdown
 {#skills}
-- {skill.name} — {skill.description} (cat {skill.path} to load)
+{skill.name} / {skill.description} / {skill.path}
 {/skills}
 ```
 
-A file with neither `{skills}` nor the block gets the default table
-appended, so a prompt written before the placeholders keeps working.
-Without the file, rhema uses its built-in default, which carries the
-same placeholders; nothing is ever written. Any other `{...}` text is
-left alone — templates are prose, not programs.
+A template without the block presents no skills at all. Without the
+file, rhema uses its built-in default, which carries the same
+construction; nothing is ever written. Any other `{...}` text is left
+alone — templates are prose, not programs.
 
 ### Skills
 
@@ -153,8 +150,8 @@ Inspect the diff, then write the message as ...
 
 Skills live globally under `~/.config/rhema/skills/<name>/SKILL.md`
 and per-workspace under `<workspace>/.rhema/skills/`; project skills
-shadow global ones by folder name. rhema presents only a name /
-trigger / file table in the system prompt — when a trigger applies,
+shadow global ones by folder name. rhema presents only name, trigger,
+and file in the system prompt — when a trigger applies,
 the model loads the body itself with the shell (`cat`), so skills
 need no special tool. `/skills` lists what was discovered.
 
