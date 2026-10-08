@@ -190,7 +190,12 @@ Commands: `/help`, `/clear` or
 `/new` (fresh session), `/resume`, `/skills`, `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
-`--max-steps`.
+`--max-steps`, `--thinking low|medium|high` (reasoning effort; mapped
+per provider — `reasoning_effort` on OpenAI-compatible endpoints,
+`reasoning.effort` on OpenRouter, a thinking budget on Anthropic and
+Gemini, and ignored where a provider has no knob). `/thinking` changes
+the level mid-session and persists it into the profile (`thinking:` in
+config.yaml); the footer names the level whenever one is set.
 
 ## Usage
 

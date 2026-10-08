@@ -100,10 +100,36 @@ pub struct Args {
     #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
     pub max_steps: u32,
 
+    /// How much reasoning the model should do. Absent, the profile's
+    /// setting stands, and absent there too, the provider's default.
+    #[arg(long)]
+    pub thinking: Option<ThinkingKind>,
+
     /// Color theme. Dark is the design's primary; light exists for
     /// light-terminal users.
     #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
     pub theme: ThemeKind,
+}
+
+/// Reasoning effort levels for `--thinking`.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum ThinkingKind {
+    /// Light reasoning.
+    Low,
+    /// The middle setting.
+    Medium,
+    /// Maximum reasoning effort.
+    High,
+}
+
+impl From<ThinkingKind> for rhema_core::request::ThinkingEffort {
+    fn from(kind: ThinkingKind) -> Self {
+        match kind {
+            ThinkingKind::Low => Self::Low,
+            ThinkingKind::Medium => Self::Medium,
+            ThinkingKind::High => Self::High,
+        }
+    }
 }
 
 #[cfg(test)]

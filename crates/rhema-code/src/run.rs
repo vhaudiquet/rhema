@@ -225,8 +225,14 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
 
     let workspace =
         std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
+    let thinking = args
+        .thinking
+        .map(rhema_core::request::ThinkingEffort::from)
+        .or_else(|| config.effective(Some(&profile)).thinking_effort())
+        .unwrap_or(rhema_core::request::ThinkingEffort::Default);
     let agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
+        thinking,
         base_system: resolve_base_system(Config::system_prompt_path().ok().as_deref()),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
     };
@@ -316,11 +322,17 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         None => Session::default(),
     };
     let agent_base = resolve_base_system(Config::system_prompt_path().ok().as_deref());
+    let thinking = args
+        .thinking
+        .map(rhema_core::request::ThinkingEffort::from)
+        .or_else(|| config.effective(Some(&profile)).thinking_effort())
+        .unwrap_or(rhema_core::request::ThinkingEffort::Default);
     let options = RunOptions {
         theme: args.theme,
         profile: Some(profile),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
+        thinking,
         base_system: agent_base,
         save: args.save,
     };

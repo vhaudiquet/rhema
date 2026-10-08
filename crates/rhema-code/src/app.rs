@@ -207,6 +207,8 @@ pub struct RunOptions {
     pub workspace: PathBuf,
     /// Max steps per turn.
     pub max_steps: u32,
+    /// How much reasoning the model should do.
+    pub thinking: rhema_core::request::ThinkingEffort,
     /// The base prompt from the user's SYSTEM.md, when their file
     /// exists; `None` uses the built-in default.
     pub base_system: Option<String>,
@@ -512,6 +514,7 @@ impl App {
             return;
         }
         let effective = self.config.effective(Some(name));
+        self.options.thinking = effective.thinking_effort().unwrap_or_default();
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -556,6 +559,39 @@ impl App {
             }
             Err(err) => self.error = Some(err.to_string()),
         }
+    }
+
+    /// Sets the session's thinking effort: persisted into the session's
+    /// profile like a model pick, and the agent rebuilds carrying the
+    /// conversation so the very next turn asks at the new level.
+    pub fn set_thinking(&mut self, effort: rhema_core::request::ThinkingEffort) {
+        if self.running {
+            self.transcript
+                .push_notice("a turn is running — /thinking waits for it to finish");
+            return;
+        }
+        self.options.thinking = effort;
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |settings| {
+                settings.thinking = (effort != rhema_core::request::ThinkingEffort::Default)
+                    .then(|| effort.as_str().to_owned());
+            });
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return;
+        }
+        if let Some(agent) = self.agent.take() {
+            let session = agent.session().clone();
+            match self.build_agent(session) {
+                Ok(rebuilt) => self.agent = Some(rebuilt),
+                Err(err) => {
+                    self.error = Some(err.to_string());
+                    return;
+                }
+            }
+        }
+        self.transcript
+            .push_notice(&format!("thinking effort set to {}", effort.as_str()));
     }
 
     /// Lists the discovered skills in the transcript: what the model's
@@ -1274,6 +1310,7 @@ impl App {
 fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfig {
     CodingAgentConfig {
         max_turn_steps: options.max_steps,
+        thinking: options.thinking,
         base_system: options.base_system.clone(),
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
     }
@@ -1417,6 +1454,7 @@ mod tests {
             session,
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
+                thinking: rhema_core::request::ThinkingEffort::Default,
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
@@ -2321,6 +2359,42 @@ mod tests {
     }
 
     #[test]
+    fn slash_thinking_persists_the_level_and_rebuilds_the_agent() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/thinking high");
+        assert_eq!(
+            h.app.options.thinking,
+            rhema_core::request::ThinkingEffort::High
+        );
+        let stored = h.store.load().unwrap();
+        let profile = h.app.session_profile.clone().unwrap_or_default();
+        assert_eq!(
+            stored.effective(Some(&profile)).thinking.as_deref(),
+            Some("high")
+        );
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .contains(&Line::Notice("thinking effort set to high".into()))
+        );
+
+        // An unknown level is declined in-band, and default clears the
+        // stored field.
+        crate::commands::dispatch(&mut h.app, "/thinking maximal");
+        assert!(h.app.error.is_none());
+        crate::commands::dispatch(&mut h.app, "/thinking default");
+        assert_eq!(
+            h.app.options.thinking,
+            rhema_core::request::ThinkingEffort::Default
+        );
+        assert_eq!(
+            h.store.load().unwrap().effective(Some(&profile)).thinking,
+            None
+        );
+    }
+
+    #[test]
     fn a_turn_records_its_profile_for_the_workspace() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         let workspace = h.app.options.workspace.clone();
@@ -2371,6 +2445,7 @@ mod tests {
             session: Session::default(),
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
+                thinking: rhema_core::request::ThinkingEffort::Default,
                 profile: Some(profile),
                 workspace: PathBuf::from("."),
                 max_steps: 4,

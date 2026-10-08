@@ -54,6 +54,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: profile,
     },
     CommandSpec {
+        name: "/thinking",
+        description: "reasoning effort (low, medium, high)",
+        argument: Argument::Optional,
+        handler: thinking,
+    },
+    CommandSpec {
         name: "/login",
         description: "re-login: provider, key, or server",
         argument: Argument::None,
@@ -224,6 +230,27 @@ fn profile(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
             Vec::new()
         }
         None => app.open_profile_picker(),
+    }
+}
+
+fn thinking(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
+    use rhema_core::request::ThinkingEffort;
+
+    let Some(text) = argument else {
+        app.push_notice("usage: /thinking low, medium, high, or default");
+        return Vec::new();
+    };
+    match ThinkingEffort::parse(text) {
+        Some(effort) => {
+            app.set_thinking(effort);
+            Vec::new()
+        }
+        None => {
+            app.push_notice(&format!(
+                "unknown effort {text:?} — use low, medium, high, or default"
+            ));
+            Vec::new()
+        }
     }
 }
 

@@ -934,6 +934,13 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         // bare model name.
         (_, Some(model)) => parts.push(Span::raw(footer_model(model).to_owned()).fg(theme.text2)),
     }
+    // A named thinking effort is session-relevant telemetry: the badge
+    // only appears when the level would change the request.
+    if app.options.thinking != rhema_core::request::ThinkingEffort::Default {
+        parts.push(
+            Span::raw(format!(" · thinking {}", app.options.thinking.as_str())).fg(theme.text3),
+        );
+    }
     let used = app.context_used();
     let mut context = format_tokens(Some(used));
     if let Some(limit) = app.current_context_window() {
@@ -1370,6 +1377,7 @@ mod scroll_tests {
             session: rhema_core::Session::default(),
             options: RunOptions {
                 theme: ThemeKind::Dark,
+                thinking: rhema_core::request::ThinkingEffort::Default,
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
@@ -1443,15 +1451,37 @@ mod scroll_tests {
             if let Some(pos) = row.find("pick the model") {
                 columns.push(("pick the model", pos));
             }
-            if let Some(pos) = row.find("fresh session") {
-                columns.push(("fresh session", pos));
+            if let Some(pos) = row.find("reasoning effort") {
+                columns.push(("reasoning effort", pos));
             }
         }
-        assert_eq!(columns.len(), 4, "all four rows visible: {columns:?}");
+        assert_eq!(columns.len(), 3, "all searched rows visible: {columns:?}");
         assert!(
             columns.iter().all(|(_, pos)| *pos == columns[0].1),
             "descriptions misaligned: {columns:?}"
         );
+    }
+
+    #[test]
+    fn the_footer_names_a_named_thinking_effort() {
+        let mut app = chat_app();
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(80, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+        assert!(
+            !draw(&mut app).contains("thinking high"),
+            "absent at default"
+        );
+        app.options.thinking = rhema_core::request::ThinkingEffort::High;
+        assert!(draw(&mut app).contains("thinking high"));
     }
 
     #[test]
@@ -1631,12 +1661,13 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // Ten commands, six visible rows: six downs put the selection on
-        // the seventh row, and the window must have followed it.
-        for _ in 0..6 {
+        // Ten commands, six visible rows: seven downs put the selection
+        // on /resume (the /thinking row sits mid-table now), and the
+        // window must have followed it.
+        for _ in 0..7 {
             app.chat.handle_key(key(KeyCode::Down));
         }
-        assert_eq!(app.chat.palette_index, 6);
+        assert_eq!(app.chat.palette_index, 7);
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();
