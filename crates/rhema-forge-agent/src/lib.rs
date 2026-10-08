@@ -62,4 +62,4 @@ pub use forge::{Forge, ForgePage};
 pub use gitea::GiteaForge;
 pub use github::GitHubForge;
 pub use gitlab::GitLabForge;
-pub use watcher::{WatchError, Watcher, parse_key, register_forge, resource_key};
+pub use watcher::{WatchError, Watcher, forge_key_fn, parse_key, register_forge, resource_key};
