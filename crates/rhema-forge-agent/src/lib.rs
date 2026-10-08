@@ -1,19 +1,17 @@
-//! `rhema-forge-agent` — forge clients for the forge-watching bot: one
-//! normalized event vocabulary and one client contract, backed by GitHub,
-//! Gitea, and GitLab.
+//! `rhema-forge-agent` — the forge-watching bot: one normalized event
+//! vocabulary and one client contract for GitHub, Gitea, and GitLab, and
+//! the dispatch glue that turns forge activity into RSD handler runs.
 //!
-//! The bot (a later layer in this crate) polls a forge for activity and
-//! hands the events to the RSD dispatcher (see
-//! specs/resource-scoped-dispatch.md). Every [`ForgeEvent`] carries the
-//! resource coordinates the dispatcher keys on ([`RepoRef`] plus the
-//! thread number, the `host:owner/repo#number` shape of RSD §8) and a
-//! stable dedup id derived from the forge's own item id and the row's
-//! updated time, so re-polling unchanged history dedups away and a
-//! changed row re-dispatches. Each [`Forge`] implementation is a
-//! standalone REST client: a base URL, a token, and the three calls the
-//! bot needs — [`Forge::poll`], [`Forge::comment`], [`Forge::snapshot`].
-//! Polling cadence, scheduling, and handler policy are the watcher's
-//! concerns, not this layer's.
+//! The [`crate::Watcher`] polls a [`crate::Forge`] for activity and feeds
+//! the events to a [`rhema_rsd::Dispatcher`](rhema_rsd) — the forge's
+//! stable dedup id becomes the event id, and the resource key is spec §8's
+//! `host:owner/repo#number` shape, so re-polling unchanged history dedups
+//! away and a changed row re-dispatches. The [`crate::ForgeBot`] closes
+//! the loop: every admitted key acquires the lease, fetches the thread's
+//! snapshot, and runs the embedder's [`crate::Handler`] with a live inbox,
+//! a resumable session, and the forge capabilities — one handler per
+//! thread, ever, surviving restarts. Polling cadence and handler policy
+//! are the embedder's; the dispatch guarantees are the dispatcher's.
 //!
 //! ```
 //! use rhema_forge_agent::{Forge, GitHubForge, RepoRef};
@@ -32,28 +30,36 @@
 //! Layout:
 //! - [`event`] — the normalized vocabulary: `ForgeEvent`, `EventKind`,
 //!   `RepoRef`, `Snapshot`, `Timestamp`
-//! - [`error`] — the crate's single error type
+//! - [`error`] — the crate's single forge error type
 //! - [`forge`] — the `Forge` client contract and `ForgePage`
 //! - [`github`] — the GitHub adapter (api.github.com)
 //! - [`gitea`] — the Gitea adapter (self-hosted, `/api/v1`)
 //! - [`gitlab`] — the GitLab adapter (gitlab.com or self-hosted, `/api/v4`)
+//! - [`watcher`] — polls a forge into an RSD `Dispatcher` (keys, dedup,
+//!   cursors)
+//! - [`bot`] — the `ForgeBot`: admitted keys become `Handler` runs with a
+//!   live inbox and a resumable session
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod bot;
 pub mod error;
 pub mod event;
 pub mod forge;
 pub mod gitea;
 pub mod github;
 pub mod gitlab;
+pub mod watcher;
 
 // Re-exported so implementors of the async seam can apply #[async_trait]
 // without adding the crate themselves.
 pub use async_trait::async_trait;
+pub use bot::{ForgeBot, Handler, ThreadContext, decode};
 pub use error::ForgeError;
 pub use event::{EventKind, ForgeEvent, RepoRef, Snapshot, ThreadState, Timestamp};
 pub use forge::{Forge, ForgePage};
 pub use gitea::GiteaForge;
 pub use github::GitHubForge;
 pub use gitlab::GitLabForge;
+pub use watcher::{WatchError, Watcher, parse_key, register_forge, resource_key};

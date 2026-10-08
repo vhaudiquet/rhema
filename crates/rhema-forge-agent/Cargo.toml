@@ -1,6 +1,6 @@
 [package]
 name = "rhema-forge-agent"
-description = "Forge clients (GitHub, Gitea, GitLab) normalizing forge activity into one event vocabulary for the rhema forge-watching bot"
+description = "The forge-watching bot: GitHub, Gitea, and GitLab activity dispatched through rhema-rsd to one handler"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,6 +8,9 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The dispatch seam: watches ingest into a Dispatcher, the bot runs its
+# leases
+rhema-rsd = { path = "../rhema-rsd", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -15,8 +18,10 @@ async-trait = { workspace = true }
 # HTTP against the three forge REST APIs: JSON request/response bodies,
 # no streaming
 reqwest = { version = "0.12", features = ["json"] }
+# The bot drives admitted keys concurrently
+tokio = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 # In-process HTTP mocks for offline tests
 wiremock = "0.6"
