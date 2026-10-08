@@ -974,17 +974,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // The layout is the render's source of truth: text rows and chip
     // rows interleaved exactly as the anchors sit in the input.
     let layout = input_layout(&app.chat.input, &app.chat.attachments, width, theme);
-    // The cursor maps onto those rows by consumed source characters —
-    // chips account for their single anchor character.
-    let mut cursor_at: Option<(usize, usize)> = None;
-    let mut consumed = 0usize;
-    for (index, row) in layout.iter().enumerate() {
-        let cursor = app.chat.cursor;
-        if cursor_at.is_none() && cursor >= consumed && cursor <= consumed + row.source_chars {
-            cursor_at = Some((index, cursor - consumed));
-        }
-        consumed += row.source_chars;
-    }
+    let cursor_at = cursor_at_rows(&layout, app.chat.cursor);
     // The window keeps the cursor's row visible; with no cursor (a
     // running turn) the tail shows.
     let remaining = INPUT_MAX_CONTENT_ROWS.max(1);
@@ -1034,6 +1024,9 @@ struct InputRow {
     source_chars: usize,
     /// Whether the row carries the two-cell logical-line marker.
     marker: bool,
+    /// Whether the row ends its logical line — the newline character is
+    /// one cursor step the cursor mapping must account for.
+    newline: bool,
 }
 
 /// One attachment chip's rendered row: icon, one-based index, line
@@ -1047,6 +1040,20 @@ fn chip_row(paste: &str, index: usize, theme: &Theme) -> Line<'static> {
     ])
 }
 
+/// Maps the cursor's source index onto (row, column) of the layout.
+/// Columns are pure input columns — the render adds the marker's two
+/// cells on marked rows; chips account for their single anchor.
+fn cursor_at_rows(layout: &[InputRow], cursor: usize) -> Option<(usize, usize)> {
+    let mut consumed = 0usize;
+    for (index, row) in layout.iter().enumerate() {
+        if cursor >= consumed && cursor <= consumed + row.source_chars {
+            return Some((index, cursor - consumed));
+        }
+        consumed += row.source_chars + usize::from(row.newline);
+    }
+    None
+}
+
 /// The input box's visual rows: every logical line wraps as before, and
 /// each attachment anchor renders as its own chip row exactly where the
 /// paste landed. Shared by the render and the height math so both
@@ -1054,7 +1061,8 @@ fn chip_row(paste: &str, index: usize, theme: &Theme) -> Line<'static> {
 fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme) -> Vec<InputRow> {
     let mut rows: Vec<InputRow> = Vec::new();
     let mut anchor = 0usize;
-    for (li, line) in input.split('\n').enumerate() {
+    let lines: Vec<&str> = input.split('\n').collect();
+    for (li, line) in lines.iter().enumerate() {
         let pieces: Vec<&str> = line.split(crate::screens::ChatState::MARK).collect();
         let marks = pieces.len() - 1;
         for (pi, piece) in pieces.iter().enumerate() {
@@ -1075,14 +1083,23 @@ fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme
                     ]),
                     width,
                 );
+                let lead_chars = lead.chars().count();
                 for (ri, row) in wrapped.into_iter().enumerate() {
+                    // The lead marker is display, not input: the row
+                    // accounts for the source characters alone.
+                    let lead_here = usize::from(ri == 0 && !lead.is_empty()) * lead_chars;
+                    let span_chars: usize = row
+                        .spans
+                        .iter()
+                        .map(|span| span.content.chars().count())
+                        .sum();
                     rows.push(InputRow {
-                        source_chars: row
-                            .spans
-                            .iter()
-                            .map(|span| span.content.chars().count())
-                            .sum(),
+                        // A narrow wrap can produce a row shorter than
+                        // the lead itself: it still accounts for what it
+                        // has, never less.
+                        source_chars: span_chars.saturating_sub(lead_here),
                         marker: ri == 0 && !lead.is_empty(),
+                        newline: false,
                         line: row,
                     });
                 }
@@ -1091,6 +1108,7 @@ fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme
                 rows.push(InputRow {
                     source_chars: 1,
                     marker: false,
+                    newline: false,
                     line: chip_row(
                         attachments.get(anchor).map(String::as_str).unwrap_or(""),
                         anchor,
@@ -1099,6 +1117,11 @@ fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme
                 });
                 anchor += 1;
             }
+        }
+        // Every logical line pushes at least one row: its last row ends
+        // in a newline unless it is the input's final line.
+        if let Some(row) = rows.last_mut() {
+            row.newline = li + 1 < lines.len();
         }
     }
     rows
@@ -1312,7 +1335,7 @@ mod tests {
 
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
-    use super::{input_layout, input_rows, render, wrap_line};
+    use super::{cursor_at_rows, input_layout, input_rows, render, wrap_line};
     use crate::app::{App, AppSetup, RunOptions};
     use crate::args::ThemeKind;
     use crate::events::OwnedEvent;
@@ -1650,6 +1673,28 @@ mod scroll_tests {
         assert_eq!(input_rows(&marked, &[paste(4), paste(4)], 40, &DARK), 6);
         let wall = "x\n".repeat(20);
         assert_eq!(input_rows(&wall, &[], 40, &DARK), 10, "the cap holds");
+    }
+
+    #[test]
+    fn the_cursor_maps_across_newlines_and_anchors() {
+        let layout = input_layout("ab\ncd", &[], 40, &DARK);
+        // End of the first line, start of the second, end of the
+        // second: the newline itself is one step between them.
+        assert_eq!(cursor_at_rows(&layout, 2), Some((0, 2)));
+        assert_eq!(cursor_at_rows(&layout, 3), Some((1, 0)));
+        assert_eq!(cursor_at_rows(&layout, 5), Some((1, 2)));
+
+        // An anchor is one step on its own row: before it, on it,
+        // after it.
+        let marked = format!("a{}b", ChatState::MARK);
+        let layout = input_layout(&marked, &["x\ny".to_owned()], 40, &DARK);
+        assert_eq!(cursor_at_rows(&layout, 1), Some((0, 1)));
+        assert_eq!(cursor_at_rows(&layout, 2), Some((1, 1)));
+        assert_eq!(
+            cursor_at_rows(&layout, 3),
+            Some((2, 1)),
+            "after b: its row's end"
+        );
     }
 
     #[test]
