@@ -142,6 +142,12 @@ impl Agent {
         });
         Ok(Step { output: out })
     }
+
+    /// The system prompt stamped into every request, as set by
+    /// [`AgentBuilder::system`]; empty when none was set.
+    pub fn system(&self) -> &str {
+        self.system.as_deref().unwrap_or_default()
+    }
 }
 
 /// Builder for [`Agent`]; the provider is required, everything else
