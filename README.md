@@ -37,6 +37,15 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   its versioned base URL: streaming, live model listing
 - `rhema-config` — the XDG config file: stored API key (0600) and
   last-used model; env vars always win over the stored key
+- `rhema-rsd` — resource-scoped dispatch: at most one live handler per
+  resource key, a live inbox delivered mid-run, revision-guarded
+  checkpoints, leases with TTL and recovery, and a persistent per-key
+  `Session` wrapping `rhema_core::Session`; in-memory and SQLite stores
+  behind one `Store` contract
+- `rhema-forge-agent` — the forge-watching bot: GitHub, Gitea, and
+  GitLab clients normalizing issues/PRs/comments into one event
+  vocabulary, a watcher feeding them to the dispatcher, and a bot that
+  turns admitted keys into handler runs
 - `rhema-coding-agent` — the coding-agent driver: one built-in tool
   (`bash`, running commands via `bash -c` in the workspace), an
   approval seam (auto-approved for now; allowlists planned), session
@@ -67,17 +76,20 @@ profiles:
     model: anthropic/claude-sonnet-4
 ```
 
-Without `--profile`, sessions run on `personal` — or, when personal has
-no usable credentials, on the first profile that does, so a logged-in
-work profile opens straight into the chat instead of the login screen.
+Without `--profile`, sessions run on the profile this workspace last
+used — rhema remembers, per directory, where its last turn ran and what
+`/profile` chose there. A
+directory with no memory starts on `personal`, or, when personal has no
+usable credentials, on the first profile that does, so a logged-in work
+profile opens straight into the chat instead of the login screen.
 An explicit `--profile` name is always honored as given.
 
 Profiles are isolated: work never sees personal's keys or model. The
-selection is per-instance, never stored — `rhema --profile work` in one
-terminal and plain `rhema` in another run side by side, and `/profile`
-switches a running TUI without touching the other instance. Logins and
-model picks write into the session's profile section, so the same
-provider can hold different keys per profile.
+selection is per-instance, never a stored global switch — `rhema
+--profile work` in one terminal and plain `rhema` in another run side by
+side, and `/profile` switches a running TUI without touching the other
+instance. Logins and model picks write into the session's profile
+section, so the same provider can hold different keys per profile.
 
 Inside the TUI, `/profile` switches mid-session: it lists the profiles
 (each in its configured color, with its provider, model, and credential
@@ -86,7 +98,7 @@ A profile without a usable key still switches — prompts wait until
 `/login` adds one, and the old profile's key is never borrowed.
 A profile can also set `color: "#RRGGBB"` to choose the tone its name
 wears in the footer and picker; unset, personal wears the jade accent and
-work the info blue.
+work a burnt orange, each tuned per theme.
 
 ### The system prompt
 
@@ -163,10 +175,16 @@ design's primary.
 backend without logging in; `ctrl-p` still lists that server's models.
 Keys: `enter` sends · `shift-enter` (kitty-protocol terminals),
 `alt-enter`, or `ctrl-j` adds a line — the box grows with the text ·
-a paste longer than three lines attaches: one chip in the box, full
-content sent on submit · `ctrl-p` re-opens the model picker (the
+a paste longer than three lines attaches: a compact chip in the box at
+the paste's place (icon, index, size, erase mark; `backspace` or
+`delete` removes a chip like any character), expanded in place on
+submit · `ctrl-p` re-opens the model picker (the
 session is kept across a model switch) · `esc` cancels the running
-turn, or asks to quit when idle · `ctrl-c` or `ctrl-d` quit immediately. Commands: `/help`, `/clear` or
+turn, or asks to quit when idle · `ctrl-c` or `ctrl-d` quit immediately.
+While a model streams its reasoning, the status strip previews its last
+rows (dimmed, three at most) — the block vanishes the moment the reply
+starts, and the trace is never stored in the session.
+Commands: `/help`, `/clear` or
 `/new` (fresh session), `/resume`, `/skills`, `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
@@ -249,7 +267,8 @@ and checkpoints through serde — expressible entirely outside crate 1.
 
 ## Roadmap
 
-- Crate 2: RSD `SessionManager` — dispatch, leases, inbox, revisions, SQLite
-  (see [specs/resource-scoped-dispatch.md](specs/resource-scoped-dispatch.md))
-- Later: compaction, provider fixtures via cassettes, custom base URLs for
-  OpenAI-compatible servers
+- A real handler for the forge bot: the coding agent with GitHub/Gitea/
+  GitLab tools, run as an end-to-end binary over `rhema-rsd`
+- Later: an OpenClaw-style multi-channel consumer on the same dispatch
+  core, compaction, provider fixtures via cassettes, custom base URLs
+  for OpenAI-compatible servers
