@@ -129,7 +129,10 @@ need no special tool. `/skills` lists what was discovered.
 
 First launch opens the login screen: pick a provider — Google Gemini by
 API key, a llama.cpp `llama-server` by URL (optional bearer key), or
-OpenRouter, Anthropic, and OpenAI by API key. The input is validated with a
+OpenRouter, Anthropic, OpenAI, and DeepSeek by API key (DeepSeek rides
+the generic OpenAI-compatible adapter against their
+`api.deepseek.com/v1` endpoint — `reasoning_content` streaming and
+replay work natively for `deepseek-reasoner`). The input is validated with a
 real model-list call and stored in `~/.config/rhema/config.yaml` with
 `0600` permissions. Then pick a model from the live list (text chat
 models only — Google rows carry pricing and context window; just type

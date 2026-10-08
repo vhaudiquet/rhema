@@ -20,6 +20,8 @@ pub enum LoginProvider {
     Anthropic,
     /// OpenAI, by API key.
     OpenAi,
+    /// DeepSeek, by API key (their OpenAI-compatible endpoint).
+    DeepSeek,
 }
 
 /// The provider rows shown at login. Every row configures an implemented
@@ -53,6 +55,10 @@ pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "OpenAI",
         kind: LoginProvider::OpenAi,
+    },
+    ProviderEntry {
+        name: "DeepSeek",
+        kind: LoginProvider::DeepSeek,
     },
 ];
 
@@ -385,6 +391,7 @@ impl LoginScreen {
                 LoginProvider::OpenRouter => provider == Some("openrouter"),
                 LoginProvider::Anthropic => provider == Some("anthropic"),
                 LoginProvider::OpenAi => provider == Some("openai"),
+                LoginProvider::DeepSeek => provider == Some("deepseek"),
             })
             .unwrap_or(0);
         Self { selected, ..self }
@@ -429,7 +436,8 @@ impl LoginScreen {
             LoginProvider::Google
             | LoginProvider::OpenRouter
             | LoginProvider::Anthropic
-            | LoginProvider::OpenAi => "API key: ",
+            | LoginProvider::OpenAi
+            | LoginProvider::DeepSeek => "API key: ",
         }
     }
 
@@ -441,7 +449,8 @@ impl LoginScreen {
             LoginProvider::Google
             | LoginProvider::OpenRouter
             | LoginProvider::Anthropic
-            | LoginProvider::OpenAi => "\u{2022}".repeat(self.input.chars().count()),
+            | LoginProvider::OpenAi
+            | LoginProvider::DeepSeek => "\u{2022}".repeat(self.input.chars().count()),
         }
     }
 

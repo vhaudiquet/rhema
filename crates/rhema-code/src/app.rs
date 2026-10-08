@@ -70,6 +70,11 @@ pub enum Backend {
         /// The resolved key (`env` first, stored second).
         api_key: String,
     },
+    /// DeepSeek, by API key (their OpenAI-compatible endpoint).
+    DeepSeek {
+        /// The resolved key (`env` first, stored second).
+        api_key: String,
+    },
 }
 
 impl Backend {
@@ -99,6 +104,10 @@ impl Backend {
             Backend::OpenAi { api_key } => Arc::new(
                 rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone()),
             ),
+            Backend::DeepSeek { api_key } => Arc::new(
+                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
+                    .with_base_url("https://api.deepseek.com/v1"),
+            ),
         }
     }
 
@@ -110,6 +119,7 @@ impl Backend {
             Backend::OpenRouter { .. } => "openrouter",
             Backend::Anthropic { .. } => "anthropic",
             Backend::OpenAi { .. } => "openai",
+            Backend::DeepSeek { .. } => "deepseek",
         }
     }
 
@@ -131,6 +141,9 @@ impl Backend {
             "openai" => profile
                 .openai_api_key()
                 .map(|api_key| Backend::OpenAi { api_key }),
+            "deepseek" => profile
+                .deepseek_api_key()
+                .map(|api_key| Backend::DeepSeek { api_key }),
             _ => profile
                 .google_api_key()
                 .map(|api_key| Backend::Google { api_key }),
@@ -156,6 +169,13 @@ impl Backend {
             // reports and defaults the rest: Anthropic rows carry id and
             // display name only, OpenAI-compatible rows add the server's
             // name/description/context_length when present.
+            Backend::DeepSeek { api_key } => {
+                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
+                    .with_base_url("https://api.deepseek.com/v1")
+                    .list_models()
+                    .await
+                    .map_err(|err| err.to_string())
+            }
             Backend::Anthropic { api_key } => {
                 rhema_provider_anthropic::AnthropicProvider::new(api_key.clone())
                     .list_models()
@@ -892,6 +912,9 @@ impl App {
             crate::screens::LoginProvider::OpenAi => Backend::OpenAi {
                 api_key: login.input.clone(),
             },
+            crate::screens::LoginProvider::DeepSeek => Backend::DeepSeek {
+                api_key: login.input.clone(),
+            },
             crate::screens::LoginProvider::Google => Backend::Google {
                 api_key: login.input.clone(),
             },
@@ -1003,6 +1026,10 @@ impl App {
                                 Backend::OpenRouter { api_key } => {
                                     settings.provider = Some("openrouter".to_owned());
                                     settings.openrouter_api_key = Some(api_key.clone());
+                                }
+                                Backend::DeepSeek { api_key } => {
+                                    settings.provider = Some("deepseek".to_owned());
+                                    settings.deepseek_api_key = Some(api_key.clone());
                                 }
                                 Backend::Anthropic { api_key } => {
                                     settings.provider = Some("anthropic".to_owned());

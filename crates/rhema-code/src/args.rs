@@ -32,6 +32,9 @@ pub enum ProviderChoice {
     /// OpenAI, by API key.
     #[value(name = "openai")]
     OpenAi,
+    /// DeepSeek, by API key (their OpenAI-compatible endpoint).
+    #[value(name = "deepseek")]
+    DeepSeek,
 }
 
 impl ProviderChoice {
@@ -43,6 +46,7 @@ impl ProviderChoice {
             Some("openrouter") => Self::OpenRouter,
             Some("anthropic") => Self::Anthropic,
             Some("openai") => Self::OpenAi,
+            Some("deepseek") => Self::DeepSeek,
             _ => Self::Google,
         }
     }

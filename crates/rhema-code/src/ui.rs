@@ -155,6 +155,9 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
                         crate::screens::LoginProvider::OpenAi => {
                             login.stored.openai_api_key.is_some()
                         }
+                        crate::screens::LoginProvider::DeepSeek => {
+                            login.stored.deepseek_api_key.is_some()
+                        }
                     };
                     let mut spans = vec![Span::styled(entry.name.to_string(), name_style)];
                     if registered {

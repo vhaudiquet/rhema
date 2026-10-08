@@ -54,6 +54,10 @@ const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
 /// [`DEFAULT_ANTHROPIC_MODEL`]: the GPT-5 family id, current at the time
 /// of writing.
 const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
+/// The headless DeepSeek model when neither `--model` nor the stored
+/// config names one: the non-thinking chat model — `deepseek-reasoner`
+/// thinks by default and is the slower choice.
+const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
 
 /// The headless event sink: reply text streams raw to stdout (so pipes
 /// capture exactly the reply), tool traffic goes to stderr.
@@ -210,6 +214,13 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
                 )
             })?,
         },
+        ProviderChoice::DeepSeek => Backend::DeepSeek {
+            api_key: effective.deepseek_api_key().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)"
+                )
+            })?,
+        },
     };
     let model = args.model.clone().unwrap_or_else(|| {
         effective
@@ -219,6 +230,7 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
                 ProviderChoice::LlamaCpp => DEFAULT_LLAMA_MODEL.to_owned(),
                 ProviderChoice::Anthropic => DEFAULT_ANTHROPIC_MODEL.to_owned(),
                 ProviderChoice::OpenAi => DEFAULT_OPENAI_MODEL.to_owned(),
+                ProviderChoice::DeepSeek => DEFAULT_DEEPSEEK_MODEL.to_owned(),
                 ProviderChoice::Google | ProviderChoice::OpenRouter => DEFAULT_MODEL.to_owned(),
             })
     });
@@ -315,6 +327,9 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         ProviderChoice::OpenAi => effective
             .openai_api_key()
             .map(|api_key| Backend::OpenAi { api_key }),
+        ProviderChoice::DeepSeek => effective
+            .deepseek_api_key()
+            .map(|api_key| Backend::DeepSeek { api_key }),
     };
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
