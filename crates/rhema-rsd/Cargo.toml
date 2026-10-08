@@ -1,0 +1,26 @@
+[package]
+name = "rhema-rsd"
+description = "Resource-scoped dispatch: per-key leases, live inboxes, and revision-guarded sessions over any store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# The reusable Store-contract suite, for replay against secondary store
+# backends (the planned SQLite implementation); see `store_contract`.
+store-contract = []
+
+[dependencies]
+# The RSD session wraps rhema-core's caller-owned session; checkpointing
+# round-trips it verbatim
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# Event payloads, plans, and session state cross the store boundary as JSON
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Typed public errors
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
