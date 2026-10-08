@@ -1,0 +1,29 @@
+rhema-claw {{ .Chart.AppVersion }} deployed as {{ include "rhema-claw.fullname" . }}.
+
+The daemon is single-node by design: one SQLite store, one dispatcher
+(specs/rhema-framework-v1.md §7) — do not scale the Deployment.
+
+1. Talk to it (port-forward; the surface speaks OpenAI chat-completions too):
+
+   kubectl port-forward svc/{{ include "rhema-claw.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+   curl http://127.0.0.1:{{ .Values.service.port }}/healthz
+
+2. Config: values `config` renders into ConfigMap {{ include "rhema-claw.fullname" . }}
+   (claw.yaml, mounted at /config/claw.yaml). db and workspace_root are pinned
+   under /data; edit them through values, not the ConfigMap.
+{{- if not (or .Values.secret.existingSecret .Values.secret.stringData) }}
+
+3. No credentials Secret is configured — set values secret.stringData
+   (e.g. ANTHROPIC_API_KEY, GITHUB_TOKEN) or secret.existingSecret, or the
+   daemon refuses to start when a watch or dispatch needs the key.
+{{- else }}
+
+3. Credentials: injected from the Secret into the environment.
+{{- end }}
+
+4. Token: /v1 routes are {{ if .Values.token }}protected by the token set in values{{ else }}OPEN (no token set) — set `token` in values if this port is reachable beyond loopback{{ end }}; /healthz stays open either way.
+{{- if not .Values.persistence.enabled }}
+
+WARNING: persistence.enabled=false — the SQLite store and workspaces live in
+an emptyDir and are lost when the pod restarts.
+{{- end }}

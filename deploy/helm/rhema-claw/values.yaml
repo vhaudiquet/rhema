@@ -1,0 +1,60 @@
+# rhema-claw is single-node by design: one daemon owns every session in one
+# SQLite store, with one dispatcher (specs/rhema-framework-v1.md §7). The
+# templates fail the render when this is anything but 1 — it is an
+# invariant, not a starting point.
+replicaCount: 1
+
+image:
+  repository: rhema-claw
+  # Defaults to Chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Bearer token for the /v1 routes, rendered into claw.yaml. Empty leaves
+# the surface open on its interface — set one whenever the port is
+# reachable from beyond loopback. /healthz stays open either way.
+token: ""
+
+# The claw.yaml content. db, workspace_root, and listen are pinned by the
+# templates (the PVC is fixed at /data and the container must bind all
+# interfaces for the Service); whatever these say here is overridden.
+config:
+  provider: anthropic
+  # Per-provider defaults apply when the key is empty or dropped.
+  model: claude-sonnet-4-5
+  poll_interval_secs: 60
+  # Seed watches: imported once, while the watch table is still empty.
+  # Example:
+  # watches:
+  #   - forge: github
+  #     repo: acme/widgets
+  watches: []
+
+service:
+  type: ClusterIP
+  port: 7799
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 5Gi
+
+# Provider and forge credentials reach the daemon as env vars (the
+# provider keys and GITHUB_TOKEN/GITEA_TOKEN/GITLAB_TOKEN fallbacks).
+# One mechanism: either name an existingSecret, or list key/value pairs
+# in stringData and the chart creates the Secret.
+secret:
+  existingSecret: ""
+  stringData: {}
+  # stringData:
+  #   ANTHROPIC_API_KEY: sk-ant-...
+  #   GITHUB_TOKEN: ghp_...
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

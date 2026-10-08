@@ -1,0 +1,7 @@
+apiVersion: v2
+name: rhema-claw
+description: The resident forge-watching agent daemon — forge watches and a
+  chat HTTP surface over one SQLite store.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

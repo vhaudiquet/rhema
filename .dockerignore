@@ -1,0 +1,5 @@
+# Scoped for the deploy/docker builds (context = repo root).
+target/
+web/node_modules/
+.git/
+specs/
