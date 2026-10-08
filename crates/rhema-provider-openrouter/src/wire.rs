@@ -352,8 +352,8 @@ pub struct WireModel {
     pub pricing: Option<WirePricing>,
 }
 
-/// The `pricing` object of a [`WireModel`]; the per-request, image, audio,
-/// and cache prices are ignored.
+/// The `pricing` object of a [`WireModel`]; the per-request, image, and
+/// audio prices are ignored.
 #[derive(Debug, Default, Deserialize)]
 pub struct WirePricing {
     /// USD per prompt token, as a decimal string.
@@ -362,6 +362,10 @@ pub struct WirePricing {
     /// USD per completion token, as a decimal string.
     #[serde(default)]
     pub completion: Option<String>,
+    /// USD per prompt token served from the provider's cache, when the
+    /// upstream supports prompt caching.
+    #[serde(default)]
+    pub input_cache_read: Option<String>,
 }
 
 impl WireModelsPage {
@@ -381,11 +385,15 @@ fn token_price(raw: Option<&str>) -> Option<f64> {
 }
 
 /// The model's per-MTok price, when its entry prices both directions.
+/// The catalog's cache-read rate rides along when published.
 fn per_mtok_pricing(wire: &WireModel) -> Option<Pricing> {
     let pricing = wire.pricing.as_ref()?;
+    let cached_input_per_mtok =
+        token_price(pricing.input_cache_read.as_deref()).map(|rate| rate * 1_000_000.0);
     Some(Pricing {
         input_per_mtok: token_price(pricing.prompt.as_deref())? * 1_000_000.0,
         output_per_mtok: token_price(pricing.completion.as_deref())? * 1_000_000.0,
+        cached_input_per_mtok,
     })
 }
 
@@ -1414,7 +1422,8 @@ mod tests {
                         "pricing": {
                             "prompt": "0.00000015",
                             "completion": "0.0000006",
-                            "request": "0"
+                            "request": "0",
+                            "input_cache_read": "0.0000000375"
                         },
                         "supported_parameters": ["tools", "temperature"]
                     },
@@ -1448,6 +1457,8 @@ mod tests {
             Some(Pricing {
                 input_per_mtok: 0.15,
                 output_per_mtok: 0.6,
+                // 0.0000000375 USD/token scales to 0.0375 USD/MTok.
+                cached_input_per_mtok: Some(0.0375),
             })
         );
 
@@ -1457,6 +1468,7 @@ mod tests {
             Some(Pricing {
                 input_per_mtok: 0.0,
                 output_per_mtok: 0.0,
+                cached_input_per_mtok: None,
             })
         );
         // No pricing object means no price at all.
