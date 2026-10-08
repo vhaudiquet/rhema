@@ -345,14 +345,18 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // keep shifted letters correct; terminals without the protocol
     // ignore the push, and newlines keep working through alt-enter and
     // ctrl-j.
+    // The flags are pushed after the alternate screen is entered and
+    // popped before it is left: the protocol's lifetime is paired with
+    // the screen it was pushed on, and a terminal keeping per-screen
+    // stacks would never see a pop issued across the swap.
     crossterm::execute!(
         stdout(),
+        EnterAlternateScreen,
         PushKeyboardEnhancementFlags(
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                 | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
         ),
-        EnterAlternateScreen,
         EnableMouseCapture,
         EnableBracketedPaste
     )
@@ -388,15 +392,17 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
 fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
     // Each step writes on its own so one failure cannot skip the rest.
-    // The enhancement pop is the canonical bare `CSI < u`, written raw:
-    // crossterm's command emits the numbered `CSI <1u`, which a terminal
-    // may ignore — and a missed pop leaves the terminal encoding every
-    // key, the shell printing CSI-u garbage. Popping an empty stack is a
-    // no-op, so the second pop only guards a missed first.
+    // The pops are the canonical bare `CSI < u` (crossterm's command
+    // emits the numbered `CSI <1u`, which a terminal may ignore), and
+    // the trailing push of zero flags masks any entry the pops could not
+    // remove — the effective encoding lands on legacy either way. All
+    // of it runs on the alternate screen, where the push happened.
     use std::io::Write;
     let _ = write!(stdout(), "\x1b[<u");
     let _ = stdout().flush();
     let _ = write!(stdout(), "\x1b[<u");
+    let _ = stdout().flush();
+    let _ = write!(stdout(), "\x1b[>0u");
     let _ = stdout().flush();
     let _ = crossterm::execute!(
         stdout(),
