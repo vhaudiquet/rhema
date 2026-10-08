@@ -63,7 +63,7 @@ use rhema_core::event::{Event, EventSink};
 use rhema_core::message::{Content, Message, Role};
 use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
-use rhema_core::request::ModelRequest;
+use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
 use rhema_provider_google::{GeminiModel, Pricing};
 use serde::{Deserialize, Serialize};
@@ -94,6 +94,18 @@ pub struct ChatCompletionRequest {
     /// Output token ceiling, when set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    /// How much reasoning the model should do, when the driver named a
+    /// level; absent means the routed model's default stands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<WireReasoning>,
+}
+
+/// The unified `reasoning` request field: OpenRouter normalizes every
+/// provider's thinking controls onto it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WireReasoning {
+    /// How much reasoning the model should do.
+    pub effort: &'static str,
 }
 
 /// One message on the wire. A single wire message carries either a text
@@ -488,7 +500,20 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
         stream: true,
         temperature: req.params.temperature,
         max_tokens: req.params.max_tokens,
+        reasoning: reasoning_effort(req.params.thinking),
     }
+}
+
+/// OpenRouter's `reasoning.effort` spelling of a thinking level; `None`
+/// sends nothing and the routed model's default stands.
+fn reasoning_effort(thinking: ThinkingEffort) -> Option<WireReasoning> {
+    let effort = match thinking {
+        ThinkingEffort::Default => return None,
+        ThinkingEffort::Low => "low",
+        ThinkingEffort::Medium => "medium",
+        ThinkingEffort::High => "high",
+    };
+    Some(WireReasoning { effort })
 }
 
 /// The text blocks of a message, joined by a blank line.
@@ -721,6 +746,28 @@ mod tests {
     }
 
     #[test]
+    fn a_named_thinking_effort_rides_in_reasoning_effort() {
+        let mut req = ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: "z-ai/glm-5.3".into(),
+                temperature: None,
+                max_tokens: None,
+                thinking: ThinkingEffort::High,
+            },
+        };
+        let body = serde_json::to_string(&request_body(&req)).unwrap();
+        assert!(body.contains("\"reasoning\":{\"effort\":\"high\"}"), "{body}");
+
+        // Default sends nothing: the routed model's default stands.
+        req.params.thinking = ThinkingEffort::Default;
+        let body = serde_json::to_string(&request_body(&req)).unwrap();
+        assert!(!body.contains("\"reasoning\""), "{body}");
+    }
+
+    #[test]
     fn request_body_maps_roles_tools_and_params() {
         let req = ModelRequest {
             system: Some("be terse".into()),
@@ -753,6 +800,7 @@ mod tests {
                 json!({ "type": "object", "properties": { "path": { "type": "string" } } }),
             )],
             params: ChatParams {
+                thinking: ThinkingEffort::Default,
                 model: "qwen/qwen3-coder".into(),
                 temperature: Some(0.2),
                 max_tokens: Some(256),
