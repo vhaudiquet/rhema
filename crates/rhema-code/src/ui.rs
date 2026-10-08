@@ -1074,53 +1074,45 @@ fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme
         let marks = pieces.len() - 1;
         for (pi, piece) in pieces.iter().enumerate() {
             // A bare logical line renders as one marker row; empty
-            // pieces around anchors carry no rows of their own.
+            // pieces around anchors carry no rows of their own. Every
+            // row hangs under the two-cell gutter — the prompt glyph on
+            // the very first row, two spaces everywhere else — so wraps
+            // and anchors align with the text, not the box edge.
             if !piece.is_empty() || marks == 0 {
-                let lead = if pi == 0 && li == 0 {
-                    "❯ "
-                } else if pi == 0 {
-                    "  "
-                } else {
-                    ""
-                };
-                let wrapped = wrap_line(
-                    &Line::from(vec![
-                        Span::raw(lead).fg(theme.text3),
-                        Span::raw(piece.to_owned()),
-                    ]),
-                    width,
-                );
-                let lead_chars = lead.chars().count();
-                for (ri, row) in wrapped.into_iter().enumerate() {
-                    // The lead marker is display, not input: the row
-                    // accounts for the source characters alone.
-                    let lead_here = usize::from(ri == 0 && !lead.is_empty()) * lead_chars;
-                    let span_chars: usize = row
-                        .spans
+                let text_width = width.saturating_sub(2);
+                let wrapped =
+                    wrap_line(&Line::from(Span::raw(piece.to_owned())), text_width.max(1));
+                for row in wrapped.into_iter() {
+                    let lead = if rows.is_empty() { "❯ " } else { "  " };
+                    let mut spans = vec![Span::raw(lead).fg(theme.text3)];
+                    spans.extend(row.spans);
+                    let source_chars: usize = spans
                         .iter()
+                        .skip(1)
                         .map(|span| span.content.chars().count())
                         .sum();
                     rows.push(InputRow {
-                        // A narrow wrap can produce a row shorter than
-                        // the lead itself: it still accounts for what it
-                        // has, never less.
-                        source_chars: span_chars.saturating_sub(lead_here),
-                        marker: ri == 0 && !lead.is_empty(),
+                        source_chars,
+                        marker: true,
                         newline: false,
-                        line: row,
+                        line: Line::from(spans),
                     });
                 }
             }
             if pi < marks {
+                let lead = if rows.is_empty() { "❯ " } else { "  " };
+                let chip = chip_row(
+                    attachments.get(anchor).map(String::as_str).unwrap_or(""),
+                    anchor,
+                    theme,
+                );
+                let mut spans = vec![Span::raw(lead).fg(theme.text3)];
+                spans.extend(chip.spans);
                 rows.push(InputRow {
                     source_chars: 1,
-                    marker: false,
+                    marker: true,
                     newline: false,
-                    line: chip_row(
-                        attachments.get(anchor).map(String::as_str).unwrap_or(""),
-                        anchor,
-                        theme,
-                    ),
+                    line: Line::from(spans),
                 });
                 anchor += 1;
             }
@@ -1743,7 +1735,7 @@ mod scroll_tests {
             .iter()
             .map(|span| span.content.to_string())
             .collect();
-        assert_eq!(chip, "▣1 5L ✕");
+        assert_eq!(chip, "  ▣1 5L ✕", "the chip hangs under the prompt gutter");
         let head: String = rows[0]
             .line
             .spans
