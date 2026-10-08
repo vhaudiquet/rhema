@@ -5,8 +5,10 @@
 //! runs under is chosen per invocation (`--profile`) or per session
 //! (`/profile`) — it is deliberately not stored, so parallel instances
 //! (work and personal side by side) never fight over one global switch.
-//! Environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`) always win
-//! over a stored key — a stored key is the fallback, not the override.
+//! Environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`,
+//! `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) always
+//! win over a stored key — a stored key is the fallback, not the
+//! override.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -36,7 +38,8 @@ pub enum ConfigError {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Profile {
-    /// Which provider serves turns: `google`, `llama-cpp`, or `openrouter`.
+    /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
+    /// `anthropic`, or `openai`.
     pub provider: Option<String>,
     /// The Google API key entered at login, when one is stored.
     pub google_api_key: Option<String>,
@@ -48,6 +51,10 @@ pub struct Profile {
     pub llama_cpp_api_key: Option<String>,
     /// The OpenRouter API key entered at login, when one is stored.
     pub openrouter_api_key: Option<String>,
+    /// The Anthropic API key entered at login, when one is stored.
+    pub anthropic_api_key: Option<String>,
+    /// The OpenAI API key entered at login, when one is stored.
+    pub openai_api_key: Option<String>,
     /// The color this profile's name wears in the UI, as `#RRGGBB`.
     /// Unset means the UI picks a tone from the theme by profile name.
     pub color: Option<String>,
@@ -95,13 +102,35 @@ impl Profile {
         )
     }
 
+    /// The Anthropic key to use: `ANTHROPIC_API_KEY`, then the stored
+    /// key.
+    pub fn anthropic_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["ANTHROPIC_API_KEY"],
+            self.anthropic_api_key.clone(),
+        )
+    }
+
+    /// The OpenAI key to use: `OPENAI_API_KEY`, then the stored key.
+    pub fn openai_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["OPENAI_API_KEY"],
+            self.openai_api_key.clone(),
+        )
+    }
+
     /// Whether this profile can build a backend: it names a provider and
     /// carries the credential that provider needs (a llama.cpp server
-    /// works keyless; google and openrouter need a key, env included).
+    /// works keyless; google, openrouter, anthropic, and openai need a
+    /// key, env included).
     pub fn has_credentials(&self) -> bool {
         match self.provider.as_deref() {
             Some("llama-cpp") => true,
             Some("openrouter") => self.openrouter_api_key().is_some(),
+            Some("anthropic") => self.anthropic_api_key().is_some(),
+            Some("openai") => self.openai_api_key().is_some(),
             _ => self.google_api_key().is_some(),
         }
     }
@@ -305,6 +334,49 @@ mod tests {
     }
 
     #[test]
+    fn anthropic_and_openai_keys_follow_the_same_env_wins_convention() {
+        let env = |name: &str| match name {
+            "ANTHROPIC_API_KEY" => Some("anthropic-from-env".into()),
+            "OPENAI_API_KEY" => Some("  ".into()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_key(env, &["ANTHROPIC_API_KEY"], Some("stored".into())),
+            Some("anthropic-from-env".into())
+        );
+        // A blank env var counts as unset: the stored key serves.
+        assert_eq!(
+            resolve_key(env, &["OPENAI_API_KEY"], Some("stored".into())),
+            Some("stored".into())
+        );
+    }
+
+    #[test]
+    fn anthropic_and_openai_profiles_need_their_own_key_to_serve() {
+        let bare = |provider: &str| Profile {
+            provider: Some(provider.to_owned()),
+            ..Profile::default()
+        };
+        let keyed = |provider: &str| Profile {
+            provider: Some(provider.to_owned()),
+            anthropic_api_key: provider.eq("anthropic").then(|| "k".to_owned()),
+            openai_api_key: provider.eq("openai").then(|| "k".to_owned()),
+            ..Profile::default()
+        };
+        // A stored key makes the profile usable...
+        assert!(keyed("anthropic").has_credentials());
+        assert!(keyed("openai").has_credentials());
+        // ...and each provider needs exactly its own key.
+        assert!(keyed("anthropic").openai_api_key.is_none());
+        assert!(keyed("openai").anthropic_api_key.is_none());
+        // No stored key and no env var: not usable. (Machines running the
+        // suite with these env vars exported would see the env key win,
+        // per the convention above.)
+        assert!(!bare("anthropic").has_credentials());
+        assert!(!bare("openai").has_credentials());
+    }
+
+    #[test]
     fn config_round_trips_through_disk_as_yaml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -318,6 +390,8 @@ mod tests {
                     llama_cpp_url: Some("http://localhost:8080".into()),
                     llama_cpp_api_key: None,
                     openrouter_api_key: None,
+                    anthropic_api_key: Some("sk-ant-123".into()),
+                    openai_api_key: None,
                     color: None,
                 },
             )]),
@@ -325,6 +399,7 @@ mod tests {
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("google_api_key:"), "yaml on disk: {raw}");
+        assert!(raw.contains("anthropic_api_key:"), "yaml on disk: {raw}");
         assert!(!raw.contains('{'), "not json: {raw}");
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, config);
