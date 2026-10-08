@@ -31,6 +31,49 @@ impl ToolSpec {
     }
 }
 
+/// How much reasoning the model should do, mapped by each provider onto
+/// its own request parameter — OpenAI-compatible `reasoning_effort`,
+/// OpenRouter's `reasoning.effort`, Anthropic's thinking budget, Gemini's
+/// thinking budget. [`ThinkingEffort::Default`] sends nothing: the
+/// server's own default stands, which keeps strict endpoints happy and
+/// leaves always-thinking models as they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ThinkingEffort {
+    /// The provider decides; rhema sends no effort parameter.
+    #[default]
+    Default,
+    /// Light reasoning — quick turns, cheap models.
+    Low,
+    /// The middle setting.
+    Medium,
+    /// Maximum reasoning effort.
+    High,
+}
+
+impl ThinkingEffort {
+    /// The level's name as the config, the flag, and the command spell it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    /// Parses a level name; `None` for anything else.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
 /// Sampling parameters for the model call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ChatParams {
@@ -40,6 +83,10 @@ pub struct ChatParams {
     pub temperature: Option<f32>,
     /// Output token ceiling, if the driver wants one.
     pub max_tokens: Option<u32>,
+    /// How much reasoning the model should do. Defaults to
+    /// [`ThinkingEffort::Default`] so pre-seam payloads load unchanged.
+    #[serde(default)]
+    pub thinking: ThinkingEffort,
 }
 
 impl ChatParams {
@@ -63,4 +110,28 @@ pub struct ModelRequest {
     pub tools: Vec<ToolSpec>,
     /// Sampling parameters.
     pub params: ChatParams,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn levels_parse_and_round_trip_through_serde() {
+        assert_eq!(ThinkingEffort::parse(" High "), Some(ThinkingEffort::High));
+        assert_eq!(ThinkingEffort::parse("low"), Some(ThinkingEffort::Low));
+        assert_eq!(ThinkingEffort::parse("maximal"), None);
+        assert_eq!(ThinkingEffort::default(), ThinkingEffort::Default);
+
+        let params = ChatParams {
+            thinking: ThinkingEffort::High,
+            ..ChatParams::new("m")
+        };
+        let json = serde_json::to_string(&params).unwrap();
+        assert!(json.contains("\"thinking\":\"high\""), "{json}");
+        assert_eq!(serde_json::from_str::<ChatParams>(&json).unwrap(), params);
+        // A payload from before the field existed loads as Default.
+        let legacy: ChatParams = serde_json::from_str(r#"{"model":"m"}"#).unwrap();
+        assert_eq!(legacy.thinking, ThinkingEffort::Default);
+    }
 }
