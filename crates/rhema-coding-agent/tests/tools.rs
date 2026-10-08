@@ -157,12 +157,12 @@ async fn large_output_is_truncated_with_a_notice() {
         result.content
     );
     assert!(result.content.len() < 64 * 1024);
-    // The elided head is counted exactly: the whole 64k minus the kept
-    // 50 KiB, aligned back to a line start.
+    // The elided head is counted exactly: the 2000-line cap binds
+    // before the 50 KiB cap on a wall of one-byte rows.
     assert!(
         result
             .content
-            .contains("[output truncated — 14336 bytes elided]"),
+            .contains("[output truncated — 61538 bytes elided]"),
         "{}",
         result.content
     );

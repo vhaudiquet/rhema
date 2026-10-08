@@ -23,9 +23,11 @@ use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 
 use crate::approval::Approval;
 
-/// Command output streams are each cut at this size, keeping the tail:
-/// errors and final results live at the end of a command's output.
+/// Command output streams are each cut at this size — in bytes and in
+/// lines, whichever is hit first — keeping the tail: errors and final
+/// results live at the end of a command's output.
 const BASH_OUTPUT_LIMIT: usize = 50 * 1024;
+const BASH_OUTPUT_LINES: usize = 2000;
 /// A command is killed after this long.
 const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -176,19 +178,35 @@ fn canonicalized(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
-/// Lossy text of `bytes`, tail-kept at `limit`: the elided head is
-/// counted in a marker, and the cut backs up to the next line start so
-/// the first kept row is whole.
-fn render_truncated(bytes: &[u8], limit: usize) -> String {
-    if bytes.len() <= limit {
+/// Lossy text of `bytes`, tail-kept at `limit` bytes and `max_lines`
+/// lines (whichever is hit first): the elided head is counted in a
+/// marker, and the byte cut lands on a line start so the first kept row
+/// is whole. A single line longer than the whole byte budget is kept
+/// partially, past the marker.
+fn render_truncated(bytes: &[u8], limit: usize, max_lines: usize) -> String {
+    let line_count = bytes.iter().filter(|&&byte| byte == b'\n').count();
+    if bytes.len() <= limit && line_count <= max_lines {
         return String::from_utf8_lossy(bytes).into_owned();
     }
-    let mut cut = bytes.len() - limit;
-    // Land on a line start within the budget; a single line longer than
-    // the whole budget is kept partially, past the marker.
-    if let Some(pos) = bytes[..cut].iter().rposition(|&byte| byte == b'\n') {
-        cut = pos + 1;
+    let byte_cut = bytes.len().saturating_sub(limit);
+    let byte_cut = match bytes[..byte_cut].iter().rposition(|&byte| byte == b'\n') {
+        Some(pos) => pos + 1,
+        None => 0,
+    };
+    // The line cut: the start of the row that begins the last
+    // `max_lines` rows.
+    let mut line_cut = 0usize;
+    let mut seen = 0usize;
+    for (index, &byte) in bytes.iter().enumerate().rev() {
+        if byte == b'\n' {
+            seen += 1;
+            if seen == max_lines {
+                line_cut = index + 1;
+                break;
+            }
+        }
     }
+    let cut = byte_cut.max(line_cut);
     let mut text = format!("[output truncated — {} bytes elided]\n", cut);
     text.push_str(&String::from_utf8_lossy(&bytes[cut..]));
     text
@@ -205,8 +223,8 @@ fn format_command_output(
     };
     format!(
         "{code}\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        render_truncated(stdout, BASH_OUTPUT_LIMIT),
-        render_truncated(stderr, BASH_OUTPUT_LIMIT),
+        render_truncated(stdout, BASH_OUTPUT_LIMIT, BASH_OUTPUT_LINES),
+        render_truncated(stderr, BASH_OUTPUT_LIMIT, BASH_OUTPUT_LINES),
     )
 }
 
@@ -217,15 +235,28 @@ mod tests {
     #[test]
     fn truncation_keeps_the_tail_and_counts_the_elided_head() {
         let bytes = b"head line\nerror: the real failure\n".to_vec();
-        let text = render_truncated(&bytes, 10);
+        let text = render_truncated(&bytes, 10, 2000);
         assert!(text.starts_with("[output truncated"), "{text}");
         assert!(text.contains("error: the real failure"), "{text}");
         // The cut lands on a line start: the first kept row is whole.
-        assert!(text.contains("\nhead") == false && text.contains("\nerror:"), "{text}");
+        assert!(!text.contains("head line"), "{text}");
     }
 
     #[test]
-    fn output_within_the_limit_passes_untouched() {
-        assert_eq!(render_truncated(b"clean\n", 10), "clean\n");
+    fn the_line_limit_cuts_more_rows_than_the_byte_limit() {
+        let bytes = (0..3000).map(|i| format!("row {i}\n")).collect::<String>();
+        let text = render_truncated(bytes.as_bytes(), 50 * 1024, 2000);
+        // The last 2000 rows minus one: the cut lands after row 1000's
+        // newline, so rows 1001..2999 survive.
+        assert!(text.starts_with("[output truncated — "), "{text}");
+        assert!(text.contains("row 1001\n"), "{text}");
+        assert!(text.contains("row 2999\n"), "{text}");
+        assert!(!text.contains("row 1000\n"), "{text}");
+        assert!(!text.contains("row 999\n"), "{text}");
+    }
+
+    #[test]
+    fn output_within_the_limits_passes_untouched() {
+        assert_eq!(render_truncated(b"clean\n", 10, 2000), "clean\n");
     }
 }
