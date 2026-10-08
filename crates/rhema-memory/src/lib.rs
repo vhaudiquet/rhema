@@ -23,6 +23,7 @@
 //! - [`search`] — `MemoryQuery` and the v1 keyword+recency ranker
 //! - [`volatile`] — the in-process `VolatileStore`
 //! - [`file`] — the markdown-file `FileMemoryStore`, the durable default
+//! - [`tools`] — the three memory tools and `MemoryResolver`
 //! - [`store_contract`] — the replayable behavioral suite
 
 #![forbid(unsafe_code)]
@@ -33,10 +34,12 @@ pub mod record;
 pub mod search;
 pub mod store;
 pub mod store_contract;
+pub mod tools;
 pub mod volatile;
 
 pub use file::FileMemoryStore;
 pub use record::{BODY_LIMIT, MemoryDraft, MemoryRecord, Scope};
 pub use search::{MemoryQuery, SEARCH_LIMIT};
 pub use store::{MemoryError, MemoryStore};
+pub use tools::{MEMORY_FORGET, MEMORY_SAVE, MEMORY_SEARCH, MemoryResolver};
 pub use volatile::VolatileStore;
