@@ -24,6 +24,9 @@ tokio = { version = "1", features = ["macros", "rt"] }
 # The claw's HTTP surface: native routes plus SSE, and the OpenAI shim
 axum = { version = "0.8", features = ["json"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
+# The system-prompt template (Jinja syntax); whitespace rules fit
+# markdown templates
+minijinja = { version = "3", default-features = false, features = ["serde", "debug"] }
 
 # Local crossterm with modifyOtherKeys (CSI 27;…;…~) parsing — Ghostty's
 # default shift+enter sequence, which crossterm 0.29 drops. Backed by the
