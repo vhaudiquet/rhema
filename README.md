@@ -119,22 +119,27 @@ work a burnt orange, each tuned per theme.
 ### The system prompt
 
 If `~/.config/rhema/SYSTEM.md` exists, it is the base prompt every
-session starts from, with `{workspace}` rendered in as the session's
-workspace. Its `{#skills} … {/skills}` block repeats its body once per
-skill, filling `{skill.name}`, `{skill.description}`, and
-`{skill.path}`; the whole block vanishes when no skill was found,
-while anything around it stays — so write lines that stand alone:
+session starts from — a [minijinja](https://docs.rs/minijinja) (Jinja)
+template: `{{ workspace }}` names the session's workspace, and
+`skills` lists the discovered skills, each carrying `name`,
+`description`, and `path`. The template decides where — and whether —
+that list appears:
 
 ```markdown
-{#skills}
-{skill.name} / {skill.description} / {skill.path}
-{/skills}
+{% if skills %}
+You have access to the following skills.
+{% for skill in skills %}
+{{ skill.name }} | {{ skill.description }} | {{ skill.path }}
+{% endfor %}
+{% endif %}
 ```
 
-A template without the block presents no skills at all. Without the
-file, rhema uses its built-in default, which carries the same
-construction; nothing is ever written. Any other `{...}` text is left
-alone — templates are prose, not programs.
+The section vanishes when no skill was found, and block tags may sit
+on their own lines without blank-line runoff. A template error — bad
+syntax, unknown filter — fails loudly with the line number instead of
+silently rendering half a prompt; a misspelled variable renders empty.
+Without the file, rhema uses its built-in default, which carries the
+same construction; nothing is ever written.
 
 ### Skills
 
