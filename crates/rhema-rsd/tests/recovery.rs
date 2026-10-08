@@ -8,14 +8,14 @@ use std::sync::Arc;
 
 use common::{DEBOUNCE, TTL, config, event, register_github, the_key};
 use rhema_core::{Message, Role};
-use rhema_rsd::{Dispatcher, FixedClock, KeyState, MemoryStore, Outcome};
+use rhema_rsd::{Dispatcher, FixedClock, KeyState, Outcome, VolatileStore};
 
 /// Builds a store as if a process died mid-work: a leased key with a
 /// checkpointed session, optionally an undelivered inbox item, and a clock
 /// sitting past the lease TTL.
-fn crashed(with_unpolled_event: bool) -> (Arc<MemoryStore>, Arc<FixedClock>) {
+fn crashed(with_unpolled_event: bool) -> (Arc<VolatileStore>, Arc<FixedClock>) {
     let clock = Arc::new(FixedClock::new(1_000));
-    let store = Arc::new(MemoryStore::new());
+    let store = Arc::new(VolatileStore::new());
     let dispatcher = Arc::new(Dispatcher::new(config(), clock.clone(), store.clone()));
     register_github(&dispatcher);
     let key = the_key();

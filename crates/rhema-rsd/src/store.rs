@@ -1,7 +1,7 @@
 //! The persistence seam: one durable record per resource key.
 //!
 //! The dispatcher reads and writes whole [`KeyRecord`]s through [`Store`].
-//! The trait is deliberately small so the bundled [`crate::MemoryStore`] and
+//! The trait is deliberately small so the bundled [`crate::VolatileStore`] and
 //! the durable [`crate::SqliteStore`] share one behavioral contract,
 //! replayed by the `store-contract` feature's [`crate::store_contract`]
 //! suite.

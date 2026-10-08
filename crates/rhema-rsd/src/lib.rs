@@ -100,7 +100,7 @@
 //!
 //! Dispatch state lives behind the [`Store`] trait: whole-record
 //! persistence with a compare-and-swap on the revision, ordered inbox,
-//! and durability before `save` returns. The bundled [`MemoryStore`] backs
+//! and durability before `save` returns. The bundled [`VolatileStore`] backs
 //! tests and in-process use; [`SqliteStore`] is the durable reference
 //! backend (spec §7, the default-on `sqlite` feature), and both replay
 //! the exact behavioral suite via the `store-contract` feature's
@@ -116,7 +116,7 @@
 //! - [`error`] — `Conflict`, `Expired`, `StoreError`, `DispatchError`
 //! - [`config`] — `DispatcherConfig`
 //! - [`store`] — the `Store` seam, `KeyRecord`, `LeaseRecord`
-//! - [`memory`] — the in-process `MemoryStore`
+//! - [`volatile`] — the in-process `VolatileStore`
 //! - [`sqlite`] — the durable `SqliteStore` (`sqlite` feature)
 //! - [`dispatcher`] — the `Dispatcher` state machine
 //! - [`store_contract`] — replayable Store behavioral suite (`store-contract` feature)
@@ -131,7 +131,6 @@ pub mod error;
 pub mod event;
 pub mod key;
 pub mod lease;
-pub mod memory;
 pub mod session;
 #[cfg(feature = "sqlite")]
 pub mod sqlite;
@@ -139,6 +138,7 @@ pub mod state;
 pub mod store;
 #[cfg(feature = "store-contract")]
 pub mod store_contract;
+pub mod volatile;
 
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::DispatcherConfig;
@@ -147,9 +147,9 @@ pub use error::{Conflict, DispatchError, Expired, StoreError};
 pub use event::{Event, InboxItem, KeyFn};
 pub use key::ResourceKey;
 pub use lease::{Lease, LeaseId};
-pub use memory::MemoryStore;
 pub use session::Session;
 #[cfg(feature = "sqlite")]
 pub use sqlite::SqliteStore;
 pub use state::{IngestResult, KeyState, KeyStatus, Outcome, Revision};
 pub use store::{KeyRecord, LeaseRecord, Store};
+pub use volatile::VolatileStore;

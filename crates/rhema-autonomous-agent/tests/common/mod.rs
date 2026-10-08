@@ -8,7 +8,9 @@
 
 use std::sync::Arc;
 
-use rhema_rsd::{Dispatcher, DispatcherConfig, Event, FixedClock, KeyFn, MemoryStore, ResourceKey};
+use rhema_rsd::{
+    Dispatcher, DispatcherConfig, Event, FixedClock, KeyFn, ResourceKey, VolatileStore,
+};
 
 /// The suite's source name.
 pub const SOURCE: &str = "github";
@@ -41,7 +43,7 @@ pub fn setup_with(config: DispatcherConfig) -> (Arc<Dispatcher>, Arc<FixedClock>
     let dispatcher = Arc::new(Dispatcher::new(
         config,
         clock.clone(),
-        Arc::new(MemoryStore::new()),
+        Arc::new(VolatileStore::new()),
     ));
     (dispatcher, clock)
 }

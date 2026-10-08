@@ -7,7 +7,7 @@ use std::sync::Arc;
 use rhema_forge_agent::{
     ForgeBot, GitHubForge, Handler, RepoRef, ThreadContext, Watcher, register_forge,
 };
-use rhema_rsd::{Dispatcher, DispatcherConfig, FixedClock, KeyState, MemoryStore, Outcome};
+use rhema_rsd::{Dispatcher, DispatcherConfig, FixedClock, KeyState, Outcome, VolatileStore};
 use serde_json::{Value, json};
 use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -50,7 +50,7 @@ fn setup() -> (Arc<Dispatcher>, Arc<FixedClock>, Watcher) {
     let dispatcher = Arc::new(Dispatcher::new(
         config(),
         clock.clone(),
-        Arc::new(MemoryStore::new()),
+        Arc::new(VolatileStore::new()),
     ));
     register_forge(&dispatcher, "github");
     let watcher = Watcher::new(dispatcher.clone(), "github");

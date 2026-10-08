@@ -180,7 +180,7 @@ fn two_dispatchers_share_one_store_but_not_a_private_one() {
     dispatcher.acquire(key.clone(), "handler-1").unwrap();
 
     // A dispatcher over a different store knows nothing of the key.
-    let elsewhere = Dispatcher::new(config(), clock, Arc::new(rhema_rsd::MemoryStore::new()));
+    let elsewhere = Dispatcher::new(config(), clock, Arc::new(rhema_rsd::VolatileStore::new()));
     let status = elsewhere.status(&key).unwrap();
     assert_eq!(status.state, KeyState::Idle);
     assert_eq!(status.revision, 0);

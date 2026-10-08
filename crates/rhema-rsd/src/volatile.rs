@@ -14,18 +14,18 @@ use crate::store::{KeyRecord, Store};
 /// An in-memory [`Store`]. Shareable; every operation is serialized by an
 /// internal mutex, so all of its mutations are atomic.
 #[derive(Debug, Default)]
-pub struct MemoryStore {
+pub struct VolatileStore {
     records: Mutex<BTreeMap<ResourceKey, KeyRecord>>,
 }
 
-impl MemoryStore {
+impl VolatileStore {
     /// An empty store.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-impl Store for MemoryStore {
+impl Store for VolatileStore {
     fn load(&self, key: &ResourceKey) -> Result<Option<KeyRecord>, StoreError> {
         let records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(records.get(key).cloned())
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn save_and_load_round_trip_one_record() {
-        let store = MemoryStore::new();
+        let store = VolatileStore::new();
         let key = ResourceKey::from("k");
         let mut record = KeyRecord::fresh(key.clone(), 7);
         record.state = KeyState::Leased;
@@ -72,7 +72,7 @@ mod tests {
 
     #[test]
     fn a_missing_key_loads_as_none() {
-        let store = MemoryStore::new();
+        let store = VolatileStore::new();
         assert_eq!(store.load(&ResourceKey::from("absent")).unwrap(), None);
     }
 }

@@ -1,7 +1,7 @@
 //! The replayable [`Store`] behavioral suite.
 //!
 //! Every function here is a plain assertion-based test body taking any
-//! `&dyn Store`; the bundled [`crate::MemoryStore`] and the durable
+//! `&dyn Store`; the bundled [`crate::VolatileStore`] and the durable
 //! [`crate::SqliteStore`] both replay the exact same suite from this
 //! crate's own tests, and any future store implementation can do the same
 //! by dev-dependending on `rhema-rsd` with

@@ -6,7 +6,7 @@
 //! statement atomicity (`INSERT` for a must-not-exist create, `UPDATE ...
 //! WHERE revision = ?` for a guarded write), and the `resource_key`,
 //! `revision`, and `updated_at` columns stay queryable for ops, matching
-//! the §7 table shape. [`MemoryStore`] and this backend are interchangeable
+//! the §7 table shape. [`VolatileStore`] and this backend are interchangeable
 //! behind the [`Store`] seam; this one replays the exact behavioral suite
 //! via the `store-contract` feature.
 //!
@@ -93,7 +93,7 @@ fn backend(err: rusqlite::Error) -> StoreError {
 }
 
 /// The stored revision for `key`: `0` when absent, matching
-/// [`crate::MemoryStore`]'s spelling of a failed compare-and-swap against a
+/// [`crate::VolatileStore`]'s spelling of a failed compare-and-swap against a
 /// missing record.
 fn stored_revision(conn: &rusqlite::Connection, key: &ResourceKey) -> Result<Revision, StoreError> {
     // SQLite integers are i64; revisions are u64 and never negative.

@@ -3,34 +3,34 @@
 
 #![cfg(feature = "store-contract")]
 
-use rhema_rsd::{MemoryStore, store_contract};
+use rhema_rsd::{VolatileStore, store_contract};
 
 #[test]
 fn load_missing_returns_none_for_the_memory_store() {
-    store_contract::load_missing_returns_none(&MemoryStore::new());
+    store_contract::load_missing_returns_none(&VolatileStore::new());
 }
 
 #[test]
 fn save_then_load_round_trips_for_the_memory_store() {
-    store_contract::save_then_load_round_trips(&MemoryStore::new());
+    store_contract::save_then_load_round_trips(&VolatileStore::new());
 }
 
 #[test]
 fn fresh_save_requires_absence_for_the_memory_store() {
-    store_contract::fresh_save_requires_absence(&MemoryStore::new());
+    store_contract::fresh_save_requires_absence(&VolatileStore::new());
 }
 
 #[test]
 fn cas_rejects_stale_revision_for_the_memory_store() {
-    store_contract::cas_rejects_stale_revision(&MemoryStore::new());
+    store_contract::cas_rejects_stale_revision(&VolatileStore::new());
 }
 
 #[test]
 fn keys_lists_all_recorded_keys_for_the_memory_store() {
-    store_contract::keys_lists_all_recorded_keys(&MemoryStore::new());
+    store_contract::keys_lists_all_recorded_keys(&VolatileStore::new());
 }
 
 #[test]
 fn the_memory_store_satisfies_the_whole_contract() {
-    store_contract::run_all(&MemoryStore::new());
+    store_contract::run_all(&VolatileStore::new());
 }

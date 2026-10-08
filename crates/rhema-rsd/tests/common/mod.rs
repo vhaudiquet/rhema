@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 pub use rhema_rsd::Event;
 
-use rhema_rsd::{Dispatcher, DispatcherConfig, FixedClock, MemoryStore, ResourceKey};
+use rhema_rsd::{Dispatcher, DispatcherConfig, FixedClock, ResourceKey, VolatileStore};
 
 /// Debounce window used across suites (milliseconds).
 pub const DEBOUNCE: u64 = 100;
@@ -40,7 +40,7 @@ pub fn setup_with(config: DispatcherConfig) -> (Arc<Dispatcher>, Arc<FixedClock>
     let dispatcher = Arc::new(Dispatcher::new(
         config,
         clock.clone(),
-        Arc::new(MemoryStore::new()),
+        Arc::new(VolatileStore::new()),
     ));
     (dispatcher, clock)
 }
