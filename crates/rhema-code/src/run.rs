@@ -15,8 +15,7 @@ use std::time::Duration;
 use anyhow::Context;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
-    PushKeyboardEnhancementFlags,
+    KeyEventKind, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
@@ -388,14 +387,23 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
 /// ignored so a restore attempt never panics (it runs in the panic hook).
 fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
+    // Each step writes on its own so one failure cannot skip the rest.
+    // The enhancement pop is the canonical bare `CSI < u`, written raw:
+    // crossterm's command emits the numbered `CSI <1u`, which a terminal
+    // may ignore — and a missed pop leaves the terminal encoding every
+    // key, the shell printing CSI-u garbage. Popping an empty stack is a
+    // no-op, so the second pop only guards a missed first.
+    use std::io::Write;
+    let _ = write!(stdout(), "\x1b[<u");
+    let _ = stdout().flush();
+    let _ = write!(stdout(), "\x1b[<u");
+    let _ = stdout().flush();
     let _ = crossterm::execute!(
         stdout(),
-        PopKeyboardEnhancementFlags,
         DisableBracketedPaste,
         DisableMouseCapture,
         LeaveAlternateScreen
     );
-    use std::io::Write;
     let _ = stdout().flush();
 }
 
