@@ -1,0 +1,127 @@
+/*
+ * The Jadeite tokens, dark theme — lifted token for token from
+ * crates/rhema-code/src/palette.rs `DARK` so the web claw reads as the
+ * same tool as the TUI. The ground is deliberately jade-tinted, not
+ * slate; saturated color stays on the accent and the status set.
+ */
+:root {
+  --ground: #0f1413;
+  --surface: #171d1b;
+  --elevated: #1f2624;
+  --sunken: #0a0f0e;
+  --border: #28312e;
+  --border-strong: #3d4844;
+  --text: #eef3f1;
+  --text2: #b9c6c1;
+  --text3: #87948f;
+  --accent: #35a882;
+  --accent-text: #64c9a3;
+  --on-accent: #07110d;
+  --running: #64c9a3;
+  --ok: #4fbf94;
+  --warn: #d9a643;
+  --error: #e4687a;
+  --info: #8fa6b8;
+
+  --mono: ui-monospace, 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo,
+    Consolas, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#__nuxt {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Section labels: the one repeated typographic voice across panels. */
+.label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text3);
+}
+
+button {
+  font: inherit;
+  color: var(--text);
+  background: var(--elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+input,
+select {
+  font: inherit;
+  color: var(--text);
+  background: var(--sunken);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 4px 8px;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 0;
+}
+
+input::placeholder {
+  color: var(--text3);
+}
+
+/* Banners: the single inline error/notice surface. Never toasts, never
+   console-only — claw down, 401, and stream drops all land here. */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--info);
+  border-radius: 3px;
+  background: var(--surface);
+  color: var(--text2);
+}
+
+.banner.error {
+  border-left-color: var(--error);
+  color: var(--text);
+}
+
+.banner.warn {
+  border-left-color: var(--warn);
+}
+
+.banner .banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

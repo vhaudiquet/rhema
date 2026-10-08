@@ -1,0 +1,22 @@
+{
+  "name": "rhema-claw-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web client for the rhema claw's /v1 HTTP surface — one consumer, the public API is the contract.",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt generate",
+    "preview": "nuxt preview",
+    "typecheck": "nuxt typecheck",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "nuxt": "^4.6.0",
+    "vue": "^3.5.43"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vue-tsc": "^3.1.4"
+  }
+}
