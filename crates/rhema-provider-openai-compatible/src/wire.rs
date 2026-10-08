@@ -281,6 +281,14 @@ pub struct WireUsage {
     /// Prompt cache accounting, when the server reports it.
     #[serde(default)]
     pub prompt_tokens_details: Option<WirePromptTokensDetails>,
+    /// DeepSeek names its KV-cache split at the top level: the prompt
+    /// subset served from the cache, and the subset that missed it. Both
+    /// are included in `prompt_tokens`.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u32>,
+    /// The prompt subset that missed the cache.
+    #[serde(default)]
+    pub prompt_cache_miss_tokens: Option<u32>,
 }
 
 /// The `prompt_tokens_details` object of a [`WireUsage`].
@@ -601,6 +609,7 @@ impl ChunkAssembler {
                 cached_input_tokens: usage
                     .prompt_tokens_details
                     .and_then(|details| details.cached_tokens)
+                    .or(usage.prompt_cache_hit_tokens)
                     .unwrap_or(0),
             };
         }
@@ -1173,6 +1182,27 @@ mod tests {
             )
             .expect("chunk feeds");
         assert_eq!(assembler.finish().stop_reason, StopReason::EndTurn);
+    }
+
+    #[test]
+    fn deepseeks_top_level_cache_split_maps_to_cached_tokens() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":2,",
+                    "\"prompt_cache_hit_tokens\":80,\"prompt_cache_miss_tokens\":20}}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk feeds");
+        let out = assembler.finish();
+
+        // DeepSeek names the KV-cache split at the top level; the cached
+        // subset is the hit side, still inside prompt_tokens.
+        assert_eq!(out.usage.input_tokens, 100);
+        assert_eq!(out.usage.cached_input_tokens, 80);
     }
 
     #[test]
