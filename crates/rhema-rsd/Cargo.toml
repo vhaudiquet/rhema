@@ -8,9 +8,13 @@ license.workspace = true
 authors.workspace = true
 
 [features]
+default = ["sqlite"]
 # The reusable Store-contract suite, for replay against secondary store
-# backends (the planned SQLite implementation); see `store_contract`.
+# backends; see `store_contract`.
 store-contract = []
+# The durable SQLite `Store` (spec §7's minimum viable store). Bundled:
+# no system sqlite is required, so the build stays self-contained.
+sqlite = ["dep:rusqlite"]
 
 [dependencies]
 # The RSD session wraps rhema-core's caller-owned session; checkpointing
@@ -21,6 +25,9 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Typed public errors
 thiserror = { workspace = true }
+
+# Durable dispatch state (feature `sqlite`): one row per resource key
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

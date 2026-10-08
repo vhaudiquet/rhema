@@ -101,8 +101,9 @@
 //! Dispatch state lives behind the [`Store`] trait: whole-record
 //! persistence with a compare-and-swap on the revision, ordered inbox,
 //! and durability before `save` returns. The bundled [`MemoryStore`] backs
-//! tests and in-process use; a durable SQLite implementation replays the
-//! exact behavioral suite via the `store-contract` feature's
+//! tests and in-process use; [`SqliteStore`] is the durable reference
+//! backend (spec §7, the default-on `sqlite` feature), and both replay
+//! the exact behavioral suite via the `store-contract` feature's
 //! [`store_contract`] module.
 //!
 //! Layout:
@@ -116,6 +117,7 @@
 //! - [`config`] — `DispatcherConfig`
 //! - [`store`] — the `Store` seam, `KeyRecord`, `LeaseRecord`
 //! - [`memory`] — the in-process `MemoryStore`
+//! - [`sqlite`] — the durable `SqliteStore` (`sqlite` feature)
 //! - [`dispatcher`] — the `Dispatcher` state machine
 //! - [`store_contract`] — replayable Store behavioral suite (`store-contract` feature)
 
@@ -131,6 +133,8 @@ pub mod key;
 pub mod lease;
 pub mod memory;
 pub mod session;
+#[cfg(feature = "sqlite")]
+pub mod sqlite;
 pub mod state;
 pub mod store;
 #[cfg(feature = "store-contract")]
@@ -145,5 +149,7 @@ pub use key::ResourceKey;
 pub use lease::{Lease, LeaseId};
 pub use memory::MemoryStore;
 pub use session::Session;
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteStore;
 pub use state::{IngestResult, KeyState, KeyStatus, Outcome, Revision};
 pub use store::{KeyRecord, LeaseRecord, Store};

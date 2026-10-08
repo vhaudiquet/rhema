@@ -1,19 +1,12 @@
 //! The replayable [`Store`] behavioral suite.
 //!
 //! Every function here is a plain assertion-based test body taking any
-//! `&dyn Store`; the bundled [`crate::MemoryStore`] runs them from this
-//! crate's own tests, and a second store implementation (the planned SQLite
-//! backend) replays the exact same suite by dev-dependending on `rhema-rsd`
-//! with `features = ["store-contract"]` and calling them from its own
-//! `#[test]`s:
-//!
-//! ```text
-//! #[test]
-//! fn sqlite_store_satisfies_the_contract() {
-//!     let store = SqliteStore::open(":memory:");
-//!     rhema_rsd::store_contract::run_all(&store);
-//! }
-//! ```
+//! `&dyn Store`; the bundled [`crate::MemoryStore`] and the durable
+//! [`crate::SqliteStore`] both replay the exact same suite from this
+//! crate's own tests, and any future store implementation can do the same
+//! by dev-dependending on `rhema-rsd` with
+//! `features = ["store-contract"]` and calling these from its own
+//! `#[test]`s.
 //!
 //! Each function uses its own key namespace so they compose on one store;
 //! `run_all` expects a fresh store and runs everything in order.

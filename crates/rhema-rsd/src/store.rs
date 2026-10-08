@@ -2,8 +2,9 @@
 //!
 //! The dispatcher reads and writes whole [`KeyRecord`]s through [`Store`].
 //! The trait is deliberately small so the bundled [`crate::MemoryStore`] and
-//! a future SQLite backend can share one behavioral contract, replayed by
-//! the `store-contract` feature's [`crate::store_contract`] suite.
+//! the durable [`crate::SqliteStore`] share one behavioral contract,
+//! replayed by the `store-contract` feature's [`crate::store_contract`]
+//! suite.
 
 use serde::{Deserialize, Serialize};
 

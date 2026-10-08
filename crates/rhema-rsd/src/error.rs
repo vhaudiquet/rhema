@@ -58,6 +58,10 @@ pub enum StoreError {
     /// Serializing or deserializing persisted state failed.
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    /// The store backend failed below the seam: a database engine error the
+    /// contract's vocabulary cannot express more precisely.
+    #[error("store backend failed: {0}")]
+    Backend(String),
 }
 
 /// Everything a [`crate::Dispatcher`] method can fail with.
