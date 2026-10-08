@@ -158,6 +158,57 @@ async fn a_base_system_with_a_skills_slot_places_the_table_there() {
 }
 
 #[tokio::test]
+async fn a_base_system_with_a_skill_block_renders_each_skill_through_it() {
+    let root = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(root.path()).unwrap();
+    let folder = root.path().join(".rhema").join("skills").join("local");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("SKILL.md"),
+        "---\ndescription: the local trigger\n---\nbody",
+    )
+    .unwrap();
+    let provider = recorder();
+    let config = CodingAgentConfig {
+        base_system: Some(
+            "{#skills}load {skill.name} from {skill.path} when {skill.description} applies\n{/skills}TAIL {workspace}"
+                .into(),
+        ),
+        ..CodingAgentConfig::new("mock-model", root.path())
+    };
+    let mut agent = CodingAgent::new(provider.clone(), config).unwrap();
+    let mut sink = NullSink;
+
+    agent
+        .turn("hi", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    let systems = provider.systems();
+    let system = systems[0].as_deref().expect("one system prompt recorded");
+    let skill_path = workspace
+        .join(".rhema")
+        .join("skills")
+        .join("local")
+        .join("SKILL.md");
+    assert!(
+        system.contains(&format!(
+            "load local from {} when the local trigger applies",
+            skill_path.display()
+        )),
+        "{system}"
+    );
+    assert!(
+        system.contains(&format!("TAIL {}", workspace.display())),
+        "{system}"
+    );
+    assert!(
+        !system.contains("Skills (name / trigger / file)"),
+        "a block counts as a slot — no default table appended: {system}"
+    );
+}
+
+#[tokio::test]
 async fn config_system_replaces_the_default() {
     let root = tempfile::tempdir().unwrap();
     let provider = recorder();
