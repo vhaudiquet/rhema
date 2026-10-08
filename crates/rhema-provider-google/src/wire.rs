@@ -14,6 +14,13 @@
 //!   the assembled message. Synthesized ids exist only to satisfy
 //!   rhema-core's `ToolCall.id`/`ToolResult.id` round-trip — Gemini ignores
 //!   them and matches responses by name.
+//! - Thinking models emit `thought` parts (thought summaries) ahead of the
+//!   `functionCall` parts they produced, and the API requires the calls'
+//!   `thoughtSignature` on replay. Both round-trip through
+//!   `ToolCall::provider_data`: the signature under `thoughtSignature`, and
+//!   the thought streamed immediately before the call under `thought`,
+//!   replayed as a `thought` part ahead of the call so the model continues
+//!   its reasoning. Thoughts with no following call stay stream-only.
 //! - `functionCall.args` must be a JSON object. Non-object history args are
 //!   wrapped as `{"_rhema_args": <original>}`; missing args become `{}`.
 //! - `functionResponse.response` must be a JSON object; a successful
@@ -75,7 +82,9 @@ pub struct WirePart {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// `true` on internal thought parts: they stream as
-    /// [`Event::ThinkingDelta`] and never map into the message.
+    /// [`Event::ThinkingDelta`], and only the thought that led to a
+    /// function call also maps into the message — riding the call's
+    /// `provider_data` so replay can put it back ahead of the call.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought: Option<bool>,
     /// Present on a function-call part.
@@ -309,6 +318,20 @@ pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, Provid
                 }),
                 Content::ToolCall(call) => {
                     call_names.insert(call.id.clone(), call.name.clone());
+                    // The call's thought replays first, in the position the
+                    // model generated it: reasoning, then the call.
+                    if let Some(thought) = call
+                        .provider_data
+                        .get("thought")
+                        .and_then(Value::as_str)
+                        .filter(|thought| !thought.is_empty())
+                    {
+                        parts.push(WirePart {
+                            text: Some(thought.to_owned()),
+                            thought: Some(true),
+                            ..WirePart::default()
+                        });
+                    }
                     parts.push(WirePart {
                         thought_signature: thought_signature(&call.provider_data),
                         function_call: Some(WireFunctionCall {
@@ -556,6 +579,9 @@ impl PartNormalizer {
 pub struct ChunkAssembler {
     normalizer: PartNormalizer,
     parts: Vec<NormalizedPart>,
+    /// The thought text streamed since the last part: claimed by the next
+    /// function call for replay, dropped once ordinary text resumes.
+    pending_thought: String,
     finish_reason: Option<String>,
     blocked: Option<String>,
     usage: Usage,
@@ -586,14 +612,36 @@ impl ChunkAssembler {
             if let Some(content) = candidate.content {
                 for part in &content.parts {
                     // Thought parts stream as reasoning deltas and never
-                    // join the assembled message (normalize drops them).
+                    // join the assembled message as text (normalize drops
+                    // them); the text also accumulates so the function call
+                    // it led to can replay it.
                     if part.thought == Some(true) {
                         if let Some(text) = part.text.as_deref().filter(|text| !text.is_empty()) {
                             sink.emit(Event::ThinkingDelta(text));
+                            self.pending_thought.push_str(text);
                         }
                         continue;
                     }
-                    if let Some(normalized) = self.normalizer.normalize(part) {
+                    if let Some(mut normalized) = self.normalizer.normalize(part) {
+                        match &mut normalized {
+                            // The call claims the thought streamed ahead of
+                            // it; the signature already in provider_data
+                            // keeps its slot.
+                            NormalizedPart::ToolCall(call) => {
+                                let thought = std::mem::take(&mut self.pending_thought);
+                                if !thought.is_empty() {
+                                    if call.provider_data.is_null() {
+                                        call.provider_data =
+                                            serde_json::json!({ "thought": thought });
+                                    } else if let Some(map) = call.provider_data.as_object_mut() {
+                                        map.insert("thought".into(), Value::String(thought));
+                                    }
+                                }
+                            }
+                            // A text response ends the thought's relevance:
+                            // only call-adjacent thoughts replay.
+                            NormalizedPart::Text(_) => self.pending_thought.clear(),
+                        }
                         normalized.emit(sink);
                         self.parts.push(normalized);
                     }
@@ -806,6 +854,41 @@ mod tests {
             body["contents"][1]["parts"][0]["functionResponse"]["name"],
             "list_dir"
         );
+    }
+
+    #[test]
+    fn assistant_thought_replays_from_provider_data() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolCall(ToolCall {
+                    id: "call_0".into(),
+                    name: "a".into(),
+                    args: json!({}),
+                    provider_data: json!({
+                        "thought": "I should check",
+                        "thoughtSignature": "sig"
+                    }),
+                })],
+            }],
+            tools: vec![],
+            params: ChatParams::new("gemini-2.5-flash"),
+        };
+
+        let json = serde_json::to_value(request_body(&req).expect("request maps"))
+            .expect("body serializes");
+        let parts = json["contents"][0]["parts"].as_array().expect("parts");
+
+        // Thought part first, then the call — matching what the model
+        // generated — and the signature still on the call part.
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0],
+            json!({ "text": "I should check", "thought": true })
+        );
+        assert_eq!(parts[1]["functionCall"]["name"], "a");
+        assert_eq!(parts[1]["thoughtSignature"], "sig");
     }
 
     #[test]
@@ -1185,6 +1268,45 @@ mod tests {
             vec![
                 "ThinkingDelta(\"thinking\")".to_owned(),
                 "TextDelta(\"answer\")".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn thought_before_a_function_call_is_kept_for_replay() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        assembler.push(
+            chunk(concat!(
+                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[",
+                "{\"text\":\"I should check\",\"thought\":true},",
+                "{\"functionCall\":{\"name\":\"a\",\"args\":{}},",
+                "\"thoughtSignature\":\"sig1\"}]}}]}"
+            )),
+            &mut sink,
+        );
+        let out = assembler.finish();
+
+        // The thought rides in the call's provider data next to the
+        // signature; it never joins the message as plain text.
+        assert_eq!(
+            out.message.content,
+            vec![Content::ToolCall(ToolCall {
+                id: "call_0".into(),
+                name: "a".into(),
+                args: json!({}),
+                provider_data: json!({
+                    "thought": "I should check",
+                    "thoughtSignature": "sig1"
+                }),
+            })]
+        );
+        assert_eq!(
+            sink.0,
+            vec![
+                "ThinkingDelta(\"I should check\")".to_owned(),
+                "ToolCallStart { id: \"call_0\", name: \"a\" }".to_owned(),
+                "ToolCallArgsDelta(\"{}\")".to_owned(),
             ]
         );
     }
