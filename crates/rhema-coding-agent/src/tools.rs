@@ -23,8 +23,9 @@ use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 
 use crate::approval::Approval;
 
-/// Command output streams are each cut at this size.
-const BASH_OUTPUT_LIMIT: usize = 10 * 1024;
+/// Command output streams are each cut at this size, keeping the tail:
+/// errors and final results live at the end of a command's output.
+const BASH_OUTPUT_LIMIT: usize = 50 * 1024;
 /// A command is killed after this long.
 const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -175,24 +176,22 @@ fn canonicalized(path: PathBuf) -> PathBuf {
     std::fs::canonicalize(&path).unwrap_or(path)
 }
 
-/// Lossy text of `bytes`, cut at `limit` on a char boundary with a notice
-/// appended when it was cut.
+/// Lossy text of `bytes`, tail-kept at `limit`: the elided head is
+/// counted in a marker, and the cut backs up to the next line start so
+/// the first kept row is whole.
 fn render_truncated(bytes: &[u8], limit: usize) -> String {
     if bytes.len() <= limit {
         return String::from_utf8_lossy(bytes).into_owned();
     }
-    let mut text = truncate_utf8_lossy(bytes, limit);
-    text.push_str("\n[truncated]");
-    text
-}
-
-fn truncate_utf8_lossy(bytes: &[u8], limit: usize) -> String {
-    // Back off over UTF-8 continuation bytes (10xxxxxx) to a char start.
-    let mut end = limit.min(bytes.len());
-    while end > 0 && (bytes[end] & 0xC0) == 0x80 {
-        end -= 1;
+    let mut cut = bytes.len() - limit;
+    // Land on a line start within the budget; a single line longer than
+    // the whole budget is kept partially, past the marker.
+    if let Some(pos) = bytes[..cut].iter().rposition(|&byte| byte == b'\n') {
+        cut = pos + 1;
     }
-    String::from_utf8_lossy(&bytes[..end]).into_owned()
+    let mut text = format!("[output truncated — {} bytes elided]\n", cut);
+    text.push_str(&String::from_utf8_lossy(&bytes[cut..]));
+    text
 }
 
 fn format_command_output(
@@ -216,9 +215,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn truncation_cuts_on_a_char_boundary() {
-        let bytes = "héllo".as_bytes();
-        assert_eq!(truncate_utf8_lossy(bytes, 2), "h");
-        assert_eq!(truncate_utf8_lossy(bytes, 3), "hé");
+    fn truncation_keeps_the_tail_and_counts_the_elided_head() {
+        let bytes = b"head line\nerror: the real failure\n".to_vec();
+        let text = render_truncated(&bytes, 10);
+        assert!(text.starts_with("[output truncated"), "{text}");
+        assert!(text.contains("error: the real failure"), "{text}");
+        // The cut lands on a line start: the first kept row is whole.
+        assert!(text.contains("\nhead") == false && text.contains("\nerror:"), "{text}");
+    }
+
+    #[test]
+    fn output_within_the_limit_passes_untouched() {
+        assert_eq!(render_truncated(b"clean\n", 10), "clean\n");
     }
 }

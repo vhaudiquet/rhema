@@ -151,8 +151,21 @@ async fn large_output_is_truncated_with_a_notice() {
     )
     .await;
     assert!(!result.is_error);
-    assert!(result.content.contains("[truncated]"), "{}", result.content);
+    assert!(
+        result.content.contains("[output truncated"),
+        "{}",
+        result.content
+    );
     assert!(result.content.len() < 64 * 1024);
+    // The elided head is counted exactly: the whole 64k minus the kept
+    // 50 KiB, aligned back to a line start.
+    assert!(
+        result
+            .content
+            .contains("[output truncated — 14336 bytes elided]"),
+        "{}",
+        result.content
+    );
 }
 
 #[tokio::test]
