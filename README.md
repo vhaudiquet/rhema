@@ -169,7 +169,12 @@ replay work natively for `deepseek-reasoner`). The input is validated with a
 real model-list call and stored in `~/.config/rhema/config.yaml` with
 `0600` permissions. Then pick a model from the live list (text chat
 models only — Google rows carry pricing and context window; just type
-to filter, arrows to move). A server exposing exactly one model
+to filter, arrows to move). The catalog spans every provider the
+profile holds credentials for, each row prefixed with its provider,
+and the filter matches provider names too — `openrouter` narrows the
+list to OpenRouter's whole catalog. Choosing a model from another
+provider switches the session's backend and the choice is stored.
+A server exposing exactly one model
 auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
 code in the palette's cyan, aligned tables); every tool call is a shell command,
