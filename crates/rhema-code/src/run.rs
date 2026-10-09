@@ -521,14 +521,16 @@ async fn event_loop(
 fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
     match effect {
         Effect::FetchModels(why) => {
-            let backend = match &why {
-                crate::events::FetchWhy::Login { backend } => Some(backend.clone()),
-                _ => app.backend.clone(),
+            // A login validates one provider; the catalogs otherwise span
+            // every provider the profile holds credentials for.
+            let backends = match &why {
+                crate::events::FetchWhy::Login { backend } => vec![backend.clone()],
+                _ => Backend::candidates_from_profile(&app.effective()),
             };
-            let Some(backend) = backend else {
+            if backends.is_empty() {
                 return;
-            };
-            spawn_model_fetch(backend, why, tx.clone());
+            }
+            spawn_model_fetch(backends, why, tx.clone());
         }
         Effect::StartTurn(input) => {
             let Some(agent) = app.agent.take() else {

@@ -132,12 +132,28 @@ pub fn spawn_turn(
 /// as login validation: a wrong key or a dead server yields the provider's
 /// error text.
 pub fn spawn_model_fetch(
-    backend: crate::app::Backend,
+    backends: Vec<crate::app::Backend>,
     why: FetchWhy,
     events: UnboundedSender<UiEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let result = backend.list_models().await;
+        // One task per provider, gathered as they land: a slow catalog
+        // cannot delay the others, and each reports its own failure so a
+        // dead provider never blanks the picker the live ones filled.
+        let mut set = tokio::task::JoinSet::new();
+        for backend in backends {
+            set.spawn(async move {
+                let provider = backend.config_name();
+                (provider, backend.list_models().await)
+            });
+        }
+        let mut result = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            if let Ok(entry) = joined {
+                result.push(entry);
+            }
+        }
+        result.sort_by_key(|(provider, _)| *provider);
         let _ = events.send(UiEvent::ModelsLoaded { why, result });
     })
 }

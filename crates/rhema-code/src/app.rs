@@ -127,7 +127,36 @@ impl Backend {
     /// profile has no usable credentials (a keyless google, openrouter,
     /// anthropic, or openai profile cannot serve turns).
     pub fn from_profile(profile: &rhema_config::Profile) -> Option<Backend> {
-        match profile.provider.as_deref().unwrap_or("google") {
+        Self::named(profile.provider.as_deref().unwrap_or("google"), profile)
+    }
+
+    /// Every backend the profile can serve: the active provider first —
+    /// its catalog is the session's own — then each other provider with
+    /// resolvable credentials, so a profile holding several logins picks
+    /// across providers. llama.cpp joins only when active: a URL is a
+    /// server address, not a login, and the default would probe a server
+    /// the profile never named.
+    pub fn candidates_from_profile(profile: &rhema_config::Profile) -> Vec<Backend> {
+        let active = profile.provider.as_deref().unwrap_or("google");
+        let mut candidates = Vec::new();
+        if let Some(backend) = Self::named(active, profile) {
+            candidates.push(backend);
+        }
+        for name in ["google", "openrouter", "anthropic", "openai", "deepseek"] {
+            if name == active {
+                continue;
+            }
+            if let Some(backend) = Self::named(name, profile) {
+                candidates.push(backend);
+            }
+        }
+        candidates
+    }
+
+    /// The backend for one provider's config name, `None` when the
+    /// profile carries no usable credentials for it.
+    fn named(provider: &str, profile: &rhema_config::Profile) -> Option<Backend> {
+        match provider {
             "llama-cpp" => Some(Backend::LlamaCpp {
                 url: profile.llama_cpp_url(),
                 api_key: profile.llama_cpp_api_key(),
@@ -283,8 +312,9 @@ pub struct App {
     pub session: Session,
     /// The current screen.
     pub screen: Screen,
-    /// Cached model list, shared with the picker when it opens.
-    pub models: Vec<GeminiModel>,
+    /// Cached model catalog, shared with the picker when it opens: every
+    /// logged-in provider's models, each tagged with its provider.
+    pub models: Vec<crate::screens::CatalogModel>,
     /// The agent; `None` while a turn runs (the turn task owns it).
     pub agent: Option<CodingAgent>,
     /// Whether a turn is in flight.
@@ -370,15 +400,7 @@ impl App {
             }
             (Some(_), None) => Screen::Picker(PickerScreen {
                 status: PickerStatus::Loading,
-                ..PickerScreen::new(
-                    Vec::new(),
-                    PickerPurpose::Initial,
-                    setup
-                        .backend
-                        .as_ref()
-                        .map(Backend::config_name)
-                        .unwrap_or("google"),
-                )
+                ..PickerScreen::new(Vec::new(), PickerPurpose::Initial)
             }),
             (None, _) => {
                 let profile_name = setup
@@ -760,8 +782,8 @@ impl App {
         };
         match routed {
             Routed::Login(LoginAction::Validate) => self.validate_login(),
-            Routed::Picker(PickerAction::Choose(id)) => {
-                self.choose_model(&id);
+            Routed::Picker(PickerAction::Choose { provider, id }) => {
+                self.choose_model(provider, &id);
                 Vec::new()
             }
             Routed::Picker(PickerAction::Quit) => {
@@ -963,14 +985,7 @@ impl App {
         }
         self.screen = Screen::Picker(PickerScreen {
             status,
-            ..PickerScreen::new(
-                self.models.clone(),
-                PickerPurpose::FromChat,
-                self.backend
-                    .as_ref()
-                    .map(Backend::config_name)
-                    .unwrap_or("google"),
-            )
+            ..PickerScreen::new(self.models.clone(), PickerPurpose::FromChat)
         });
         effects
     }
@@ -1010,7 +1025,11 @@ impl App {
 
     /// Routes a model-list result to the login screen, the open picker,
     /// or the cache.
-    fn on_models_loaded(&mut self, why: FetchWhy, result: Result<Vec<GeminiModel>, String>) {
+    fn on_models_loaded(
+        &mut self,
+        why: FetchWhy,
+        result: Vec<(&'static str, Result<Vec<GeminiModel>, String>)>,
+    ) {
         match why {
             FetchWhy::Login { backend } => {
                 let Screen::Login(login) = &mut self.screen else {
@@ -1020,8 +1039,10 @@ impl App {
                 // knows the way back.
                 let from_chat = login.purpose == LoginPurpose::FromChat;
                 let tab = login.profile.clone();
-                match result {
-                    Ok(models) => {
+                // The login fetch validates one provider: its result is
+                // the catalog's only entry.
+                match result.into_iter().next().map(|(_, result)| result) {
+                    Some(Ok(models)) => {
                         self.config
                             .set_for_profile(Some(&tab), |settings| match &backend {
                                 Backend::Google { api_key } => {
@@ -1057,13 +1078,20 @@ impl App {
                         self.session_profile = Some(tab);
                         self.backend = Some(backend.clone());
                         self.provider = Some(backend.provider());
-                        self.models = models.clone();
+                        let provider = backend.config_name();
+                        self.models = models
+                            .iter()
+                            .map(|model| crate::screens::CatalogModel {
+                                provider,
+                                model: model.clone(),
+                            })
+                            .collect();
                         // A single-model server (plain llama-server rather
                         // than a router) has nothing to pick: take it and
                         // go straight to chat.
                         if models.len() == 1 {
                             let id = models[0].id.clone();
-                            self.choose_model(&id);
+                            self.choose_model(provider, &id);
                             return;
                         }
                         let purpose = if from_chat {
@@ -1071,32 +1099,57 @@ impl App {
                         } else {
                             PickerPurpose::Initial
                         };
-                        let provider = backend.config_name();
-                        self.screen = Screen::Picker(PickerScreen::new(models, purpose, provider));
+                        self.screen =
+                            Screen::Picker(PickerScreen::new(self.models.clone(), purpose));
                     }
-                    Err(message) => login.on_validated(&Err(message)),
+                    Some(Err(message)) => login.on_validated(&Err(message)),
+                    // The dispatch always spawns one backend per login;
+                    // an empty result cannot arrive.
+                    None => login.on_validated(&Err("no provider answered".to_owned())),
                 }
             }
             FetchWhy::Bootstrap | FetchWhy::Refresh => {
-                self.models = result.clone().unwrap_or_default();
+                // One result per queried provider: successes merge into the
+                // catalog; a total failure is the picker's error, and a
+                // partial one is named in its footer — a missing provider
+                // must never look like an empty one.
+                let (catalogs, failed): (Vec<_>, Vec<_>) =
+                    result.into_iter().partition(|(_, result)| result.is_ok());
+                let models: Vec<crate::screens::CatalogModel> = catalogs
+                    .iter()
+                    .flat_map(|(provider, result)| {
+                        let models = result.as_deref().unwrap_or_default();
+                        models
+                            .iter()
+                            .map(move |model| crate::screens::CatalogModel {
+                                provider,
+                                model: model.clone(),
+                            })
+                    })
+                    .collect();
+                self.models = models;
                 if let Screen::Picker(picker) = &mut self.screen {
-                    match result {
-                        Ok(models) => {
-                            picker.set_models(models);
-                            picker.status = PickerStatus::Ready;
-                            // The single-model failover applies at startup
-                            // too: a server with one offering has nothing
-                            // to pick. Refresh (ctrl-p) always shows the
-                            // list instead.
-                            if picker.purpose == PickerPurpose::Initial && picker.models.len() == 1
-                            {
-                                // Nothing follows in this arm: the chat
-                                // screen choose_model installed stands.
-                                let id = picker.models[0].id.clone();
-                                self.choose_model(&id);
-                            }
+                    if catalogs.is_empty() {
+                        let message = failed
+                            .into_iter()
+                            .next()
+                            .and_then(|(_, result)| result.err())
+                            .unwrap_or_else(|| "no provider answered".to_owned());
+                        picker.status = PickerStatus::Error(message);
+                    } else {
+                        picker.set_models(self.models.clone());
+                        picker.failed = failed.into_iter().map(|(provider, _)| provider).collect();
+                        picker.status = PickerStatus::Ready;
+                        // The single-model failover applies at startup
+                        // too: a server with one offering has nothing
+                        // to pick. Refresh (ctrl-p) always shows the
+                        // list instead.
+                        if picker.purpose == PickerPurpose::Initial && picker.models.len() == 1 {
+                            // Nothing follows in this arm: the chat
+                            // screen choose_model installed stands.
+                            let entry = picker.models[0].clone();
+                            self.choose_model(entry.provider, &entry.model.id);
                         }
-                        Err(message) => picker.status = PickerStatus::Error(message),
                     }
                 }
             }
@@ -1107,7 +1160,7 @@ impl App {
     /// agent, carrying the current session over. The old agent is only
     /// dropped once the new one built, so a rebuild failure cannot strand
     /// the chat.
-    fn choose_model(&mut self, id: &str) {
+    fn choose_model(&mut self, provider: &'static str, id: &str) {
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -1115,13 +1168,28 @@ impl App {
         // The write follows the session's profile, not the startup flag:
         // after a mid-session /profile the pick must land where effective()
         // reads it back from — profiles never inherit each other's model.
+        // The provider moves with the model: a pick from another login's
+        // catalog switches the backend this session rides on.
         let profile = self.session_profile.as_deref();
-        self.config
-            .set_for_profile(profile, |settings| settings.model = Some(id.to_owned()));
+        self.config.set_for_profile(profile, |settings| {
+            settings.provider = Some(provider.to_owned());
+            settings.model = Some(id.to_owned());
+        });
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
             return;
         }
+        let backend = match Backend::from_profile(&self.effective()) {
+            Some(backend) => backend,
+            None => {
+                self.error = Some(format!(
+                    "no usable credentials for {provider} — /login first"
+                ));
+                return;
+            }
+        };
+        self.backend = Some(backend.clone());
+        self.provider = Some(backend.provider());
         match self.build_agent(session) {
             Ok(agent) => {
                 // The screen is still the picker here; its purpose says
@@ -1129,7 +1197,7 @@ impl App {
                 let from_chat = matches!(&self.screen, Screen::Picker(picker) if picker.purpose == PickerPurpose::FromChat);
                 if from_chat {
                     self.transcript
-                        .push_notice(&format!("model switched to {id}"));
+                        .push_notice(&format!("model switched to {provider}/{id}"));
                 }
                 self.agent = Some(agent);
                 self.screen = Screen::Chat;
@@ -1320,20 +1388,22 @@ impl App {
     fn current_model_pricing(&self) -> Option<rhema_provider_google::Pricing> {
         let effective = self.effective();
         let model = effective.model.as_deref()?;
+        let active = self.backend.as_ref().map(Backend::config_name);
         self.models
             .iter()
-            .find(|entry| entry.id == model)
-            .and_then(|entry| entry.pricing())
+            .find(|entry| entry.model.id == model && Some(entry.provider) == active)
+            .and_then(|entry| entry.model.pricing())
     }
 
     /// The context window of the current model, when known.
     pub fn current_context_window(&self) -> Option<u64> {
         let effective = self.effective();
         let model = effective.model.as_deref()?;
+        let active = self.backend.as_ref().map(Backend::config_name);
         self.models
             .iter()
-            .find(|entry| entry.id == model)
-            .and_then(|entry| entry.input_token_limit)
+            .find(|entry| entry.model.id == model && Some(entry.provider) == active)
+            .and_then(|entry| entry.model.input_token_limit)
     }
 
     /// The context footprint the footer shows: the last turn's reported
@@ -1451,6 +1521,23 @@ mod tests {
         vec![model("m-b"), model("m-a")]
     }
 
+    /// A `ModelsLoaded` result of one provider's catalog, the shape the
+    /// fetch task reports per queried backend.
+    fn loaded(
+        provider: &'static str,
+        models: Vec<GeminiModel>,
+    ) -> Vec<(&'static str, Result<Vec<GeminiModel>, String>)> {
+        vec![(provider, Ok(models))]
+    }
+
+    /// A `ModelsLoaded` result of one provider's failure.
+    fn failed(
+        provider: &'static str,
+        message: &str,
+    ) -> Vec<(&'static str, Result<Vec<GeminiModel>, String>)> {
+        vec![(provider, Err(message.to_owned()))]
+    }
+
     /// A model whose id is in the pricing table, for cost-math tests.
     fn priced_model(id: &str) -> GeminiModel {
         model(id)
@@ -1536,7 +1623,7 @@ mod tests {
         );
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         match &h.app.screen {
             Screen::Picker(picker) => {
@@ -1581,7 +1668,7 @@ mod tests {
                     api_key: "secret".into(),
                 },
             },
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         match &h.app.screen {
             Screen::Picker(picker) => assert_eq!(picker.models.len(), 2),
@@ -1639,17 +1726,20 @@ mod tests {
                     api_key: None,
                 },
             },
-            result: Ok(vec![llama_model("qwen3-8b"), llama_model("qwen3-32b")]),
+            result: loaded(
+                "llama-cpp",
+                vec![llama_model("qwen3-8b"), llama_model("qwen3-32b")],
+            ),
         });
         // Router mode: several models land in the picker with no
         // metadata, and the rows carry the llama.cpp prefix — not google's.
         match &h.app.screen {
             Screen::Picker(picker) => {
-                assert_eq!(picker.provider, "llama-cpp");
+                assert!(picker.models.iter().all(|m| m.provider == "llama-cpp"));
                 assert_eq!(picker.models.len(), 2);
-                let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+                let ids: Vec<&str> = picker.models.iter().map(|m| m.model.id.as_str()).collect();
                 assert_eq!(ids, ["qwen3-32b", "qwen3-8b"]);
-                assert!(picker.models[0].input_token_limit.is_none());
+                assert!(picker.models[0].model.input_token_limit.is_none());
             }
             _ => panic!("expected the picker after a successful llama login"),
         }
@@ -1697,19 +1787,22 @@ mod tests {
                     api_key: "sk-ant-01".into(),
                 },
             },
-            result: Ok(vec![
-                llama_model("claude-sonnet-4-5"),
-                llama_model("claude-opus-4-1"),
-            ]),
+            result: loaded(
+                "anthropic",
+                vec![
+                    llama_model("claude-sonnet-4-5"),
+                    llama_model("claude-opus-4-1"),
+                ],
+            ),
         });
         match &h.app.screen {
             Screen::Picker(picker) => {
-                assert_eq!(picker.provider, "anthropic");
+                assert!(picker.models.iter().all(|m| m.provider == "anthropic"));
                 assert_eq!(picker.models.len(), 2);
                 // The Anthropic listing carries identity only: no
                 // context, no pricing.
-                assert!(picker.models[0].input_token_limit.is_none());
-                assert!(picker.models[0].pricing.is_none());
+                assert!(picker.models[0].model.input_token_limit.is_none());
+                assert!(picker.models[0].model.pricing.is_none());
             }
             _ => panic!("expected the picker after a successful anthropic login"),
         }
@@ -1751,7 +1844,7 @@ mod tests {
                     api_key: "sk-proj-01".into(),
                 },
             },
-            result: Err("openai-compatible api error (HTTP 401): denied".into()),
+            result: failed("openai", "openai-compatible api error (HTTP 401): denied"),
         });
         match &h.app.screen {
             Screen::Login(login) => assert!(matches!(login.status, LoginStatus::Error(_))),
@@ -1806,11 +1899,125 @@ mod tests {
     }
 
     #[test]
+    fn candidates_span_every_provider_the_profile_holds_keys_for() {
+        let mut profile = rhema_config::Profile {
+            provider: Some("openrouter".to_owned()),
+            google_api_key: Some("g".into()),
+            openrouter_api_key: Some("o".into()),
+            ..rhema_config::Profile::default()
+        };
+        let names: Vec<&str> = Backend::candidates_from_profile(&profile)
+            .iter()
+            .map(Backend::config_name)
+            .collect();
+        assert_eq!(names, ["openrouter", "google"], "the active provider leads");
+
+        // llama.cpp stays out: a stored URL is a server address, not a
+        // login, and it only joins as the active provider.
+        profile.llama_cpp_url = Some("http://box:8080".into());
+        let names: Vec<&str> = Backend::candidates_from_profile(&profile)
+            .iter()
+            .map(Backend::config_name)
+            .collect();
+        assert_eq!(names, ["openrouter", "google"]);
+        profile.provider = Some("llama-cpp".into());
+        let names: Vec<&str> = Backend::candidates_from_profile(&profile)
+            .iter()
+            .map(Backend::config_name)
+            .collect();
+        assert_eq!(names, ["llama-cpp", "google", "openrouter"]);
+    }
+
+    #[test]
+    fn refresh_merges_every_providers_catalog_and_names_the_failures() {
+        let mut h = harness(Some("g"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: vec![
+                ("google", Ok(models())),
+                ("openrouter", Ok(vec![llama_model("openrouter/auto")])),
+            ],
+        });
+        h.app.on_key(ctrl('p'));
+        // A refresh where google's catalog fails: the openrouter one keeps
+        // the picker alive, and the footer names the gap.
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Refresh,
+            result: vec![
+                ("openrouter", Ok(vec![llama_model("openrouter/auto")])),
+                ("google", Err("gemini api error (HTTP 403): denied".into())),
+            ],
+        });
+        match &h.app.screen {
+            Screen::Picker(picker) => {
+                assert_eq!(picker.status, PickerStatus::Ready);
+                assert_eq!(picker.failed, ["google"]);
+                assert_eq!(picker.models.len(), 1);
+                assert_eq!(picker.models[0].provider, "openrouter");
+            }
+            _ => panic!("expected the picker"),
+        }
+    }
+
+    #[test]
+    fn a_total_catalog_failure_is_the_pickers_error() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        h.app.on_key(ctrl('p'));
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Refresh,
+            result: failed("google", "gemini api error (HTTP 403): denied"),
+        });
+        match &h.app.screen {
+            Screen::Picker(picker) => {
+                assert!(matches!(picker.status, PickerStatus::Error(_)));
+            }
+            _ => panic!("expected the picker"),
+        }
+    }
+
+    #[test]
+    fn choosing_from_another_provider_switches_the_backend() {
+        let mut h = harness(Some("g"), Some("m-a"), Session::default());
+        h.app.config.set_for_profile(Some("personal"), |settings| {
+            settings.openrouter_api_key = Some("o".into());
+        });
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: vec![
+                ("google", Ok(models())),
+                ("openrouter", Ok(vec![llama_model("openrouter/auto")])),
+            ],
+        });
+        // Filter by provider, pick the openrouter model.
+        h.app.on_key(ctrl('p'));
+        for c in "openrouter".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert!(effects.is_empty(), "a pick rebuilds inline: {effects:?}");
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(matches!(
+            h.app.backend,
+            Some(Backend::OpenRouter { ref api_key }) if api_key == "o"
+        ));
+        let effective = h.store.load().unwrap().effective(None);
+        assert_eq!(effective.provider.as_deref(), Some("openrouter"));
+        assert_eq!(effective.model.as_deref(), Some("openrouter/auto"));
+        assert!(h.app.transcript.lines().contains(&Line::Notice(
+            "model switched to openrouter/openrouter/auto".into()
+        )));
+    }
+
+    #[test]
     fn turn_costs_accumulate_from_the_model_pricing() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         // models() carries a 1M-token limit; give the fixture a price by
         // matching a priced id instead.
@@ -1818,7 +2025,7 @@ mod tests {
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
             // gemini-3.8-flash prices at $0.75/M in and $3.75/M out.
-            result: Ok(vec![priced_model("gemini-3.8-flash")]),
+            result: loaded("google", vec![priced_model("gemini-3.8-flash")]),
         });
         h.app.on_key(key(KeyCode::Char('a')));
         let effects = h.app.on_key(key(KeyCode::Enter));
@@ -1859,7 +2066,7 @@ mod tests {
                     api_key: None,
                 },
             },
-            result: Ok(vec![llama_model("qwen3-8b")]),
+            result: loaded("llama-cpp", vec![llama_model("qwen3-8b")]),
         });
         // Exactly one model: no picker, straight to chat on that model.
         assert!(matches!(h.app.screen, Screen::Chat));
@@ -1883,7 +2090,7 @@ mod tests {
                     api_key: "bad-key".into(),
                 },
             },
-            result: Err("gemini api error (HTTP 403): denied".into()),
+            result: failed("google", "gemini api error (HTTP 403): denied"),
         });
         match &h.app.screen {
             Screen::Login(login) => assert_eq!(
@@ -1906,7 +2113,7 @@ mod tests {
         let mut h = harness(Some("k"), None, Session::default());
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         let effects = h.app.on_key(key(KeyCode::Enter));
         assert!(effects.is_empty());
@@ -1927,7 +2134,7 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), session);
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         // Warm cache: no refetch effect.
         assert!(h.app.on_key(ctrl('p')).is_empty());
@@ -1952,7 +2159,7 @@ mod tests {
             h.app
                 .transcript
                 .lines()
-                .contains(&Line::Notice("model switched to m-b".into()))
+                .contains(&Line::Notice("model switched to google/m-b".into()))
         );
     }
 
@@ -1961,7 +2168,7 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         h.app.on_key(key(KeyCode::Esc));
         assert!(h.app.confirm_quit);
@@ -2195,7 +2402,7 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         // An empty input never submits.
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
@@ -2297,7 +2504,7 @@ mod tests {
                     api_key: "work-key".into(),
                 },
             },
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         // The session now runs on work, and the key landed in its section.
         assert_eq!(h.app.session_profile.as_deref(), Some("work"));
@@ -2711,7 +2918,7 @@ mod tests {
         crate::commands::dispatch(&mut h.app, "/model");
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Refresh,
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         // Enter picks the first row (the picker sorts by id): "m-a".
         h.app.on_key(key(KeyCode::Enter));
@@ -2823,7 +3030,7 @@ mod tests {
                     api_key: "k".into(),
                 },
             },
-            result: Ok(models()),
+            result: loaded("google", models()),
         });
         match &h.app.screen {
             Screen::Picker(picker) => {

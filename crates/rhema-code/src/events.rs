@@ -118,8 +118,9 @@ pub enum UiEvent {
     ModelsLoaded {
         /// What the fetch was for; the app routes the result accordingly.
         why: FetchWhy,
-        /// The fetched models, or the provider's error text.
-        result: Result<Vec<GeminiModel>, String>,
+        /// Per provider queried: its config name with the fetched models
+        /// or the provider's error text.
+        result: Vec<(&'static str, Result<Vec<GeminiModel>, String>)>,
     },
     /// A gated tool call is waiting for the user's answer. The turn task
     /// blocks until the UI answers (see `crate::approval`).

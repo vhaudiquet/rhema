@@ -230,7 +230,7 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
     let filtered = picker.filtered();
     let rows: Vec<ListItem> = filtered
         .iter()
-        .map(|model| ListItem::new(model_row(picker.provider, model, theme)))
+        .map(|entry| ListItem::new(model_row(entry.provider, &entry.model, theme)))
         .collect();
     let mut state = ListState::default();
     state.select(Some(picker.selected));
@@ -245,16 +245,23 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
         &mut state,
     );
 
-    let footer = Line::from(vec![
+    let mut footer = vec![
         Span::raw("filter: "),
         Span::raw(picker.filter.clone()).bold(),
         Span::raw("▌").bold(),
         Span::raw("  "),
         Span::raw(format!("{} models", filtered.len())).fg(theme.text3),
-        Span::raw("  "),
-        Span::raw("type to filter · enter choose · esc clear/quit").fg(theme.text3),
-    ]);
-    frame.render_widget(Paragraph::new(footer), footer_area);
+    ];
+    // A provider whose fetch failed while others answered: its absence
+    // from the list must read as an error, not as an empty catalog.
+    if !picker.failed.is_empty() {
+        footer.push(
+            Span::raw(format!("  · no models from {}", picker.failed.join(", "))).fg(theme.warn),
+        );
+    }
+    footer.push(Span::raw("  "));
+    footer.push(Span::raw("type to filter · enter choose · esc clear/quit").fg(theme.text3));
+    frame.render_widget(Paragraph::new(Line::from(footer)), footer_area);
 }
 
 /// The profile picker: same frame as the model picker, rows in the
@@ -1213,7 +1220,7 @@ fn render_confirm_quit(frame: &mut Frame, theme: &Theme) {
 mod tests {
     use super::*;
     use crate::palette::DARK;
-    use crate::screens::{PickerPurpose, PickerScreen};
+    use crate::screens::{CatalogModel, PickerPurpose, PickerScreen};
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_provider_google::GeminiModel;
 
@@ -1234,9 +1241,14 @@ mod tests {
     #[test]
     fn the_selected_picker_row_shows_the_marker() {
         let picker = PickerScreen::new(
-            vec![model("model-a"), model("model-b")],
+            vec![model("model-a"), model("model-b")]
+                .into_iter()
+                .map(|model| CatalogModel {
+                    provider: "google",
+                    model,
+                })
+                .collect(),
             PickerPurpose::Initial,
-            "google",
         );
         assert_eq!(picker.selected, 0);
 
@@ -1259,12 +1271,44 @@ mod tests {
         );
     }
 
+    /// A provider whose fetch failed while others answered is named in
+    /// the footer: a missing catalog must not read as an empty one.
+    #[test]
+    fn the_footer_names_the_failed_providers() {
+        let mut picker = PickerScreen::new(
+            vec![model("model-a")]
+                .into_iter()
+                .map(|model| CatalogModel {
+                    provider: "google",
+                    model,
+                })
+                .collect(),
+            PickerPurpose::Initial,
+        );
+        picker.failed = vec!["openrouter"];
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal
+            .draw(|frame| render_picker(frame, &picker, &DARK))
+            .unwrap();
+        let footer: String = (0..80)
+            .map(|x| terminal.backend().buffer()[(x, 10)].symbol())
+            .collect();
+        assert!(footer.contains("no models from openrouter"), "{footer}");
+    }
+
     /// A selection scrolled to the bottom of a long list must land on the
     /// last model row, never on the footer row underneath the list.
     #[test]
     fn the_marker_never_lands_on_the_footer_row() {
-        let models: Vec<GeminiModel> = (0..20).map(|i| model(&format!("model-{i:02}"))).collect();
-        let mut picker = PickerScreen::new(models, PickerPurpose::Initial, "google");
+        let models: Vec<CatalogModel> = (0..20)
+            .map(|i| model(&format!("model-{i:02}")))
+            .map(|model| CatalogModel {
+                provider: "google",
+                model,
+            })
+            .collect();
+        let mut picker = PickerScreen::new(models, PickerPurpose::Initial);
         picker.selected = 19;
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
@@ -1365,7 +1409,7 @@ mod scroll_tests {
     use ratatui::text::Line;
     use std::collections::BTreeMap;
 
-    use crate::screens::ChatState;
+    use crate::screens::{CatalogModel, ChatState};
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_core::Usage;
@@ -1503,14 +1547,17 @@ mod scroll_tests {
         // A named level rides with the thinking glyph, and the gauge
         // fills with the window's usage.
         app.options.thinking = rhema_core::request::ThinkingEffort::High;
-        app.models.push(GeminiModel {
-            id: "m".into(),
-            display_name: "m".into(),
-            description: String::new(),
-            input_token_limit: Some(1_048_576),
-            output_token_limit: None,
-            generation_methods: vec!["generateContent".to_owned()],
-            pricing: None,
+        app.models.push(CatalogModel {
+            provider: "google",
+            model: GeminiModel {
+                id: "m".into(),
+                display_name: "m".into(),
+                description: String::new(),
+                input_token_limit: Some(1_048_576),
+                output_token_limit: None,
+                generation_methods: vec!["generateContent".to_owned()],
+                pricing: None,
+            },
         });
         app.usage = Some(Usage {
             input_tokens: 131_072,

@@ -585,8 +585,14 @@ pub enum PickerPurpose {
 pub enum PickerAction {
     /// Nothing to do.
     None,
-    /// The highlighted model was chosen.
-    Choose(String),
+    /// The highlighted model was chosen, with its provider's config name:
+    /// a pick from another provider switches the session's backend.
+    Choose {
+        /// The provider's config name.
+        provider: &'static str,
+        /// The model's id.
+        id: String,
+    },
     /// Leave the app.
     Quit,
     /// Return to the chat.
@@ -595,14 +601,27 @@ pub enum PickerAction {
     Retry,
 }
 
-/// The model picker: text chat models sorted by id, a type-to-filter
-/// prompt, and one highlighted row.
+/// One pickable model, tagged with its provider's config name: the row
+/// prefix, the filter's provider match, and the switch target on choose.
+/// A profile may hold several logins, so a catalog spans providers.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogModel {
+    /// The provider's config name (`google`, `openrouter`, ...).
+    pub provider: &'static str,
+    /// The normalized model.
+    pub model: GeminiModel,
+}
+
+/// The model picker: text chat models across every logged-in provider,
+/// sorted by provider then id, a type-to-filter prompt, and one
+/// highlighted row.
 #[derive(Debug)]
 pub struct PickerScreen {
-    /// The models to pick from (text chat only), sorted by id.
-    pub models: Vec<GeminiModel>,
-    /// The provider the models come from; the row prefix.
-    pub provider: &'static str,
+    /// The models to pick from (text chat only).
+    pub models: Vec<CatalogModel>,
+    /// Providers whose fetch failed while others succeeded; the footer
+    /// names them so a missing catalog is never silent.
+    pub failed: Vec<&'static str>,
     /// The filter text; printable keys extend it without any prefix.
     pub filter: String,
     /// Index into the filtered list of the highlighted row.
@@ -614,18 +633,14 @@ pub struct PickerScreen {
 }
 
 impl PickerScreen {
-    /// A picker over `models` (sorted by id, text chat models only),
-    /// initially unfiltered.
-    pub fn new(
-        mut models: Vec<GeminiModel>,
-        purpose: PickerPurpose,
-        provider: &'static str,
-    ) -> Self {
-        models.retain(Self::usable);
-        models.sort_by(|a, b| a.id.cmp(&b.id));
+    /// A picker over `models` (text chat models only, sorted by provider
+    /// then id), initially unfiltered.
+    pub fn new(mut models: Vec<CatalogModel>, purpose: PickerPurpose) -> Self {
+        models.retain(|entry| Self::usable(&entry.model));
+        models.sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
         Self {
             models,
-            provider,
+            failed: Vec::new(),
             filter: String::new(),
             selected: 0,
             status: PickerStatus::Ready,
@@ -640,24 +655,26 @@ impl PickerScreen {
 
     /// Replaces the model list (scoped and re-sorted) and clamps the
     /// selection.
-    pub fn set_models(&mut self, models: Vec<GeminiModel>) {
+    pub fn set_models(&mut self, models: Vec<CatalogModel>) {
         let mut models = models;
-        models.retain(Self::usable);
+        models.retain(|entry| Self::usable(&entry.model));
         self.models = models;
-        self.models.sort_by(|a, b| a.id.cmp(&b.id));
+        self.models
+            .sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
         self.clamp_selection();
     }
 
-    /// The models matching the filter: case-insensitive substring on id or
-    /// display name, in the sorted order.
-    pub fn filtered(&self) -> Vec<&GeminiModel> {
+    /// The models matching the filter: case-insensitive substring on the
+    /// provider's name, id, or display name, in the sorted order.
+    pub fn filtered(&self) -> Vec<&CatalogModel> {
         let needle = self.filter.to_lowercase();
         self.models
             .iter()
-            .filter(|model| {
+            .filter(|entry| {
                 needle.is_empty()
-                    || model.id.to_lowercase().contains(&needle)
-                    || model.display_name.to_lowercase().contains(&needle)
+                    || entry.provider.contains(&needle)
+                    || entry.model.id.to_lowercase().contains(&needle)
+                    || entry.model.display_name.to_lowercase().contains(&needle)
             })
             .collect()
     }
@@ -734,7 +751,10 @@ impl PickerScreen {
             return PickerAction::None;
         }
         match self.filtered().get(self.selected) {
-            Some(model) => PickerAction::Choose(model.id.clone()),
+            Some(entry) => PickerAction::Choose {
+                provider: entry.provider,
+                id: entry.model.id.clone(),
+            },
             None => PickerAction::None,
         }
     }
@@ -1232,45 +1252,62 @@ mod tests {
 
     // --- Picker ---
 
+    fn catalog(provider: &'static str, models: Vec<GeminiModel>) -> Vec<CatalogModel> {
+        models
+            .into_iter()
+            .map(|model| CatalogModel { provider, model })
+            .collect()
+    }
+
     fn picker() -> PickerScreen {
         PickerScreen::new(
-            vec![
-                model("gemini-3.8-pro", "Gemini 3.8 Pro", true),
-                model("gemini-3.8-flash", "Gemini 3.8 Flash", true),
-                // Non-text families are dropped by the picker itself.
-                model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", true),
-                model("veo-3.1-generate-preview", "Veo 3.1", true),
-            ],
+            catalog(
+                "google",
+                vec![
+                    model("gemini-3.8-pro", "Gemini 3.8 Pro", true),
+                    model("gemini-3.8-flash", "Gemini 3.8 Flash", true),
+                    // Non-text families are dropped by the picker itself.
+                    model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", true),
+                    model("veo-3.1-generate-preview", "Veo 3.1", true),
+                ],
+            ),
             PickerPurpose::Initial,
-            "google",
         )
     }
 
     #[test]
     fn picker_sorts_by_id() {
         let picker = picker();
-        let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = picker.models.iter().map(|m| m.model.id.as_str()).collect();
         assert_eq!(ids, ["gemini-3.8-flash", "gemini-3.8-pro"]);
     }
 
     #[test]
     fn non_text_models_are_dropped_from_the_list() {
         let picker = picker();
-        let ids: Vec<&str> = picker.models.iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = picker.models.iter().map(|m| m.model.id.as_str()).collect();
         assert!(!ids.contains(&"gemini-3.8-flash-tts"));
         assert!(!ids.contains(&"veo-3.1-generate-preview"));
-        assert_eq!(picker.provider, "google");
+        assert!(picker.models.iter().all(|m| m.provider == "google"));
     }
 
     #[test]
     fn picker_filter_matches_id_or_display_name_case_insensitively() {
         let mut picker = picker();
         picker.filter = "FLASH".into();
-        let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|m| m.model.id.as_str())
+            .collect();
         assert_eq!(ids, ["gemini-3.8-flash"]);
 
         picker.filter = "3.8 pro".into();
-        let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|m| m.model.id.as_str())
+            .collect();
         assert_eq!(ids, ["gemini-3.8-pro"]);
 
         picker.filter = "zzz".into();
@@ -1286,7 +1323,11 @@ mod tests {
         );
         picker.handle_key(key(KeyCode::Char('R')));
         assert_eq!(picker.filter, "pR");
-        let ids: Vec<&str> = picker.filtered().iter().map(|m| m.id.as_str()).collect();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|m| m.model.id.as_str())
+            .collect();
         assert_eq!(ids, ["gemini-3.8-pro"]);
     }
 
@@ -1298,8 +1339,55 @@ mod tests {
         }
         assert_eq!(
             picker.handle_key(key(KeyCode::Enter)),
-            PickerAction::Choose("gemini-3.8-pro".into())
+            PickerAction::Choose {
+                provider: "google",
+                id: "gemini-3.8-pro".into(),
+            }
         );
+    }
+
+    #[test]
+    fn the_filter_matches_the_provider_and_groups_are_sorted() {
+        let mut picker = PickerScreen::new(
+            catalog(
+                "openrouter",
+                vec![model("openrouter/auto", "OpenRouter Auto", true)],
+            )
+            .into_iter()
+            .chain(catalog(
+                "google",
+                vec![model("gemini-3.8-flash", "Gemini 3.8 Flash", true)],
+            ))
+            .collect(),
+            PickerPurpose::Initial,
+        );
+
+        // Unfiltered, the catalog groups by provider: google's rows first,
+        // each prefixed with its own provider.
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|entry| entry.model.id.as_str())
+            .collect();
+        assert_eq!(ids, ["gemini-3.8-flash", "openrouter/auto"]);
+
+        // The provider's name is itself a filter: one word picks its
+        // whole catalog, whatever the model ids are.
+        picker.filter = "openrouter".into();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|entry| entry.model.id.as_str())
+            .collect();
+        assert_eq!(ids, ["openrouter/auto"]);
+
+        picker.filter = "google".into();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|entry| entry.model.id.as_str())
+            .collect();
+        assert_eq!(ids, ["gemini-3.8-flash"]);
     }
 
     #[test]
@@ -1352,7 +1440,7 @@ mod tests {
     fn picker_esc_quits_initially_and_returns_to_chat_mid_session() {
         let mut picker = picker();
         assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::Quit);
-        let mut picker = PickerScreen::new(Vec::new(), PickerPurpose::FromChat, "google");
+        let mut picker = PickerScreen::new(Vec::new(), PickerPurpose::FromChat);
         assert_eq!(
             picker.handle_key(key(KeyCode::Esc)),
             PickerAction::BackToChat
@@ -1378,9 +1466,9 @@ mod tests {
     fn picker_set_models_replaces_and_clamps() {
         let mut picker = picker();
         picker.selected = 2;
-        picker.set_models(vec![model("a-model", "A", true)]);
+        picker.set_models(catalog("google", vec![model("a-model", "A", true)]));
         assert_eq!(picker.selected, 0);
-        assert_eq!(picker.models[0].id, "a-model");
+        assert_eq!(picker.models[0].model.id, "a-model");
     }
 
     #[test]
