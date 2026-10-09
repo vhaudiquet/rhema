@@ -41,7 +41,6 @@
 //!   [`rhema_core::ModelRequest`] / SSE events and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
 //!   mapping onto `GeminiModel`
-//! - [`stream`] — the SSE byte-stream decoder
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
@@ -49,9 +48,7 @@
 #![deny(missing_docs)]
 
 pub mod provider;
-pub mod stream;
 pub mod wire;
 
 pub use provider::{ANTHROPIC_VERSION, AnthropicProvider, DEFAULT_BASE_URL};
-pub use stream::SseDecoder;
 pub use wire::{ChunkAssembler, DEFAULT_MAX_TOKENS, MessagesRequest, StreamEvent};

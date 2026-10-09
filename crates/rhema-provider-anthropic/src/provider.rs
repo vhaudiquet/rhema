@@ -27,7 +27,8 @@ use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 use rhema_provider_google::GeminiModel;
 
-use crate::stream::SseDecoder;
+use rhema_provider::SseDecoder;
+
 use crate::wire::{ChunkAssembler, StreamEvent, WireErrorBody, WireModelsPage};
 
 /// The production Anthropic API base.
@@ -74,7 +75,8 @@ impl AnthropicProvider {
     }
 
     /// Every model the key can see, following `has_more`/`after_id`
-    /// pagination until the list is exhausted.
+    /// pagination until the list is exhausted. Anthropic's listing is
+    /// text chat models only, so there is nothing to filter.
     pub async fn list_models(&self) -> Result<Vec<GeminiModel>, ProviderError> {
         let mut models = Vec::new();
         let mut after_id: Option<String> = None;
