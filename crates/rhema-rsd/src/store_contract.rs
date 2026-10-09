@@ -70,6 +70,8 @@ pub fn save_then_load_round_trips(store: &dyn Store) {
                     "resume here",
                 )],
                 driver_state: json!({ "opaque": 1 }),
+
+                cost_usd: 0.0,
             },
             plan: Some(json!(["step one", "step two"])),
             artifact_ref: Some("worktrees/issue-142".into()),

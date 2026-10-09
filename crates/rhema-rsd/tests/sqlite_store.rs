@@ -77,6 +77,7 @@ fn records_survive_a_reopen() {
         core: rhema_core::Session {
             history: vec![Message::text(Role::User, "half the work is done")],
             driver_state: serde_json::json!({ "attempt": 2 }),
+            cost_usd: 0.0,
         },
         plan: Some(serde_json::json!(["step one"])),
         artifact_ref: Some("worktrees/issue-142".into()),

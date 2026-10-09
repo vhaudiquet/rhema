@@ -19,6 +19,12 @@ pub struct Session {
     /// it empty; the RSD driver stores key/plan/artifact_ref here (or keeps
     /// its own table). Opaque on purpose.
     pub driver_state: serde_json::Value,
+    /// The USD the session has cost so far, accumulated by the frontend
+    /// from per-turn usage and its model pricing; the engine never reads
+    /// it. Serde-defaulted, so files written before the field existed
+    /// load as free.
+    #[serde(default)]
+    pub cost_usd: f64,
 }
 
 #[cfg(test)]
@@ -34,9 +40,39 @@ mod tests {
                 content: vec![Content::Text("fix the test".into())],
             }],
             driver_state: serde_json::json!({ "key": "interactive:main" }),
+            cost_usd: 0.0,
         };
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(back, session);
+    }
+
+    #[test]
+    fn a_session_written_before_cost_existed_loads_as_free() {
+        // A resumed conversation must not wear a phantom cost: the same
+        // shape minus the field is what the first format wrote.
+        let session = Session {
+            history: vec![Message::text(Role::User, "hi")],
+            ..Session::default()
+        };
+        let mut value = serde_json::to_value(&session).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("cost_usd")
+            .expect("the field was written");
+        let session: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(session.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn the_cost_round_trips_through_the_saved_format() {
+        let session = Session {
+            cost_usd: 4.275,
+            ..Session::default()
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.cost_usd, 4.275);
     }
 }

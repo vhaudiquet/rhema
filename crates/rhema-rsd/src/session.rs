@@ -76,6 +76,7 @@ mod tests {
                     },
                 ],
                 driver_state: serde_json::json!({ "attempt": 2 }),
+                cost_usd: 0.0,
             },
             plan: Some(serde_json::json!(["reproduce", "fix", "verify"])),
             artifact_ref: Some("worktrees/issue-142".into()),
