@@ -964,7 +964,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if app.options.thinking != rhema_core::request::ThinkingEffort::Default {
         parts.push(
             Span::raw(format!(
-                " · {} {}",
+                " · {}  {}",
                 app.icons.thinking,
                 app.options.thinking.as_str()
             ))
@@ -1579,7 +1579,7 @@ mod scroll_tests {
             cached_input_tokens: 0,
         });
         let screen = draw(&mut app);
-        assert!(screen.contains("⁂ high"), "{screen}");
+        assert!(screen.contains("⁂  high"), "{screen}");
         // 131_072 of 1_048_576 is ~12%: the emptiest quarter.
         assert!(screen.contains("◔ 131k/1.0M"), "{screen}");
     }
