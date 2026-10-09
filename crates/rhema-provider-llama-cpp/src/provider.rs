@@ -17,7 +17,8 @@ use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 
-use crate::stream::SseDecoder;
+use rhema_provider::SseDecoder;
+
 use crate::wire::{ChatCompletionChunk, ChunkAssembler, LlamaModel, WireErrorBody};
 
 /// The `llama-server` default listen address.

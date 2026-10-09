@@ -9,6 +9,8 @@ authors.workspace = true
 
 [dependencies]
 rhema-core = { path = "../rhema-core" }
+# The shared SSE decoder
+rhema-provider = { path = "../rhema-provider" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
