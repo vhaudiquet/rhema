@@ -28,9 +28,14 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # markdown templates
 minijinja = { version = "3", default-features = false, features = ["serde", "debug"] }
 
-# Local crossterm with modifyOtherKeys (CSI 27;…;…~) parsing — Ghostty's
-# default shift+enter sequence, which crossterm 0.29 drops. Backed by the
-# commit on the modify-other-keys branch of ~/Documents/contrib/crossterm;
-# delete this section to return to the crates.io release.
+# Local crossterm with the two key patches the TUI leans on (branch
+# modify-other-keys of ~/Documents/contrib/crossterm; delete this section
+# to return to the crates.io release):
+# - modifyOtherKeys parsing (CSI 27;…;…~) — Ghostty's default shift+enter
+#   sequence, which crossterm 0.29 drops;
+# - kitty associated text (the `;text` tail of CSI u) decoded into the
+#   key code — without it, every AltGr character and dead key is lost,
+#   since an AltGr key's codepoint stays its base key (`@` arrives as
+#   `à`) and the composed character rides only in the text field.
 [patch.crates-io]
 crossterm = { path = "../../contrib/crossterm" }

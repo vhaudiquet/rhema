@@ -382,6 +382,13 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // keep shifted letters correct; terminals without the protocol
     // ignore the push, and newlines keep working through alt-enter and
     // ctrl-j.
+    // Associated text is not optional here: all-keys mode alone strips
+    // text from the stream, and an AltGr key's codepoint is its base
+    // key — `@` on AZERTY (AltGr+0) arrives as `à` plus Ctrl+Alt. Only
+    // the associated-text field names the composed character, so a
+    // text-driven reader without it loses every AltGr character and
+    // dead key. The parser decoding it lives in the patched crossterm
+    // (see [patch.crates-io] in the workspace Cargo.toml).
     // The flags are pushed after the alternate screen is entered and
     // popped before it is left: the protocol's lifetime is paired with
     // the screen it was pushed on, and a terminal keeping per-screen
@@ -393,6 +400,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
                 | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ASSOCIATED_TEXT
         ),
         EnableMouseCapture,
         EnableBracketedPaste
