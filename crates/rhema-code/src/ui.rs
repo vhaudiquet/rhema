@@ -1745,6 +1745,47 @@ mod scroll_tests {
         );
     }
 
+    /// Typing `/model ` must raise the model palette over the input:
+    /// the rows come from the cached catalog, and tab completes into it.
+    #[test]
+    fn the_model_palette_renders_above_the_input() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        fn key(code: KeyCode) -> crossterm::event::KeyEvent {
+            crossterm::event::KeyEvent::new(code, KeyModifiers::empty())
+        }
+        let mut app = chat_app();
+        app.on_event(crate::events::UiEvent::ModelsLoaded {
+            why: crate::events::FetchWhy::Bootstrap,
+            result: vec![(
+                "google",
+                Ok(vec![GeminiModel {
+                    id: "gemini-3.8-flash".into(),
+                    display_name: "Gemini 3.8 Flash".into(),
+                    description: String::new(),
+                    input_token_limit: Some(1_048_576),
+                    output_token_limit: None,
+                    generation_methods: vec!["generateContent".into()],
+                    pricing: None,
+                }]),
+            )],
+        });
+        assert!(!app.models.is_empty(), "the catalog is cached");
+        for c in "/model ".chars() {
+            app.chat.handle_key(key(KeyCode::Char(c)), &app.models);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(
+            screen.contains("google/gemini-3.8-flash"),
+            "the model row is on screen: {screen}"
+        );
+    }
+
     #[test]
     fn the_palette_window_scrolls_with_the_selection() {
         use crossterm::event::{KeyCode, KeyModifiers};
