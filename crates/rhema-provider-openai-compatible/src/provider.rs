@@ -29,7 +29,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider_google::GeminiModel;
+use rhema_provider_google::{GeminiModel, Pricing};
 
 use crate::stream::SseDecoder;
 use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody};
@@ -109,7 +109,65 @@ impl OpenAiCompatibleProvider {
             .json()
             .await
             .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
-        Ok(crate::wire::normalize_models(&page))
+        let mut models = crate::wire::normalize_models(&page);
+        if self.base_url.contains(DEEPSEEK_HOST) {
+            decorate_deepseek(&mut models);
+        }
+        Ok(models)
+    }
+}
+
+/// The api.deepseek.com host — the one endpoint this adapter decorates
+/// with a published catalog, because their `/models` serves ids alone.
+const DEEPSEEK_HOST: &str = "api.deepseek.com";
+
+/// One row of DeepSeek's published catalog: context window, output
+/// ceiling, and the standard per-MTok rates — cached input, uncached
+/// input, output; off-peak halves every rate. The numbers move with
+/// DeepSeek's price list (api-docs.deepseek.com/quick_start/pricing,
+/// fetched 2026-10-10); the endpoint serves none of them.
+struct DeepSeekFacts {
+    id: &'static str,
+    context: u64,
+    output: u64,
+    cached_input_per_mtok: f64,
+    input_per_mtok: f64,
+    output_per_mtok: f64,
+}
+
+const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
+    DeepSeekFacts {
+        id: "deepseek-flash",
+        context: 1_048_576,
+        output: 393_216,
+        cached_input_per_mtok: 0.006,
+        input_per_mtok: 0.30,
+        output_per_mtok: 1.20,
+    },
+    DeepSeekFacts {
+        id: "deepseek-v4-pro",
+        context: 1_048_576,
+        output: 393_216,
+        cached_input_per_mtok: 0.044,
+        input_per_mtok: 1.32,
+        output_per_mtok: 3.96,
+    },
+];
+
+/// Fills DeepSeek's published facts into a listing: ids naming a catalog
+/// row gain their context window and pricing, everything else passes
+/// through untouched — unknown models simply show no facts.
+fn decorate_deepseek(models: &mut [GeminiModel]) {
+    for model in models {
+        if let Some(row) = DEEPSEEK_CATALOG.iter().find(|row| row.id == model.id) {
+            model.input_token_limit = Some(row.context);
+            model.output_token_limit = Some(row.output);
+            model.pricing = Some(Pricing {
+                input_per_mtok: row.input_per_mtok,
+                output_per_mtok: row.output_per_mtok,
+                cached_input_per_mtok: Some(row.cached_input_per_mtok),
+            });
+        }
     }
 }
 
@@ -211,5 +269,42 @@ impl ModelProvider for OpenAiCompatibleProvider {
             feed_chunk(&payload, &mut assembler, sink)?;
         }
         Ok(assembler.finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::normalize_models;
+
+    #[test]
+    fn deepseek_models_carry_the_published_facts() {
+        let page = serde_json::json!({
+            "data": [
+                { "id": "deepseek-flash" },
+                { "id": "deepseek-v4-pro" },
+                { "id": "some-local-model", "context_length": 8192 }
+            ]
+        });
+        let mut models = normalize_models(&page);
+        assert!(models.iter().all(|model| model.pricing.is_none()));
+        assert!(models[2].input_token_limit == Some(8192));
+
+        decorate_deepseek(&mut models);
+        let flash = &models[0];
+        assert_eq!(flash.input_token_limit, Some(1_048_576));
+        assert_eq!(flash.output_token_limit, Some(393_216));
+        let pricing = flash.pricing.expect("flash is priced");
+        assert_eq!(pricing.input_per_mtok, 0.30);
+        assert_eq!(pricing.output_per_mtok, 1.20);
+        assert_eq!(pricing.cached_input_per_mtok, Some(0.006));
+
+        let pro = &models[1];
+        assert_eq!(pro.pricing.expect("pro is priced").input_per_mtok, 1.32);
+
+        // The server's own facts win: a decorated listing leaves unknown
+        // models exactly as the endpoint described them.
+        assert_eq!(models[2].input_token_limit, Some(8192));
+        assert!(models[2].pricing.is_none());
     }
 }

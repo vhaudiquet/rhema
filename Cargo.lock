@@ -2146,6 +2146,7 @@ dependencies = [
  "rhema-config",
  "rhema-core",
  "rhema-forge-agent",
+ "rhema-memory",
  "rhema-provider-anthropic",
  "rhema-provider-google",
  "rhema-provider-llama-cpp",
