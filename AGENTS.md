@@ -46,6 +46,8 @@ Rules:
     (`src/engine.rs`)
   - `mock` — `MockProvider` (`src/mock.rs`, `mock` feature)
   - `tests` — integration suites under `crates/rhema-core/tests/`
+  - `rhema-provider` — the adapter-family base: the `ModelCard` catalog
+    row, `Pricing`, and the SSE decoder (`crates/rhema-provider/`)
   - `google` — the Gemini provider adapter (`crates/rhema-provider-google/`)
   - `llama-cpp` — the llama.cpp server adapter (`crates/rhema-provider-llama-cpp/`)
   - `openrouter` — the OpenRouter adapter (`crates/rhema-provider-openrouter/`)

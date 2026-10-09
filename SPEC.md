@@ -236,6 +236,7 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
 - **`run_turn` home** — core convenience vs sibling crate.
 - **Provider naming** — `ModelProvider` aligned to the framework spec (chosen) vs shorter `Llm`.
 - **Whether `ToolContext` is created by the driver or the engine** — driver, so permissions/cwd are fixed before the step.
+- ~~**Where the adapters' shared catalog types live**~~ — **decided:** `rhema-provider`, the adapter-family base crate: `ModelCard` (the normalized listing row), `Pricing`, and the `SseDecoder`. What varies per backend stays in the adapter — each owns its text-chat filter over its own ids and bakes its prices into the rows it hands out, so `list_models` only ever returns models a coding agent can drive. No adapter depends on another.
 
 ---
 

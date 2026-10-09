@@ -22,13 +22,17 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   - `Event` / `EventSink` — streaming deltas and step lifecycle events
   - `run_turn` — the provided coding-agent driver (~15 lines, not the primitive)
   - `MockProvider` — scripted offline provider, behind the `mock` feature
+- `rhema-provider` — the adapters' shared base: `ModelCard` (the
+  normalized catalog row), `Pricing`, and the SSE decoder; each adapter
+  filters its own catalog down to the text chat models it can drive
 - `rhema-provider-google` — Gemini adapter: streaming SSE, native function
   calling, live model listing; `GoogleProvider::new(api_key)` implements
   `ModelProvider`
 - `rhema-provider-llama-cpp` — llama.cpp `llama-server` adapter (OpenAI-
   compatible streaming chat completions): server URL, optional bearer key
-- `rhema-provider-openrouter` — OpenRouter adapter: the full catalog with
-  per-model pricing and context lengths, streaming completions by API key
+- `rhema-provider-openrouter` — OpenRouter adapter: the catalog's text
+  chat models with per-model pricing and context lengths, streaming
+  completions by API key
 - `rhema-provider-anthropic` — Anthropic Messages API adapter: streaming
   SSE, native tool use, live model listing; `AnthropicProvider::new(api_key)`
   implements `ModelProvider`
