@@ -237,7 +237,7 @@ Commands: `/help`, `/clear` or
 `/new` (fresh session), `/resume`, `/skills`, `/system` (the system
 prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
-The footer's badges are plain-Unicode icons — `✻` names the thinking
+The footer's badges are plain-Unicode icons — `⁂` names the thinking
 level, and the context gauge (`◔◑◕●`) fills with the window so the fill
 is readable at a glance. Terminals carrying a Nerd Font can switch to
 the brain and database glyphs with `--icons nerd` or `icons: nerd` in

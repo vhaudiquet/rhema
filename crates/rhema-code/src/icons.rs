@@ -12,16 +12,17 @@ pub struct Icons {
     pub context: fn(fraction: f64) -> &'static str,
 }
 
-/// The plain set: every glyph renders in any terminal font.
+/// The plain set: every glyph renders in any terminal font. The thinking
+/// badge is the typographic asterism — a break for reflection.
 pub const UNICODE: Icons = Icons {
-    thinking: "✻",
+    thinking: "⁂",
     context: unicode_gauge,
 };
 
 /// The Nerd Font set: FontAwesome brain and database — needs a patched
 /// font installed, or the badges read as tofu.
 pub const NERD: Icons = Icons {
-    thinking: "\u{f26d}",
+    thinking: "\u{f5dc}",
     context: nerd_gauge,
 };
 
@@ -93,7 +94,7 @@ mod tests {
         assert_eq!(Flavor::parse(" nerd "), Some(Flavor::Nerd));
         assert_eq!(Flavor::parse("emoji"), None);
         assert_eq!(Flavor::default(), Flavor::Unicode);
-        assert_eq!(Flavor::Nerd.set().thinking, "\u{f26d}");
-        assert_eq!(Flavor::Unicode.set().thinking, "✻");
+        assert_eq!(Flavor::Nerd.set().thinking, "\u{f5dc}");
+        assert_eq!(Flavor::Unicode.set().thinking, "⁂");
     }
 }

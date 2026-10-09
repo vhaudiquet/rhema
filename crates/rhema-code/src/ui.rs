@@ -1552,7 +1552,7 @@ mod scroll_tests {
                 })
                 .collect::<String>()
         };
-        assert!(!draw(&mut app).contains("✻ high"), "absent at default");
+        assert!(!draw(&mut app).contains("⁂ high"), "absent at default");
         assert!(
             draw(&mut app).contains("◔ 0"),
             "the empty gauge still shows"
@@ -1579,7 +1579,7 @@ mod scroll_tests {
             cached_input_tokens: 0,
         });
         let screen = draw(&mut app);
-        assert!(screen.contains("✻ high"), "{screen}");
+        assert!(screen.contains("⁂ high"), "{screen}");
         // 131_072 of 1_048_576 is ~12%: the emptiest quarter.
         assert!(screen.contains("◔ 131k/1.0M"), "{screen}");
     }
