@@ -8,7 +8,8 @@
 //! rhema-core [`Event`](rhema_core::Event)s and assembled into a
 //! [`ModelOutput`](rhema_core::ModelOutput). `GET {base}/models` lists the
 //! server's models as [`GeminiModel`](rhema_provider_google::GeminiModel)
-//! rows — the shared normalized model type. This is the home for "other
+//! rows — the shared normalized model type, text chat models only. This is
+//! the home for "other
 //! base URLs": any server speaking the dialect (OpenAI itself, vLLM, LM
 //! Studio, a proxy) is addressed by its full versioned base, e.g.
 //! `https://api.openai.com/v1` or a local server's `/v1`. The wire mapping
@@ -44,7 +45,6 @@
 //!   [`rhema_core::ModelRequest`] / SSE chunks and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
 //!   listing mapping onto `GeminiModel`
-//! - [`stream`] — the SSE byte-stream decoder
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
@@ -52,9 +52,7 @@
 #![deny(missing_docs)]
 
 pub mod provider;
-pub mod stream;
 pub mod wire;
 
 pub use provider::{DEFAULT_BASE_URL, OpenAiCompatibleProvider};
-pub use stream::SseDecoder;
 pub use wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler};

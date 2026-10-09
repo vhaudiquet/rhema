@@ -31,8 +31,9 @@ use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 use rhema_provider_google::{GeminiModel, Pricing};
 
-use crate::stream::SseDecoder;
-use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody};
+use rhema_provider::SseDecoder;
+
+use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody, is_text};
 
 /// The production OpenAI API base, version segment included.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -86,9 +87,10 @@ impl OpenAiCompatibleProvider {
         self
     }
 
-    /// The models the server can serve (`GET {base}/models` → `data[].id`,
-    /// plus whatever metadata the entry carries). Sparse entries are the
-    /// norm on generic servers; see [`crate::wire::normalize_models`].
+    /// The text chat models the server can serve (`GET {base}/models` →
+    /// `data[].id`, plus whatever metadata the entry carries). Sparse
+    /// entries are the norm on generic servers; see
+    /// [`crate::wire::normalize_models`].
     pub async fn list_models(&self) -> Result<Vec<GeminiModel>, ProviderError> {
         let response = self
             .http
@@ -110,6 +112,7 @@ impl OpenAiCompatibleProvider {
             .await
             .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
         let mut models = crate::wire::normalize_models(&page);
+        models.retain(is_text);
         if self.base_url.contains(DEEPSEEK_HOST) {
             decorate_deepseek(&mut models);
         }

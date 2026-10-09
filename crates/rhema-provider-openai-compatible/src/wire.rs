@@ -379,6 +379,24 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<GeminiModel> {
         .collect()
 }
 
+/// Whether the model is a text chat model. A generic server serves
+/// whatever is loaded into it — embedding, reranking, and speech models
+/// behind the same `/models` page as the chat models — and only the ids
+/// tell them apart; those are excluded.
+pub fn is_text(model: &GeminiModel) -> bool {
+    const NON_TEXT: [&str; 8] = [
+        "embed",
+        "rerank",
+        "whisper",
+        "tts",
+        "asr",
+        "audio",
+        "transcribe",
+        "moderation",
+    ];
+    !NON_TEXT.iter().any(|marker| model.id.contains(marker))
+}
+
 // --- Mapping: ModelRequest -> wire ---
 
 /// Builds the chat-completions request body for `req`. The model is passed
@@ -1486,6 +1504,28 @@ mod tests {
         assert_eq!(models[1].id, "local-model");
         assert_eq!(models[1].display_name, "Local");
         assert_eq!(models[1].input_token_limit, Some(32_768));
+    }
+
+    #[test]
+    fn non_text_modalities_are_excluded_by_id() {
+        let text = |id: &str| {
+            is_text(&GeminiModel {
+                id: id.to_owned(),
+                display_name: String::new(),
+                description: String::new(),
+                input_token_limit: None,
+                output_token_limit: None,
+                generation_methods: vec!["generateContent".to_owned()],
+                pricing: None,
+            })
+        };
+        // Generic servers load embedding, reranking, and speech models
+        // behind the same listing as the chat models.
+        assert!(!text("text-embedding-3-large"));
+        assert!(!text("bge-reranker-v2-m3"));
+        assert!(!text("Systran/faster-whisper-large-v3"));
+        assert!(text("gpt-4o-mini"));
+        assert!(text("qwen2.5-coder-7b-instruct"));
     }
 
     #[test]
