@@ -1,0 +1,12 @@
+[package]
+name = "rhema-provider"
+description = "Shared base of the rhema provider adapters: model card, pricing, SSE decoding"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The card and the price record round-trip through stored catalogs
+serde = { workspace = true }
