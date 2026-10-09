@@ -389,7 +389,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
 
     // Wrapping is done here rather than by Paragraph so the row count is
     // exact: the scroll offset is expressed in rendered rows.
-    let width = inner.width as usize;
+    let width = inner.width.saturating_sub(2) as usize;
     // The banner is the conversation's first content, not chrome: it
     // scrolls away with the history and shares the transcript background.
     // One mark, one word — the model and keys live in the footer and /help.
@@ -447,15 +447,16 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
                     }
                 } else if let transcript::Line::User(text) = other {
                     // A multi-line prompt renders as the lines it is:
-                    // a raw \n inside one row's spans would vanish.
+                    // a raw \n inside one row's spans would vanish. The
+                    // prompt glyph marks only the first row; the rest
+                    // speak for themselves.
                     for (index, segment) in text.split('\n').enumerate() {
-                        // The wrap pass normalizes whitespace runs, so
-                        // the continuation marker is a glyph, not spaces.
-                        let marker = if index == 0 { "❯ " } else { "⋮ " };
-                        lines.push(Line::from(vec![
-                            Span::raw(marker).fg(theme.text3),
-                            Span::raw(segment.to_owned()),
-                        ]));
+                        let mut spans = Vec::new();
+                        if index == 0 {
+                            spans.push(Span::raw("❯ ").fg(theme.text3));
+                        }
+                        spans.push(Span::raw(segment.to_owned()));
+                        lines.push(Line::from(spans));
                     }
                 } else if let transcript::Line::ToolCall { args, ok, code, .. } = other {
                     if name_is_bash(other) {
@@ -992,7 +993,11 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let width = inner.width.saturating_sub(2) as usize;
+    // The full inner width: `input_layout` subtracts the marker gutter
+    // itself, and `input_rows` sizes the box from the same border-minus-
+    // gutter width. Wrapping narrower here than there would clip the last
+    // row under the box until the next keystroke grew it.
+    let width = inner.width as usize;
     let prompt = "❯ ";
     // The layout is the render's source of truth: text rows and chip
     // rows interleaved exactly as the anchors sit in the input.
@@ -1024,10 +1029,12 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     if !app.running {
         let (cursor_row, cursor_col) = cursor_at.unwrap_or((0, 0));
         // The prompt and the continuation indent are both two cells,
-        // and only rows carrying one shift the cursor by them.
+        // and only rows carrying one shift the cursor by them. A cursor
+        // past a full row's last cell clamps onto it — there is no
+        // column beyond the box.
         let marker = u16::from(layout[cursor_row].marker);
         frame.set_cursor_position(Position {
-            x: inner.x + marker * 2 + cursor_col as u16,
+            x: (inner.x + marker * 2 + cursor_col as u16).min(inner.right().saturating_sub(1)),
             y: inner.y + (cursor_row - first) as u16,
         });
     }
@@ -1909,8 +1916,8 @@ mod scroll_tests {
             "first line keeps the prompt: {rows:?}"
         );
         assert!(
-            rows.contains(&" ⋮ beta".to_owned()) && rows.contains(&" ⋮ gamma".to_owned()),
-            "continuation lines keep their break: {rows:?}"
+            rows.contains(&" beta".to_owned()) && rows.contains(&" gamma".to_owned()),
+            "continuation lines keep their break, bare: {rows:?}"
         );
     }
 
@@ -1993,6 +2000,32 @@ mod scroll_tests {
         assert!(
             input_rows(&long, &[], 40, &DARK) > 3,
             "one wrapped line, taller box"
+        );
+    }
+
+    #[test]
+    fn the_input_box_grows_exactly_when_the_render_wraps() {
+        // The height math and the render must wrap at the same width. A
+        // prompt one or two cells past the render's wrap point used to
+        // reserve a one-row box and clip its tail — cursor and text
+        // hidden below — until further typing pushed past the height
+        // math's own wrap point.
+        let mut app = chat_app();
+        // 36 chars: one row by the height math's wrap (36), two by the
+        // render's old, narrower one (34).
+        let prompt = format!("{} tail", "a".repeat(31));
+        app.chat.insert_str(&prompt);
+
+        let backend = TestBackend::new(40, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(
+            screen.contains("tail"),
+            "the whole prompt is visible: {screen}"
         );
     }
 

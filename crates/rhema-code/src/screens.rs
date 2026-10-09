@@ -952,7 +952,12 @@ impl ChatState {
             self.insert_newline();
             return ChatAction::None;
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // AltGr lands as CONTROL|ALT on most terminals outside the kitty
+        // protocol: a printable char carrying both is composed text, not
+        // a combo — on French AZERTY, `@` is AltGr+0.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !(key.modifiers.contains(KeyModifiers::ALT) && matches!(key.code, KeyCode::Char(_)))
+        {
             return ChatAction::None;
         }
         // Shift-enter reports as a distinct key only under the kitty
@@ -1444,6 +1449,22 @@ mod tests {
             chat.handle_key(key(KeyCode::Enter)),
             ChatAction::Submit("x\n\n".into())
         );
+    }
+
+    #[test]
+    fn altgr_composed_characters_insert_as_text() {
+        // Outside the kitty protocol, AltGr reports CONTROL|ALT: on
+        // French AZERTY, `@` is AltGr+0 and used to be swallowed as an
+        // inert Ctrl combo.
+        let mut chat = ChatState::new();
+        chat.handle_key(KeyEvent::new(
+            KeyCode::Char('@'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
+        assert_eq!(chat.input, "@");
+        // Plain Ctrl combos stay inert.
+        chat.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert_eq!(chat.input, "@");
     }
 
     #[test]

@@ -837,7 +837,11 @@ impl App {
             }
             return Vec::new();
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Plain Ctrl combos only: with Alt also held the key is AltGr
+        // composing a character, which the input already took.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
             // Other Ctrl combos (including Ctrl-P mid-turn) are inert.
             if key.code == KeyCode::Char('p') && !self.running {
                 return self.open_picker();
