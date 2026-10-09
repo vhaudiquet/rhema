@@ -25,10 +25,10 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
+use rhema_provider::SseDecoder;
 use rhema_provider_google::GeminiModel;
 
-use crate::stream::SseDecoder;
-use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody, WireModelsPage};
+use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody, WireModelsPage, is_text};
 
 /// The production OpenRouter API base.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -83,9 +83,9 @@ impl OpenRouterProvider {
         self
     }
 
-    /// Every model OpenRouter offers, following `limit`/`offset` pagination
-    /// until `links.next` is exhausted. The catalog is public: the call
-    /// works without an API key.
+    /// Every text chat model OpenRouter offers, following `limit`/`offset`
+    /// pagination until `links.next` is exhausted. The catalog is public:
+    /// the call works without an API key.
     pub async fn list_models(&self) -> Result<Vec<GeminiModel>, ProviderError> {
         let mut models = Vec::new();
         let mut offset: u32 = 0;
@@ -116,7 +116,7 @@ impl OpenRouterProvider {
             // Linked before the models move out of the page.
             let more = page.next_page();
             let fetched = page.data.len();
-            models.extend(page.data.into_iter().map(GeminiModel::from));
+            models.extend(page.data.into_iter().map(GeminiModel::from).filter(is_text));
             // The zero-row guard keeps a misbehaving mirror from spinning
             // this loop forever.
             if fetched == 0 || !more {

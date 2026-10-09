@@ -419,6 +419,25 @@ impl From<WireModel> for GeminiModel {
     }
 }
 
+/// Whether the model is a text chat model. Every listed row is served
+/// through chat completions, but the catalog aggregates image, audio,
+/// speech, and embedding backends whose ids carry the modality; those
+/// cannot drive a coding agent and are excluded by id.
+pub fn is_text(model: &GeminiModel) -> bool {
+    const NON_TEXT: [&str; 9] = [
+        "image",
+        "audio",
+        "tts",
+        "asr",
+        "transcribe",
+        "whisper",
+        "embedding",
+        "moderation",
+        "video",
+    ];
+    !NON_TEXT.iter().any(|marker| model.id.contains(marker))
+}
+
 // --- Mapping: ModelRequest -> wire ---
 
 /// Builds the chat-completions request body for `req`. The model is passed
@@ -1540,6 +1559,31 @@ mod tests {
         for model in models {
             assert_eq!(model.pricing, None, "for {}", model.id);
         }
+    }
+
+    #[test]
+    fn non_text_modalities_are_excluded_by_id() {
+        let text = |id: &str| {
+            is_text(&GeminiModel {
+                id: id.to_owned(),
+                display_name: id.to_owned(),
+                description: String::new(),
+                input_token_limit: None,
+                output_token_limit: None,
+                generation_methods: vec!["generateContent".to_owned()],
+                pricing: None,
+            })
+        };
+        // Image, audio, and speech backends ride the same catalog; only
+        // the ids that carry their modality are caught.
+        assert!(!text("google/gemini-2.5-flash-image-preview"));
+        assert!(!text("openai/gpt-4o-audio-preview"));
+        assert!(!text("openai/gpt-4o-mini-tts"));
+        assert!(!text("openai/text-embedding-3-large"));
+        // A vendor prefix carrying a marker word stays: the marker must
+        // be the model's own modality, not its provenance.
+        assert!(text("google/gemini-2.5-flash"));
+        assert!(text("openai/gpt-4o-mini"));
     }
 
     #[test]

@@ -10,7 +10,9 @@
 //! [`ModelOutput`](rhema_core::ModelOutput). `GET {base}/models` lists the
 //! public catalog as [`GeminiModel`](rhema_provider_google::GeminiModel)
 //! rows — the shared normalized model type — with pricing converted from
-//! OpenRouter's USD-per-token strings to per-MTok. The wire mapping
+//! OpenRouter's USD-per-token strings to per-MTok; the text chat models
+//! only, since the catalog also aggregates image, audio, and embedding
+//! backends. The wire mapping
 //! constraints, including OpenRouter's deviations from the OpenAI dialect,
 //! are documented in the [`wire`] module.
 //!
@@ -43,7 +45,6 @@
 //!   [`rhema_core::ModelRequest`] / SSE chunks and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
 //!   catalog mapping onto `GeminiModel`
-//! - [`stream`] — the SSE byte-stream decoder
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
@@ -51,9 +52,7 @@
 #![deny(missing_docs)]
 
 pub mod provider;
-pub mod stream;
 pub mod wire;
 
 pub use provider::{APP_REFERER, APP_TITLE, DEFAULT_BASE_URL, OpenRouterProvider};
-pub use stream::SseDecoder;
 pub use wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler};
