@@ -258,6 +258,85 @@ pub fn filtered_commands(input: &str) -> Vec<&'static crate::commands::CommandSp
         .collect()
 }
 
+/// One row of the input palette: a command while the typed token matches
+/// the command table, or a model once `/model ` is naming its argument.
+/// The palette's rendering and its keys (arrows, tab) read the same rows.
+#[derive(Debug, Clone)]
+pub enum PaletteRow {
+    /// A slash command; completing replaces the whole input with its name.
+    Command(&'static crate::commands::CommandSpec),
+    /// A model under `/model`; completing fills the argument. The
+    /// provider's config name prefixes the row and rides on the switch.
+    Model {
+        /// The provider's config name.
+        provider: &'static str,
+        /// The model id, the value completion inserts.
+        id: String,
+        /// What the row says about the model, after the id.
+        description: String,
+    },
+}
+
+/// The palette's rows for an input over the model catalog: command names
+/// while the input matches one, then the models matching the `/model`
+/// argument. The argument filter follows the picker's rules — provider
+/// name, id, or display name, case-insensitive.
+pub fn palette_rows(input: &str, models: &[CatalogModel]) -> Vec<PaletteRow> {
+    if !input.starts_with('/') {
+        return Vec::new();
+    }
+    if let Some(needle) = input.strip_prefix("/model ") {
+        let needle = needle.to_lowercase();
+        return models
+            .iter()
+            .filter(|entry| {
+                needle.is_empty()
+                    || entry.provider.contains(&needle)
+                    || entry.model.id.to_lowercase().contains(&needle)
+                    || entry.model.display_name.to_lowercase().contains(&needle)
+            })
+            .map(|entry| PaletteRow::Model {
+                provider: entry.provider,
+                id: entry.model.id.clone(),
+                description: model_description(&entry.model),
+            })
+            .collect();
+    }
+    filtered_commands(input)
+        .into_iter()
+        .map(PaletteRow::Command)
+        .collect()
+}
+
+/// A model's palette description: the display name with the picker's
+/// facts — pricing and context window — when the catalog knows them.
+fn model_description(model: &GeminiModel) -> String {
+    let mut detail = model.display_name.clone();
+    if let Some(pricing) = model.pricing() {
+        detail.push_str(&format!(
+            " · ${:.2}/M in · ${:.2}/M out",
+            pricing.input_per_mtok, pricing.output_per_mtok
+        ));
+    }
+    if let Some(limit) = model.input_token_limit {
+        detail.push_str(&format!(" · {} ctx", format_tokens(Some(limit))));
+    }
+    detail
+}
+
+/// Humanizes a token count: 1_048_576 → "1.0M", 131_072 → "131k", none →
+/// "?".
+pub(crate) fn format_tokens(limit: Option<u64>) -> String {
+    match limit {
+        None => "?".to_owned(),
+        Some(limit) if limit >= 1_000_000 => {
+            format!("{:.1}M", limit as f64 / 1_000_000.0)
+        }
+        Some(limit) if limit >= 10_000 => format!("{}k", limit / 1_000),
+        Some(limit) => format!("{limit}"),
+    }
+}
+
 // --- Login ---
 
 /// What Esc means on the login screen: with no session behind it, leaving
@@ -964,8 +1043,10 @@ impl ChatState {
     }
 
     /// Handles one keypress. Ctrl combos are the app's (quit, model
-    /// picker); Esc is the app's (approval decline / quit confirm).
-    pub fn handle_key(&mut self, key: KeyEvent) -> ChatAction {
+    /// picker); Esc is the app's (approval decline / quit confirm). The
+    /// model catalog feeds the `/model` palette's rows; an empty slice
+    /// simply leaves those rows empty.
+    pub fn handle_key(&mut self, key: KeyEvent, models: &[CatalogModel]) -> ChatAction {
         // Ctrl-J is readline's historical newline: it inserts even
         // though plain control combos are inert.
         if key.code == KeyCode::Char('j') && key.modifiers == KeyModifiers::CONTROL {
@@ -1043,12 +1124,10 @@ impl ChatState {
                 self.cursor = start + len;
                 ChatAction::None
             }
-            // The command palette owns the vertical arrows while a slash
-            // input filters it.
-            KeyCode::Up | KeyCode::Down
-                if self.input.starts_with('/') && !filtered_commands(&self.input).is_empty() =>
-            {
-                let count = filtered_commands(&self.input).len();
+            // The palette owns the vertical arrows while a slash input
+            // filters it — commands, or models under `/model`.
+            KeyCode::Up | KeyCode::Down if !palette_rows(&self.input, models).is_empty() => {
+                let count = palette_rows(&self.input, models).len();
                 if key.code == KeyCode::Down {
                     self.palette_index = (self.palette_index + 1).min(count - 1);
                 } else {
@@ -1065,15 +1144,20 @@ impl ChatState {
                 self.move_vertical(false);
                 ChatAction::None
             }
-            KeyCode::Tab if self.input.starts_with('/') => {
-                let candidates = filtered_commands(&self.input);
-                if let Some(spec) =
-                    candidates.get(self.palette_index.min(candidates.len().saturating_sub(1)))
-                {
+            KeyCode::Tab => {
+                let rows = palette_rows(&self.input, models);
+                if let Some(row) = rows.get(self.palette_index.min(rows.len().saturating_sub(1))) {
                     // The input is replaced wholesale: any anchors in it
                     // go, and their payloads go with them.
                     self.attachments.clear();
-                    self.input = spec.name.to_owned();
+                    match row {
+                        PaletteRow::Command(spec) => {
+                            self.input = spec.name.to_owned();
+                        }
+                        PaletteRow::Model { id, .. } => {
+                            self.input = format!("/model {id}");
+                        }
+                    }
                     self.cursor = self.input.chars().count();
                 }
                 ChatAction::None
@@ -1486,21 +1570,21 @@ mod tests {
     fn chat_input_buffers_with_cursor_editing() {
         let mut chat = ChatState::new();
         for c in "helo".chars() {
-            chat.handle_key(key(KeyCode::Char(c)));
+            chat.handle_key(key(KeyCode::Char(c)), &[]);
         }
-        chat.handle_key(key(KeyCode::Left));
-        chat.handle_key(key(KeyCode::Left));
+        chat.handle_key(key(KeyCode::Left), &[]);
+        chat.handle_key(key(KeyCode::Left), &[]);
         // cursor sits between "hel" and "o"
-        chat.handle_key(key(KeyCode::Char('l')));
+        chat.handle_key(key(KeyCode::Char('l')), &[]);
         assert_eq!(chat.input, "hello");
         assert_eq!(chat.cursor, 3);
-        chat.handle_key(key(KeyCode::Backspace));
+        chat.handle_key(key(KeyCode::Backspace), &[]);
         assert_eq!(chat.input, "helo");
-        chat.handle_key(key(KeyCode::End));
-        chat.handle_key(key(KeyCode::Char('!')));
+        chat.handle_key(key(KeyCode::End), &[]);
+        chat.handle_key(key(KeyCode::Char('!')), &[]);
         assert_eq!(chat.input, "helo!");
-        chat.handle_key(key(KeyCode::Home));
-        chat.handle_key(key(KeyCode::Delete));
+        chat.handle_key(key(KeyCode::Home), &[]);
+        chat.handle_key(key(KeyCode::Delete), &[]);
         assert_eq!(chat.input, "elo!");
     }
 
@@ -1508,10 +1592,10 @@ mod tests {
     fn chat_enter_submits_the_input_text() {
         let mut chat = ChatState::new();
         for c in "fix it".chars() {
-            chat.handle_key(key(KeyCode::Char(c)));
+            chat.handle_key(key(KeyCode::Char(c)), &[]);
         }
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
+            chat.handle_key(key(KeyCode::Enter), &[]),
             ChatAction::Submit("fix it".into())
         );
         // The input box is NOT cleared here: the app clears it only when
@@ -1527,14 +1611,14 @@ mod tests {
         }
         let mut chat = ChatState::new();
         chat.insert_str("x");
-        chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+        chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT), &[]);
         assert_eq!(chat.input, "x\n");
-        chat.handle_key(ctrl('j'));
+        chat.handle_key(ctrl('j'), &[]);
         assert_eq!(chat.input, "x\n\n");
         assert_eq!(chat.cursor, 3);
         // Enter itself still submits the whole multi-line text.
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
+            chat.handle_key(key(KeyCode::Enter), &[]),
             ChatAction::Submit("x\n\n".into())
         );
     }
@@ -1545,13 +1629,19 @@ mod tests {
         // French AZERTY, `@` is AltGr+0 and used to be swallowed as an
         // inert Ctrl combo.
         let mut chat = ChatState::new();
-        chat.handle_key(KeyEvent::new(
-            KeyCode::Char('@'),
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ));
+        chat.handle_key(
+            KeyEvent::new(
+                KeyCode::Char('@'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            &[],
+        );
         assert_eq!(chat.input, "@");
         // Plain Ctrl combos stay inert.
-        chat.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        chat.handle_key(
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            &[],
+        );
         assert_eq!(chat.input, "@");
     }
 
@@ -1560,16 +1650,16 @@ mod tests {
         let mut chat = ChatState::new();
         chat.insert_str("alpha\nbeta\ngamma");
         assert_eq!(chat.cursor_line_index(), 2, "the end is the last line");
-        chat.handle_key(key(KeyCode::Up));
+        chat.handle_key(key(KeyCode::Up), &[]);
         assert_eq!(chat.cursor_line_index(), 1);
         assert_eq!(chat.cursor_column(), 4, "column kept");
-        chat.handle_key(key(KeyCode::Up));
+        chat.handle_key(key(KeyCode::Up), &[]);
         assert_eq!(chat.cursor_line_index(), 0);
         assert_eq!(chat.cursor_column(), 4, "clamped to the shorter line");
-        chat.handle_key(key(KeyCode::Up));
+        chat.handle_key(key(KeyCode::Up), &[]);
         assert_eq!(chat.cursor_line_index(), 0, "the top stays");
-        chat.handle_key(key(KeyCode::Down));
-        chat.handle_key(key(KeyCode::Down));
+        chat.handle_key(key(KeyCode::Down), &[]);
+        chat.handle_key(key(KeyCode::Down), &[]);
         assert_eq!(chat.cursor_line_index(), 2);
     }
 
@@ -1577,10 +1667,10 @@ mod tests {
     fn home_and_end_stay_within_the_cursor_line() {
         let mut chat = ChatState::new();
         chat.insert_str("alpha\nbeta");
-        chat.handle_key(key(KeyCode::Home));
+        chat.handle_key(key(KeyCode::Home), &[]);
         assert_eq!(chat.cursor_line_index(), 1);
         assert_eq!(chat.cursor_column(), 0);
-        chat.handle_key(key(KeyCode::End));
+        chat.handle_key(key(KeyCode::End), &[]);
         assert_eq!(chat.cursor_column(), 4);
     }
 
@@ -1602,7 +1692,7 @@ mod tests {
         // accepted.
         chat.insert_str(" closely");
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
+            chat.handle_key(key(KeyCode::Enter), &[]),
             ChatAction::Submit(format!("look at {long} closely"))
         );
         assert_eq!(
@@ -1624,13 +1714,13 @@ mod tests {
 
         // Backspace removes the anchor behind the cursor — the last
         // chip — and its payload alone.
-        chat.handle_key(key(KeyCode::Backspace));
+        chat.handle_key(key(KeyCode::Backspace), &[]);
         assert_eq!(chat.attachments, vec![first.to_owned()]);
         assert_eq!(chat.input, ChatState::MARK.to_string());
 
         // Deleting the remaining anchor from before it works the same.
-        chat.handle_key(key(KeyCode::Home));
-        chat.handle_key(key(KeyCode::Delete));
+        chat.handle_key(key(KeyCode::Home), &[]);
+        chat.handle_key(key(KeyCode::Delete), &[]);
         assert!(chat.attachments.is_empty());
         assert_eq!(chat.input, "");
     }
@@ -1647,7 +1737,7 @@ mod tests {
     fn shift_enter_adds_a_line() {
         let mut chat = ChatState::new();
         chat.insert_str("x");
-        chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT));
+        chat.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT), &[]);
         assert_eq!(chat.input, "x\n");
     }
 
@@ -1656,14 +1746,14 @@ mod tests {
         let mut chat = ChatState::new();
         // A terminal reporting every key but not the shifted alternate
         // delivers the base char with SHIFT still set.
-        chat.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT));
+        chat.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT), &[]);
         assert_eq!(chat.input, "A");
         // Ghostty & co. send the shifted char with SHIFT cleared
         // (crossterm's alternate-key path): untouched.
-        chat.handle_key(key(KeyCode::Char('B')));
+        chat.handle_key(key(KeyCode::Char('B')), &[]);
         assert_eq!(chat.input, "AB");
         // Plain lowercase typing stays lowercase.
-        chat.handle_key(key(KeyCode::Char('c')));
+        chat.handle_key(key(KeyCode::Char('c')), &[]);
         assert_eq!(chat.input, "ABc");
     }
 
@@ -1678,7 +1768,7 @@ mod tests {
     fn chat_enter_on_an_empty_input_yields_an_empty_submit() {
         let mut chat = ChatState::new();
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter)),
+            chat.handle_key(key(KeyCode::Enter), &[]),
             ChatAction::Submit(String::new())
         );
     }
@@ -1686,17 +1776,17 @@ mod tests {
     #[test]
     fn chat_scroll_moves_with_page_keys_and_never_goes_negative() {
         let mut chat = ChatState::new();
-        chat.handle_key(key(KeyCode::PageUp));
-        chat.handle_key(key(KeyCode::PageUp));
+        chat.handle_key(key(KeyCode::PageUp), &[]);
+        chat.handle_key(key(KeyCode::PageUp), &[]);
         assert_eq!(chat.scroll, 2 * ChatState::SCROLL_STEP);
         chat.scroll_by(-3);
         assert_eq!(chat.scroll, 2 * ChatState::SCROLL_STEP - 3);
-        chat.handle_key(key(KeyCode::PageDown));
-        chat.handle_key(key(KeyCode::PageDown));
-        chat.handle_key(key(KeyCode::PageDown));
+        chat.handle_key(key(KeyCode::PageDown), &[]);
+        chat.handle_key(key(KeyCode::PageDown), &[]);
+        chat.handle_key(key(KeyCode::PageDown), &[]);
         assert_eq!(chat.scroll, 0);
         chat.scroll_by(5);
-        chat.handle_key(key(KeyCode::Enter));
+        chat.handle_key(key(KeyCode::Enter), &[]);
         assert_eq!(chat.scroll, 0, "submitting follows the latest line");
     }
 
@@ -1715,14 +1805,14 @@ mod tests {
     fn slash_input_filters_the_command_palette() {
         let mut chat = ChatState::new();
         for c in "/".chars() {
-            chat.handle_key(key(KeyCode::Char(c)));
+            chat.handle_key(key(KeyCode::Char(c)), &[]);
         }
         assert_eq!(
             crate::screens::filtered_commands("/").len(),
             crate::commands::COMMANDS.len()
         );
         for c in "cl".chars() {
-            chat.handle_key(key(KeyCode::Char(c)));
+            chat.handle_key(key(KeyCode::Char(c)), &[]);
         }
         let names: Vec<&str> = crate::screens::filtered_commands("/cl")
             .iter()
@@ -1737,26 +1827,70 @@ mod tests {
     fn arrows_navigate_the_palette_and_tab_completes() {
         let mut chat = ChatState::new();
         for c in "/".chars() {
-            chat.handle_key(key(KeyCode::Char(c)));
+            chat.handle_key(key(KeyCode::Char(c)), &[]);
         }
-        chat.handle_key(key(KeyCode::Down));
-        chat.handle_key(key(KeyCode::Down));
+        chat.handle_key(key(KeyCode::Down), &[]);
+        chat.handle_key(key(KeyCode::Down), &[]);
         assert_eq!(chat.palette_index, 2);
-        chat.handle_key(key(KeyCode::Up));
+        chat.handle_key(key(KeyCode::Up), &[]);
         assert_eq!(chat.palette_index, 1);
-        chat.handle_key(key(KeyCode::Tab));
+        chat.handle_key(key(KeyCode::Tab), &[]);
         assert_eq!(chat.input, "/model");
         assert_eq!(chat.cursor, "/model".chars().count());
+    }
+
+    #[test]
+    fn the_model_palette_narrows_and_tab_fills_the_argument() {
+        // Catalog order follows the fetch: providers alphabetical.
+        let models = catalog(
+            "google",
+            vec![model("gemini-3.8-pro", "Gemini 3.8 Pro", true)],
+        )
+        .into_iter()
+        .chain(catalog(
+            "openrouter",
+            vec![model("openrouter/auto", "OpenRouter Auto", true)],
+        ))
+        .collect::<Vec<_>>();
+        let mut chat = ChatState::new();
+        for c in "/model ".chars() {
+            chat.handle_key(key(KeyCode::Char(c)), &models);
+        }
+        // The empty argument lists the whole catalog; the provider filter
+        // narrows like the picker's.
+        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, &models)
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::screens::PaletteRow::Model { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["gemini-3.8-pro", "openrouter/auto"]);
+        for c in "openrouter".chars() {
+            chat.handle_key(key(KeyCode::Char(c)), &models);
+        }
+        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, &models)
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::screens::PaletteRow::Model { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["openrouter/auto"]);
+        // Tab completes the argument, keeping the command prefix.
+        chat.handle_key(key(KeyCode::Tab), &models);
+        assert_eq!(chat.input, "/model openrouter/auto");
+        assert_eq!(chat.cursor, "/model openrouter/auto".chars().count());
     }
 
     #[test]
     fn editing_the_input_resets_the_palette_selection() {
         let mut chat = ChatState::new();
         for c in "/".chars() {
-            chat.handle_key(key(KeyCode::Char(c)));
+            chat.handle_key(key(KeyCode::Char(c)), &[]);
         }
-        chat.handle_key(key(KeyCode::Down));
-        chat.handle_key(key(KeyCode::Backspace));
+        chat.handle_key(key(KeyCode::Down), &[]);
+        chat.handle_key(key(KeyCode::Backspace), &[]);
         assert_eq!(chat.palette_index, 0);
     }
 
@@ -1764,7 +1898,10 @@ mod tests {
     fn chat_ctrl_combos_are_left_to_the_app() {
         let mut chat = ChatState::new();
         assert_eq!(
-            chat.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            chat.handle_key(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                &[]
+            ),
             ChatAction::None
         );
         assert_eq!(chat.input, "");

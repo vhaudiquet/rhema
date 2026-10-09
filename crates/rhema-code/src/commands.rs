@@ -43,8 +43,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/model",
-        description: "pick the model",
-        argument: Argument::None,
+        description: "pick the model (type for suggestions)",
+        argument: Argument::Optional,
         handler: model,
     },
     CommandSpec {
@@ -205,12 +205,18 @@ fn help(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     Vec::new()
 }
 
-fn model(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
     if app.running {
         app.push_notice("a turn is running — /model waits for it to finish");
         return Vec::new();
     }
-    app.open_picker()
+    match argument {
+        None => app.open_picker(),
+        Some(needle) => {
+            app.choose_model_by_id(needle);
+            Vec::new()
+        }
+    }
 }
 
 fn resume(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {

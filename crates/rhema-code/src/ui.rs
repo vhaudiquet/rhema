@@ -10,7 +10,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Screen};
-use crate::screens::{PROVIDERS, PickerScreen, PickerStatus};
+use crate::screens::{PROVIDERS, PickerScreen, PickerStatus, format_tokens};
 use crate::transcript::{self, pretty_args};
 use rhema_provider_google::GeminiModel;
 
@@ -526,19 +526,6 @@ fn footer_model(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
-/// Humanizes a token count: 1_048_576 → "1.0M", 131_072 → "131k", none →
-/// "?".
-fn format_tokens(limit: Option<u64>) -> String {
-    match limit {
-        None => "?".to_owned(),
-        Some(limit) if limit >= 1_000_000 => {
-            format!("{:.1}M", limit as f64 / 1_000_000.0)
-        }
-        Some(limit) if limit >= 10_000 => format!("{}k", limit / 1_000),
-        Some(limit) => format!("{limit}"),
-    }
-}
-
 /// Greedy word wrap over styled spans. A word wider than `width` is
 /// hard-split at the display-width boundary, so the returned row count is
 /// exact for the given width — the transcript scroll math depends on it.
@@ -858,11 +845,11 @@ fn thinking_rows(app: &App, width: usize) -> u16 {
 /// The command reads in accent, the description dim, and the highlighted
 /// row carries the elevated tone. Tab completes, enter runs.
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme: &Theme) {
-    let candidates = crate::screens::filtered_commands(&app.chat.input);
-    if candidates.is_empty() {
+    let rows = crate::screens::palette_rows(&app.chat.input, &app.models);
+    if rows.is_empty() {
         return;
     }
-    let visible = candidates.len().min(6) as u16;
+    let visible = rows.len().min(6) as u16;
     let area = Rect {
         x: input_area.x,
         y: input_area.y.saturating_sub(visible + 2),
@@ -880,10 +867,9 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    // The window follows the selection: more commands than rows scroll
-    // the list once the highlight passes the bottom, instead of hiding
-    // it.
-    let count = candidates.len();
+    // The window follows the selection: more rows than lines scroll the
+    // list once the highlight passes the bottom, instead of hiding it.
+    let count = rows.len();
     let visible = visible as usize;
     let first = if count > visible {
         (app.chat.palette_index + 1)
@@ -895,34 +881,56 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
     let selected = app.chat.palette_index.min(count - 1);
     // Descriptions align in a column: every name is padded to the longest
     // visible name plus a three-space gap.
-    let shown = &candidates[first..first + visible];
+    let shown = &rows[first..first + visible];
     let name_width = shown
         .iter()
-        .map(|spec| spec.name.width())
+        .map(|row| palette_row_name(row).width())
         .max()
         .unwrap_or(0)
         + 3;
-    let rows: Vec<Line> = shown
+    let lines: Vec<Line> = shown
         .iter()
         .enumerate()
-        .map(|(index, spec)| {
+        .map(|(index, row)| {
             // The selection lives in the text, not the row: bold marks it,
             // the background stays shared.
-            let name_style = if first + index == selected {
-                Style::default().fg(theme.accent_text).bold()
-            } else {
-                Style::default().fg(theme.accent_text)
-            };
-            Line::from(vec![
-                Span::styled(format!("{:<name_width$}", spec.name), name_style),
-                Span::styled(
-                    spec.description.to_string(),
-                    Style::default().fg(theme.text3),
-                ),
-            ])
+            let selected_row = first + index == selected;
+            let (name, description) = palette_row_texts(row);
+            let mut spans = vec![Span::styled(
+                format!("{:<name_width$}", name),
+                if selected_row {
+                    Style::default().fg(theme.accent_text).bold()
+                } else {
+                    Style::default().fg(theme.accent_text)
+                },
+            )];
+            spans.push(Span::styled(description, Style::default().fg(theme.text3)));
+            Line::from(spans)
         })
         .collect();
-    frame.render_widget(Paragraph::new(rows), inner);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The palette row's name column: the command's name, or the model's
+/// provider-prefixed id — the same shape the picker's rows carry.
+fn palette_row_name(row: &crate::screens::PaletteRow) -> String {
+    match row {
+        crate::screens::PaletteRow::Command(spec) => spec.name.to_owned(),
+        crate::screens::PaletteRow::Model { provider, id, .. } => format!("{provider}/{id}"),
+    }
+}
+
+/// The palette row's description: the command's own, or the model's
+/// display name with its facts.
+fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
+    match row {
+        crate::screens::PaletteRow::Command(spec) => {
+            (palette_row_name(row), spec.description.to_string())
+        }
+        crate::screens::PaletteRow::Model { description, .. } => {
+            (palette_row_name(row), description.clone())
+        }
+    }
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
@@ -1751,7 +1759,7 @@ mod scroll_tests {
         // on /resume (the /thinking row sits mid-table now), and the
         // window must have followed it.
         for _ in 0..7 {
-            app.chat.handle_key(key(KeyCode::Down));
+            app.chat.handle_key(key(KeyCode::Down), &[]);
         }
         assert_eq!(app.chat.palette_index, 7);
         let backend = TestBackend::new(60, 24);

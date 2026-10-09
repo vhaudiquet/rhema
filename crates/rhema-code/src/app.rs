@@ -778,7 +778,7 @@ impl App {
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
             Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
             Screen::Resume(resume) => Routed::Resume(resume.handle_key(key)),
-            Screen::Chat => Routed::Chat(self.chat.handle_key(key)),
+            Screen::Chat => Routed::Chat(self.chat.handle_key(key, &self.models)),
         };
         match routed {
             Routed::Login(LoginAction::Validate) => self.validate_login(),
@@ -1156,6 +1156,42 @@ impl App {
         }
     }
 
+    /// A model was named for `/model <needle>`: resolve the needle against
+    /// the cached catalog — exact id first, then a unique prefix — and
+    /// switch, or say what went missing. `/model` with no needle opens
+    /// the full picker instead.
+    pub fn choose_model_by_id(&mut self, needle: &str) {
+        let mut exact: Vec<(&'static str, String)> = self
+            .models
+            .iter()
+            .filter(|entry| entry.model.id == needle)
+            .map(|entry| (entry.provider, entry.model.id.clone()))
+            .collect();
+        let prefix: Vec<(&'static str, String)> = self
+            .models
+            .iter()
+            .filter(|entry| entry.model.id.starts_with(needle))
+            .map(|entry| (entry.provider, entry.model.id.clone()))
+            .collect();
+        let (exact_count, prefix_count) = (exact.len(), prefix.len());
+        let resolved = if exact_count == 1 {
+            exact.pop()
+        } else if prefix_count == 1 {
+            prefix.into_iter().next()
+        } else {
+            None
+        };
+        match resolved {
+            Some((provider, id)) => self.choose_model(provider, &id),
+            None if prefix_count > 1 => self.push_notice(&format!(
+                "{prefix_count} models match {needle:?} — name one fully or use /model"
+            )),
+            None => self.push_notice(&format!(
+                "no model matches {needle:?} in the cached catalog — /model lists them"
+            )),
+        }
+    }
+
     /// A model was chosen in the picker: persist it and (re)build the
     /// agent, carrying the current session over. The old agent is only
     /// dropped once the new one built, so a rebuild failure cannot strand
@@ -1192,10 +1228,11 @@ impl App {
         self.provider = Some(backend.provider());
         match self.build_agent(session) {
             Ok(agent) => {
-                // The screen is still the picker here; its purpose says
-                // whether this was a mid-session rebuild.
+                // An interactive switch — the picker opened from the chat,
+                // or a `/model <needle>` typed there — says where it
+                // landed; the login and startup auto-selects stay quiet.
                 let from_chat = matches!(&self.screen, Screen::Picker(picker) if picker.purpose == PickerPurpose::FromChat);
-                if from_chat {
+                if from_chat || matches!(self.screen, Screen::Chat) {
                     self.transcript
                         .push_notice(&format!("model switched to {provider}/{id}"));
                 }
@@ -1977,6 +2014,68 @@ mod tests {
             }
             _ => panic!("expected the picker"),
         }
+    }
+
+    #[test]
+    fn slash_model_with_a_needle_switches_directly() {
+        let mut h = harness(Some("g"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        for c in "/model m-b".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert!(
+            effects.is_empty(),
+            "a named model rebuilds inline: {effects:?}"
+        );
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert_eq!(
+            h.store.load().unwrap().effective(None).model.as_deref(),
+            Some("m-b")
+        );
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .contains(&Line::Notice("model switched to google/m-b".into()))
+        );
+    }
+
+    #[test]
+    fn slash_model_with_a_unique_prefix_resolves_and_an_unknown_needle_says_so() {
+        let mut h = harness(Some("g"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        for c in "/model m-".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(h.app.screen, Screen::Chat),
+            "the picker never opens"
+        );
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .iter()
+                .any(|line| matches!(line, Line::Notice(text) if text.contains("2 models match"))),
+            "ambiguous prefix says so"
+        );
+        for c in "/model nope".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(
+            h.app.transcript.lines().iter().any(
+                |line| matches!(line, Line::Notice(text) if text.contains("no model matches"))
+            )
+        );
     }
 
     #[test]
