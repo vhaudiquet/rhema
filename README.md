@@ -174,6 +174,9 @@ profile holds credentials for, each row prefixed with its provider,
 and the filter matches provider names too — `openrouter` narrows the
 list to OpenRouter's whole catalog. Choosing a model from another
 provider switches the session's backend and the choice is stored.
+`/model <text>` narrows inline instead: the input palette lists the
+matching models with the same type-to-filter, arrows, and tab
+completion as the command palette, and enter switches directly.
 A server exposing exactly one model
 auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,
