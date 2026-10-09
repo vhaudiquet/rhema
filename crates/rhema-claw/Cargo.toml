@@ -32,6 +32,8 @@ rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
 rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }
 rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
 rhema-rsd = { path = "../rhema-rsd" }
+# The resident tier's durable memory: its tools join the resolver chain
+rhema-memory = { path = "../rhema-memory" }
 # Args for the two-flag binary surface
 clap = { version = "4.5", features = ["derive"] }
 serde = { workspace = true }

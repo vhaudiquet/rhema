@@ -57,7 +57,9 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   contract for deterministic model-free detection, the lease-driven
   `Driver` loop (live inbox batches, per-round checkpoints), and a tool
   registry cut into allowlist-filtered resolvers
-- `rhema-claw` — the resident agent daemon: a chat surface over HTTP
+- `rhema-claw` — the resident agent daemon: durable cross-session
+  memory its model pulls through the `memory_*` tools, a chat surface
+  over HTTP
   (native routes with SSE, plus an OpenAI-compatible `/v1/chat/
 completions` shim for stock UIs), watch management by agent tool or
   HTTP, and forge threads answered with one coding-agent turn posted as

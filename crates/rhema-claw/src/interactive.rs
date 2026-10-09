@@ -34,6 +34,7 @@ use rhema_core::{
     Agent, ChatParams, Content, Event as ModelEvent, EventSink, Message, Role, Session,
     ToolContext, run_turn,
 };
+use rhema_memory::{MemoryResolver, MemoryStore, Scope};
 use rhema_rsd::{Dispatcher, Event, Outcome, ResourceKey};
 use serde_json::{Value, json};
 
@@ -102,6 +103,9 @@ pub struct InteractiveHandler {
     workspace: PathBuf,
     tools: Arc<CodingTools>,
     watch_resolver: Arc<dyn rhema_core::ToolResolver>,
+    /// The durable cross-session store the memory tools act on; the
+    /// resolver is built per dispatch so its scope tracks the workspace.
+    memory: Arc<dyn MemoryStore>,
     hub: Arc<EventHub>,
 }
 
@@ -116,6 +120,7 @@ impl InteractiveHandler {
         model: impl Into<String>,
         workspace: impl Into<PathBuf>,
         watches: Arc<ClawStore>,
+        memory: Arc<dyn MemoryStore>,
         hub: Arc<EventHub>,
     ) -> Self {
         let workspace = workspace.into();
@@ -129,6 +134,7 @@ impl InteractiveHandler {
             workspace,
             tools,
             watch_resolver,
+            memory,
             hub,
         }
     }
@@ -141,6 +147,10 @@ impl InteractiveHandler {
             .provider(self.provider.clone())
             .resolver(Arc::new(ResolverChain::new(vec![
                 self.tools.clone(),
+                Arc::new(MemoryResolver::new(
+                    self.memory.clone(),
+                    Scope::Workspace(self.workspace.clone()),
+                )),
                 self.watch_resolver.clone(),
             ])))
             .system(persona(&self.workspace))
@@ -250,7 +260,12 @@ fn persona(workspace: &Path) -> String {
          read code, run tests, make edits there. You manage your own \
          watch list with the watch_repo, unwatch_repo, and list_watches \
          tools: a watched repository's activity (issues, pull requests, \
-         comments) arrives as its own dispatch. Keep replies terse and \
+         comments) arrives as its own dispatch. You keep persistent \
+         memory across sessions: memory_save stores what is worth \
+         remembering (decisions, conventions, tone, pointers), \
+         memory_search recalls it before asking the user for something \
+         they have likely said before, memory_forget removes it. Keep \
+         replies terse and \
          concrete; do the work with tools instead of narrating it. Your \
          final message — the one you end the turn on, with no tool calls \
          after it — is the reply the user sees.",
@@ -337,7 +352,8 @@ impl EventSink for HubSink {
 mod tests {
     use super::*;
     use rhema_core::{
-        Message as CoreMessage, MockProvider, ModelOutput, Role as CoreRole, StopReason, Usage,
+        Content, Message as CoreMessage, MockProvider, ModelOutput, Role as CoreRole, StopReason,
+        ToolCall, Usage,
     };
     use rhema_rsd::{
         DispatcherConfig, KeyState, Outcome as RsdOutcome, ResourceKey as Key, VolatileStore,
@@ -351,6 +367,23 @@ mod tests {
         }
     }
 
+    /// A scripted tool-call turn: the model asking for `name` with `args`.
+    fn scripted_call(id: &str, name: &str, args: serde_json::Value) -> ModelOutput {
+        ModelOutput {
+            message: CoreMessage {
+                role: CoreRole::Assistant,
+                content: vec![Content::ToolCall(ToolCall {
+                    id: id.to_owned(),
+                    name: name.to_owned(),
+                    args,
+                    provider_data: serde_json::Value::Null,
+                })],
+            },
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
+        }
+    }
+
     #[test]
     fn the_persona_names_the_workspace_and_the_tools() {
         let prompt = persona(Path::new("/state/claw/workspaces/interactive"));
@@ -358,7 +391,13 @@ mod tests {
             prompt.contains("/state/claw/workspaces/interactive"),
             "{prompt}"
         );
-        for tool in ["watch_repo", "unwatch_repo", "list_watches"] {
+        for tool in [
+            "watch_repo",
+            "unwatch_repo",
+            "list_watches",
+            "memory_save",
+            "memory_search",
+        ] {
             assert!(prompt.contains(tool), "missing {tool}: {prompt}");
         }
         assert!(prompt.contains("final message"), "{prompt}");
@@ -463,6 +502,7 @@ mod tests {
             "test-model",
             workspace.path().join("interactive"),
             store,
+            Arc::new(rhema_memory::VolatileStore::new()),
             hub.clone(),
         );
 
@@ -508,6 +548,86 @@ mod tests {
         );
     }
 
+    /// Memory rides the resolver chain across dispatches: the model saves
+    /// in one session turn, and the record is in the durable store for
+    /// every session after — searchable by the model, never injected.
+    #[tokio::test]
+    async fn a_memory_save_in_one_dispatch_is_recalled_in_the_next() {
+        use rhema_memory::{MEMORY_SAVE, MemoryQuery};
+
+        let memory = Arc::new(rhema_memory::VolatileStore::new());
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        let hub = Arc::new(EventHub::default());
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let workspace_path = workspace.path().join("interactive");
+        let handler = InteractiveHandler::new(
+            Arc::new(MockProvider::new([
+                scripted_call(
+                    "call-save",
+                    MEMORY_SAVE,
+                    json!({"body": "the release channel is #deploys", "tags": ["release"]}),
+                ),
+                reply("remembered."),
+                scripted_call("call-search", "memory_search", json!({"query": "release"})),
+                reply("the release channel is #deploys."),
+            ])),
+            "test-model",
+            workspace_path.clone(),
+            store,
+            memory.clone(),
+            hub,
+        );
+
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            Arc::new(VolatileStore::new()),
+        ));
+        register_user(&dispatcher);
+        let driver = rhema_autonomous_agent::Driver::new(dispatcher.clone(), Arc::new(handler))
+            .with_holder("test");
+        let key = Key::from("interactive:web");
+
+        // Dispatch 1: the model saves through the chain's memory tools.
+        dispatcher
+            .ingest(user_event(key.as_str(), "remember the channel"))
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("first run"),
+            vec![RsdOutcome::Handled]
+        );
+
+        // The record is in the store, in the handler's workspace scope.
+        let found = memory
+            .search(MemoryQuery::new("release"))
+            .expect("search reads");
+        assert!(
+            found.iter().any(|record| record.body.contains("#deploys")),
+            "the saved record is durable: {found:?}"
+        );
+
+        // Dispatch 2: the model searches the same chain and answers from
+        // memory — a fresh session turn, the same durable store.
+        dispatcher
+            .ingest(user_event(key.as_str(), "where do releases go?"))
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("second run"),
+            vec![RsdOutcome::Handled]
+        );
+        assert_eq!(
+            memory
+                .search(MemoryQuery::new("#deploys"))
+                .expect("search reads")
+                .len(),
+            1,
+            "the search turn did not duplicate the record"
+        );
+    }
+
     /// The stash proof, done properly through the dispatcher's record.
     #[tokio::test]
     async fn a_dispatch_stashes_the_exchange_in_driver_state() {
@@ -521,6 +641,7 @@ mod tests {
             "test-model",
             workspace.path().join("interactive"),
             store,
+            Arc::new(rhema_memory::VolatileStore::new()),
             hub,
         );
         let backing = Arc::new(VolatileStore::new());

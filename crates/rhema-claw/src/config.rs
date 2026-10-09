@@ -187,6 +187,9 @@ pub struct ClawConfig {
     /// The root the handler's per-thread workspaces live under. Under the
     /// XDG state dir when unset.
     pub workspace_root: Option<PathBuf>,
+    /// The root of the resident tier's durable memory store. Under the
+    /// XDG state dir when unset (`$XDG_STATE_HOME/rhema/claw/memory`).
+    pub memory_root: Option<PathBuf>,
     /// Seconds between detect passes of the resident loop.
     pub poll_interval_secs: u64,
     /// The handler's model backend: `google`, `llama-cpp`, `openrouter`,
@@ -212,6 +215,7 @@ impl Default for ClawConfig {
         Self {
             db: None,
             workspace_root: None,
+            memory_root: None,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             provider: None,
             model: None,
@@ -259,6 +263,15 @@ impl ClawConfig {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| Self::state_dir().map(|dir| dir.join("workspaces")))
+    }
+
+    /// The memory root, defaulted under the state dir: the durable store
+    /// the resident tier's memory tools read and write.
+    pub fn memory_path(&self) -> Result<PathBuf, ConfigError> {
+        self.memory_root
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| Self::state_dir().map(|dir| dir.join("memory")))
     }
 
     /// The HTTP surface's address: the config's, or
@@ -342,6 +355,7 @@ mod tests {
         let raw = "\
 db: /var/lib/rhema/claw.db
 workspace_root: /var/lib/rhema/claw-work
+memory_root: /var/lib/rhema/claw-memory
 poll_interval_secs: 30
 provider: anthropic
 model: claude-sonnet-4-5

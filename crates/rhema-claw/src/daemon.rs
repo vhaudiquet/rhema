@@ -32,6 +32,8 @@ use crate::config::{ClawConfig, ConfigError, ForgeKind};
 use crate::forge::ForgeSource;
 use crate::handler::ClawHandler;
 use crate::http::ClawState;
+use rhema_memory::FileMemoryStore;
+
 use crate::hub::EventHub;
 use crate::interactive::InteractiveHandler;
 use crate::watch_store::ClawStore;
@@ -162,11 +164,13 @@ impl Daemon {
         );
 
         let hub = Arc::new(EventHub::default());
+        let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let interactive_handler = InteractiveHandler::new(
             provider,
             config.resolved_model(),
             interactive_workspace,
             watches.clone(),
+            memory,
             hub.clone(),
         );
         let interactive_driver = Arc::new(
