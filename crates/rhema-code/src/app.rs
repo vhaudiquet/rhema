@@ -778,7 +778,10 @@ impl App {
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
             Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
             Screen::Resume(resume) => Routed::Resume(resume.handle_key(key)),
-            Screen::Chat => Routed::Chat(self.chat.handle_key(key, &self.models)),
+            Screen::Chat => {
+                let profiles = self.palette_profiles();
+                Routed::Chat(self.chat.handle_key(key, &self.models, &profiles))
+            }
         };
         match routed {
             Routed::Login(LoginAction::Validate) => self.validate_login(),
@@ -1402,6 +1405,21 @@ impl App {
     /// section. Computed on demand — it changes mid-session.
     pub fn effective(&self) -> rhema_config::Profile {
         self.config.effective(self.session_profile.as_deref())
+    }
+
+    /// The profiles the input palette completes `/profile` with: the
+    /// config registry's rows, the session's own marked.
+    pub fn palette_profiles(&self) -> Vec<crate::screens::PaletteProfile> {
+        self.config
+            .profiles
+            .iter()
+            .map(|(name, profile)| crate::screens::PaletteProfile {
+                name: name.clone(),
+                provider: profile.provider.clone(),
+                model: profile.model.clone(),
+                active: self.session_profile.as_deref() == Some(name.as_str()),
+            })
+            .collect()
     }
 
     /// The active profile's name and display color: the `--profile` flag
@@ -2076,6 +2094,32 @@ mod tests {
                 |line| matches!(line, Line::Notice(text) if text.contains("no model matches"))
             )
         );
+    }
+
+    #[test]
+    fn slash_profile_switches_to_a_named_profile() {
+        let mut h = harness(Some("g"), Some("m-a"), Session::default());
+        h.app.config.set_for_profile(Some("personal"), |settings| {
+            settings.openrouter_api_key = Some("o".into());
+        });
+        h.app.config.profiles.insert(
+            "work".to_owned(),
+            rhema_config::Profile {
+                provider: Some("openrouter".to_owned()),
+                openrouter_api_key: Some("o".into()),
+                ..rhema_config::Profile::default()
+            },
+        );
+        for c in "/profile work".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert_eq!(h.app.session_profile.as_deref(), Some("work"));
+        assert!(matches!(
+            h.app.backend,
+            Some(Backend::OpenRouter { ref api_key }) if api_key == "o"
+        ));
     }
 
     #[test]

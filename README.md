@@ -177,6 +177,7 @@ provider switches the session's backend and the choice is stored.
 `/model <text>` narrows inline instead: the input palette lists the
 matching models with the same type-to-filter, arrows, and tab
 completion as the command palette, and enter switches directly.
+`/profile <text>` completes the config's profiles the same way.
 A server exposing exactly one model
 auto-selects it and skips the picker. After that you land
 in chat: responses stream in as rendered markdown (headings, bold,

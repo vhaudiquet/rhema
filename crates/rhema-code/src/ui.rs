@@ -845,7 +845,8 @@ fn thinking_rows(app: &App, width: usize) -> u16 {
 /// The command reads in accent, the description dim, and the highlighted
 /// row carries the elevated tone. Tab completes, enter runs.
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme: &Theme) {
-    let rows = crate::screens::palette_rows(&app.chat.input, &app.models);
+    let profiles = app.palette_profiles();
+    let rows = crate::screens::palette_rows(&app.chat.input, &app.models, &profiles);
     if rows.is_empty() {
         return;
     }
@@ -911,23 +912,28 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The palette row's name column: the command's name, or the model's
-/// provider-prefixed id — the same shape the picker's rows carry.
+/// The palette row's name column: the command's name, the model's
+/// provider-prefixed id — the same shape the picker's rows carry — or
+/// the profile's name.
 fn palette_row_name(row: &crate::screens::PaletteRow) -> String {
     match row {
         crate::screens::PaletteRow::Command(spec) => spec.name.to_owned(),
         crate::screens::PaletteRow::Model { provider, id, .. } => format!("{provider}/{id}"),
+        crate::screens::PaletteRow::Profile { name, .. } => name.clone(),
     }
 }
 
-/// The palette row's description: the command's own, or the model's
-/// display name with its facts.
+/// The palette row's description: the command's own, the model's display
+/// name with its facts, or the profile's provider and model.
 fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
     match row {
         crate::screens::PaletteRow::Command(spec) => {
             (palette_row_name(row), spec.description.to_string())
         }
         crate::screens::PaletteRow::Model { description, .. } => {
+            (palette_row_name(row), description.clone())
+        }
+        crate::screens::PaletteRow::Profile { description, .. } => {
             (palette_row_name(row), description.clone())
         }
     }
@@ -1772,7 +1778,7 @@ mod scroll_tests {
         });
         assert!(!app.models.is_empty(), "the catalog is cached");
         for c in "/model ".chars() {
-            app.chat.handle_key(key(KeyCode::Char(c)), &app.models);
+            app.chat.handle_key(key(KeyCode::Char(c)), &app.models, &[]);
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();
@@ -1800,7 +1806,7 @@ mod scroll_tests {
         // on /resume (the /thinking row sits mid-table now), and the
         // window must have followed it.
         for _ in 0..7 {
-            app.chat.handle_key(key(KeyCode::Down), &[]);
+            app.chat.handle_key(key(KeyCode::Down), &[], &[]);
         }
         assert_eq!(app.chat.palette_index, 7);
         let backend = TestBackend::new(60, 24);
