@@ -521,6 +521,7 @@ impl App {
         }
         self.transcript = Transcript::new();
         self.usage = None;
+        self.session_cost = 0.0;
         self.error = None;
         self.resumed_from = None;
         self.transcript.push_notice("conversation cleared");
@@ -531,10 +532,13 @@ impl App {
     /// origin when this session was resumed. A session of notices alone
     /// (a switch, a decline) has nothing resumable and saves nothing.
     pub fn export_session(&self) -> Option<(Session, Option<PathBuf>)> {
-        let session = match &self.agent {
+        let mut session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
+        // The accumulated cost rides with the save: a resumed session's
+        // footer continues where this one ended.
+        session.cost_usd = self.session_cost;
         if session.history.is_empty() {
             None
         } else {
@@ -735,7 +739,9 @@ impl App {
         self.resumed_from = Some(path.to_path_buf());
         self.transcript = Transcript::from_history(&self.session.history);
         self.usage = None;
-        self.session_cost = 0.0;
+        // The saved session carries what it spent; the footer continues
+        // the story instead of quoting a fresh zero.
+        self.session_cost = self.session.cost_usd;
         self.chat.scroll = 0;
         self.screen = Screen::Chat;
         self.transcript
@@ -2113,6 +2119,34 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_session_continues_its_cost() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let mut session = Session::default();
+        session
+            .history
+            .push(Message::text(Role::User, "earlier work"));
+        session.cost_usd = 2.5;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        crate::sessions::write_session(&path, &session).unwrap();
+
+        h.app.resume_session(&path);
+        assert_eq!(h.app.session_cost, 2.5, "the footer continues the story");
+        // A turn on top of it accumulates further, and the exit save
+        // carries the total back into the file.
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        h.app.config.set_for_profile(Some("personal"), |settings| {
+            settings.model = Some("m-a".into())
+        });
+        let (exported, origin) = h.app.export_session().unwrap();
+        assert_eq!(origin.as_deref(), Some(path.as_path()));
+        assert_eq!(exported.cost_usd, 2.5);
+    }
+
+    #[test]
     fn slash_profile_switches_to_a_named_profile() {
         let mut h = harness(Some("g"), Some("m-a"), Session::default());
         h.app.config.set_for_profile(Some("personal"), |settings| {
@@ -2179,8 +2213,17 @@ mod tests {
             result: loaded("google", models()),
         });
         // models() carries a 1M-token limit; give the fixture a price by
-        // matching a priced id instead.
-        let mut h = harness(Some("k"), None, Session::default());
+        // matching a priced id instead. The session carries a message so
+        // the export has something to save.
+        let mut h = harness(
+            Some("k"),
+            None,
+            Session {
+                history: vec![Message::text(Role::User, "earlier work")],
+                driver_state: serde_json::Value::Null,
+                cost_usd: 0.0,
+            },
+        );
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
             // gemini-3.8-flash prices at $0.75/M in and $3.75/M out.
@@ -2208,6 +2251,9 @@ mod tests {
         // 600k uncached in at $0.75/M + 400k cached in at a quarter of
         // that + 1M out at $3.75/M.
         assert!((h.app.session_cost - 4.275).abs() < 1e-9);
+        // The exit save carries the total, so a resume continues it.
+        let (exported, _) = h.app.export_session().unwrap();
+        assert!((exported.cost_usd - 4.275).abs() < 1e-9);
     }
 
     #[test]
@@ -2289,6 +2335,7 @@ mod tests {
         let session = Session {
             history: vec![Message::text(Role::User, "earlier work")],
             driver_state: serde_json::Value::Null,
+            cost_usd: 0.0,
         };
         let mut h = harness(Some("k"), Some("m-a"), session);
         h.app.on_event(UiEvent::ModelsLoaded {
@@ -3244,6 +3291,7 @@ mod tests {
         let session = Session {
             history: vec![Message::text(Role::User, "earlier")],
             driver_state: serde_json::Value::Null,
+            cost_usd: 0.0,
         };
         let mut h = harness(Some("k"), Some("m-a"), session);
         crate::commands::dispatch(&mut h.app, "/clear");
