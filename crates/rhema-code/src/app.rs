@@ -743,10 +743,13 @@ impl App {
     }
 
     /// A bracketed paste landed: into the input, newlines included —
-    /// pasting multi-line text must not fire submits.
+    /// pasting multi-line text must not fire submits. The login's
+    /// credential line takes its own, single-line shape.
     pub fn on_paste(&mut self, text: &str) {
-        if matches!(self.screen, Screen::Chat) {
-            self.chat.paste(text);
+        match &mut self.screen {
+            Screen::Chat => self.chat.paste(text),
+            Screen::Login(login) => login.paste(text),
+            _ => {}
         }
     }
 
@@ -1659,6 +1662,19 @@ mod tests {
         })
         .unwrap();
         Harness { app, store }
+    }
+
+    #[test]
+    fn a_paste_on_the_login_screen_fills_the_credential() {
+        let mut h = harness(None, None, Session::default());
+        assert!(matches!(h.app.screen, Screen::Login(_)));
+        // Descend into the credential stage first.
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_paste("sk-123");
+        match &h.app.screen {
+            Screen::Login(login) => assert_eq!(login.input, "sk-123"),
+            _ => panic!("expected the login screen"),
+        }
     }
 
     #[test]

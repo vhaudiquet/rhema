@@ -43,6 +43,11 @@ anyhow = "1"
 serde_json = { workspace = true }
 # Turn tasks and the unbounded UI event channel
 async-trait = { workspace = true }
+# The system clipboard, for ctrl-v as a paste key where the terminal
+# does not bind it itself; no image payloads
+arboard = { version = "3", default-features = false, features = [
+    "wayland-data-control",
+] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]

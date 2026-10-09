@@ -15,6 +15,7 @@
 //!
 //! Layout:
 //! - [`args`] — clap flags (no `--model`, no `--api-key`)
+//! - [`clipboard`] — the system clipboard, for ctrl-v as a paste key
 //! - [`events`] — the UI event protocol and owned event copies
 //! - [`store`] — the config persistence seam
 //! - [`approval`] — the synchronous approval bridge
@@ -32,6 +33,7 @@
 pub mod app;
 pub mod approval;
 pub mod args;
+pub mod clipboard;
 pub mod commands;
 pub mod events;
 pub mod icons;

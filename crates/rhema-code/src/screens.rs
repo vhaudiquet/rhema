@@ -558,7 +558,7 @@ impl LoginScreen {
                     LoginProvider::LlamaCpp => "the server URL",
                     _ => "the API key",
                 };
-                format!("enter {what}, then press enter")
+                format!("enter {what} · ctrl-v paste · enter when done")
             }
         };
         match self.purpose {
@@ -597,8 +597,29 @@ impl LoginScreen {
         }
     }
 
+    /// A bracketed paste landed on the credential input. A key or a
+    /// server URL is a single line: control characters — newlines above
+    /// all, the trailing one a stray copy loves to carry — are dropped.
+    pub fn paste(&mut self, text: &str) {
+        if self.stage == LoginStage::EnterCredential {
+            self.input.extend(text.chars().filter(|c| !c.is_control()));
+        }
+    }
+
     /// Handles one keypress.
     pub fn handle_key(&mut self, key: KeyEvent) -> LoginAction {
+        // ctrl-v and ctrl-shift-v are paste in terminals that leave them
+        // unbound: the key reads the clipboard, carrying the text a
+        // bracketed paste would have. Only on the credential line.
+        if key.code == KeyCode::Char('v')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && self.stage == LoginStage::EnterCredential
+        {
+            if let Some(text) = crate::clipboard::read() {
+                self.paste(&text);
+            }
+            return LoginAction::None;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return LoginAction::None;
         }
@@ -1124,6 +1145,19 @@ impl ChatState {
         // though plain control combos are inert.
         if key.code == KeyCode::Char('j') && key.modifiers == KeyModifiers::CONTROL {
             self.insert_newline();
+            return ChatAction::None;
+        }
+        // Ctrl-v (with or without shift) is paste in terminals that do
+        // not bind it themselves: the clipboard is read directly, the
+        // same text a bracketed paste would have carried — attachments
+        // and all.
+        if key.code == KeyCode::Char('v')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+        {
+            if let Some(text) = crate::clipboard::read() {
+                self.paste(&text);
+            }
             return ChatAction::None;
         }
         // AltGr lands as CONTROL|ALT on most terminals outside the kitty
@@ -1749,6 +1783,18 @@ mod tests {
             chat.handle_key(key(KeyCode::Enter), &[], &[]),
             ChatAction::Submit("x\n\n".into())
         );
+    }
+
+    #[test]
+    fn login_paste_lands_on_the_credential_line_without_control_characters() {
+        let mut login = LoginScreen::new();
+        // The provider list has no credential line to fill.
+        login.paste("sk-123");
+        assert_eq!(login.input, "");
+
+        login.handle_key(key(KeyCode::Enter));
+        login.paste("sk-12\n34\r\n");
+        assert_eq!(login.input, "sk-1234", "a key is a single line");
     }
 
     #[test]
