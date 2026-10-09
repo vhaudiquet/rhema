@@ -1091,13 +1091,20 @@ impl App {
                         self.backend = Some(backend.clone());
                         self.provider = Some(backend.provider());
                         let provider = backend.config_name();
-                        self.models = models
-                            .iter()
-                            .map(|model| crate::screens::CatalogModel {
+                        // The other logins' catalogs stay: a fresh login
+                        // must not blank the picker down to one provider.
+                        // The logged-in provider's slice replaces its own,
+                        // so a stale copy cannot linger.
+                        self.models.retain(|entry| entry.provider != provider);
+                        self.models.extend(models.iter().map(|model| {
+                            crate::screens::CatalogModel {
                                 provider,
                                 model: model.clone(),
-                            })
-                            .collect();
+                            }
+                        }));
+                        self.models.sort_by(|a, b| {
+                            a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id))
+                        });
                         // A single-model server (plain llama-server rather
                         // than a router) has nothing to pick: take it and
                         // go straight to chat.
@@ -1764,6 +1771,52 @@ mod tests {
             h.app.backend,
             Some(Backend::Google { ref api_key }) if api_key == "secret"
         ));
+    }
+
+    #[test]
+    fn a_login_merges_its_catalog_instead_of_replacing_the_cache() {
+        let mut h = harness(Some("g"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        // /login, then select the openrouter row and hand it a key.
+        for c in "/login".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Enter));
+        for c in "o".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::OpenRouter { .. }
+            })]
+        ));
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::OpenRouter {
+                    api_key: "o".into(),
+                },
+            },
+            result: loaded(
+                "openrouter",
+                vec![llama_model("openrouter/auto"), llama_model("z-ai/glm-5.3")],
+            ),
+        });
+        match &h.app.screen {
+            Screen::Picker(picker) => {
+                assert_eq!(picker.models.len(), 4, "google stays: {picker:?}");
+                let providers: Vec<&str> = picker.models.iter().map(|m| m.provider).collect();
+                assert_eq!(providers, ["google", "google", "openrouter", "openrouter"]);
+            }
+            _ => panic!("expected the picker"),
+        }
     }
 
     #[test]
