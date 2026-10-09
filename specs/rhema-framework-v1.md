@@ -389,3 +389,31 @@ What's intentionally *not* novel: the three-tier core/module/plugin split
 and trait-based contract structure, which mirrors ZeroClaw's own crate
 layout because that part of ZeroClaw's engineering is simply sound and worth
 reusing rather than reinventing for its own sake.
+
+---
+
+## 13. The two agent tiers
+
+**Decided.** Handlers come in two tiers, built on the same
+SessionManager contract and differing in context and trust, never in
+mechanism:
+
+- **`rhema-simple-agent`** — an RSD-driven handler for one integration:
+  a Slack/Discord bot, a GitHub PR answerer. No memory; the context is
+  the thread and nothing else. The safe tier: it pairs with tight §8
+  allowlists and can face untrusted keys, because a hijacked thread
+  gets a stateless responder with nowhere to learn and nothing saved
+  to leak. Not yet built.
+- **`rhema-autonomous-agent`** — the resident (the claw): long-lived
+  sessions, durable cross-session memory (the `memory_*` tools over
+  the memory module, pulled by the model per §9), full context
+  accumulation. The powerful tier — all of that context is blast
+  radius, so it is deployment-gated (§7: hardened, single-node,
+  owned) and earns the permissive §8 default only where the
+  deployment says so.
+
+The tiers share every mechanism — one dispatcher, one notion of
+Session, one resolver seam; a simple agent is a handler profile, not a
+second framework. The choice is per-source, per-key configuration: the
+same watch can feed a simple agent on a public repository and the
+resident on a private one.
