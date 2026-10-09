@@ -279,8 +279,8 @@ pub enum PaletteRow {
 
 /// The palette's rows for an input over the model catalog: command names
 /// while the input matches one, then the models matching the `/model`
-/// argument. The argument filter follows the picker's rules — provider
-/// name, id, or display name, case-insensitive.
+/// argument. The argument filter follows the picker's rules: the rendered
+/// `provider/id` row or the display name, case-insensitive.
 pub fn palette_rows(input: &str, models: &[CatalogModel]) -> Vec<PaletteRow> {
     if !input.starts_with('/') {
         return Vec::new();
@@ -291,8 +291,9 @@ pub fn palette_rows(input: &str, models: &[CatalogModel]) -> Vec<PaletteRow> {
             .iter()
             .filter(|entry| {
                 needle.is_empty()
-                    || entry.provider.contains(&needle)
-                    || entry.model.id.to_lowercase().contains(&needle)
+                    || format!("{}/{}", entry.provider, entry.model.id)
+                        .to_lowercase()
+                        .contains(&needle)
                     || entry.model.display_name.to_lowercase().contains(&needle)
             })
             .map(|entry| PaletteRow::Model {
@@ -744,15 +745,18 @@ impl PickerScreen {
     }
 
     /// The models matching the filter: case-insensitive substring on the
-    /// provider's name, id, or display name, in the sorted order.
+    /// rendered row — `provider/id`, so `openrouter/` names the provider's
+    /// whole catalog and `openrouter/anthropic` narrows inside it — or on
+    /// the display name, in the sorted order.
     pub fn filtered(&self) -> Vec<&CatalogModel> {
         let needle = self.filter.to_lowercase();
         self.models
             .iter()
             .filter(|entry| {
                 needle.is_empty()
-                    || entry.provider.contains(&needle)
-                    || entry.model.id.to_lowercase().contains(&needle)
+                    || format!("{}/{}", entry.provider, entry.model.id)
+                        .to_lowercase()
+                        .contains(&needle)
                     || entry.model.display_name.to_lowercase().contains(&needle)
             })
             .collect()
@@ -1399,6 +1403,55 @@ mod tests {
     }
 
     #[test]
+    fn the_filter_matches_the_rendered_provider_slash_id_row() {
+        // A vendor slash in the filter names the provider's whole catalog
+        // — `openrouter/` must not collapse to the models whose ids
+        // happen to repeat the provider's name.
+        let mut picker = PickerScreen::new(
+            catalog(
+                "openrouter",
+                vec![
+                    model("openrouter/auto", "OpenRouter Auto", true),
+                    model("anthropic/claude", "Claude", true),
+                ],
+            )
+            .into_iter()
+            .chain(catalog(
+                "google",
+                vec![model("gemini-3.8-pro", "Gemini 3.8 Pro", true)],
+            ))
+            .collect(),
+            PickerPurpose::Initial,
+        );
+
+        picker.filter = "openrouter/".into();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|entry| entry.model.id.as_str())
+            .collect();
+        // Every row renders `openrouter/…`, the provider's whole catalog.
+        assert_eq!(ids, ["anthropic/claude", "openrouter/auto"]);
+
+        picker.filter = "openrouter/anthropic".into();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|entry| entry.model.id.as_str())
+            .collect();
+        assert_eq!(ids, ["anthropic/claude"]);
+
+        // And the bare provider still selects the whole group.
+        picker.filter = "google".into();
+        let ids: Vec<&str> = picker
+            .filtered()
+            .iter()
+            .map(|entry| entry.model.id.as_str())
+            .collect();
+        assert_eq!(ids, ["gemini-3.8-pro"]);
+    }
+
+    #[test]
     fn typing_filters_without_any_prefix() {
         let mut picker = picker();
         assert_eq!(
@@ -1877,6 +1930,16 @@ mod tests {
             })
             .collect();
         assert_eq!(ids, ["openrouter/auto"]);
+        // The vendor slash keeps narrowing instead of breaking the match.
+        chat.handle_key(key(KeyCode::Char('/')), &models);
+        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, &models)
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::screens::PaletteRow::Model { id, .. } => Some(id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["openrouter/auto"], "openrouter/ stays alive");
         // Tab completes the argument, keeping the command prefix.
         chat.handle_key(key(KeyCode::Tab), &models);
         assert_eq!(chat.input, "/model openrouter/auto");
