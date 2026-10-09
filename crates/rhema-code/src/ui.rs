@@ -972,17 +972,20 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         );
     }
     let used = app.context_used();
-    let mut context = format_tokens(Some(used));
     let limit = app.current_context_window();
-    if let Some(limit) = limit {
-        context.push_str(&format!("/{}", format_tokens(Some(limit))));
-    }
     // The gauge is the telemetry: the glyph itself fills with the
     // window, readable before the numbers are.
     let fraction = limit
         .map(|limit| used as f64 / limit as f64)
         .unwrap_or(0.0)
         .clamp(0.0, 1.0);
+    let mut context = format_tokens(Some(used));
+    if let Some(limit) = limit {
+        context.push_str(&format!("/{}", format_tokens(Some(limit))));
+        // The fill as a number beside the glyph: the glyph shows the
+        // bucket, the percentage the exact read.
+        context.push_str(&format!(" ({:.1}%)", fraction * 100.0));
+    }
     parts
         .push(Span::raw(format!(" · {} {context}", (app.icons.context)(fraction))).fg(theme.text3));
     let cost = if app.session_cost >= 0.01 || app.session_cost == 0.0 {
@@ -1581,7 +1584,7 @@ mod scroll_tests {
         let screen = draw(&mut app);
         assert!(screen.contains("⁂  high"), "{screen}");
         // 131_072 of 1_048_576 is ~12%: the emptiest quarter.
-        assert!(screen.contains("◔ 131k/1.0M"), "{screen}");
+        assert!(screen.contains("◔ 131k/1.0M (12.5%)"), "{screen}");
     }
 
     #[test]
