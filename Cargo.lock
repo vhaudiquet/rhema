@@ -2256,6 +2256,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-provider"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "rhema-provider-anthropic"
 version = "0.1.0"
 dependencies = [

@@ -54,6 +54,9 @@ pub enum ClawError {
     /// The watch table could not be opened or read.
     #[error(transparent)]
     Watches(#[from] crate::watch_store::WatchStoreError),
+    /// The bootstrap store could not be opened.
+    #[error(transparent)]
+    Bootstrap(#[from] crate::bootstrap::BootstrapError),
     /// A source's detect pass failed.
     #[error(transparent)]
     Source(#[from] SourceError),
@@ -165,12 +168,18 @@ impl Daemon {
 
         let hub = Arc::new(EventHub::default());
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
+        let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
+        // The environment report is detection, not conversation: generated
+        // at every boot by deterministic discovery, never by the model,
+        // and regenerated over whatever the last boot wrote.
+        crate::environment::write_report(config.bootstrap_dir()?.join("ENVIRONMENT.md"))?;
         let interactive_handler = InteractiveHandler::new(
             provider,
             config.resolved_model(),
             interactive_workspace,
             watches.clone(),
             memory,
+            bootstrap.clone(),
             hub.clone(),
         );
         let interactive_driver = Arc::new(
@@ -187,6 +196,7 @@ impl Daemon {
             interactive_driver.clone(),
             store,
             watches,
+            bootstrap,
             hub,
             config.resolved_model(),
             config.token.clone(),

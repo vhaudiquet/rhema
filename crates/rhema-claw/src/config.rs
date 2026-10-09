@@ -190,6 +190,10 @@ pub struct ClawConfig {
     /// The root of the resident tier's durable memory store. Under the
     /// XDG state dir when unset (`$XDG_STATE_HOME/rhema/claw/memory`).
     pub memory_root: Option<PathBuf>,
+    /// The root of the bootstrap store — SOUL.md, USER.md,
+    /// ENVIRONMENT.md. Under the XDG state dir when unset
+    /// (`$XDG_STATE_HOME/rhema/claw/bootstrap`).
+    pub bootstrap_root: Option<PathBuf>,
     /// Seconds between detect passes of the resident loop.
     pub poll_interval_secs: u64,
     /// The handler's model backend: `google`, `llama-cpp`, `openrouter`,
@@ -216,6 +220,7 @@ impl Default for ClawConfig {
             db: None,
             workspace_root: None,
             memory_root: None,
+            bootstrap_root: None,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
             provider: None,
             model: None,
@@ -272,6 +277,16 @@ impl ClawConfig {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| Self::state_dir().map(|dir| dir.join("memory")))
+    }
+
+    /// The bootstrap store's root, defaulted under the state dir: the
+    /// SOUL.md/USER.md the resident prompt renders and the
+    /// ENVIRONMENT.md the boot pass generates.
+    pub fn bootstrap_dir(&self) -> Result<PathBuf, ConfigError> {
+        self.bootstrap_root
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| Self::state_dir().map(|dir| dir.join("bootstrap")))
     }
 
     /// The HTTP surface's address: the config's, or
@@ -356,6 +371,7 @@ mod tests {
 db: /var/lib/rhema/claw.db
 workspace_root: /var/lib/rhema/claw-work
 memory_root: /var/lib/rhema/claw-memory
+bootstrap_root: /var/lib/rhema/claw-bootstrap
 poll_interval_secs: 30
 provider: anthropic
 model: claude-sonnet-4-5
@@ -380,6 +396,10 @@ watches:
         assert_eq!(
             config.db.as_deref(),
             Some(std::path::Path::new("/var/lib/rhema/claw.db"))
+        );
+        assert_eq!(
+            config.bootstrap_root.as_deref(),
+            Some(std::path::Path::new("/var/lib/rhema/claw-bootstrap"))
         );
         assert_eq!(config.watches.len(), 3);
         assert_eq!(config.watches[0].forge, ForgeKind::GitHub);
@@ -407,6 +427,7 @@ watches:
         assert_eq!(config.model, None);
         assert_eq!(config.db, None);
         assert_eq!(config.workspace_root, None);
+        assert_eq!(config.bootstrap_root, None);
         assert_eq!(config.listen_addr(), DEFAULT_LISTEN);
         assert_eq!(config.token, None);
     }

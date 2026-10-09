@@ -1,6 +1,7 @@
 //! The HTTP surface: the resident agent's chat routes, its session
-//! inventory, and its watch CRUD — plus the health probe that stays
-//! open when everything else is tokened.
+//! inventory, its watch CRUD, and its setup badge (`/v1/bootstrap`) —
+//! plus the health probe that stays open when everything else is
+//! tokened.
 //!
 //! The shape of a chat request, end to end: subscribe the hub FIRST
 //! (nothing emitted before a subscriber exists is ever streamed to it),
@@ -33,6 +34,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::bootstrap::Bootstrap;
 use crate::hub::{EventHub, TurnEvent};
 use crate::interactive::KEY_PREFIX;
 use crate::watch_store::{ClawStore, validate_watch};
@@ -51,6 +53,7 @@ pub struct ClawState {
     driver: Arc<Driver>,
     store: Arc<SqliteStore>,
     watches: Arc<ClawStore>,
+    bootstrap: Arc<Bootstrap>,
     hub: Arc<EventHub>,
     model: String,
     token: Option<String>,
@@ -58,13 +61,16 @@ pub struct ClawState {
 
 impl ClawState {
     /// The state over the interactive dispatcher and its driver, the
-    /// shared dispatch store, the watch table, the event hub, and the
-    /// configured `model` (the shim's echo default) and bearer `token`.
+    /// shared dispatch store, the watch table, the bootstrap store, the
+    /// event hub, and the configured `model` (the shim's echo default)
+    /// and bearer `token`.
+    #[allow(clippy::too_many_arguments)] // eight parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
         store: Arc<SqliteStore>,
         watches: Arc<ClawStore>,
+        bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
         model: impl Into<String>,
         token: Option<String>,
@@ -74,6 +80,7 @@ impl ClawState {
             driver,
             store,
             watches,
+            bootstrap,
             hub,
             model: model.into(),
             token,
@@ -130,6 +137,7 @@ pub fn router(state: ClawState) -> Router {
         .route("/sessions", get(sessions))
         .route("/sessions/{key}/messages", post(messages))
         .route("/sessions/{key}/events", get(events))
+        .route("/bootstrap", get(bootstrap_status))
         .route("/watches", get(watches_list).post(watches_add))
         .route("/watches/{forge}/{*repo}", delete(watches_remove))
         .route("/chat/completions", post(crate::openai::chat_completions))
@@ -168,6 +176,19 @@ async fn sessions(
 ) -> Result<Json<Vec<Value>>, (StatusCode, String)> {
     state
         .sessions()
+        .map(Json)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+/// The setup badge: which of SOUL.md and USER.md exist, read live — a
+/// UI badges first-run setup from it while the onboarding offer is
+/// still open.
+async fn bootstrap_status(
+    State(state): State<ClawState>,
+) -> Result<Json<crate::bootstrap::BootstrapStatus>, (StatusCode, String)> {
+    state
+        .bootstrap
+        .status()
         .map(Json)
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }

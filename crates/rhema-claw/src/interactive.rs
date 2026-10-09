@@ -19,11 +19,13 @@
 //!
 //! Deterministic setup first (spec §1, §8): the allowlist — permissive,
 //! v1's starting point — and the resolver chain (the coding toolset over
-//! the interactive workspace plus the watch tools) are assembled before
-//! the first model call; the model never decides its own permissions.
+//! the interactive workspace, the memory tools, `bootstrap_save`, and
+//! the watch tools) are assembled before the first model call; the model
+//! never decides its own permissions. The system prompt is rendered per
+//! dispatch from the bootstrap template over the live SOUL/USER files.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,6 +40,7 @@ use rhema_memory::{MemoryResolver, MemoryStore, Scope};
 use rhema_rsd::{Dispatcher, Event, Outcome, ResourceKey};
 use serde_json::{Value, json};
 
+use crate::bootstrap::{Bootstrap, DEFAULT_SYSTEM_MD, render_system};
 use crate::hub::{EventHub, TurnEvent};
 use crate::watch_store::ClawStore;
 
@@ -96,7 +99,8 @@ pub fn user_event(key: &str, text: &str) -> Event {
 }
 
 /// The resident agent: a provider, a model, one shared workspace, the
-/// watch table its tools manage, and the hub its turns stream through.
+/// bootstrap store its identity files live in, the watch table its
+/// tools manage, and the hub its turns stream through.
 pub struct InteractiveHandler {
     provider: Arc<dyn rhema_core::ModelProvider>,
     model: String,
@@ -106,6 +110,10 @@ pub struct InteractiveHandler {
     /// The durable cross-session store the memory tools act on; the
     /// resolver is built per dispatch so its scope tracks the workspace.
     memory: Arc<dyn MemoryStore>,
+    /// The identity files: the system prompt renders from them per
+    /// dispatch, and the `bootstrap_save` resolver writes them.
+    bootstrap: Arc<Bootstrap>,
+    bootstrap_resolver: Arc<dyn rhema_core::ToolResolver>,
     hub: Arc<EventHub>,
 }
 
@@ -121,6 +129,7 @@ impl InteractiveHandler {
         workspace: impl Into<PathBuf>,
         watches: Arc<ClawStore>,
         memory: Arc<dyn MemoryStore>,
+        bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
     ) -> Self {
         let workspace = workspace.into();
@@ -128,6 +137,8 @@ impl InteractiveHandler {
         tools.install_approval(Arc::new(AllowAll));
         let watch_resolver =
             crate::watch_tools::registry(watches).resolver_for(&Allowlist::permissive());
+        let bootstrap_resolver =
+            crate::bootstrap::registry(bootstrap.clone()).resolver_for(&Allowlist::permissive());
         Self {
             provider,
             model: model.into(),
@@ -135,14 +146,21 @@ impl InteractiveHandler {
             tools,
             watch_resolver,
             memory,
+            bootstrap,
+            bootstrap_resolver,
             hub,
         }
     }
 
     /// The agent for one dispatch: rebuilt per run over the restored
     /// session (the engine's own step counter is per-agent; the
-    /// conversation lives in the session, not the agent).
+    /// conversation lives in the session, not the agent). The system
+    /// prompt is re-rendered per dispatch, so a SOUL.md or USER.md the
+    /// last turn wrote is live this turn, and the onboarding section is
+    /// gone the moment both files exist.
     fn agent(&self) -> Result<Agent, String> {
+        let system = render_system(DEFAULT_SYSTEM_MD, &self.workspace, &self.bootstrap)
+            .map_err(|err| format!("cannot render the bootstrap system prompt: {err}"))?;
         Agent::builder()
             .provider(self.provider.clone())
             .resolver(Arc::new(ResolverChain::new(vec![
@@ -151,9 +169,10 @@ impl InteractiveHandler {
                     self.memory.clone(),
                     Scope::Workspace(self.workspace.clone()),
                 )),
+                self.bootstrap_resolver.clone(),
                 self.watch_resolver.clone(),
             ])))
-            .system(persona(&self.workspace))
+            .system(system)
             .params(ChatParams::new(self.model.clone()))
             .build()
             .map_err(|err| format!("cannot build the interactive agent: {err}"))
@@ -251,28 +270,6 @@ fn restore_session(stashed: &Value, key: &str) -> Result<Session, String> {
     }
 }
 
-/// The resident agent's persona: what it is, where its shell runs, and
-/// what it can manage — tersely, because this enters every request.
-fn persona(workspace: &Path) -> String {
-    format!(
-        "You are rhema-claw, the resident agent on this machine. You \
-         answer chat here; your shell runs in the workspace at {} — \
-         read code, run tests, make edits there. You manage your own \
-         watch list with the watch_repo, unwatch_repo, and list_watches \
-         tools: a watched repository's activity (issues, pull requests, \
-         comments) arrives as its own dispatch. You keep persistent \
-         memory across sessions: memory_save stores what is worth \
-         remembering (decisions, conventions, tone, pointers), \
-         memory_search recalls it before asking the user for something \
-         they have likely said before, memory_forget removes it. Keep \
-         replies terse and \
-         concrete; do the work with tools instead of narrating it. Your \
-         final message — the one you end the turn on, with no tool calls \
-         after it — is the reply the user sees.",
-        workspace.display()
-    )
-}
-
 /// The text a turn ends on: the assistant message's text parts, joined
 /// and trimmed. `None` when the model ended without writing a reply.
 fn final_text(message: &Message) -> Option<String> {
@@ -351,6 +348,8 @@ impl EventSink for HubSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
     use rhema_core::{
         Content, Message as CoreMessage, MockProvider, ModelOutput, Role as CoreRole, StopReason,
         ToolCall, Usage,
@@ -385,8 +384,15 @@ mod tests {
     }
 
     #[test]
-    fn the_persona_names_the_workspace_and_the_tools() {
-        let prompt = persona(Path::new("/state/claw/workspaces/interactive"));
+    fn the_prompt_names_the_workspace_and_the_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bootstrap = Bootstrap::new(dir.path().join("bootstrap")).expect("store opens");
+        let prompt = render_system(
+            DEFAULT_SYSTEM_MD,
+            Path::new("/state/claw/workspaces/interactive"),
+            &bootstrap,
+        )
+        .expect("renders");
         assert!(
             prompt.contains("/state/claw/workspaces/interactive"),
             "{prompt}"
@@ -397,10 +403,14 @@ mod tests {
             "list_watches",
             "memory_save",
             "memory_search",
+            "bootstrap_save",
         ] {
             assert!(prompt.contains(tool), "missing {tool}: {prompt}");
         }
         assert!(prompt.contains("final message"), "{prompt}");
+        // A fresh store is pending onboarding: the offered setup renders.
+        assert!(prompt.contains("## Setup"), "{prompt}");
+        assert!(prompt.contains("(pending onboarding)"), "{prompt}");
     }
 
     #[test]
@@ -503,6 +513,7 @@ mod tests {
             workspace.path().join("interactive"),
             store,
             Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
         );
 
@@ -575,6 +586,7 @@ mod tests {
             workspace_path.clone(),
             store,
             memory.clone(),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub,
         );
 
@@ -628,6 +640,90 @@ mod tests {
         );
     }
 
+    /// The bootstrap tool rides the resolver chain across dispatches,
+    /// exactly as the memory tools do: the model saves SOUL.md in one
+    /// turn and USER.md in the next, the files land through the store,
+    /// and the status the onboarding section renders from flips — gone
+    /// the moment both files exist.
+    #[tokio::test]
+    async fn a_bootstrap_save_in_one_dispatch_flips_the_status_for_the_next() {
+        use crate::bootstrap::BOOTSTRAP_SAVE;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bootstrap =
+            Arc::new(Bootstrap::new(dir.path().join("bootstrap")).expect("store opens"));
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        let hub = Arc::new(EventHub::default());
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let handler = InteractiveHandler::new(
+            Arc::new(MockProvider::new([
+                scripted_call(
+                    "call-soul",
+                    BOOTSTRAP_SAVE,
+                    json!({"kind": "soul", "content": "I am claw: terse, warm."}),
+                ),
+                reply("noted."),
+                scripted_call(
+                    "call-user",
+                    BOOTSTRAP_SAVE,
+                    json!({"kind": "user", "content": "The user is Ana."}),
+                ),
+                reply("setup is done."),
+            ])),
+            "test-model",
+            workspace.path().join("interactive"),
+            store,
+            Arc::new(rhema_memory::VolatileStore::new()),
+            bootstrap.clone(),
+            hub,
+        );
+
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            Arc::new(VolatileStore::new()),
+        ));
+        register_user(&dispatcher);
+        let driver = rhema_autonomous_agent::Driver::new(dispatcher.clone(), Arc::new(handler))
+            .with_holder("test");
+        let key = Key::from("interactive:web");
+
+        // Dispatch 1: the model writes SOUL.md through the chain. A key
+        // with a session continues, so both calls ride one key.
+        dispatcher
+            .ingest(user_event(key.as_str(), "call me claw"))
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("first run"),
+            vec![RsdOutcome::Handled]
+        );
+        assert_eq!(
+            bootstrap
+                .load(crate::bootstrap::BootstrapKind::Soul)
+                .expect("reads"),
+            Some("I am claw: terse, warm.".to_owned())
+        );
+        let status = bootstrap.status().expect("status reads");
+        assert!(status.soul);
+        assert!(!status.user);
+        assert!(bootstrap.needs_onboarding(), "user is still unwritten");
+
+        // Dispatch 2: USER.md, same chain — and the pending flag clears.
+        dispatcher
+            .ingest(user_event(key.as_str(), "and I am Ana"))
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("second run"),
+            vec![RsdOutcome::Handled]
+        );
+        let status = bootstrap.status().expect("status reads");
+        assert!(status.soul && status.user);
+        assert!(!bootstrap.needs_onboarding(), "both files exist");
+    }
+
     /// The stash proof, done properly through the dispatcher's record.
     #[tokio::test]
     async fn a_dispatch_stashes_the_exchange_in_driver_state() {
@@ -642,6 +738,7 @@ mod tests {
             workspace.path().join("interactive"),
             store,
             Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub,
         );
         let backing = Arc::new(VolatileStore::new());

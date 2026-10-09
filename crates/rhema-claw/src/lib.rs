@@ -17,6 +17,8 @@
 //! Layout:
 //! - [`config`] — the YAML config: the watch seed, paths, HTTP surface,
 //!   provider and model
+//! - [`bootstrap`] — the SOUL/USER/ENVIRONMENT store, the system prompt
+//!   rendered from it per dispatch, and the `bootstrap_save` tool
 //! - [`watch_store`] — the persistent watch table (SQLite, shared file)
 //! - [`hub`] — the event hub: per-key broadcast of live turn events
 //! - [`watch_tools`] — the agent's watch-management tool set
@@ -33,8 +35,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod bootstrap;
 pub mod config;
 pub mod daemon;
+pub mod environment;
 pub mod forge;
 pub mod handler;
 pub mod http;
@@ -46,8 +50,13 @@ pub mod openai;
 pub mod watch_store;
 pub mod watch_tools;
 
+pub use bootstrap::{
+    BOOTSTRAP_SAVE, Bootstrap, BootstrapError, BootstrapKind, BootstrapStatus, DEFAULT_SYSTEM_MD,
+    render_system,
+};
 pub use config::{ClawConfig, ConfigError, ForgeKind, Watch};
 pub use daemon::{ClawError, Daemon, TickReport, run_once};
+pub use environment::write_report;
 pub use forge::ForgeSource;
 pub use handler::ClawHandler;
 pub use hub::{EventHub, TurnEvent};

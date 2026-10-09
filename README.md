@@ -57,9 +57,10 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   contract for deterministic model-free detection, the lease-driven
   `Driver` loop (live inbox batches, per-round checkpoints), and a tool
   registry cut into allowlist-filtered resolvers
-- `rhema-claw` — the resident agent daemon: durable cross-session
-  memory its model pulls through the `memory_*` tools, a chat surface
-  over HTTP
+- `rhema-claw` — the resident agent daemon: an identity (SOUL.md,
+  USER.md) written with the user over a first-run onboarding offer,
+  durable cross-session memory its model pulls through the `memory_*`
+  tools, a chat surface over HTTP
   (native routes with SSE, plus an OpenAI-compatible `/v1/chat/
 completions` shim for stock UIs), watch management by agent tool or
   HTTP, and forge threads answered with one coding-agent turn posted as
@@ -290,7 +291,23 @@ GET  /healthz                          GET  /v1/sessions
 POST /v1/sessions/{key}/messages       {"text": "..."}   -> 202
 GET  /v1/sessions/{key}/events         SSE turn events (see below)
 GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{forge}/{repo}
+GET  /v1/bootstrap                     {"soul": bool, "user": bool}
 ```
+
+### Identity and first-run
+
+The claw's prompt is assembled per turn from an in-binary base plus
+three identity files under the state dir's `bootstrap/` (config:
+`bootstrap_root`): **SOUL.md** — who the claw is, tone and purpose,
+written with you; **USER.md** — the always-visible summary of who you
+are; **ENVIRONMENT.md** — host, shell, and tool inventory, generated
+deterministically at every boot (detection is code, not conversation;
+hand edits are overwritten). On first run the claw *offers* a short
+setup in chat — who you are, what the machine is for, who it should be
+— and writes the first two files itself through the `bootstrap_save`
+tool as you answer; decline and it simply keeps offering, never
+interrogating. Both files stay hand-editable forever; `/v1/bootstrap`
+lets a UI badge setup state.
 
 SSE frames are JSON, `data: {..}
 

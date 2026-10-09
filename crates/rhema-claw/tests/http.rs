@@ -36,6 +36,7 @@ fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
         db: Some(dir.path().join("dispatch.db")),
         workspace_root: Some(dir.path().join("workspaces")),
         memory_root: None,
+        bootstrap_root: Some(dir.path().join("bootstrap")),
         poll_interval_secs: 60,
         provider: Some("google".to_owned()),
         model: Some("test-model".to_owned()),
@@ -545,6 +546,69 @@ async fn the_shim_rejects_requests_without_a_user_message() {
             .as_str()
             .is_some_and(|message| message.contains("user")),
         "{body}"
+    );
+}
+
+/// The bootstrap badge as the route serves it for `daemon`, with the
+/// config's bearer.
+async fn bootstrap_badge(daemon: &Daemon) -> Value {
+    let base = serve(daemon).await;
+    reqwest::Client::new()
+        .get(format!("{base}/v1/bootstrap"))
+        .header(reqwest::header::AUTHORIZATION, "Bearer sekrit")
+        .send()
+        .await
+        .expect("the badge reads")
+        .json()
+        .await
+        .expect("the badge parses")
+}
+
+/// GET /v1/bootstrap reflects the store live, behind the same bearer
+/// check as every /v1 route: a UI badges first-run setup from it while
+/// the onboarding offer is open.
+#[tokio::test]
+async fn the_bootstrap_route_reports_the_identity_files_and_requires_auth() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, Some("sekrit")),
+        Arc::new(MockProvider::new(Vec::new())),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let url = format!("{base}/v1/bootstrap");
+    let client = reqwest::Client::new();
+
+    // The badge is a /v1 route: open reads are refused.
+    assert_eq!(
+        client
+            .get(&url)
+            .send()
+            .await
+            .expect("the open read goes out")
+            .status(),
+        401
+    );
+
+    // A fresh install: both files unwritten.
+    assert_eq!(
+        bootstrap_badge(&daemon).await,
+        json!({"soul": false, "user": false})
+    );
+
+    // The files the onboarding flow writes flip the badge live — the
+    // route reads the store per request, never a boot-time snapshot.
+    let root = dir.path().join("bootstrap");
+    std::fs::write(root.join("SOUL.md"), "I am claw: terse.").expect("write");
+    assert_eq!(
+        bootstrap_badge(&daemon).await,
+        json!({"soul": true, "user": false})
+    );
+    std::fs::write(root.join("USER.md"), "The user is Ana.").expect("write");
+    assert_eq!(
+        bootstrap_badge(&daemon).await,
+        json!({"soul": true, "user": true})
     );
 }
 

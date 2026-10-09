@@ -34,6 +34,8 @@ if [ "$MOCK" = 1 ]; then
 # Scratch debug config (scripts/dev.sh --mock): no model is called.
 db: $SCRATCH/claw.db
 workspace_root: $SCRATCH/workspaces
+memory_root: $SCRATCH/memory
+bootstrap_root: $SCRATCH/bootstrap
 listen: 127.0.0.1:7799
 poll_interval_secs: 60
 EOF
@@ -57,6 +59,8 @@ else
 provider: $PROVIDER
 db: $SCRATCH/claw.db
 workspace_root: $SCRATCH/workspaces
+memory_root: $SCRATCH/memory
+bootstrap_root: $SCRATCH/bootstrap
 listen: 127.0.0.1:7799
 poll_interval_secs: 60
 EOF

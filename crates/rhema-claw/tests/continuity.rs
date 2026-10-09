@@ -60,6 +60,7 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
         db: Some(dir.path().join("dispatch.db")),
         workspace_root: Some(dir.path().join("workspaces")),
         memory_root: None,
+        bootstrap_root: None,
         poll_interval_secs: 60,
         provider: Some("google".to_owned()),
         model: Some("test-model".to_owned()),
