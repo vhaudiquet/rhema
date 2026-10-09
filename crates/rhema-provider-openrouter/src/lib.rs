@@ -8,8 +8,8 @@
 //! `HTTP-Referer`/`X-Title` attribution headers), the SSE stream decoded
 //! into rhema-core [`Event`](rhema_core::Event)s and assembled into a
 //! [`ModelOutput`](rhema_core::ModelOutput). `GET {base}/models` lists the
-//! public catalog as [`GeminiModel`](rhema_provider_google::GeminiModel)
-//! rows — the shared normalized model type — with pricing converted from
+//! public catalog as [`ModelCard`](rhema_provider::ModelCard) rows — the
+//! shared normalized model type — with pricing converted from
 //! OpenRouter's USD-per-token strings to per-MTok; the text chat models
 //! only, since the catalog also aggregates image, audio, and embedding
 //! backends. The wire mapping
@@ -44,7 +44,7 @@
 //! - [`wire`] — serde wire types plus the pure mapping between
 //!   [`rhema_core::ModelRequest`] / SSE chunks and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
-//!   catalog mapping onto `GeminiModel`
+//!   catalog mapping onto `ModelCard`
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 

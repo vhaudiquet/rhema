@@ -9,10 +9,8 @@ authors.workspace = true
 
 [dependencies]
 rhema-core = { path = "../rhema-core" }
-# The shared SSE decoder
+# The shared model card and SSE decoder
 rhema-provider = { path = "../rhema-provider" }
-# The shared normalized model row (`GeminiModel`)
-rhema-provider-google = { path = "../rhema-provider-google" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

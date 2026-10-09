@@ -35,6 +35,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::{ToolCall, ToolResult};
+use rhema_provider::ModelCard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -691,63 +692,6 @@ fn stop_reason(finish_reason: Option<&str>, parts: &[NormalizedPart]) -> StopRea
 
 // --- ListModels: wire -> normalized ---
 
-/// One model from the ListModels API, normalized for consumers: no
-/// `models/` prefix, no wire-only fields. Not `Eq`: the per-instance price
-/// is floating point.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GeminiModel {
-    /// Model id without the `models/` prefix (e.g. `gemini-3.8-flash`).
-    pub id: String,
-    /// Human-readable name (e.g. `Gemini 3.8 Flash`).
-    pub display_name: String,
-    /// What the model is for, from the API.
-    pub description: String,
-    /// Prompt ceiling in tokens, when advertised.
-    pub input_token_limit: Option<u64>,
-    /// Output ceiling in tokens, when advertised.
-    pub output_token_limit: Option<u64>,
-    /// The API's `supportedGenerationMethods`, verbatim.
-    pub generation_methods: Vec<String>,
-    /// Per-MTok price carried by the source listing itself, when it has one
-    /// (Google's ListModels never does; sibling adapters reusing this
-    /// normalized row may). [`GeminiModel::pricing`] prefers it over the
-    /// curated table.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pricing: Option<crate::pricing::Pricing>,
-}
-
-impl GeminiModel {
-    /// Whether the model can be used with `generateContent`.
-    pub fn supports_chat(&self) -> bool {
-        self.generation_methods
-            .iter()
-            .any(|m| m == "generateContent")
-    }
-
-    /// Whether the model is a text chat model. `generateContent` alone does
-    /// not discriminate — video (veo), image (nano-banana), speech (tts,
-    /// audio), realtime (live), and specialty models expose it too — so
-    /// non-chat families are excluded by id.
-    pub fn is_text(&self) -> bool {
-        const NON_TEXT: [&str; 13] = [
-            "veo",
-            "image",
-            "nano-banana",
-            "tts",
-            "audio",
-            "live",
-            "omni",
-            "transcribe",
-            "embedding",
-            "aqa",
-            "computer-use",
-            "robotics",
-            "lyria",
-        ];
-        !NON_TEXT.iter().any(|marker| self.id.contains(marker))
-    }
-}
-
 /// One page of the ListModels response.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -785,7 +729,7 @@ pub struct WireModel {
     pub supported_generation_methods: Vec<String>,
 }
 
-impl From<WireModel> for GeminiModel {
+impl From<WireModel> for ModelCard {
     fn from(wire: WireModel) -> Self {
         Self {
             id: wire
@@ -798,11 +742,35 @@ impl From<WireModel> for GeminiModel {
             input_token_limit: wire.input_token_limit,
             output_token_limit: wire.output_token_limit,
             generation_methods: wire.supported_generation_methods,
-            // ListModels carries no pricing; `GeminiModel::pricing` falls
-            // back to the curated table.
+            // ListModels carries no pricing; the provider step bakes the
+            // curated table in.
             pricing: None,
         }
     }
+}
+
+/// Whether the model is a text chat model. `generateContent` alone does not
+/// discriminate — video (veo), image (nano-banana), speech (tts, audio),
+/// realtime (live), and specialty models expose it too — so non-chat
+/// families are excluded by id. This is Gemini-catalog knowledge, which is
+/// why it lives here and not on the shared [`ModelCard`].
+pub fn is_text(model: &ModelCard) -> bool {
+    const NON_TEXT: [&str; 13] = [
+        "veo",
+        "image",
+        "nano-banana",
+        "tts",
+        "audio",
+        "live",
+        "omni",
+        "transcribe",
+        "embedding",
+        "aqa",
+        "computer-use",
+        "robotics",
+        "lyria",
+    ];
+    !NON_TEXT.iter().any(|marker| model.id.contains(marker))
 }
 
 #[cfg(test)]
@@ -1409,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn wire_model_normalizes_and_filters_chat_capability() {
+    fn wire_model_normalizes_and_chat_capability_is_text_discriminates() {
         let wire: WireModel = serde_json::from_str(
             r#"{
                 "name": "models/gemini-3.8-flash",
@@ -1420,14 +1388,15 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let model: GeminiModel = wire.into();
+        let model: ModelCard = wire.into();
         assert_eq!(model.id, "gemini-3.8-flash");
         assert_eq!(model.display_name, "Gemini 3.8 Flash");
         assert_eq!(model.input_token_limit, Some(1_048_576));
         assert_eq!(model.output_token_limit, None);
         assert!(model.supports_chat());
+        assert!(is_text(&model));
 
-        let tts: GeminiModel = serde_json::from_str::<WireModel>(
+        let tts: ModelCard = serde_json::from_str::<WireModel>(
             r#"{
                 "name": "models/gemini-3.8-flash-tts",
                 "supportedGenerationMethods": ["generateContent", "generateAudio"]
@@ -1439,6 +1408,10 @@ mod tests {
         assert!(
             tts.supports_chat(),
             "tts models still expose generateContent"
+        );
+        assert!(
+            !is_text(&tts),
+            "the id marker, not the method list, excludes speech models"
         );
     }
 }

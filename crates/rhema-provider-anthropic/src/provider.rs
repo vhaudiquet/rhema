@@ -25,9 +25,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider_google::GeminiModel;
-
-use rhema_provider::SseDecoder;
+use rhema_provider::{ModelCard, SseDecoder};
 
 use crate::wire::{ChunkAssembler, StreamEvent, WireErrorBody, WireModelsPage};
 
@@ -77,7 +75,7 @@ impl AnthropicProvider {
     /// Every model the key can see, following `has_more`/`after_id`
     /// pagination until the list is exhausted. Anthropic's listing is
     /// text chat models only, so there is nothing to filter.
-    pub async fn list_models(&self) -> Result<Vec<GeminiModel>, ProviderError> {
+    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         let mut models = Vec::new();
         let mut after_id: Option<String> = None;
         loop {
@@ -101,7 +99,7 @@ impl AnthropicProvider {
                 .await
                 .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
             let fetched = page.data.len();
-            models.extend(page.data.into_iter().map(GeminiModel::from));
+            models.extend(page.data.into_iter().map(ModelCard::from));
             // A missing cursor or a zero-row page keeps a misbehaving mirror
             // from spinning this loop forever.
             match page.has_more.then_some(page.last_id).flatten() {

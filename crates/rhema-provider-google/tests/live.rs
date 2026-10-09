@@ -10,7 +10,7 @@
 use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, Role,
 };
-use rhema_provider_google::{GeminiModel, GoogleProvider};
+use rhema_provider_google::GoogleProvider;
 
 struct NullSink;
 
@@ -20,7 +20,7 @@ impl EventSink for NullSink {
 
 #[tokio::test]
 #[ignore = "hits the live Gemini API; set GEMINI_API_KEY and run with `cargo test -p rhema-provider-google --all-features -- --ignored`"]
-async fn live_gemini_lists_chat_capable_models() {
+async fn live_gemini_lists_text_chat_models() {
     let key = std::env::var("GEMINI_API_KEY")
         .unwrap_or_else(|_| panic!("set GEMINI_API_KEY to run the live test"));
 
@@ -28,13 +28,9 @@ async fn live_gemini_lists_chat_capable_models() {
         .list_models()
         .await
         .expect("the live ListModels call succeeds");
-    let chat: Vec<&GeminiModel> = models
-        .iter()
-        .filter(|model| model.supports_chat())
-        .collect();
     assert!(
-        chat.iter().any(|model| model.id.starts_with("gemini-")),
-        "expected at least one chat-capable gemini model, got {chat:?}"
+        models.iter().any(|model| model.id.starts_with("gemini-")),
+        "expected at least one text chat gemini model, got {models:?}"
     );
 }
 

@@ -17,10 +17,10 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
+use rhema_provider::{ModelCard, SseDecoder};
 
-use crate::stream::SseDecoder;
 use crate::wire::{
-    ChunkAssembler, GeminiModel, GenerateContentResponse, WireErrorBody, WireModelsPage,
+    ChunkAssembler, GenerateContentResponse, WireErrorBody, WireModelsPage, is_text,
 };
 
 /// The production Generative Language API base (v1beta).
@@ -51,9 +51,14 @@ impl GoogleProvider {
         self
     }
 
-    /// Every model the key can see, following pagination until the list is
-    /// exhausted. `models/` is stripped from `GeminiModel::id`.
-    pub async fn list_models(&self) -> Result<Vec<GeminiModel>, ProviderError> {
+    /// Every text chat model the key can see, following pagination until
+    /// the list is exhausted. The ListModels API also reports embeddings,
+    /// video, speech, and image models — those cannot drive a coding agent
+    /// and are filtered here, by Gemini-catalog knowledge that never rides
+    /// on the shared [`ModelCard`]. `models/` is stripped from
+    /// `ModelCard::id`, and the curated table prices each row the listing
+    /// itself leaves unpriced.
+    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         let mut models = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
@@ -82,7 +87,18 @@ impl GoogleProvider {
                 .json()
                 .await
                 .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
-            models.extend(page.models.into_iter().map(Into::into));
+            models.extend(
+                page.models
+                    .into_iter()
+                    .map(ModelCard::from)
+                    // A listing-carried price would win; ListModels has
+                    // none, so the curated table decides.
+                    .map(|mut card| {
+                        card.pricing = card.pricing.or_else(|| crate::model_pricing(&card.id));
+                        card
+                    })
+                    .filter(|card| card.supports_chat() && is_text(card)),
+            );
             match page.next_page_token {
                 Some(token) => page_token = Some(token),
                 None => return Ok(models),

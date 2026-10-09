@@ -66,7 +66,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
-use rhema_provider_google::GeminiModel;
+use rhema_provider::ModelCard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -413,7 +413,7 @@ pub struct WireModel {
     pub display_name: String,
 }
 
-impl From<WireModel> for GeminiModel {
+impl From<WireModel> for ModelCard {
     fn from(wire: WireModel) -> Self {
         Self {
             id: wire.id,
@@ -1749,7 +1749,7 @@ mod tests {
 
         assert!(page.has_more);
         assert_eq!(page.last_id.as_deref(), Some("claude-opus-4-1"));
-        let models: Vec<GeminiModel> = page.data.into_iter().map(Into::into).collect();
+        let models: Vec<ModelCard> = page.data.into_iter().map(Into::into).collect();
 
         assert_eq!(models[0].id, "claude-sonnet-4-5");
         assert_eq!(models[0].display_name, "Claude Sonnet 4.5");
@@ -1760,7 +1760,6 @@ mod tests {
         assert_eq!(models[0].generation_methods, vec!["generateContent"]);
         assert_eq!(models[0].pricing, None);
         assert!(models[0].supports_chat());
-        assert!(models[0].is_text());
     }
 
     #[test]

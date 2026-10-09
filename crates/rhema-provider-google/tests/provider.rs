@@ -5,7 +5,7 @@ use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, Usage,
 };
-use rhema_provider_google::GoogleProvider;
+use rhema_provider_google::{GoogleProvider, model_pricing};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -243,13 +243,13 @@ async fn list_models_follows_pagination_and_strips_the_prefix() {
     let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
     let models = provider.list_models().await.expect("pages assemble");
 
+    // The embedding row cannot drive a coding agent: filtered. The
+    // chat rows keep their page order across the pagination.
     let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
-    assert_eq!(
-        ids,
-        ["gemini-3.7-flash", "text-embedding-1", "gemini-3.8-flash"]
-    );
+    assert_eq!(ids, ["gemini-3.7-flash", "gemini-3.8-flash"]);
     assert_eq!(models[0].display_name, "Gemini 3.7 Flash");
     assert_eq!(models[0].input_token_limit, Some(1_000_000));
     assert!(models[0].supports_chat());
-    assert!(!models[1].supports_chat());
+    // ListModels carries no prices; the curated table is baked in.
+    assert_eq!(models[0].pricing, model_pricing("gemini-3.7-flash"));
 }

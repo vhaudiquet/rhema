@@ -7,7 +7,7 @@
 //! key in the `Authorization: Bearer` header, the SSE stream decoded into
 //! rhema-core [`Event`](rhema_core::Event)s and assembled into a
 //! [`ModelOutput`](rhema_core::ModelOutput). `GET {base}/models` lists the
-//! server's models as [`GeminiModel`](rhema_provider_google::GeminiModel)
+//! server's models as [`ModelCard`](rhema_provider::ModelCard)
 //! rows — the shared normalized model type, text chat models only. This is
 //! the home for "other
 //! base URLs": any server speaking the dialect (OpenAI itself, vLLM, LM
@@ -44,7 +44,7 @@
 //! - [`wire`] — serde wire types plus the pure mapping between
 //!   [`rhema_core::ModelRequest`] / SSE chunks and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
-//!   listing mapping onto `GeminiModel`
+//!   listing mapping onto `ModelCard`
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 

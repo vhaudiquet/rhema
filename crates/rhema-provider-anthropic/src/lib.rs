@@ -7,8 +7,9 @@
 //! into rhema-core [`Event`](rhema_core::Event)s and assembled into a
 //! [`ModelOutput`](rhema_core::ModelOutput). `GET {base}/v1/models` lists
 //! the account's models as
-//! [`GeminiModel`](rhema_provider_google::GeminiModel) rows — the shared
-//! normalized model type. The wire mapping constraints — user-turn tool
+//! [`ModelCard`](rhema_provider::ModelCard) rows — the shared
+//! normalized model type; Anthropic's listing is text chat models only.
+//! The wire mapping constraints — user-turn tool
 //! results, the split usage accounting, stop reasons — are documented in
 //! the [`wire`] module.
 //!
@@ -40,7 +41,7 @@
 //! - [`wire`] — serde wire types plus the pure mapping between
 //!   [`rhema_core::ModelRequest`] / SSE events and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
-//!   mapping onto `GeminiModel`
+//!   mapping onto `ModelCard`
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 

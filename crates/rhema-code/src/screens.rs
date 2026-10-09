@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use rhema_provider_google::GeminiModel;
+use rhema_provider::ModelCard;
 
 /// Which backend a login provider row configures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -358,9 +358,9 @@ pub fn palette_rows(
 
 /// A model's palette description: the display name with the picker's
 /// facts — pricing and context window — when the catalog knows them.
-fn model_description(model: &GeminiModel) -> String {
+fn model_description(model: &ModelCard) -> String {
     let mut detail = model.display_name.clone();
-    if let Some(pricing) = model.pricing() {
+    if let Some(pricing) = model.pricing {
         detail.push_str(&format!(
             " · ${:.2}/M in · ${:.2}/M out",
             pricing.input_per_mtok, pricing.output_per_mtok
@@ -715,7 +715,7 @@ impl LoginScreen {
     /// Records the validation outcome: an error renders inline and allows
     /// retrying; success leaves the transition to the app (it needs the
     /// models and the store).
-    pub fn on_validated(&mut self, result: &Result<Vec<GeminiModel>, String>) {
+    pub fn on_validated(&mut self, result: &Result<Vec<ModelCard>, String>) {
         if let Err(message) = result {
             self.status = LoginStatus::Error(message.clone());
         }
@@ -773,7 +773,7 @@ pub struct CatalogModel {
     /// The provider's config name (`google`, `openrouter`, ...).
     pub provider: &'static str,
     /// The normalized model.
-    pub model: GeminiModel,
+    pub model: ModelCard,
 }
 
 /// The model picker: text chat models across every logged-in provider,
@@ -812,9 +812,12 @@ impl PickerScreen {
         }
     }
 
-    /// The models this coding agent can drive: text chat models.
-    fn usable(model: &GeminiModel) -> bool {
-        model.supports_chat() && model.is_text()
+    /// The models this coding agent can drive: chat-capable rows. The
+    /// adapters only hand out text chat models — the id markers that
+    /// decide "text" are per-provider catalog knowledge — so this is just
+    /// the defensive line against a row without the chat marker.
+    fn usable(model: &ModelCard) -> bool {
+        model.supports_chat()
     }
 
     /// Replaces the model list (scoped and re-sorted) and clamps the
@@ -1298,15 +1301,14 @@ impl ChatState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhema_provider_google::GeminiModel;
+    use rhema_provider::ModelCard;
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
-    fn model(id: &str, display: &str, chat: bool) -> GeminiModel {
-        assert!(chat, "pickers only list chat models");
-        GeminiModel {
+    fn model(id: &str, display: &str, chat: bool) -> ModelCard {
+        ModelCard {
             id: id.into(),
             display_name: display.into(),
             description: String::new(),
@@ -1449,7 +1451,7 @@ mod tests {
 
     // --- Picker ---
 
-    fn catalog(provider: &'static str, models: Vec<GeminiModel>) -> Vec<CatalogModel> {
+    fn catalog(provider: &'static str, models: Vec<ModelCard>) -> Vec<CatalogModel> {
         models
             .into_iter()
             .map(|model| CatalogModel { provider, model })
@@ -1463,9 +1465,11 @@ mod tests {
                 vec![
                     model("gemini-3.8-pro", "Gemini 3.8 Pro", true),
                     model("gemini-3.8-flash", "Gemini 3.8 Flash", true),
-                    // Non-text families are dropped by the picker itself.
-                    model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", true),
-                    model("veo-3.1-generate-preview", "Veo 3.1", true),
+                    // Rows without the chat marker are dropped by the
+                    // picker itself; the adapters never deliver text-wise
+                    // non-chat models in the first place.
+                    model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", false),
+                    model("text-embedding-1", "Text Embedding 1", false),
                 ],
             ),
             PickerPurpose::Initial,
@@ -1480,11 +1484,11 @@ mod tests {
     }
 
     #[test]
-    fn non_text_models_are_dropped_from_the_list() {
+    fn non_chat_models_are_dropped_from_the_list() {
         let picker = picker();
         let ids: Vec<&str> = picker.models.iter().map(|m| m.model.id.as_str()).collect();
         assert!(!ids.contains(&"gemini-3.8-flash-tts"));
-        assert!(!ids.contains(&"veo-3.1-generate-preview"));
+        assert!(!ids.contains(&"text-embedding-1"));
         assert!(picker.models.iter().all(|m| m.provider == "google"));
     }
 

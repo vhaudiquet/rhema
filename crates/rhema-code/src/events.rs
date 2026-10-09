@@ -8,7 +8,7 @@
 
 use rhema_coding_agent::CodingAgent;
 use rhema_core::{Event, ModelOutput, ToolCall, Usage};
-use rhema_provider_google::GeminiModel;
+use rhema_provider::ModelCard;
 
 /// Why the runner fetched the model list.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +120,7 @@ pub enum UiEvent {
         why: FetchWhy,
         /// Per provider queried: its config name with the fetched models
         /// or the provider's error text.
-        result: Vec<(&'static str, Result<Vec<GeminiModel>, String>)>,
+        result: Vec<(&'static str, Result<Vec<ModelCard>, String>)>,
     },
     /// A gated tool call is waiting for the user's answer. The turn task
     /// blocks until the UI answers (see `crate::approval`).

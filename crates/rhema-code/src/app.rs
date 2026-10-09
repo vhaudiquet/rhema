@@ -12,7 +12,7 @@ use rhema_config::Config;
 use rhema_core::{
     AgentError, Content, Message, ModelOutput, ModelProvider, Session, ToolCall, Usage,
 };
-use rhema_provider_google::GeminiModel;
+use rhema_provider::ModelCard;
 
 use crate::approval::ApprovalAnswerer;
 use crate::events::{FetchWhy, OwnedEvent, UiEvent};
@@ -180,7 +180,7 @@ impl Backend {
     }
 
     /// The models the backend offers, normalized to the picker's row type.
-    pub async fn list_models(&self) -> Result<Vec<GeminiModel>, String> {
+    pub async fn list_models(&self) -> Result<Vec<ModelCard>, String> {
         match self {
             Backend::Google { api_key } => {
                 rhema_provider_google::GoogleProvider::new(api_key.clone())
@@ -228,7 +228,7 @@ impl Backend {
                     .map_err(|err| err.to_string())?;
                 Ok(models
                     .into_iter()
-                    .map(|model| GeminiModel {
+                    .map(|model| ModelCard {
                         display_name: model.id.clone(),
                         // The server's own context report, so picker rows
                         // and the footer carry a real window.
@@ -1040,7 +1040,7 @@ impl App {
     fn on_models_loaded(
         &mut self,
         why: FetchWhy,
-        result: Vec<(&'static str, Result<Vec<GeminiModel>, String>)>,
+        result: Vec<(&'static str, Result<Vec<ModelCard>, String>)>,
     ) {
         match why {
             FetchWhy::Login { backend } => {
@@ -1454,16 +1454,16 @@ impl App {
         Some((name, color))
     }
 
-    /// The pricing of the model the session currently runs on, when it is
-    /// one this crate prices.
-    fn current_model_pricing(&self) -> Option<rhema_provider_google::Pricing> {
+    /// The pricing of the model the session currently runs on, when its
+    /// adapter prices it.
+    fn current_model_pricing(&self) -> Option<rhema_provider::Pricing> {
         let effective = self.effective();
         let model = effective.model.as_deref()?;
         let active = self.backend.as_ref().map(Backend::config_name);
         self.models
             .iter()
             .find(|entry| entry.model.id == model && Some(entry.provider) == active)
-            .and_then(|entry| entry.model.pricing())
+            .and_then(|entry| entry.model.pricing)
     }
 
     /// The context window of the current model, when known.
@@ -1565,7 +1565,8 @@ mod tests {
     use crate::transcript::Line;
     use rhema_coding_agent::{Approval, CodingAgentConfig};
     use rhema_core::{Message, Role, Session, StopReason, ToolCall, Usage};
-    use rhema_provider_google::{GeminiModel, GoogleProvider};
+    use rhema_provider::ModelCard;
+    use rhema_provider_google::GoogleProvider;
     use std::collections::BTreeMap;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -1576,8 +1577,8 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
-    fn model(id: &str) -> GeminiModel {
-        GeminiModel {
+    fn model(id: &str) -> ModelCard {
+        ModelCard {
             id: id.into(),
             display_name: id.into(),
             description: String::new(),
@@ -1588,7 +1589,7 @@ mod tests {
         }
     }
 
-    fn models() -> Vec<GeminiModel> {
+    fn models() -> Vec<ModelCard> {
         vec![model("m-b"), model("m-a")]
     }
 
@@ -1596,8 +1597,8 @@ mod tests {
     /// fetch task reports per queried backend.
     fn loaded(
         provider: &'static str,
-        models: Vec<GeminiModel>,
-    ) -> Vec<(&'static str, Result<Vec<GeminiModel>, String>)> {
+        models: Vec<ModelCard>,
+    ) -> Vec<(&'static str, Result<Vec<ModelCard>, String>)> {
         vec![(provider, Ok(models))]
     }
 
@@ -1605,18 +1606,22 @@ mod tests {
     fn failed(
         provider: &'static str,
         message: &str,
-    ) -> Vec<(&'static str, Result<Vec<GeminiModel>, String>)> {
+    ) -> Vec<(&'static str, Result<Vec<ModelCard>, String>)> {
         vec![(provider, Err(message.to_owned()))]
     }
 
-    /// A model whose id is in the pricing table, for cost-math tests.
-    fn priced_model(id: &str) -> GeminiModel {
-        model(id)
+    /// A priced card, for cost-math tests: the price rides the row, the
+    /// way the adapters hand catalogs out.
+    fn priced_model(id: &str, pricing: rhema_provider::Pricing) -> ModelCard {
+        ModelCard {
+            pricing: Some(pricing),
+            ..model(id)
+        }
     }
 
     /// A llama.cpp row: an id with none of the metadata Google reports.
-    fn llama_model(id: &str) -> GeminiModel {
-        GeminiModel {
+    fn llama_model(id: &str) -> ModelCard {
+        ModelCard {
             id: id.to_owned(),
             display_name: id.to_owned(),
             description: String::new(),
@@ -2265,9 +2270,9 @@ mod tests {
             why: FetchWhy::Bootstrap,
             result: loaded("google", models()),
         });
-        // models() carries a 1M-token limit; give the fixture a price by
-        // matching a priced id instead. The session carries a message so
-        // the export has something to save.
+        // models() carries a 1M-token limit; give the fixture a price
+        // directly, the way google's catalog bakes one in. The session
+        // carries a message so the export has something to save.
         let mut h = harness(
             Some("k"),
             None,
@@ -2279,8 +2284,19 @@ mod tests {
         );
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            // gemini-3.8-flash prices at $0.75/M in and $3.75/M out.
-            result: loaded("google", vec![priced_model("gemini-3.8-flash")]),
+            // $0.75/M in, $3.75/M out, cached input at a quarter — the
+            // shape the google adapter bakes for a flash model.
+            result: loaded(
+                "google",
+                vec![priced_model(
+                    "gemini-3.8-flash",
+                    rhema_provider::Pricing {
+                        input_per_mtok: 0.75,
+                        output_per_mtok: 3.75,
+                        cached_input_per_mtok: Some(0.1875),
+                    },
+                )],
+            ),
         });
         h.app.on_key(key(KeyCode::Char('a')));
         let effects = h.app.on_key(key(KeyCode::Enter));

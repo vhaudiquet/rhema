@@ -37,7 +37,6 @@
 //! - [`wire`] — serde wire types plus the pure mapping between
 //!   [`rhema_core::ModelRequest`] / SSE chunks and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s
-//! - [`stream`] — the SSE byte-stream decoder
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
@@ -46,12 +45,8 @@
 
 pub mod pricing;
 pub mod provider;
-pub mod stream;
 pub mod wire;
 
-pub use pricing::{Pricing, model_pricing};
+pub use pricing::model_pricing;
 pub use provider::{DEFAULT_BASE_URL, GoogleProvider};
-pub use stream::SseDecoder;
-pub use wire::{
-    ChunkAssembler, GeminiModel, GenerateContentRequest, GenerateContentResponse, NormalizedPart,
-};
+pub use wire::{ChunkAssembler, GenerateContentRequest, GenerateContentResponse, NormalizedPart};

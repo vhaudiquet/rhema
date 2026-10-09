@@ -82,7 +82,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
-use rhema_provider_google::GeminiModel;
+use rhema_provider::ModelCard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -344,7 +344,7 @@ impl WireErrorBody {
 /// generic listing guarantees only `data[].id`: `name`, `description`, and
 /// `context_length` are read when present, everything else is defaulted,
 /// and entries without a usable id are dropped.
-pub fn normalize_models(page: &serde_json::Value) -> Vec<GeminiModel> {
+pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
     let entries = page
         .get("data")
         .and_then(|value| value.as_array())
@@ -361,7 +361,7 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<GeminiModel> {
                     .unwrap_or_default()
                     .to_owned()
             };
-            Some(GeminiModel {
+            Some(ModelCard {
                 id,
                 display_name: text("name"),
                 description: text("description"),
@@ -383,7 +383,7 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<GeminiModel> {
 /// whatever is loaded into it — embedding, reranking, and speech models
 /// behind the same `/models` page as the chat models — and only the ids
 /// tell them apart; those are excluded.
-pub fn is_text(model: &GeminiModel) -> bool {
+pub fn is_text(model: &ModelCard) -> bool {
     const NON_TEXT: [&str; 8] = [
         "embed",
         "rerank",
@@ -1509,7 +1509,7 @@ mod tests {
     #[test]
     fn non_text_modalities_are_excluded_by_id() {
         let text = |id: &str| {
-            is_text(&GeminiModel {
+            is_text(&ModelCard {
                 id: id.to_owned(),
                 display_name: String::new(),
                 description: String::new(),

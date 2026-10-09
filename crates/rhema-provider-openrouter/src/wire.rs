@@ -68,7 +68,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
-use rhema_provider_google::{GeminiModel, Pricing};
+use rhema_provider::{ModelCard, Pricing};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -400,7 +400,7 @@ fn per_mtok_pricing(wire: &WireModel) -> Option<Pricing> {
     })
 }
 
-impl From<WireModel> for GeminiModel {
+impl From<WireModel> for ModelCard {
     fn from(wire: WireModel) -> Self {
         // Priced before the fields move out.
         let pricing = per_mtok_pricing(&wire);
@@ -423,7 +423,7 @@ impl From<WireModel> for GeminiModel {
 /// through chat completions, but the catalog aggregates image, audio,
 /// speech, and embedding backends whose ids carry the modality; those
 /// cannot drive a coding agent and are excluded by id.
-pub fn is_text(model: &GeminiModel) -> bool {
+pub fn is_text(model: &ModelCard) -> bool {
     const NON_TEXT: [&str; 9] = [
         "image",
         "audio",
@@ -1502,7 +1502,7 @@ mod tests {
         .expect("models page parses");
 
         assert!(!page.next_page());
-        let models: Vec<GeminiModel> = page.data.into_iter().map(Into::into).collect();
+        let models: Vec<ModelCard> = page.data.into_iter().map(Into::into).collect();
 
         assert_eq!(models[0].id, "openai/gpt-4o-mini");
         assert_eq!(models[0].display_name, "GPT-4o mini");
@@ -1555,7 +1555,7 @@ mod tests {
             }"#,
         )
         .expect("models page parses");
-        let models: Vec<GeminiModel> = page.data.into_iter().map(Into::into).collect();
+        let models: Vec<ModelCard> = page.data.into_iter().map(Into::into).collect();
         for model in models {
             assert_eq!(model.pricing, None, "for {}", model.id);
         }
@@ -1564,7 +1564,7 @@ mod tests {
     #[test]
     fn non_text_modalities_are_excluded_by_id() {
         let text = |id: &str| {
-            is_text(&GeminiModel {
+            is_text(&ModelCard {
                 id: id.to_owned(),
                 display_name: id.to_owned(),
                 description: String::new(),

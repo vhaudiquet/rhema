@@ -461,9 +461,8 @@ async fn list_models_maps_entries_to_gemini_rows_with_per_mtok_pricing() {
     let pricing = models[0].pricing.expect("the entry is priced");
     assert_eq!(pricing.input_per_mtok, 1.5);
     assert_eq!(pricing.output_per_mtok, 6.0);
-    // model.pricing() prefers the instance price; the catalog id is no
-    // Gemini, so the curated table has no fallback here.
-    assert_eq!(models[0].pricing(), models[0].pricing);
+    // The price rides the row: what the listing carried, per MTok.
+    assert_eq!(models[0].pricing, Some(pricing));
     assert_eq!(models[1].pricing, None);
 
     // The catalog call carries the attribution headers too, and no key was

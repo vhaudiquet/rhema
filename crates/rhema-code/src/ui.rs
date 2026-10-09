@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Screen};
 use crate::screens::{PROVIDERS, PickerScreen, PickerStatus, format_tokens};
 use crate::transcript::{self, pretty_args};
-use rhema_provider_google::GeminiModel;
+use rhema_provider::ModelCard;
 
 /// Renders one frame.
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -502,9 +502,9 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
 
 /// One picker row: `provider/` dim, id bright, then display name, price,
 /// and context window dim.
-fn model_row(provider: &str, model: &GeminiModel, theme: &Theme) -> Line<'static> {
+fn model_row(provider: &str, model: &ModelCard, theme: &Theme) -> Line<'static> {
     let mut details = String::new();
-    if let Some(pricing) = model.pricing() {
+    if let Some(pricing) = model.pricing {
         details.push_str(&format!(
             "${:.2}/M in · ${:.2}/M out · ",
             pricing.input_per_mtok, pricing.output_per_mtok
@@ -1239,10 +1239,10 @@ mod tests {
     use crate::palette::DARK;
     use crate::screens::{CatalogModel, PickerPurpose, PickerScreen};
     use ratatui::{Terminal, backend::TestBackend};
-    use rhema_provider_google::GeminiModel;
+    use rhema_provider::ModelCard;
 
-    fn model(id: &str) -> GeminiModel {
-        GeminiModel {
+    fn model(id: &str) -> ModelCard {
+        ModelCard {
             id: id.to_owned(),
             display_name: id.to_owned(),
             description: String::new(),
@@ -1430,7 +1430,7 @@ mod scroll_tests {
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_core::Usage;
-    use rhema_provider_google::GeminiModel;
+    use rhema_provider::ModelCard;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -1566,7 +1566,7 @@ mod scroll_tests {
         app.options.thinking = rhema_core::request::ThinkingEffort::High;
         app.models.push(CatalogModel {
             provider: "google",
-            model: GeminiModel {
+            model: ModelCard {
                 id: "m".into(),
                 display_name: "m".into(),
                 description: String::new(),
@@ -1768,7 +1768,7 @@ mod scroll_tests {
             why: crate::events::FetchWhy::Bootstrap,
             result: vec![(
                 "google",
-                Ok(vec![GeminiModel {
+                Ok(vec![ModelCard {
                     id: "gemini-3.8-flash".into(),
                     display_name: "Gemini 3.8 Flash".into(),
                     description: String::new(),

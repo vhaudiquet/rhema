@@ -29,9 +29,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider_google::{GeminiModel, Pricing};
-
-use rhema_provider::SseDecoder;
+use rhema_provider::{ModelCard, Pricing, SseDecoder};
 
 use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody, is_text};
 
@@ -91,7 +89,7 @@ impl OpenAiCompatibleProvider {
     /// `data[].id`, plus whatever metadata the entry carries). Sparse
     /// entries are the norm on generic servers; see
     /// [`crate::wire::normalize_models`].
-    pub async fn list_models(&self) -> Result<Vec<GeminiModel>, ProviderError> {
+    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         let response = self
             .http
             .get(format!("{}/models", self.base_url))
@@ -160,7 +158,7 @@ const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
 /// Fills DeepSeek's published facts into a listing: ids naming a catalog
 /// row gain their context window and pricing, everything else passes
 /// through untouched — unknown models simply show no facts.
-fn decorate_deepseek(models: &mut [GeminiModel]) {
+fn decorate_deepseek(models: &mut [ModelCard]) {
     for model in models {
         if let Some(row) = DEEPSEEK_CATALOG.iter().find(|row| row.id == model.id) {
             model.input_token_limit = Some(row.context);
