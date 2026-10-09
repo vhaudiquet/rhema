@@ -11,6 +11,7 @@ use crate::palette::Theme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthStr;
 
 /// Renders one assistant response (its full markdown source) into styled
 /// lines at `width` columns — tables lay their columns out against it.
@@ -229,6 +230,9 @@ impl<'a> MarkdownRenderer<'a> {
                     cell.push_str(&text);
                 } else if self.in_code_block {
                     // One parser Text event per source line inside a fence.
+                    // Every row — blank ones too — carries the slate to the
+                    // full width: a block reads as one solid slab, not as
+                    // patches that stop where each line's text stops.
                     for (i, row) in text.split('\n').enumerate() {
                         if i > 0 {
                             self.flush_line();
@@ -236,6 +240,14 @@ impl<'a> MarkdownRenderer<'a> {
                         if !row.is_empty() {
                             self.spans.push(
                                 Span::raw(row.to_owned())
+                                    .fg(self.theme.accent_text)
+                                    .bg(self.theme.surface),
+                            );
+                        }
+                        let pad = self.width.saturating_sub(row.width());
+                        if pad > 0 {
+                            self.spans.push(
+                                Span::raw(" ".repeat(pad))
                                     .fg(self.theme.accent_text)
                                     .bg(self.theme.surface),
                             );
@@ -572,13 +584,34 @@ mod tests {
         let source = "```rust\nfn main() {\n    done();\n}\n```";
         let lines = render_markdown_d(source);
         let rendered = plain(&lines);
-        assert_eq!(rendered[0], "fn main() {");
-        assert_eq!(rendered[1], "    done();");
+        assert_eq!(rendered[0].trim_end(), "fn main() {");
+        assert_eq!(rendered[1].trim_end(), "    done();");
         assert_eq!(
             lines[0].spans[0].style.bg,
             Some(DARK.surface),
             "code rows carry the slate background"
         );
+    }
+
+    #[test]
+    fn code_rows_carry_the_slate_to_the_full_width() {
+        // The slab must be solid: a block whose rows stop where their text
+        // stops reads as staircase patches, not as a block.
+        let source = "```text\nshort\n\n\nwide line of code\n```";
+        let lines = render_markdown_d(source);
+        // Four content rows plus the fence's trailing newline: the
+        // block's bottom pad band.
+        assert_eq!(lines.len(), 5, "blank code lines render as rows");
+        for line in &lines {
+            let width: usize = line.spans.iter().map(|span| span.content.width()).sum();
+            assert_eq!(width, 80, "one solid row: {:?}", plain(&lines));
+            assert!(
+                line.spans
+                    .iter()
+                    .all(|span| span.style.bg == Some(DARK.surface)),
+                "the padding carries the slate too"
+            );
+        }
     }
 
     #[test]
