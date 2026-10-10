@@ -1,7 +1,9 @@
 <script setup lang="ts">
 // The transcript: sent lines and streamed turns, the turn in flight at
 // the bottom. The claw owns the conversation — this renders what the
-// event stream delivered, nothing more.
+// event stream delivered, nothing more. The header and the composer
+// chips mirror live claw state; the backend chip jumps to settings.
+import type { ClawSession, StreamStatus } from '~/composables/useClaw'
 import type { TranscriptItem, TurnBlock } from '~/composables/useTranscript'
 
 const props = defineProps<{
@@ -11,9 +13,12 @@ const props = defineProps<{
   /** Only `interactive:*` keys accept messages (the claw 400s the rest). */
   canSend: boolean
   busy: boolean
+  session: ClawSession | null
+  activeBackend: { provider: string; model: string } | null
+  streamStatus: StreamStatus
 }>()
 
-const emit = defineEmits<{ send: [text: string] }>()
+const emit = defineEmits<{ send: [text: string]; openProviders: [] }>()
 
 const draft = ref('')
 const scroller = ref<HTMLElement | null>(null)
@@ -43,144 +48,240 @@ function submit(): void {
   draft.value = ''
   pinned.value = true
 }
+
+const displayName = computed(() => props.activeKey.replace(/^interactive:/, ''))
+
+const streamLabel = computed(() =>
+  props.streamStatus === 'open' ? 'live' : props.streamStatus,
+)
+
+function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
+  if (status === 'open') return 'ok'
+  if (status === 'reconnecting') return 'error'
+  return 'warn'
+}
 </script>
 
 <template>
-  <section class="panel chat">
-    <header class="panel-head">
-      <span class="label">Transcript</span>
-      <span class="session" :title="activeKey">{{ activeKey }}</span>
+  <section class="chat">
+    <header class="head">
+      <div class="avatar agent" aria-hidden="true">R</div>
+      <div class="text">
+        <h2>{{ displayName }}</h2>
+        <p class="mono">
+          {{ session ? `${session.state} · rev ${session.revision}` : activeKey }}
+          <template v-if="session?.last_outcome"> · {{ session.last_outcome }}</template>
+        </p>
+      </div>
+      <span class="stream-status" :title="`event stream: ${streamStatus}`">
+        <StatusDot :tone="streamTone(streamStatus)" />
+        {{ streamLabel }}
+      </span>
     </header>
 
-    <div ref="scroller" class="stream" @scroll.passive="onScroll">
+    <div ref="scroller" class="stream-area" @scroll.passive="onScroll">
       <p v-if="items.length === 0 && !live" class="empty">
-        nothing streamed yet — messages POST to the claw and replies arrive here live
+        nothing streamed yet — messages post to the claw and replies arrive here live
       </p>
 
       <template v-for="item in items" :key="item.id">
-        <div v-if="item.kind === 'sent'" class="sent">
-          <span class="who">you ▸</span>
-          <span class="text">{{ item.text }}</span>
+        <div v-if="item.kind === 'sent'" class="msg">
+          <div class="avatar user" aria-hidden="true">·</div>
+          <div class="msg-body">
+            <div class="who">you</div>
+            <div class="reply">{{ item.text }}</div>
+          </div>
         </div>
-        <div v-else class="turn">
-          <details v-if="item.turn.thinking" class="thinking">
+        <div v-else class="msg">
+          <div class="avatar agent" aria-hidden="true">R</div>
+          <div class="msg-body">
+            <div class="who">rhema</div>
+            <details v-if="item.turn.thinking" class="thinking">
+              <summary>thinking</summary>
+              <pre>{{ item.turn.thinking }}</pre>
+            </details>
+            <ul v-if="item.turn.tools.length > 0" class="tools">
+              <li
+                v-for="(tool, index) in item.turn.tools"
+                :key="index"
+                :class="{ error: tool.isError === true }"
+              >
+                <span class="glyph" aria-hidden="true">{{
+                  tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
+                }}</span>
+                <span class="name mono">{{ tool.name }}</span>
+                <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
+              </li>
+            </ul>
+            <div v-if="item.turn.reply" class="reply">{{ item.turn.reply }}</div>
+            <div
+              v-if="item.turn.outcome"
+              class="outcome mono"
+              :class="{ failed: item.turn.outcome === 'failed' }"
+            >
+              {{ item.turn.outcome }}
+            </div>
+          </div>
+        </div>
+      </template>
+
+      <div v-if="live" class="msg live">
+        <div class="avatar agent" aria-hidden="true">R</div>
+        <div class="msg-body">
+          <div class="who">rhema</div>
+          <details v-if="live.thinking" class="thinking" open>
             <summary>thinking</summary>
-            <pre>{{ item.turn.thinking }}</pre>
+            <pre>{{ live.thinking }}</pre>
           </details>
-          <ul v-if="item.turn.tools.length > 0" class="tools">
+          <ul v-if="live.tools.length > 0" class="tools">
             <li
-              v-for="(tool, index) in item.turn.tools"
+              v-for="(tool, index) in live.tools"
               :key="index"
               :class="{ error: tool.isError === true }"
             >
               <span class="glyph" aria-hidden="true">{{
                 tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
               }}</span>
-              <span class="name">{{ tool.name }}</span>
-              <span v-if="tool.summary" class="summary">{{ tool.summary }}</span>
+              <span class="name mono">{{ tool.name }}</span>
+              <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
             </li>
           </ul>
-          <pre v-if="item.turn.reply" class="reply">{{ item.turn.reply }}</pre>
-          <div v-if="item.turn.outcome" class="outcome" :class="{ failed: item.turn.outcome === 'failed' }">
-            {{ item.turn.outcome }}
-          </div>
+          <div v-if="live.reply" class="reply">{{ live.reply }}<span
+            class="cursor"
+            aria-hidden="true"
+          >▊</span></div>
         </div>
-      </template>
-
-      <div v-if="live" class="turn live">
-        <details v-if="live.thinking" class="thinking" open>
-          <summary>thinking</summary>
-          <pre>{{ live.thinking }}</pre>
-        </details>
-        <ul v-if="live.tools.length > 0" class="tools">
-          <li
-            v-for="(tool, index) in live.tools"
-            :key="index"
-            :class="{ error: tool.isError === true }"
-          >
-            <span class="glyph" aria-hidden="true">{{
-              tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
-            }}</span>
-            <span class="name">{{ tool.name }}</span>
-            <span v-if="tool.summary" class="summary">{{ tool.summary }}</span>
-          </li>
-        </ul>
-        <pre v-if="live.reply" class="reply">{{ live.reply }}<span
-          class="cursor"
-          aria-hidden="true"
-        >▊</span></pre>
       </div>
     </div>
 
     <footer class="composer">
-      <input
-        v-model="draft"
-        type="text"
-        :placeholder="canSend ? `message ${activeKey}…` : 'only interactive:* sessions accept messages'"
-        :disabled="!canSend"
-        @keydown.enter="submit"
-      />
-      <button :disabled="!canSend || busy || draft.trim() === ''" @click="submit">send</button>
+      <div class="chips">
+        <span class="badge">{{ activeKey }}</span>
+        <button
+          class="badge chip-btn"
+          title="switch the model backend in settings"
+          :disabled="!activeBackend"
+          @click="emit('openProviders')"
+        >
+          {{ activeBackend ? `${activeBackend.provider} · ${activeBackend.model}` : 'no backend' }}
+        </button>
+      </div>
+      <div class="input-row">
+        <input
+          v-model="draft"
+          type="text"
+          :placeholder="canSend ? 'Message rhema…' : 'only interactive:* sessions accept messages'"
+          :disabled="!canSend"
+          @keydown.enter="submit"
+        />
+        <button class="primary send" :disabled="!canSend || busy || draft.trim() === ''" title="send" @click="submit">
+          ↑
+        </button>
+      </div>
     </footer>
   </section>
 </template>
 
 <style scoped>
-.panel {
+.chat {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
+  flex: 1;
   background: var(--ground);
 }
 
-.panel-head {
+.head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
-  padding: 10px 16px;
+  padding: 12px 20px;
   border-bottom: 1px solid var(--border);
+  background: var(--surface);
 }
 
-.session {
+.avatar {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  border-radius: 10px;
+  font-weight: 700;
+}
+
+.avatar.agent {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.avatar.user {
+  background: var(--elevated);
+  border: 1px solid var(--border-strong);
+  color: var(--text2);
+}
+
+.text {
+  flex: 1;
+  min-width: 0;
+}
+
+.text h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.text p {
+  margin: 1px 0 0;
   color: var(--text3);
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.stream {
+.stream-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text3);
+  font-size: 12px;
+  flex: none;
+}
+
+.stream-area {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
-  padding: 16px;
+  padding: 20px 24px;
 }
 
 .empty {
   color: var(--text3);
+  padding: 24px;
 }
 
-.sent {
+.msg {
   display: flex;
-  gap: 8px;
-  margin: 0 0 12px;
-  padding: 6px 10px;
-  border-left: 2px solid var(--border-strong);
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.msg-body {
+  flex: 1;
+  min-width: 0;
 }
 
 .who {
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 2px;
+}
+
+.live .who {
   color: var(--accent-text);
-  flex: none;
-}
-
-.text {
-  color: var(--text2);
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.turn {
-  margin: 0 0 16px;
 }
 
 .thinking {
@@ -200,7 +301,7 @@ function submit(): void {
   padding: 8px 10px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 3px;
+  border-radius: 6px;
   color: var(--text3);
   font-style: italic;
   white-space: pre-wrap;
@@ -209,16 +310,22 @@ function submit(): void {
 
 .tools {
   list-style: none;
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 
 .tools li {
   display: flex;
   gap: 8px;
   align-items: baseline;
-  padding: 3px 10px;
-  border-left: 2px solid var(--border-strong);
+  padding: 5px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--ok);
+  border-radius: 6px;
 }
 
 .tools li.error {
@@ -246,8 +353,6 @@ li.error .glyph {
 }
 
 .reply {
-  margin: 0;
-  font: inherit;
   color: var(--text);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -267,7 +372,7 @@ li.error .glyph {
 .outcome {
   margin-top: 6px;
   font-size: 11px;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text3);
 }
@@ -277,27 +382,47 @@ li.error .glyph {
 }
 
 .composer {
-  display: flex;
-  gap: 8px;
-  padding: 12px 16px;
   border-top: 1px solid var(--border);
   background: var(--surface);
+  padding: 10px 16px 14px;
 }
 
-.composer input {
+.chips {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.chip-btn {
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+
+.input-row input {
   flex: 1;
   min-width: 0;
+  padding: 9px 12px;
 }
 
-.composer button {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--on-accent);
-}
-
-.composer button:hover:not(:disabled) {
-  color: var(--on-accent);
-  border-color: var(--accent-text);
-  background: var(--accent-text);
+.send {
+  width: 38px;
+  padding: 0;
+  font-size: 16px;
+  border-radius: 9px;
+  flex: none;
 }
 </style>

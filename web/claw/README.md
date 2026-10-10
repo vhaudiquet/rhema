@@ -1,9 +1,10 @@
 # rhema claw — web
 
 A small, hand-rolled web client for the claw (`rhema-claw`): a live
-transcript of one session, the session inventory, and the watch table.
-Nuxt 4 + Vue 3 + TypeScript, no component library, no store — it is
-strictly **one client** of the claw's public `/v1` HTTP surface.
+transcript of one session, the session inventory, and a settings area
+(model providers, about). Nuxt 4 + Vue 3 + TypeScript, no component
+library, no store — it is strictly **one client** of the claw's public
+`/v1` HTTP surface.
 
 ## Run it against a locally running claw
 
@@ -48,7 +49,7 @@ cross-origin use needs a proxy, not a different origin.
 ## The one-consumer principle
 
 The claw's `/v1` API is the contract (`crates/rhema-claw/src/http.rs`):
-sessions, messages, events, watches. This client uses only public
+sessions, messages, events, providers. This client uses only public
 routes, speaks the wire shapes the Rust side serializes, and adds
 nothing server-side. UI needs never justify private endpoints — they
 justify claw API changes, argued in the Rust tree.
@@ -70,18 +71,39 @@ Two consequences worth knowing before changing this code:
 
 ## Layout
 
+The shell is an icon rail plus two views, switched by a tiny hash
+router (`#/chat`, `#/settings/providers`, `#/settings/about`) — no
+vue-router. The chat view is the session inventory plus the live
+transcript; the settings view is a searchable nav plus pages over one
+shared detail panel. Settings pages stage edits into a local draft and
+apply them with an explicit Save (`PUT /v1/providers/active` answers
+the new pair only; the client carries the provider list forward).
+
 ```
 app/
-  app.vue                  the one page: header, banners, three panels
-  assets/css/main.css      the Jadeite tokens (matches the TUI's palette.rs DARK)
+  app.vue                        the shell: rail, banners, view switch
+  assets/css/main.css            the Jadeite tokens (matches the TUI's
+                                 palette.rs DARK) + card/badge primitives
   components/
-    ClawBanner.vue         the one inline error/notice surface
-    ChatPanel.vue          transcript: sent lines, streamed turns, composer
-    SessionsSidebar.vue    every dispatch key, interactive first
-    WatchesPanel.vue       the watch table + add/remove
+    AppRail.vue                  the icon rail: views, claw pulse
+    AppBadge.vue                 the status/tag pill
+    AppCallout.vue               the toned inline note (info/ok/warn/error)
+    ClawBanner.vue               the one error/notice banner surface
+    ChatPanel.vue                transcript: sent lines, streamed turns,
+                                 composer with the backend chip
+    SessionsSidebar.vue          every dispatch key, interactive first
+    DetailPanel.vue              the right-hand detail column
+    PageHeader.vue               title + subtitle + page actions
+    SettingCard.vue              one titled card of rows
+    SettingRow.vue               name + description + control
+    SettingsNav.vue              searchable settings nav
+    StatusDot.vue                one honest state dot
+    settings/
+      ProvidersPage.vue          the backend switch: draft → Save/Discard
+      AboutPage.vue              identity, stack, the routes spoken
   composables/
-    useClaw.ts             the typed API client + fetch-based SSE
-    useTranscript.ts       folds TurnEvents into renderable turn blocks
+    useClaw.ts                   the typed API client + fetch-based SSE
+    useTranscript.ts             folds TurnEvents into renderable turn blocks
 server/
   middleware/claw-proxy.ts dev-only same-origin proxy to a running claw
 ```

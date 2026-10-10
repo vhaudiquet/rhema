@@ -23,6 +23,8 @@
   --error: #e4687a;
   --info: #8fa6b8;
 
+  --sans: ui-sans-serif, system-ui, 'Segoe UI', Roboto, 'Helvetica Neue',
+    Arial, sans-serif;
   --mono: ui-monospace, 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo,
     Consolas, monospace;
 }
@@ -41,28 +43,40 @@ body {
   margin: 0;
   background: var(--ground);
   color: var(--text);
-  font-family: var(--mono);
-  font-size: 13px;
+  font-family: var(--sans);
+  font-size: 13.5px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
 
+/* Values, keys, and anything the claw itself says render mono; the UI
+   chrome around them renders sans. */
+code,
+pre,
+.mono {
+  font-family: var(--mono);
+  font-size: 0.93em;
+}
+
 /* Section labels: the one repeated typographic voice across panels. */
 .label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
   text-transform: uppercase;
   color: var(--text3);
 }
+
+/* --- controls ------------------------------------------------------- */
 
 button {
   font: inherit;
   color: var(--text);
   background: var(--elevated);
   border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  padding: 4px 12px;
+  border-radius: 6px;
+  padding: 5px 14px;
   cursor: pointer;
 }
 
@@ -76,14 +90,42 @@ button:disabled {
   cursor: not-allowed;
 }
 
+button.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-text);
+  border-color: var(--accent-text);
+  color: var(--on-accent);
+}
+
+button.ghost {
+  background: none;
+  border-color: transparent;
+  color: var(--text3);
+}
+
+button.ghost:hover:not(:disabled) {
+  color: var(--accent-text);
+}
+
 input,
 select {
   font: inherit;
   color: var(--text);
   background: var(--sunken);
   border: 1px solid var(--border);
-  border-radius: 3px;
-  padding: 4px 8px;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+
+input:hover,
+select:hover {
+  border-color: var(--border-strong);
 }
 
 input:focus-visible,
@@ -97,6 +139,92 @@ input::placeholder {
   color: var(--text3);
 }
 
+/* --- surfaces ------------------------------------------------------- */
+
+/* The one card: a titled container of setting rows or static facts. */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.card > .card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.card > .card-head .title {
+  font-weight: 700;
+  font-size: 14px;
+}
+
+.card > .card-head .meta {
+  color: var(--text3);
+  font-size: 12px;
+  min-width: 0;
+  text-align: right;
+}
+
+.card > .card-body {
+  padding: 0;
+}
+
+/* Rows inside a card body separate by hairline, not by gaps. */
+.card > .card-body > * + * {
+  border-top: 1px solid var(--border);
+}
+
+.card > .card-body.flush {
+  padding: 8px 16px;
+}
+
+.card > .card-body.flush > * + * {
+  border-top: none;
+}
+
+/* --- badges ---------------------------------------------------------- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  color: var(--text3);
+  font-size: 11px;
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.badge.accent {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  color: var(--accent-text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.badge.ok {
+  border-color: color-mix(in srgb, var(--ok) 55%, transparent);
+  color: var(--ok);
+}
+
+.badge.warn {
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  color: var(--warn);
+}
+
+.badge.error {
+  border-color: color-mix(in srgb, var(--error) 55%, transparent);
+  color: var(--error);
+}
+
+/* --- banners --------------------------------------------------------- */
+
 /* Banners: the single inline error/notice surface. Never toasts, never
    console-only — claw down, 401, and stream drops all land here. */
 .banner {
@@ -106,7 +234,7 @@ input::placeholder {
   padding: 8px 12px;
   border: 1px solid var(--border-strong);
   border-left: 3px solid var(--info);
-  border-radius: 3px;
+  border-radius: 6px;
   background: var(--surface);
   color: var(--text2);
 }

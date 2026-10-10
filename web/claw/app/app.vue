@@ -1,8 +1,10 @@
 <script setup lang="ts">
-// The one page: chat over the active session, the session inventory,
-// and the watch table — panels over one claw. Everything is
-// in-memory; only the token and the active session persist. The claw
-// owns the conversation, so this page is a mirror, not a store.
+// The one page: the icon rail, then either the chat view (session
+// inventory + live transcript) or the settings view (nav + pages). A
+// tiny hash router keeps views deep-linkable without vue-router. All
+// state is in-memory; only the token and the active session persist.
+// The claw owns the conversation and the config, so this page is a
+// mirror, not a store.
 import { ClawError, clawHealth, isInteractive, useClaw } from '~/composables/useClaw'
 import type { ClawSession, ModelCard, ProvidersState, StreamStatus } from '~/composables/useClaw'
 import { useTranscript } from '~/composables/useTranscript'
@@ -31,6 +33,40 @@ function persist(key: string, value: string | null): void {
   }
 }
 
+// --- the two views ---------------------------------------------------
+type Route = { view: 'chat' } | { view: 'settings'; section: string }
+
+const SETTINGS_SECTIONS: { label: string; entries: { id: string; label: string }[] }[] = [
+  { label: 'Providers', entries: [{ id: 'providers', label: 'Model providers' }] },
+  { label: 'System', entries: [{ id: 'about', label: 'About' }] },
+]
+
+function parseHash(): Route {
+  if (!import.meta.client) return { view: 'chat' }
+  const hash = window.location.hash.replace(/^#\/?/, '')
+  if (hash.startsWith('settings')) {
+    const section = hash.split('/')[1] ?? 'providers'
+    return {
+      view: 'settings',
+      section: SETTINGS_SECTIONS.some((s) => s.entries.some((e) => e.id === section))
+        ? section
+        : 'providers',
+    }
+  }
+  return { view: 'chat' }
+}
+
+const route = ref<Route>(parseHash())
+
+function go(next: Route): void {
+  window.location.hash = next.view === 'chat' ? '#/chat' : `#/settings/${next.section}`
+}
+
+function onHashChange(): void {
+  route.value = parseHash()
+}
+
+// --- claw state ------------------------------------------------------
 const config = useRuntimeConfig()
 const token = ref<string | null>(
   stored(TOKEN_STORE_KEY) ?? (config.public.clawToken || null),
@@ -43,7 +79,6 @@ watch(activeKey, (key) => persist(ACTIVE_STORE_KEY, key))
 const transcript = useTranscript()
 const { items: transcriptItems, live: liveTurn } = transcript
 
-// --- surface state -------------------------------------------------
 const clawUp = ref<boolean | null>(null)
 const sessions = ref<ClawSession[]>([])
 const sessionsLoading = ref(false)
@@ -52,6 +87,7 @@ const providerModels = ref<ModelCard[]>([])
 const providerModelsLoading = ref(false)
 const providerModelsError = ref<string | null>(null)
 const selectedProvider = ref<string | null>(null)
+const savingProviders = ref(false)
 const streamStatus = ref<StreamStatus>('connecting')
 const busy = ref(false)
 const authRequired = ref(false)
@@ -59,6 +95,10 @@ const tokenDraft = ref('')
 const apiError = ref<string | null>(null)
 const notices = ref<{ id: number; text: string }[]>([])
 let noticeId = 1
+
+const activeSession = computed(
+  () => sessions.value.find((session) => session.key === activeKey.value) ?? null,
+)
 
 function noteApiError(err: unknown): void {
   if (err instanceof ClawError && err.status === 401) {
@@ -73,7 +113,7 @@ function pushNotice(text: string): void {
   if (notices.value.length > 4) notices.value.shift()
 }
 
-// --- claw calls ----------------------------------------------------
+// --- claw calls ------------------------------------------------------
 async function checkHealth(): Promise<void> {
   clawUp.value = await clawHealth()
 }
@@ -111,7 +151,7 @@ async function loadProviderModels(kind: string): Promise<void> {
     providerModels.value = await claw.models(kind)
   } catch (err) {
     // A backend without a live listing is normal (404): the operator
-    // still sees the switch go through.
+    // still sees the switch go through on the kind's default model.
     providerModels.value = []
     providerModelsError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -119,17 +159,21 @@ async function loadProviderModels(kind: string): Promise<void> {
   }
 }
 
-async function switchProvider(provider: string, model?: string): Promise<void> {
+async function saveProviders(provider: string, model?: string): Promise<void> {
+  savingProviders.value = true
   try {
-    providersState.value = await claw.setActive(provider, model)
-    selectedProvider.value = provider
-    if (model) {
-      providerModelsError.value = null
-    }
-    pushNotice(`active backend: ${provider} / ${providersState.value.active.model}`)
+    // The route answers the new pair only; carry the provider list
+    // forward so the state stays whole.
+    const { active } = await claw.setActive(provider, model)
+    providersState.value = providersState.value
+      ? { ...providersState.value, active }
+      : { active, providers: [] }
+    pushNotice(`active backend: ${provider} / ${active.model}`)
     apiError.value = null
   } catch (err) {
     noteApiError(err)
+  } finally {
+    savingProviders.value = false
   }
 }
 
@@ -163,7 +207,7 @@ function saveToken(): void {
   void refreshSessions()
 }
 
-// --- the one live subscription --------------------------------------
+// --- the one live subscription ---------------------------------------
 let stream: { close: () => void } | null = null
 
 function resubscribe(): void {
@@ -187,6 +231,7 @@ let healthTimer: ReturnType<typeof setInterval> | undefined
 let sessionsTimer: ReturnType<typeof setInterval> | undefined
 
 onMounted(() => {
+  window.addEventListener('hashchange', onHashChange)
   resubscribe()
   void checkHealth()
   void refreshProviders()
@@ -196,6 +241,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  window.removeEventListener('hashchange', onHashChange)
   stream?.close()
   clearInterval(healthTimer)
   clearInterval(sessionsTimer)
@@ -204,147 +250,138 @@ onUnmounted(() => {
 
 <template>
   <div class="shell">
-    <header class="top">
-      <span class="brand"><span class="mark" aria-hidden="true">◆</span> rhema claw</span>
-      <span class="indicators">
-        <span class="indicator" :title="`event stream: ${streamStatus}`">
-          <span class="dot" :class="streamStatus" aria-hidden="true" />
-          {{ streamStatus === 'open' ? 'live' : streamStatus }}
-        </span>
-        <span class="indicator" :title="clawUp === null ? 'health unknown' : clawUp ? '/healthz ok' : '/healthz failing'">
-          <span class="dot" :class="{ up: clawUp === true, down: clawUp === false }" aria-hidden="true" />
-          {{ clawUp === null ? 'checking' : clawUp ? 'claw up' : 'claw down' }}
-        </span>
-      </span>
-    </header>
+    <AppRail :view="route.view" :claw-up="clawUp" @navigate="go($event === 'chat' ? { view: 'chat' } : { view: 'settings', section: 'providers' })" />
 
-    <div class="banners">
-      <ClawBanner v-if="authRequired" variant="error">
-        the claw requires a bearer token on /v1.
-        <template #actions>
-          <input
-            v-model="tokenDraft"
-            type="password"
-            placeholder="token"
-            autocomplete="off"
-            @keydown.enter="saveToken"
+    <div class="body">
+      <div class="banners">
+        <ClawBanner v-if="authRequired" variant="error">
+          the claw requires a bearer token on /v1.
+          <template #actions>
+            <input
+              v-model="tokenDraft"
+              type="password"
+              placeholder="token"
+              autocomplete="off"
+              @keydown.enter="saveToken"
+            />
+            <button @click="saveToken">save</button>
+          </template>
+        </ClawBanner>
+        <ClawBanner v-if="clawUp === false" variant="error">
+          the claw is unreachable at {{ config.public.clawBase || 'same origin (dev proxy → 127.0.0.1:7799)' }} —
+          start it with <code>rhema-claw</code>
+        </ClawBanner>
+        <ClawBanner v-if="apiError" variant="error" dismissible @dismiss="apiError = null">
+          {{ apiError }}
+        </ClawBanner>
+        <ClawBanner
+          v-for="notice in notices"
+          :key="notice.id"
+          variant="warn"
+          dismissible
+          @dismiss="notices = notices.filter((n) => n.id !== notice.id)"
+        >
+          {{ notice.text }}
+        </ClawBanner>
+      </div>
+
+      <main class="view">
+        <template v-if="route.view === 'chat'">
+          <SessionsSidebar
+            :sessions="sessions"
+            :active-key="activeKey"
+            :loading="sessionsLoading"
+            @select="activeKey = $event"
+            @refresh="refreshSessions"
           />
-          <button @click="saveToken">save</button>
+          <ChatPanel
+            :items="transcriptItems"
+            :live="liveTurn"
+            :active-key="activeKey"
+            :can-send="isInteractive(activeKey)"
+            :busy="busy"
+            :session="activeSession"
+            :active-backend="providersState?.active ?? null"
+            :stream-status="streamStatus"
+            @send="send"
+            @open-providers="go({ view: 'settings', section: 'providers' })"
+          />
         </template>
-      </ClawBanner>
-      <ClawBanner v-if="clawUp === false" variant="error">
-        the claw is unreachable at {{ config.public.clawBase || 'same origin (dev proxy → 127.0.0.1:7799)' }} —
-        start it with <code>rhema-claw</code>
-      </ClawBanner>
-      <ClawBanner v-if="apiError" variant="error" dismissible @dismiss="apiError = null">
-        {{ apiError }}
-      </ClawBanner>
-      <ClawBanner
-        v-for="notice in notices"
-        :key="notice.id"
-        variant="warn"
-        dismissible
-        @dismiss="notices = notices.filter((n) => n.id !== notice.id)"
-      >
-        {{ notice.text }}
-      </ClawBanner>
-    </div>
 
-    <main class="columns">
-      <SessionsSidebar
-        :sessions="sessions"
-        :active-key="activeKey"
-        :loading="sessionsLoading"
-        @select="activeKey = $event"
-        @refresh="refreshSessions"
-      />
-      <ChatPanel
-        :items="transcriptItems"
-        :live="liveTurn"
-        :active-key="activeKey"
-        :can-send="isInteractive(activeKey)"
-        :busy="busy"
-        @send="send"
-      />
-      <ProvidersPanel
-        :state="providersState"
-        :models="providerModels"
-        :models-loading="providerModelsLoading"
-        :models-error="providerModelsError"
-        :selected-provider="selectedProvider"
-        :loading="false"
-        @refresh="refreshProviders"
-        @select="loadProviderModels"
-        @switch="switchProvider"
-      />
-    </main>
+        <template v-else>
+          <SettingsNav
+            :sections="SETTINGS_SECTIONS"
+            :active="route.section"
+            :claw-up="clawUp"
+            @select="go({ view: 'settings', section: $event })"
+          />
+          <SettingsProvidersPage
+            v-show="route.section === 'providers'"
+            :state="providersState"
+            :models="providerModels"
+            :models-loading="providerModelsLoading"
+            :models-error="providerModelsError"
+            :selected-provider="selectedProvider"
+            :saving="savingProviders"
+            @inspect="loadProviderModels"
+            @save="saveProviders"
+          />
+          <SettingsAboutPage v-show="route.section === 'about'" :claw-up="clawUp" />
+          <DetailPanel v-if="route.section === 'providers'" title="Backend">
+            <template v-if="selectedProvider">
+              <div class="detail-name">
+                <strong class="mono">{{ selectedProvider }}</strong>
+                <AppBadge
+                  :variant="providerModelsError ? 'warn' : providerModelsLoading ? undefined : 'ok'"
+                >
+                  {{ providerModelsLoading
+                    ? 'listing…'
+                    : providerModelsError
+                      ? 'no live listing'
+                      : `${providerModels.length} models` }}
+                </AppBadge>
+              </div>
+              <p v-if="providerModelsError" class="detail-note">
+                {{ providerModelsError }} — the kind still switches; its
+                default model applies.
+              </p>
+              <div v-if="providerModels.length > 0" class="detail-models">
+                <span class="label">Live listing</span>
+                <div v-for="m in providerModels" :key="m.id" class="detail-model mono">
+                  {{ m.id }}
+                </div>
+              </div>
+              <button class="ghost" :disabled="providerModelsLoading" @click="loadProviderModels(selectedProvider)">
+                ↻ reload listing
+              </button>
+            </template>
+            <p v-else class="detail-note">loading…</p>
+          </DetailPanel>
+          <DetailPanel v-else-if="route.section === 'about'" title="Where things live">
+            <p class="detail-note">
+              The claw's code, including this client, sits in the rhema
+              workspace: <code>crates/rhema-claw</code> for the daemon,
+              <code>web/claw</code> for this UI. Design decisions live in
+              <code>SPEC.md</code>.
+            </p>
+          </DetailPanel>
+        </template>
+      </main>
+    </div>
   </div>
 </template>
 
 <style scoped>
-.right-column {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  min-width: 0;
-}
-
 .shell {
   display: flex;
-  flex-direction: column;
   height: 100vh;
 }
 
-.top {
+.body {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface);
-}
-
-.brand {
-  letter-spacing: 0.06em;
-  color: var(--text);
-}
-
-.mark {
-  color: var(--accent-text);
-}
-
-.indicators {
-  display: flex;
-  gap: 16px;
-  font-size: 11px;
-  color: var(--text3);
-}
-
-.indicator {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: var(--text3);
-}
-
-.dot.open,
-.dot.up {
-  background: var(--ok);
-}
-
-.dot.reconnecting,
-.dot.down {
-  background: var(--error);
-}
-
-.dot.connecting {
-  background: var(--warn);
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
 }
 
 .banners {
@@ -354,12 +391,47 @@ onUnmounted(() => {
   padding: 8px 16px 0;
 }
 
-.columns {
+.view {
   flex: 1;
-  display: grid;
-  grid-template-columns: 230px minmax(0, 1fr) 300px;
+  display: flex;
   min-height: 0;
-  padding-top: 8px;
+}
+
+.view > * {
+  min-height: 0;
+}
+
+.detail-name {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detail-name strong {
+  font-size: 14px;
+}
+
+.detail-note {
+  margin: 0;
+  color: var(--text3);
+  font-size: 12.5px;
+}
+
+.detail-models {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.detail-model {
+  color: var(--text2);
+  font-size: 12px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 @media (max-width: 980px) {
@@ -368,14 +440,12 @@ onUnmounted(() => {
     min-height: 100vh;
   }
 
-  .columns {
-    display: flex;
+  .view {
     flex-direction: column;
   }
 
-  .columns > * {
+  .view > * {
     height: 60vh;
-    border: none;
     border-top: 1px solid var(--border);
   }
 }

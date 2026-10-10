@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // The session inventory: every dispatch key the claw holds, interactive
-// first. Clicking selects the session the chat mirrors.
+// first. Clicking selects the session the chat mirrors. Displayed names
+// drop the `interactive:` prefix — the full key stays in the tooltip.
 import type { ClawSession } from '~/composables/useClaw'
 
 const props = defineProps<{
@@ -11,154 +12,159 @@ const props = defineProps<{
 
 defineEmits<{ select: [key: string]; refresh: [] }>()
 
-// Interactive sessions are the chat surface; forge keys read after.
-const sorted = computed(() => {
-  const interactive = props.sessions.filter((session) => session.key.startsWith('interactive:'))
-  const forge = props.sessions.filter((session) => !session.key.startsWith('interactive:'))
+interface Group {
+  label: string
+  rows: { key: string; name: string; session: ClawSession }[]
+}
+
+const groups = computed<Group[]>(() => {
   const byKey = (a: ClawSession, b: ClawSession) => a.key.localeCompare(b.key)
-  return [...interactive.sort(byKey), ...forge.sort(byKey)]
+  const interactive = props.sessions
+    .filter((session) => session.key.startsWith('interactive:'))
+    .sort(byKey)
+  const others = props.sessions
+    .filter((session) => !session.key.startsWith('interactive:'))
+    .sort(byKey)
+  const row = (session: ClawSession) => ({
+    key: session.key,
+    name: session.key.replace(/^interactive:/, ''),
+    session,
+  })
+  const groups: Group[] = []
+  if (interactive.length > 0)
+    groups.push({ label: 'interactive', rows: interactive.map(row) })
+  if (others.length > 0) groups.push({ label: 'other keys', rows: others.map(row) })
+  return groups
 })
 
-function stateClass(state: string): string {
-  if (state === 'leased') return 'leased'
-  if (state === 'reacquire') return 'reacquire'
+function stateTone(state: string): 'ok' | 'warn' | 'idle' {
+  if (state === 'leased') return 'ok'
+  if (state === 'reacquire') return 'warn'
   return 'idle'
 }
 </script>
 
 <template>
-  <aside class="panel sessions">
-    <header class="panel-head">
+  <aside class="sidebar">
+    <header class="head">
       <span class="label">Sessions</span>
+      <span class="count">{{ sessions.length }}</span>
       <button class="ghost" title="refresh sessions" :disabled="loading" @click="$emit('refresh')">
         ↻
       </button>
     </header>
+
     <p v-if="sessions.length === 0" class="empty">
       {{ loading ? 'loading…' : 'no sessions yet — send the first message' }}
     </p>
-    <ul v-else class="list">
-      <li
-        v-for="session in sorted"
-        :key="session.key"
-        :class="{ active: session.key === activeKey }"
+
+    <div v-for="group in groups" :key="group.label" class="group">
+      <span class="label">{{ group.label }}</span>
+      <button
+        v-for="row in group.rows"
+        :key="row.key"
+        class="entry"
+        :class="{ active: row.key === activeKey }"
+        :title="row.key"
+        @click="$emit('select', row.key)"
       >
-        <button class="row" :title="session.key" @click="$emit('select', session.key)">
-          <span class="key">{{ session.key }}</span>
-          <span class="meta">
-            <span class="state" :class="stateClass(session.state)">{{ session.state }}</span>
-            <span v-if="session.inbox_depth > 0" class="inbox" title="inbox depth">
-              {{ session.inbox_depth }}
-            </span>
-          </span>
-        </button>
-      </li>
-    </ul>
+        <StatusDot :tone="stateTone(row.session.state)" />
+        <span class="name">{{ row.name }}</span>
+        <span v-if="row.session.inbox_depth > 0" class="depth" title="inbox depth">
+          {{ row.session.inbox_depth }}
+        </span>
+      </button>
+    </div>
   </aside>
 </template>
 
 <style scoped>
-.panel {
+.sidebar {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  width: 240px;
+  flex: none;
+  padding: 14px 10px;
   border-right: 1px solid var(--border);
   background: var(--surface);
-}
-
-.panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 12px 8px;
-  border-bottom: 1px solid var(--border);
-}
-
-.ghost {
-  padding: 0 6px;
-  border: none;
-  background: none;
-  color: var(--text3);
-}
-
-.ghost:hover:not(:disabled) {
-  color: var(--accent-text);
-}
-
-.empty {
-  padding: 12px;
-  color: var(--text3);
-}
-
-.list {
-  list-style: none;
-  margin: 0;
-  padding: 4px 0;
   overflow-y: auto;
 }
 
-.row {
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 10px;
+}
+
+.count {
+  flex: 1;
+  color: var(--text3);
+  font-size: 12px;
+}
+
+.head .ghost {
+  padding: 0 6px;
+}
+
+.empty {
+  margin: 4px 8px;
+  color: var(--text3);
+}
+
+.group {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  margin-bottom: 14px;
+}
+
+.group .label {
+  padding: 0 8px 4px;
+}
+
+.entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   text-align: left;
   background: none;
   border: none;
-  border-left: 2px solid transparent;
-  border-radius: 0;
-  padding: 6px 12px;
+  border-radius: 7px;
+  padding: 7px 10px;
+  color: var(--text2);
 }
 
-.row:hover:not(:disabled) {
+.entry:hover:not(:disabled) {
   background: var(--elevated);
   color: var(--text);
 }
 
-li.active .row {
-  background: var(--elevated);
-  border-left-color: var(--accent);
+.entry.active {
+  background: color-mix(in srgb, var(--accent) 17%, transparent);
+  color: var(--accent-text);
+  font-weight: 600;
 }
 
-.key {
+.name {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text);
 }
 
-li.active .key {
-  color: var(--accent-text);
-}
-
-.meta {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-}
-
-.state {
+.depth {
+  flex: none;
+  min-width: 18px;
+  text-align: center;
   font-size: 11px;
-  color: var(--text3);
-}
-
-.state.idle {
-  color: var(--text3);
-}
-
-.state.leased {
-  color: var(--running);
-}
-
-.state.reacquire {
-  color: var(--warn);
-}
-
-.inbox {
-  font-size: 11px;
+  font-family: var(--mono);
   color: var(--info);
   border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  padding: 0 6px;
+  border-radius: 999px;
+  padding: 0 5px;
 }
 </style>

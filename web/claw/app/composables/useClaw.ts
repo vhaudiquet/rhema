@@ -47,6 +47,12 @@ export interface ProvidersState {
   providers: ClawProvider[]
 }
 
+/** The `PUT /v1/providers/active` answer: the new pair only — the
+ * provider list is not echoed and the caller carries it forward. */
+export interface ActiveBackend {
+  active: { provider: string; model: string }
+}
+
 /** A failed API call: the status plus the claw's `error` string when it sent one. */
 export class ClawError extends Error {
   /** HTTP status; 0 when the claw was unreachable at all. */
@@ -134,8 +140,8 @@ export interface ClawApi {
   sendMessage(key: string, text: string): Promise<void>
   /** `GET /v1/providers` — the constructible backends and the active pair. */
   providers(): Promise<ProvidersState>
-  /** `PUT /v1/providers/active` — switch the backend, persisted claw-side. */
-  setActive(provider: string, model?: string): Promise<ProvidersState>
+  /** `PUT /v1/providers/active` — switch the backend, persisted claw-side. Answers the new active pair only. */
+  setActive(provider: string, model?: string): Promise<ActiveBackend>
   /** `GET /v1/providers/{kind}/models` — the live listing; 404 when none. */
   models(kind: string): Promise<ModelCard[]>
   /**
@@ -164,12 +170,12 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     return (await get('/v1/providers', token.value)) as ProvidersState
   }
 
-  async function setActive(provider: string, model?: string): Promise<ProvidersState> {
+  async function setActive(provider: string, model?: string): Promise<ActiveBackend> {
     return (await send('/v1/providers/active', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
       body: JSON.stringify({ provider, ...(model ? { model } : {}) }),
-    })) as ProvidersState
+    })) as ActiveBackend
   }
 
   async function models(kind: string): Promise<ModelCard[]> {
