@@ -26,11 +26,11 @@ COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-op
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
 
-# The vendored crossterm patch is a local TUI dev convenience (a path
-# outside this build context); the image builds the daemon, which does not
-# use crossterm, so the section is stripped to let the workspace resolve
-# against the stock crates.io release. The section is the root manifest's
-# last, so the range deletes exactly it. Cargo validates explicit target
+# Resolution reads the vendored crossterm (the root manifest path-patches
+# to it) even though the image builds the daemon, which does not link it.
+COPY vendor/ vendor/
+
+# Cargo validates explicit target
 # paths at manifest-parse time, so the fetch needs stub files at every
 # declared target path: src/ for every member, plus examples/tests/benches
 # as declared (default path from the target name, or the explicit `path`).
@@ -38,8 +38,7 @@ COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
 # nothing until the stub exists — an unmatched glob would hand mkdir a
 # literal path. The real sources land below. (The awk program must stay on
 # one line: a Dockerfile line not ending in a backslash ends the RUN.)
-RUN sed -i '/^\[patch\.crates-io\]/,$d' Cargo.toml \
-    && for crate in crates/*/; do \
+RUN for crate in crates/*/; do \
            mkdir -p "$crate/src"; \
            touch "$crate/src/lib.rs" "$crate/src/main.rs"; \
            awk -F'"' '/^\[/ { d = ""; p = 0; if ($0 == "[[example]]") { d = "examples" } else if ($0 == "[[test]]") { d = "tests" } else if ($0 == "[[bench]]") { d = "benches" }; next } d == "" { next } /^name = / && p == 0 { print d "/" $2 ".rs" } /^path = / { p = 1; print $2 }' "$crate/Cargo.toml" \
@@ -51,11 +50,9 @@ RUN sed -i '/^\[patch\.crates-io\]/,$d' Cargo.toml \
     && cargo fetch
 
 # Sources. target/ and .git never land here: the repo-root .dockerignore
-# keeps them out of the context. The second strip undoes the COPY, which
-# restores the patched manifest.
+# keeps them out of the context.
 COPY . .
-RUN sed -i '/^\[patch\.crates-io\]/,$d' Cargo.toml \
-    && cargo build --release -p rhema-claw
+RUN cargo build --release -p rhema-claw
 
 FROM debian:stable-slim
 
