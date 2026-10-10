@@ -1,0 +1,207 @@
+package dev.rhema.phone.net
+
+import dev.rhema.phone.data.SettingsRepository
+import java.io.IOException
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
+
+sealed interface ClawResult<out T> {
+    data class Ok<T>(val value: T) : ClawResult<T>
+    data class HttpError(val code: Int, val body: String?) : ClawResult<Nothing>
+    data class Network(val message: String) : ClawResult<Nothing>
+}
+
+sealed interface SseFrame {
+    data object Opened : SseFrame
+    data class Event(val event: ClawEvent) : SseFrame
+
+    // code != null carries an HTTP status; 401 means the token is wrong.
+    data class Failed(val code: Int?, val message: String) : SseFrame
+    data object Closed : SseFrame
+}
+
+// One object per claw endpoint. Paths mirror the claw's /v1 contract exactly;
+// the bearer token rides on every /v1 call and never on /healthz.
+class ClawApi(
+    private val settings: SettingsRepository,
+    baseClient: OkHttpClient,
+    private val json: Json,
+) {
+    private val client = baseClient
+
+    // The event stream must not time out while idle; keep-alive comments are
+    // the only liveness signal. Regular calls keep the 30s default from baseClient.
+    private val streamingClient = baseClient.newBuilder()
+        .readTimeout(0, TimeUnit.MILLISECONDS)
+        .build()
+
+    private val jsonBody = "application/json; charset=utf-8".toMediaType()
+
+    // /healthz is the only unauthenticated endpoint; it is the settings gate.
+    suspend fun health(): ClawResult<Unit> {
+        val base = baseOrNull() ?: return ClawResult.Network("no base URL configured")
+        return execute(Request.Builder().url("$base/healthz").build()) { }
+    }
+
+    suspend fun sessions(): ClawResult<List<SessionInfo>> {
+        val builder = v1("sessions") ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.get().build()) { response ->
+            json.decodeFromString<List<SessionInfo>>(response.body?.string() ?: "[]")
+        }
+    }
+
+    // The claw's documented dance: subscribe to the event stream first, then
+    // POST; the reply arrives on the stream, not in the POST response (202).
+    suspend fun postMessage(sessionKey: String, text: String): ClawResult<Unit> {
+        val builder = v1("sessions", sessionKey, "messages")
+            ?: return ClawResult.Network("no base URL configured")
+        val body = json.encodeToString(MessageRequest(text)).toRequestBody(jsonBody)
+        return execute(builder.post(body).build()) { }
+    }
+
+    suspend fun ingest(source: String, key: String, payload: JsonObject): ClawResult<Unit> {
+        val builder = v1("ingest") ?: return ClawResult.Network("no base URL configured")
+        val body = json.encodeToString(IngestRequest(source, key, payload)).toRequestBody(jsonBody)
+        return execute(builder.post(body).build()) { }
+    }
+
+    suspend fun notifications(deviceId: String, since: String): ClawResult<List<RhemaNotification>> {
+        val base = baseOrNull() ?: return ClawResult.Network("no base URL configured")
+        val url = base.toHttpUrlOrNull()?.newBuilder()
+            ?.addPathSegments("v1/notifications")
+            ?.addQueryParameter("device", deviceId)
+            ?.addQueryParameter("since", since)
+            ?.build()
+            ?: return ClawResult.Network("bad base URL")
+        val request = Request.Builder().url(url).header("Authorization", bearer()).build()
+        return execute(request) { response ->
+            json.decodeFromString<NotificationPage>(response.body?.string() ?: "{}").notifications
+        }
+    }
+
+    suspend fun ackNotification(id: String): ClawResult<Unit> {
+        val builder = v1("notifications", id, "ack")
+            ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.post(EMPTY_BODY).build()) { }
+    }
+
+    fun eventStream(sessionKey: String): Flow<SseFrame> = callbackFlow {
+        val builder = v1("sessions", sessionKey, "events")
+        if (builder == null) {
+            trySend(SseFrame.Failed(null, "no base URL configured"))
+            close()
+            return@callbackFlow
+        }
+        val call = streamingClient.newCall(builder.get().build())
+        // The chat screen cancels its collector on dispose; call.cancel() is
+        // what unblocks the blocking read inside onResponse below.
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                trySend(SseFrame.Failed(null, e.message ?: "connection failed"))
+                close()
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                response.use { resp ->
+                    if (resp.code == 401) {
+                        trySend(SseFrame.Failed(401, "unauthorized"))
+                        close()
+                        return
+                    }
+                    if (!resp.isSuccessful) {
+                        trySend(SseFrame.Failed(resp.code, "HTTP ${resp.code}"))
+                        close()
+                        return
+                    }
+                    trySend(SseFrame.Opened)
+                    val source = resp.body?.source()
+                    if (source == null) {
+                        trySend(SseFrame.Failed(resp.code, "empty stream body"))
+                        close()
+                        return
+                    }
+                    // SSE framing per contract: blank-line-delimited data lines,
+                    // ":" comment lines are keep-alives. No event:/id: fields.
+                    val data = StringBuilder()
+                    try {
+                        while (true) {
+                            val line = source.readUtf8Line() ?: break
+                            when {
+                                line.startsWith(":") -> Unit
+                                line.isEmpty() -> {
+                                    if (data.isNotEmpty()) {
+                                        val payload = data.toString().trim()
+                                        data.setLength(0)
+                                        runCatching { json.decodeFromString<ClawEvent>(payload) }
+                                            .getOrNull()
+                                            ?.let { trySend(SseFrame.Event(it)) }
+                                    }
+                                }
+                                line.startsWith("data:") -> {
+                                    data.append(line.removePrefix("data:").trimStart())
+                                    data.append('\n')
+                                }
+                            }
+                        }
+                        trySend(SseFrame.Closed)
+                    } catch (e: IOException) {
+                        // call.cancel() from awaitClose lands here: normal close.
+                        trySend(SseFrame.Closed)
+                    }
+                    close()
+                }
+            }
+        })
+        awaitClose { call.cancel() }
+    }.buffer(Channel.UNLIMITED)
+
+    private suspend fun baseOrNull(): String? =
+        settings.current().baseUrl.trim().trimEnd('/').takeIf { it.isNotBlank() }
+
+    private suspend fun bearer(): String = settings.current().token
+
+    // Builds GET-ready /v1/{...} request with auth; null when unconfigured.
+    private suspend fun v1(vararg segments: String): Request.Builder? {
+        val base = baseOrNull() ?: return null
+        val url = base.toHttpUrlOrNull()?.newBuilder() ?: return null
+        for (segment in segments) url.addPathSegment(segment)
+        return Request.Builder().url(url.build()).header("Authorization", bearer())
+    }
+
+    private suspend fun <T> execute(request: Request, parse: (Response) -> T): ClawResult<T> =
+        withContext(Dispatchers.IO) {
+            try {
+                client.newCall(request).execute().use { response ->
+                    if (response.isSuccessful) {
+                        ClawResult.Ok(parse(response))
+                    } else {
+                        ClawResult.HttpError(response.code, response.body?.string()?.take(500))
+                    }
+                }
+            } catch (e: IOException) {
+                ClawResult.Network(e.message ?: "network error")
+            }
+        }
+
+    private companion object {
+        val EMPTY_BODY = ByteArray(0).toRequestBody(null)
+    }
+}

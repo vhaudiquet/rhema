@@ -1,0 +1,50 @@
+package dev.rhema.phone.work
+
+import android.content.Context
+import androidx.work.Constraints
+import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkManager
+import java.time.Duration
+
+private const val PHONE_STATUS = "phone_status"
+private const val NOTIFICATIONS = "notifications"
+private const val PHONE_STATUS_KICK = "phone_status_kick"
+
+private fun networked() = Constraints.Builder()
+    .setRequiredNetworkType(NetworkType.CONNECTED)
+    .build()
+
+// KEEP everywhere: re-running the schedule (app start, boot) must not reset
+// the 15-minute cadence. 15 minutes is the WorkManager periodic floor.
+fun schedulePeriodicWork(context: Context) {
+    val wm = WorkManager.getInstance(context)
+    wm.enqueueUniquePeriodicWork(
+        PHONE_STATUS,
+        ExistingPeriodicWorkPolicy.KEEP,
+        PeriodicWorkRequestBuilder<PhoneStatusWorker>(Duration.ofMinutes(15))
+            .setConstraints(networked())
+            .build(),
+    )
+    wm.enqueueUniquePeriodicWork(
+        NOTIFICATIONS,
+        ExistingPeriodicWorkPolicy.KEEP,
+        PeriodicWorkRequestBuilder<NotificationsWorker>(Duration.ofMinutes(15))
+            .setConstraints(networked())
+            .build(),
+    )
+}
+
+// Receiver-side kick for charging flips; KEEP coalesces bursts into one run.
+fun enqueuePhoneStatusNow(context: Context) {
+    WorkManager.getInstance(context).enqueueUniqueWork(
+        PHONE_STATUS_KICK,
+        ExistingWorkPolicy.KEEP,
+        OneTimeWorkRequestBuilder<PhoneStatusWorker>()
+            .setConstraints(networked())
+            .build(),
+    )
+}

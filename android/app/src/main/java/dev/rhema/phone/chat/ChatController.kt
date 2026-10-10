@@ -1,0 +1,162 @@
+package dev.rhema.phone.chat
+
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import dev.rhema.phone.net.ClawApi
+import dev.rhema.phone.net.ClawEvent
+import dev.rhema.phone.net.ClawResult
+import dev.rhema.phone.net.SseFrame
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+
+// Holds the live transcript of one open chat screen. Its lifetime is the
+// screen's: rotation or process death drops the transcript (v1 trade-off;
+// the claw-side session is unaffected).
+class ChatController(
+    private val api: ClawApi,
+    private val scope: CoroutineScope,
+    val sessionKey: String,
+) {
+    sealed interface Item {
+        val id: Long
+    }
+
+    data class UserMessage(override val id: Long, val text: String) : Item
+    data class Thinking(override val id: Long, val text: String) : Item
+    data class ToolCall(
+        override val id: Long,
+        val name: String,
+        val summary: String?,
+        val isError: Boolean,
+        val running: Boolean,
+    ) : Item
+
+    data class Reply(override val id: Long, val text: String, val streaming: Boolean) : Item
+
+    sealed interface Conn {
+        data object Connecting : Conn
+        data object Live : Conn
+        data object Reconnecting : Conn
+        data class Failed(val code: Int?, val message: String) : Conn
+    }
+
+    var items by mutableStateOf<List<Item>>(emptyList())
+        private set
+    var connection by mutableStateOf<Conn>(Conn.Connecting)
+        private set
+    var sending by mutableStateOf(false)
+        private set
+    var sendError by mutableStateOf<String?>(null)
+        private set
+
+    private var nextId = 0L
+    private fun newId() = nextId++
+
+    private var streamJob: Job? = null
+
+    fun start() {
+        if (streamJob != null) return
+        streamJob = scope.launch {
+            while (isActive) {
+                api.eventStream(sessionKey).collect { frame ->
+                    when (frame) {
+                        SseFrame.Opened -> connection = Conn.Live
+                        is SseFrame.Event -> apply(frame.event)
+                        SseFrame.Closed -> Unit
+                        is SseFrame.Failed -> connection = Conn.Failed(frame.code, frame.message)
+                    }
+                }
+                // A wrong token does not fix itself by retrying.
+                val conn = connection
+                if (conn is Conn.Failed && conn.code == 401) break
+                connection = Conn.Reconnecting
+                delay(RECONNECT_DELAY_MS)
+            }
+        }
+    }
+
+    fun stop() {
+        streamJob?.cancel()
+        streamJob = null
+    }
+
+    // The stream is already collecting by the time the user can press send,
+    // so this preserves the claw's subscribe-then-post order. A failed POST
+    // restores the draft in the UI; nothing optimistic is appended before 202.
+    suspend fun send(text: String): Boolean {
+        sending = true
+        sendError = null
+        val result = api.postMessage(sessionKey, text)
+        sending = false
+        return when (result) {
+            is ClawResult.Ok -> {
+                items = items + UserMessage(newId(), text)
+                true
+            }
+            is ClawResult.HttpError -> {
+                sendError = "HTTP ${result.code}"
+                false
+            }
+            is ClawResult.Network -> {
+                sendError = result.message
+                false
+            }
+        }
+    }
+
+    private fun apply(event: ClawEvent) {
+        when (event) {
+            is ClawEvent.ThinkingDelta -> {
+                val last = items.lastOrNull()
+                items = if (last is Thinking) {
+                    items.dropLast(1) + last.copy(text = last.text + event.text)
+                } else {
+                    items + Thinking(newId(), event.text)
+                }
+            }
+            is ClawEvent.TextDelta -> {
+                val last = items.lastOrNull()
+                items = if (last is Reply && last.streaming) {
+                    items.dropLast(1) + last.copy(text = last.text + event.text)
+                } else {
+                    items + Reply(newId(), event.text, streaming = true)
+                }
+            }
+            is ClawEvent.ToolStart ->
+                items = items + ToolCall(newId(), event.name, summary = null, isError = false, running = true)
+            is ClawEvent.ToolResult -> {
+                // tool_result has no index; match the last open row of the same tool.
+                val index = items.indexOfLast { it is ToolCall && it.name == event.name && it.running }
+                items = if (index >= 0) {
+                    items.toMutableList().also { list ->
+                        val tool = list[index] as ToolCall
+                        list[index] = tool.copy(summary = event.summary, isError = event.isError, running = false)
+                    }
+                } else {
+                    items + ToolCall(newId(), event.name, event.summary, event.isError, running = false)
+                }
+            }
+            is ClawEvent.TurnDone -> {
+                // Thinking is scratch: it disappears once the turn settles, and
+                // the pinned reply replaces whatever streamed in.
+                val kept = items.filterNot { it is Thinking }
+                val replyIndex = kept.indexOfLast { it is Reply }
+                items = when {
+                    event.reply.isNotEmpty() && replyIndex >= 0 -> kept.mapIndexed { i, item ->
+                        if (i == replyIndex) (item as Reply).copy(text = event.reply, streaming = false) else item
+                    }
+                    event.reply.isNotEmpty() -> kept + Reply(newId(), event.reply, streaming = false)
+                    else -> kept.map { if (it is Reply) it.copy(streaming = false) else it }
+                }
+            }
+        }
+    }
+
+    private companion object {
+        const val RECONNECT_DELAY_MS = 2_000L
+    }
+}

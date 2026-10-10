@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Single glyph used for both the launcher icon and the notification small
+     icon. The solid silhouette is intentional: notification small icons render
+     alpha only. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FF2E7D6F"
+        android:pathData="M4,2h16c1.1,0 2,0.9 2,2v12c0,1.1 -0.9,2 -2,2H8l-4,4V4c0,-1.1 0.9,-2 2,-2zM7,7h10v2H7zM7,11h7v2H7z" />
+</vector>

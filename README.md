@@ -368,7 +368,12 @@ survival for disposability.
 
 The UI in `web/claw` is one client of the same surface: `npm run dev`
 proxies to a local claw, `npm run build` emits the static bundle an
-ingress serves next to `/v1`.
+ingress serves next to `/v1`. The phone is another: `android/` is the
+Kotlin/Compose client — chat over the same SSE stream, phone status
+(battery, charging, network, DND transitions) posted to `/v1/ingest`
+as `phone:<device>:<topic>` events, and agent notifications polled
+onto the lock screen (no push infrastructure; a 15-minute WorkManager
+floor, live SSE while the app is open). See `android/README.md`.
 
 ## Usage
 

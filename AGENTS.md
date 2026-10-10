@@ -72,6 +72,8 @@ Rules:
     one-shot (`crates/rhema-code/`); its binary is `rhema`
   - `deploy` — the docker image and helm chart under `deploy/`
   - `web` — the claw's Nuxt UI under `web/`
+  - `android` — the claw's phone client: chat, status source,
+    notifications (`android/`)
   - `deps` — dependency additions/bumps (manifests, lockfile)
 - Omit the scope entirely for repo-wide changes that do not belong to
   a single component (root config, README.md, SPEC.md).
