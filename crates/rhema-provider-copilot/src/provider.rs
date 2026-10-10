@@ -7,15 +7,17 @@
 //! `{github}/copilot_internal/v2/token` for a Copilot token that lives
 //! minutes, and re-exchanges ahead of expiry — a small margin before
 //! `expires_at`, and once more immediately when the chat endpoint
-//! answers 401, because a cached token can expire mid-turn. The exchange
-//! response also carries the chat base (`endpoints.api`), which wins
-//! over [`DEFAULT_API_BASE`] for every call the token serves.
+//! answers 401, because a cached token can expire mid-turn. The chat
+//! base for every call the token serves comes from the token itself
+//! (its `proxy-ep` claim names the per-plan proxy host), falling back
+//! to the exchange response's `endpoints.api`, then [`DEFAULT_API_BASE`].
 //!
 //! The chat and models calls speak the OpenAI dialect — the wire
 //! constraints are [`crate::wire`]'s. The proxy rejects requests that
 //! do not look like an editor integration, so every call carries the
-//! editor headers (`Copilot-Integration-Id`, `Editor-Version`) beside
-//! the bearer token.
+//! editor headers (`Copilot-Integration-Id`, `Editor-Version`, the
+//! `X-GitHub-Api-Version` the endpoints understand) beside the bearer
+//! token.
 //!
 //! Timeouts follow the sibling adapters: connect capped (10s), stream
 //! reads stall-guarded (90s — a stall guard, not a duration cap), and
@@ -39,7 +41,7 @@ use crate::wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler, Wi
 pub const DEFAULT_GITHUB_URL: &str = "https://github.com";
 
 /// The chat base assumed before the first exchange answers with the
-/// token's own `endpoints.api`.
+/// token's own serving host.
 pub const DEFAULT_API_BASE: &str = "https://api.githubcopilot.com";
 
 /// The SSE payload that ends every OpenAI-compatible chat stream.
@@ -50,10 +52,17 @@ const DONE_SENTINEL: &str = "[DONE]";
 /// failed request plus a retry.
 const EXPIRY_MARGIN: u64 = 300;
 
-/// The editor identity the proxy expects on every call.
-const EDITOR_VERSION: &str = "vscode/1.99.0";
+/// The editor identity the proxy expects on every call, kept current
+/// with the official Copilot Chat extension — the proxy classifies
+/// clients by these headers, and a stale-looking version invites the
+/// rejection third-party clients have no recourse against.
+const EDITOR_VERSION: &str = "vscode/1.107.0";
 const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
-const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.4.0";
+const EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.35.0";
+const USER_AGENT: &str = "GitHubCopilotChat/0.35.0";
+/// The GitHub REST API version the proxy endpoints understand; without
+/// it the proxy pins its own (older) default.
+const COPILOT_API_VERSION: &str = "2026-06-01";
 
 /// The HTTP client every instance shares: connect capped, stream reads
 /// stall-guarded, never total-time capped.
@@ -136,9 +145,10 @@ impl CopilotProvider {
         self
     }
 
-    /// Answers chat calls at `api_base` instead of [`DEFAULT_API_BASE`].
-    /// A test seam over the exchange's `endpoints.api`, which still wins
-    /// when the first exchange answers.
+    /// Answers chat calls at `api_base` instead of the served base. A
+    /// test seam: production resolution takes the token's `proxy-ep`
+    /// claim, then the exchange response's `endpoints.api`, then this
+    /// default.
     pub fn with_api_base(mut self, api_base: impl Into<String>) -> Self {
         self.api_base = api_base.into().trim_end_matches('/').to_owned();
         self
@@ -186,10 +196,13 @@ impl CopilotProvider {
         if parsed.token.is_empty() {
             return Err(ProviderError::Api("token response carries no token".into()));
         }
-        let api_base = parsed
-            .endpoints
-            .map(|endpoints| endpoints.api)
-            .filter(|api| !api.is_empty())
+        let api_base = api_base_from_token(&parsed.token)
+            .or_else(|| {
+                parsed
+                    .endpoints
+                    .map(|endpoints| endpoints.api)
+                    .filter(|api| !api.is_empty())
+            })
             .unwrap_or_else(|| self.api_base.to_owned());
         Ok(CopilotToken {
             token: parsed.token,
@@ -238,8 +251,32 @@ impl EditorHeaders for reqwest::RequestBuilder {
         self.header("Editor-Version", EDITOR_VERSION)
             .header("Editor-Plugin-Version", EDITOR_PLUGIN_VERSION)
             .header("Copilot-Integration-Id", COPILOT_INTEGRATION_ID)
-            .header(reqwest::header::USER_AGENT, EDITOR_PLUGIN_VERSION)
+            .header("X-GitHub-Api-Version", COPILOT_API_VERSION)
+            .header(reqwest::header::USER_AGENT, USER_AGENT)
     }
+}
+
+/// The API base a Copilot token serves, from the `proxy-ep` host claim
+/// its semicolon-separated body carries:
+/// `proxy.<plan>.githubcopilot.com` serves at
+/// `https://api.<plan>.githubcopilot.com`. Only GitHub's own hosts are
+/// honored — the claim is meaningless for any other host, and honoring
+/// it would let a malformed token point the chat calls somewhere else.
+/// `None` when the token carries no usable claim, falling back to the
+/// exchange response's `endpoints.api`.
+fn api_base_from_token(token: &str) -> Option<String> {
+    let host = token
+        .split(';')
+        .find_map(|part| part.strip_prefix("proxy-ep="))?
+        .trim();
+    if !host.ends_with(".githubcopilot.com") {
+        return None;
+    }
+    let host = match host.strip_prefix("proxy.") {
+        Some(rest) => format!("api.{rest}"),
+        None => host.to_owned(),
+    };
+    Some(format!("https://{host}"))
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the OpenAI
@@ -352,5 +389,37 @@ impl CopilotProvider {
             .send()
             .await
             .map_err(network_error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_proxy_ep_claim_names_the_serving_host() {
+        let token = "tid=abc;exp=1;ctu=1;proxy-ep=proxy.individual.githubcopilot.com;";
+        assert_eq!(
+            api_base_from_token(token).as_deref(),
+            Some("https://api.individual.githubcopilot.com")
+        );
+        // A business plan's claim maps the same way.
+        let token = "tid=abc;proxy-ep=proxy.business.githubcopilot.com";
+        assert_eq!(
+            api_base_from_token(token).as_deref(),
+            Some("https://api.business.githubcopilot.com")
+        );
+    }
+
+    #[test]
+    fn a_claim_off_githubs_hosts_is_ignored() {
+        // Honoring a foreign claim would point the chat calls wherever
+        // the token says — the claim is only meaningful for GitHub's
+        // own hosts.
+        assert_eq!(
+            api_base_from_token("tid=abc;proxy-ep=proxy.evil.example.com"),
+            None
+        );
+        assert_eq!(api_base_from_token("tid=abc;exp=1;ctu=1;"), None);
     }
 }
