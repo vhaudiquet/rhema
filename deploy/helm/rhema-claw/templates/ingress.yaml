@@ -1,0 +1,42 @@
+{{- if .Values.ingress.enabled }}
+{{- if not .Values.ingress.host }}
+{{- fail "ingress.host is required when ingress.enabled: the claw is single-user and bearer-gated, and an unnamed host has no TLS story" }}
+{{- end }}
+{{- if and .Values.ingress.tls.enabled (not .Values.ingress.tls.secretName) }}
+{{- fail "ingress.tls.secretName is required when ingress.tls.enabled: bearer tokens cross this ingress in the clear without TLS" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "rhema-claw.fullname" . }}
+  labels:
+    {{- include "rhema-claw.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # The whole surface — chat, /v1, /healthz — is one origin; the
+          # bearer token is the auth, and the tls block above is what
+          # keeps it off the wire in the clear.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "rhema-claw.fullname" . }}
+                port:
+                  name: http
+{{- end }}

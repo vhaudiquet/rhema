@@ -367,6 +367,11 @@ helm install claw deploy/helm/rhema-claw \
   --set config.provider=anthropic --set config.model=claude-sonnet-4-5
 ```
 
+Expose it with the chart's optional ingress (`ingress.enabled` +
+`ingress.host`, TLS strongly recommended — bearer tokens cross it) or
+keep it cluster-private behind Tailscale; the claw is bearer-gated
+either way.
+
 The image is the daemon plus `bash` and `git` (the agent's shell is
 load-bearing); the chart runs exactly one replica — the claw is
 single-node by design, one SQLite store, one dispatcher — with the

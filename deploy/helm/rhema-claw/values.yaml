@@ -42,6 +42,26 @@ service:
   type: ClusterIP
   port: 7799
 
+ingress:
+  # Off by default: the claw is single-user and bearer-gated, and bearer
+  # tokens must not cross the public internet in the clear. When enabled,
+  # a host is required (the render refuses without one), TLS is strongly
+  # recommended, and the whole surface — chat, /v1, /healthz — is one
+  # origin. A UI on the same host's / path composes: put the UI's
+  # ingress first, or route /v1 here from its own host.
+  enabled: false
+  # Required when enabled; the render refuses an ingress without one.
+  host: ""
+  # The ingress controller's class (nginx, traefik, ...); empty means
+  # the cluster default.
+  className: ""
+  annotations: {}
+  tls:
+    enabled: false
+    # The cert-manager (or manually provisioned) secret carrying the
+    # certificate; required when tls.enabled.
+    secretName: ""
+
 persistence:
   enabled: true
   storageClass: ""

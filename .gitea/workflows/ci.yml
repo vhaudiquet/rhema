@@ -94,6 +94,25 @@ jobs:
           grep -q "workspace_root: /data/workspaces" <<<"$render"
           grep -q "listen: 0.0.0.0:7799" <<<"$render"
 
+          # The ingress shapes: host+class, host+TLS, and the two
+          # refusals — an enabled ingress without a host, and TLS without
+          # a certificate secret. Bearer tokens cross this ingress; neither
+          # may render silently.
+          check deploy/helm/rhema-claw --set ingress.enabled=true \
+            --set ingress.host=claw.example.com --set ingress.className=nginx
+          check deploy/helm/rhema-claw --set ingress.enabled=true \
+            --set ingress.host=claw.example.com --set ingress.tls.enabled=true \
+            --set ingress.tls.secretName=claw-tls
+          if helm template test deploy/helm/rhema-claw \
+              --set ingress.enabled=true > /dev/null 2>&1; then
+            echo "ingress without a host must not render"; exit 1
+          fi
+          if helm template test deploy/helm/rhema-claw \
+              --set ingress.enabled=true --set ingress.host=claw.example.com \
+              --set ingress.tls.enabled=true > /dev/null 2>&1; then
+            echo "tls without a secret must not render"; exit 1
+          fi
+
           # The invariant is a render-time failure: the claw is single-node
           # by design (one SQLite store, one dispatcher), and the chart is
           # where that is enforced.
