@@ -12,6 +12,7 @@ use rhema_config::Profile;
 use rhema_core::{ModelProvider, ProviderError};
 use rhema_provider::ModelCard;
 use rhema_provider_anthropic::AnthropicProvider;
+use rhema_provider_copilot::CopilotProvider;
 use rhema_provider_google::GoogleProvider;
 use rhema_provider_llama_cpp::LlamaCppProvider;
 use rhema_provider_openai_compatible::OpenAiCompatibleProvider;
@@ -27,6 +28,7 @@ pub const PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
     "deepseek",
+    "copilot",
     "google",
 ];
 
@@ -60,6 +62,8 @@ pub fn default_model_for(provider: &str) -> &'static str {
         "anthropic" => "claude-sonnet-4-5",
         "openai" => "gpt-5",
         "deepseek" => "deepseek-chat",
+        // The proxy's long-running default workhorse.
+        "copilot" => "gpt-4.1",
         // Google and OpenRouter share the Gemini fallback; OpenRouter
         // routes it.
         _ => "gemini-3.8-flash",
@@ -167,6 +171,10 @@ fn catalog_fetch(
                     .await
             })
         }
+        "copilot" => {
+            let key = profile.copilot_api_key()?;
+            tokio::spawn(async move { CopilotProvider::new(key).list_models().await })
+        }
         _ => {
             let key = profile.google_api_key()?;
             tokio::spawn(async move { GoogleProvider::new(key).list_models().await })
@@ -232,6 +240,7 @@ pub fn provider_for(
             OpenAiCompatibleProvider::new(profile.deepseek_api_key()?)
                 .with_base_url("https://api.deepseek.com/v1"),
         )),
+        "copilot" => Some(Arc::new(CopilotProvider::new(profile.copilot_api_key()?))),
         _ => Some(Arc::new(GoogleProvider::new(profile.google_api_key()?))),
     }
 }
@@ -314,6 +323,18 @@ mod tests {
             return;
         }
         assert!(resolve(&profile(None, None), Some("openrouter"), None, None).is_none());
+    }
+
+    #[test]
+    fn the_copilot_kind_resolves_from_a_stored_token() {
+        let profile = Profile {
+            provider: Some("copilot".into()),
+            copilot_api_key: Some("gho_token".into()),
+            ..Profile::default()
+        };
+        let resolved = resolve(&profile, None, None, None).expect("a stored token resolves");
+        assert_eq!(resolved.kind, "copilot");
+        assert_eq!(resolved.model, "gpt-4.1");
     }
 
     #[test]
