@@ -130,3 +130,13 @@ app/src/main/java/dev/rhema/phone/
   work/                PhoneStatusWorker, NotificationsWorker, receivers, scheduling
   notif/Notifier.kt    channel + system notifications
 ```
+
+## Road notes
+
+- Theming is Jadeite dark, always — the same tokens as the TUI and the
+  web UI (`crates/rhema-code/src/palette.rs` DARK). No light scheme, no
+  dynamic color: the palette is the brand.
+- Future onboarding: scanning a QR code from the claw (base URL +
+  token, rendered by the web UI or printed in the terminal) instead of
+  typing both by hand. Deliberately deferred; the Settings screen is
+  the manual path today.
