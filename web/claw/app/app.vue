@@ -6,7 +6,13 @@
 // The claw owns the conversation and the config, so this page is a
 // mirror, not a store.
 import { ClawError, clawHealth, isInteractive, useClaw } from '~/composables/useClaw'
-import type { ClawSession, ModelCard, ProvidersState, StreamStatus } from '~/composables/useClaw'
+import type {
+  ClawSession,
+  ModelCard,
+  ProviderCredentials,
+  ProvidersState,
+  StreamStatus,
+} from '~/composables/useClaw'
 import { useTranscript } from '~/composables/useTranscript'
 
 const TOKEN_STORE_KEY = 'claw.token'
@@ -88,6 +94,7 @@ const providerModelsLoading = ref(false)
 const providerModelsError = ref<string | null>(null)
 const selectedProvider = ref<string | null>(null)
 const savingProviders = ref(false)
+const mutatingProviders = ref(false)
 const streamStatus = ref<StreamStatus>('connecting')
 const busy = ref(false)
 const authRequired = ref(false)
@@ -174,6 +181,42 @@ async function saveProviders(provider: string, model?: string): Promise<void> {
     noteApiError(err)
   } finally {
     savingProviders.value = false
+  }
+}
+
+async function addProvider(kind: string, credentials: ProviderCredentials): Promise<void> {
+  mutatingProviders.value = true
+  try {
+    // The login answers the whole state: the roster with the new (or
+    // replaced) backend on it.
+    providersState.value = await claw.setCredentials(kind, credentials)
+    selectedProvider.value = kind
+    await loadProviderModels(kind)
+    pushNotice(`provider ${kind} added`)
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    mutatingProviders.value = false
+  }
+}
+
+async function removeProvider(kind: string): Promise<void> {
+  mutatingProviders.value = true
+  try {
+    providersState.value = await claw.removeProvider(kind)
+    // The removal may have moved the active pair, and the removed kind
+    // cannot keep the detail panel: both re-ground on what remains.
+    if (selectedProvider.value === kind) {
+      selectedProvider.value = providersState.value.active.provider
+      await loadProviderModels(selectedProvider.value)
+    }
+    pushNotice(`provider ${kind} removed`)
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    mutatingProviders.value = false
   }
 }
 
@@ -323,8 +366,11 @@ onUnmounted(() => {
             :models-error="providerModelsError"
             :selected-provider="selectedProvider"
             :saving="savingProviders"
+            :mutating="mutatingProviders"
             @inspect="loadProviderModels"
             @save="saveProviders"
+            @add="addProvider"
+            @remove="removeProvider"
           />
           <SettingsAboutPage v-show="route.section === 'about'" :claw-up="clawUp" />
           <DetailPanel v-if="route.section === 'providers'" title="Backend">

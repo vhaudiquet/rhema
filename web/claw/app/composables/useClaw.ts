@@ -40,11 +40,29 @@ export interface ModelCard {
 export interface ClawProvider {
   kind: string
   default_model: string
+  /** Where the credential resolves from: `env` (survives a removal
+   * until restart), `stored` (this surface persisted it), `profile`
+   * (the stored rhema config), or `keyless`. */
+  source?: 'env' | 'stored' | 'profile' | 'keyless'
+}
+
+/** One kind a runtime login can add, with the fields its form takes. */
+export interface AddableKind {
+  kind: string
+  fields: string[]
 }
 
 export interface ProvidersState {
   active: { provider: string; model: string }
   providers: ClawProvider[]
+  addable?: AddableKind[]
+}
+
+/** The credentials a provider login carries: an API key (a GitHub
+ * token for copilot), and a server URL for llama.cpp. */
+export interface ProviderCredentials {
+  api_key?: string
+  url?: string
 }
 
 /** The `PUT /v1/providers/active` answer: the new pair only — the
@@ -144,6 +162,12 @@ export interface ClawApi {
   setActive(provider: string, model?: string): Promise<ActiveBackend>
   /** `GET /v1/providers/{kind}/models` — the live listing; 404 when none. */
   models(kind: string): Promise<ModelCard[]>
+  /** `PUT /v1/providers/{kind}/credentials` — add a backend (or replace
+   * its credentials) at runtime; answers the new providers state. */
+  setCredentials(kind: string, credentials: ProviderCredentials): Promise<ProvidersState>
+  /** `DELETE /v1/providers/{kind}` — remove a backend; answers the new
+   * providers state. The last backend is refused claw-side. */
+  removeProvider(kind: string): Promise<ProvidersState>
   /**
    * Stream one session's turns. Resolves with a handle once the fetch
    * is started; the claw keeps the stream open forever, and a drop is
@@ -183,6 +207,21 @@ export function useClaw(token: Ref<string | null>): ClawApi {
       models: ModelCard[]
     }
     return body.models
+  }
+
+  async function setCredentials(kind: string, credentials: ProviderCredentials): Promise<ProvidersState> {
+    return (await send(`/v1/providers/${encodeURIComponent(kind)}/credentials`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
+      body: JSON.stringify(credentials),
+    })) as ProvidersState
+  }
+
+  async function removeProvider(kind: string): Promise<ProvidersState> {
+    return (await send(`/v1/providers/${encodeURIComponent(kind)}`, {
+      method: 'DELETE',
+      headers: authHeaders(token.value),
+    })) as ProvidersState
   }
 
   function subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void } {
@@ -257,6 +296,8 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     providers,
     setActive,
     models,
+    setCredentials,
+    removeProvider,
     subscribeEvents,
   }
 }

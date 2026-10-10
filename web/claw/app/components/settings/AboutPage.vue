@@ -16,6 +16,8 @@ const routes = [
   { method: 'GET', path: '/v1/sessions/{key}/events', note: 'the turn-event stream (SSE)' },
   { method: 'GET', path: '/v1/providers', note: 'constructible backends + active pair' },
   { method: 'PUT', path: '/v1/providers/active', note: 'switch the backend, persisted' },
+  { method: 'PUT', path: '/v1/providers/{kind}/credentials', note: 'add a backend or replace its login' },
+  { method: 'DELETE', path: '/v1/providers/{kind}', note: 'drop a backend from the roster' },
   { method: 'GET', path: '/v1/providers/{kind}/models', note: "a kind's live model listing" },
 ]
 </script>

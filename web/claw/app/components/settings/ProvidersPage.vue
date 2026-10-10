@@ -1,11 +1,15 @@
 <script setup lang="ts">
 // The Model providers page: the primary backend the claw answers turns
-// with. Edits stage into a local draft; Save PUTs it (the claw applies
-// the pair on the next turn and persists it), Discard reverts to what
-// the claw reports. The live model listing comes from the provider
-// itself; a kind without one still switches — its default model applies.
+// with, plus the provider roster itself. Pair edits stage into a local
+// draft; Save PUTs it (the claw applies the pair on the next turn and
+// persists it), Discard reverts to what the claw reports. Logins apply
+// immediately: adding a kind constructs its backend claw-side and
+// persists its credentials, removing one drops it (env-backed kinds
+// re-discover on restart — the source badge says which). The live
+// model listing comes from the provider itself; a kind without one
+// still switches — its default model applies.
 // Presentational: data flows in as props, intent flows up as events.
-import type { ModelCard, ProvidersState } from '~/composables/useClaw'
+import type { ModelCard, ProviderCredentials, ProvidersState } from '~/composables/useClaw'
 
 const props = defineProps<{
   state: ProvidersState | null
@@ -15,6 +19,8 @@ const props = defineProps<{
   /** The kind whose listing is loaded/shown in the detail panel. */
   selectedProvider: string | null
   saving: boolean
+  /** A login or a removal is in flight. */
+  mutating: boolean
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +28,10 @@ const emit = defineEmits<{
   inspect: [kind: string]
   save: [provider: string, model?: string]
   refresh: []
+  /** Add a backend (or replace a kind's credentials). */
+  add: [kind: string, credentials: ProviderCredentials]
+  /** Remove a backend from the claw's roster. */
+  remove: [kind: string]
 }>()
 
 // The draft pair. An empty model string means "the kind's default" —
@@ -58,8 +68,13 @@ function syncDraft(): void {
 
 watch(
   () => props.state,
-  () => {
-    if (!dirty.value) syncDraft()
+  (state) => {
+    // A removal can take the staged kind with it: the draft re-grounds
+    // even when dirty, because staging a gone provider saves nothing.
+    const stagedGone =
+      draftProvider.value !== null &&
+      !state?.providers.some((p) => p.kind === draftProvider.value)
+    if (!dirty.value || stagedGone) syncDraft()
   },
   { immediate: true },
 )
@@ -78,11 +93,89 @@ function save(): void {
   if (!dirty.value || draftProvider.value === null) return
   emit('save', draftProvider.value, draftModel.value || undefined)
 }
+
+// --- the login form ---------------------------------------------------
+const KIND_LABELS: Record<string, string> = {
+  anthropic: 'Anthropic',
+  copilot: 'GitHub Copilot',
+  deepseek: 'DeepSeek',
+  google: 'Google Gemini',
+  'llama-cpp': 'llama.cpp server',
+  openai: 'OpenAI',
+  openrouter: 'OpenRouter',
+}
+
+function kindLabel(kind: string): string {
+  return KIND_LABELS[kind] ?? kind
+}
+
+/** The key field's voice: copilot logs in with a GitHub token. */
+const keyLabel = computed(() =>
+  addKind.value === 'copilot' ? 'GitHub token' : 'API key',
+)
+
+const addKind = ref<string>('')
+const addApiKey = ref('')
+const addUrl = ref('')
+
+const addable = computed(() => props.state?.addable ?? [])
+
+const addFields = computed(() => {
+  const entry = addable.value.find((entry) => entry.kind === addKind.value)
+  return entry?.fields ?? []
+})
+
+const addKindPresent = computed(() =>
+  props.state?.providers.some((p) => p.kind === addKind.value) ?? false,
+)
+
+const addReady = computed(() => {
+  if (!addKind.value) return false
+  if (addFields.value.includes('url') && addUrl.value.trim() === '') return false
+  if (addFields.value.includes('api_key') && addApiKey.value.trim() === '') {
+    return false
+  }
+  return true
+})
+
+function submitAdd(): void {
+  if (!addReady.value || props.mutating) return
+  const credentials: ProviderCredentials = {}
+  if (addFields.value.includes('api_key')) credentials.api_key = addApiKey.value.trim()
+  if (addFields.value.includes('url')) credentials.url = addUrl.value.trim()
+  emit('add', addKind.value, credentials)
+}
+
+function sourceTitle(source: string): string {
+  switch (source) {
+    case 'env':
+      return 'credential from the environment — a removal lasts until restart'
+    case 'stored':
+      return 'credential stored claw-side through this surface'
+    case 'profile':
+      return 'credential from the stored rhema config'
+    default:
+      return 'serves without a credential'
+  }
+}
+
+// A login landed: the kind joined the roster, the form forgets the
+// secret it held.
+watch(
+  () => props.state?.providers.map((p) => p.kind).join(','),
+  (roster, previous) => {
+    if (addKind.value && roster && roster !== previous && roster.includes(addKind.value)) {
+      addApiKey.value = ''
+      addUrl.value = ''
+      addKind.value = ''
+    }
+  },
+)
 </script>
 
 <template>
   <div class="page">
-    <PageHeader title="Model providers" subtitle="The backend the claw answers with — switching persists and applies from the next turn.">
+    <PageHeader title="Model providers" subtitle="The backends the claw can answer with — logins apply immediately; the pair switch persists.">
       <template #actions>
         <button :disabled="!dirty || saving" @click="discard">Discard</button>
         <button class="primary" :disabled="!dirty || saving" @click="save">
@@ -127,7 +220,10 @@ function save(): void {
           </SettingRow>
         </SettingCard>
 
-        <SettingCard title="Available backends" :meta="`${state.providers.length} constructible`">
+        <SettingCard
+          title="Available backends"
+          :meta="`${state.providers.length} constructed · env-backed kinds return on restart`"
+        >
           <div
             v-for="p in state.providers"
             :key="p.kind"
@@ -140,8 +236,75 @@ function save(): void {
           >
             <span class="kind mono">{{ p.kind }}</span>
             <span class="model mono">{{ p.default_model }}</span>
+            <AppBadge
+              v-if="p.source"
+              variant="dim"
+              :title="sourceTitle(p.source)"
+            >{{ p.source }}</AppBadge>
             <AppBadge v-if="p.kind === state.active.provider" variant="accent">active</AppBadge>
             <AppBadge v-else-if="p.kind === draftProvider && dirty">staged</AppBadge>
+            <button
+              class="ghost remove"
+              :title="`remove ${p.kind}`"
+              :disabled="mutating || state.providers.length <= 1"
+              @click.stop="emit('remove', p.kind)"
+            >
+              ×
+            </button>
+          </div>
+        </SettingCard>
+
+        <SettingCard
+          title="Add a provider"
+          meta="the kind's backend constructs immediately; credentials persist"
+        >
+          <div class="add-form">
+            <div class="add-row">
+              <label class="add-label" for="add-kind">Kind</label>
+              <select id="add-kind" v-model="addKind" :disabled="mutating">
+                <option value="" disabled>choose a provider…</option>
+                <option v-for="entry in addable" :key="entry.kind" :value="entry.kind">
+                  {{ kindLabel(entry.kind) }}{{ state.providers.some((p) => p.kind === entry.kind) ? ' — replaces its credentials' : '' }}
+                </option>
+              </select>
+            </div>
+            <div v-if="addFields.includes('url')" class="add-row">
+              <label class="add-label" for="add-url">Server URL</label>
+              <input
+                id="add-url"
+                v-model="addUrl"
+                type="text"
+                placeholder="http://127.0.0.1:8080"
+                autocomplete="off"
+                :disabled="mutating"
+                class="mono"
+              />
+            </div>
+            <div v-if="addFields.includes('api_key')" class="add-row">
+              <label class="add-label" for="add-key">{{ keyLabel }}</label>
+              <input
+                id="add-key"
+                v-model="addApiKey"
+                type="password"
+                placeholder="stored claw-side, never shown again"
+                autocomplete="off"
+                :disabled="mutating"
+              />
+            </div>
+            <p v-if="addKindPresent" class="add-note">
+              {{ kindLabel(addKind) }} is already serving — saving replaces
+              its credentials and restarts nothing; the active pair is
+              untouched.
+            </p>
+            <div class="add-actions">
+              <button
+                class="primary"
+                :disabled="!addReady || mutating"
+                @click="submitAdd"
+              >
+                {{ mutating ? 'Working…' : addKindPresent ? 'Replace credentials' : 'Add provider' }}
+              </button>
+            </div>
           </div>
         </SettingCard>
       </template>
@@ -203,5 +366,64 @@ function save(): void {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.backend .remove {
+  flex: none;
+  padding: 0 6px;
+  font-size: 14px;
+}
+
+.add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+}
+
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.add-label {
+  width: 110px;
+  flex: none;
+  color: var(--text3);
+  font-size: 12.5px;
+}
+
+.add-row select,
+.add-row input {
+  flex: 1;
+  min-width: 0;
+}
+
+.add-note {
+  margin: 0;
+  color: var(--text3);
+  font-size: 12.5px;
+}
+
+.add-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.add-actions .callout {
+  flex: 1;
+}
+
+@media (max-width: 760px) {
+  .add-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .add-label {
+    width: auto;
+  }
 }
 </style>

@@ -78,6 +78,12 @@ transcript; the settings view is a searchable nav plus pages over one
 shared detail panel. Settings pages stage edits into a local draft and
 apply them with an explicit Save (`PUT /v1/providers/active` answers
 the new pair only; the client carries the provider list forward).
+The providers page also manages the roster itself: the add form renders
+from the `addable` kinds the claw serves (`PUT .../credentials` — apply
+immediately, credentials persist), rows carry the credential's `source`
+badge (env-backed kinds return on restart after a removal), and the
+remove button (`DELETE /v1/providers/{kind}`) refuses the last backend
+claw-side.
 
 ```
 app/
