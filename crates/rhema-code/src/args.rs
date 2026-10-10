@@ -37,6 +37,9 @@ pub enum ProviderChoice {
     /// DeepSeek, by API key (their OpenAI-compatible endpoint).
     #[value(name = "deepseek")]
     DeepSeek,
+    /// GitHub Copilot, by GitHub OAuth token (the device flow's output).
+    #[value(name = "copilot")]
+    Copilot,
 }
 
 impl ProviderChoice {
@@ -49,6 +52,7 @@ impl ProviderChoice {
             Some("anthropic") => Self::Anthropic,
             Some("openai") => Self::OpenAi,
             Some("deepseek") => Self::DeepSeek,
+            Some("copilot") => Self::Copilot,
             _ => Self::Google,
         }
     }
@@ -63,6 +67,7 @@ impl ProviderChoice {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
+            Self::Copilot => "copilot",
         }
     }
 }
@@ -285,6 +290,11 @@ mod tests {
         assert_eq!(args.provider, Some(ProviderChoice::Anthropic));
         let args = parse(&["--provider", "openai"]);
         assert_eq!(args.provider, Some(ProviderChoice::OpenAi));
+        let args = parse(&["--provider", "deepseek"]);
+        assert_eq!(args.provider, Some(ProviderChoice::DeepSeek));
+        let args = parse(&["--provider", "copilot"]);
+        assert_eq!(args.provider, Some(ProviderChoice::Copilot));
+        assert_eq!(ProviderChoice::Copilot.stored_name(), "copilot");
     }
 
     #[test]

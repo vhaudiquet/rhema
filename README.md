@@ -213,7 +213,11 @@ API key, a llama.cpp `llama-server` by URL (optional bearer key), or
 OpenRouter, Anthropic, OpenAI, and DeepSeek by API key (DeepSeek rides
 the generic OpenAI-compatible adapter against their
 `api.deepseek.com/v1` endpoint — `reasoning_content` streaming and
-replay work natively for `deepseek-reasoner`). The input is validated with a
+replay work natively for `deepseek-reasoner`). GitHub Copilot runs the
+GitHub device flow instead: the screen shows a URL and a user code to
+authorize once in the browser, the resulting long-lived GitHub token is
+stored like any other key, and the adapter exchanges it for short-lived
+Copilot tokens as it works. The input is validated with a
 real model-list call and stored in `~/.config/rhema/config.yaml` with
 `0600` permissions. Then pick a model from the live list (text chat
 models only — Google rows carry pricing and context window; just type
@@ -255,8 +259,9 @@ git diff | rhema --print -                # prompt from stdin
 
 Headless backends resolve from config and environment only (there is no
 login prompt): log in once interactively, or set the key env vars —
-`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, or
-`OPENAI_API_KEY` for the keyed backends. Tool
+`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, or `GITHUB_COPILOT_TOKEN` for the
+keyed backends. Tool
 calls run auto-approved for now; command allowlists are planned.
 
 The TUI paints the Jadeite design system — jade-tinted dark ground,
@@ -291,9 +296,10 @@ config.yaml.
 Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
 `--max-steps`, `--icons unicode|nerd`, `--thinking low|medium|high`
 (reasoning effort; mapped
-per provider — `reasoning_effort` on OpenAI-compatible endpoints,
-`reasoning.effort` on OpenRouter, a thinking budget on Anthropic and
-Gemini, and ignored where a provider has no knob). `/thinking` changes
+per provider — `reasoning_effort` on OpenAI-compatible endpoints (the
+Copilot proxy included), `reasoning.effort` on OpenRouter, a thinking
+budget on Anthropic and Gemini, and ignored where a provider has no
+knob). `/thinking` changes
 the level mid-session and persists it into the profile (`thinking:` in
 config.yaml); the footer names the level whenever one is set.
 

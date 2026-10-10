@@ -59,6 +59,11 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
 /// config names one: the non-thinking chat model — `deepseek-reasoner`
 /// thinks by default and is the slower choice.
 const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
+/// The headless Copilot model when neither `--model` nor the stored
+/// config names one, chosen with the same reasoning as
+/// [`DEFAULT_ANTHROPIC_MODEL`]: the GPT-4.1 id, the proxy's long-running
+/// default workhorse.
+const DEFAULT_COPILOT_MODEL: &str = "gpt-4.1";
 
 /// The headless event sink: reply text streams raw to stdout (so pipes
 /// capture exactly the reply), tool traffic goes to stderr.
@@ -242,6 +247,13 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
                 )
             })?,
         },
+        ProviderChoice::Copilot => Backend::Copilot {
+            api_key: effective.copilot_api_key().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)"
+                )
+            })?,
+        },
     };
     let model = args.model.clone().unwrap_or_else(|| {
         effective
@@ -252,6 +264,7 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
                 ProviderChoice::Anthropic => DEFAULT_ANTHROPIC_MODEL.to_owned(),
                 ProviderChoice::OpenAi => DEFAULT_OPENAI_MODEL.to_owned(),
                 ProviderChoice::DeepSeek => DEFAULT_DEEPSEEK_MODEL.to_owned(),
+                ProviderChoice::Copilot => DEFAULT_COPILOT_MODEL.to_owned(),
                 ProviderChoice::Google | ProviderChoice::OpenRouter => DEFAULT_MODEL.to_owned(),
             })
     });
@@ -351,6 +364,9 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         ProviderChoice::DeepSeek => effective
             .deepseek_api_key()
             .map(|api_key| Backend::DeepSeek { api_key }),
+        ProviderChoice::Copilot => effective
+            .copilot_api_key()
+            .map(|api_key| Backend::Copilot { api_key }),
     };
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
@@ -570,6 +586,23 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
                 cancelled,
                 tx.clone(),
             );
+        }
+        Effect::StartLoginFlow => {
+            let crate::app::Screen::Login(login) = &app.screen else {
+                return;
+            };
+            // The screen already flipped to the flow stage; the effect
+            // only builds the flow. Copilot's device grant is the first
+            // user; further flow providers join behind the same arm.
+            let flow: Box<dyn rhema_provider::InteractiveLogin> = match login.selected_provider() {
+                crate::screens::LoginProvider::Copilot => {
+                    Box::new(rhema_provider_copilot::CopilotLogin::new())
+                }
+                _ => return,
+            };
+            let (cancel, cancelled) = tokio::sync::watch::channel(false);
+            app.login_cancel = Some(cancel);
+            crate::turn::spawn_login_flow(flow, cancelled, tx.clone());
         }
     }
 }

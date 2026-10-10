@@ -110,7 +110,7 @@ impl From<&Event<'_>> for OwnedEvent {
     }
 }
 
-/// One message from the turn/fetch tasks to the UI loop.
+/// One message from the turn/fetch/login tasks to the UI loop.
 pub enum UiEvent {
     /// A streaming or lifecycle event of the running turn.
     Engine(OwnedEvent),
@@ -122,6 +122,10 @@ pub enum UiEvent {
         /// or the provider's error text.
         result: Vec<(&'static str, Result<Vec<ModelCard>, String>)>,
     },
+    /// A step of the running login flow: an instruction to render, a
+    /// progress note, the credential to persist, or the failure. The
+    /// protocol specifics stay in the flow; the app only routes these.
+    LoginUpdate(rhema_provider::LoginUpdate),
     /// A gated tool call is waiting for the user's answer. The turn task
     /// blocks until the UI answers (see `crate::approval`).
     ApprovalRequested {

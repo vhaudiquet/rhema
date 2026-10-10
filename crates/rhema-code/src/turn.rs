@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use rhema_coding_agent::{Approval, CodingAgent, repair_dangling_calls};
 use rhema_core::{Event, EventSink};
+use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
 #[cfg(feature = "mock")]
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -124,6 +125,34 @@ pub fn spawn_model_fetch(
     })
 }
 
+/// Spawns the interactive login flow, forwarding its updates as
+/// [`UiEvent::LoginUpdate`]. The task ends when the flow does; a change
+/// on `cancelled` (the Esc path's `true`) or a dropped sender (the
+/// app's cleanup after the credential lands) ends it early.
+pub fn spawn_login_flow(
+    flow: Box<dyn InteractiveLogin>,
+    mut cancelled: watch::Receiver<bool>,
+    events: UnboundedSender<UiEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut sink = FlowSink(events);
+        tokio::select! {
+            _ = cancelled.changed() => {}
+            _ = flow.run(&mut sink) => {}
+        }
+    })
+}
+
+/// Forwards login-flow updates onto the UI channel; a closed channel
+/// means the UI is gone, and the flow dies with the task.
+struct FlowSink(UnboundedSender<UiEvent>);
+
+impl LoginSink for FlowSink {
+    fn update(&mut self, update: LoginUpdate) {
+        let _ = self.0.send(UiEvent::LoginUpdate(update));
+    }
+}
+
 /// Drains `events` until a turn finishes, applying engine events to
 /// `transcript`; used by tests to exercise a whole turn offline.
 #[cfg(feature = "mock")]
@@ -137,7 +166,8 @@ pub async fn drive_turn_for_test(
             UiEvent::TurnFinished { agent, result } => return (agent, result),
             UiEvent::TurnCancelled { .. }
             | UiEvent::ModelsLoaded { .. }
-            | UiEvent::ApprovalRequested { .. } => {}
+            | UiEvent::ApprovalRequested { .. }
+            | UiEvent::LoginUpdate(_) => {}
         }
     }
 }

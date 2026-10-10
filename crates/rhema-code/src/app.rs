@@ -75,6 +75,12 @@ pub enum Backend {
         /// The resolved key (`env` first, stored second).
         api_key: String,
     },
+    /// GitHub Copilot, driven by the device flow's long-lived GitHub
+    /// OAuth token (the adapter exchanges it for short-lived tokens).
+    Copilot {
+        /// The resolved GitHub token (`env` first, stored second).
+        api_key: String,
+    },
 }
 
 impl Backend {
@@ -108,6 +114,9 @@ impl Backend {
                 rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
                     .with_base_url("https://api.deepseek.com/v1"),
             ),
+            Backend::Copilot { api_key } => Arc::new(rhema_provider_copilot::CopilotProvider::new(
+                api_key.clone(),
+            )),
         }
     }
 
@@ -120,6 +129,7 @@ impl Backend {
             Backend::Anthropic { .. } => "anthropic",
             Backend::OpenAi { .. } => "openai",
             Backend::DeepSeek { .. } => "deepseek",
+            Backend::Copilot { .. } => "copilot",
         }
     }
 
@@ -142,7 +152,14 @@ impl Backend {
         if let Some(backend) = Self::named(active, profile) {
             candidates.push(backend);
         }
-        for name in ["google", "openrouter", "anthropic", "openai", "deepseek"] {
+        for name in [
+            "google",
+            "openrouter",
+            "anthropic",
+            "openai",
+            "deepseek",
+            "copilot",
+        ] {
             if name == active {
                 continue;
             }
@@ -173,6 +190,9 @@ impl Backend {
             "deepseek" => profile
                 .deepseek_api_key()
                 .map(|api_key| Backend::DeepSeek { api_key }),
+            "copilot" => profile
+                .copilot_api_key()
+                .map(|api_key| Backend::Copilot { api_key }),
             _ => profile
                 .google_api_key()
                 .map(|api_key| Backend::Google { api_key }),
@@ -213,6 +233,12 @@ impl Backend {
             }
             Backend::OpenAi { api_key } => {
                 rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
+                    .list_models()
+                    .await
+                    .map_err(|err| err.to_string())
+            }
+            Backend::Copilot { api_key } => {
+                rhema_provider_copilot::CopilotProvider::new(api_key.clone())
                     .list_models()
                     .await
                     .map_err(|err| err.to_string())
@@ -291,6 +317,10 @@ pub enum Effect {
     FetchModels(FetchWhy),
     /// Start one turn with this prompt.
     StartTurn(String),
+    /// Spawn the interactive login flow the login screen chose (its
+    /// stage is already `Flow`); updates arrive as
+    /// `UiEvent::LoginUpdate`.
+    StartLoginFlow,
 }
 
 /// The whole application state.
@@ -341,6 +371,10 @@ pub struct App {
     /// The cancel flag of the running turn; `None` while idle. The runner
     /// creates the pair at submit and the task watches the receiver.
     pub turn_cancel: Option<tokio::sync::watch::Sender<bool>>,
+    /// The cancel handle of the running login flow; `None` while idle.
+    /// Dropping it ends the flow task — the watch receiver errors out —
+    /// exactly what Esc and a completed flow both want.
+    pub login_cancel: Option<tokio::sync::watch::Sender<bool>>,
     /// A command is executing while the turn runs; `false` while the
     /// model itself is streaming — thinking.
     pub processing: bool,
@@ -448,6 +482,7 @@ impl App {
             confirm_quit: false,
             decline_all: false,
             turn_cancel: None,
+            login_cancel: None,
             processing: false,
             thinking: String::new(),
             resumed_from: None,
@@ -794,6 +829,13 @@ impl App {
         };
         match routed {
             Routed::Login(LoginAction::Validate) => self.validate_login(),
+            Routed::Login(LoginAction::StartFlow) => {
+                vec![Effect::StartLoginFlow]
+            }
+            Routed::Login(LoginAction::CancelFlow) => {
+                self.cancel_login_flow();
+                Vec::new()
+            }
             Routed::Picker(PickerAction::Choose { provider, id }) => {
                 self.choose_model(provider, &id);
                 Vec::new()
@@ -959,11 +1001,62 @@ impl App {
             crate::screens::LoginProvider::DeepSeek => Backend::DeepSeek {
                 api_key: login.input.clone(),
             },
+            // The flow path never validates a typed key: its credential
+            // arrives from the flow task, already wrapped in the backend.
+            crate::screens::LoginProvider::Copilot => return Vec::new(),
             crate::screens::LoginProvider::Google => Backend::Google {
                 api_key: login.input.clone(),
             },
         };
         vec![Effect::FetchModels(FetchWhy::Login { backend })]
+    }
+
+    /// Esc on the flow stage: end the flow task and return to the
+    /// provider list.
+    fn cancel_login_flow(&mut self) {
+        self.login_cancel = None;
+        if let Screen::Login(login) = &mut self.screen {
+            login.stage = crate::screens::LoginStage::SelectProvider;
+            login.status = LoginStatus::Idle;
+            login.flow_instruction = None;
+            login.flow_waiting = None;
+        }
+    }
+
+    /// A step of the running login flow: render it on the login screen,
+    /// and on completion validate the credential it produced through the
+    /// same fetch path a typed key takes.
+    fn on_login_update(&mut self, update: rhema_provider::LoginUpdate) -> Vec<Effect> {
+        let Screen::Login(login) = &mut self.screen else {
+            // The flow was left behind (Esc raced a completed update):
+            // drop the credential with the screen it belonged to.
+            self.login_cancel = None;
+            return Vec::new();
+        };
+        match update {
+            rhema_provider::LoginUpdate::Instruct(instruction) => {
+                login.flow_instruction = Some(instruction);
+                login.flow_waiting = None;
+                Vec::new()
+            }
+            rhema_provider::LoginUpdate::Waiting(text) => {
+                login.flow_waiting = Some(text);
+                Vec::new()
+            }
+            rhema_provider::LoginUpdate::Failed(message) => {
+                login.status = LoginStatus::Error(message);
+                // The flow task has ended; the handle can go.
+                self.login_cancel = None;
+                Vec::new()
+            }
+            rhema_provider::LoginUpdate::Completed(token) => {
+                login.flow_waiting = Some("fetching the model list".to_owned());
+                self.login_cancel = None;
+                vec![Effect::FetchModels(FetchWhy::Login {
+                    backend: Backend::Copilot { api_key: token },
+                })]
+            }
+        }
     }
 
     /// Retry a failed model fetch, per the picker's purpose.
@@ -1014,6 +1107,7 @@ impl App {
                 self.on_models_loaded(why, result);
                 Vec::new()
             }
+            UiEvent::LoginUpdate(update) => self.on_login_update(update),
             UiEvent::ApprovalRequested { call } => {
                 if self.decline_all {
                     // Esc declined the rest of the turn: answer without a
@@ -1081,6 +1175,10 @@ impl App {
                                 Backend::OpenAi { api_key } => {
                                     settings.provider = Some("openai".to_owned());
                                     settings.openai_api_key = Some(api_key.clone());
+                                }
+                                Backend::Copilot { api_key } => {
+                                    settings.provider = Some("copilot".to_owned());
+                                    settings.copilot_api_key = Some(api_key.clone());
                                 }
                             });
                         if let Err(err) = self.store.save(&self.config) {
@@ -1561,6 +1659,7 @@ mod tests {
     use super::*;
     use crate::approval::TuiApproval;
     use crate::events::OwnedEvent;
+    use crate::screens::LoginProvider;
     use crate::store::MemoryStore;
     use crate::transcript::Line;
     use rhema_coding_agent::{Approval, CodingAgentConfig};
@@ -2380,6 +2479,118 @@ mod tests {
                 .values()
                 .all(|profile| profile.google_api_key.is_none())
         );
+    }
+
+    #[test]
+    fn the_copilot_login_runs_a_flow_and_persists_its_credential() {
+        let mut h = harness(None, None, Session::default());
+        // Walk down to the GitHub Copilot row (the last) and enter: the
+        // effect starts the flow, not a credential input.
+        for _ in 0..crate::screens::PROVIDERS.len() - 1 {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        match &h.app.screen {
+            Screen::Login(login) => {
+                assert_eq!(login.stage, crate::screens::LoginStage::Flow);
+                assert_eq!(login.selected_provider(), LoginProvider::Copilot);
+            }
+            _ => panic!("expected the login screen in its flow stage"),
+        }
+
+        // The flow's instruction and progress render on the screen.
+        h.app
+            .on_event(UiEvent::LoginUpdate(rhema_provider::LoginUpdate::Instruct(
+                rhema_provider::LoginInstruction {
+                    text: "open the page".into(),
+                    url: Some("https://github.com/login/device".into()),
+                    code: Some("ABCD-1234".into()),
+                },
+            )));
+        h.app
+            .on_event(UiEvent::LoginUpdate(rhema_provider::LoginUpdate::Waiting(
+                "waiting".into(),
+            )));
+        match &h.app.screen {
+            Screen::Login(login) => {
+                assert_eq!(login.flow_waiting.as_deref(), Some("waiting"));
+                assert!(login.flow_instruction.is_some());
+            }
+            _ => panic!("expected the login screen mid-flow"),
+        }
+
+        // Completion validates the credential through the fetch path.
+        let effects = h.app.on_event(UiEvent::LoginUpdate(
+            rhema_provider::LoginUpdate::Completed("gho_token".into()),
+        ));
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::Copilot {
+                    api_key: "gho_token".into(),
+                },
+            })]
+        );
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::Copilot {
+                    api_key: "gho_token".into(),
+                },
+            },
+            result: loaded("copilot", models()),
+        });
+        match &h.app.screen {
+            Screen::Picker(picker) => assert_eq!(picker.models.len(), 2),
+            _ => panic!("expected the picker after a successful flow login"),
+        }
+        assert_eq!(
+            h.store
+                .load()
+                .unwrap()
+                .effective(None)
+                .copilot_api_key
+                .as_deref(),
+            Some("gho_token")
+        );
+        assert!(matches!(
+            h.app.backend,
+            Some(Backend::Copilot { ref api_key }) if api_key == "gho_token"
+        ));
+    }
+
+    #[test]
+    fn a_failed_flow_renders_its_error_and_persists_nothing() {
+        let mut h = harness(None, None, Session::default());
+        for _ in 0..crate::screens::PROVIDERS.len() - 1 {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        h.app
+            .on_event(UiEvent::LoginUpdate(rhema_provider::LoginUpdate::Failed(
+                "authorization was denied on GitHub".into(),
+            )));
+        match &h.app.screen {
+            Screen::Login(login) => assert_eq!(
+                login.status,
+                crate::screens::LoginStatus::Error("authorization was denied on GitHub".into())
+            ),
+            _ => panic!("expected the login screen"),
+        }
+        let stored = h.store.load().unwrap();
+        assert!(
+            stored
+                .profiles
+                .values()
+                .all(|profile| profile.copilot_api_key.is_none())
+        );
+        // Esc returns to the provider list for a retry.
+        h.app.on_key(key(KeyCode::Esc));
+        match &h.app.screen {
+            Screen::Login(login) => {
+                assert_eq!(login.stage, crate::screens::LoginStage::SelectProvider)
+            }
+            _ => panic!("expected the login screen's provider list"),
+        }
     }
 
     #[test]

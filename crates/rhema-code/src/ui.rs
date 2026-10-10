@@ -158,6 +158,9 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
                         crate::screens::LoginProvider::DeepSeek => {
                             login.stored.deepseek_api_key.is_some()
                         }
+                        crate::screens::LoginProvider::Copilot => {
+                            login.stored.copilot_api_key.is_some()
+                        }
                     };
                     let mut spans = vec![Span::styled(entry.name.to_string(), name_style)];
                     if registered {
@@ -182,12 +185,41 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
                 input_area,
             );
         }
+        crate::screens::LoginStage::Flow => {
+            // The flow's instruction: what to do, the code to enter, the
+            // URL to enter it at, then the latest progress note.
+            let mut lines: Vec<Line> = Vec::new();
+            if let Some(instruction) = &login.flow_instruction {
+                lines.push(Line::from(instruction.text.clone()).fg(theme.text2));
+                if let Some(code) = &instruction.code {
+                    lines.push(Line::from(vec![
+                        Span::raw("code: ").fg(theme.text3),
+                        Span::raw(code.clone()).fg(theme.accent_text).bold(),
+                    ]));
+                }
+                if let Some(url) = &instruction.url {
+                    lines.push(Line::from(url.clone()).fg(theme.text3));
+                }
+            }
+            if let Some(waiting) = &login.flow_waiting {
+                lines.push(Line::from(waiting.clone()).fg(theme.text3));
+            }
+            frame.render_widget(Paragraph::new(lines), input_area);
+        }
     }
 
-    let status = match &login.status {
-        crate::screens::LoginStatus::Idle => Line::from(login.input_hint()).fg(theme.text3),
-        crate::screens::LoginStatus::Validating => Line::from("validating…").fg(theme.text3),
-        crate::screens::LoginStatus::Error(message) => Line::from(message.clone()).fg(theme.error),
+    let status = match (&login.stage, &login.status) {
+        // The flow stage renders its own progress; the status line stays
+        // the way out.
+        (crate::screens::LoginStage::Flow, crate::screens::LoginStatus::Error(message)) => {
+            Line::from(message.clone()).fg(theme.error)
+        }
+        (crate::screens::LoginStage::Flow, _) => Line::from(login.input_hint()).fg(theme.text3),
+        (_, crate::screens::LoginStatus::Idle) => Line::from(login.input_hint()).fg(theme.text3),
+        (_, crate::screens::LoginStatus::Validating) => Line::from("validating…").fg(theme.text3),
+        (_, crate::screens::LoginStatus::Error(message)) => {
+            Line::from(message.clone()).fg(theme.error)
+        }
     };
     frame.render_widget(Paragraph::new(status), status_area);
 }

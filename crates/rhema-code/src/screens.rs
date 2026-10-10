@@ -22,6 +22,8 @@ pub enum LoginProvider {
     OpenAi,
     /// DeepSeek, by API key (their OpenAI-compatible endpoint).
     DeepSeek,
+    /// GitHub Copilot, through the device-code flow.
+    Copilot,
 }
 
 /// The provider rows shown at login. Every row configures an implemented
@@ -59,6 +61,10 @@ pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "DeepSeek",
         kind: LoginProvider::DeepSeek,
+    },
+    ProviderEntry {
+        name: "GitHub Copilot",
+        kind: LoginProvider::Copilot,
     },
 ];
 
@@ -422,6 +428,11 @@ pub enum LoginStage {
     SelectProvider,
     /// The credential input for the chosen provider.
     EnterCredential,
+    /// An interactive flow (device code and friends) is running: its
+    /// instruction and progress render from the screen's `flow_*`
+    /// fields, Esc cancels, and the credential arrives through the
+    /// app — the screen never sees the protocol.
+    Flow,
 }
 
 /// Where the login screen stands.
@@ -443,6 +454,11 @@ pub enum LoginAction {
     None,
     /// Validate the entered key against the provider.
     Validate,
+    /// The highlighted provider logs in through an interactive flow:
+    /// spawn it (the stage transition already happened on the screen).
+    StartFlow,
+    /// Cancel the running flow; the app drops its task handle.
+    CancelFlow,
     /// Leave the app (no key to log in with, nothing else to show).
     Quit,
 }
@@ -468,6 +484,11 @@ pub struct LoginScreen {
     /// The stored settings of that profile: what each provider row
     /// reports as registered.
     pub stored: rhema_config::Profile,
+    /// The flow's instruction, once the running flow has reported one
+    /// (the Flow stage renders from this).
+    pub flow_instruction: Option<rhema_provider::LoginInstruction>,
+    /// The flow's latest progress note, when it has sent one.
+    pub flow_waiting: Option<String>,
 }
 
 impl Default for LoginScreen {
@@ -488,6 +509,8 @@ impl LoginScreen {
             profiles: BTreeMap::new(),
             profile: "personal".to_owned(),
             stored: rhema_config::Profile::default(),
+            flow_instruction: None,
+            flow_waiting: None,
         }
     }
 
@@ -535,6 +558,7 @@ impl LoginScreen {
                 LoginProvider::Anthropic => provider == Some("anthropic"),
                 LoginProvider::OpenAi => provider == Some("openai"),
                 LoginProvider::DeepSeek => provider == Some("deepseek"),
+                LoginProvider::Copilot => provider == Some("copilot"),
             })
             .unwrap_or(0);
         Self { selected, ..self }
@@ -560,6 +584,7 @@ impl LoginScreen {
                 };
                 format!("enter {what} · ctrl-v paste · enter when done")
             }
+            LoginStage::Flow => "esc cancels the login".to_owned(),
         };
         match self.purpose {
             LoginPurpose::FromChat => format!("{base} · esc back"),
@@ -580,7 +605,8 @@ impl LoginScreen {
             | LoginProvider::OpenRouter
             | LoginProvider::Anthropic
             | LoginProvider::OpenAi
-            | LoginProvider::DeepSeek => "API key: ",
+            | LoginProvider::DeepSeek
+            | LoginProvider::Copilot => "API key: ",
         }
     }
 
@@ -593,7 +619,8 @@ impl LoginScreen {
             | LoginProvider::OpenRouter
             | LoginProvider::Anthropic
             | LoginProvider::OpenAi
-            | LoginProvider::DeepSeek => "\u{2022}".repeat(self.input.chars().count()),
+            | LoginProvider::DeepSeek
+            | LoginProvider::Copilot => "\u{2022}".repeat(self.input.chars().count()),
         }
     }
 
@@ -626,11 +653,13 @@ impl LoginScreen {
         match self.stage {
             LoginStage::SelectProvider => self.handle_provider_key(key),
             LoginStage::EnterCredential => self.handle_credential_key(key),
+            LoginStage::Flow => self.handle_flow_key(key),
         }
     }
 
     /// Keys on the provider list: arrows choose, enter descends into the
-    /// credential input, esc leaves the login.
+    /// credential input — or starts the provider's interactive flow, for
+    /// the providers that log in that way — esc leaves the login.
     fn handle_provider_key(&mut self, key: KeyEvent) -> LoginAction {
         match key.code {
             KeyCode::Up | KeyCode::Down => {
@@ -639,6 +668,15 @@ impl LoginScreen {
             }
             KeyCode::Enter => {
                 self.input.clear();
+                if self.selected_provider() == LoginProvider::Copilot {
+                    // A flow provider has no key to type: the stage
+                    // flips and the app spawns the flow.
+                    self.status = LoginStatus::Validating;
+                    self.flow_instruction = None;
+                    self.flow_waiting = None;
+                    self.stage = LoginStage::Flow;
+                    return LoginAction::StartFlow;
+                }
                 self.status = LoginStatus::Idle;
                 self.stage = LoginStage::EnterCredential;
                 LoginAction::None
@@ -648,6 +686,21 @@ impl LoginScreen {
                 LoginAction::None
             }
             KeyCode::Esc => LoginAction::Quit,
+            _ => LoginAction::None,
+        }
+    }
+
+    /// Keys while a flow runs: esc cancels back to the provider list;
+    /// everything else is inert — the flow has no input of its own.
+    fn handle_flow_key(&mut self, key: KeyEvent) -> LoginAction {
+        match key.code {
+            KeyCode::Esc => {
+                self.status = LoginStatus::Idle;
+                self.flow_instruction = None;
+                self.flow_waiting = None;
+                self.stage = LoginStage::SelectProvider;
+                LoginAction::CancelFlow
+            }
             _ => LoginAction::None,
         }
     }
@@ -1366,6 +1419,28 @@ mod tests {
         // A validation in flight swallows Enter.
         assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
         assert_eq!(login.status, LoginStatus::Validating);
+    }
+
+    #[test]
+    fn the_copilot_row_starts_the_flow_instead_of_a_credential_input() {
+        let mut login = LoginScreen::new();
+        login.selected = PROVIDERS.len() - 1;
+        assert_eq!(login.selected_provider(), LoginProvider::Copilot);
+        assert_eq!(
+            login.handle_key(key(KeyCode::Enter)),
+            LoginAction::StartFlow
+        );
+        assert_eq!(login.stage, LoginStage::Flow);
+        assert_eq!(login.status, LoginStatus::Validating);
+        // A running flow swallows every key but esc.
+        assert_eq!(login.handle_key(key(KeyCode::Char('x'))), LoginAction::None);
+        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
+        // Esc cancels back to the provider list, stage state cleared.
+        assert_eq!(login.handle_key(key(KeyCode::Esc)), LoginAction::CancelFlow);
+        assert_eq!(login.stage, LoginStage::SelectProvider);
+        assert_eq!(login.status, LoginStatus::Idle);
+        assert_eq!(login.flow_instruction, None);
+        assert_eq!(login.flow_waiting, None);
     }
 
     #[test]
