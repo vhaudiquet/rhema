@@ -1,0 +1,100 @@
+name: publish
+on:
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: git.vhaudiquet.fr
+  OWNER: vhaudiquet
+
+jobs:
+  build-and-push-image:
+    # The one deployable image: the claw daemon. amd64 only for now, like
+    # every other image on this registry. The chart pulls it by the names
+    # below (`rhema-claw`), tag rides the job.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: https://git.vhaudiquet.fr
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.PACKAGES_TOKEN }}
+
+      - name: Compute the release version (tag builds strip the v)
+        id: ver
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/docker/claw.Dockerfile
+          push: true
+          # Tag builds carry the release version (the chart's appVersion
+          # shape); main pushes get the rolling latest + sha pair.
+          tags: |
+            git.vhaudiquet.fr/${{ env.OWNER }}/rhema-claw:latest
+            git.vhaudiquet.fr/${{ env.OWNER }}/rhema-claw:${{ gitea.sha }}
+            git.vhaudiquet.fr/${{ env.OWNER }}/rhema-claw:${{ steps.ver.outputs.version }}
+
+  lint-and-publish-chart:
+    # One Helm package repository per owner; the claw chart lands there
+    # (`helm install rhema-claw oci://…`). The version rides the base
+    # version + a timestamp on main (ordered, SemVer pre-release rules
+    # allow no dots) and the exact tag version on tags; appVersion pins
+    # the exact commit the image was built from.
+    runs-on: ubuntu-latest
+    needs: build-and-push-image
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Update Chart version and appVersion
+        run: |
+          # A tag ships the exact version it names so deployments pin
+          # `--version 0.1.0`; main pushes keep the ordered timestamp.
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            CHART_VERSION="${GITHUB_REF_NAME#v}"
+          else
+            BASE_VERSION=$(grep '^version:' deploy/helm/rhema-claw/Chart.yaml | awk '{print $2}')
+            TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+            CHART_VERSION="${BASE_VERSION}-${TIMESTAMP}"
+          fi
+          sed -i "s/^version:.*/version: \"${CHART_VERSION}\"/" deploy/helm/rhema-claw/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ gitea.sha }}\"/" deploy/helm/rhema-claw/Chart.yaml
+          echo "chart_version=${CHART_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Lint Helm chart
+        run: helm lint deploy/helm/rhema-claw
+
+      - name: Package Helm chart
+        run: helm package deploy/helm/rhema-claw
+
+      - name: Push Helm chart to Gitea registry
+        run: |
+          TOKEN=$(echo -n "${{ secrets.PACKAGES_TOKEN }}" | tr -d '\n')
+          curl --fail --user "${{ gitea.actor }}:${TOKEN}" \
+            -X POST \
+            --upload-file rhema-claw-*.tgz \
+            "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
