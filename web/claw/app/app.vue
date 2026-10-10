@@ -1,10 +1,10 @@
 <script setup lang="ts">
 // The one page: chat over the active session, the session inventory,
-// and the watch table — three panels over one claw. Everything is
+// and the watch table — panels over one claw. Everything is
 // in-memory; only the token and the active session persist. The claw
 // owns the conversation, so this page is a mirror, not a store.
 import { ClawError, clawHealth, isInteractive, useClaw } from '~/composables/useClaw'
-import type { ClawSession, ClawWatch, StreamStatus, WatchInput , ModelCard, ProvidersState } from '~/composables/useClaw'
+import type { ClawSession, ModelCard, ProvidersState, StreamStatus } from '~/composables/useClaw'
 import { useTranscript } from '~/composables/useTranscript'
 
 const TOKEN_STORE_KEY = 'claw.token'
@@ -47,8 +47,6 @@ const { items: transcriptItems, live: liveTurn } = transcript
 const clawUp = ref<boolean | null>(null)
 const sessions = ref<ClawSession[]>([])
 const sessionsLoading = ref(false)
-const watches = ref<ClawWatch[]>([])
-const watchesLoading = ref(false)
 const providersState = ref<ProvidersState | null>(null)
 const providerModels = ref<ModelCard[]>([])
 const providerModelsLoading = ref(false)
@@ -89,18 +87,6 @@ async function refreshSessions(): Promise<void> {
     noteApiError(err)
   } finally {
     sessionsLoading.value = false
-  }
-}
-
-async function refreshWatches(): Promise<void> {
-  watchesLoading.value = true
-  try {
-    watches.value = await claw.watches()
-    apiError.value = null
-  } catch (err) {
-    noteApiError(err)
-  } finally {
-    watchesLoading.value = false
   }
 }
 
@@ -163,24 +149,6 @@ async function send(text: string): Promise<void> {
   void refreshSessions()
 }
 
-async function addWatch(input: WatchInput): Promise<void> {
-  try {
-    await claw.addWatch(input)
-    await refreshWatches()
-  } catch (err) {
-    noteApiError(err)
-  }
-}
-
-async function removeWatch(forge: string, repo: string): Promise<void> {
-  try {
-    await claw.removeWatch(forge, repo)
-    await refreshWatches()
-  } catch (err) {
-    noteApiError(err)
-  }
-}
-
 function saveToken(): void {
   const next = tokenDraft.value.trim()
   token.value = next || null
@@ -193,7 +161,6 @@ function saveToken(): void {
   void checkHealth()
   void refreshProviders()
   void refreshSessions()
-  void refreshWatches()
 }
 
 // --- the one live subscription --------------------------------------
@@ -224,7 +191,6 @@ onMounted(() => {
   void checkHealth()
   void refreshProviders()
   void refreshSessions()
-  void refreshWatches()
   healthTimer = setInterval(checkHealth, 30000)
   sessionsTimer = setInterval(() => void refreshSessions(), 20000)
 })
@@ -300,26 +266,17 @@ onUnmounted(() => {
         :busy="busy"
         @send="send"
       />
-      <div class="right-column">
-        <ProvidersPanel
-          :state="providersState"
-          :models="providerModels"
-          :models-loading="providerModelsLoading"
-          :models-error="providerModelsError"
-          :selected-provider="selectedProvider"
-          :loading="watchesLoading"
-          @refresh="refreshProviders"
-          @select="loadProviderModels"
-          @switch="switchProvider"
-        />
-        <WatchesPanel
-          :watches="watches"
-          :loading="watchesLoading"
-          @refresh="refreshWatches"
-          @add="addWatch"
-          @remove="removeWatch"
-        />
-      </div>
+      <ProvidersPanel
+        :state="providersState"
+        :models="providerModels"
+        :models-loading="providerModelsLoading"
+        :models-error="providerModelsError"
+        :selected-provider="selectedProvider"
+        :loading="false"
+        @refresh="refreshProviders"
+        @select="loadProviderModels"
+        @switch="switchProvider"
+      />
     </main>
   </div>
 </template>

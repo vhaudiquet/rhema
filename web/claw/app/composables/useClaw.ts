@@ -47,21 +47,6 @@ export interface ProvidersState {
   providers: ClawProvider[]
 }
 
-export interface ClawWatch {
-  forge: string
-  repo: string
-  host: string | null
-  token: string | null
-}
-
-/** Body of `POST /v1/watches` (http.rs `WatchBody`). */
-export interface WatchInput {
-  forge: string
-  repo: string
-  host?: string
-  token?: string
-}
-
 /** A failed API call: the status plus the claw's `error` string when it sent one. */
 export class ClawError extends Error {
   /** HTTP status; 0 when the claw was unreachable at all. */
@@ -153,12 +138,6 @@ export interface ClawApi {
   setActive(provider: string, model?: string): Promise<ProvidersState>
   /** `GET /v1/providers/{kind}/models` — the live listing; 404 when none. */
   models(kind: string): Promise<ModelCard[]>
-  /** `GET /v1/watches`. */
-  watches(): Promise<ClawWatch[]>
-  /** `POST /v1/watches` — 201 when newly added, 200 when it already existed. */
-  addWatch(input: WatchInput): Promise<void>
-  /** `DELETE /v1/watches/{forge}/{repo}`. */
-  removeWatch(forge: string, repo: string): Promise<void>
   /**
    * Stream one session's turns. Resolves with a handle once the fetch
    * is started; the claw keeps the stream open forever, and a drop is
@@ -181,24 +160,6 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     })
   }
 
-  async function watches(): Promise<ClawWatch[]> {
-    const body = (await get('/v1/watches', token.value)) as { watches: ClawWatch[] }
-    return body.watches
-  }
-
-  async function addWatch(input: WatchInput): Promise<void> {
-    await send('/v1/watches', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
-      body: JSON.stringify({
-        forge: input.forge,
-        repo: input.repo.trim(),
-        host: input.host?.trim() || undefined,
-        token: input.token?.trim() || undefined,
-      }),
-    })
-  }
-
   async function providers(): Promise<ProvidersState> {
     return (await get('/v1/providers', token.value)) as ProvidersState
   }
@@ -216,19 +177,6 @@ export function useClaw(token: Ref<string | null>): ClawApi {
       models: ModelCard[]
     }
     return body.models
-  }
-
-  async function removeWatch(forge: string, repo: string): Promise<void> {
-    // The repo is a wildcard tail (`{*repo}`); keep its slash a real
-    // path separator — only the segments themselves are escaped.
-    const repoPath = repo
-      .split('/')
-      .map(encodeURIComponent)
-      .join('/')
-    await send(`/v1/watches/${encodeURIComponent(forge)}/${repoPath}`, {
-      method: 'DELETE',
-      headers: authHeaders(token.value),
-    })
   }
 
   function subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void } {
@@ -303,9 +251,6 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     providers,
     setActive,
     models,
-    watches,
-    addWatch,
-    removeWatch,
     subscribeEvents,
   }
 }
