@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The vendored crossterm rides under [patch.crates-io] below; excluding
+# it keeps cargo from claiming the tree when run from inside it.
+exclude = ["vendor/crossterm"]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,9 +31,9 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # markdown templates
 minijinja = { version = "3", default-features = false, features = ["serde", "debug"] }
 
-# Local crossterm with the two key patches the TUI leans on (branch
-# modify-other-keys of ~/Documents/contrib/crossterm; delete this section
-# to return to the crates.io release):
+# Vendored crossterm with the two key patches the TUI leans on (see
+# vendor/README.md for provenance and refresh; delete this section to
+# return to the crates.io release):
 # - modifyOtherKeys parsing (CSI 27;…;…~) — Ghostty's default shift+enter
 #   sequence, which crossterm 0.29 drops;
 # - kitty associated text (the `;text` tail of CSI u) decoded into the
@@ -38,4 +41,4 @@ minijinja = { version = "3", default-features = false, features = ["serde", "deb
 #   since an AltGr key's codepoint stays its base key (`@` arrives as
 #   `à`) and the composed character rides only in the text field.
 [patch.crates-io]
-crossterm = { path = "../../contrib/crossterm" }
+crossterm = { path = "vendor/crossterm" }
