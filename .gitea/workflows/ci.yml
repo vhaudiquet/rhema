@@ -78,7 +78,7 @@ jobs:
       - name: Render and validate
         run: |
           check() {
-            helm template test deploy/helm/rhema-claw "$@" | kubeconform -strict -summary
+            helm template test "$@" | kubeconform -strict -summary
           }
           # The shapes: defaults (persistent), the disposable one (emptyDir
           # + token), the recommended secret path, and a seeded watch.
