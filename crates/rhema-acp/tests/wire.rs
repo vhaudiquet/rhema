@@ -13,7 +13,8 @@ use agent_client_protocol::schema::v1::{
     AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest, InitializeResponse,
     LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOptionId, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, StopReason,
+    SelectedPermissionOutcome, SessionConfigOptionCategory, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, StopReason,
 };
 use agent_client_protocol::{Channel, Client, on_receive_notification, on_receive_request};
 use rhema_acp::AcpOptions;
@@ -508,4 +509,95 @@ async fn authenticate_reports_unresolvable_credentials() {
     )
     .await;
     outcome.expect("authenticate scenario");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_model_picker_advertises_the_active_model_and_switches_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_dir = dir.path().join("sessions");
+    let updates = updates();
+
+    // Two scripted replies so a turn runs on the first model and another
+    // on the switched one.
+    let permissions: Permissions = Arc::new(Mutex::new(Vec::new()));
+    let outcome = with_agent(
+        options(vec![reply("first"), reply("second")], &session_dir),
+        updates,
+        permissions,
+        RequestPermissionOutcome::Cancelled,
+        async move |cx| {
+            initialize(&cx).await;
+            let session = new_session(&cx, &workspace).await;
+
+            // session/new advertises a Model select whose current value is
+            // the model the agent runs on ("mock").
+            let select = session
+                .config_options
+                .as_ref()
+                .and_then(|options| {
+                    options.iter().find(|option| {
+                        option.category.as_ref() == Some(&SessionConfigOptionCategory::Model)
+                    })
+                })
+                .expect("session/new advertises a Model select");
+            match &select.kind {
+                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
+                    assert_eq!(select.current_value.0.as_ref(), "mock");
+                }
+                _ => panic!("the Model option is a select"),
+            }
+
+            // A first turn runs on the advertised model.
+            let first = cx
+                .send_request(PromptRequest::new(
+                    session.session_id.clone(),
+                    vec![ContentBlock::from("hi")],
+                ))
+                .block_task()
+                .await
+                .expect("first prompt");
+            assert_eq!(first.stop_reason, StopReason::EndTurn);
+
+            // A model switch rebuilds the agent over the history; the
+            // response's select now names the new model as current.
+            let switched = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session.session_id.clone(),
+                    "model",
+                    "other-model",
+                ))
+                .block_task()
+                .await
+                .expect("set_config_option");
+            let select = switched
+                .config_options
+                .iter()
+                .find(|option| {
+                    option.category.as_ref() == Some(&SessionConfigOptionCategory::Model)
+                })
+                .expect("the response carries the Model select");
+            match &select.kind {
+                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
+                    assert_eq!(select.current_value.0.as_ref(), "other-model");
+                }
+                _ => panic!("the Model option is a select"),
+            }
+
+            // The session continues on the new model: a second turn runs.
+            let second = cx
+                .send_request(PromptRequest::new(
+                    session.session_id.clone(),
+                    vec![ContentBlock::from("more")],
+                ))
+                .block_task()
+                .await
+                .expect("second prompt");
+            assert_eq!(second.stop_reason, StopReason::EndTurn);
+            Ok(())
+        },
+    )
+    .await;
+    let _ = outcome;
 }

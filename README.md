@@ -101,9 +101,17 @@ Each editor session becomes a rhema session rooted at the directory the
 client passes (`session/new`'s `cwd`); reply text and tool traffic
 stream back as session updates, and every `bash` call asks through the
 client's own permission UI. Sessions persist under the cache dir and
-`session/load` restores one with a full replay. The backend resolves
-once from `--profile`/`--provider`/`--model` and the stored config —
-the same resolution the TUI and one-shot use; without a resolvable
+`session/load` restores one with a full replay.
+
+The backend resolves once from `--profile`/`--provider`/`--model` and
+the stored config, the same resolution the TUI and one-shot use. On
+`session/new` and `session/load`, the agent advertises a `Model` select
+(`config_options`) whose current value is the model it is running and
+whose choices are the active provider's text-chat catalog rows fetched
+over its API. Clients that support `session/set_config_option` use this
+to show a working model picker: switching the select rebuilds the
+agent over the session's history with the same provider, and the
+conversation continues on the new model. Without a resolvable
 credential, `authenticate` fails naming the fix.
 
 ### Profiles

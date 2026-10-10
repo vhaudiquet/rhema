@@ -29,9 +29,11 @@ use agent_client_protocol::schema::v1::{
     AgentCapabilities, AuthMethod, AuthMethodAgent, AuthMethodId, AuthenticateRequest,
     AuthenticateResponse, CancelNotification, ContentBlock, ContentChunk, Implementation,
     InitializeRequest, InitializeResponse, LoadSessionRequest, LoadSessionResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionId,
-    SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
-    ToolCallId, ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, ToolKind,
+    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, SessionConfigOption,
+    SessionConfigOptionCategory, SessionConfigSelectOption, SessionId, SessionNotification,
+    SessionUpdate, SetSessionConfigOptionRequest, SetSessionConfigOptionResponse, StopReason,
+    TextContent, ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
+    ToolCallUpdateFields, ToolKind,
 };
 use agent_client_protocol::{
     Agent, Client, ConnectionTo, Error, Stdio, on_receive_notification, on_receive_request,
@@ -40,7 +42,7 @@ use anyhow::Context;
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig, CodingAgentError, repair_dangling_calls};
 use rhema_config::Config;
 use rhema_core::request::ThinkingEffort;
-use rhema_core::{AgentError, Content, Role, Session, StopReason as EngineStop};
+use rhema_core::{AgentError, Content, ModelProvider, Role, Session, StopReason as EngineStop};
 use tokio::sync::watch;
 
 use crate::approval::{AcpApproval, AlwaysMemory};
@@ -84,8 +86,22 @@ pub struct AcpOptions {
 /// One live session: the agent between turns, the cancel sender of the
 /// turn in flight, and the `always` answers the session has collected.
 pub(crate) struct SessionSlot {
+    /// The provider every model on this session runs on; a model switch
+    /// rebuilds the agent over the history with the same provider.
+    provider: Arc<dyn ModelProvider>,
     /// Gone while a turn runs; the prompt task puts it back after.
     agent: Option<CodingAgent>,
+    /// The model the agent runs on. A `session/set_config_option` that
+    /// names a different model rebuilds the agent over the session's
+    /// history; the slot's `model` is the current value the picker shows.
+    model: String,
+    /// The workspace root the agent's tools are scoped to; a model
+    /// change rebuilds the agent over the same history and root.
+    workspace: std::path::PathBuf,
+    /// The catalog rows the model picker offers; a model switch re-emits
+    /// the select from these rows without re-fetching. `None` when no
+    /// catalog resolved (the picker shows nothing).
+    catalog_rows: Option<Vec<rhema_provider::ModelCard>>,
     /// The watch sender the prompt task listens to; `None` when idle.
     cancel: Option<watch::Sender<bool>>,
     /// Shared with the session's approval hooks.
@@ -171,6 +187,43 @@ impl App {
         )
     }
 
+    /// The catalog rows the session's model picker offers. Under the
+    /// `mock` feature there is no real provider: the scripted model alone
+    /// is the row, so the picker still names it. Otherwise the active
+    /// provider's catalog is fetched over its API; `None` when no
+    /// credentials resolve or the listing fails.
+    async fn catalog(&self) -> Option<Vec<rhema_provider::ModelCard>> {
+        #[cfg(feature = "mock")]
+        {
+            // Under the mock feature there is no real provider: the
+            // scripted model alone is the row, so the picker still names
+            // it. No replies means no catalog at all.
+            self.options.mock_replies.as_ref().map(|_| {
+                let model = self
+                    .options
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| "mock".to_owned());
+                vec![rhema_provider::ModelCard {
+                    id: model.clone(),
+                    display_name: model,
+                    description: String::new(),
+                    input_token_limit: None,
+                    output_token_limit: None,
+                    generation_methods: vec!["generateContent".to_owned()],
+                    pricing: None,
+                }]
+            })
+        }
+        #[cfg(not(feature = "mock"))]
+        backend::catalog(
+            &self.effective,
+            self.options.provider.as_deref(),
+            self.options.llama_url.as_deref(),
+        )
+        .await
+    }
+
     fn thinking(&self) -> ThinkingEffort {
         self.options
             .thinking
@@ -188,6 +241,38 @@ impl App {
             base_system: self.base_system.clone(),
             ..CodingAgentConfig::new(model, workspace)
         }
+    }
+
+    /// The `Model` select one session carries: the model it runs on is
+    /// the current value, the catalog rows are the choices. `None` when
+    /// no catalog resolved (the client then shows no picker).
+    fn model_select(
+        &self,
+        current: &str,
+        rows: Option<Vec<rhema_provider::ModelCard>>,
+    ) -> Option<Vec<SessionConfigOption>> {
+        let rows = rows?;
+        // The active model leads; the catalog fills the rest. A row that
+        // already is the current value does not repeat.
+        let mut options = vec![SessionConfigSelectOption::new(
+            current.to_string(),
+            current.to_string(),
+        )];
+        for card in rows {
+            if card.id == current {
+                continue;
+            }
+            let name = if card.display_name.is_empty() {
+                card.id.clone()
+            } else {
+                card.display_name.clone()
+            };
+            options.push(SessionConfigSelectOption::new(card.id, name));
+        }
+        Some(vec![
+            SessionConfigOption::select("model", "Model", current.to_string(), options)
+                .category(Some(SessionConfigOptionCategory::Model)),
+        ])
     }
 
     /// A fresh, unique, file-safe session id.
@@ -236,6 +321,31 @@ impl App {
             slot.agent = Some(agent);
             slot.cancel = None;
         }
+    }
+
+    /// Swaps the session's model: the agent is rebuilt over the session's
+    /// existing history with the same provider, so the conversation
+    /// continues under the new model. Returns the updated `Model` select
+    /// (the client re-renders its picker). `None` when the session is
+    /// unknown or a turn is in flight.
+    fn switch_model(&self, id: &str, model: &str) -> Option<Vec<SessionConfigOption>> {
+        // The swap runs under the lock; the select is built once it is
+        // released, since `model_select` borrows `self` again.
+        let catalog_rows = {
+            let mut sessions = self.lock();
+            let slot = sessions.get_mut(id)?;
+            let session = slot.agent.as_ref()?.session().clone();
+            let agent = CodingAgent::from_session(
+                slot.provider.clone(),
+                self.agent_config(model, &slot.workspace),
+                session,
+            )
+            .ok()?;
+            slot.model = model.to_owned();
+            slot.agent = Some(agent);
+            slot.catalog_rows.clone()
+        };
+        self.model_select(model, catalog_rows)
     }
 
     /// Persists a session after a completed turn. Best effort: a failed
@@ -339,19 +449,28 @@ async fn serve_connection(
                              in the rhema config",
                         ));
                     };
+                    let provider = backend.provider.clone();
                     let agent = CodingAgent::new(
                         backend.provider,
                         app.agent_config(&backend.model, &request.cwd),
                     )
                     .map_err(|err| Error::internal_error().data(err.to_string()))?;
                     let id = app.fresh_id();
+                    let catalog = app.catalog().await;
+                    let config_options = app.model_select(&backend.model, catalog.clone());
                     let slot = SessionSlot {
+                        provider,
                         agent: Some(agent),
+                        model: backend.model.clone(),
+                        workspace: request.cwd.clone(),
+                        catalog_rows: catalog,
                         cancel: None,
                         memory: Arc::new(Mutex::new(AlwaysMemory::default())),
                     };
                     app.lock().insert(id.clone(), slot);
-                    responder.respond(NewSessionResponse::new(SessionId::new(id)))
+                    responder.respond(
+                        NewSessionResponse::new(SessionId::new(id)).config_options(config_options),
+                    )
                 }
             },
             on_receive_request!(),
@@ -374,6 +493,7 @@ async fn serve_connection(
                             Error::invalid_params()
                                 .data(format!("session {}: {err}", request.session_id.0))
                         })?;
+                    let provider = backend.provider.clone();
                     let agent = CodingAgent::from_session(
                         backend.provider,
                         app.agent_config(&backend.model, &request.cwd),
@@ -382,13 +502,19 @@ async fn serve_connection(
                     .map_err(|err| Error::internal_error().data(err.to_string()))?;
                     replay(&cx, &request.session_id, agent.session());
                     let id = request.session_id.0.to_string();
+                    let catalog = app.catalog().await;
+                    let config_options = app.model_select(&backend.model, catalog.clone());
                     let slot = SessionSlot {
+                        provider,
                         agent: Some(agent),
+                        model: backend.model.clone(),
+                        workspace: request.cwd.clone(),
+                        catalog_rows: catalog,
                         cancel: None,
                         memory: Arc::new(Mutex::new(AlwaysMemory::default())),
                     };
-                    app.lock().insert(id, slot);
-                    responder.respond(LoadSessionResponse::new())
+                    app.lock().insert(id.clone(), slot);
+                    responder.respond(LoadSessionResponse::new().config_options(config_options))
                 }
             },
             on_receive_request!(),
@@ -476,6 +602,41 @@ async fn serve_connection(
                             }
                         }
                     });
+                    Ok(())
+                }
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            {
+                let app = app.clone();
+                async move |request: SetSessionConfigOptionRequest, responder, _cx| {
+                    // Only the `model` select is advertised, so a config id
+                    // that is not `model` is a client bug; name it.
+                    if request.config_id.0.as_ref() != "model" {
+                        return Err(Error::invalid_params().data(format!(
+                            "unknown config option: \"{}\"",
+                            request.config_id.0
+                        )));
+                    }
+                    // A select option carries its value as a string id.
+                    let Some(model) = request.value.as_value_id() else {
+                        return Err(
+                            Error::invalid_params().data("model option expects a string value")
+                        );
+                    };
+                    // Rebuild the agent over the session's history on the
+                    // new model; the updated select is the response.
+                    match app.switch_model(&request.session_id.0, &model.0) {
+                        Some(config_options) => {
+                            let _ = responder
+                                .respond(SetSessionConfigOptionResponse::new(config_options));
+                        }
+                        None => {
+                            return Err(Error::invalid_request()
+                                .data("unknown session, or a turn is already running for it"));
+                        }
+                    }
                     Ok(())
                 }
             },

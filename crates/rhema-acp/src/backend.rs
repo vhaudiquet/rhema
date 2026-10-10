@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use rhema_config::Profile;
 use rhema_core::ModelProvider;
+use rhema_provider::ModelCard;
 use rhema_provider_anthropic::AnthropicProvider;
 use rhema_provider_google::GoogleProvider;
 use rhema_provider_llama_cpp::LlamaCppProvider;
@@ -36,6 +37,73 @@ pub fn default_model_for(provider: &str) -> &'static str {
         // routes it.
         _ => "gemini-3.8-flash",
     }
+}
+
+/// The catalog rows of the provider the profile (or an override) points
+/// at: the active provider's text-chat models, fetched over its API.
+/// `provider` and `llama_url` apply the same overrides as [`resolve`];
+/// `None` when that kind has no resolvable credentials or the listing
+/// fails. These are the choices a client's model picker renders.
+pub async fn catalog(
+    profile: &Profile,
+    provider: Option<&str>,
+    llama_url: Option<&str>,
+) -> Option<Vec<ModelCard>> {
+    let kind = provider.or(profile.provider.as_deref()).unwrap_or("google");
+    let models = match kind {
+        "llama-cpp" => {
+            let url = llama_url
+                .map(str::to_owned)
+                .unwrap_or_else(|| profile.llama_cpp_url());
+            let mut llama = LlamaCppProvider::new(url);
+            if let Some(api_key) = profile.llama_cpp_api_key() {
+                llama = llama.with_api_key(api_key);
+            }
+            llama
+                .list_models()
+                .await
+                .ok()?
+                .into_iter()
+                .map(|m| ModelCard {
+                    id: m.id.clone(),
+                    display_name: m.id.clone(),
+                    description: String::new(),
+                    input_token_limit: m.context_length,
+                    output_token_limit: None,
+                    generation_methods: vec!["generateContent".to_owned()],
+                    pricing: None,
+                })
+                .collect()
+        }
+        "openrouter" => {
+            let key = profile.openrouter_api_key()?;
+            OpenRouterProvider::new(key).list_models().await.ok()?
+        }
+        "anthropic" => {
+            let key = profile.anthropic_api_key()?;
+            AnthropicProvider::new(key).list_models().await.ok()?
+        }
+        "openai" => {
+            let key = profile.openai_api_key()?;
+            OpenAiCompatibleProvider::new(key)
+                .list_models()
+                .await
+                .ok()?
+        }
+        "deepseek" => {
+            let key = profile.deepseek_api_key()?;
+            OpenAiCompatibleProvider::new(key)
+                .with_base_url("https://api.deepseek.com/v1")
+                .list_models()
+                .await
+                .ok()?
+        }
+        _ => {
+            let key = profile.google_api_key()?;
+            GoogleProvider::new(key).list_models().await.ok()?
+        }
+    };
+    Some(models)
 }
 
 /// Resolves the backend the profile's settings call for. `provider`
