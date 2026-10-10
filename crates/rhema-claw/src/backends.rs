@@ -2,9 +2,12 @@
 //! active at a time, switchable at runtime.
 //!
 //! At boot the registry constructs every provider whose credentials
-//! resolve — env vars win, stored keys serve, and the keyless
+//! resolve — env vars win, the claw's own stored credentials serve
+//! next, the stored rhema config after that, and the keyless
 //! llama-cpp backend is always constructible, so a daemon can always
-//! boot. One backend is *active*; handlers read the registry per
+//! boot. The same construction runs over HTTP: credentials saved
+//! through the surface insert (or replace) a backend in the live
+//! registry and persist in the settings store. One backend is *active*; handlers read the registry per
 //! dispatch, so a switch takes effect on the next turn without a
 //! restart. The active pair is deployment state: seeded from the config
 //! file, persisted in the settings store, changeable over `/v1/providers`
@@ -22,12 +25,14 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockWriteGuard};
 use rhema_autonomous_agent::async_trait;
 use rhema_core::{EventSink, ModelOutput, ModelProvider, ModelRequest, ProviderError};
 use rhema_provider_anthropic::AnthropicProvider;
+use rhema_provider_copilot::CopilotProvider;
 use rhema_provider_google::GoogleProvider;
 use rhema_provider_llama_cpp::LlamaCppProvider;
 use rhema_provider_openai_compatible::OpenAiCompatibleProvider;
 use rhema_provider_openrouter::OpenRouterProvider;
 
 use rhema_provider::ModelCard;
+use serde::{Deserialize, Serialize};
 
 /// The default model per backend kind, when neither the operator nor the
 /// settings store names one.
@@ -37,6 +42,8 @@ pub fn default_model_for(kind: &str) -> &'static str {
         "anthropic" => "claude-sonnet-4-5",
         "openai" => "gpt-5",
         "openrouter" => "openrouter/auto",
+        "deepseek" => "deepseek-chat",
+        "copilot" => "gpt-4.1",
         _ => "gemini-3.8-flash",
     }
 }
@@ -81,7 +88,7 @@ struct Active {
 /// The deployment's providers and the active pair, shared by every
 /// handler so a switch takes effect on the next dispatch.
 pub struct BackendRegistry {
-    backends: BTreeMap<String, Arc<Backend>>,
+    backends: RwLock<BTreeMap<String, Arc<Backend>>>,
     active: RwLock<Active>,
 }
 
@@ -120,15 +127,47 @@ impl BackendRegistry {
             }
         };
         Ok(Self {
-            backends: map,
+            backends: RwLock::new(map),
             active: RwLock::new(active),
         })
+    }
+
+    /// Inserts (or replaces) `backend` in the live registry: the write
+    /// behind the credentials routes. The active pair is untouched — a
+    /// replaced backend keeps serving under its kind.
+    pub fn insert(&self, backend: Backend) {
+        let mut backends = self.backends_lock();
+        backends.insert(backend.kind.clone(), Arc::new(backend));
+    }
+
+    /// Removes `kind` from the live registry. Removing the last backend
+    /// is refused: handlers never face an absent backend. When the
+    /// removed kind was active, the first remaining backend (ascending)
+    /// takes over with its default model — the caller re-persists the
+    /// pair it reads back from [`Self::active`].
+    pub fn remove(&self, kind: &str) -> Result<(), String> {
+        let mut backends = self.backends_lock();
+        if backends.len() == 1 && backends.contains_key(kind) {
+            return Err("cannot remove the last provider backend".to_owned());
+        }
+        let removed_was_active = self.active_lock().kind == kind;
+        if backends.remove(kind).is_none() {
+            return Err(format!("unknown provider kind {kind:?}"));
+        }
+        if removed_was_active {
+            let first = backends.values().next().expect("a backend remains");
+            *self.active_lock() = Active {
+                kind: first.kind.clone(),
+                model: first.default_model.clone(),
+            };
+        }
+        Ok(())
     }
 
     /// The provider and model the next dispatch runs on.
     pub fn current(&self) -> (Arc<dyn ModelProvider>, String) {
         let active = self.active_lock();
-        let backend = &self.backends[&active.kind];
+        let backend = self.backends_lock()[&active.kind].clone();
         (backend.provider.clone(), active.model.clone())
     }
 
@@ -141,13 +180,14 @@ impl BackendRegistry {
     /// Switches the active pair. An unknown kind is an error; a model
     /// left unset falls back to that kind's default.
     pub fn set_active(&self, kind: &str, model: Option<&str>) -> Result<(), String> {
-        let backend = self
-            .backends
-            .get(kind)
-            .ok_or_else(|| format!("unknown provider kind {kind:?}"))?;
-        let model = model
-            .map(str::to_owned)
-            .unwrap_or_else(|| backend.default_model.clone());
+        let default = {
+            let backends = self.backends_lock();
+            let backend = backends
+                .get(kind)
+                .ok_or_else(|| format!("unknown provider kind {kind:?}"))?;
+            backend.default_model.clone()
+        };
+        let model = model.map(str::to_owned).unwrap_or_else(|| default);
         *self.active_lock() = Active {
             kind: kind.to_owned(),
             model,
@@ -157,7 +197,7 @@ impl BackendRegistry {
 
     /// Every constructible backend: kind and model fallback, ascending.
     pub fn list(&self) -> Vec<(String, String)> {
-        self.backends
+        self.backends_lock()
             .values()
             .map(|backend| (backend.kind.clone(), backend.default_model.clone()))
             .collect()
@@ -165,12 +205,18 @@ impl BackendRegistry {
 
     /// The live model listing of `kind`, when the backend carries one.
     pub fn list_models(&self, kind: &str) -> Option<ModelListing> {
-        let backend = self.backends.get(kind)?;
+        let backend = self.backends_lock().get(kind)?.clone();
         backend.list_models.as_ref().map(|list| list())
     }
 
     fn active_lock(&self) -> RwLockWriteGuard<'_, Active> {
         self.active.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn backends_lock(&self) -> RwLockWriteGuard<'_, BTreeMap<String, Arc<Backend>>> {
+        self.backends
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -188,6 +234,10 @@ pub enum AnyProvider {
     Anthropic(AnthropicProvider),
     /// The generic OpenAI-compatible adapter.
     OpenAiCompatible(OpenAiCompatibleProvider),
+    /// DeepSeek through the OpenAI-compatible adapter at its own base.
+    DeepSeek(OpenAiCompatibleProvider),
+    /// GitHub Copilot through the Copilot adapter.
+    Copilot(CopilotProvider),
 }
 
 impl AnyProvider {
@@ -200,6 +250,8 @@ impl AnyProvider {
             AnyProvider::Anthropic(provider) => provider.list_models().await,
             AnyProvider::OpenRouter(provider) => provider.list_models().await,
             AnyProvider::OpenAiCompatible(provider) => provider.list_models().await,
+            AnyProvider::DeepSeek(provider) => provider.list_models().await,
+            AnyProvider::Copilot(provider) => provider.list_models().await,
             AnyProvider::LlamaCpp(provider) => {
                 let models = provider.list_models().await?;
                 Ok(models
@@ -240,6 +292,8 @@ impl ModelProvider for AnyProvider {
             AnyProvider::OpenRouter(provider) => provider.complete(request, sink).await,
             AnyProvider::Anthropic(provider) => provider.complete(request, sink).await,
             AnyProvider::OpenAiCompatible(provider) => provider.complete(request, sink).await,
+            AnyProvider::DeepSeek(provider) => provider.complete(request, sink).await,
+            AnyProvider::Copilot(provider) => provider.complete(request, sink).await,
         }
     }
 }
@@ -247,100 +301,202 @@ impl ModelProvider for AnyProvider {
 /// The env variable each keyed backend reads, in precedence order
 /// (checked before the stored rhema config's value, mirroring the
 /// frontend's env-wins rule).
+/// The env variable names a kind's credential reads, in precedence
+/// order — the list route's `source` computation needs the names, the
+/// discovery the values.
+pub fn env_key_names(kind: &str) -> &'static [&'static str] {
+    env_vars_for(kind)
+}
+
 fn env_vars_for(kind: &str) -> &'static [&'static str] {
     match kind {
         "google" => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
         "anthropic" => &["ANTHROPIC_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],
         "openrouter" => &["OPENROUTER_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "copilot" => &["GITHUB_COPILOT_TOKEN"],
         _ => &[],
     }
 }
 
-/// Discovers every constructible backend from the config seed, the
-/// stored rhema credentials, and the environment. The keyless llama.cpp
-/// backend is always constructed, so the registry is never empty; a
-/// keyed backend joins only when its env var or stored key resolves.
-/// The config's `provider`/`model` pair is the caller's seed for the
-/// active backend — deployment defaults, not a constraint.
+/// DeepSeek speaks the OpenAI-compatible dialect at its own base.
+const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
+
+/// The settings-store key prefix under which a kind's credentials
+/// persist: `provider.<kind>` holds a [`ProviderParams`] JSON.
+pub const PROVIDER_KEY_PREFIX: &str = "provider.";
+
+/// The settings key for one kind's stored credentials.
+pub fn provider_settings_key(kind: &str) -> String {
+    format!("{PROVIDER_KEY_PREFIX}{kind}")
+}
+
+/// The credentials a keyed backend constructs from, as the settings
+/// store persists them: an API key, and for server-addressed kinds the
+/// URL. `api_key` never logs and never round-trips through the list
+/// route — the list says only where a credential came from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ProviderParams {
+    /// The API key (or GitHub token for copilot).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// The server address (llama.cpp).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Every kind a runtime login can construct, ascending: the addable
+/// list the HTTP surface serves and the UI renders forms from.
+pub fn addable_kinds() -> &'static [&'static str] {
+    &[
+        "anthropic",
+        "copilot",
+        "deepseek",
+        "google",
+        "llama-cpp",
+        "openai",
+        "openrouter",
+    ]
+}
+
+/// The parameter fields a kind's login takes, in form order — the wire
+/// shape under `addable` the UI builds its inputs from.
+pub fn param_fields_for(kind: &str) -> &'static [&'static str] {
+    match kind {
+        "llama-cpp" => &["url", "api_key"],
+        _ => &["api_key"],
+    }
+}
+
+/// Constructs one backend from `params`. The per-kind requirements:
+/// keyed kinds want an `api_key`; llama.cpp wants a `url` (the keyless
+/// default still applies when neither is given). Unknown kinds are an
+/// error — "mock" is registry-injected, never constructed.
+pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String> {
+    let provider = match kind {
+        "google" => AnyProvider::Google(GoogleProvider::new(require_key(kind, params)?)),
+        "anthropic" => AnyProvider::Anthropic(AnthropicProvider::new(require_key(kind, params)?)),
+        "openai" => {
+            AnyProvider::OpenAiCompatible(OpenAiCompatibleProvider::new(require_key(kind, params)?))
+        }
+        "openrouter" => {
+            AnyProvider::OpenRouter(OpenRouterProvider::new(require_key(kind, params)?))
+        }
+        "deepseek" => AnyProvider::DeepSeek(
+            OpenAiCompatibleProvider::new(require_key(kind, params)?)
+                .with_base_url(DEEPSEEK_BASE_URL),
+        ),
+        "copilot" => AnyProvider::Copilot(CopilotProvider::new(require_key(kind, params)?)),
+        "llama-cpp" => {
+            let mut provider = LlamaCppProvider::new(
+                params
+                    .url
+                    .clone()
+                    .unwrap_or_else(|| rhema_config::Profile::default().llama_cpp_url()),
+            );
+            if let Some(key) = &params.api_key {
+                provider = provider.with_api_key(key);
+            }
+            AnyProvider::LlamaCpp(provider)
+        }
+        _ => return Err(format!("unknown provider kind {kind:?}")),
+    };
+    let default_model = default_model_for(kind).to_owned();
+    let provider = Arc::new(provider);
+    Ok(Backend {
+        kind: kind.to_owned(),
+        provider: provider.clone(),
+        default_model,
+        list_models: Some(AnyProvider::boxed_listing(provider)),
+    })
+}
+
+/// The kind's API key, or the error the credentials route answers with.
+fn require_key(kind: &str, params: &ProviderParams) -> Result<String, String> {
+    params
+        .api_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .ok_or_else(|| format!("{kind} needs an api_key"))
+}
+
+/// Discovers every constructible backend from the environment, the
+/// claw's own stored credentials, and the stored rhema config — in that
+/// precedence, mirroring the frontend's env-wins rule. The keyless
+/// llama.cpp backend always constructs, so the registry is never empty;
+/// a keyed backend joins when any source resolves for it. The config's
+/// `provider`/`model` pair is the caller's seed for the active backend —
+/// deployment defaults, not a constraint. `claw_stored` reads the
+/// daemon's settings store (the credentials the HTTP surface wrote).
 pub fn discover(
     config: &crate::config::ClawConfig,
     stored: &rhema_config::Profile,
     env: &dyn Fn(&str) -> Option<String>,
+    claw_stored: &dyn Fn(&str) -> Option<ProviderParams>,
 ) -> Vec<Backend> {
     let mut backends = Vec::new();
-    let mut add = |kind: &str, provider: AnyProvider, stored_default: Option<String>| {
-        let default_model = stored_default.unwrap_or_else(|| default_model_for(kind).to_owned());
-        let provider = Arc::new(provider);
-        backends.push(Backend {
-            kind: kind.to_owned(),
-            provider: provider.clone(),
-            default_model,
-            list_models: Some(AnyProvider::boxed_listing(provider)),
-        });
-    };
 
-    // llama-cpp first: keyless, so the registry is never empty.
-    {
-        let mut provider = LlamaCppProvider::new(stored.llama_cpp_url());
-        if let Some(key) = &stored.llama_cpp_api_key {
-            provider = provider.with_api_key(key);
-        }
-        add(
-            "llama-cpp",
-            AnyProvider::LlamaCpp(provider),
-            config.model.clone(),
-        );
-    }
-    if stored.google_api_key.is_some()
-        || env_vars_for("google")
+    for kind in [
+        "llama-cpp",
+        "google",
+        "anthropic",
+        "openai",
+        "openrouter",
+        "deepseek",
+        "copilot",
+    ] {
+        // Env first, the claw's stored credentials second, the stored
+        // rhema profile third.
+        let env_key = env_vars_for(kind)
             .iter()
-            .any(|name| env(name).is_some())
-    {
-        add(
-            "google",
-            AnyProvider::Google(GoogleProvider::new(
-                env_vars_for("google")
-                    .iter()
-                    .find_map(|name| env(name))
-                    .or_else(|| stored.google_api_key.clone())
-                    .expect("a key resolved above"),
-            )),
-            None,
-        );
-    }
-    if stored.anthropic_api_key.is_some() || env("ANTHROPIC_API_KEY").is_some() {
-        add(
-            "anthropic",
-            AnyProvider::Anthropic(AnthropicProvider::new(
-                env("ANTHROPIC_API_KEY")
-                    .or_else(|| stored.anthropic_api_key.clone())
-                    .expect("a key resolved above"),
-            )),
-            None,
-        );
-    }
-    if stored.openai_api_key.is_some() || env("OPENAI_API_KEY").is_some() {
-        add(
-            "openai",
-            AnyProvider::OpenAiCompatible(OpenAiCompatibleProvider::new(
-                env("OPENAI_API_KEY")
-                    .or_else(|| stored.openai_api_key.clone())
-                    .expect("a key resolved above"),
-            )),
-            None,
-        );
-    }
-    if stored.openrouter_api_key.is_some() || env("OPENROUTER_API_KEY").is_some() {
-        add(
-            "openrouter",
-            AnyProvider::OpenRouter(OpenRouterProvider::new(
-                env("OPENROUTER_API_KEY")
-                    .or_else(|| stored.openrouter_api_key.clone())
-                    .expect("a key resolved above"),
-            )),
-            None,
-        );
+            .find_map(|name| env(name))
+            .filter(|key| !key.trim().is_empty());
+        let claw_params = claw_stored(kind);
+        let api_key = env_key
+            .or(claw_params.as_ref().and_then(|p| p.api_key.clone()))
+            .or(match kind {
+                "google" => stored.google_api_key.clone(),
+                "anthropic" => stored.anthropic_api_key.clone(),
+                "openai" => stored.openai_api_key.clone(),
+                "openrouter" => stored.openrouter_api_key.clone(),
+                "deepseek" => stored.deepseek_api_key.clone(),
+                "copilot" => stored.copilot_api_key.clone(),
+                _ => None,
+            });
+        let url = claw_params.as_ref().and_then(|p| p.url.clone());
+        let params = ProviderParams {
+            api_key,
+            url: if kind == "llama-cpp" {
+                Some(url.unwrap_or_else(|| stored.llama_cpp_url()))
+            } else {
+                None
+            },
+        };
+        let has_creds = match kind {
+            // The keyless server backend always constructs.
+            "llama-cpp" => true,
+            _ => params.api_key.is_some(),
+        };
+        if !has_creds {
+            continue;
+        }
+        match construct(kind, &params) {
+            Ok(mut backend) => {
+                if kind == "llama-cpp" {
+                    // The config file's model seeds llama's fallback, as
+                    // discovery always has: it names the deployment's
+                    // local model when it names one at all.
+                    if let Some(model) = &config.model {
+                        backend.default_model = model.clone();
+                    }
+                }
+                backends.push(backend);
+            }
+            // An unconstructible kind (a blank key) never blocks the boot.
+            Err(_) => continue,
+        }
     }
     backends
 }
@@ -423,5 +579,88 @@ mod tests {
     #[test]
     fn an_empty_registry_is_a_construction_error() {
         assert!(BackendRegistry::new(vec![], None).is_err());
+    }
+
+    fn params(api_key: Option<&str>, url: Option<&str>) -> ProviderParams {
+        ProviderParams {
+            api_key: api_key.map(str::to_owned),
+            url: url.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn construct_demands_what_each_kind_needs() {
+        // Keyed kinds want a non-blank key.
+        assert!(construct("google", &params(None, None)).is_err());
+        assert!(construct("google", &params(Some("  "), None)).is_err());
+        assert!(construct("google", &params(Some("k"), None)).is_ok());
+        assert!(construct("deepseek", &params(Some("k"), None)).is_ok());
+        assert!(construct("copilot", &params(Some("t"), None)).is_ok());
+        assert!(construct("nope", &params(Some("k"), None)).is_err());
+        // llama.cpp serves keyless on its default url.
+        assert!(construct("llama-cpp", &params(None, None)).is_ok());
+        assert!(construct("llama-cpp", &params(None, Some("http://h:1"))).is_ok());
+    }
+
+    #[test]
+    fn discover_builds_exactly_the_kinds_with_a_source() {
+        let config = test_config();
+        let profile = profile_with_google();
+        let env = |_name: &str| None;
+        let claw_stored = |kind: &str| (kind == "deepseek").then(|| params(Some("cd"), None));
+        let backends = discover(&config, &profile, &env, &claw_stored);
+        let mut kinds: Vec<&str> = backends.iter().map(|b| b.kind.as_str()).collect();
+        kinds.sort_unstable();
+        assert_eq!(kinds, vec!["deepseek", "google", "llama-cpp"]);
+    }
+
+    #[test]
+    fn discover_boots_llama_even_when_nobody_stored_anything() {
+        let config = test_config();
+        let profile = rhema_config::Profile::default();
+        let env = |_name: &str| None;
+        let backends = discover(&config, &profile, &env, &|_kind| None);
+        assert_eq!(backends.len(), 1);
+        assert_eq!(backends[0].kind, "llama-cpp");
+    }
+
+    #[test]
+    fn insert_replaces_and_remove_moves_the_active_pair() {
+        let registry = BackendRegistry::new(
+            vec![backend("anthropic"), backend("google")],
+            Some(("google".to_owned(), None)),
+        )
+        .unwrap();
+
+        // A replace: the kind count holds, the default may change.
+        registry.insert(backend("google"));
+        assert_eq!(registry.list().len(), 2);
+
+        // An addition joins the list.
+        registry.insert(backend("openai"));
+        assert_eq!(registry.list().len(), 3);
+
+        // Removing the active kind hands the pair to the first
+        // remaining backend, ascending.
+        registry.remove("google").unwrap();
+        assert_eq!(registry.active().0, "anthropic");
+
+        // The last backend refuses to go.
+        registry.remove("openai").unwrap();
+        assert!(registry.remove("anthropic").is_err());
+        assert_eq!(registry.list().len(), 1);
+    }
+
+    fn test_config() -> crate::config::ClawConfig {
+        serde_json::from_value(serde_json::json!({
+            "poll_interval_secs": 60,
+            "watches": []
+        }))
+        .expect("a minimal claw config")
+    }
+
+    fn profile_with_google() -> rhema_config::Profile {
+        serde_json::from_value(serde_json::json!({ "google_api_key": "pg" }))
+            .expect("a profile with a google key")
     }
 }

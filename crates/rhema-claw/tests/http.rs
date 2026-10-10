@@ -1124,3 +1124,120 @@ async fn providers_are_listed_switched_and_persisted() {
     .expect("the daemon reassembles");
     assert_eq!(daemon.backends().active().1, "mock-large");
 }
+
+/// The credentials surface: a runtime login adds a backend, the list
+/// names where its credential came from, a re-add replaces it in place,
+/// and a removal drops it — refusing to remove the last backend, and
+/// moving the active pair when the removed kind was serving.
+#[tokio::test]
+async fn providers_gain_and_lose_backends_over_the_surface() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    // A login: llama.cpp takes a url, no key, and joins the registry.
+    let added: Value = client
+        .put(format!("{base}/v1/providers/llama-cpp/credentials"))
+        .json(&json!({"url": "http://127.0.0.1:9999"}))
+        .send()
+        .await
+        .expect("the login posts")
+        .json()
+        .await
+        .expect("the state parses");
+    let row = added["providers"]
+        .as_array()
+        .expect("the providers array")
+        .iter()
+        .find(|p| p["kind"] == "llama-cpp")
+        .expect("the new backend listed")
+        .clone();
+    assert_eq!(row["source"], "stored");
+    assert_eq!(row["default_model"], "local");
+    assert_eq!(added["active"]["provider"], "mock", "the pair is untouched");
+
+    // A re-add replaces the kind in place instead of duplicating it.
+    let replaced: Value = client
+        .put(format!("{base}/v1/providers/llama-cpp/credentials"))
+        .json(&json!({"url": "http://127.0.0.1:10000"}))
+        .send()
+        .await
+        .expect("the re-add posts")
+        .json()
+        .await
+        .expect("the state parses");
+    let llama_rows = replaced["providers"]
+        .as_array()
+        .expect("the providers array")
+        .iter()
+        .filter(|p| p["kind"] == "llama-cpp")
+        .count();
+    assert_eq!(llama_rows, 1);
+
+    // A keyed kind without its key is a 400, and nothing was added.
+    let refused = client
+        .put(format!("{base}/v1/providers/google/credentials"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(refused.status(), 400);
+    let listed: Value = client
+        .get(format!("{base}/v1/providers"))
+        .send()
+        .await
+        .expect("the list reads")
+        .json()
+        .await
+        .expect("the list parses");
+    assert!(
+        !listed["providers"]
+            .as_array()
+            .expect("the providers array")
+            .iter()
+            .any(|p| p["kind"] == "google")
+    );
+
+    // An unknown kind is a 400 too.
+    let unknown = client
+        .put(format!("{base}/v1/providers/nope/credentials"))
+        .json(&json!({"api_key": "k"}))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(unknown.status(), 400);
+
+    // Removal: the active kind going away moves the pair to what
+    // remains, and the persisted pair moves with it.
+    let removed: Value = client
+        .delete(format!("{base}/v1/providers/mock"))
+        .send()
+        .await
+        .expect("the removal posts")
+        .json()
+        .await
+        .expect("the state parses");
+    assert_eq!(removed["active"]["provider"], "llama-cpp");
+
+    // The last backend refuses to go.
+    let last = client
+        .delete(format!("{base}/v1/providers/llama-cpp"))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(last.status(), 400);
+
+    // A removal of an unknown kind is a 400 as well.
+    let gone = client
+        .delete(format!("{base}/v1/providers/ethereal"))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(gone.status(), 400);
+}

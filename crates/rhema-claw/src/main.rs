@@ -126,8 +126,22 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
         }
     };
     let profile = stored.effective(None);
+    // A second connection to the shared database, read-only in spirit:
+    // discovery reads the credentials the HTTP surface persisted. An
+    // unopenable store boots the daemon without them rather than not at
+    // all — the same grace the rhema config gets above.
+    let claw_creds = rhema_claw::SettingsStore::open(config.db_path()?).ok();
+    let claw_stored = |kind: &str| {
+        claw_creds.as_ref().and_then(|store| {
+            store
+                .get(&rhema_claw::backends::provider_settings_key(kind))
+                .ok()
+                .flatten()
+                .and_then(|json| serde_json::from_str(&json).ok())
+        })
+    };
     let env = |name: &str| std::env::var(name).ok();
-    let backends = rhema_claw::backends::discover(config, &profile, &env);
+    let backends = rhema_claw::backends::discover(config, &profile, &env, &claw_stored);
     let seed = config
         .provider
         .as_deref()

@@ -27,6 +27,7 @@ rhema-config = { path = "../rhema-config" }
 rhema-core = { path = "../rhema-core" }
 rhema-forge-agent = { path = "../rhema-forge-agent" }
 rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
+rhema-provider-copilot = { path = "../rhema-provider-copilot" }
 rhema-provider-google = { path = "../rhema-provider-google" }
 rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
 rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }

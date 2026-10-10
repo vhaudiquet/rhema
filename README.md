@@ -73,8 +73,12 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   tools, a chat surface over HTTP
   (native routes with SSE, plus an OpenAI-compatible `/v1/chat/
 completions` shim for stock UIs), watch management by agent tool or
-  HTTP, and forge threads answered with one coding-agent turn posted as
-  the thread's reply; `--once` for cron-driven ephemeral machines
+  HTTP, runtime provider management over the same surface (log in with
+  a kind's credentials — key, server address — or remove a backend;
+  the roster re-discovers from environment, stored credentials, and
+  the rhema config at every boot), and forge threads answered with one
+  coding-agent turn posted as the thread's reply; `--once` for
+  cron-driven ephemeral machines
 - `rhema-coding-agent` — the coding-agent driver: one built-in tool
   (`bash`, running commands via `bash -c` in the workspace), an
   approval seam (auto-approved for now; allowlists planned), session

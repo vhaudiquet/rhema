@@ -82,6 +82,14 @@ impl SettingsStore {
         .map_err(|err| SettingsError::Backend(err.to_string()))?;
         Ok(())
     }
+
+    /// Removes `key` from the store; a no-op when it was absent.
+    pub fn delete(&self, key: &str) -> Result<(), SettingsError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.execute("DELETE FROM settings WHERE key = ?1", params![key])
+            .map_err(|err| SettingsError::Backend(err.to_string()))?;
+        Ok(())
+    }
 }
 
 /// The persisted settings keys: the active backend pair.
