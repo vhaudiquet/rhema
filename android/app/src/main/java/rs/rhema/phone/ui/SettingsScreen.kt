@@ -1,4 +1,4 @@
-package dev.rhema.phone.ui
+package rs.rhema.phone.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -24,9 +24,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import dev.rhema.phone.R
-import dev.rhema.phone.di.AppContainer
-import dev.rhema.phone.net.ClawResult
+import rs.rhema.phone.R
+import rs.rhema.phone.di.AppContainer
+import rs.rhema.phone.net.ClawResult
 import kotlinx.coroutines.launch
 
 // First launch lands here and stays until GET /healthz succeeds against the

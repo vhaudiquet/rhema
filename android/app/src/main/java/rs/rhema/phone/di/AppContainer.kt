@@ -1,12 +1,12 @@
-package dev.rhema.phone.di
+package rs.rhema.phone.di
 
 import android.content.Context
-import dev.rhema.phone.data.SettingsRepository
-import dev.rhema.phone.data.StatusRepository
-import dev.rhema.phone.data.rhemaStore
-import dev.rhema.phone.net.ClawApi
-import dev.rhema.phone.notif.Notifier
-import dev.rhema.phone.work.schedulePeriodicWork
+import rs.rhema.phone.data.SettingsRepository
+import rs.rhema.phone.data.StatusRepository
+import rs.rhema.phone.data.rhemaStore
+import rs.rhema.phone.net.ClawApi
+import rs.rhema.phone.notif.Notifier
+import rs.rhema.phone.work.schedulePeriodicWork
 import java.util.concurrent.TimeUnit
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient

@@ -1,11 +1,11 @@
-package dev.rhema.phone
+package rs.rhema.phone
 
 import android.app.Application
 import android.content.Intent
 import android.content.IntentFilter
 import androidx.core.content.ContextCompat
-import dev.rhema.phone.di.AppContainer
-import dev.rhema.phone.work.PowerEventReceiver
+import rs.rhema.phone.di.AppContainer
+import rs.rhema.phone.work.PowerEventReceiver
 
 class RhemaApp : Application() {
 

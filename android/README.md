@@ -119,7 +119,7 @@ BOM 2025.12.01, minSdk 26 / target & compileSdk 36.
 ## Layout
 
 ```
-app/src/main/java/dev/rhema/phone/
+app/src/main/java/rs/rhema/phone/
   MainActivity.kt      nav state + POST_NOTIFICATIONS runtime request
   RhemaApp.kt          Application: container, channel, schedule, receiver
   di/AppContainer.kt   manual DI (OkHttp, Json, repos, api, notifier)

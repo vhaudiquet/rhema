@@ -8,11 +8,11 @@ plugins {
 }
 
 android {
-    namespace = "dev.rhema.phone"
+    namespace = "rs.rhema.phone"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "dev.rhema.phone"
+        applicationId = "rs.rhema.phone"
         minSdk = 26
         targetSdk = 36
         versionCode = 1

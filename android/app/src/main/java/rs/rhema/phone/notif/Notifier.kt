@@ -1,4 +1,4 @@
-package dev.rhema.phone.notif
+package rs.rhema.phone.notif
 
 import android.Manifest
 import android.app.NotificationChannel
@@ -9,8 +9,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
-import dev.rhema.phone.MainActivity
-import dev.rhema.phone.R
+import rs.rhema.phone.MainActivity
+import rs.rhema.phone.R
 
 class Notifier(private val context: Context) {
 

@@ -1,4 +1,4 @@
-package dev.rhema.phone.work
+package rs.rhema.phone.work
 
 import android.content.BroadcastReceiver
 import android.content.Context

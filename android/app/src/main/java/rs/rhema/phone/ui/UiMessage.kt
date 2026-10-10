@@ -1,4 +1,4 @@
-package dev.rhema.phone.ui
+package rs.rhema.phone.ui
 
 // Screen state holds the failure data, not a formatted string; user-visible
 // text is resolved with stringResource at render time so configuration

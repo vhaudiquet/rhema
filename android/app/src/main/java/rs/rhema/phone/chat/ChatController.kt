@@ -1,12 +1,12 @@
-package dev.rhema.phone.chat
+package rs.rhema.phone.chat
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import dev.rhema.phone.net.ClawApi
-import dev.rhema.phone.net.ClawEvent
-import dev.rhema.phone.net.ClawResult
-import dev.rhema.phone.net.SseFrame
+import rs.rhema.phone.net.ClawApi
+import rs.rhema.phone.net.ClawEvent
+import rs.rhema.phone.net.ClawResult
+import rs.rhema.phone.net.SseFrame
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay

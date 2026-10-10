@@ -1,4 +1,4 @@
-package dev.rhema.phone.ui
+package rs.rhema.phone.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,10 +31,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import dev.rhema.phone.R
-import dev.rhema.phone.di.AppContainer
-import dev.rhema.phone.net.ClawResult
-import dev.rhema.phone.net.SessionInfo
+import rs.rhema.phone.R
+import rs.rhema.phone.di.AppContainer
+import rs.rhema.phone.net.ClawResult
+import rs.rhema.phone.net.SessionInfo
 import kotlinx.coroutines.launch
 
 @Composable

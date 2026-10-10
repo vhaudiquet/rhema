@@ -1,4 +1,4 @@
-package dev.rhema.phone
+package rs.rhema.phone
 
 import android.Manifest
 import android.os.Build
@@ -24,12 +24,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
-import dev.rhema.phone.di.AppContainer
-import dev.rhema.phone.ui.ChatScreen
-import dev.rhema.phone.ui.JadeiteGround
-import dev.rhema.phone.ui.RhemaTheme
-import dev.rhema.phone.ui.SessionsScreen
-import dev.rhema.phone.ui.SettingsScreen
+import rs.rhema.phone.di.AppContainer
+import rs.rhema.phone.ui.ChatScreen
+import rs.rhema.phone.ui.JadeiteGround
+import rs.rhema.phone.ui.RhemaTheme
+import rs.rhema.phone.ui.SessionsScreen
+import rs.rhema.phone.ui.SettingsScreen
 
 class MainActivity : ComponentActivity() {
 

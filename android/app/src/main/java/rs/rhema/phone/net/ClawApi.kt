@@ -1,6 +1,6 @@
-package dev.rhema.phone.net
+package rs.rhema.phone.net
 
-import dev.rhema.phone.data.SettingsRepository
+import rs.rhema.phone.data.SettingsRepository
 import java.io.IOException
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers

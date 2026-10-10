@@ -1,4 +1,4 @@
-package dev.rhema.phone.net
+package rs.rhema.phone.net
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable

@@ -1,4 +1,4 @@
-package dev.rhema.phone.ui
+package rs.rhema.phone.ui
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme

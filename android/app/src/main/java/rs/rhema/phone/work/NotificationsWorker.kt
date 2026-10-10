@@ -1,10 +1,10 @@
-package dev.rhema.phone.work
+package rs.rhema.phone.work
 
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import dev.rhema.phone.RhemaApp
-import dev.rhema.phone.net.ClawResult
+import rs.rhema.phone.RhemaApp
+import rs.rhema.phone.net.ClawResult
 import kotlinx.coroutines.flow.first
 
 // Periodic notification poll. Latency is bounded by the WorkManager interval

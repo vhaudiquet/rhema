@@ -1,4 +1,4 @@
-package dev.rhema.phone.data
+package rs.rhema.phone.data
 
 import android.content.Context
 import androidx.datastore.core.DataStore

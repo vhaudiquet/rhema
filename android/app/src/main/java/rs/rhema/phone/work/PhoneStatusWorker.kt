@@ -1,4 +1,4 @@
-package dev.rhema.phone.work
+package rs.rhema.phone.work
 
 import android.app.NotificationManager
 import android.content.Context
@@ -8,9 +8,9 @@ import android.net.ConnectivityManager
 import android.os.BatteryManager
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import dev.rhema.phone.RhemaApp
-import dev.rhema.phone.data.PhoneSnapshot
-import dev.rhema.phone.net.ClawResult
+import rs.rhema.phone.RhemaApp
+import rs.rhema.phone.data.PhoneSnapshot
+import rs.rhema.phone.net.ClawResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put

@@ -1,4 +1,4 @@
-package dev.rhema.phone.data
+package rs.rhema.phone.data
 
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
