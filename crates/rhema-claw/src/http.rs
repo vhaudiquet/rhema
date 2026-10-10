@@ -172,6 +172,20 @@ pub fn router(state: ClawState) -> Router {
         .route("/chat/completions", post(crate::openai::chat_completions))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
+        .route(
+            "/",
+            get(|| async {
+                // A bare host hit (a browser on a ui-less deployment, a
+                // curl probing the daemon) explains itself instead of
+                // 404ing into confusion.
+                Json(json!({
+                    "service": "rhema-claw",
+                    "chat": "/v1/sessions",
+                    "api": ["/v1/sessions", "/v1/providers", "/v1/watches",
+                            "/v1/notifications", "/v1/bootstrap", "/v1/ingest"],
+                }))
+            }),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .nest("/v1", v1)
         .with_state(state)
