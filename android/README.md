@@ -131,6 +131,17 @@ app/src/main/java/rs/rhema/phone/
   notif/Notifier.kt    channel + system notifications
 ```
 
+## Cleartext and certificates
+
+The claw is self-hosted, so its address is whatever the operator points
+at — a LAN name (`kosmos.lan`), a bare IP, a Tailscale name — where a
+publicly-trusted certificate is rare. The app therefore permits
+cleartext HTTP app-wide and trusts user-installed CAs (mkcert installs
+into the user store, so a mkcert-secured claw works over HTTPS too).
+Only the operator's configured claw is ever contacted, and the bearer
+token is the auth; prefer HTTPS wherever the deployment has a real
+certificate.
+
 ## Road notes
 
 - Theming is Jadeite dark, always — the same tokens as the TUI and the
