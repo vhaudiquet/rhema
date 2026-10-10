@@ -173,6 +173,14 @@ jobs:
           cd android
           ./gradlew :app:assembleDebug :app:lintDebug
 
+      - name: Upload the debug APK
+        uses: https://gitea.com/actions/gitea-upload-artifact@v4
+        with:
+          name: rhema-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
   # The web UI: install and produce the static bundle — the artifact an
   # ingress serves next to /v1.
   web:
