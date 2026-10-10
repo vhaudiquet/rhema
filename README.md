@@ -73,14 +73,38 @@ completions` shim for stock UIs), watch management by agent tool or
   (`bash`, running commands via `bash -c` in the workspace), an
   approval seam (auto-approved for now; allowlists planned), session
   save/resume
+- `rhema-acp` — the Agent Client Protocol adapter: the coding agent as
+  an ACP agent subprocess, so any ACP client (Zed, JetBrains, Neovim's
+  CodeCompanion, Emacs agent-shell, the VS Code extensions) drives
+  rhema without a plugin per editor; prompts stream, `bash` calls ask
+  the client's permission UI, `session/load` restores a saved
+  conversation with a full replay
 - `rhema` — the frontend binary: a full-screen terminal UI when attached
-  to a terminal, a pipeable one-shot runner when not
+  to a terminal, a pipeable one-shot runner when not, and `rhema acp`
+  for editors
 
 ## The frontend: `rhema`
 
 ```sh
 cargo run --bin rhema          # full-screen TUI (or `cargo install`d rhema)
 ```
+
+### In your editor: `rhema acp`
+
+```sh
+rhema acp                      # serve the Agent Client Protocol over stdio
+```
+
+The agent side of ACP (agentclientprotocol.com): an editor launches
+`rhema acp` as a subprocess and speaks JSON-RPC over its stdin/stdout.
+Each editor session becomes a rhema session rooted at the directory the
+client passes (`session/new`'s `cwd`); reply text and tool traffic
+stream back as session updates, and every `bash` call asks through the
+client's own permission UI. Sessions persist under the cache dir and
+`session/load` restores one with a full replay. The backend resolves
+once from `--profile`/`--provider`/`--model` and the stored config —
+the same resolution the TUI and one-shot use; without a resolvable
+credential, `authenticate` fails naming the fix.
 
 ### Profiles
 
@@ -370,7 +394,10 @@ helm install claw deploy/helm/rhema-claw \
 Expose it with the chart's optional ingress (`ingress.enabled` +
 `ingress.host`, TLS strongly recommended — bearer tokens cross it) or
 keep it cluster-private behind Tailscale; the claw is bearer-gated
-either way.
+either way. With the chart's UI on (`ui.enabled`, the default), the
+same host serves both: the browser gets the web UI on `/`, the daemon
+answers `/v1` and `/healthz` — one address for the browser and the
+phone app, no CORS anywhere.
 
 The image is the daemon plus `bash` and `git` (the agent's shell is
 load-bearing); the chart runs exactly one replica — the claw is

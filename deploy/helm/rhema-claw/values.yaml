@@ -55,6 +55,21 @@ ingress:
     # certificate; required when tls.enabled.
     secretName: ""
 
+ui:
+  # The web UI on the same host as the daemon: the ingress routes /
+  # here and /v1 (+ /healthz) to the daemon, so one address serves the
+  # browser and the phone app alike, with no CORS anywhere. Stateless
+  # static files — replicas may scale freely.
+  enabled: true
+  image:
+    # Built by deploy/docker/ui.Dockerfile; published by the ui job in
+    # the publish workflow.
+    repository: git.vhaudiquet.fr/vhaudiquet/rhema-claw-ui
+    # Defaults to the chart's appVersion when empty.
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources: {}
+
 persistence:
   enabled: true
   storageClass: ""

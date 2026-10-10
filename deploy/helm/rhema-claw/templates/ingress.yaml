@@ -29,9 +29,34 @@ spec:
     - host: {{ .Values.ingress.host | quote }}
       http:
         paths:
-          # The whole surface — chat, /v1, /healthz — is one origin; the
-          # bearer token is the auth, and the tls block above is what
-          # keeps it off the wire in the clear.
+          {{- if .Values.ui.enabled }}
+          # One address, two services: the browser gets the UI on /,
+          # the daemon answers /v1 and /healthz (longest prefix wins),
+          # and the phone app points at the same host. One origin, so
+          # no CORS anywhere; the bearer token is the auth.
+          - path: /v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "rhema-claw.fullname" . }}
+                port:
+                  name: http
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "rhema-claw.fullname" . }}
+                port:
+                  name: http
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "rhema-claw.fullname" . }}-ui
+                port:
+                  name: http
+          {{- else }}
+          # No UI in the release: the daemon owns the whole host.
           - path: /
             pathType: Prefix
             backend:
@@ -39,4 +64,5 @@ spec:
                 name: {{ include "rhema-claw.fullname" . }}
                 port:
                   name: http
+          {{- end }}
 {{- end }}

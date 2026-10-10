@@ -16,10 +16,18 @@ env:
 
 jobs:
   build-and-push-image:
-    # The one deployable image: the claw daemon. amd64 only for now, like
-    # every other image on this registry. The chart pulls it by the names
-    # below (`rhema-claw`), tag rides the job.
+    # The two deployable images — the claw daemon (built from its
+    # dedicated Dockerfile) and the static UI bundle behind nginx. amd64
+    # only for now, like every other image on this registry. The chart
+    # pulls them by the names below (`rhema-claw`, `rhema-claw-ui`).
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: deploy/docker/claw.Dockerfile
+            image: rhema-claw
+          - dockerfile: deploy/docker/ui.Dockerfile
+            image: rhema-claw-ui
     steps:
       - name: Checkout repository
         uses: https://gitea.com/actions/checkout@v4
@@ -44,14 +52,14 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: deploy/docker/claw.Dockerfile
+          file: ${{ matrix.dockerfile }}
           push: true
           # Tag builds carry the release version (the chart's appVersion
           # shape); main pushes get the rolling latest + sha pair.
           tags: |
-            git.vhaudiquet.fr/${{ env.OWNER }}/rhema-claw:latest
-            git.vhaudiquet.fr/${{ env.OWNER }}/rhema-claw:${{ gitea.sha }}
-            git.vhaudiquet.fr/${{ env.OWNER }}/rhema-claw:${{ steps.ver.outputs.version }}
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:latest
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ gitea.sha }}
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ steps.ver.outputs.version }}
 
   lint-and-publish-chart:
     # One Helm package repository per owner; the claw chart lands there
