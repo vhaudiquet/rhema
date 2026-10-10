@@ -4,7 +4,8 @@
 //! would: subscribe the event stream, POST a message, watch the turn go
 //! by; add and remove watches over HTTP and watch the next detect pass
 //! pick them up; talk `/v1/chat/completions` both streamed and whole;
-//! and verify a bearer token guards `/v1` while `/healthz` stays open.
+//! feed `/v1/ingest` and poll the notification queue; and verify a
+//! bearer token guards `/v1` while `/healthz` stays open.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -243,10 +244,74 @@ async fn chat_streams_turns_and_remembers_across_messages() {
         .send()
         .await
         .expect("the forged key posts");
+    assert_eq!(refused.status(), 400, "only resident keys take messages");
+}
+
+/// The other two resident prefixes take chat messages, and their turns'
+/// replies auto-notify: a `phone:` key delivers to the device its name
+/// carries, a `task:` key to the phone. Forge keys stay refused.
+#[tokio::test]
+async fn phone_and_task_keys_take_messages_and_auto_notify_their_replies() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        Arc::new(MockProvider::new([reply("on it"), reply("done")])),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    // A phone-surface message: accepted like a chat message.
+    let accepted = client
+        .post(format!("{base}/v1/sessions/phone%3Aana/messages"))
+        .json(&json!({"text": "is CI green?"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202, "phone: keys take messages");
+
+    // The reply had no subscriber: it landed in the notification table,
+    // on the device the key names.
+    let listed: Value = client
+        .get(format!("{base}/v1/notifications?device=ana"))
+        .send()
+        .await
+        .expect("the poll reads")
+        .json()
+        .await
+        .expect("the poll parses");
+    let rows = listed["notifications"].as_array().expect("rows");
+    assert_eq!(rows.len(), 1, "{listed}");
+    assert_eq!(rows[0]["body"], "on it");
+    assert_eq!(rows[0]["device"], "ana");
+    assert_eq!(rows[0]["title"], "claw");
+
+    // A task-surface message notifies the phone: the key names no
+    // device, so the default answers.
+    client
+        .post(format!("{base}/v1/sessions/task%3A7/messages"))
+        .json(&json!({"text": "check the bread"}))
+        .send()
+        .await
+        .expect("the message posts")
+        .error_for_status()
+        .expect("task: keys take messages");
+    let listed: Value = client
+        .get(format!("{base}/v1/notifications"))
+        .send()
+        .await
+        .expect("the poll reads")
+        .json()
+        .await
+        .expect("the poll parses");
+    let rows = listed["notifications"].as_array().expect("rows");
     assert_eq!(
-        refused.status(),
-        400,
-        "only interactive: keys take messages"
+        rows.iter()
+            .map(|row| row["body"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("done")],
+        "the task reply is the only outstanding phone row: {listed}"
     );
 }
 
@@ -742,4 +807,234 @@ async fn the_seed_imports_into_an_empty_table_and_then_the_table_rules() {
         "the seed never rewrites a populated table: {listed}"
     );
     assert_eq!(listed["watches"][0]["repo"], "acme/seeded", "{listed}");
+}
+
+/// The ingest door: an external event lands on its key in the resident
+/// dispatcher, an identical redelivery dedups, the daemon's own source
+/// names cannot be re-registered, and the bearer guard covers it like
+/// every `/v1` route.
+#[tokio::test]
+async fn ingest_feeds_the_resident_dispatcher_and_dedups_and_requires_auth() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, Some("sekrit")),
+        Arc::new(MockProvider::new(Vec::new())),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+    let url = format!("{base}/v1/ingest");
+    let auth = |request: reqwest::RequestBuilder| {
+        request.header(reqwest::header::AUTHORIZATION, "Bearer sekrit")
+    };
+    let body = json!({"source": "phone", "key": "phone:ana", "payload": {"text": "hello"}});
+
+    // The door is a /v1 route: open posts are refused.
+    assert_eq!(
+        client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .expect("the open post goes out")
+            .status(),
+        401
+    );
+
+    let first: Value = auth(client.post(&url))
+        .json(&body)
+        .send()
+        .await
+        .expect("the event posts")
+        .json()
+        .await
+        .expect("the answer parses");
+    assert_eq!(first, json!({"ingested": "dispatched"}), "{first}");
+
+    // The event sits on its key: the inventory — which reads the shared
+    // store through the resident dispatcher — shows the depth.
+    let sessions: Vec<Value> = auth(client.get(format!("{base}/v1/sessions")))
+        .send()
+        .await
+        .expect("sessions reads")
+        .json()
+        .await
+        .expect("sessions parses");
+    let entry = sessions
+        .iter()
+        .find(|session| session["key"] == "phone:ana")
+        .expect("the key is in the inventory");
+    assert_eq!(entry["inbox_depth"], 1, "{entry}");
+    assert_eq!(entry["state"], "idle");
+
+    // An identical redelivery dedups; the depth does not move.
+    let second: Value = auth(client.post(&url))
+        .json(&body)
+        .send()
+        .await
+        .expect("the replay posts")
+        .json()
+        .await
+        .expect("the answer parses");
+    assert_eq!(second, json!({"ingested": "duplicate"}), "{second}");
+    let sessions: Vec<Value> = auth(client.get(format!("{base}/v1/sessions")))
+        .send()
+        .await
+        .expect("sessions reads")
+        .json()
+        .await
+        .expect("sessions parses");
+    let entry = sessions
+        .iter()
+        .find(|session| session["key"] == "phone:ana")
+        .expect("the key is still in the inventory");
+    assert_eq!(entry["inbox_depth"], 1, "the dedup dropped it: {entry}");
+
+    // A changed payload re-ingests: the depth moves.
+    let changed: Value = auth(client.post(&url))
+        .json(&json!({
+            "source": "phone",
+            "key": "phone:ana",
+            "payload": {"text": "hello again"},
+        }))
+        .send()
+        .await
+        .expect("the changed post goes out")
+        .json()
+        .await
+        .expect("the answer parses");
+    assert_eq!(changed, json!({"ingested": "dispatched"}), "{changed}");
+
+    // Shape checks: empty key, non-object payload, and the daemon's own
+    // source names, which a re-register would misroute.
+    for (bad, status) in [
+        (json!({"source": "phone", "key": "  ", "payload": {}}), 400),
+        (
+            json!({"source": "phone", "key": "phone:ana", "payload": [1]}),
+            422,
+        ),
+        (
+            json!({"source": "github", "key": "phone:ana", "payload": {}}),
+            400,
+        ),
+        (
+            json!({"source": "tasks", "key": "phone:ana", "payload": {}}),
+            400,
+        ),
+    ] {
+        let response = auth(client.post(&url))
+            .json(&bad)
+            .send()
+            .await
+            .expect("the bad post goes out");
+        assert_eq!(response.status(), status, "{bad}");
+    }
+}
+
+/// The notification queue over HTTP: a second connection to the same db
+/// file — exactly what the handler's notify tool gets — lands in the
+/// queue the routes read; the poll returns a device's outstanding rows
+/// ascending, `since` and `device` filter, and the ack delivers.
+#[tokio::test]
+async fn notifications_round_trip_over_http() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        Arc::new(MockProvider::new(Vec::new())),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let store = Arc::new(
+        rhema_claw::NotificationStore::open(dir.path().join("dispatch.db")).expect("reopens"),
+    );
+    let first = store.push("phone", "claw", "first").expect("push lands");
+    let second = store.push("phone", "claw", "second").expect("push lands");
+    store.push("watch", "claw", "wrist").expect("push lands");
+
+    // The default queue is the phone's: two outstanding, ascending.
+    let listed: Value = client
+        .get(format!("{base}/v1/notifications"))
+        .send()
+        .await
+        .expect("the poll reads")
+        .json()
+        .await
+        .expect("the poll parses");
+    let rows = listed["notifications"].as_array().expect("rows");
+    assert_eq!(
+        rows.iter()
+            .map(|row| row["body"].as_str())
+            .collect::<Vec<_>>(),
+        [Some("first"), Some("second")],
+        "{listed}"
+    );
+    assert_eq!(rows[0]["device"], "phone");
+    assert!(rows[0]["delivered_at"].is_null(), "outstanding");
+
+    // `since` skips what the device saw; `device` picks the queue.
+    let since = first.id;
+    let listed: Value = client
+        .get(format!(
+            "{base}/v1/notifications?device=phone&since={since}"
+        ))
+        .send()
+        .await
+        .expect("the poll reads")
+        .json()
+        .await
+        .expect("the poll parses");
+    assert_eq!(
+        listed["notifications"].as_array().map(Vec::len),
+        Some(1),
+        "{listed}"
+    );
+    let listed: Value = client
+        .get(format!("{base}/v1/notifications?device=watch"))
+        .send()
+        .await
+        .expect("the poll reads")
+        .json()
+        .await
+        .expect("the poll parses");
+    assert_eq!(listed["notifications"][0]["body"], "wrist", "{listed}");
+
+    // Acking delivers: the row stops answering, a re-ack is a quiet
+    // false, and an unknown id is refused the same quiet way.
+    let acked: Value = client
+        .post(format!("{base}/v1/notifications/{}/ack", second.id))
+        .send()
+        .await
+        .expect("the ack posts")
+        .json()
+        .await
+        .expect("the ack parses");
+    assert_eq!(acked, json!({"acked": true}), "{acked}");
+    let listed: Value = client
+        .get(format!("{base}/v1/notifications"))
+        .send()
+        .await
+        .expect("the poll reads")
+        .json()
+        .await
+        .expect("the poll parses");
+    assert_eq!(
+        listed["notifications"].as_array().map(Vec::len),
+        Some(1),
+        "the acked row is delivered: {listed}"
+    );
+    for id in [second.id, 10_000] {
+        let acked: Value = client
+            .post(format!("{base}/v1/notifications/{id}/ack"))
+            .send()
+            .await
+            .expect("the ack posts")
+            .json()
+            .await
+            .expect("the ack parses");
+        assert_eq!(acked, json!({"acked": false}), "{acked}");
+    }
 }

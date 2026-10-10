@@ -5,14 +5,18 @@
 //! rhema-framework-v1.md): detection is deterministic code, never the
 //! model (§1) — every timer here drives a detect pass and an admission
 //! step, and the model is reached only inside a handler run; there is no
-//! periodic, unconditional model-invoking timer (§7); and the open
-//! interactive surface never resolves keys (§6.2) — one
-//! `interactive:<name>` key is one owned session, forever. Two
-//! dispatchers share one SQLite store: the forge dispatcher turns watch
-//! activity into [`ClawHandler`] runs (one turn per dispatch, the final
-//! text posted back as the thread's comment), the interactive
-//! dispatcher turns chat messages into [`InteractiveHandler`] runs (one
-//! turn per dispatch, the final text streamed to the subscriber).
+//! periodic, unconditional model-invoking timer (§7) — a scheduled task
+//! is an event the [`TaskScheduler`] detects, not a heartbeat; and the
+//! open interactive surface never resolves keys (§6.2) — one resident
+//! key is one owned session, forever. Two dispatchers share one SQLite
+//! store: the forge dispatcher turns watch activity into [`ClawHandler`]
+//! runs (one turn per dispatch, the final text posted back as the
+//! thread's comment); the resident dispatcher — keys prefixed
+//! `interactive:`, `task:`, or `phone:`, the contract
+//! [`interactive`] documents — turns chat messages, `/v1/ingest`
+//! events, and due tasks into [`InteractiveHandler`] runs (one turn per
+//! dispatch, streamed to a chat subscriber or auto-notified to a
+//! device).
 //!
 //! Layout:
 //! - [`config`] — the YAML config: the watch seed, paths, HTTP surface,
@@ -20,14 +24,22 @@
 //! - [`bootstrap`] — the SOUL/USER/ENVIRONMENT store, the system prompt
 //!   rendered from it per dispatch, and the `bootstrap_save` tool
 //! - [`watch_store`] — the persistent watch table (SQLite, shared file)
+//! - [`notifications`] — the notification table: the outbound queue the
+//!   devices poll and ack
+//! - [`task_store`] — the task table: scheduled prompts, inert until the
+//!   scheduler detects them due
 //! - [`hub`] — the event hub: per-key broadcast of live turn events
 //! - [`watch_tools`] — the agent's watch-management tool set
+//! - [`notify_tools`] — the `notify` tool: the queue a device polls
+//! - [`task_tools`] — `schedule_task`, `list_tasks`, `cancel_task`
 //! - [`forge`] — the sources: one detectable stream per forge kind
+//! - [`task_source`] — the [`TaskScheduler`]: due tasks in, events out
 //! - [`handler`] — the forge dispatch: snapshot, inbox, one turn, one
 //!   comment
-//! - [`interactive`] — the interactive dispatch: inbox, one turn, one
-//!   streamed reply
-//! - [`http`] — the routes: chat, sessions, watches, the event stream
+//! - [`interactive`] — the resident dispatch: the key-prefix contract,
+//!   inbox, one turn, one streamed reply, auto-notify
+//! - [`http`] — the routes: chat, sessions, watches, ingest,
+//!   notifications, the event stream
 //! - [`openai`] — the `/v1/chat/completions` shim for stock web UIs
 //! - [`daemon`] — the assembly and the loop (`run` with HTTP, and the
 //!   headless `--once` shape [`run_once`])
@@ -46,7 +58,12 @@ pub mod hub;
 pub mod interactive;
 #[cfg(feature = "mock")]
 pub mod mock;
+pub mod notifications;
+pub mod notify_tools;
 pub mod openai;
+pub mod task_source;
+pub mod task_store;
+pub mod task_tools;
 pub mod watch_store;
 pub mod watch_tools;
 
@@ -63,4 +80,7 @@ pub use hub::{EventHub, TurnEvent};
 pub use interactive::InteractiveHandler;
 #[cfg(feature = "mock")]
 pub use mock::MockLoop;
+pub use notifications::{NotificationRecord, NotificationStore, NotificationStoreError};
+pub use task_source::{TASKS_SOURCE, TaskScheduler};
+pub use task_store::{TaskKind, TaskRecord, TaskStore, TaskStoreError};
 pub use watch_store::{ClawStore, WatchRecord, WatchStoreError};

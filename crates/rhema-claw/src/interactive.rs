@@ -1,14 +1,29 @@
-//! The interactive handler: one dispatch of `interactive:<name>` is one
-//! chat turn, and the turn's final text is the reply the subscriber
-//! sees.
+//! The resident handler: one dispatch of a resident-context key is one
+//! agent turn, and the turn's final text is the reply.
 //!
-//! The open interactive surface never resolves keys (spec §6.2): every
+//! **The prefix contract** — the one split between the two handlers on
+//! the shared store, documented here and nowhere else: every key the
+//! resident dispatcher's handler answers to starts with one of
+//! [`RESIDENT_PREFIXES`] — `interactive:<name>` for the live chat
+//! surface, `task:<n>` for scheduled tasks, `phone:<device>` for the
+//! phone client's sessions. Forge keys (they carry `#`) belong to the
+//! forge handler. [`is_resident_key`] is the contract's only arbiter;
+//! the HTTP surface and the source key functions defer to it.
+//!
+//! The live interactive surface never resolves keys (spec §6.2): every
 //! message on `interactive:<name>` belongs to that session by
 //! construction — the source's key function is the payload's `key`
 //! verbatim, and the handler's only classification is "none". One
 //! dispatch drains the inbox and folds every drained text into ONE user
 //! input (the spec §3 batching rule), so a burst of quick messages costs
 //! one reasoning step, not one per message.
+//!
+//! **The delivery rule:** `interactive:` keys reply into the live chat
+//! surface (the event hub's stream). Task and phone keys have no chat
+//! surface to reply into, so the turn's final text auto-notifies the
+//! key's device — `phone` unless the key names one — through the
+//! notification table ([`crate::notifications`]); the `notify` tool
+//! remains the model's explicit channel, this is the implicit one.
 //!
 //! Continuity rides the dispatcher exactly as the forge handler's does:
 //! the whole [`rhema_core::Session`] is stashed into
@@ -19,10 +34,11 @@
 //!
 //! Deterministic setup first (spec §1, §8): the allowlist — permissive,
 //! v1's starting point — and the resolver chain (the coding toolset over
-//! the interactive workspace, the memory tools, `bootstrap_save`, and
-//! the watch tools) are assembled before the first model call; the model
-//! never decides its own permissions. The system prompt is rendered per
-//! dispatch from the bootstrap template over the live SOUL/USER files.
+//! the interactive workspace, the memory tools, `bootstrap_save`, the
+//! notify tool, the task tools, and the watch tools) are assembled
+//! before the first model call; the model never decides its own
+//! permissions. The system prompt is rendered per dispatch from the
+//! bootstrap template over the live SOUL/USER files.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -37,16 +53,23 @@ use rhema_core::{
     ToolContext, run_turn,
 };
 use rhema_memory::{MemoryResolver, MemoryStore, Scope};
-use rhema_rsd::{Dispatcher, Event, Outcome, ResourceKey};
+use rhema_rsd::{Dispatcher, Event, KeyFn, Outcome, ResourceKey};
 use serde_json::{Value, json};
 
 use crate::bootstrap::{Bootstrap, DEFAULT_SYSTEM_MD, render_system};
 use crate::hub::{EventHub, TurnEvent};
+use crate::notifications::NotificationStore;
 use crate::watch_store::ClawStore;
 
-/// The prefix every interactive dispatch key carries:
-/// `interactive:<name>` — the name is the caller's label for the
-/// session (`web`, a chat window, a script).
+/// The key prefixes of the resident context (see the module docs):
+/// `interactive:`, `task:`, and `phone:`. Forge keys — they carry `#` —
+/// belong to the forge handler; these three and nothing else belong to
+/// this one.
+pub const RESIDENT_PREFIXES: [&str; 3] = ["interactive:", "task:", "phone:"];
+
+/// The prefix of the live chat surface's keys: `interactive:<name>` —
+/// the name is the caller's label for the session (`web`, a chat
+/// window, a script). The OpenAI shim speaks this prefix only.
 pub const KEY_PREFIX: &str = "interactive:";
 
 /// The source name the interactive messages ingest under.
@@ -57,25 +80,49 @@ pub const SOURCE: &str = "user";
 /// keeps going.
 const MAX_TURN_ITERATIONS: u32 = 16;
 
-/// Registers the interactive source on its dispatcher: the passthrough
-/// key function, the payload's `key` verbatim. A payload without a key
-/// still gets its own unique key — the infallible-seam rule the forge
-/// sources follow — so it can neither clobber a session nor wedge the
-/// dispatcher. Run once, before the first ingest.
+/// The title an auto-notified reply carries: the resident's name — the
+/// reply itself is the body, the key it came from is the session.
+const AUTO_NOTIFY_TITLE: &str = "claw";
+
+/// Whether `key` belongs to the resident context ([`RESIDENT_PREFIXES`])
+/// — the check the messages route and the generic ingest gate keys on.
+pub fn is_resident_key(key: &str) -> bool {
+    RESIDENT_PREFIXES
+        .iter()
+        .any(|prefix| key.starts_with(prefix))
+}
+
+/// The notification device a resident key replies to: the suffix a
+/// `phone:` key names (`phone:desk` → `desk`),
+/// [`DEFAULT_DEVICE`](crate::notifications::DEFAULT_DEVICE) otherwise —
+/// `task:` keys always notify the phone.
+fn notify_device(key: &str) -> &str {
+    key.strip_prefix("phone:")
+        .filter(|device| !device.is_empty())
+        .unwrap_or(crate::notifications::DEFAULT_DEVICE)
+}
+
+/// The passthrough key function the resident context's sources share
+/// (`user`, `tasks`, and every generic `/v1/ingest` source): the
+/// payload's `key` verbatim — one key, one owned session (spec §6.2) —
+/// with the infallible unique-key fallback the forge sources use, so a
+/// keyless payload can neither clobber a session nor wedge the
+/// dispatcher; it lands in the resident context's unroutable slot.
+pub fn passthrough_key_fn() -> Arc<KeyFn> {
+    Arc::new(|event: &Event| {
+        event
+            .payload
+            .get("key")
+            .and_then(Value::as_str)
+            .map(ResourceKey::from)
+            .unwrap_or_else(|| ResourceKey::from(format!("{KEY_PREFIX}unroutable#{}", event.id)))
+    })
+}
+
+/// Registers the interactive source on its dispatcher. Run once, before
+/// the first ingest.
 pub fn register_user(dispatcher: &Dispatcher) {
-    dispatcher.register_source(
-        SOURCE,
-        Arc::new(move |event: &Event| {
-            event
-                .payload
-                .get("key")
-                .and_then(Value::as_str)
-                .map(ResourceKey::from)
-                .unwrap_or_else(|| {
-                    ResourceKey::from(format!("{KEY_PREFIX}unroutable#{}", event.id))
-                })
-        }),
-    );
+    dispatcher.register_source(SOURCE, passthrough_key_fn());
 }
 
 /// The event one chat message becomes. The id is unique per message (a
@@ -100,13 +147,16 @@ pub fn user_event(key: &str, text: &str) -> Event {
 
 /// The resident agent: a provider, a model, one shared workspace, the
 /// bootstrap store its identity files live in, the watch table its
-/// tools manage, and the hub its turns stream through.
+/// tools manage, the notification table it reaches devices through, and
+/// the hub its turns stream through.
 pub struct InteractiveHandler {
     provider: Arc<dyn rhema_core::ModelProvider>,
     model: String,
     workspace: PathBuf,
     tools: Arc<CodingTools>,
     watch_resolver: Arc<dyn rhema_core::ToolResolver>,
+    notify_resolver: Arc<dyn rhema_core::ToolResolver>,
+    task_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// The durable cross-session store the memory tools act on; the
     /// resolver is built per dispatch so its scope tracks the workspace.
     memory: Arc<dyn MemoryStore>,
@@ -115,14 +165,20 @@ pub struct InteractiveHandler {
     bootstrap: Arc<Bootstrap>,
     bootstrap_resolver: Arc<dyn rhema_core::ToolResolver>,
     hub: Arc<EventHub>,
+    /// The notification table: the `notify` tool writes it, and
+    /// non-interactive replies auto-notify through it.
+    notifications: Arc<NotificationStore>,
 }
 
 impl InteractiveHandler {
     /// A handler whose chat turns run in `workspace` (the interactive
-    /// scratch space under the daemon's workspace root) and whose watch
-    /// tools mutate `watches`. Approval is v1-permissive — the shell is
-    /// the point of a resident coding agent — installed once, since
-    /// resolution is synchronous within a turn.
+    /// scratch space under the daemon's workspace root), whose watch
+    /// tools mutate `watches`, whose notifications land in
+    /// `notifications`, and whose task tools manage `tasks`. Approval is
+    /// v1-permissive — the shell is the point of a resident coding
+    /// agent — installed once, since resolution is synchronous within a
+    /// turn.
+    #[allow(clippy::too_many_arguments)] // nine parts, each load-bearing
     pub fn new(
         provider: Arc<dyn rhema_core::ModelProvider>,
         model: impl Into<String>,
@@ -131,12 +187,18 @@ impl InteractiveHandler {
         memory: Arc<dyn MemoryStore>,
         bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
+        notifications: Arc<NotificationStore>,
+        tasks: Arc<crate::task_store::TaskStore>,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(CodingTools::new(&workspace));
         tools.install_approval(Arc::new(AllowAll));
         let watch_resolver =
             crate::watch_tools::registry(watches).resolver_for(&Allowlist::permissive());
+        let notify_resolver = crate::notify_tools::registry(notifications.clone())
+            .resolver_for(&Allowlist::permissive());
+        let task_resolver =
+            crate::task_tools::registry(tasks).resolver_for(&Allowlist::permissive());
         let bootstrap_resolver =
             crate::bootstrap::registry(bootstrap.clone()).resolver_for(&Allowlist::permissive());
         Self {
@@ -145,10 +207,13 @@ impl InteractiveHandler {
             workspace,
             tools,
             watch_resolver,
+            notify_resolver,
+            task_resolver,
             memory,
             bootstrap,
             bootstrap_resolver,
             hub,
+            notifications,
         }
     }
 
@@ -170,6 +235,8 @@ impl InteractiveHandler {
                     Scope::Workspace(self.workspace.clone()),
                 )),
                 self.bootstrap_resolver.clone(),
+                self.notify_resolver.clone(),
+                self.task_resolver.clone(),
                 self.watch_resolver.clone(),
             ])))
             .system(system)
@@ -182,19 +249,39 @@ impl InteractiveHandler {
     async fn dispatch(&self, ctx: &mut SessionContext) -> Result<Option<String>, String> {
         let key = ctx.key.as_str().to_owned();
         // Renews the lease and drains: every text since the last poll,
-        // folded into one input (spec §3's batching rule).
+        // folded into one input (spec §3's batching rule). Chat events
+        // carry `text`, scheduled tasks carry `prompt` — both are turn
+        // input, and a mixed batch folds in arrival order.
         let items = ctx
             .poll_inbox()
             .await
             .map_err(|err| format!("inbox poll for {key} failed: {err}"))?;
         let input = items
             .iter()
-            .filter_map(|item| item.event.payload.get("text").and_then(Value::as_str))
+            .filter_map(|item| {
+                item.event
+                    .payload
+                    .get("text")
+                    .or_else(|| item.event.payload.get("prompt"))
+                    .and_then(Value::as_str)
+            })
             .collect::<Vec<_>>()
             .join("\n\n");
         if input.trim().is_empty() {
             return Err(format!("dispatch for {key} carried no text"));
         }
+        // A non-chat resident key has no subscriber to read the reply:
+        // say so in the input, so the model writes for the notification
+        // the final message becomes.
+        let input = if is_resident_key(&key) && !key.starts_with(KEY_PREFIX) {
+            format!(
+                "[Turn on {key}: this session has no live chat surface — \
+                 your final message is delivered to the user as a \
+                 notification.]\n\n{input}"
+            )
+        } else {
+            input
+        };
 
         let mut session = restore_session(&ctx.session.core.driver_state, &key)?;
         let mut agent = self.agent()?;
@@ -233,6 +320,7 @@ impl Handler for InteractiveHandler {
         let key = ctx.key.clone();
         match self.dispatch(ctx).await {
             Ok(reply) => {
+                self.auto_notify(&key, reply.as_deref());
                 self.hub.emit(
                     &key,
                     TurnEvent::TurnDone {
@@ -255,6 +343,27 @@ impl Handler for InteractiveHandler {
                 );
                 Outcome::Failed(reason)
             }
+        }
+    }
+}
+
+impl InteractiveHandler {
+    /// The auto-notify contract (see the module docs): a non-chat
+    /// resident key's reply has no subscriber, so the final text posts
+    /// as a notification on the key's device — `phone` unless the key
+    /// names one. A failed push is logged, never failed over: the turn
+    /// ran, and a re-dispatch would find an empty inbox. Interactive
+    /// keys and reply-less turns notify nothing.
+    fn auto_notify(&self, key: &ResourceKey, reply: Option<&str>) {
+        if key.as_str().starts_with(KEY_PREFIX) {
+            return;
+        }
+        let Some(text) = reply else {
+            return;
+        };
+        let device = notify_device(key.as_str());
+        if let Err(err) = self.notifications.push(device, AUTO_NOTIFY_TITLE, text) {
+            eprintln!("[claw] warning: auto-notify for {key} failed: {err}");
         }
     }
 }
@@ -350,6 +459,9 @@ mod tests {
     use super::*;
     use std::path::Path;
 
+    use crate::notifications::NotificationStore;
+    use crate::task_store::TaskStore;
+
     use rhema_core::{
         Content, Message as CoreMessage, MockProvider, ModelOutput, Role as CoreRole, StopReason,
         ToolCall, Usage,
@@ -357,6 +469,18 @@ mod tests {
     use rhema_rsd::{
         DispatcherConfig, KeyState, Outcome as RsdOutcome, ResourceKey as Key, VolatileStore,
     };
+
+    /// A throwaway notification table, the shape the dispatch tests hand
+    /// the handler.
+    fn notifications() -> Arc<NotificationStore> {
+        Arc::new(NotificationStore::in_memory().expect("store opens"))
+    }
+
+    /// A throwaway task table, the shape the dispatch tests hand the
+    /// handler.
+    fn tasks() -> Arc<TaskStore> {
+        Arc::new(TaskStore::in_memory().expect("store opens"))
+    }
 
     fn reply(text: &str) -> ModelOutput {
         ModelOutput {
@@ -404,6 +528,10 @@ mod tests {
             "memory_save",
             "memory_search",
             "bootstrap_save",
+            "notify",
+            "schedule_task",
+            "list_tasks",
+            "cancel_task",
         ] {
             assert!(prompt.contains(tool), "missing {tool}: {prompt}");
         }
@@ -411,6 +539,30 @@ mod tests {
         // A fresh store is pending onboarding: the offered setup renders.
         assert!(prompt.contains("## Setup"), "{prompt}");
         assert!(prompt.contains("(pending onboarding)"), "{prompt}");
+    }
+
+    #[test]
+    fn the_prefix_contract_splits_the_resident_context_from_the_forge() {
+        for key in ["interactive:web", "task:5", "phone:ana", "phone:"] {
+            assert!(is_resident_key(key), "{key} is resident");
+        }
+        for key in [
+            "github:acme/widgets#7",
+            "gitea:acme/barn#1",
+            "interactive",
+            "tasks",
+            "task",
+        ] {
+            assert!(!is_resident_key(key), "{key} is not resident");
+        }
+    }
+
+    #[test]
+    fn a_phone_key_names_its_device_and_a_task_key_notifies_the_phone() {
+        assert_eq!(notify_device("task:5"), "phone");
+        assert_eq!(notify_device("phone:desk"), "desk");
+        assert_eq!(notify_device("phone:"), "phone", "no suffix, the default");
+        assert_eq!(notify_device("interactive:web"), "phone", "never reached");
     }
 
     #[test]
@@ -515,6 +667,8 @@ mod tests {
             Arc::new(rhema_memory::VolatileStore::new()),
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
+            notifications(),
+            tasks(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -588,6 +742,8 @@ mod tests {
             memory.clone(),
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub,
+            notifications(),
+            tasks(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -676,6 +832,8 @@ mod tests {
             Arc::new(rhema_memory::VolatileStore::new()),
             bootstrap.clone(),
             hub,
+            notifications(),
+            tasks(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -740,6 +898,8 @@ mod tests {
             Arc::new(rhema_memory::VolatileStore::new()),
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub,
+            notifications(),
+            tasks(),
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -779,6 +939,115 @@ mod tests {
                 (CoreRole::User, "hello".to_owned()),
                 (CoreRole::Assistant, "hi back".to_owned()),
             ]
+        );
+    }
+
+    /// The auto-notify contract, end to end: a `task:` dispatch runs the
+    /// prompt as a turn and its reply lands in the notification table on
+    /// the phone; an `interactive:` dispatch replies into the hub and
+    /// notifies nothing.
+    #[tokio::test]
+    async fn a_task_dispatch_runs_the_prompt_and_auto_notifies_the_phone() {
+        use rhema_rsd::Store;
+
+        let notifications = notifications();
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        let hub = Arc::new(EventHub::default());
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let backing = Arc::new(VolatileStore::new());
+        let handler = Arc::new(InteractiveHandler::new(
+            Arc::new(MockProvider::new([
+                reply("the bread is done."),
+                reply("hi back"),
+            ])),
+            "test-model",
+            workspace.path().join("interactive"),
+            store,
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub,
+            notifications.clone(),
+            tasks(),
+        ));
+
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            backing.clone(),
+        ));
+        register_user(&dispatcher);
+        // The source registration the daemon's assembly performs.
+        let _scheduler = crate::task_source::TaskScheduler::new(
+            &dispatcher,
+            Arc::new(rhema_rsd::SystemClock),
+            tasks(),
+        );
+        let driver =
+            rhema_autonomous_agent::Driver::new(dispatcher.clone(), handler).with_holder("test");
+
+        // The event shape TaskScheduler::detect delivers: the prompt is
+        // the payload's `prompt`, the key is the task's.
+        dispatcher
+            .ingest(Event {
+                id: "task-1@1500".into(),
+                source: crate::task_source::TASKS_SOURCE.into(),
+                payload: json!({ "key": "task:1", "prompt": "check the bread" }),
+                received_at: 1_500,
+            })
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("the run happens"),
+            vec![RsdOutcome::Handled]
+        );
+
+        // The reply reached the phone: the key names no device, so the
+        // auto-notify rule answers to the default.
+        let pending = notifications.pending("phone", 0).expect("poll reads");
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].device, "phone");
+        assert_eq!(pending[0].title, "claw");
+        assert_eq!(pending[0].body, "the bread is done.");
+
+        // The turn ran with the prompt — the stashed session carries it
+        // verbatim, under the delivery-contract framing.
+        let record = backing
+            .load(&Key::from("task:1"))
+            .expect("the record loads")
+            .expect("the key has a record");
+        let stashed: Session =
+            serde_json::from_value(record.session.expect("a session").core.driver_state)
+                .expect("the stash parses");
+        let user_texts: Vec<&str> = stashed
+            .history
+            .iter()
+            .filter_map(|message| match &message.content[0] {
+                Content::Text(text) if message.role == Role::User => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts.len(), 1, "{user_texts:?}");
+        assert!(user_texts[0].contains("check the bread"), "{user_texts:?}");
+        assert!(
+            user_texts[0].contains("notification"),
+            "the delivery contract rode in: {user_texts:?}"
+        );
+
+        // An interactive reply is the chat surface's business: notified
+        // nowhere.
+        dispatcher
+            .ingest(user_event("interactive:web", "hello"))
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("the run happens"),
+            vec![RsdOutcome::Handled]
+        );
+        assert_eq!(
+            notifications.pending("phone", 0).expect("poll reads").len(),
+            1,
+            "still just the task's notification"
         );
     }
 }

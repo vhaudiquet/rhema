@@ -1,7 +1,8 @@
 //! The HTTP surface: the resident agent's chat routes, its session
-//! inventory, its watch CRUD, and its setup badge (`/v1/bootstrap`) —
-//! plus the health probe that stays open when everything else is
-//! tokened.
+//! inventory, its watch CRUD, its setup badge (`/v1/bootstrap`), the
+//! external-event ingress (`/v1/ingest`), the notification queue the
+//! devices poll, and the health probe that stays open when everything
+//! else is tokened.
 //!
 //! The shape of a chat request, end to end: subscribe the hub FIRST
 //! (nothing emitted before a subscriber exists is ever streamed to it),
@@ -16,11 +17,12 @@
 //! [`MAX_DRAIN_PASSES`] and leaves the rest to the daemon's tick, which
 //! drains the interactive dispatcher as its backstop.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::{Path, Request, State};
+use axum::extract::{Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -28,7 +30,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use rhema_autonomous_agent::Driver;
-use rhema_rsd::{DispatchError, Dispatcher, KeyState, ResourceKey, SqliteStore, Store};
+use rhema_rsd::{
+    DispatchError, Dispatcher, IngestResult, KeyState, ResourceKey, SqliteStore, Store,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
@@ -36,7 +40,7 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::bootstrap::Bootstrap;
 use crate::hub::{EventHub, TurnEvent};
-use crate::interactive::KEY_PREFIX;
+use crate::notifications::NotificationStore;
 use crate::watch_store::{ClawStore, validate_watch};
 
 /// How many `run_once` passes one POST may spend draining.
@@ -53,23 +57,29 @@ pub struct ClawState {
     driver: Arc<Driver>,
     store: Arc<SqliteStore>,
     watches: Arc<ClawStore>,
+    notifications: Arc<NotificationStore>,
     bootstrap: Arc<Bootstrap>,
     hub: Arc<EventHub>,
     model: String,
     token: Option<String>,
+    /// The generic sources `/v1/ingest` has registered on the
+    /// dispatcher, so a source name registers exactly once however many
+    /// events race in through it.
+    generic_sources: Arc<Mutex<BTreeSet<String>>>,
 }
 
 impl ClawState {
     /// The state over the interactive dispatcher and its driver, the
-    /// shared dispatch store, the watch table, the bootstrap store, the
-    /// event hub, and the configured `model` (the shim's echo default)
-    /// and bearer `token`.
-    #[allow(clippy::too_many_arguments)] // eight parts, each load-bearing
+    /// shared dispatch store, the watch table, the notification table,
+    /// the bootstrap store, the event hub, and the configured `model`
+    /// (the shim's echo default) and bearer `token`.
+    #[allow(clippy::too_many_arguments)] // nine parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
         store: Arc<SqliteStore>,
         watches: Arc<ClawStore>,
+        notifications: Arc<NotificationStore>,
         bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
         model: impl Into<String>,
@@ -80,10 +90,12 @@ impl ClawState {
             driver,
             store,
             watches,
+            notifications,
             bootstrap,
             hub,
             model: model.into(),
             token,
+            generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
@@ -140,6 +152,9 @@ pub fn router(state: ClawState) -> Router {
         .route("/bootstrap", get(bootstrap_status))
         .route("/watches", get(watches_list).post(watches_add))
         .route("/watches/{forge}/{*repo}", delete(watches_remove))
+        .route("/ingest", post(ingest))
+        .route("/notifications", get(notifications_list))
+        .route("/notifications/{id}/ack", post(notifications_ack))
         .route("/chat/completions", post(crate::openai::chat_completions))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
@@ -205,10 +220,10 @@ async fn messages(
     Path(key): Path<String>,
     Json(body): Json<MessageBody>,
 ) -> Response {
-    if !key.starts_with(KEY_PREFIX) {
+    if !crate::interactive::is_resident_key(&key) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({"error": format!("key must start with {KEY_PREFIX:?}")})),
+            Json(json!({"error": "key must start with interactive:, task:, or phone:"})),
         )
             .into_response();
     }
@@ -375,6 +390,184 @@ async fn watches_remove(
     }
 }
 
+/// `{"source": "...", "key": "...", "payload": {...}}` — one external
+/// event: the phone's reporting door, and any future emitter's.
+#[derive(Deserialize)]
+pub struct IngestBody {
+    /// The source name the event ingests under; registered on first use.
+    pub source: String,
+    /// The resource key the event dispatches to, verbatim.
+    pub key: String,
+    /// The event body; the key rides inside it for the handler.
+    pub payload: Value,
+}
+
+/// The source names the daemon's own assembly registers. `/v1/ingest`
+/// cannot re-register them: `register_source` replaces, and a generic
+/// passthrough landing over the forge or task key functions would
+/// misroute every later event of those sources.
+fn is_reserved_source(source: &str) -> bool {
+    matches!(
+        source,
+        crate::interactive::SOURCE | crate::task_source::TASKS_SOURCE
+    ) || crate::config::ForgeKind::parse(source).is_some()
+}
+
+/// The external event's dedup id: a hash of the request's coordinates
+/// (key plus canonical payload), so an identical redelivery dedups and
+/// any change re-ingests — the caller's retry and the dispatcher's
+/// at-least-once contract meet here.
+fn dedup_id(key: &str, payload: &Value) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    payload.to_string().hash(&mut hasher);
+    format!("ext-{:016x}", hasher.finish())
+}
+
+/// What an ingest result says on the wire: the interactive dispatcher's
+/// debounce window is zero, so `DebouncePending` means the event is
+/// queued for the next driver pass — "dispatched".
+fn ingest_tag(result: IngestResult) -> &'static str {
+    match result {
+        IngestResult::DeliveredLive => "live",
+        IngestResult::DebouncePending => "dispatched",
+        IngestResult::Duplicate => "duplicate",
+    }
+}
+
+impl ClawState {
+    /// Ingests one external event into the resident dispatcher under
+    /// `source`. The source registers lazily on first use — the same
+    /// passthrough key function the resident context's own sources use,
+    /// reading `payload["key"]` verbatim with the infallible
+    /// unique-key fallback — so a source nobody has seen before needs no
+    /// restart and no config.
+    pub fn ingest_external(
+        &self,
+        source: &str,
+        key: &str,
+        payload: Value,
+    ) -> Result<IngestResult, DispatchError> {
+        {
+            let mut known = self
+                .generic_sources
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            if known.insert(source.to_owned()) {
+                self.dispatcher
+                    .register_source(source, crate::interactive::passthrough_key_fn());
+            }
+        }
+        // The key_fn reads the payload: the request's key rides inside
+        // it, top-level winning over anything the body carried.
+        let mut payload = payload;
+        payload["key"] = json!(key);
+        let event = rhema_rsd::Event {
+            id: dedup_id(key, &payload),
+            source: source.to_owned(),
+            payload,
+            received_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        };
+        self.dispatcher.ingest(event)
+    }
+}
+
+async fn ingest(State(state): State<ClawState>, Json(body): Json<IngestBody>) -> Response {
+    let source = body.source.trim();
+    if source.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "source must not be empty"})),
+        )
+            .into_response();
+    }
+    if is_reserved_source(source) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!(
+                "source {source:?} is reserved by the daemon's own sources"
+            )})),
+        )
+            .into_response();
+    }
+    let key = body.key.trim();
+    if key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "key must not be empty"})),
+        )
+            .into_response();
+    }
+    if !body.payload.is_object() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": "payload must be a JSON object"})),
+        )
+            .into_response();
+    }
+    match state.ingest_external(source, key, body.payload) {
+        Ok(result) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ingested": ingest_tag(result) })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// The poll's query: which device, and the last notification id the
+/// caller already saw.
+#[derive(Deserialize)]
+pub struct NotificationQuery {
+    /// The device queue to read; the phone when unset.
+    pub device: Option<String>,
+    /// Only notifications with a greater id; `0` when unset.
+    pub since: Option<i64>,
+}
+
+/// The device's outstanding notifications, ascending by id. Delivered
+/// rows stop answering once acked; an unacked row keeps coming back, so
+/// a poll-and-ack device sees every notification at least once.
+async fn notifications_list(
+    State(state): State<ClawState>,
+    Query(query): Query<NotificationQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let device = query
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|device| !device.is_empty())
+        .unwrap_or(crate::notifications::DEFAULT_DEVICE);
+    let since = query.since.unwrap_or(0);
+    let notifications = state
+        .notifications
+        .pending(device, since)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(json!({ "notifications": notifications })))
+}
+
+/// Marks one notification delivered. Idempotent: `false` when the id is
+/// unknown or already acked.
+async fn notifications_ack(State(state): State<ClawState>, Path(id): Path<i64>) -> Response {
+    match state.notifications.ack(id) {
+        Ok(acked) => (StatusCode::OK, Json(json!({ "acked": acked }))).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// Drains the interactive dispatcher around one triggered message: run
 /// passes until one admits nothing and `key` has nothing waiting, capped
 /// at [`MAX_DRAIN_PASSES`] — a message delivered live into a running
@@ -412,5 +605,39 @@ mod tests {
             serde_json::to_value(rhema_rsd::Outcome::Handled).unwrap(),
             "Handled"
         );
+    }
+
+    #[test]
+    fn an_ingest_result_reads_as_the_wire_tag() {
+        assert_eq!(ingest_tag(IngestResult::DebouncePending), "dispatched");
+        assert_eq!(ingest_tag(IngestResult::DeliveredLive), "live");
+        assert_eq!(ingest_tag(IngestResult::Duplicate), "duplicate");
+    }
+
+    #[test]
+    fn a_dedup_id_is_stable_per_coordinates_and_moves_with_the_payload() {
+        let payload = json!({"text": "hello"});
+        let first = dedup_id("phone:ana", &payload);
+        assert_eq!(first, dedup_id("phone:ana", &payload), "same post, same id");
+        assert_ne!(
+            first,
+            dedup_id("phone:ana", &json!({"text": "hello again"})),
+            "a different payload re-ingests"
+        );
+        assert_ne!(
+            first,
+            dedup_id("phone:bob", &payload),
+            "a different key re-ingests"
+        );
+    }
+
+    #[test]
+    fn the_daemons_own_source_names_are_reserved() {
+        for name in ["github", "gitea", "gitlab", "user", "tasks"] {
+            assert!(is_reserved_source(name), "{name} is reserved");
+        }
+        for name in ["phone", "weather", "telegram"] {
+            assert!(!is_reserved_source(name), "{name} is free");
+        }
     }
 }

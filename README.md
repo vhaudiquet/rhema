@@ -296,6 +296,8 @@ POST /v1/sessions/{key}/messages       {"text": "..."}   -> 202
 GET  /v1/sessions/{key}/events         SSE turn events (see below)
 GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{forge}/{repo}
 GET  /v1/bootstrap                     {"soul": bool, "user": bool}
+POST /v1/ingest                         {"source","key","payload"} -> 202
+GET  /v1/notifications?device=&since=   POST /v1/notifications/{id}/ack
 ```
 
 ### Identity and first-run
@@ -320,6 +322,16 @@ SSE frames are JSON, `data: {..}
 `/events` once, POSTs messages, and renders the stream per turn; the
 daemon owns the conversation, so the client mirrors replies rather than
 managing history.
+
+The claw registers RSD sources three ways: watches (forge), scheduled
+tasks the agent creates in chat (`schedule_task` with `at` or
+`every_secs`; a due task dispatches `task:<id>` through the resident
+agent, whose reply auto-notifies the phone), and a generic door —
+`POST /v1/ingest` — any external emitter addresses (`phone:<device>:<topic>`
+keys from the Android app, for example). The resident agent owns
+`interactive:`, `task:`, and `phone:` keys; forge threads own the rest.
+Its `notify` tool queues a notification for a device; the device polls
+and acks.
 
 Stock OpenAI-speaking UIs point at the shim instead:
 

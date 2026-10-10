@@ -51,6 +51,8 @@ tokio-stream = { workspace = true }
 # The watch table: a second connection to the same SQLite file as the
 # dispatcher's store — the two-connections pattern rhema-rsd's tests use
 rusqlite = { version = "0.40", features = ["bundled"] }
+# RFC3339 parsing for schedule_task's `at`
+time = { version = "0.3", default-features = false, features = ["parsing"] }
 
 [dev-dependencies]
 tempfile = "3"

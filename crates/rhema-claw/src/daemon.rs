@@ -3,12 +3,14 @@
 //!
 //! Two dispatchers share one SQLite store: the forge dispatcher (watches
 //! polled by the sources, answered by [`ClawHandler`]) and the
-//! interactive dispatcher (chat messages ingested by the HTTP routes,
-//! answered by the interactive handler). Sharing the store is what makes
-//! the whole thing one resident agent with one inventory — and it is
-//! safe because the store's whole-record revision compare-and-swap
-//! serializes across every instance holding the file (rhema-rsd's
-//! cross-connection CAS tests pin that).
+//! interactive dispatcher — the resident dispatcher — whose keys carry
+//! the `interactive:`/`task:`/`phone:` prefixes and whose inputs are the
+//! chat routes' messages, the `/v1/ingest` door, and the task
+//! scheduler's due firings, all answered by the interactive handler.
+//! Sharing the store is what makes the whole thing one resident agent
+//! with one inventory — and it is safe because the store's whole-record
+//! revision compare-and-swap serializes across every instance holding
+//! the file (rhema-rsd's cross-connection CAS tests pin that).
 //!
 //! Every timer here drives deterministic detection and admission only —
 //! the model is reached exclusively inside handler runs (spec §7's
@@ -32,6 +34,9 @@ use crate::config::{ClawConfig, ConfigError, ForgeKind};
 use crate::forge::ForgeSource;
 use crate::handler::ClawHandler;
 use crate::http::ClawState;
+use crate::notifications::NotificationStore;
+use crate::task_source::TaskScheduler;
+use crate::task_store::TaskStore;
 use rhema_memory::FileMemoryStore;
 
 use crate::hub::EventHub;
@@ -54,6 +59,12 @@ pub enum ClawError {
     /// The watch table could not be opened or read.
     #[error(transparent)]
     Watches(#[from] crate::watch_store::WatchStoreError),
+    /// The notification table could not be opened or read.
+    #[error(transparent)]
+    Notifications(#[from] crate::notifications::NotificationStoreError),
+    /// The task table could not be opened or read.
+    #[error(transparent)]
+    Tasks(#[from] crate::task_store::TaskStoreError),
     /// The bootstrap store could not be opened.
     #[error(transparent)]
     Bootstrap(#[from] crate::bootstrap::BootstrapError),
@@ -90,10 +101,11 @@ fn interactive_dispatch() -> DispatcherConfig {
     }
 }
 
-/// The resident daemon: one source per forge kind, the two drivers, and
-/// the HTTP surface.
+/// The resident daemon: one source per forge kind, the task scheduler,
+/// the two drivers, and the HTTP surface.
 pub struct Daemon {
     sources: Vec<ForgeSource>,
+    scheduler: TaskScheduler,
     forge_driver: Arc<Driver>,
     interactive_driver: Arc<Driver>,
     poll_interval: Duration,
@@ -121,10 +133,13 @@ impl Daemon {
         let interactive_workspace = workspace_root.join("interactive");
         std::fs::create_dir_all(&interactive_workspace)?;
 
-        // One store file, two connections: the dispatcher's records and
-        // the watch table live side by side.
+        // One store file, several connections: the dispatcher's records,
+        // the watch table, the notification table, and the task table
+        // live side by side.
         let store = Arc::new(SqliteStore::open(&db)?);
         let watches = Arc::new(ClawStore::open(&db)?);
+        let notifications = Arc::new(NotificationStore::open(&db)?);
+        let tasks = Arc::new(TaskStore::open(&db)?);
 
         // The YAML watch list is the one-time seed; the table rules
         // after that.
@@ -181,6 +196,8 @@ impl Daemon {
             memory,
             bootstrap.clone(),
             hub.clone(),
+            notifications.clone(),
+            tasks.clone(),
         );
         let interactive_driver = Arc::new(
             Driver::new(
@@ -190,12 +207,21 @@ impl Daemon {
             .with_holder("rhema-claw-interactive"),
         );
         crate::interactive::register_user(&interactive_dispatcher);
+        // The scheduler is the resident dispatcher's second own source:
+        // its detect pass (the daemon's tick drives it) is what turns a
+        // due task row into an event, never a timer near the model.
+        let scheduler = TaskScheduler::new(
+            &interactive_dispatcher,
+            Arc::new(SystemClock),
+            tasks.clone(),
+        );
 
         let http = ClawState::new(
             interactive_dispatcher,
             interactive_driver.clone(),
             store,
             watches,
+            notifications,
             bootstrap,
             hub,
             config.resolved_model(),
@@ -204,6 +230,7 @@ impl Daemon {
 
         Ok(Self {
             sources,
+            scheduler,
             forge_driver,
             interactive_driver,
             // A zero poll interval would spin detect passes against the
@@ -233,12 +260,13 @@ impl Daemon {
         self.interactive_driver.bootstrap().await
     }
 
-    /// One pass: every source detects, the forge driver runs every key
-    /// the debounce released, and the interactive driver drains as a
+    /// One pass: every source detects (due tasks first — a reminder is
+    /// the user-facing clock), the forge driver runs every key the
+    /// debounce released, and the interactive driver drains as a
     /// backstop — a message delivered live into a running turn waits at
     /// the key for a pass like this one.
     pub async fn tick(&self) -> Result<TickReport, ClawError> {
-        let mut detected = 0;
+        let mut detected = self.scheduler.detect().await?;
         for source in &self.sources {
             detected += source.detect().await?;
         }
