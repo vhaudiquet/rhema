@@ -10,6 +10,7 @@ WORKDIR /build
 
 # Manifests first: the registry cache this populates survives source edits.
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
+COPY crates/rhema-acp/Cargo.toml crates/rhema-acp/Cargo.toml
 COPY crates/rhema-autonomous-agent/Cargo.toml crates/rhema-autonomous-agent/Cargo.toml
 COPY crates/rhema-claw/Cargo.toml crates/rhema-claw/Cargo.toml
 COPY crates/rhema-code/Cargo.toml crates/rhema-code/Cargo.toml
