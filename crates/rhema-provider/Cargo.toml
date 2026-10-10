@@ -10,3 +10,9 @@ authors.workspace = true
 [dependencies]
 # The card and the price record round-trip through stored catalogs
 serde = { workspace = true }
+# dyn InteractiveLogin: the frontends hold boxed flows
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# The login-flow tests run on the test runtime
+tokio = { workspace = true, features = ["macros", "rt"] }

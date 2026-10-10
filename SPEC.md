@@ -237,6 +237,7 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
 - **Provider naming** — `ModelProvider` aligned to the framework spec (chosen) vs shorter `Llm`.
 - **Whether `ToolContext` is created by the driver or the engine** — driver, so permissions/cwd are fixed before the step.
 - ~~**Where the adapters' shared catalog types live**~~ — **decided:** `rhema-provider`, the adapter-family base crate: `ModelCard` (the normalized listing row), `Pricing`, and the `SseDecoder`. What varies per backend stays in the adapter — each owns its text-chat filter over its own ids and bakes its prices into the rows it hands out, so `list_models` only ever returns models a coding agent can drive. No adapter depends on another.
+- ~~**How a provider runs an interactive login**~~ — **decided:** the `InteractiveLogin` seam in `rhema-provider` (`login.rs`). An adapter declares the flow (device codes, polling, expiry — all inside the flow) and reports `LoginUpdate`s to a sink; a frontend renders the updates generically and persists the `Completed` credential — one opaque string, the same shape a static API key takes — into the profile field it maps the provider to. Cancellation is dropping the flow's task; the flow keeps no state a retry would trip over. First consumer: the GitHub Copilot device flow.
 
 ---
 

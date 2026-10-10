@@ -8,19 +8,25 @@
 //! decode through. What varies per backend stays in the adapter —
 //! including which of its listed models count as text chat models, so a
 //! `list_models` call only ever hands out rows the coding agent can drive.
+//! The one exception is the [`login`](crate::login) seam: OAuth-style
+//! handshakes repeat across backends, so an adapter declares its flow
+//! there and any frontend renders it without knowing the protocol.
 //!
 //! Layout:
 //! - [`card`] — the normalized catalog row
 //! - [`pricing`] — the per-MTok price record
 //! - [`stream`] — the SSE byte-stream decoder
+//! - [`login`] — the interactive login flow seam
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod card;
+pub mod login;
 pub mod pricing;
 pub mod stream;
 
 pub use card::ModelCard;
+pub use login::{InteractiveLogin, LoginInstruction, LoginSink, LoginUpdate};
 pub use pricing::Pricing;
 pub use stream::SseDecoder;
