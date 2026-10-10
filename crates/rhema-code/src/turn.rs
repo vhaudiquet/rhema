@@ -1,12 +1,11 @@
 //! The tokio tasks: turn execution and model-list fetches. Everything here
 //! runs OFF the UI thread and reports back through the UI event channel.
 
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rhema_coding_agent::{Approval, CodingAgent};
-use rhema_core::{Content, Event, EventSink, Message, Role, Session, ToolResult};
+use rhema_coding_agent::{Approval, CodingAgent, repair_dangling_calls};
+use rhema_core::{Event, EventSink};
 #[cfg(feature = "mock")]
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
@@ -39,39 +38,6 @@ async fn cancelled(mut rx: watch::Receiver<bool>) {
         if rx.changed().await.is_err() {
             std::future::pending::<()>().await;
         }
-    }
-}
-
-/// Appends failure results for tool calls a cancelled turn left hanging.
-/// A provider rejects an assistant tool call with no matching result, so
-/// without this the next turn would fail before saying a word.
-fn repair_dangling_calls(session: &mut Session) {
-    let answered: HashSet<String> = session
-        .history
-        .iter()
-        .flat_map(|message| message.content.iter())
-        .filter_map(|content| match content {
-            Content::ToolResult(result) => Some(result.id.clone()),
-            _ => None,
-        })
-        .collect();
-    let dangling: Vec<String> = session
-        .history
-        .iter()
-        .flat_map(|message| message.content.iter())
-        .filter_map(|content| match content {
-            Content::ToolCall(call) if !answered.contains(&call.id) => Some(call.id.clone()),
-            _ => None,
-        })
-        .collect();
-    for id in dangling {
-        session.history.push(Message {
-            role: Role::Tool,
-            content: vec![Content::ToolResult(ToolResult::failure(
-                id,
-                "cancelled by user",
-            ))],
-        });
     }
 }
 
@@ -295,47 +261,5 @@ mod mock_tests {
                 _ => {}
             }
         }
-    }
-
-    #[test]
-    fn repair_closes_tool_calls_a_drop_left_hanging() {
-        use rhema_core::ToolCall;
-
-        let call = |id: &str| ToolCall {
-            id: id.into(),
-            name: "bash".into(),
-            args: serde_json::json!({ "command": "x" }),
-            provider_data: serde_json::Value::Null,
-        };
-        // The drop landed after call-a's result: call-b hangs.
-        let mut session = Session::default();
-        session.history.push(Message::text(Role::User, "go"));
-        session.history.push(Message {
-            role: Role::Assistant,
-            content: vec![
-                Content::Text("on it".into()),
-                Content::ToolCall(call("call-a")),
-                Content::ToolCall(call("call-b")),
-            ],
-        });
-        session.history.push(Message {
-            role: Role::Tool,
-            content: vec![Content::ToolResult(ToolResult::success("call-a", "ok"))],
-        });
-
-        repair_dangling_calls(&mut session);
-        let last = session.history.last().unwrap();
-        match last.content.first() {
-            Some(Content::ToolResult(result)) => {
-                assert_eq!(result.id, "call-b");
-                assert!(result.is_error, "the repair is a failure result");
-            }
-            other => panic!("expected a repaired tool result, got {other:?}"),
-        }
-        // A repaired history is closed: nothing dangles.
-        assert_eq!(session.history.len(), 4);
-        // And it never over-repairs.
-        repair_dangling_calls(&mut session);
-        assert_eq!(session.history.len(), 4);
     }
 }
