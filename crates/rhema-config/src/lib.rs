@@ -9,9 +9,9 @@
 //! it a turn — a directory reopens on the profile it last used, never
 //! overriding an explicit flag.
 //! Environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`,
-//! `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`) always
-//! win over a stored key — a stored key is the fallback, not the
-//! override.
+//! `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+//! `DEEPSEEK_API_KEY`, `GITHUB_COPILOT_TOKEN`) always win over a stored
+//! key — a stored key is the fallback, not the override.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -43,7 +43,7 @@ pub enum ConfigError {
 #[serde(default, rename_all = "snake_case")]
 pub struct Profile {
     /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
-    /// `anthropic`, or `openai`.
+    /// `anthropic`, `openai`, `deepseek`, or `copilot`.
     pub provider: Option<String>,
     /// The Google API key entered at login, when one is stored.
     pub google_api_key: Option<String>,
@@ -61,6 +61,10 @@ pub struct Profile {
     pub openai_api_key: Option<String>,
     /// The DeepSeek API key entered at login, when one is stored.
     pub deepseek_api_key: Option<String>,
+    /// The GitHub OAuth token the Copilot adapter runs on — the device
+    /// flow's long-lived output, stored like any other key; the
+    /// short-lived Copilot token it exchanges for never touches disk.
+    pub copilot_api_key: Option<String>,
     /// The color this profile's name wears in the UI, as `#RRGGBB`.
     /// Unset means the UI picks a tone from the theme by profile name.
     pub color: Option<String>,
@@ -140,6 +144,16 @@ impl Profile {
         )
     }
 
+    /// The GitHub token the Copilot adapter runs on:
+    /// `GITHUB_COPILOT_TOKEN`, then the stored token.
+    pub fn copilot_api_key(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["GITHUB_COPILOT_TOKEN"],
+            self.copilot_api_key.clone(),
+        )
+    }
+
     /// The profile's thinking level, when set and parseable.
     pub fn thinking_effort(&self) -> Option<ThinkingEffort> {
         ThinkingEffort::parse(self.thinking.as_deref()?)
@@ -147,8 +161,7 @@ impl Profile {
 
     /// Whether this profile can build a backend: it names a provider and
     /// carries the credential that provider needs (a llama.cpp server
-    /// works keyless; google, openrouter, anthropic, and openai need a
-    /// key, env included).
+    /// works keyless; the rest need a key, env included).
     pub fn has_credentials(&self) -> bool {
         match self.provider.as_deref() {
             Some("llama-cpp") => true,
@@ -156,6 +169,7 @@ impl Profile {
             Some("anthropic") => self.anthropic_api_key().is_some(),
             Some("openai") => self.openai_api_key().is_some(),
             Some("deepseek") => self.deepseek_api_key().is_some(),
+            Some("copilot") => self.copilot_api_key().is_some(),
             _ => self.google_api_key().is_some(),
         }
     }
@@ -419,11 +433,15 @@ mod tests {
             provider: Some(provider.to_owned()),
             anthropic_api_key: provider.eq("anthropic").then(|| "k".to_owned()),
             openai_api_key: provider.eq("openai").then(|| "k".to_owned()),
+            deepseek_api_key: provider.eq("deepseek").then(|| "k".to_owned()),
+            copilot_api_key: provider.eq("copilot").then(|| "k".to_owned()),
             ..Profile::default()
         };
         // A stored key makes the profile usable...
         assert!(keyed("anthropic").has_credentials());
         assert!(keyed("openai").has_credentials());
+        assert!(keyed("deepseek").has_credentials());
+        assert!(keyed("copilot").has_credentials());
         // ...and each provider needs exactly its own key.
         assert!(keyed("anthropic").openai_api_key.is_none());
         assert!(keyed("openai").anthropic_api_key.is_none());
@@ -432,6 +450,8 @@ mod tests {
         // per the convention above.)
         assert!(!bare("anthropic").has_credentials());
         assert!(!bare("openai").has_credentials());
+        assert!(!bare("deepseek").has_credentials());
+        assert!(!bare("copilot").has_credentials());
     }
 
     #[test]
@@ -451,6 +471,7 @@ mod tests {
                     anthropic_api_key: Some("sk-ant-123".into()),
                     openai_api_key: None,
                     deepseek_api_key: Some("sk-dsk-123".into()),
+                    copilot_api_key: Some("gho-123".into()),
                     color: None,
                     thinking: Some("low".into()),
                 },
@@ -463,6 +484,7 @@ mod tests {
         assert!(raw.contains("google_api_key:"), "yaml on disk: {raw}");
         assert!(raw.contains("anthropic_api_key:"), "yaml on disk: {raw}");
         assert!(raw.contains("deepseek_api_key:"), "yaml on disk: {raw}");
+        assert!(raw.contains("copilot_api_key:"), "yaml on disk: {raw}");
         assert!(!raw.contains('{'), "not json: {raw}");
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, config);
