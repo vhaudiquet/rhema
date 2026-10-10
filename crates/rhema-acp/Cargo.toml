@@ -1,0 +1,38 @@
+[package]
+name = "rhema-acp"
+description = "The Agent Client Protocol adapter: rhema's coding agent as an ACP agent subprocess"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# Scripted MockProvider for offline tests; mirrors rhema-core's feature.
+mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
+
+[dependencies]
+rhema-config = { path = "../rhema-config" }
+rhema-core = { path = "../rhema-core" }
+rhema-coding-agent = { path = "../rhema-coding-agent" }
+# The adapter family, resolved from config the same way the other
+# frontends resolve it
+rhema-provider = { path = "../rhema-provider" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
+rhema-provider-google = { path = "../rhema-provider-google" }
+rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
+# The ACP schema and agent-side connection; `stdio` is the transport a
+# subprocess agent serves on
+agent-client-protocol = { workspace = true, features = ["stdio"] }
+anyhow = "1"
+serde_json = { workspace = true }
+# serve() builds the multi-thread runtime the approval bridge parks
+# workers on (block_in_place needs rt; the multi-thread scheduler is
+# what makes parking deadlock-free)
+tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
