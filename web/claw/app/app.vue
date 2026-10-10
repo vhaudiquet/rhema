@@ -4,7 +4,7 @@
 // in-memory; only the token and the active session persist. The claw
 // owns the conversation, so this page is a mirror, not a store.
 import { ClawError, clawHealth, isInteractive, useClaw } from '~/composables/useClaw'
-import type { ClawSession, ClawWatch, StreamStatus, WatchInput } from '~/composables/useClaw'
+import type { ClawSession, ClawWatch, StreamStatus, WatchInput , ModelCard, ProvidersState } from '~/composables/useClaw'
 import { useTranscript } from '~/composables/useTranscript'
 
 const TOKEN_STORE_KEY = 'claw.token'
@@ -49,6 +49,11 @@ const sessions = ref<ClawSession[]>([])
 const sessionsLoading = ref(false)
 const watches = ref<ClawWatch[]>([])
 const watchesLoading = ref(false)
+const providersState = ref<ProvidersState | null>(null)
+const providerModels = ref<ModelCard[]>([])
+const providerModelsLoading = ref(false)
+const providerModelsError = ref<string | null>(null)
+const selectedProvider = ref<string | null>(null)
 const streamStatus = ref<StreamStatus>('connecting')
 const busy = ref(false)
 const authRequired = ref(false)
@@ -99,6 +104,49 @@ async function refreshWatches(): Promise<void> {
   }
 }
 
+async function refreshProviders(): Promise<void> {
+  try {
+    providersState.value = await claw.providers()
+    if (providersState.value && !selectedProvider.value) {
+      selectedProvider.value = providersState.value.active.provider
+      await loadProviderModels(selectedProvider.value)
+    }
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  }
+}
+
+async function loadProviderModels(kind: string): Promise<void> {
+  selectedProvider.value = kind
+  providerModelsLoading.value = true
+  providerModelsError.value = null
+  try {
+    providerModels.value = await claw.models(kind)
+  } catch (err) {
+    // A backend without a live listing is normal (404): the operator
+    // still sees the switch go through.
+    providerModels.value = []
+    providerModelsError.value = err instanceof Error ? err.message : String(err)
+  } finally {
+    providerModelsLoading.value = false
+  }
+}
+
+async function switchProvider(provider: string, model?: string): Promise<void> {
+  try {
+    providersState.value = await claw.setActive(provider, model)
+    selectedProvider.value = provider
+    if (model) {
+      providerModelsError.value = null
+    }
+    pushNotice(`active backend: ${provider} / ${providersState.value.active.model}`)
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  }
+}
+
 async function send(text: string): Promise<void> {
   transcript.addSent(text)
   busy.value = true
@@ -143,6 +191,7 @@ function saveToken(): void {
   // The stream's retry loop reads the token fresh each attempt, so it
   // recovers on its own; the polls below confirm the token works.
   void checkHealth()
+  void refreshProviders()
   void refreshSessions()
   void refreshWatches()
 }
@@ -173,6 +222,7 @@ let sessionsTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   resubscribe()
   void checkHealth()
+  void refreshProviders()
   void refreshSessions()
   void refreshWatches()
   healthTimer = setInterval(checkHealth, 30000)
@@ -250,18 +300,38 @@ onUnmounted(() => {
         :busy="busy"
         @send="send"
       />
-      <WatchesPanel
-        :watches="watches"
-        :loading="watchesLoading"
-        @refresh="refreshWatches"
-        @add="addWatch"
-        @remove="removeWatch"
-      />
+      <div class="right-column">
+        <ProvidersPanel
+          :state="providersState"
+          :models="providerModels"
+          :models-loading="providerModelsLoading"
+          :models-error="providerModelsError"
+          :selected-provider="selectedProvider"
+          :loading="watchesLoading"
+          @refresh="refreshProviders"
+          @select="loadProviderModels"
+          @switch="switchProvider"
+        />
+        <WatchesPanel
+          :watches="watches"
+          :loading="watchesLoading"
+          @refresh="refreshWatches"
+          @add="addWatch"
+          @remove="removeWatch"
+        />
+      </div>
     </main>
   </div>
 </template>
 
 <style scoped>
+.right-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
 .shell {
   display: flex;
   flex-direction: column;

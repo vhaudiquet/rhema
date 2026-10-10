@@ -39,7 +39,19 @@ class SettingsRepository(private val store: DataStore<Preferences>) {
 
     suspend fun current(): Credentials = credentials.first()
 
-    suspend fun setCredentials(baseUrl: String, token: String) {
+    suspend fun setCredentials(rawBaseUrl: String, token: String) {
+        // Normalize the base: trim, drop trailing slashes, and drop a
+        // trailing `/v1` — the client appends the API paths itself, and a
+        // pasted `…/v1` would double-prefix every call into the UI's
+        // catch-all. Also downgrade the host spelling of a schemeless
+        // paste by prepending http, the self-hosted default.
+        val trimmed = rawBaseUrl.trim().trimEnd('/')
+        val base = if (trimmed.endsWith("/v1")) trimmed.removeSuffix("/v1") else trimmed
+        val baseUrl = when {
+            base.startsWith("http://") || base.startsWith("https://") -> base
+            base.isNotEmpty() -> "http://$base"
+            else -> base
+        }
         store.edit {
             it[Keys.baseUrl] = baseUrl
             it[Keys.token] = token

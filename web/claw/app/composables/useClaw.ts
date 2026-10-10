@@ -29,6 +29,24 @@ export interface ClawSession {
 }
 
 /** One watch (config.rs `Watch`, as the watches routes accept and return it). */
+/** One row of a provider's live model listing (`ModelCard` server-side). */
+export interface ModelCard {
+  id: string
+  display_name: string
+  description: string
+  input_token_limit?: number | null
+}
+
+export interface ClawProvider {
+  kind: string
+  default_model: string
+}
+
+export interface ProvidersState {
+  active: { provider: string; model: string }
+  providers: ClawProvider[]
+}
+
 export interface ClawWatch {
   forge: string
   repo: string
@@ -129,6 +147,12 @@ export interface ClawApi {
   sessions(): Promise<ClawSession[]>
   /** `POST /v1/sessions/{key}/messages` — fire-and-forget: the claw answers 202 and the reply arrives on the event stream. */
   sendMessage(key: string, text: string): Promise<void>
+  /** `GET /v1/providers` — the constructible backends and the active pair. */
+  providers(): Promise<ProvidersState>
+  /** `PUT /v1/providers/active` — switch the backend, persisted claw-side. */
+  setActive(provider: string, model?: string): Promise<ProvidersState>
+  /** `GET /v1/providers/{kind}/models` — the live listing; 404 when none. */
+  models(kind: string): Promise<ModelCard[]>
   /** `GET /v1/watches`. */
   watches(): Promise<ClawWatch[]>
   /** `POST /v1/watches` — 201 when newly added, 200 when it already existed. */
@@ -173,6 +197,25 @@ export function useClaw(token: Ref<string | null>): ClawApi {
         token: input.token?.trim() || undefined,
       }),
     })
+  }
+
+  async function providers(): Promise<ProvidersState> {
+    return (await get('/v1/providers', token.value)) as ProvidersState
+  }
+
+  async function setActive(provider: string, model?: string): Promise<ProvidersState> {
+    return (await send('/v1/providers/active', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
+      body: JSON.stringify({ provider, ...(model ? { model } : {}) }),
+    })) as ProvidersState
+  }
+
+  async function models(kind: string): Promise<ModelCard[]> {
+    const body = (await get(`/v1/providers/${encodeURIComponent(kind)}/models`, token.value)) as {
+      models: ModelCard[]
+    }
+    return body.models
   }
 
   async function removeWatch(forge: string, repo: string): Promise<void> {
@@ -254,7 +297,17 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     }
   }
 
-  return { sessions, sendMessage, watches, addWatch, removeWatch, subscribeEvents }
+  return {
+    sessions,
+    sendMessage,
+    providers,
+    setActive,
+    models,
+    watches,
+    addWatch,
+    removeWatch,
+    subscribeEvents,
+  }
 }
 
 /** One parsed SSE frame: the joined `data:` payload, comments excluded. */
