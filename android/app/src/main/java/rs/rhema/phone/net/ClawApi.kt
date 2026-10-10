@@ -10,6 +10,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -191,7 +192,19 @@ class ClawApi(
             try {
                 client.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
-                        ClawResult.Ok(parse(response))
+                        try {
+                            ClawResult.Ok(parse(response))
+                        } catch (e: SerializationException) {
+                            // A 2xx body that is not the expected JSON (an
+                            // HTML page from a wrong route, a captive
+                            // portal) is an error result, never a crash.
+                            // The body may already be consumed by the parse
+                            // attempt; its text is not recoverable here.
+                            ClawResult.HttpError(
+                                response.code,
+                                "unexpected response body (not JSON)",
+                            )
+                        }
                     } else {
                         ClawResult.HttpError(response.code, response.body?.string()?.take(500))
                     }
