@@ -11,7 +11,11 @@ data class SessionInfo(
     val state: String? = null,
     val revision: Long? = null,
     @SerialName("inbox_depth") val inboxDepth: Int? = null,
-    @SerialName("last_outcome") val lastOutcome: String? = null,
+    // The claw serializes the outcome as an externally-tagged enum:
+    // {"Handled":null}, {"Failed":"reason"}, {"Superseded":null} — or
+    // null when the key never released. Kept as raw JSON; the UI shows
+    // the variant name.
+    @SerialName("last_outcome") val lastOutcome: JsonObject? = null,
 )
 
 // POST /v1/sessions/{key}/messages

@@ -13,6 +13,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
@@ -158,12 +160,21 @@ private fun SessionRow(session: SessionInfo, onClick: () -> Unit) {
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            session.lastOutcome?.takeIf { it.isNotBlank() }?.let {
-                Text(
-                    it,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+            session.lastOutcome?.let { outcome ->
+                val text = outcome.entries.firstOrNull()?.let { (variant, reason) ->
+                    reason.takeIf { it is JsonPrimitive && it.isString }
+                        ?.let { primitive ->
+                            val text = primitive.jsonPrimitive.content
+                            text.takeIf { it.isNotBlank() }?.let { "$variant: $text" } ?: variant
+                        } ?: variant
+                }
+                text?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }

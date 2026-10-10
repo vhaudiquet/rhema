@@ -177,12 +177,18 @@ class ClawApi(
     private suspend fun baseOrNull(): String? =
         settings.current().baseUrl.trim().trimEnd('/').takeIf { it.isNotBlank() }
 
-    private suspend fun bearer(): String = settings.current().token
+    // The claw's middleware strips the `Bearer ` prefix; the raw token
+    // alone does not authorize.
+    private suspend fun bearer(): String = "Bearer " + settings.current().token
 
     // Builds GET-ready /v1/{...} request with auth; null when unconfigured.
     private suspend fun v1(vararg segments: String): Request.Builder? {
+        // The `v1` prefix lives here and nowhere else: the callers name
+        // only their own segments. Without it every call lands in the
+        // web UI's catch-all and reads as a 2xx HTML page.
         val base = baseOrNull() ?: return null
         val url = base.toHttpUrlOrNull()?.newBuilder() ?: return null
+        url.addPathSegment("v1")
         for (segment in segments) url.addPathSegment(segment)
         return Request.Builder().url(url.build()).header("Authorization", bearer())
     }
@@ -192,18 +198,26 @@ class ClawApi(
             try {
                 client.newCall(request).execute().use { response ->
                     if (response.isSuccessful) {
-                        try {
-                            ClawResult.Ok(parse(response))
-                        } catch (e: SerializationException) {
-                            // A 2xx body that is not the expected JSON (an
-                            // HTML page from a wrong route, a captive
-                            // portal) is an error result, never a crash.
-                            // The body may already be consumed by the parse
-                            // attempt; its text is not recoverable here.
+                        // Peek first: a 2xx body that is not the expected
+                        // JSON (an HTML page from a wrong route, a captive
+                        // portal) is an error result naming the body, never
+                        // a crash — and the snippet says who actually
+                        // answered.
+                        val peeked = response.peekBody(256).string().trimStart()
+                        if (!peeked.startsWith("{") && !peeked.startsWith("[")) {
                             ClawResult.HttpError(
                                 response.code,
-                                "unexpected response body (not JSON)",
+                                "unexpected 2xx body: " + peeked.take(150),
                             )
+                        } else {
+                            try {
+                                ClawResult.Ok(parse(response))
+                            } catch (e: SerializationException) {
+                                ClawResult.HttpError(
+                                    response.code,
+                                    "unexpected response body (not JSON): " + peeked.take(150),
+                                )
+                            }
                         }
                     } else {
                         ClawResult.HttpError(response.code, response.body?.string()?.take(500))
