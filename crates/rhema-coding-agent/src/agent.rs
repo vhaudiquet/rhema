@@ -7,14 +7,15 @@
 //! `Arc`). The session is plain data — the driver may mutate it between
 //! turns, checkpoint it, or resume it from disk.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use rhema_core::{
-    Agent, AgentError, ChatParams, EventSink, Message, ModelOutput, Role, Session, ToolContext,
-    run_turn,
+    Agent, AgentError, ChatParams, Content, EventSink, Message, ModelOutput, Role, Session,
+    ToolContext, ToolResult, run_turn,
 };
 
 use crate::approval::Approval;
@@ -178,5 +179,91 @@ impl CodingAgent {
     pub fn load_session_from(path: &impl AsRef<Path>) -> io::Result<Session> {
         let raw = std::fs::read_to_string(path)?;
         serde_json::from_str(&raw).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+}
+
+/// Appends failure results for tool calls a dropped turn left hanging.
+/// A provider rejects an assistant tool call with no matching result, so
+/// without this the next turn would fail before saying a word. The drop
+/// can land between a committed call and its result — cancellation by
+/// future-drop (the TUI) and by `session/cancel` (ACP) both unwind this
+/// way — and the history must stay load-bearing for the next turn.
+pub fn repair_dangling_calls(session: &mut Session) {
+    let answered: HashSet<String> = session
+        .history
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            Content::ToolResult(result) => Some(result.id.clone()),
+            _ => None,
+        })
+        .collect();
+    let dangling: Vec<String> = session
+        .history
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            Content::ToolCall(call) if !answered.contains(&call.id) => Some(call.id.clone()),
+            _ => None,
+        })
+        .collect();
+    for id in dangling {
+        session.history.push(Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(ToolResult::failure(
+                id,
+                "cancelled by user",
+            ))],
+        });
+    }
+}
+
+#[cfg(test)]
+mod repair_tests {
+    use super::*;
+    use rhema_core::ToolCall;
+    use serde_json::json;
+
+    fn call(id: &str) -> ToolCall {
+        ToolCall {
+            id: id.into(),
+            name: "bash".into(),
+            args: json!({ "command": "x" }),
+            provider_data: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn repair_closes_tool_calls_a_drop_left_hanging() {
+        // The drop landed after call-a's result: call-b hangs.
+        let mut session = Session::default();
+        session.history.push(Message::text(Role::User, "go"));
+        session.history.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::Text("on it".into()),
+                Content::ToolCall(call("call-a")),
+                Content::ToolCall(call("call-b")),
+            ],
+        });
+        session.history.push(Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(ToolResult::success("call-a", "ok"))],
+        });
+
+        repair_dangling_calls(&mut session);
+        let last = session.history.last().unwrap();
+        match last.content.first() {
+            Some(Content::ToolResult(result)) => {
+                assert_eq!(result.id, "call-b");
+                assert!(result.is_error, "the repair is a failure result");
+            }
+            other => panic!("expected a repaired tool result, got {other:?}"),
+        }
+        // A repaired history is closed: nothing dangles.
+        assert_eq!(session.history.len(), 4);
+        // And it never over-repairs.
+        repair_dangling_calls(&mut session);
+        assert_eq!(session.history.len(), 4);
     }
 }
