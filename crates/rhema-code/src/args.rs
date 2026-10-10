@@ -1,10 +1,12 @@
 //! The command-line surface, parsed with clap's derive API. Deliberately
 //! narrower than the rhema CLI: the model is owned by the picker and
 //! credentials by the login screen, so neither is accepted as a flag.
+//! The `acp` subcommand serves the Agent Client Protocol instead of a
+//! terminal; its flags mirror the headless subset.
 
 use std::path::PathBuf;
 
-use clap::{Parser, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use rhema_coding_agent::CodingAgentConfig;
 
 /// Which Jadeite theme paints the screen.
@@ -48,6 +50,19 @@ impl ProviderChoice {
             Some("openai") => Self::OpenAi,
             Some("deepseek") => Self::DeepSeek,
             _ => Self::Google,
+        }
+    }
+
+    /// The config value this choice persists as — the inverse of
+    /// [`Self::from_stored`] for the canonical spellings.
+    pub fn stored_name(self) -> &'static str {
+        match self {
+            Self::Google => "google",
+            Self::LlamaCpp => "llama-cpp",
+            Self::OpenRouter => "openrouter",
+            Self::Anthropic => "anthropic",
+            Self::OpenAi => "openai",
+            Self::DeepSeek => "deepseek",
         }
     }
 }
@@ -117,10 +132,58 @@ pub struct Args {
     /// light-terminal users.
     #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
     pub theme: ThemeKind,
+
+    /// A subcommand switches the frontend; without one, rhema runs the
+    /// terminal UI (or the headless one-shot when piped).
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+/// The alternate frontends.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum Command {
+    /// Serve the Agent Client Protocol over stdio: the coding agent as
+    /// an editor-launched subprocess (Zed, Neovim, JetBrains, Emacs).
+    Acp(AcpArgs),
+}
+
+/// Flags of `rhema acp`. The workspace comes from the client's
+/// `session/new` (`cwd`), not a flag — one process serves every
+/// workspace the client opens.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct AcpArgs {
+    /// Which config profile to use (e.g. work, personal). Without it
+    /// the default profile stands.
+    #[arg(long)]
+    pub profile: Option<String>,
+
+    /// Model backend for turns. Defaults to the stored choice, then
+    /// google.
+    #[arg(long, value_enum)]
+    pub provider: Option<ProviderChoice>,
+
+    /// Model name. Defaults to the stored choice, then the backend's
+    /// default.
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+
+    /// llama.cpp server base URL (provider llama-cpp). Defaults to the
+    /// stored URL, then http://localhost:8080.
+    #[arg(long)]
+    pub llama_url: Option<String>,
+
+    /// Max steps per turn.
+    #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
+    pub max_steps: u32,
+
+    /// How much reasoning the model should do. Absent, the profile's
+    /// setting stands, and absent there too, the provider's default.
+    #[arg(long)]
+    pub thinking: Option<ThinkingKind>,
 }
 
 /// Reasoning effort levels for `--thinking`.
-#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 pub enum ThinkingKind {
     /// Light reasoning.
     Low,
@@ -237,5 +300,56 @@ mod tests {
         assert_eq!(args.print.as_deref(), Some("fix the tests"));
         let args = parse(&["-p", "-"]);
         assert_eq!(args.print.as_deref(), Some("-"));
+    }
+
+    #[test]
+    fn the_acp_subcommand_takes_its_own_flags() {
+        let args = Args::parse_from(["rhema", "acp"]);
+        assert_eq!(
+            args.command,
+            Some(Command::Acp(AcpArgs {
+                profile: None,
+                provider: None,
+                model: None,
+                llama_url: None,
+                max_steps: CodingAgentConfig::DEFAULT_MAX_TURN_STEPS,
+                thinking: None,
+            }))
+        );
+
+        let args = Args::parse_from([
+            "rhema",
+            "acp",
+            "--profile",
+            "work",
+            "--provider",
+            "anthropic",
+            "-m",
+            "claude-sonnet-4-5",
+            "--max-steps",
+            "16",
+            "--thinking",
+            "high",
+        ]);
+        match args.command {
+            Some(Command::Acp(acp)) => {
+                assert_eq!(acp.profile.as_deref(), Some("work"));
+                assert_eq!(acp.provider, Some(ProviderChoice::Anthropic));
+                assert_eq!(acp.model.as_deref(), Some("claude-sonnet-4-5"));
+                assert_eq!(acp.max_steps, 16);
+                assert_eq!(acp.thinking, Some(ThinkingKind::High));
+            }
+            other => panic!("expected the acp subcommand, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_acp_flags_do_not_leak_into_the_default_frontend() {
+        // The workspace belongs to session/new under ACP: no --workspace
+        // before the subcommand name, where it would be ambiguous with
+        // the TUI's.
+        assert!(try_parse(&["acp", "--workspace", "/tmp"]).is_err());
+        // And the default frontend still parses as before.
+        assert!(try_parse(&["--print", "hi"]).is_ok());
     }
 }

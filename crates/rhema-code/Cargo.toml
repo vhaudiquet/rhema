@@ -24,6 +24,8 @@ mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
 rhema-core = { path = "../rhema-core" }
 rhema-config = { path = "../rhema-config" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
+# The `rhema acp` subcommand: the Agent Client Protocol server
+rhema-acp = { path = "../rhema-acp" }
 # The shared model card every adapter's catalog normalizes into
 rhema-provider = { path = "../rhema-provider" }
 rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }

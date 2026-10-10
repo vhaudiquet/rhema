@@ -20,6 +20,7 @@ use crossterm::event::{
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use rhema_acp::AcpOptions;
 use rhema_coding_agent::{AllowAll, Approval, CodingAgent};
 use rhema_config::Config;
 use rhema_core::{Event as ModelEvent, EventSink, Session};
@@ -115,10 +116,15 @@ fn resolve_base_system(path: Option<&std::path::Path>) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// Runs the frontend: headless one-shot when a prompt or a pipe asks for
-/// it, the full-screen TUI otherwise.
+/// Runs the frontend: the ACP server when the subcommand asks for it,
+/// headless one-shot when a prompt or a pipe asks for it, the
+/// full-screen TUI otherwise.
 pub async fn run(args: Args) -> anyhow::Result<()> {
-    use std::io::IsTerminal;
+    // The ACP branch first: stdin/stdout are the protocol wire, so no
+    // terminal detection may run — a served agent never has a tty.
+    if let Some(crate::args::Command::Acp(acp)) = args.command {
+        return run_acp(acp);
+    }
     let headless = args.print.is_some()
         || args.print == Some("-".to_owned())
         || !std::io::stdout().is_terminal();
@@ -128,6 +134,21 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         return run_headless(args).await;
     }
     run_tui(args).await
+}
+
+/// Runs the ACP server: stdin/stdout become the protocol wire and the
+/// call blocks until the client hangs up. The backend the sessions run
+/// on resolves once, from the flags and the stored config.
+fn run_acp(args: crate::args::AcpArgs) -> anyhow::Result<()> {
+    rhema_acp::serve(rhema_acp::AcpOptions {
+        profile: args.profile,
+        provider: args.provider.map(|choice| choice.stored_name().to_owned()),
+        model: args.model,
+        llama_url: args.llama_url,
+        max_steps: Some(args.max_steps),
+        thinking: args.thinking.map(From::from),
+        ..AcpOptions::default()
+    })
 }
 
 /// The headless one-shot: resolve the backend, run one turn, print the
