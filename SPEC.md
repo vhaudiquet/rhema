@@ -243,3 +243,11 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
 ## 9. Follow-ups (not v1)
 
 Crate 2: RSD `SessionManager` (dispatch, leases, inbox, revisions, SQLite). Then: `rhema-provider-anthropic`, `rhema-provider-openai`, `rhema-tui`, compaction, provider fixtures via cassettes.
+
+Later arrivals: `rhema-acp` serves the Agent Client Protocol (the
+coding agent as an editor subprocess; the third `CodingAgent`
+consumer, after the TUI and the one-shot) — a falsification pass on
+the driver seams that demanded no core changes and one justified
+approval-bridge addition (`repair_dangling_calls` shared with the
+TUI). Structured file tools remain the gate for ACP's diff and
+follow-along UX; the adapter already answers `session/request_permission`.

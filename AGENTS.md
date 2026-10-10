@@ -66,6 +66,8 @@ Rules:
     (`crates/rhema-autonomous-agent/`)
   - `claw` — the resident agent daemon: the first
     autonomous-agent consumer (`crates/rhema-claw/`)
+  - `acp` — the Agent Client Protocol adapter and the `rhema acp`
+    subcommand (`crates/rhema-acp/`)
   - `config` — stored settings and credentials (`crates/rhema-config/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema-code` — the frontend crate: terminal UI and headless
