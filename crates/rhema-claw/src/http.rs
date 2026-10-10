@@ -210,7 +210,13 @@ async fn require_auth(State(state): State<ClawState>, request: Request, next: Ne
     if authorized {
         next.run(request).await
     } else {
-        StatusCode::UNAUTHORIZED.into_response()
+        // A body, however small: a silent 401 reads as a network fault
+        // to every client debugging its token.
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error": "missing or wrong bearer token"})),
+        )
+            .into_response()
     }
 }
 
