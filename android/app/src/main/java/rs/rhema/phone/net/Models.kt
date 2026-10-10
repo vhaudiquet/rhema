@@ -22,6 +22,38 @@ data class SessionInfo(
 @Serializable
 data class MessageRequest(val text: String)
 
+// GET /v1/providers — the constructible backends and the active pair.
+@Serializable
+data class ProviderInfo(
+    val kind: String,
+    @SerialName("default_model") val defaultModel: String,
+)
+
+@Serializable
+data class ActivePair(val provider: String, val model: String)
+
+@Serializable
+data class ProvidersState(val active: ActivePair, val providers: List<ProviderInfo>)
+
+// GET /v1/providers/{kind}/models — a kind's live listing; 404 when none.
+@Serializable
+data class ModelCard(
+    val id: String,
+    @SerialName("display_name") val displayName: String? = null,
+    val description: String? = null,
+)
+
+@Serializable
+data class ModelListing(val models: List<ModelCard> = emptyList())
+
+// PUT /v1/providers/active — answers the new pair only; the provider
+// list is not echoed and the caller carries it forward.
+@Serializable
+data class ActiveRequest(val provider: String, val model: String? = null)
+
+@Serializable
+data class ActiveBackend(val active: ActivePair)
+
 // POST /v1/ingest
 @Serializable
 data class IngestRequest(val source: String, val key: String, val payload: JsonObject)

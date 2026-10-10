@@ -69,6 +69,36 @@ class ClawApi(
         }
     }
 
+    // GET /v1/providers: every constructible backend and the active pair.
+    suspend fun providers(): ClawResult<ProvidersState> {
+        val builder = v1("providers") ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.get().build()) { response ->
+            json.decodeFromString<ProvidersState>(response.body?.string() ?: "{}")
+        }
+    }
+
+    // GET /v1/providers/{kind}/models: the kind's live listing. A kind
+    // without one (unknown, or the mock) is a 404 — an ordinary result,
+    // not a failure: the kind still switches on its default model.
+    suspend fun providerModels(kind: String): ClawResult<ModelListing> {
+        val builder = v1("providers", kind, "models")
+            ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.get().build()) { response ->
+            json.decodeFromString<ModelListing>(response.body?.string() ?: "{}")
+        }
+    }
+
+    // PUT /v1/providers/active: switch the backend, persisted claw-side;
+    // it applies from the next turn. The answer carries the new pair only.
+    suspend fun setActiveProvider(provider: String, model: String?): ClawResult<ActiveBackend> {
+        val builder = v1("providers", "active")
+            ?: return ClawResult.Network("no base URL configured")
+        val body = json.encodeToString(ActiveRequest(provider, model)).toRequestBody(jsonBody)
+        return execute(builder.put(body).build()) { response ->
+            json.decodeFromString<ActiveBackend>(response.body?.string() ?: "{}")
+        }
+    }
+
     // The claw's documented dance: subscribe to the event stream first, then
     // POST; the reply arrives on the stream, not in the POST response (202).
     suspend fun postMessage(sessionKey: String, text: String): ClawResult<Unit> {

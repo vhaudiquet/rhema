@@ -33,4 +33,26 @@
     <string name="chat_send_failed">Send failed: %1$s</string>
     <string name="chat_tool_running">tool running: %1$s</string>
     <string name="chat_tool_done">tool: %1$s</string>
+<string name="settings_page_title">Settings</string>
+    <string name="card_connection">Connection</string>
+    <string name="card_providers">Model providers</string>
+    <string name="providers_hint">What the claw answers with</string>
+    <string name="providers_field_provider">Provider</string>
+    <string name="providers_field_model">Model</string>
+    <string name="providers_default_option">(provider default)</string>
+    <string name="providers_none">No live listing — the provider\'s default model applies.</string>
+    <string name="providers_saved">Saved: %1$s / %2$s</string>
+    <string name="providers_loading">Loading providers…</string>
+    <string name="providers_staged">Change not applied</string>
+    <string name="providers_staged_detail">The staged pair takes effect on the claw\'s next turn — save to apply it, discard to keep the running backend.</string>
+    <string name="providers_discard">Discard</string>
+    <string name="providers_save">Save</string>
+    <string name="providers_error">The claw answered: %1$s</string>
+
+    <string name="sessions_group_interactive">Interactive</string>
+    <string name="sessions_group_other">Other keys</string>
+
+    <string name="chat_you">you</string>
+    <string name="chat_agent">rhema</string>
 </resources>
+

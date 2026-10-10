@@ -9,7 +9,11 @@ notifications.
 
 - **Settings** — first launch lands here until a base URL is saved and
   validated with `GET /healthz`. Stores the claw base URL and bearer token
-  (plus a generated, persistent device ID) in app-private DataStore.
+  (plus a generated, persistent device ID) in app-private DataStore. Once
+  connected, the screen also carries the **Model providers** card: the
+  constructible backends (`GET /v1/providers`), each kind's live model
+  listing, and the active pair staged as a draft behind an explicit save
+  (`PUT /v1/providers/active` — it applies from the claw's next turn).
   Trade-off: the token is stored in plain DataStore rather than
   EncryptedSharedPreferences — `androidx.security:security-crypto` is an
   alpha-quality, unmaintained artifact, and the OS app sandbox already covers
@@ -56,6 +60,9 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | Endpoint | Used for |
 |---|---|
 | `GET /healthz` | settings gate (no auth) |
+| `GET /v1/providers` | constructible backends + active pair |
+| `GET /v1/providers/{kind}/models` | a kind's live model listing |
+| `PUT /v1/providers/active` | switch the backend, persisted |
 | `GET /v1/sessions` | session list |
 | `POST /v1/sessions/{key}/messages` | `{"text"}` → 202; reply via stream |
 | `GET /v1/sessions/{key}/events` | SSE: `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done` |
@@ -126,7 +133,8 @@ app/src/main/java/rs/rhema/phone/
   data/                DataStore-backed settings + status repositories
   net/                 ClawApi (one object per endpoint, sealed result type)
   chat/ChatController  transcript state + SSE loop for the open screen
-  ui/                  Theme, SettingsScreen, SessionsScreen, ChatScreen
+  ui/                  Theme, shared design components, SettingsScreen,
+                       SessionsScreen, ChatScreen
   work/                PhoneStatusWorker, NotificationsWorker, receivers, scheduling
   notif/Notifier.kt    channel + system notifications
 ```
@@ -146,7 +154,11 @@ certificate.
 
 - Theming is Jadeite dark, always — the same tokens as the TUI and the
   web UI (`crates/rhema-code/src/palette.rs` DARK). No light scheme, no
-  dynamic color: the palette is the brand.
+  dynamic color: the palette is the brand. The screens mirror the web
+  claw's redesign — cards with hairline-divided rows, state dots, badges,
+  toned callouts, avatar-row transcripts with accent-bar tool cards, and
+  the round accent send button; the shared pieces live in
+  `ui/Components.kt`, the Compose counterparts of the web's components.
 - Future onboarding: scanning a QR code from the claw (base URL +
   token, rendered by the web UI or printed in the terminal) instead of
   typing both by hand. Deliberately deferred; the Settings screen is

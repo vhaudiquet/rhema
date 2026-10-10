@@ -37,6 +37,10 @@ class ChatController(
 
     data class Reply(override val id: Long, val text: String, val streaming: Boolean) : Item
 
+    // The turn's end tag ("Handled", "Failed", …) from turn_done; the
+    // reply carries the text, this carries the outcome.
+    data class Outcome(override val id: Long, val outcome: String) : Item
+
     sealed interface Conn {
         data object Connecting : Conn
         data object Live : Conn
@@ -120,9 +124,15 @@ class ChatController(
                 }
             }
             is ClawEvent.TextDelta -> {
-                val last = items.lastOrNull()
-                items = if (last is Reply && last.streaming) {
-                    items.dropLast(1) + last.copy(text = last.text + event.text)
+                // The turn has ONE reply: deltas append to the last open
+                // reply even after tool rows landed between them, so the
+                // agent's text reads continuously around its tool cards.
+                val index = items.indexOfLast { it is Reply && it.streaming }
+                items = if (index >= 0) {
+                    items.toMutableList().also { list ->
+                        val reply = list[index] as Reply
+                        list[index] = reply.copy(text = reply.text + event.text)
+                    }
                 } else {
                     items + Reply(newId(), event.text, streaming = true)
                 }
@@ -143,16 +153,20 @@ class ChatController(
             }
             is ClawEvent.TurnDone -> {
                 // Thinking is scratch: it disappears once the turn settles, and
-                // the pinned reply replaces whatever streamed in.
+                // the pinned reply replaces whatever streamed in. Every reply
+                // stops streaming; the last one carries the final text.
                 val kept = items.filterNot { it is Thinking }
                 val replyIndex = kept.indexOfLast { it is Reply }
-                items = when {
-                    event.reply.isNotEmpty() && replyIndex >= 0 -> kept.mapIndexed { i, item ->
-                        if (i == replyIndex) (item as Reply).copy(text = event.reply, streaming = false) else item
+                items = kept.mapIndexed { i, item ->
+                    if (item !is Reply) {
+                        item
+                    } else if (i == replyIndex && event.reply.isNotEmpty()) {
+                        item.copy(text = event.reply, streaming = false)
+                    } else {
+                        item.copy(streaming = false)
                     }
-                    event.reply.isNotEmpty() -> kept + Reply(newId(), event.reply, streaming = false)
-                    else -> kept.map { if (it is Reply) it.copy(streaming = false) else it }
                 }
+                event.outcome?.let { outcome -> items = items + Outcome(newId(), outcome) }
             }
         }
     }

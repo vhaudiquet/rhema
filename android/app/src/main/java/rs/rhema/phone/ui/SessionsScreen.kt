@@ -13,13 +13,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
-import kotlinx.serialization.json.JsonPrimitive
-import kotlinx.serialization.json.jsonPrimitive
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ElevatedCard
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -39,6 +34,10 @@ import rs.rhema.phone.net.ClawResult
 import rs.rhema.phone.net.SessionInfo
 import kotlinx.coroutines.launch
 
+// The session inventory, the design's sidebar as a screen: grouped
+// interactive-first rows with an honest state dot and the inbox depth.
+// Displayed names drop the `interactive:` prefix; the full key is what
+// gets opened.
 @Composable
 fun SessionsScreen(
     container: AppContainer,
@@ -55,11 +54,7 @@ fun SessionsScreen(
             loading = true
             error = null
             when (val result = container.api.sessions()) {
-                is ClawResult.Ok ->
-                    // Interactive sessions first; key order is stable within a group.
-                    sessions = result.value.sortedWith(
-                        compareBy({ it.state != "interactive" }, { it.key }),
-                    )
+                is ClawResult.Ok -> sessions = result.value
                 is ClawResult.HttpError -> error = UiMessage.Http(result.code, result.body)
                 is ClawResult.Network -> error = UiMessage.Network(result.message)
             }
@@ -69,43 +64,28 @@ fun SessionsScreen(
 
     LaunchedEffect(Unit) { refresh() }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(16.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                stringResource(R.string.sessions_title),
-                style = MaterialTheme.typography.headlineSmall,
-                modifier = Modifier.weight(1f),
-            )
-            IconButton(onClick = onOpenSettings) {
-                Icon(
-                    Icons.Filled.Settings,
-                    contentDescription = stringResource(R.string.sessions_open_settings),
-                )
-            }
-            IconButton(onClick = refresh, enabled = !loading) {
-                Icon(
-                    Icons.Filled.Refresh,
-                    contentDescription = stringResource(R.string.sessions_refresh),
-                )
-            }
-        }
+    Column(modifier = Modifier.fillMaxSize()) {
+        PageHeader(
+            title = stringResource(R.string.sessions_title),
+            actions = {
+                GhostIcon(Icons.Filled.Settings, stringResource(R.string.sessions_open_settings), onClick = onOpenSettings)
+                GhostIcon(Icons.Filled.Refresh, stringResource(R.string.sessions_refresh), enabled = !loading, onClick = refresh)
+            },
+        )
 
         val currentError = error
         when {
-            currentError != null -> {
-                val text = when (currentError) {
-                    is UiMessage.Http -> stringResource(R.string.sessions_http_error, currentError.code) +
-                    (currentError.detail?.let { " — $it" } ?: "")
-                    is UiMessage.Network -> stringResource(R.string.sessions_network_error, currentError.message)
-                }
-                Text(
-                    text,
-                    color = MaterialTheme.colorScheme.error,
-                    style = MaterialTheme.typography.bodyMedium,
+            currentError != null -> Column(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppCallout(
+                    tone = CalloutTone.Error,
+                    text = when (currentError) {
+                        is UiMessage.Http -> stringResource(R.string.sessions_http_error, currentError.code) +
+                            (currentError.detail?.let { " — $it" } ?: "")
+                        is UiMessage.Network -> stringResource(R.string.sessions_network_error, currentError.message)
+                    },
                 )
                 if (currentError is UiMessage.Http && currentError.code == 401) {
                     Text(
@@ -124,15 +104,57 @@ fun SessionsScreen(
             ) { CircularProgressIndicator() }
             sessions?.isEmpty() == true -> Text(
                 stringResource(R.string.sessions_empty),
+                modifier = Modifier.padding(horizontal = 16.dp),
                 style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                color = JadeiteText3,
             )
-            sessions != null -> LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(sessions ?: emptyList(), key = { it.key }) { session ->
-                    SessionRow(session) { onOpenSession(session.key) }
-                }
+            sessions != null -> SessionsList(
+                sessions = sessions ?: emptyList(),
+                onOpenSession = onOpenSession,
+            )
+        }
+    }
+}
+
+private data class SessionGroup(val labelKey: String, val rows: List<SessionInfo>)
+
+private const val GROUP_INTERACTIVE = "interactive"
+private const val GROUP_OTHER = "other"
+
+// Interactive keys are the chat surface and lead; other dispatch keys
+// read after. Key order is stable within a group.
+private fun groupSessions(sessions: List<SessionInfo>): List<SessionGroup> {
+    val byKey = compareBy<SessionInfo> { it.key }
+    val interactive = sessions.filter { it.key.startsWith("interactive:") }.sortedWith(byKey)
+    val others = sessions.filterNot { it.key.startsWith("interactive:") }.sortedWith(byKey)
+    val groups = mutableListOf<SessionGroup>()
+    if (interactive.isNotEmpty()) {
+        groups += SessionGroup(GROUP_INTERACTIVE, interactive)
+    }
+    if (others.isNotEmpty()) {
+        groups += SessionGroup(GROUP_OTHER, others)
+    }
+    return groups
+}
+
+@Composable
+private fun SessionsList(sessions: List<SessionInfo>, onOpenSession: (String) -> Unit) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        groupSessions(sessions).forEach { group ->
+            item(key = group.labelKey) {
+                SectionLabel(
+                    stringResource(
+                        if (group.labelKey == GROUP_INTERACTIVE) {
+                            R.string.sessions_group_interactive
+                        } else {
+                            R.string.sessions_group_other
+                        },
+                    ),
+                    modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp),
+                )
+            }
+            items(group.rows, key = { it.key }) { session ->
+                SessionRow(session) { onOpenSession(session.key) }
             }
         }
     }
@@ -140,42 +162,42 @@ fun SessionsScreen(
 
 @Composable
 private fun SessionRow(session: SessionInfo, onClick: () -> Unit) {
-    ElevatedCard(
+    Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            Text(session.key, style = MaterialTheme.typography.titleMedium)
+        StatusDot(tone = stateTone(session.state))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                session.key.removePrefix("interactive:"),
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+            )
             Text(
                 listOfNotNull(
                     session.state,
-                    session.inboxDepth?.let { "inbox: $it" },
+                    session.revision?.let { "rev $it" },
                 ).joinToString(" · "),
                 style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontFamily = JadeiteMono,
+                color = JadeiteText3,
             )
-            session.lastOutcome?.let { outcome ->
-                val text = outcome.entries.firstOrNull()?.let { (variant, reason) ->
-                    reason.takeIf { it is JsonPrimitive && it.isString }
-                        ?.let { primitive ->
-                            val text = primitive.jsonPrimitive.content
-                            text.takeIf { it.isNotBlank() }?.let { "$variant: $text" } ?: variant
-                        } ?: variant
-                }
-                text?.let {
-                    Text(
-                        it,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
+        }
+        val depth = session.inboxDepth
+        if (depth != null && depth > 0) {
+            AppBadge(depth.toString(), tint = JadeiteInfo)
         }
     }
+}
+
+/** Leased keys are alive, reacquiring ones are troubled, the rest idle. */
+private fun stateTone(state: String?): DotTone = when (state) {
+    "leased" -> DotTone.Ok
+    "reacquire" -> DotTone.Warn
+    else -> DotTone.Idle
 }
