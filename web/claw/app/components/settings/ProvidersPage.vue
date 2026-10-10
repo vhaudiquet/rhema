@@ -114,6 +114,7 @@ const keyLabel = computed(() =>
   addKind.value === 'copilot' ? 'GitHub token' : 'API key',
 )
 
+const loginOpen = ref(false)
 const addKind = ref<string>('')
 const addApiKey = ref('')
 const addUrl = ref('')
@@ -165,6 +166,9 @@ watch(
   () => props.state?.providers.map((p) => p.kind).join(','),
   (roster, previous) => {
     if (addKind.value && roster && roster !== previous && roster.includes(addKind.value)) {
+      // The login landed: forget the secret, close the modal. A failed
+      // one leaves both up — the banner names the error.
+      loginOpen.value = false
       addApiKey.value = ''
       addUrl.value = ''
       addKind.value = ''
@@ -177,6 +181,7 @@ watch(
   <div class="page">
     <PageHeader title="Model providers" subtitle="The backends the claw can answer with — logins apply immediately; the pair switch persists.">
       <template #actions>
+        <button :disabled="mutating" @click="loginOpen = true">Add provider</button>
         <button :disabled="!dirty || saving" @click="discard">Discard</button>
         <button class="primary" :disabled="!dirty || saving" @click="save">
           {{ saving ? 'Saving…' : 'Save' }}
@@ -254,61 +259,55 @@ watch(
           </div>
         </SettingCard>
 
-        <SettingCard
-          title="Add a provider"
-          meta="the kind's backend constructs immediately; credentials persist"
-        >
-          <div class="add-form">
-            <div class="add-row">
-              <label class="add-label" for="add-kind">Kind</label>
-              <select id="add-kind" v-model="addKind" :disabled="mutating">
-                <option value="" disabled>choose a provider…</option>
-                <option v-for="entry in addable" :key="entry.kind" :value="entry.kind">
-                  {{ kindLabel(entry.kind) }}{{ state.providers.some((p) => p.kind === entry.kind) ? ' — replaces its credentials' : '' }}
-                </option>
-              </select>
-            </div>
-            <div v-if="addFields.includes('url')" class="add-row">
-              <label class="add-label" for="add-url">Server URL</label>
-              <input
-                id="add-url"
-                v-model="addUrl"
-                type="text"
-                placeholder="http://127.0.0.1:8080"
-                autocomplete="off"
-                :disabled="mutating"
-                class="mono"
-              />
-            </div>
-            <div v-if="addFields.includes('api_key')" class="add-row">
-              <label class="add-label" for="add-key">{{ keyLabel }}</label>
-              <input
-                id="add-key"
-                v-model="addApiKey"
-                type="password"
-                placeholder="stored claw-side, never shown again"
-                autocomplete="off"
-                :disabled="mutating"
-              />
-            </div>
-            <p v-if="addKindPresent" class="add-note">
-              {{ kindLabel(addKind) }} is already serving — saving replaces
-              its credentials and restarts nothing; the active pair is
-              untouched.
-            </p>
-            <div class="add-actions">
-              <button
-                class="primary"
-                :disabled="!addReady || mutating"
-                @click="submitAdd"
-              >
-                {{ mutating ? 'Working…' : addKindPresent ? 'Replace credentials' : 'Add provider' }}
-              </button>
-            </div>
-          </div>
-        </SettingCard>
       </template>
     </div>
+
+    <AppModal :open="loginOpen" title="Add a provider" @close="loginOpen = false">
+      <div v-if="state" class="add-form">
+        <div class="add-row">
+          <label class="add-label" for="add-kind">Kind</label>
+          <select id="add-kind" v-model="addKind" :disabled="mutating">
+            <option value="" disabled>choose a provider…</option>
+            <option v-for="entry in addable" :key="entry.kind" :value="entry.kind">
+              {{ kindLabel(entry.kind) }}{{ state.providers.some((p) => p.kind === entry.kind) ? ' — replaces its credentials' : '' }}
+            </option>
+          </select>
+        </div>
+        <div v-if="addFields.includes('url')" class="add-row">
+          <label class="add-label" for="add-url">Server URL</label>
+          <input
+            id="add-url"
+            v-model="addUrl"
+            type="text"
+            placeholder="http://127.0.0.1:8080"
+            autocomplete="off"
+            :disabled="mutating"
+            class="mono"
+          />
+        </div>
+        <div v-if="addFields.includes('api_key')" class="add-row">
+          <label class="add-label" for="add-key">{{ keyLabel }}</label>
+          <input
+            id="add-key"
+            v-model="addApiKey"
+            type="password"
+            placeholder="stored claw-side, never shown again"
+            autocomplete="off"
+            :disabled="mutating"
+          />
+        </div>
+        <p v-if="addKindPresent" class="add-note">
+          {{ kindLabel(addKind) }} is already serving — saving replaces its
+          credentials and restarts nothing; the active pair is untouched.
+        </p>
+      </div>
+      <template #actions>
+        <button @click="loginOpen = false">Cancel</button>
+        <button class="primary" :disabled="!addReady || mutating" @click="submitAdd">
+          {{ mutating ? 'Working…' : addKindPresent ? 'Replace credentials' : 'Add provider' }}
+        </button>
+      </template>
+    </AppModal>
   </div>
 </template>
 
