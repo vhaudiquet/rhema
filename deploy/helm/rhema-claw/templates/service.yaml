@@ -13,3 +13,6 @@ spec:
       protocol: TCP
   selector:
     {{- include "rhema-claw.selectorLabels" . | nindent 4 }}
+    # The UI pods share the name/instance labels; without this the
+    # daemon's service load-balances chat traffic to nginx.
+    app.kubernetes.io/component: server

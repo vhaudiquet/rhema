@@ -10,10 +10,12 @@ spec:
   selector:
     matchLabels:
       {{- include "rhema-claw.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: server
   template:
     metadata:
       labels:
         {{- include "rhema-claw.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: server
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
