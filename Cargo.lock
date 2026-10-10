@@ -2704,6 +2704,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-provider-copilot"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "reqwest",
+ "rhema-core",
+ "rhema-provider",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rhema-provider-google"
 version = "0.1.0"
 dependencies = [

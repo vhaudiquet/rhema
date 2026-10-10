@@ -23,8 +23,10 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   - `run_turn` — the provided coding-agent driver (~15 lines, not the primitive)
   - `MockProvider` — scripted offline provider, behind the `mock` feature
 - `rhema-provider` — the adapters' shared base: `ModelCard` (the
-  normalized catalog row), `Pricing`, and the SSE decoder; each adapter
-  filters its own catalog down to the text chat models it can drive
+  normalized catalog row), `Pricing`, the SSE decoder, and the
+  `InteractiveLogin` seam adapters declare OAuth-style login flows on;
+  each adapter filters its own catalog down to the text chat models it
+  can drive
 - `rhema-provider-google` — Gemini adapter: streaming SSE, native function
   calling, live model listing; `GoogleProvider::new(api_key)` implements
   `ModelProvider`
@@ -39,6 +41,10 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 - `rhema-provider-openai-compatible` — any OpenAI-compatible
   chat-completions server (OpenAI itself, vLLM, LM Studio), addressed by
   its versioned base URL: streaming, live model listing
+- `rhema-provider-copilot` — GitHub Copilot adapter: the OpenAI-shaped
+  proxy API driven by a long-lived GitHub OAuth token (the `InteractiveLogin`
+  device flow's output) exchanged for a short-lived token the provider
+  caches and refreshes; streaming, live model listing
 - `rhema-config` — the XDG config file: stored API key (0600) and
   last-used model; env vars always win over the stored key
 - `rhema-rsd` — resource-scoped dispatch: at most one live handler per

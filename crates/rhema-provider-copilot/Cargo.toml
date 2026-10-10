@@ -1,0 +1,28 @@
+[package]
+name = "rhema-provider-copilot"
+description = "GitHub Copilot adapter for the rhema ModelProvider seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core" }
+# The shared model card, SSE decoder, and login-flow seam
+rhema-provider = { path = "../rhema-provider" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# HTTP + SSE streaming against the Copilot proxy API
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The cached short-lived Copilot token refreshes across awaited calls,
+# and the device flow sleeps between polls
+tokio = { workspace = true, features = ["sync", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+# In-process HTTP mock for offline SSE and device-flow tests
+wiremock = "0.6"

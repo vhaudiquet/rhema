@@ -47,7 +47,8 @@ Rules:
   - `mock` — `MockProvider` (`src/mock.rs`, `mock` feature)
   - `tests` — integration suites under `crates/rhema-core/tests/`
   - `rhema-provider` — the adapter-family base: the `ModelCard` catalog
-    row, `Pricing`, and the SSE decoder (`crates/rhema-provider/`)
+    row, `Pricing`, the SSE decoder, and the `InteractiveLogin`
+    login-flow seam (`crates/rhema-provider/`)
   - `google` — the Gemini provider adapter (`crates/rhema-provider-google/`)
   - `llama-cpp` — the llama.cpp server adapter (`crates/rhema-provider-llama-cpp/`)
   - `openrouter` — the OpenRouter adapter (`crates/rhema-provider-openrouter/`)
@@ -55,6 +56,8 @@ Rules:
     (`crates/rhema-provider-anthropic/`)
   - `openai-compatible` — the generic OpenAI-compatible adapter
     (`crates/rhema-provider-openai-compatible/`)
+  - `copilot` — the GitHub Copilot adapter
+    (`crates/rhema-provider-copilot/`)
   - `memory` — the agent memory layer: the `MemoryStore` contract, its
     stores, and the memory tools (`crates/rhema-memory/`)
   - `rsd` — resource-scoped dispatch: the dispatcher and its stores
