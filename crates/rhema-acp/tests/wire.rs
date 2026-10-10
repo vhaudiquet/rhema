@@ -531,8 +531,10 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
             initialize(&cx).await;
             let session = new_session(&cx, &workspace).await;
 
-            // session/new advertises a Model select whose current value is
-            // the model the agent runs on ("mock").
+            // session/new advertises a Model select whose current value
+            // is the model the agent runs on, in the `<kind>/<model>`
+            // shape every choice value carries ("mock" under the mock
+            // feature), and the choice's description names its provider.
             let select = session
                 .config_options
                 .as_ref()
@@ -542,12 +544,21 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                     })
                 })
                 .expect("session/new advertises a Model select");
-            match &select.kind {
-                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
-                    assert_eq!(select.current_value.0.as_ref(), "mock");
-                }
+            let kind = match &select.kind {
+                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => select,
                 _ => panic!("the Model option is a select"),
-            }
+            };
+            assert_eq!(kind.current_value.0.as_ref(), "mock/mock");
+            let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(choices) =
+                &kind.options
+            else {
+                panic!("the Model select's choices are ungrouped");
+            };
+            let first = choices
+                .iter()
+                .find(|option| option.value.0.as_ref() == "mock/mock")
+                .expect("the current value is among the choices");
+            assert_eq!(first.description.as_deref(), Some("mock"));
 
             // A first turn runs on the advertised model.
             let first = cx
@@ -560,13 +571,30 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 .expect("first prompt");
             assert_eq!(first.stop_reason, StopReason::EndTurn);
 
+            // A choice naming an unknown provider kind is a named
+            // parameter error, not a model id leaking to the provider.
+            let bogus = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session.session_id.clone(),
+                    "model",
+                    "bogus/model",
+                ))
+                .block_task()
+                .await
+                .expect_err("an unknown kind must not switch");
+            assert_eq!(
+                bogus.code,
+                agent_client_protocol::schema::v1::ErrorCode::InvalidParams
+            );
+
             // A model switch rebuilds the agent over the history; the
-            // response's select now names the new model as current.
+            // response's select now names the new model as current. The
+            // mock kind's own prefix strips without a provider rebuild.
             let switched = cx
                 .send_request(SetSessionConfigOptionRequest::new(
                     session.session_id.clone(),
                     "model",
-                    "other-model",
+                    "mock/other-model",
                 ))
                 .block_task()
                 .await
@@ -580,7 +608,32 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 .expect("the response carries the Model select");
             match &select.kind {
                 agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
-                    assert_eq!(select.current_value.0.as_ref(), "other-model");
+                    assert_eq!(select.current_value.0.as_ref(), "mock/other-model");
+                }
+                _ => panic!("the Model option is a select"),
+            }
+
+            // A bare value keeps the session's provider, the compatibility
+            // shape for hand-written clients.
+            let bare = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session.session_id.clone(),
+                    "model",
+                    "third-model",
+                ))
+                .block_task()
+                .await
+                .expect("bare set_config_option");
+            let select = bare
+                .config_options
+                .iter()
+                .find(|option| {
+                    option.category.as_ref() == Some(&SessionConfigOptionCategory::Model)
+                })
+                .expect("the response carries the Model select");
+            match &select.kind {
+                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
+                    assert_eq!(select.current_value.0.as_ref(), "mock/third-model");
                 }
                 _ => panic!("the Model option is a select"),
             }

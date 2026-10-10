@@ -106,13 +106,16 @@ client's own permission UI. Sessions persist under the cache dir and
 The backend resolves once from `--profile`/`--provider`/`--model` and
 the stored config, the same resolution the TUI and one-shot use. On
 `session/new` and `session/load`, the agent advertises a `Model` select
-(`config_options`) whose current value is the model it is running and
-whose choices are the active provider's text-chat catalog rows fetched
-over its API. Clients that support `session/set_config_option` use this
-to show a working model picker: switching the select rebuilds the
-agent over the session's history with the same provider, and the
-conversation continues on the new model. Without a resolvable
-credential, `authenticate` fails naming the fix.
+(`config_options`): the model it is running is the current value, in
+the `<provider>/<model>` shape every choice value carries, and the
+choices span every provider the profile holds credentials for — each
+fetched over its API, its description carrying the provider plus the
+catalog's facts (pricing, context window), the same list the TUI's
+`/model` picker offers. Clients that support `session/set_config_option`
+use this to show a working model picker: switching the select rebuilds
+the agent over the session's history, moving it across providers when
+the choice names one, and the conversation continues on the new model.
+Without a resolvable credential, `authenticate` fails naming the fix.
 
 ### Profiles
 

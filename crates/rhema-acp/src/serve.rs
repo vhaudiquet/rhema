@@ -15,8 +15,10 @@
 //!
 //! Deliberately absent: MCP servers (`mcpServers` is accepted and
 //! ignored — nothing is advertised), fs/terminal callbacks (the `bash`
-//! tool does its own I/O), and session modes/config options (nothing
-//! advertised, so no client offers them).
+//! tool does its own I/O), and session modes (nothing advertised, so
+//! no client offers them). The one config option is the `Model` select
+//! — the model catalog every logged-in provider offers — see
+//! [`App::model_select`].
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -86,8 +88,12 @@ pub struct AcpOptions {
 /// One live session: the agent between turns, the cancel sender of the
 /// turn in flight, and the `always` answers the session has collected.
 pub(crate) struct SessionSlot {
-    /// The provider every model on this session runs on; a model switch
-    /// rebuilds the agent over the history with the same provider.
+    /// The provider kind the session rides on — a [`backend::PROVIDERS`]
+    /// name, or `"mock"` under the mock feature. A model switch may
+    /// change it; the provider moves with it.
+    kind: &'static str,
+    /// The provider the agent's turns run on; a model switch that names
+    /// another kind replaces it.
     provider: Arc<dyn ModelProvider>,
     /// Gone while a turn runs; the prompt task puts it back after.
     agent: Option<CodingAgent>,
@@ -98,10 +104,11 @@ pub(crate) struct SessionSlot {
     /// The workspace root the agent's tools are scoped to; a model
     /// change rebuilds the agent over the same history and root.
     workspace: std::path::PathBuf,
-    /// The catalog rows the model picker offers; a model switch re-emits
-    /// the select from these rows without re-fetching. `None` when no
-    /// catalog resolved (the picker shows nothing).
-    catalog_rows: Option<Vec<rhema_provider::ModelCard>>,
+    /// The catalog rows the model picker offers — every logged-in
+    /// provider's, fetched once per `session/new`/`session/load`. A
+    /// model switch re-renders the select from these rows without
+    /// re-fetching.
+    catalog_rows: Vec<backend::CatalogRow>,
     /// The watch sender the prompt task listens to; `None` when idle.
     cancel: Option<watch::Sender<bool>>,
     /// Shared with the session's approval hooks.
@@ -171,6 +178,7 @@ impl App {
         #[cfg(feature = "mock")]
         if let Some(replies) = &self.options.mock_replies {
             return Some(backend::Resolved {
+                kind: "mock",
                 provider: Arc::new(rhema_core::MockProvider::new(replies.iter().cloned())),
                 model: self
                     .options
@@ -187,41 +195,42 @@ impl App {
         )
     }
 
-    /// The catalog rows the session's model picker offers. Under the
-    /// `mock` feature there is no real provider: the scripted model alone
-    /// is the row, so the picker still names it. Otherwise the active
-    /// provider's catalog is fetched over its API; `None` when no
-    /// credentials resolve or the listing fails.
-    async fn catalog(&self) -> Option<Vec<rhema_provider::ModelCard>> {
+    /// The catalog rows the session's model picker offers: every
+    /// provider the profile holds credentials for (the same set the
+    /// TUI's `/model` picker offers). Under the `mock` feature there is
+    /// no real provider: the scripted model alone is the row, so the
+    /// picker still names it.
+    async fn catalog(&self) -> Vec<backend::CatalogRow> {
         #[cfg(feature = "mock")]
         {
-            // Under the mock feature there is no real provider: the
-            // scripted model alone is the row, so the picker still names
-            // it. No replies means no catalog at all.
-            self.options.mock_replies.as_ref().map(|_| {
-                let model = self
-                    .options
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| "mock".to_owned());
-                vec![rhema_provider::ModelCard {
-                    id: model.clone(),
-                    display_name: model,
-                    description: String::new(),
-                    input_token_limit: None,
-                    output_token_limit: None,
-                    generation_methods: vec!["generateContent".to_owned()],
-                    pricing: None,
-                }]
-            })
+            // The mock row only stands when a scripted provider is
+            // actually configured; a real backend that resolved beside
+            // it is not ours to fake a catalog for.
+            match self.options.mock_replies.as_ref() {
+                Some(_) => {
+                    let model = self
+                        .options
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "mock".to_owned());
+                    vec![backend::CatalogRow {
+                        provider: "mock",
+                        card: rhema_provider::ModelCard {
+                            id: model.clone(),
+                            display_name: model,
+                            description: String::new(),
+                            input_token_limit: None,
+                            output_token_limit: None,
+                            generation_methods: vec!["generateContent".to_owned()],
+                            pricing: None,
+                        },
+                    }]
+                }
+                None => Vec::new(),
+            }
         }
         #[cfg(not(feature = "mock"))]
-        backend::catalog(
-            &self.effective,
-            self.options.provider.as_deref(),
-            self.options.llama_url.as_deref(),
-        )
-        .await
+        backend::catalog(&self.effective, self.options.llama_url.as_deref()).await
     }
 
     fn thinking(&self) -> ThinkingEffort {
@@ -244,35 +253,46 @@ impl App {
     }
 
     /// The `Model` select one session carries: the model it runs on is
-    /// the current value, the catalog rows are the choices. `None` when
-    /// no catalog resolved (the client then shows no picker).
+    /// the current value — `<kind>/<model>` — and every catalog row is
+    /// a choice, led by the current model when the catalog does not
+    /// list it (a `--model` override, or its provider's slice failed to
+    /// fetch). Each choice's description carries its provider and the
+    /// card's facts — the same line the TUI's picker renders — so the
+    /// client can show pricing and context window beside the name.
     fn model_select(
         &self,
-        current: &str,
-        rows: Option<Vec<rhema_provider::ModelCard>>,
-    ) -> Option<Vec<SessionConfigOption>> {
-        let rows = rows?;
-        // The active model leads; the catalog fills the rest. A row that
-        // already is the current value does not repeat.
-        let mut options = vec![SessionConfigSelectOption::new(
-            current.to_string(),
-            current.to_string(),
-        )];
-        for card in rows {
-            if card.id == current {
+        kind: &str,
+        model: &str,
+        rows: &[backend::CatalogRow],
+    ) -> Vec<SessionConfigOption> {
+        let current = format!("{kind}/{model}");
+        let mut options = Vec::with_capacity(rows.len() + 1);
+        let current_card = rows
+            .iter()
+            .find(|row| row.provider == kind && row.card.id == model)
+            .map(|row| &row.card);
+        options.push(
+            SessionConfigSelectOption::new(current.clone(), model.to_owned()).description(
+                match current_card {
+                    Some(card) => card_description(kind, card),
+                    None => kind.to_owned(),
+                },
+            ),
+        );
+        for row in rows {
+            let value = format!("{}/{}", row.provider, row.card.id);
+            if value == current {
                 continue;
             }
-            let name = if card.display_name.is_empty() {
-                card.id.clone()
-            } else {
-                card.display_name.clone()
-            };
-            options.push(SessionConfigSelectOption::new(card.id, name));
+            options.push(
+                SessionConfigSelectOption::new(value, option_name(&row.card))
+                    .description(card_description(row.provider, &row.card)),
+            );
         }
-        Some(vec![
-            SessionConfigOption::select("model", "Model", current.to_string(), options)
+        vec![
+            SessionConfigOption::select("model", "Model", current, options)
                 .category(Some(SessionConfigOptionCategory::Model)),
-        ])
+        ]
     }
 
     /// A fresh, unique, file-safe session id.
@@ -323,29 +343,60 @@ impl App {
         }
     }
 
-    /// Swaps the session's model: the agent is rebuilt over the session's
-    /// existing history with the same provider, so the conversation
-    /// continues under the new model. Returns the updated `Model` select
-    /// (the client re-renders its picker). `None` when the session is
-    /// unknown or a turn is in flight.
-    fn switch_model(&self, id: &str, model: &str) -> Option<Vec<SessionConfigOption>> {
+    /// Swaps the session's model — and, when the choice names another
+    /// provider kind, the provider with it: the agent is rebuilt over
+    /// the session's existing history, so the conversation continues
+    /// under the new model. Returns the updated `Model` select (the
+    /// client re-renders its picker). An unknown session or a turn in
+    /// flight is `invalid_request`; a bad choice value or a kind whose
+    /// credentials do not resolve is `invalid_params` naming the fix.
+    fn switch_model(&self, id: &str, value: &str) -> Result<Vec<SessionConfigOption>, Error> {
         // The swap runs under the lock; the select is built once it is
         // released, since `model_select` borrows `self` again.
-        let catalog_rows = {
+        let (kind, model, rows) = {
             let mut sessions = self.lock();
-            let slot = sessions.get_mut(id)?;
-            let session = slot.agent.as_ref()?.session().clone();
+            let slot = sessions.get_mut(id).ok_or_else(|| {
+                Error::invalid_request()
+                    .data("unknown session, or a turn is already running for it")
+            })?;
+            let (kind, model) = backend::split_switch(value, slot.kind)
+                .map_err(|message| Error::invalid_params().data(message))?;
+            let provider = match kind {
+                Some(kind) => {
+                    backend::provider_for(kind, &self.effective, self.options.llama_url.as_deref())
+                        .ok_or_else(|| {
+                            Error::invalid_params().data(format!(
+                                "no usable credentials for {kind} — log in once with the \
+                         rhema TUI or set its API key"
+                            ))
+                        })?
+                }
+                None => slot.provider.clone(),
+            };
+            let kind = kind.unwrap_or(slot.kind);
+            let session = slot
+                .agent
+                .as_ref()
+                .ok_or_else(|| {
+                    Error::invalid_request()
+                        .data("unknown session, or a turn is already running for it")
+                })?
+                .session()
+                .clone();
             let agent = CodingAgent::from_session(
-                slot.provider.clone(),
-                self.agent_config(model, &slot.workspace),
+                provider.clone(),
+                self.agent_config(&model, &slot.workspace),
                 session,
             )
-            .ok()?;
-            slot.model = model.to_owned();
+            .map_err(|err| Error::internal_error().data(err.to_string()))?;
+            slot.kind = kind;
+            slot.provider = provider;
+            slot.model = model.clone();
             slot.agent = Some(agent);
-            slot.catalog_rows.clone()
+            let rows = slot.catalog_rows.clone();
+            (kind, model, rows)
         };
-        self.model_select(model, catalog_rows)
+        Ok(self.model_select(kind, &model, &rows))
     }
 
     /// Persists a session after a completed turn. Best effort: a failed
@@ -457,8 +508,9 @@ async fn serve_connection(
                     .map_err(|err| Error::internal_error().data(err.to_string()))?;
                     let id = app.fresh_id();
                     let catalog = app.catalog().await;
-                    let config_options = app.model_select(&backend.model, catalog.clone());
+                    let config_options = app.model_select(backend.kind, &backend.model, &catalog);
                     let slot = SessionSlot {
+                        kind: backend.kind,
                         provider,
                         agent: Some(agent),
                         model: backend.model.clone(),
@@ -503,8 +555,9 @@ async fn serve_connection(
                     replay(&cx, &request.session_id, agent.session());
                     let id = request.session_id.0.to_string();
                     let catalog = app.catalog().await;
-                    let config_options = app.model_select(&backend.model, catalog.clone());
+                    let config_options = app.model_select(backend.kind, &backend.model, &catalog);
                     let slot = SessionSlot {
+                        kind: backend.kind,
                         provider,
                         agent: Some(agent),
                         model: backend.model.clone(),
@@ -626,16 +679,14 @@ async fn serve_connection(
                         );
                     };
                     // Rebuild the agent over the session's history on the
-                    // new model; the updated select is the response.
+                    // new model — across providers when the choice names
+                    // one; the updated select is the response.
                     match app.switch_model(&request.session_id.0, &model.0) {
-                        Some(config_options) => {
+                        Ok(config_options) => {
                             let _ = responder
                                 .respond(SetSessionConfigOptionResponse::new(config_options));
                         }
-                        None => {
-                            return Err(Error::invalid_request()
-                                .data("unknown session, or a turn is already running for it"));
-                        }
+                        Err(err) => return Err(err),
                     }
                     Ok(())
                 }
@@ -668,6 +719,46 @@ async fn cancelled_turn(mut rx: watch::Receiver<bool>) {
         if rx.changed().await.is_err() {
             std::future::pending::<()>().await;
         }
+    }
+}
+
+/// A model select choice's label: the display name when the listing
+/// knows one, the id otherwise.
+fn option_name(card: &rhema_provider::ModelCard) -> String {
+    if card.display_name.is_empty() {
+        card.id.clone()
+    } else {
+        card.display_name.clone()
+    }
+}
+
+/// A model select choice's description: the provider kind serving the
+/// model, then the card's facts — pricing and context window — when
+/// the card knows them. The same line the TUI's picker renders; a
+/// client shows it beside the choice's name.
+fn card_description(provider: &str, card: &rhema_provider::ModelCard) -> String {
+    let mut parts = vec![provider.to_owned()];
+    if let Some(pricing) = card.pricing {
+        parts.push(format!(
+            "${:.2}/M in · ${:.2}/M out",
+            pricing.input_per_mtok, pricing.output_per_mtok
+        ));
+    }
+    if let Some(limit) = card.input_token_limit {
+        parts.push(format!("{} ctx", format_tokens(limit)));
+    }
+    parts.join(" · ")
+}
+
+/// Humanizes a token count the way the TUI's picker does: 1_048_576 →
+/// "1.0M", 131_072 → "131k", small counts stay raw.
+fn format_tokens(limit: u64) -> String {
+    if limit >= 1_000_000 {
+        format!("{:.1}M", limit as f64 / 1_000_000.0)
+    } else if limit >= 10_000 {
+        format!("{}k", limit / 1_000)
+    } else {
+        format!("{limit}")
     }
 }
 
