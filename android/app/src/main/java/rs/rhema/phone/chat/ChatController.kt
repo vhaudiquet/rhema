@@ -98,7 +98,8 @@ class ChatController(
                 true
             }
             is ClawResult.HttpError -> {
-                sendError = "HTTP ${result.code}"
+                sendError = "HTTP ${result.code}" +
+                    (result.body?.take(200)?.let { " — $it" } ?: "")
                 false
             }
             is ClawResult.Network -> {

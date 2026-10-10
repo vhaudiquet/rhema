@@ -58,7 +58,7 @@ fun SessionsScreen(
                     sessions = result.value.sortedWith(
                         compareBy({ it.state != "interactive" }, { it.key }),
                     )
-                is ClawResult.HttpError -> error = UiMessage.Http(result.code)
+                is ClawResult.HttpError -> error = UiMessage.Http(result.code, result.body)
                 is ClawResult.Network -> error = UiMessage.Network(result.message)
             }
             loading = false
@@ -96,7 +96,8 @@ fun SessionsScreen(
         when {
             currentError != null -> {
                 val text = when (currentError) {
-                    is UiMessage.Http -> stringResource(R.string.sessions_http_error, currentError.code)
+                    is UiMessage.Http -> stringResource(R.string.sessions_http_error, currentError.code) +
+                    (currentError.detail?.let { " — $it" } ?: "")
                     is UiMessage.Network -> stringResource(R.string.sessions_network_error, currentError.message)
                 }
                 Text(

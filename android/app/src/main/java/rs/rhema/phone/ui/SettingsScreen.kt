@@ -84,7 +84,7 @@ fun SettingsScreen(container: AppContainer, onConnected: () -> Unit = {}) {
                     container.settings.setCredentials(baseUrl.trim(), token.trim())
                     when (val result = container.api.health()) {
                         is ClawResult.Ok -> onConnected()
-                        is ClawResult.HttpError -> status = UiMessage.Http(result.code)
+                        is ClawResult.HttpError -> status = UiMessage.Http(result.code, result.body)
                         is ClawResult.Network -> status = UiMessage.Network(result.message)
                     }
                     busy = false
@@ -96,7 +96,8 @@ fun SettingsScreen(container: AppContainer, onConnected: () -> Unit = {}) {
         val currentStatus = status
         if (currentStatus != null) {
             val text: String = when (currentStatus) {
-                is UiMessage.Http -> stringResource(R.string.settings_health_http, currentStatus.code)
+                is UiMessage.Http -> stringResource(R.string.settings_health_http, currentStatus.code) +
+                    (currentStatus.detail?.let { " — $it" } ?: "")
                 is UiMessage.Network -> stringResource(R.string.settings_health_network, currentStatus.message)
             }
             Text(text, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium)
