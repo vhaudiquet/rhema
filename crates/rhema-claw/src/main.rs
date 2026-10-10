@@ -9,12 +9,6 @@ use std::sync::Arc;
 
 use clap::Parser;
 use rhema_claw::{ClawConfig, ClawError, Daemon, run_once};
-use rhema_core::ModelProvider;
-use rhema_provider_anthropic::AnthropicProvider;
-use rhema_provider_google::GoogleProvider;
-use rhema_provider_llama_cpp::LlamaCppProvider;
-use rhema_provider_openai_compatible::OpenAiCompatibleProvider;
-use rhema_provider_openrouter::OpenRouterProvider;
 use rhema_rsd::{DispatcherConfig, Outcome};
 
 /// `rhema-claw` — the resident forge-watching agent daemon.
@@ -59,14 +53,16 @@ async fn run(args: Args) -> Result<(), ClawError> {
         None => ClawConfig::default_path()?,
     };
     let config = ClawConfig::load_from(&path)?;
-    let (provider, model) = if args.mock {
-        mock_backend()
+    let backends = if args.mock {
+        mock_backends()
     } else {
-        resolve_backend(&config)
+        resolve_backends(&config)?
     };
     eprintln!(
-        "[claw] {} seeded watch(es), model {model}, db {}, http {}",
+        "[claw] {} seeded watch(es), active {}/{}, db {}, http {}",
         config.watches.len(),
+        backends.active().0,
+        backends.active().1,
         config
             .db_path()
             .map(|db| db.display().to_string())
@@ -75,7 +71,7 @@ async fn run(args: Args) -> Result<(), ClawError> {
     );
 
     if args.once {
-        let report = run_once(&config, provider).await?;
+        let report = run_once(&config, backends.clone()).await?;
         // A cron pass reports its failures through the exit code.
         if report
             .outcomes
@@ -88,7 +84,7 @@ async fn run(args: Args) -> Result<(), ClawError> {
     } else {
         // The resident daemon always serves HTTP: the chat surface is
         // how it is talked to. Only `--once` runs headless.
-        let daemon = Daemon::build(&config, provider, DispatcherConfig::default())?;
+        let daemon = Daemon::build(&config, backends, DispatcherConfig::default())?;
         daemon.run().await
     }
 }
@@ -96,22 +92,32 @@ async fn run(args: Args) -> Result<(), ClawError> {
 /// The `--mock` backend: an endless canned provider behind the `mock`
 /// feature; without it the flag is a loud startup failure naming the fix.
 #[cfg(feature = "mock")]
-fn mock_backend() -> (Arc<dyn ModelProvider>, String) {
+fn mock_backends() -> Arc<rhema_claw::BackendRegistry> {
     eprintln!("[claw] mock backend: every turn answers with canned streamed text");
-    (rhema_claw::mock::MockLoop::provider(), "mock".to_owned())
+    Arc::new(
+        rhema_claw::BackendRegistry::new(
+            vec![rhema_claw::Backend::headless(
+                "mock",
+                rhema_claw::mock::MockLoop::provider(),
+            )],
+            None,
+        )
+        .expect("a single mock backend always constructs"),
+    )
 }
 
 #[cfg(not(feature = "mock"))]
-fn mock_backend() -> (Arc<dyn ModelProvider>, String) {
+fn mock_backends() -> Arc<rhema_claw::BackendRegistry> {
     eprintln!("error: --mock needs a mock build: cargo build -p rhema-claw --features mock");
     std::process::exit(1);
 }
 
-/// The handler's backend, resolved through the stored rhema credentials
-/// exactly as the frontend resolves them: the env key wins, the stored
-/// key serves, and a backend without its key is a startup failure — a
-/// daemon must not boot to fail on every dispatch.
-fn resolve_backend(config: &ClawConfig) -> (Arc<dyn ModelProvider>, String) {
+/// The deployment's backends: every provider whose credentials resolve
+/// (env wins, the stored rhema config serves), with the config's
+/// provider/model pair as the active seed. A daemon always boots —
+/// the keyless llama-cpp backend is always constructible — and a
+/// dispatch against an unreachable provider fails loudly per turn.
+fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegistry>, ClawError> {
     let stored = match rhema_config::Config::load() {
         Ok(stored) => stored,
         Err(err) => {
@@ -120,51 +126,13 @@ fn resolve_backend(config: &ClawConfig) -> (Arc<dyn ModelProvider>, String) {
         }
     };
     let profile = stored.effective(None);
-    let provider: Arc<dyn ModelProvider> = match config.provider.as_deref().unwrap_or("google") {
-        "google" => Arc::new(GoogleProvider::new(
-            profile
-                .google_api_key()
-                .unwrap_or_else(|| die("google", "GEMINI_API_KEY")),
-        )),
-        "llama-cpp" => {
-            // A llama.cpp server works keyless; the bearer key is
-            // optional, the URL defaults to localhost.
-            let mut provider = LlamaCppProvider::new(profile.llama_cpp_url());
-            if let Some(key) = profile.llama_cpp_api_key() {
-                provider = provider.with_api_key(key);
-            }
-            Arc::new(provider)
-        }
-        "openrouter" => Arc::new(OpenRouterProvider::new(
-            profile
-                .openrouter_api_key()
-                .unwrap_or_else(|| die("openrouter", "OPENROUTER_API_KEY")),
-        )),
-        "anthropic" => Arc::new(AnthropicProvider::new(
-            profile
-                .anthropic_api_key()
-                .unwrap_or_else(|| die("anthropic", "ANTHROPIC_API_KEY")),
-        )),
-        "openai" => Arc::new(OpenAiCompatibleProvider::new(
-            profile
-                .openai_api_key()
-                .unwrap_or_else(|| die("openai", "OPENAI_API_KEY")),
-        )),
-        other => {
-            eprintln!(
-                "error: unknown provider {other:?}: google, llama-cpp, openrouter, anthropic, or openai"
-            );
-            std::process::exit(1);
-        }
-    };
-    let model = config.resolved_model();
-    (provider, model)
-}
-
-/// Exits naming the provider and the env variable that would fix it.
-fn die(provider: &str, env: &str) -> ! {
-    eprintln!(
-        "error: missing API key for provider {provider}: set {env} (or store one with rhema)"
-    );
-    std::process::exit(1);
+    let env = |name: &str| std::env::var(name).ok();
+    let backends = rhema_claw::backends::discover(config, &profile, &env);
+    let seed = config
+        .provider
+        .as_deref()
+        .map(|kind| (kind.to_owned(), config.model.clone()));
+    Ok(Arc::new(
+        rhema_claw::BackendRegistry::new(backends, seed).map_err(ClawError::Backend)?,
+    ))
 }

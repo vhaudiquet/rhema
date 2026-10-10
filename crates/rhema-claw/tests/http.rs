@@ -116,7 +116,7 @@ async fn chat_streams_turns_and_remembers_across_messages() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, None),
-        provider.clone() as Arc<dyn rhema_core::ModelProvider>,
+        mock_registry(provider.clone()),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -255,7 +255,7 @@ async fn phone_and_task_keys_take_messages_and_auto_notify_their_replies() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, None),
-        Arc::new(MockProvider::new([reply("on it"), reply("done")])),
+        mock_registry(Arc::new(MockProvider::new([reply("on it"), reply("done")]))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -324,7 +324,7 @@ async fn watches_added_over_http_feed_the_next_detect_pass() {
         &config(&dir, None),
         // One scripted reply, in case a forge run starts; this test
         // asserts detection only.
-        Arc::new(MockProvider::new([reply("on it")])),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -412,7 +412,7 @@ async fn the_watch_tools_mutate_the_same_table_the_http_routes_read() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, None),
-        Arc::new(MockProvider::new([reply("on it")])),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -504,7 +504,7 @@ async fn the_shim_answers_whole_and_streamed_and_ignores_incoming_history() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, None),
-        provider.clone() as Arc<dyn rhema_core::ModelProvider>,
+        mock_registry(provider.clone()),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -524,7 +524,7 @@ async fn the_shim_answers_whole_and_streamed_and_ignores_incoming_history() {
         .await
         .expect("the completion parses");
     assert_eq!(whole["object"], "chat.completion");
-    assert_eq!(whole["model"], "test-model");
+    assert_eq!(whole["model"], "mock");
     assert_eq!(whole["choices"][0]["message"]["role"], "assistant");
     assert_eq!(whole["choices"][0]["message"]["content"], "on it");
     assert_eq!(whole["choices"][0]["finish_reason"], "stop");
@@ -592,7 +592,7 @@ async fn the_shim_rejects_requests_without_a_user_message() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, None),
-        Arc::new(MockProvider::new(Vec::new())),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -637,7 +637,7 @@ async fn the_bootstrap_route_reports_the_identity_files_and_requires_auth() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, Some("sekrit")),
-        Arc::new(MockProvider::new(Vec::new())),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -682,7 +682,7 @@ async fn a_configured_token_guards_v1_and_leaves_healthz_open() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, Some("sekrit")),
-        Arc::new(MockProvider::new([reply("on it")])),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -786,7 +786,7 @@ async fn the_seed_imports_into_an_empty_table_and_then_the_table_rules() {
     // First boot: the empty table takes the seed.
     let first = Daemon::build(
         &yaml_seed(),
-        Arc::new(MockProvider::new(Vec::new())),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the first daemon assembles");
@@ -796,7 +796,7 @@ async fn the_seed_imports_into_an_empty_table_and_then_the_table_rules() {
     // Second boot, different YAML, populated table: the table rules.
     let second = Daemon::build(
         &changed_seed(),
-        Arc::new(MockProvider::new(Vec::new())),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the second daemon assembles");
@@ -818,7 +818,7 @@ async fn ingest_feeds_the_resident_dispatcher_and_dedups_and_requires_auth() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, Some("sekrit")),
-        Arc::new(MockProvider::new(Vec::new())),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -941,7 +941,7 @@ async fn notifications_round_trip_over_http() {
     let dir = tempfile::tempdir().expect("tempdir");
     let daemon = Daemon::build(
         &config(&dir, None),
-        Arc::new(MockProvider::new(Vec::new())),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
         rhema_rsd::DispatcherConfig::default(),
     )
     .expect("the daemon assembles");
@@ -1037,4 +1037,90 @@ async fn notifications_round_trip_over_http() {
             .expect("the ack parses");
         assert_eq!(acked, json!({"acked": false}), "{acked}");
     }
+}
+
+/// A registry whose only backend is the scripted mock.
+fn mock_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<rhema_claw::BackendRegistry> {
+    Arc::new(
+        rhema_claw::BackendRegistry::new(
+            vec![rhema_claw::Backend::headless("mock", provider)],
+            None,
+        )
+        .expect("a single mock backend always constructs"),
+    )
+}
+
+/// The providers surface: the registry's list, the active pair, a
+/// runtime switch, and the switch's persistence across a daemon
+/// rebuild — the whole point of the runtime registry.
+#[tokio::test]
+async fn providers_are_listed_switched_and_persisted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let listed: Value = client
+        .get(format!("{base}/v1/providers"))
+        .send()
+        .await
+        .expect("the list reads")
+        .json()
+        .await
+        .expect("the list parses");
+    assert_eq!(listed["active"]["provider"], "mock");
+    assert_eq!(listed["active"]["model"], "mock");
+    let kinds: Vec<&str> = listed["providers"]
+        .as_array()
+        .expect("the providers array")
+        .iter()
+        .filter_map(|p| p["kind"].as_str())
+        .collect();
+    assert_eq!(kinds, vec!["mock"]);
+
+    // A switch to a model within the same backend.
+    let switched: Value = client
+        .put(format!("{base}/v1/providers/active"))
+        .json(&json!({"provider": "mock", "model": "mock-large"}))
+        .send()
+        .await
+        .expect("the switch posts")
+        .json()
+        .await
+        .expect("the switch parses");
+    assert_eq!(switched["active"]["model"], "mock-large");
+
+    // An unknown kind is a 400, and the active pair is untouched.
+    let refused = client
+        .put(format!("{base}/v1/providers/active"))
+        .json(&json!({"provider": "nope"}))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(refused.status(), 400);
+
+    // The live-listing route: the mock backend has none, so 404 —
+    // the shape, not the network.
+    let models = client
+        .get(format!("{base}/v1/providers/mock/models"))
+        .send()
+        .await
+        .expect("the models route answers");
+    assert_eq!(models.status(), 404);
+
+    // Persistence: a rebuilt daemon over the same db reopens the
+    // switched pair, not the config seed.
+    drop(base);
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon reassembles");
+    assert_eq!(daemon.backends().active().1, "mock-large");
 }

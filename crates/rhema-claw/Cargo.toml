@@ -34,6 +34,8 @@ rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
 rhema-rsd = { path = "../rhema-rsd" }
 # The resident tier's durable memory: its tools join the resolver chain
 rhema-memory = { path = "../rhema-memory" }
+# The shared ModelCard the backend registry's listings return
+rhema-provider = { path = "../rhema-provider" }
 # Args for the two-flag binary surface
 clap = { version = "4.5", features = ["derive"] }
 serde = { workspace = true }

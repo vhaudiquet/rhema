@@ -27,6 +27,7 @@ use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use axum::routing::put;
 use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use rhema_autonomous_agent::Driver;
@@ -38,6 +39,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::backends::BackendRegistry;
 use crate::bootstrap::Bootstrap;
 use crate::hub::{EventHub, TurnEvent};
 use crate::notifications::NotificationStore;
@@ -60,7 +62,8 @@ pub struct ClawState {
     notifications: Arc<NotificationStore>,
     bootstrap: Arc<Bootstrap>,
     hub: Arc<EventHub>,
-    model: String,
+    backends: Arc<BackendRegistry>,
+    settings: Arc<crate::settings::SettingsStore>,
     token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
@@ -82,7 +85,8 @@ impl ClawState {
         notifications: Arc<NotificationStore>,
         bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
-        model: impl Into<String>,
+        backends: Arc<BackendRegistry>,
+        settings: Arc<crate::settings::SettingsStore>,
         token: Option<String>,
     ) -> Self {
         Self {
@@ -93,7 +97,8 @@ impl ClawState {
             notifications,
             bootstrap,
             hub,
-            model: model.into(),
+            backends,
+            settings,
             token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
@@ -132,8 +137,14 @@ impl ClawState {
     }
 
     /// The configured model — the shim's echo default.
-    pub fn model(&self) -> &str {
-        &self.model
+    /// The backend registry: the provider list and the active pair.
+    pub fn backends(&self) -> &BackendRegistry {
+        &self.backends
+    }
+
+    /// The settings store: where a runtime switch persists.
+    pub fn settings(&self) -> &crate::settings::SettingsStore {
+        &self.settings
     }
 
     /// The configured bearer token, when the surface is guarded.
@@ -155,6 +166,9 @@ pub fn router(state: ClawState) -> Router {
         .route("/ingest", post(ingest))
         .route("/notifications", get(notifications_list))
         .route("/notifications/{id}/ack", post(notifications_ack))
+        .route("/providers", get(providers_list))
+        .route("/providers/active", put(providers_active))
+        .route("/providers/{kind}/models", get(providers_models))
         .route("/chat/completions", post(crate::openai::chat_completions))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
@@ -586,6 +600,81 @@ pub(crate) async fn drain(
         }
     }
     Ok(())
+}
+
+/// `GET /v1/providers`: every constructible backend and the active pair.
+/// The active pair is runtime state — the config file seeded it, the
+/// settings store owns it now.
+async fn providers_list(State(state): State<ClawState>) -> Json<Value> {
+    let (provider, model) = state.backends().active();
+    Json(json!({
+        "active": {"provider": provider, "model": model},
+        "providers": state.backends().list()
+            .into_iter()
+            .map(|(kind, default_model)| json!({"kind": kind, "default_model": default_model}))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// `PUT /v1/providers/active`: switch the backend the next dispatch
+/// runs on, and persist the choice across restarts. An unknown kind is
+/// a 400; a model left unset falls back to the kind's default.
+async fn providers_active(
+    State(state): State<ClawState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(provider) = body["provider"].as_str() else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "body must carry a provider string"})),
+        ));
+    };
+    let model = body["model"].as_str();
+    if let Err(reason) = state.backends().set_active(provider, model) {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": reason}))));
+    }
+    state
+        .settings()
+        .set(crate::settings::ACTIVE_PROVIDER_KEY, provider)
+        .map_err(internal_error)?;
+    let (_, active_model) = state.backends().active();
+    state
+        .settings()
+        .set(crate::settings::ACTIVE_MODEL_KEY, &active_model)
+        .map_err(internal_error)?;
+    Ok(Json(json!(
+        {"active": {"provider": provider, "model": active_model}}
+    )))
+}
+
+/// `GET /v1/providers/{kind}/models`: the kind's live listing, straight
+/// from the provider. A kind without a listing (unknown, or the mock)
+/// is a 404.
+async fn providers_models(
+    State(state): State<ClawState>,
+    Path(kind): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let Some(listing) = state.backends().list_models(&kind) else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": format!("no live listing for provider {kind:?}")})),
+        ));
+    };
+    let models = listing.await.map_err(|err| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": format!("model listing failed: {err}")})),
+        )
+    })?;
+    Ok(Json(json!({ "models": models })))
+}
+
+/// The 502 shape: the upstream provider failed.
+fn internal_error(err: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
+    (
+        StatusCode::BAD_GATEWAY,
+        Json(json!({"error": err.to_string()})),
+    )
 }
 
 #[cfg(test)]

@@ -130,18 +130,24 @@ async fn the_second_dispatch_resumes_the_first_conversation() {
 
     // Pass one: the opened event alone. The cron shape — a fresh process,
     // a fresh watcher, the same db.
-    let first = run_once(&config, Arc::new(MockProvider::new([reply("on it")])))
-        .await
-        .expect("the first pass runs");
+    let first = run_once(
+        &config,
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+    )
+    .await
+    .expect("the first pass runs");
     assert_eq!(first.detected, 1);
     assert_eq!(first.outcomes, vec![Outcome::Handled]);
     drop(first_post);
 
     // Pass two: the replayed opened event plus dave's comment, both
     // decoded into one prompt for one resumed run.
-    let second = run_once(&config, Arc::new(MockProvider::new([reply("still on it")])))
-        .await
-        .expect("the second pass runs");
+    let second = run_once(
+        &config,
+        mock_registry(Arc::new(MockProvider::new([reply("still on it")]))),
+    )
+    .await
+    .expect("the second pass runs");
     assert_eq!(second.detected, 2, "the replay re-delivers, at-least-once");
     assert_eq!(second.outcomes, vec![Outcome::Handled]);
     drop(second_post);
@@ -198,4 +204,16 @@ async fn the_second_dispatch_resumes_the_first_conversation() {
         ["on it", "still on it"],
         "the conversation resumed"
     );
+}
+
+/// A registry whose only backend is the scripted mock — the shape every
+/// integration test runs on.
+fn mock_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<rhema_claw::BackendRegistry> {
+    Arc::new(
+        rhema_claw::BackendRegistry::new(
+            vec![rhema_claw::Backend::headless("mock", provider)],
+            None,
+        )
+        .expect("a single mock backend always constructs"),
+    )
 }

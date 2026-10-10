@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rhema_autonomous_agent::{Driver, Source, SourceError};
-use rhema_core::ModelProvider;
 use rhema_rsd::{
     DispatchError, Dispatcher, DispatcherConfig, Outcome, SqliteStore, StoreError, SystemClock,
 };
@@ -39,6 +38,7 @@ use crate::task_source::TaskScheduler;
 use crate::task_store::TaskStore;
 use rhema_memory::FileMemoryStore;
 
+use crate::backends::BackendRegistry;
 use crate::hub::EventHub;
 use crate::interactive::InteractiveHandler;
 use crate::watch_store::ClawStore;
@@ -59,12 +59,19 @@ pub enum ClawError {
     /// The watch table could not be opened or read.
     #[error(transparent)]
     Watches(#[from] crate::watch_store::WatchStoreError),
+    /// The runtime settings table could not be opened or read.
+    #[error(transparent)]
+    Settings(#[from] crate::settings::SettingsError),
     /// The notification table could not be opened or read.
     #[error(transparent)]
     Notifications(#[from] crate::notifications::NotificationStoreError),
     /// The task table could not be opened or read.
     #[error(transparent)]
     Tasks(#[from] crate::task_store::TaskStoreError),
+    /// The backend registry could not be built: no provider constructed,
+    /// or the configured seed named an unknown kind.
+    #[error("backend registry failed: {0}")]
+    Backend(String),
     /// The bootstrap store could not be opened.
     #[error(transparent)]
     Bootstrap(#[from] crate::bootstrap::BootstrapError),
@@ -111,6 +118,9 @@ pub struct Daemon {
     poll_interval: Duration,
     listen: String,
     http: ClawState,
+    /// The registry the drivers' handlers read per dispatch; kept for
+    /// introspection (the active pair after a bootstrap).
+    registry: Arc<BackendRegistry>,
 }
 
 impl Daemon {
@@ -121,7 +131,7 @@ impl Daemon {
     /// defaults, `--once` zeroes the debounce.
     pub fn build(
         config: &ClawConfig,
-        provider: Arc<dyn ModelProvider>,
+        backends: Arc<BackendRegistry>,
         dispatch: DispatcherConfig,
     ) -> Result<Self, ClawError> {
         config.validate()?;
@@ -171,12 +181,7 @@ impl Daemon {
         // The forge handler resolves its watches through the table at
         // dispatch time, so a watch added mid-run is answerable without a
         // restart.
-        let forge_handler = ClawHandler::new(
-            provider.clone(),
-            config.resolved_model(),
-            workspace_root,
-            watches.clone(),
-        );
+        let forge_handler = ClawHandler::new(backends.clone(), workspace_root, watches.clone());
         let forge_driver = Arc::new(
             Driver::new(forge_dispatcher, Arc::new(forge_handler)).with_holder("rhema-claw"),
         );
@@ -184,13 +189,22 @@ impl Daemon {
         let hub = Arc::new(EventHub::default());
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
+        let settings = Arc::new(crate::settings::SettingsStore::open(&db)?);
+        // The persisted pair wins over the config seed — it is what a
+        // runtime switch wrote. A persisted kind the registry no longer
+        // knows (a key removed from the deployment) falls back to the
+        // seed silently: the daemon still boots.
+        let persisted_provider = settings.get(crate::settings::ACTIVE_PROVIDER_KEY)?;
+        let persisted_model = settings.get(crate::settings::ACTIVE_MODEL_KEY)?;
+        if let Some(kind) = persisted_provider {
+            let _ = backends.set_active(&kind, persisted_model.as_deref());
+        }
         // The environment report is detection, not conversation: generated
         // at every boot by deterministic discovery, never by the model,
         // and regenerated over whatever the last boot wrote.
         crate::environment::write_report(config.bootstrap_dir()?.join("ENVIRONMENT.md"))?;
         let interactive_handler = InteractiveHandler::new(
-            provider,
-            config.resolved_model(),
+            backends.clone(),
             interactive_workspace,
             watches.clone(),
             memory,
@@ -224,7 +238,8 @@ impl Daemon {
             notifications,
             bootstrap,
             hub,
-            config.resolved_model(),
+            backends.clone(),
+            settings.clone(),
             config.token.clone(),
         );
 
@@ -238,6 +253,7 @@ impl Daemon {
             poll_interval: Duration::from_secs(config.poll_interval_secs.max(1)),
             listen: config.listen_addr().to_owned(),
             http,
+            registry: backends,
         })
     }
 
@@ -250,6 +266,11 @@ impl Daemon {
     /// The HTTP surface's configured address.
     pub fn listen_addr(&self) -> &str {
         &self.listen
+    }
+
+    /// The deployment's backend registry: providers and the active pair.
+    pub fn backends(&self) -> &BackendRegistry {
+        &self.registry
     }
 
     /// Startup recovery (RSD spec §7): sweeps leases a dead process left
@@ -330,13 +351,13 @@ impl Daemon {
 /// pass has no one to chat with.
 pub async fn run_once(
     config: &ClawConfig,
-    provider: Arc<dyn ModelProvider>,
+    backends: Arc<BackendRegistry>,
 ) -> Result<TickReport, ClawError> {
     let dispatch = DispatcherConfig {
         debounce_window_millis: 0,
         ..DispatcherConfig::default()
     };
-    let daemon = Daemon::build(config, provider, dispatch)?;
+    let daemon = Daemon::build(config, backends, dispatch)?;
     daemon.bootstrap().await?;
     daemon.tick().await
 }

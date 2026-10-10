@@ -56,6 +56,7 @@ use rhema_memory::{MemoryResolver, MemoryStore, Scope};
 use rhema_rsd::{Dispatcher, Event, KeyFn, Outcome, ResourceKey};
 use serde_json::{Value, json};
 
+use crate::backends::BackendRegistry;
 use crate::bootstrap::{Bootstrap, DEFAULT_SYSTEM_MD, render_system};
 use crate::hub::{EventHub, TurnEvent};
 use crate::notifications::NotificationStore;
@@ -150,8 +151,9 @@ pub fn user_event(key: &str, text: &str) -> Event {
 /// tools manage, the notification table it reaches devices through, and
 /// the hub its turns stream through.
 pub struct InteractiveHandler {
-    provider: Arc<dyn rhema_core::ModelProvider>,
-    model: String,
+    /// The deployment's providers and the active pair, read per dispatch
+    /// so a runtime switch is live on the next turn.
+    backends: Arc<BackendRegistry>,
     workspace: PathBuf,
     tools: Arc<CodingTools>,
     watch_resolver: Arc<dyn rhema_core::ToolResolver>,
@@ -180,8 +182,7 @@ impl InteractiveHandler {
     /// turn.
     #[allow(clippy::too_many_arguments)] // nine parts, each load-bearing
     pub fn new(
-        provider: Arc<dyn rhema_core::ModelProvider>,
-        model: impl Into<String>,
+        backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
         watches: Arc<ClawStore>,
         memory: Arc<dyn MemoryStore>,
@@ -202,8 +203,7 @@ impl InteractiveHandler {
         let bootstrap_resolver =
             crate::bootstrap::registry(bootstrap.clone()).resolver_for(&Allowlist::permissive());
         Self {
-            provider,
-            model: model.into(),
+            backends,
             workspace,
             tools,
             watch_resolver,
@@ -224,10 +224,11 @@ impl InteractiveHandler {
     /// last turn wrote is live this turn, and the onboarding section is
     /// gone the moment both files exist.
     fn agent(&self) -> Result<Agent, String> {
+        let (provider, model) = self.backends.current();
         let system = render_system(DEFAULT_SYSTEM_MD, &self.workspace, &self.bootstrap)
             .map_err(|err| format!("cannot render the bootstrap system prompt: {err}"))?;
         Agent::builder()
-            .provider(self.provider.clone())
+            .provider(provider)
             .resolver(Arc::new(ResolverChain::new(vec![
                 self.tools.clone(),
                 Arc::new(MemoryResolver::new(
@@ -240,7 +241,7 @@ impl InteractiveHandler {
                 self.watch_resolver.clone(),
             ])))
             .system(system)
-            .params(ChatParams::new(self.model.clone()))
+            .params(ChatParams::new(model))
             .build()
             .map_err(|err| format!("cannot build the interactive agent: {err}"))
     }
@@ -462,6 +463,7 @@ mod tests {
     use crate::notifications::NotificationStore;
     use crate::task_store::TaskStore;
 
+    use crate::backends::{Backend, BackendRegistry};
     use rhema_core::{
         Content, Message as CoreMessage, MockProvider, ModelOutput, Role as CoreRole, StopReason,
         ToolCall, Usage,
@@ -480,6 +482,13 @@ mod tests {
     /// handler.
     fn tasks() -> Arc<TaskStore> {
         Arc::new(TaskStore::in_memory().expect("store opens"))
+    }
+
+    fn test_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<BackendRegistry> {
+        Arc::new(
+            BackendRegistry::new(vec![Backend::headless("mock", provider)], None)
+                .expect("a single mock backend always constructs"),
+        )
     }
 
     fn reply(text: &str) -> ModelOutput {
@@ -660,8 +669,7 @@ mod tests {
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
         let handler = InteractiveHandler::new(
-            Arc::new(MockProvider::new([reply("hi back")])),
-            "test-model",
+            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
             workspace.path().join("interactive"),
             store,
             Arc::new(rhema_memory::VolatileStore::new()),
@@ -726,7 +734,7 @@ mod tests {
         let workspace = tempfile::tempdir().expect("tempdir");
         let workspace_path = workspace.path().join("interactive");
         let handler = InteractiveHandler::new(
-            Arc::new(MockProvider::new([
+            test_registry(Arc::new(MockProvider::new([
                 scripted_call(
                     "call-save",
                     MEMORY_SAVE,
@@ -735,8 +743,7 @@ mod tests {
                 reply("remembered."),
                 scripted_call("call-search", "memory_search", json!({"query": "release"})),
                 reply("the release channel is #deploys."),
-            ])),
-            "test-model",
+            ]))),
             workspace_path.clone(),
             store,
             memory.clone(),
@@ -812,7 +819,7 @@ mod tests {
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
         let handler = InteractiveHandler::new(
-            Arc::new(MockProvider::new([
+            test_registry(Arc::new(MockProvider::new([
                 scripted_call(
                     "call-soul",
                     BOOTSTRAP_SAVE,
@@ -825,8 +832,7 @@ mod tests {
                     json!({"kind": "user", "content": "The user is Ana."}),
                 ),
                 reply("setup is done."),
-            ])),
-            "test-model",
+            ]))),
             workspace.path().join("interactive"),
             store,
             Arc::new(rhema_memory::VolatileStore::new()),
@@ -891,8 +897,7 @@ mod tests {
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
         let handler = InteractiveHandler::new(
-            Arc::new(MockProvider::new([reply("hi back")])),
-            "test-model",
+            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
             workspace.path().join("interactive"),
             store,
             Arc::new(rhema_memory::VolatileStore::new()),
@@ -956,11 +961,10 @@ mod tests {
         let workspace = tempfile::tempdir().expect("tempdir");
         let backing = Arc::new(VolatileStore::new());
         let handler = Arc::new(InteractiveHandler::new(
-            Arc::new(MockProvider::new([
+            test_registry(Arc::new(MockProvider::new([
                 reply("the bread is done."),
                 reply("hi back"),
-            ])),
-            "test-model",
+            ]))),
             workspace.path().join("interactive"),
             store,
             Arc::new(rhema_memory::VolatileStore::new()),

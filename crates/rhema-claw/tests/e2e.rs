@@ -99,7 +99,9 @@ async fn one_pass_polls_reasons_and_posts() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = config(&server, &dir);
     let provider = Arc::new(MockProvider::new([reply("on it")]));
-    let report = run_once(&config, provider).await.expect("the pass runs");
+    let report = run_once(&config, mock_registry(provider))
+        .await
+        .expect("the pass runs");
     assert_eq!(report.detected, 1, "the feed's one event was fed");
     assert_eq!(report.outcomes, vec![Outcome::Handled]);
     drop(comment);
@@ -117,4 +119,16 @@ async fn one_pass_polls_reasons_and_posts() {
     assert_eq!(status.state, KeyState::Idle);
     assert_eq!(status.inbox_depth, 0);
     assert_eq!(status.last_outcome, Some(Outcome::Handled));
+}
+
+/// A registry whose only backend is the scripted mock — the shape every
+/// integration test runs on.
+fn mock_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<rhema_claw::BackendRegistry> {
+    Arc::new(
+        rhema_claw::BackendRegistry::new(
+            vec![rhema_claw::Backend::headless("mock", provider)],
+            None,
+        )
+        .expect("a single mock backend always constructs"),
+    )
 }

@@ -23,6 +23,10 @@ token: ""
 # templates (the PVC is fixed at /data and the container must bind all
 # interfaces for the Service); whatever these say here is overridden.
 config:
+  # The seed backend: the pair a fresh deployment starts on. Every
+  # provider whose key resolves is constructed at boot, and switching is
+  # runtime state over /v1/providers (persisted in the claw's db) — the
+  # chart pins nothing.
   provider: anthropic
   # Per-provider defaults apply when the key is empty or dropped.
   model: claude-sonnet-4-5

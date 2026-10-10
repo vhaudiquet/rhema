@@ -181,10 +181,10 @@ pub async fn chat_completions(
         .filter(|user| !user.is_empty())
         .unwrap_or(DEFAULT_USER);
     let key = ResourceKey::from(format!("{KEY_PREFIX}{user}"));
-    let model = request
-        .model
-        .clone()
-        .unwrap_or_else(|| state.model().to_owned());
+    let model = request.model.clone().unwrap_or_else(|| {
+        let (_, active_model) = state.backends().active();
+        active_model
+    });
     let id = completion_id();
     let created = unix_secs();
 

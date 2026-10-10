@@ -25,11 +25,13 @@ use crate::forge::record_client;
 use crate::watch_store::ClawStore;
 use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
 use rhema_coding_agent::{AllowAll, CodingAgent, CodingAgentConfig};
-use rhema_core::{Content, Event as ModelEvent, EventSink, Message, ModelProvider, Session};
+use rhema_core::{Content, Event as ModelEvent, EventSink, Message, Session};
 use rhema_forge_agent::{
     EventKind, Forge, ForgeEvent, RepoRef, Snapshot, ThreadState, decode, parse_key,
 };
 use rhema_rsd::{Outcome, ResourceKey};
+
+use crate::backends::BackendRegistry;
 
 /// The handler's tool permissions, resolved deterministically before the
 /// agent's first step (spec §8) — never by the model, never mid-run. V1
@@ -44,8 +46,8 @@ fn allowlist() -> rhema_autonomous_agent::Allowlist {
 /// root, and the watch table the dispatch keys resolve through — live,
 /// so a watch added at runtime is answerable without a restart.
 pub struct ClawHandler {
-    provider: Arc<dyn ModelProvider>,
-    model: String,
+    /// The deployment's providers and the active pair, read per dispatch.
+    backends: Arc<BackendRegistry>,
     workspace_root: PathBuf,
     watches: Arc<ClawStore>,
     clients: Mutex<HashMap<String, Arc<dyn Forge>>>,
@@ -55,14 +57,12 @@ impl ClawHandler {
     /// A handler whose per-thread workspaces live under `workspace_root`
     /// and whose dispatch keys resolve through `watches` at dispatch time.
     pub fn new(
-        provider: Arc<dyn ModelProvider>,
-        model: impl Into<String>,
+        backends: Arc<BackendRegistry>,
         workspace_root: impl Into<PathBuf>,
         watches: Arc<ClawStore>,
     ) -> Self {
         Self {
-            provider,
-            model: model.into(),
+            backends,
             workspace_root: workspace_root.into(),
             watches,
             clients: Mutex::new(HashMap::new()),
@@ -176,14 +176,15 @@ impl ClawHandler {
         workspace: &Path,
         key: &str,
     ) -> Result<CodingAgent, String> {
-        let config = CodingAgentConfig::new(self.model.clone(), workspace);
+        let (provider, model) = self.backends.current();
+        let config = CodingAgentConfig::new(model, workspace);
         let agent = match &ctx.session.core.driver_state {
             // A never-dispatched key carries no stash: start clean.
-            serde_json::Value::Null => CodingAgent::new(self.provider.clone(), config),
+            serde_json::Value::Null => CodingAgent::new(provider, config),
             stashed => {
                 let session: Session = serde_json::from_value(stashed.clone())
                     .map_err(|err| format!("stashed session for {key} does not parse: {err}"))?;
-                CodingAgent::from_session(self.provider.clone(), config, session)
+                CodingAgent::from_session(provider, config, session)
             }
         };
         agent.map_err(|err| format!("cannot start the coding agent for {key}: {err}"))
@@ -366,6 +367,7 @@ fn first_line(content: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_core::ModelProvider;
 
     fn snapshot() -> Snapshot {
         serde_json::from_value(serde_json::json!({
@@ -461,7 +463,17 @@ mod tests {
         watches
             .add("github", "acme/widgets", None, "tok")
             .expect("watch added");
-        let handler = ClawHandler::new(Arc::new(NoopProvider), "m", "/tmp/w", watches);
+        let registry = Arc::new(
+            crate::backends::BackendRegistry::new(
+                vec![crate::backends::Backend::headless(
+                    "mock",
+                    Arc::new(NoopProvider),
+                )],
+                None,
+            )
+            .expect("constructs"),
+        );
+        let handler = ClawHandler::new(registry, "/tmp/w", watches);
 
         // A watch added to the table AFTER the handler was built resolves:
         // the table is the source of truth, not a boot-time snapshot.

@@ -47,6 +47,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod backends;
 pub mod bootstrap;
 pub mod config;
 pub mod daemon;
@@ -61,12 +62,14 @@ pub mod mock;
 pub mod notifications;
 pub mod notify_tools;
 pub mod openai;
+pub mod settings;
 pub mod task_source;
 pub mod task_store;
 pub mod task_tools;
 pub mod watch_store;
 pub mod watch_tools;
 
+pub use backends::{Backend, BackendRegistry};
 pub use bootstrap::{
     BOOTSTRAP_SAVE, Bootstrap, BootstrapError, BootstrapKind, BootstrapStatus, DEFAULT_SYSTEM_MD,
     render_system,
@@ -81,6 +84,7 @@ pub use interactive::InteractiveHandler;
 #[cfg(feature = "mock")]
 pub use mock::MockLoop;
 pub use notifications::{NotificationRecord, NotificationStore, NotificationStoreError};
+pub use settings::SettingsStore;
 pub use task_source::{TASKS_SOURCE, TaskScheduler};
 pub use task_store::{TaskKind, TaskRecord, TaskStore, TaskStoreError};
 pub use watch_store::{ClawStore, WatchRecord, WatchStoreError};

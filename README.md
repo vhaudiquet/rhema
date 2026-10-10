@@ -298,6 +298,9 @@ GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{for
 GET  /v1/bootstrap                     {"soul": bool, "user": bool}
 POST /v1/ingest                         {"source","key","payload"} -> 202
 GET  /v1/notifications?device=&since=   POST /v1/notifications/{id}/ack
+GET  /v1/providers                      the backends + the active pair
+PUT  /v1/providers/active               {"provider","model"?} — switch, persisted
+GET  /v1/providers/{kind}/models        the live model listing
 ```
 
 ### Identity and first-run
@@ -322,6 +325,12 @@ SSE frames are JSON, `data: {..}
 `/events` once, POSTs messages, and renders the stream per turn; the
 daemon owns the conversation, so the client mirrors replies rather than
 managing history.
+
+Every provider whose credentials resolve (env or the stored rhema
+config) is constructed at boot; one is active, and switching —
+`PUT /v1/providers/active` — is runtime state persisted in SQLite: the
+config's `provider`/`model` pair is only the seed, so the chart pins
+nothing and a switch never needs a restart.
 
 The claw registers RSD sources three ways: watches (forge), scheduled
 tasks the agent creates in chat (`schedule_task` with `at` or
