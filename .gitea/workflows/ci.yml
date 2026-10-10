@@ -23,15 +23,6 @@ jobs:
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
 
-      # The vendored crossterm patch points outside this checkout (a
-      # local TUI dev convenience) and the workspace cannot resolve with
-      # it missing. Strip it — the section is the root manifest's last —
-      # and accept that CI-built `rhema` binaries compile against the
-      # stock crossterm release (the daemon image never uses it). Every
-      # rust job below needs the same step.
-      - name: Strip the local crossterm patch
-        run: sed -i '/^\[patch\.crates-io\]/,$d' Cargo.toml
-
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -58,9 +49,6 @@ jobs:
 
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
-
-      - name: Strip the local crossterm patch
-        run: sed -i '/^\[patch\.crates-io\]/,$d' Cargo.toml
 
       # The offline-suite rule is load-bearing here: no test talks to the
       # network, so the runner needs nothing beyond the toolchain.
