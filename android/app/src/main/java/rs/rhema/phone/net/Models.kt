@@ -2,6 +2,7 @@ package rs.rhema.phone.net
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 
 // GET /v1/sessions
@@ -11,11 +12,12 @@ data class SessionInfo(
     val state: String? = null,
     val revision: Long? = null,
     @SerialName("inbox_depth") val inboxDepth: Int? = null,
-    // The claw serializes the outcome as an externally-tagged enum:
-    // {"Handled":null}, {"Failed":"reason"}, {"Superseded":null} — or
-    // null when the key never released. Kept as raw JSON; the UI shows
-    // the variant name.
-    @SerialName("last_outcome") val lastOutcome: JsonObject? = null,
+    // The claw serializes the outcome with serde's default externally
+    // tagged enum form: unit variants as bare strings ("Handled",
+    // "Superseded"), Failed as {"Failed":"reason"} — or null when the
+    // key never released. Kept as raw JSON; the UI shows the variant
+    // name.
+    @SerialName("last_outcome") val lastOutcome: JsonElement? = null,
 )
 
 // POST /v1/sessions/{key}/messages

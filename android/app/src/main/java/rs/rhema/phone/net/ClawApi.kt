@@ -244,9 +244,14 @@ class ClawApi(
                             try {
                                 ClawResult.Ok(parse(response))
                             } catch (e: SerializationException) {
+                                // Valid JSON in the wrong shape fails here
+                                // too; the serializer's message names the
+                                // field, so it rides along with the body.
                                 ClawResult.HttpError(
                                     response.code,
-                                    "unexpected response body (not JSON): " + peeked.take(150),
+                                    "unexpected response body: " +
+                                        (e.message ?: "unparseable JSON") +
+                                        " — body: " + peeked.take(150),
                                 )
                             }
                         }
