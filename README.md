@@ -359,8 +359,8 @@ allowance when the active backend reports one (prepaid credit on
 OpenRouter and DeepSeek, the premium-request quota of the plan cycle
 on Copilot; the badge refreshes with each turn and stays hidden when
 the fetch fails or the provider reports nothing). Terminals carrying
-a Nerd Font can switch to the brain, database, folder, and coins
-glyphs with `icons: nerd` in config.yaml.
+a Nerd Font can switch to the lightbulb, database, folder, and
+banknote glyphs with `icons: nerd` in config.yaml.
 Flags: `--profile`, `-m/--model`, `--workspace`, `--resume`/`--save`
 (session checkpointing), `--max-steps`, `--thinking low|medium|high`
 (reasoning effort; mapped

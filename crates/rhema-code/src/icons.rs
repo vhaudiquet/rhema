@@ -26,13 +26,16 @@ pub const UNICODE: Icons = Icons {
     allowance: "◎",
 };
 
-/// The Nerd Font set: FontAwesome brain, database, folder, and coins —
-/// needs a patched font installed, or the badges read as tofu.
+/// The Nerd Font set: FontAwesome lightbulb, database, folder, and
+/// banknote — needs a patched font installed, or the badges read as
+/// tofu. Every glyph sits in the FA core range (F000–F2E0) the oldest
+/// patches carry; the brain this set once used sits where Nerd Fonts
+/// v3 dropped Material Design, and v3 fonts render nothing there.
 pub const NERD: Icons = Icons {
-    thinking: "\u{f5dc}",
+    thinking: "\u{f0eb}",
     context: nerd_gauge,
     folder: "\u{f07b}",
-    allowance: "\u{f51e}",
+    allowance: "\u{f0d6}",
 };
 
 /// Which flavor the footer draws with.
@@ -103,7 +106,7 @@ mod tests {
         assert_eq!(Flavor::parse(" nerd "), Some(Flavor::Nerd));
         assert_eq!(Flavor::parse("emoji"), None);
         assert_eq!(Flavor::default(), Flavor::Unicode);
-        assert_eq!(Flavor::Nerd.set().thinking, "\u{f5dc}");
+        assert_eq!(Flavor::Nerd.set().thinking, "\u{f0eb}");
         assert_eq!(Flavor::Unicode.set().thinking, "⁂");
     }
 }
