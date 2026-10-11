@@ -1,10 +1,13 @@
 //! Backend resolution: which provider and model serve ACP turns.
 //!
 //! The same startup resolution the headless one-shot performs — a
-//! provider choice (flag, then stored config, then google), a model
-//! (flag, then stored, then the kind's fallback), and whatever
-//! credentials the profile holds. `None` means no credential resolved:
-//! to the client that is `auth_required`, the one honest answer.
+//! provider choice (flag, then `RHEMA_PROVIDER` over the stored
+//! config), a model (flag, then stored, then the kind's fallback), and
+//! whatever credentials the profile holds. `Ok(None)` means no
+//! credential resolved: to the client that is `auth_required`, the one
+//! honest answer. An `Err` names a configuration problem — nothing
+//! configured, or a stored spelling that names no known kind; nothing
+//! defaults to a provider the user never picked.
 
 use std::sync::Arc;
 
@@ -33,13 +36,13 @@ pub const PROVIDERS: &[&str] = &[
 ];
 
 /// The [`PROVIDERS`] name a stored or flagged kind reads as; anything
-/// unknown reads as `google`, the same fallback [`resolve`] applies.
-fn canonical(kind: &str) -> &'static str {
+/// unknown is an error, not a default — see [`resolve`].
+fn known_kind(kind: &str) -> Result<&'static str, String> {
     PROVIDERS
         .iter()
         .find(|known| **known == kind)
         .copied()
-        .unwrap_or("google")
+        .ok_or_else(|| format!("unknown provider kind \"{kind}\" in the stored config"))
 }
 
 /// A backend that can serve turns: which provider kind it rides on,
@@ -187,38 +190,49 @@ fn catalog_fetch(
 /// overrides the stored choice; `model` the stored model; `llama_url`
 /// the stored server URL. The stored choice reads through
 /// [`Profile::provider_name`], so `RHEMA_PROVIDER` wins over the stored
-/// `provider`, the same env-wins convention the keys follow. `None`
-/// when the chosen kind has no usable credentials (or an explicit
-/// choice names a kind that does not resolve).
+/// `provider`, the same env-wins convention the keys follow. `Ok(None)`
+/// when the chosen kind has no usable credentials — `auth_required` to
+/// the client. An `Err` names the configuration problem: nothing
+/// configured at all, or a spelling that names no known kind.
 pub fn resolve(
     profile: &Profile,
     provider: Option<&str>,
     model: Option<&str>,
     llama_url: Option<&str>,
-) -> Option<Resolved> {
+) -> Result<Option<Resolved>, String> {
     let stored = profile.provider_name();
-    let kind = canonical(provider.or(stored.as_deref()).unwrap_or("google"));
+    let chosen = provider
+        .map(str::to_owned)
+        .or(stored)
+        .ok_or_else(|| NO_PROVIDER_CONFIGURED.to_owned())?;
+    let kind = known_kind(&chosen)?;
     let model = model
         .map(str::to_owned)
         .or_else(|| profile.model.clone())
         .unwrap_or_else(|| default_model_for(kind).to_owned());
     let provider = provider_for(kind, profile, llama_url)?;
-    Some(Resolved {
+    Ok(provider.map(|provider| Resolved {
         kind,
         provider,
         model,
-    })
+    }))
 }
 
-/// The provider implementation a kind rides on; `None` when the kind's
-/// credentials do not resolve. `llama-cpp` is keyless and always
-/// resolves. A kind outside [`PROVIDERS`] reads as `google`, the same
-/// fallback [`resolve`] applies.
+/// The fix list a resolution with nothing configured reports. The
+/// spelled-out fixes are the point: nothing defaults, so the error is
+/// the only guidance a headless or editor-side session gets.
+const NO_PROVIDER_CONFIGURED: &str = "no provider configured: set RHEMA_PROVIDER, log in with the rhema TUI, \
+     or store one in a profile";
+
+/// The provider implementation a kind rides on. `Ok(None)` when the
+/// kind's credentials do not resolve; `llama-cpp` is keyless and always
+/// resolves. A kind outside [`PROVIDERS`] is an error naming the
+/// stored value, never a silent google.
 pub fn provider_for(
     kind: &str,
     profile: &Profile,
     llama_url: Option<&str>,
-) -> Option<Arc<dyn ModelProvider>> {
+) -> Result<Option<Arc<dyn ModelProvider>>, String> {
     match kind {
         "llama-cpp" => {
             let url = llama_url
@@ -228,23 +242,29 @@ pub fn provider_for(
             if let Some(api_key) = profile.llama_cpp_api_key() {
                 llama = llama.with_api_key(api_key);
             }
-            Some(Arc::new(llama))
+            Ok(Some(Arc::new(llama)))
         }
-        "openrouter" => Some(Arc::new(OpenRouterProvider::new(
-            profile.openrouter_api_key()?,
-        ))),
-        "anthropic" => Some(Arc::new(AnthropicProvider::new(
-            profile.anthropic_api_key()?,
-        ))),
-        "openai" => Some(Arc::new(OpenAiCompatibleProvider::new(
-            profile.openai_api_key()?,
-        ))),
-        "deepseek" => Some(Arc::new(
-            OpenAiCompatibleProvider::new(profile.deepseek_api_key()?)
-                .with_base_url("https://api.deepseek.com/v1"),
-        )),
-        "copilot" => Some(Arc::new(CopilotProvider::new(profile.copilot_api_key()?))),
-        _ => Some(Arc::new(GoogleProvider::new(profile.google_api_key()?))),
+        "openrouter" => Ok(profile
+            .openrouter_api_key()
+            .map(|key| Arc::new(OpenRouterProvider::new(key)) as Arc<dyn ModelProvider>)),
+        "anthropic" => Ok(profile
+            .anthropic_api_key()
+            .map(|key| Arc::new(AnthropicProvider::new(key)) as Arc<dyn ModelProvider>)),
+        "openai" => Ok(profile
+            .openai_api_key()
+            .map(|key| Arc::new(OpenAiCompatibleProvider::new(key)) as Arc<dyn ModelProvider>)),
+        "deepseek" => Ok(profile.deepseek_api_key().map(|key| {
+            Arc::new(
+                OpenAiCompatibleProvider::new(key).with_base_url("https://api.deepseek.com/v1"),
+            ) as Arc<dyn ModelProvider>
+        })),
+        "copilot" => Ok(profile
+            .copilot_api_key()
+            .map(|key| Arc::new(CopilotProvider::new(key)) as Arc<dyn ModelProvider>)),
+        "google" => Ok(profile
+            .google_api_key()
+            .map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn ModelProvider>)),
+        other => Err(format!("unknown provider kind \"{other}\"")),
     }
 }
 
@@ -289,6 +309,7 @@ mod tests {
     #[test]
     fn the_keyless_backend_always_resolves() {
         let resolved = resolve(&profile(Some("llama-cpp"), None), None, None, None)
+            .expect("llama-cpp is keyless and always resolves")
             .expect("llama-cpp is keyless and always resolves");
         assert_eq!(resolved.model, "local");
     }
@@ -301,6 +322,7 @@ mod tests {
             Some("flag-model"),
             Some("http://localhost:9999"),
         )
+        .expect("llama-cpp is keyless and always resolves")
         .expect("llama-cpp is keyless and always resolves");
         assert_eq!(resolved.model, "flag-model");
     }
@@ -313,6 +335,7 @@ mod tests {
             None,
             None,
         )
+        .expect("llama-cpp is keyless and always resolves")
         .expect("llama-cpp is keyless and always resolves");
         assert_eq!(stored.model, "stored-model");
     }
@@ -320,12 +343,51 @@ mod tests {
     #[test]
     fn an_explicit_choice_to_a_keyed_kind_can_only_fail() {
         // Without a resolvable key an explicit openrouter choice is
-        // `None` — the serve layer answers `auth_required`. A key in the
-        // sandbox env would flip this; CI keeps the env bare.
+        // `Ok(None)` — the serve layer answers `auth_required`. A key in
+        // the sandbox env would flip this; CI keeps the env bare.
         if std::env::var_os("OPENROUTER_API_KEY").is_some() {
             return;
         }
-        assert!(resolve(&profile(None, None), Some("openrouter"), None, None).is_none());
+        assert!(matches!(
+            resolve(&profile(None, None), Some("openrouter"), None, None),
+            Ok(None)
+        ));
+    }
+
+    #[test]
+    fn nothing_configured_is_an_error_naming_the_fixes() {
+        // No flag, no stored provider: an error listing the fixes, not a
+        // silent google. (An exported RHEMA_PROVIDER in the suite's env
+        // would count as configured; CI keeps the env bare.)
+        if std::env::var_os("RHEMA_PROVIDER").is_some() {
+            return;
+        }
+        let err = match resolve(&profile(None, None), None, None, None) {
+            Ok(_) => panic!("nothing is configured, yet a backend resolved"),
+            Err(err) => err,
+        };
+        assert!(
+            err.contains("RHEMA_PROVIDER"),
+            "the error names the fixes: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_stored_spelling_is_an_error_naming_the_value() {
+        if std::env::var_os("RHEMA_PROVIDER").is_some() {
+            return;
+        }
+        let err = match resolve(&profile(Some("nonsense"), None), None, None, None) {
+            Ok(_) => panic!("an unknown spelling resolved a backend"),
+            Err(err) => err,
+        };
+        assert!(err.contains("nonsense"), "the error names the value: {err}");
+        // An explicit unknown kind errors the same way.
+        let err = match resolve(&profile(None, None), Some("bogus"), None, None) {
+            Ok(_) => panic!("an unknown flagged kind resolved a backend"),
+            Err(err) => err,
+        };
+        assert!(err.contains("bogus"), "the error names the value: {err}");
     }
 
     #[test]
@@ -335,9 +397,24 @@ mod tests {
             copilot_api_key: Some("gho_token".into()),
             ..Profile::default()
         };
-        let resolved = resolve(&profile, None, None, None).expect("a stored token resolves");
+        let resolved = resolve(&profile, None, None, None)
+            .expect("a stored token resolves")
+            .expect("a stored token resolves");
         assert_eq!(resolved.kind, "copilot");
         assert_eq!(resolved.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn a_provider_for_an_unknown_kind_is_an_error_not_google() {
+        let keyed = Profile {
+            google_api_key: Some("g".into()),
+            ..Profile::default()
+        };
+        let err = match provider_for("nonsense", &keyed, None) {
+            Ok(_) => panic!("an unknown kind built a provider"),
+            Err(err) => err,
+        };
+        assert!(err.contains("nonsense"), "the error names the kind: {err}");
     }
 
     #[test]

@@ -201,8 +201,16 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
         .unwrap_or_else(|| startup_profile(&config, &workspace));
     let effective = config.effective(Some(&profile));
     // RHEMA_PROVIDER (inside provider_name) wins over the stored
-    // profile, the same env-wins convention the keys follow.
-    let provider_choice = ProviderChoice::from_stored(effective.provider_name().as_deref());
+    // profile, the same env-wins convention the keys follow. Nothing
+    // configured is an error naming the fixes: headless has no login
+    // screen to fall through to.
+    let provider_choice = ProviderChoice::from_stored(effective.provider_name().as_deref())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no provider configured: set RHEMA_PROVIDER, pick one in the \
+                 UI, or store one in a profile"
+            )
+        })?;
     // No login screen exists headless: a missing credential is an error
     // naming the fix.
     let backend = match provider_choice {
@@ -337,33 +345,38 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .unwrap_or_else(|| startup_profile(&config, &workspace));
     let effective = config.effective(Some(&profile));
     // RHEMA_PROVIDER (inside provider_name) wins over the stored
-    // profile, the same env-wins convention the keys follow.
-    let provider_choice = ProviderChoice::from_stored(effective.provider_name().as_deref());
-    let backend = match provider_choice {
-        ProviderChoice::Google => effective
-            .google_api_key()
-            .map(|api_key| Backend::Google { api_key }),
-        ProviderChoice::LlamaCpp => Some(Backend::LlamaCpp {
-            url: effective.llama_cpp_url(),
-            api_key: effective.llama_cpp_api_key(),
-        }),
-        ProviderChoice::OpenRouter => effective
-            .openrouter_api_key()
-            .map(|api_key| Backend::OpenRouter { api_key }),
-        ProviderChoice::Anthropic => effective
-            .anthropic_api_key()
-            .map(|api_key| Backend::Anthropic { api_key }),
-        ProviderChoice::OpenAi => effective.openai_api_key().map(|api_key| Backend::OpenAi {
-            api_key,
-            base_url: effective.openai_base_url(),
-        }),
-        ProviderChoice::DeepSeek => effective
-            .deepseek_api_key()
-            .map(|api_key| Backend::DeepSeek { api_key }),
-        ProviderChoice::Copilot => effective
-            .copilot_api_key()
-            .map(|api_key| Backend::Copilot { api_key }),
-    };
+    // profile, the same env-wins convention the keys follow. Nothing
+    // configured (or a spelling no provider answers to) leaves the
+    // backend unresolved: the login screen opens, nothing defaults.
+    let backend = ProviderChoice::from_stored(effective.provider_name().as_deref()).and_then(
+        |provider_choice| match provider_choice {
+            ProviderChoice::Google => effective
+                .google_api_key()
+                .map(|api_key| Backend::Google { api_key }),
+            ProviderChoice::LlamaCpp => Some(Backend::LlamaCpp {
+                url: effective.llama_cpp_url(),
+                api_key: effective.llama_cpp_api_key(),
+            }),
+            ProviderChoice::OpenRouter => effective
+                .openrouter_api_key()
+                .map(|api_key| Backend::OpenRouter { api_key }),
+            ProviderChoice::Anthropic => effective
+                .anthropic_api_key()
+                .map(|api_key| Backend::Anthropic { api_key }),
+            ProviderChoice::OpenAi => effective
+                .openai_api_key()
+                .map(|api_key| Backend::OpenAi {
+                    api_key,
+                    base_url: effective.openai_base_url(),
+                }),
+            ProviderChoice::DeepSeek => effective
+                .deepseek_api_key()
+                .map(|api_key| Backend::DeepSeek { api_key }),
+            ProviderChoice::Copilot => effective
+                .copilot_api_key()
+                .map(|api_key| Backend::Copilot { api_key }),
+        },
+    );
     let session = match &args.resume {
         Some(path) => CodingAgent::load_session_from(path)
             .with_context(|| format!("cannot resume session: {}", path.display()))?,

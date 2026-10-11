@@ -146,16 +146,18 @@ impl Backend {
     }
 
     /// Builds the backend a profile's settings call for; `None` when the
-    /// profile has no usable credentials (a keyless google, openrouter,
-    /// anthropic, or openai profile cannot serve turns). The active
-    /// instance serves; a profile without instances falls back to the
-    /// legacy flat fields.
+    /// profile names no provider (or a spelling no provider answers to,
+    /// or has no usable credentials for the one it names) — the login
+    /// flow runs, no default backend substitutes. `RHEMA_PROVIDER` wins
+    /// over the stored `provider`, the same env-wins convention the keys
+    /// follow. The active instance serves; a profile without instances
+    /// falls back to the legacy flat fields.
     pub fn from_profile(profile: &rhema_config::Profile) -> Option<Backend> {
-        let active = profile.provider.as_deref().unwrap_or("google");
-        if let Some((_, instance)) = profile.instance_for_provider(active) {
+        let active = profile.provider_name()?;
+        if let Some((_, instance)) = profile.instance_for_provider(&active) {
             return Self::from_instance(profile, instance);
         }
-        Self::named(active, profile)
+        Self::named(&active, profile)
     }
 
     /// Builds one backend per logged-in instance of the profile — the
@@ -165,23 +167,26 @@ impl Backend {
     /// back to the legacy flat fields (llama.cpp only when active: a
     /// URL is a server address, not a login).
     pub fn candidates_from_profile(profile: &rhema_config::Profile) -> Vec<Candidate> {
-        let active = profile.provider.as_deref().unwrap_or("google");
-        let active_entry = profile
-            .instance_for_provider(active)
+        let active = profile.provider_name();
+        let active_entry = active
+            .as_deref()
+            .and_then(|kind| profile.instance_for_provider(kind))
             .map(|(name, _)| name.to_owned());
         let mut candidates = Vec::new();
-        if let Some((name, instance)) = profile.instance_for_provider(active) {
-            if let Some(backend) = Self::from_instance(profile, instance) {
+        if let Some(kind) = active.as_deref() {
+            if let Some((name, instance)) = profile.instance_for_provider(kind) {
+                if let Some(backend) = Self::from_instance(profile, instance) {
+                    candidates.push(Candidate {
+                        instance: Some(name.to_owned()),
+                        backend,
+                    });
+                }
+            } else if let Some(backend) = Self::named(kind, profile) {
                 candidates.push(Candidate {
-                    instance: Some(name.to_owned()),
+                    instance: None,
                     backend,
                 });
             }
-        } else if let Some(backend) = Self::named(active, profile) {
-            candidates.push(Candidate {
-                instance: None,
-                backend,
-            });
         }
         for (name, instance) in profile.instance_entries() {
             if active_entry.as_deref() == Some(name) {
@@ -202,7 +207,7 @@ impl Backend {
             "deepseek",
             "copilot",
         ] {
-            if name == active || profile.instance_for_provider(name).is_some() {
+            if Some(name) == active.as_deref() || profile.instance_for_provider(name).is_some() {
                 continue;
             }
             if let Some(backend) = Self::named(name, profile) {
@@ -217,7 +222,8 @@ impl Backend {
 
     /// Builds the backend one stored instance calls for; `None` when its
     /// provider needs a key and neither the environment nor the instance
-    /// carries one.
+    /// carries one. A kind no provider answers to builds nothing — an
+    /// unknown spelling never reads as google.
     fn from_instance(
         profile: &rhema_config::Profile,
         instance: &rhema_config::ProviderInstance,
@@ -249,6 +255,7 @@ impl Backend {
                 .map(|api_key| Backend::Copilot { api_key }),
             _ => profile
                 .instance_api_key(instance)
+                .filter(|_| instance.provider == "google")
                 .map(|api_key| Backend::Google { api_key }),
         }
     }
@@ -259,6 +266,9 @@ impl Backend {
     /// [`Backend::from_profile`] instead.
     fn named(provider: &str, profile: &rhema_config::Profile) -> Option<Backend> {
         match provider {
+            "google" => profile
+                .google_api_key()
+                .map(|api_key| Backend::Google { api_key }),
             "llama-cpp" => Some(Backend::LlamaCpp {
                 url: profile.llama_cpp_url(),
                 api_key: profile.llama_cpp_api_key(),
@@ -279,9 +289,7 @@ impl Backend {
             "copilot" => profile
                 .copilot_api_key()
                 .map(|api_key| Backend::Copilot { api_key }),
-            _ => profile
-                .google_api_key()
-                .map(|api_key| Backend::Google { api_key }),
+            _ => None,
         }
     }
 
@@ -2018,6 +2026,9 @@ mod tests {
             profiles: BTreeMap::from([(
                 "personal".to_owned(),
                 rhema_config::Profile {
+                    // The key alone never served a turn: a usable
+                    // profile names its provider too.
+                    provider: Some("google".into()),
                     google_api_key: api_key.map(str::to_owned),
                     model: model.map(str::to_owned),
                     ..rhema_config::Profile::default()
@@ -2435,6 +2446,23 @@ mod tests {
                 ..rhema_config::Profile::default()
             }),
             None
+        );
+        // No provider named, and a spelling no provider answers to, both
+        // leave the backend unresolved: the login flow runs, nothing
+        // silently serves google.
+        assert_eq!(
+            Backend::from_profile(&rhema_config::Profile::default()),
+            None,
+            "a provider-less profile opens the login flow"
+        );
+        assert_eq!(
+            Backend::from_profile(&rhema_config::Profile {
+                provider: Some("nonsense".into()),
+                google_api_key: Some("k".into()),
+                ..rhema_config::Profile::default()
+            }),
+            None,
+            "an unknown spelling never falls back to google"
         );
     }
 
@@ -3609,11 +3637,12 @@ mod tests {
                 (
                     "personal".to_owned(),
                     rhema_config::Profile {
+                        provider: Some("google".into()),
                         google_api_key: Some("k".into()),
                         ..rhema_config::Profile::default()
                     },
                 ),
-                ("work".to_owned(), work_ready),
+                ("work".to_owned(), work_ready.clone()),
             ]),
             ..Default::default()
         };
@@ -3624,11 +3653,29 @@ mod tests {
             startup_profile(&Config::default(), Path::new("/nowhere")),
             "personal"
         );
+        // A key without a provider name is not usable either: nothing
+        // defaults to google, so the logged-out-looking profile loses to
+        // the ready one.
+        let config = Config {
+            profiles: BTreeMap::from([
+                (
+                    "personal".to_owned(),
+                    rhema_config::Profile {
+                        google_api_key: Some("k".into()),
+                        ..rhema_config::Profile::default()
+                    },
+                ),
+                ("work".to_owned(), work_ready),
+            ]),
+            ..Default::default()
+        };
+        assert_eq!(startup_profile(&config, Path::new("/nowhere")), "work");
     }
 
     #[test]
     fn a_workspace_reopens_on_the_profile_it_last_used() {
         let ready = |key: &str| rhema_config::Profile {
+            provider: Some("google".into()),
             google_api_key: Some(key.to_owned()),
             ..rhema_config::Profile::default()
         };

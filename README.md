@@ -308,9 +308,11 @@ rhema run`); with a terminal attached, `rhema run` without a prompt
 errors instead of waiting. Bare `rhema` on a non-terminal stdout errors
 too — headless runs are explicit now. Headless backends resolve from
 config and environment only (there is no
-login prompt): log in once interactively, or set the key env vars —
-`GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, or `GITHUB_COPILOT_TOKEN` for the
+login prompt), and nothing defaults: name the provider with
+`RHEMA_PROVIDER` (or a stored profile), then log in once interactively
+or set the key env vars — `GEMINI_API_KEY`, `OPENROUTER_API_KEY`,
+`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, or
+`GITHUB_COPILOT_TOKEN` for the
 keyed backends. Tool
 calls run auto-approved for now; command allowlists are planned.
 
@@ -321,7 +323,9 @@ is the design's primary.
 
 The backend is a stored decision, not a flag: the profile's `provider`
 picks it (a `RHEMA_PROVIDER` environment variable overrides), and the
-model comes from the picker or the profile's `model`. Storing
+model comes from the picker or the profile's `model`. Nothing is
+defaulted — a session with no configured provider opens the login
+screen to pick one. Storing
 `provider: llama-cpp` (with the server in `LLAMA_CPP_URL` or the
 profile's `llama_cpp_url`) starts on the llama.cpp backend without
 logging in; `ctrl-p` still lists that server's models.

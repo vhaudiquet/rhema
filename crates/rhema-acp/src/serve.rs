@@ -187,12 +187,22 @@ impl App {
                     .unwrap_or_else(|| "mock".to_owned()),
             });
         }
-        backend::resolve(
+        // A configuration problem (nothing configured, an unknown
+        // stored spelling) is reported on stderr — the one channel left
+        // — and reads to the client as `None`: `auth_required`, the
+        // honest answer for a session that cannot start either way.
+        match backend::resolve(
             &self.effective,
             self.options.provider.as_deref(),
             self.options.model.as_deref(),
             self.options.llama_url.as_deref(),
-        )
+        ) {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                eprintln!("rhema-acp: {err}");
+                None
+            }
+        }
     }
 
     /// The catalog rows the session's model picker offers: every
@@ -364,6 +374,7 @@ impl App {
             let provider = match kind {
                 Some(kind) => {
                     backend::provider_for(kind, &self.effective, self.options.llama_url.as_deref())
+                        .map_err(|message| Error::invalid_params().data(message))?
                         .ok_or_else(|| {
                             Error::invalid_params().data(format!(
                                 "no usable credentials for {kind} — log in once with the \
@@ -479,8 +490,9 @@ async fn serve_connection(
                         // the call doubles as a credential check.
                         Some(_) => responder.respond(AuthenticateResponse::new()),
                         None => Err(Error::internal_error().data(
-                            "no rhema credentials resolved: set an API key \
-                             (e.g. GEMINI_API_KEY) or log in once with the rhema TUI",
+                            "no rhema credentials resolved: set RHEMA_PROVIDER \
+                             and an API key (e.g. GEMINI_API_KEY), or log in \
+                             once with the rhema TUI",
                         )),
                     }
                 }
@@ -495,8 +507,8 @@ async fn serve_connection(
                         // The code editors check to offer their login
                         // flow before retrying.
                         return Err(Error::auth_required().data(
-                            "no rhema credentials resolved: authenticate, \
-                             or store an API key (e.g. GEMINI_API_KEY) \
+                            "no rhema credentials resolved: set RHEMA_PROVIDER, \
+                             authenticate, or store an API key (e.g. GEMINI_API_KEY) \
                              in the rhema config",
                         ));
                     };

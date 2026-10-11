@@ -47,17 +47,19 @@ pub enum ProviderChoice {
 }
 
 impl ProviderChoice {
-    /// Parses a stored config value; unknown spellings fall back to
-    /// google.
-    pub fn from_stored(value: Option<&str>) -> Self {
+    /// Parses a stored config value; `None` for no value and unknown
+    /// spellings alike — the caller decides whether that means the
+    /// login flow or an error naming the stored value.
+    pub fn from_stored(value: Option<&str>) -> Option<Self> {
         match value {
-            Some("llama-cpp") | Some("llama_cpp") | Some("llamacpp") => Self::LlamaCpp,
-            Some("openrouter") => Self::OpenRouter,
-            Some("anthropic") => Self::Anthropic,
-            Some("openai") => Self::OpenAi,
-            Some("deepseek") => Self::DeepSeek,
-            Some("copilot") => Self::Copilot,
-            _ => Self::Google,
+            Some("google") => Some(Self::Google),
+            Some("llama-cpp") | Some("llama_cpp") | Some("llamacpp") => Some(Self::LlamaCpp),
+            Some("openrouter") => Some(Self::OpenRouter),
+            Some("anthropic") => Some(Self::Anthropic),
+            Some("openai") => Some(Self::OpenAi),
+            Some("deepseek") => Some(Self::DeepSeek),
+            Some("copilot") => Some(Self::Copilot),
+            _ => None,
         }
     }
 
@@ -276,25 +278,25 @@ mod tests {
     fn stored_provider_spellings_map() {
         assert_eq!(
             ProviderChoice::from_stored(Some("llama_cpp")),
-            ProviderChoice::LlamaCpp
+            Some(ProviderChoice::LlamaCpp)
         );
         assert_eq!(
             ProviderChoice::from_stored(Some("google")),
-            ProviderChoice::Google
+            Some(ProviderChoice::Google)
         );
         assert_eq!(
             ProviderChoice::from_stored(Some("anthropic")),
-            ProviderChoice::Anthropic
+            Some(ProviderChoice::Anthropic)
         );
         assert_eq!(
             ProviderChoice::from_stored(Some("openai")),
-            ProviderChoice::OpenAi
+            Some(ProviderChoice::OpenAi)
         );
-        assert_eq!(ProviderChoice::from_stored(None), ProviderChoice::Google);
-        assert_eq!(
-            ProviderChoice::from_stored(Some("nonsense")),
-            ProviderChoice::Google
-        );
+        // Nothing stored and a spelling no provider answers to both read
+        // as unconfigured: the caller errors or opens the login flow, it
+        // never silently serves google.
+        assert_eq!(ProviderChoice::from_stored(None), None);
+        assert_eq!(ProviderChoice::from_stored(Some("nonsense")), None);
     }
 
     #[test]
@@ -303,19 +305,19 @@ mod tests {
         // flag: the spellings round-trip through from_stored.
         assert_eq!(
             ProviderChoice::from_stored(Some("anthropic")),
-            ProviderChoice::Anthropic
+            Some(ProviderChoice::Anthropic)
         );
         assert_eq!(
             ProviderChoice::from_stored(Some("openai")),
-            ProviderChoice::OpenAi
+            Some(ProviderChoice::OpenAi)
         );
         assert_eq!(
             ProviderChoice::from_stored(Some("deepseek")),
-            ProviderChoice::DeepSeek
+            Some(ProviderChoice::DeepSeek)
         );
         assert_eq!(
             ProviderChoice::from_stored(Some("copilot")),
-            ProviderChoice::Copilot
+            Some(ProviderChoice::Copilot)
         );
         assert_eq!(ProviderChoice::Copilot.stored_name(), "copilot");
     }
