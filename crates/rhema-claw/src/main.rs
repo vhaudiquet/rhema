@@ -154,10 +154,17 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
     };
     let env = |name: &str| std::env::var(name).ok();
     let backends = rhema_claw::backends::discover(config, &profile, &env, &claw_rows);
+    // The config's provider/model pair seeds the active backend when it
+    // names one. When it does not, the seed is the first credential
+    // discovery actually found — never a hardcoded default kind, and
+    // never the keyless llama.cpp fallback; with nothing keyed at all,
+    // the registry serves the keyless server and the UI's
+    // add-a-provider state is the honest answer.
     let seed = config
         .provider
         .as_deref()
-        .map(|kind| (kind.to_owned(), config.model.clone()));
+        .map(|kind| (kind.to_owned(), config.model.clone()))
+        .or_else(|| rhema_claw::backends::credential_seed(&backends));
     Ok(Arc::new(
         rhema_claw::BackendRegistry::new(backends, seed).map_err(ClawError::Backend)?,
     ))

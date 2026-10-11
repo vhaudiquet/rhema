@@ -447,7 +447,10 @@ logins, or the stored rhema config) is constructed at boot as a backend
 llama.cpp servers (or two keys of one cloud) coexist under two names.
 One is active, and switching with `PUT /v1/providers/active` is runtime
 state persisted in SQLite: the
-config's `provider`/`model` pair is only the seed, so the chart pins
+config's `provider`/`model` pair is only the seed, and when the config
+names no provider the first credential discovery actually finds (a
+stored login, an env key, or the stored rhema config) is active — the
+keyless llama.cpp fallback never wins a seed, so the chart pins
 nothing and a switch never needs a restart.
 
 The claw registers RSD sources three ways: watches (forge), scheduled

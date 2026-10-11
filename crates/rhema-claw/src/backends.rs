@@ -257,6 +257,21 @@ impl BackendRegistry {
     }
 }
 
+/// The credential-backed seed for the active pair when the config
+/// names no provider: the first discovered backend that resolved an
+/// actual credential — a stored row, an env key, or the stored rhema
+/// profile. The keyless llama.cpp fallback is skipped: it exists so
+/// the registry is never empty, not because anyone chose it, and with
+/// nothing keyed the registry serves it while the UI's add-a-provider
+/// state stays the honest answer. The model stays unset — the
+/// registry fills each kind's default.
+pub fn credential_seed(backends: &[Backend]) -> Option<(String, Option<String>)> {
+    backends
+        .iter()
+        .find(|backend| backend.kind != "llama-cpp")
+        .map(|backend| (backend.id.clone(), None))
+}
+
 /// The concrete providers behind [`Backend`]: an enum because the live
 /// model listings are inherent methods, and the registry stores the
 /// provider behind the object-safe seam. Shared by `Arc`, never cloned.
@@ -669,6 +684,37 @@ mod tests {
             default_model: default_model_for(kind).to_owned(),
             list_models: None,
         }
+    }
+
+    #[test]
+    fn the_credential_seed_is_the_first_keyed_backend_in_discovery_order() {
+        // The keyless llama.cpp fallback never seeds: it exists so the
+        // registry is never empty, not because anyone chose it.
+        assert_eq!(
+            credential_seed(&[backend("llama-cpp")]),
+            None,
+            "nothing keyed: no seed, the keyless server serves"
+        );
+        // The first keyed backend wins, in discovery order.
+        assert_eq!(
+            credential_seed(&[
+                backend("llama-cpp"),
+                backend("google"),
+                backend("anthropic")
+            ]),
+            Some(("google".to_owned(), None))
+        );
+        // A stored named row comes first in discovery order, whatever
+        // its kind sorts to in the registry.
+        let mut stored = backend("anthropic");
+        stored.id = "work-key".to_owned();
+        assert_eq!(
+            credential_seed(&[stored, backend("google")]),
+            Some(("work-key".to_owned(), None))
+        );
+        // The model stays unset: the registry fills the kind default.
+        let (id, model) = credential_seed(&[backend("openai")]).unwrap();
+        assert_eq!((id.as_str(), model), ("openai", None));
     }
 
     #[test]
