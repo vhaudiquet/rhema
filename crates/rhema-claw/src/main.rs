@@ -83,7 +83,10 @@ async fn run(args: Args) -> Result<(), ClawError> {
         Ok(())
     } else {
         // The resident daemon always serves HTTP: the chat surface is
-        // how it is talked to. Only `--once` runs headless.
+        // how it is talked to. Only `--once` runs headless. The
+        // surface's posture is checked before anything binds: a wide
+        // listen with no token never comes up.
+        config.validate_surface()?;
         let daemon = Daemon::build(&config, backends, DispatcherConfig::default())?;
         daemon.run().await
     }

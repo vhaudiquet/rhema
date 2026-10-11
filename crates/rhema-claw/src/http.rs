@@ -211,6 +211,21 @@ pub fn router(state: ClawState) -> Router {
         .with_state(state)
 }
 
+/// Byte-length-safe constant-time equality over the two strings' UTF-8
+/// bytes: every compared byte is XOR-folded into one difference word
+/// along with the length difference, so the answer takes the same work
+/// whether the mismatch is in the first byte or the last. Not a MAC —
+/// just enough that the bearer check does not leak the token a timing
+/// probe at a time.
+fn tokens_match(presented: &str, expected: &str) -> bool {
+    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
+    let mut diff = presented.len() ^ expected.len();
+    for (a, b) in presented.iter().zip(expected) {
+        diff |= usize::from(a ^ b);
+    }
+    diff == 0
+}
+
 /// The bearer check: with no configured token the surface is open; with
 /// one, `Authorization: Bearer <token>` is required on every `/v1`
 /// route. `/healthz` never reaches this.
@@ -224,7 +239,7 @@ async fn require_auth(State(state): State<ClawState>, request: Request, next: Ne
             .is_some_and(|value| {
                 value
                     .strip_prefix("Bearer ")
-                    .is_some_and(|presented| presented == expected)
+                    .is_some_and(|presented| tokens_match(presented, expected))
             }),
     };
     if authorized {
@@ -1006,6 +1021,25 @@ mod tests {
             dedup_id("phone:bob", &payload),
             "a different key re-ingests"
         );
+    }
+
+    #[test]
+    fn the_bearer_comparison_agrees_with_equality() {
+        for (presented, expected, matches) in [
+            ("sekrit", "sekrit", true),
+            ("", "", true),
+            ("sekrit", "sekri", false),
+            ("sekri", "sekrit", false),
+            ("sekrit", "sekritx", false),
+            ("wrong", "sekrit", false),
+            ("sékrit", "sekrit", false),
+        ] {
+            assert_eq!(
+                tokens_match(presented, expected),
+                matches,
+                "{presented:?} vs {expected:?}"
+            );
+        }
     }
 
     #[test]

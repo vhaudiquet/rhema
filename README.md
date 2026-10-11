@@ -392,6 +392,11 @@ watches:                         # a seed: imported while the table is empty
     repo: acme/widgets
 ```
 
+The surface refuses to start on a non-loopback `listen` with no
+`token`: anything beyond loopback can reach the port, and the bearer
+token is what stands between it and the agent's tools. Set a token, or
+bind a loopback address.
+
 The native surface:
 
 ```
@@ -472,7 +477,7 @@ session, the daemon's, behind a wire format every web UI already speaks.
 ```sh
 docker build -f deploy/docker/claw.Dockerfile -t rhema-claw .
 helm install claw deploy/helm/rhema-claw \
-  --set auth.token=$(openssl rand -hex 24) \
+  --set token=$(openssl rand -hex 24) \
   --set secret.stringData.ANTHROPIC_API_KEY=... \
   --set secret.stringData.GITHUB_TOKEN=... \
   --set config.provider=anthropic --set config.model=claude-sonnet-4-5
@@ -490,9 +495,10 @@ The image is the daemon plus `bash` and `git` (the agent's shell is
 load-bearing); the chart runs exactly one replica, the claw is
 single-node by design: one SQLite store, one dispatcher. The
 store and workspaces live on a PVC, `claw.yaml` in a ConfigMap (db and
-workspace paths are pinned to the mounted volume), and credentials or
-the API token in a Secret. `persistence.enabled=false` trades restart
-survival for disposability.
+workspace paths are pinned to the mounted volume), credentials in a
+Secret, and the bearer token is the `token` value — required, since the
+daemon binds all interfaces in-cluster. `persistence.enabled=false`
+trades restart survival for disposability.
 
 The UI in `web/claw` is one client of the same surface: `npm run dev`
 proxies to a local claw, `npm run build` emits the static bundle an

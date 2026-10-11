@@ -57,6 +57,17 @@ pub enum ConfigError {
         /// What is missing or malformed.
         reason: String,
     },
+    /// The HTTP surface would listen beyond loopback with no bearer
+    /// token: anyone who can reach the port could run tools on this
+    /// machine.
+    #[error(
+        "listen {listen} is not a loopback address and the surface has no \
+         token: set a token, or bind a loopback address"
+    )]
+    OpenSurface {
+        /// The listen address as configured.
+        listen: String,
+    },
 }
 
 /// Which forge a watch polls. The wire spelling is the source name the
@@ -177,6 +188,33 @@ pub fn resolve_token(
         })
 }
 
+/// Whether a `host:port` listen address binds beyond loopback.
+/// `localhost` (any case) and any loopback IP literal — `127.x.x.x`,
+/// `::1` — are loopback; an empty host (`:7799`, the bind-everything
+/// shape) is not. A malformed host is not loopback either: it will
+/// fail at bind time, and until then it must not read as safe.
+pub fn is_loopback_listen(listen: &str) -> bool {
+    let host = if listen.starts_with('[') {
+        // A bracketed IPv6 literal, with or without a port.
+        listen
+            .split(']')
+            .next()
+            .and_then(|host| host.strip_prefix('['))
+            .unwrap_or(listen)
+    } else if listen.matches(':').count() > 1 {
+        // A bare IPv6 literal carries several colons; a port on one
+        // would be bracketed.
+        listen
+    } else {
+        listen.split(':').next().unwrap_or(listen)
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .is_ok_and(|ip| ip.is_loopback())
+}
+
 /// The daemon's config file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
@@ -293,6 +331,24 @@ impl ClawConfig {
     /// [`DEFAULT_LISTEN`] when unset.
     pub fn listen_addr(&self) -> &str {
         self.listen.as_deref().unwrap_or(DEFAULT_LISTEN)
+    }
+
+    /// The surface's startup posture check: a listen address reachable
+    /// beyond loopback with no bearer token is an open agent API —
+    /// anyone who can reach the port could run tools on this machine.
+    /// Refused before the daemon binds, naming both facts and the fix.
+    pub fn validate_surface(&self) -> Result<(), ConfigError> {
+        let guarded = self
+            .token
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|token| !token.is_empty());
+        if !guarded && !is_loopback_listen(self.listen_addr()) {
+            return Err(ConfigError::OpenSurface {
+                listen: self.listen_addr().to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// The model identifier the handler runs: the config's, or the
@@ -524,6 +580,71 @@ watches:
         )])
         .validate()
         .expect("a complete gitea watch validates");
+    }
+
+    #[test]
+    fn a_non_loopback_surface_demands_a_token() {
+        let config = |listen: Option<&str>, token: Option<&str>| ClawConfig {
+            listen: listen.map(str::to_owned),
+            token: token.map(str::to_owned),
+            ..ClawConfig::default()
+        };
+        // The default listen is loopback: open is fine.
+        config(None, None)
+            .validate_surface()
+            .expect("default is safe");
+        config(Some("localhost:7799"), None)
+            .validate_surface()
+            .expect("the localhost literal is loopback");
+        config(Some("127.0.0.1:7799"), None)
+            .validate_surface()
+            .expect("an explicit loopback ip is loopback");
+        config(Some("[::1]:7799"), None)
+            .validate_surface()
+            .expect("a bracketed ::1 is loopback");
+        // A token guards a wide bind.
+        config(Some("0.0.0.0:7799"), Some("sekrit"))
+            .validate_surface()
+            .expect("a token guards the wide bind");
+        // No token on a wide bind is refused, naming the fix.
+        let err = config(Some("0.0.0.0:7799"), None)
+            .validate_surface()
+            .expect_err("an unguarded wide bind is refused");
+        assert!(
+            err.to_string().contains("0.0.0.0:7799") && err.to_string().contains("set a token"),
+            "got: {err}"
+        );
+        // A blank token counts as unset, everywhere else too.
+        assert!(
+            config(Some("192.168.1.10:7800"), Some("   "))
+                .validate_surface()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn loopback_detection_covers_the_listen_spellings() {
+        for listen in [
+            "localhost:7799",
+            "LOCALHOST:7799",
+            "127.0.0.1:7799",
+            "127.8.8.8:80",
+            "::1",
+            "[::1]:7799",
+            "[::1]",
+        ] {
+            assert!(is_loopback_listen(listen), "{listen} is loopback");
+        }
+        for listen in [
+            "0.0.0.0:7799",
+            "192.168.1.10:7800",
+            "[::]:7799",
+            ":7799",
+            "example.com:7799",
+            "not an address",
+        ] {
+            assert!(!is_loopback_listen(listen), "{listen} is not loopback");
+        }
     }
 
     #[test]
