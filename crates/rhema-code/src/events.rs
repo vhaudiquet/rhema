@@ -13,18 +13,35 @@ use rhema_provider::ModelCard;
 /// Why the runner fetched the model list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FetchWhy {
-    /// The login screen validated a provider's input; the fetch is the
-    /// validation (`Login` carries the backend the screen assembled —
-    /// key or server URL — and nothing else stores it mid-flight).
+    /// The login screen validated a new instance's input; the fetch is
+    /// the validation (`Login` carries the backend the screen assembled
+    /// — key or server URL — and the instance name it will persist the
+    /// credential under; nothing else stores them mid-flight).
     Login {
         /// The backend being validated.
         backend: crate::app::Backend,
+        /// The name the credential lands under in the profile's
+        /// instances.
+        instance: Option<String>,
     },
     /// Startup with a resolvable key; populates the picker (and the Ctrl-P
     /// cache) without blocking the first paint.
     Bootstrap,
     /// The model picker reopened mid-session and its cache is stale.
     Refresh,
+}
+
+/// One fetched catalog slice: which backend answered, and with what.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatalogFetch {
+    /// The backend's provider config name.
+    pub provider: &'static str,
+    /// The profile instance the backend was built from, when it has a
+    /// name — every stored instance does; only a legacy flat login
+    /// fetches unnamed.
+    pub instance: Option<String>,
+    /// The models, or the provider's error text.
+    pub result: Result<Vec<ModelCard>, String>,
 }
 
 /// An owned copy of a [`rhema_core::Event`]. [`Event`] borrows from the
@@ -118,9 +135,9 @@ pub enum UiEvent {
     ModelsLoaded {
         /// What the fetch was for; the app routes the result accordingly.
         why: FetchWhy,
-        /// Per provider queried: its config name with the fetched models
-        /// or the provider's error text.
-        result: Vec<(&'static str, Result<Vec<ModelCard>, String>)>,
+        /// Per backend queried: provider, instance, and the fetched
+        /// models or the provider's error text.
+        result: Vec<CatalogFetch>,
     },
     /// A step of the running login flow: an instruction to render, a
     /// progress note, the credential to persist, or the failure. The

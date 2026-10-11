@@ -79,9 +79,75 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
+/// The flow stage's lines: the wrapped instruction — a device-grant URL
+/// and its code exceed the box's width, and a cut-off code cannot be
+/// typed — then the code, the URL, and the latest progress note. Each
+/// part wears its own tone.
+fn flow_lines(
+    login: &crate::screens::LoginScreen,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    if let Some(instruction) = &login.flow_instruction {
+        lines.extend(
+            wrap_line(&Line::from(instruction.text.clone()), width)
+                .into_iter()
+                .map(|mut line| {
+                    line.spans
+                        .iter_mut()
+                        .for_each(|span| span.style = span.style.fg(theme.text2));
+                    line
+                }),
+        );
+        if let Some(code) = &instruction.code {
+            lines.push(Line::from(vec![
+                Span::raw("code: ").fg(theme.text3),
+                Span::raw(code.clone()).fg(theme.accent_text).bold(),
+            ]));
+        }
+        if let Some(url) = &instruction.url {
+            lines.extend(
+                wrap_line(&Line::from(url.clone()), width)
+                    .into_iter()
+                    .map(|mut line| {
+                        line.spans
+                            .iter_mut()
+                            .for_each(|span| span.style = span.style.fg(theme.text3));
+                        line
+                    }),
+            );
+        }
+    }
+    if let Some(waiting) = &login.flow_waiting {
+        lines.extend(
+            wrap_line(&Line::from(waiting.clone()), width)
+                .into_iter()
+                .map(|mut line| {
+                    line.spans
+                        .iter_mut()
+                        .for_each(|span| span.style = span.style.fg(theme.text3));
+                    line
+                }),
+        );
+    }
+    lines
+}
+
 fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &Theme) {
-    // Two border rows plus tabs, one row per provider, input, status.
-    let height = 2 + 1 + PROVIDERS.len() as u16 + 1 + 1;
+    // The inner width of the centered box: the text lines wrap to it.
+    const INNER_WIDTH: usize = 56;
+    // Two border rows plus tabs, one row per list entry (instances on
+    // the home stage, providers while adding), input, status. The flow
+    // stage grows with its wrapped instruction instead.
+    let flow = flow_lines(login, theme, INNER_WIDTH);
+    let rows = match login.stage {
+        crate::screens::LoginStage::Instances => login.instance_rows().len(),
+        crate::screens::LoginStage::SelectProvider => PROVIDERS.len(),
+        crate::screens::LoginStage::NameInstance | crate::screens::LoginStage::EnterCredential => 1,
+        crate::screens::LoginStage::Flow => flow.len().max(1),
+    } as u16;
+    let height = 2 + 1 + rows + 1 + 1;
     let area = centered(58, height, frame.area());
     frame.render_widget(Clear, area);
     let title = format!(" rhema — sign in ({}) ", login.profile);
@@ -94,9 +160,9 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [tabs_area, providers_area, input_area, status_area] = Layout::vertical([
+    let [tabs_area, providers_area, _input_area, status_area] = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(PROVIDERS.len() as u16),
+        Constraint::Length(rows),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
@@ -126,9 +192,44 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
     frame.render_widget(Paragraph::new(Line::from(tabs)), tabs_area);
 
     match login.stage {
+        crate::screens::LoginStage::Instances => {
+            // One row per logged-in instance — the active one marked —
+            // then the add row.
+            let rows: Vec<ListItem> = login
+                .instance_rows()
+                .into_iter()
+                .enumerate()
+                .map(|(index, row)| {
+                    let selected = index == login.selected;
+                    let name_style = if selected {
+                        Style::default().fg(theme.text).bold()
+                    } else {
+                        Style::default().fg(theme.text2)
+                    };
+                    let mut spans = Vec::new();
+                    if row.add {
+                        spans.push(Span::raw("+ add a new instance…").fg(theme.text2));
+                    } else {
+                        spans.push(Span::raw("● ").fg(if row.active {
+                            theme.ok
+                        } else {
+                            theme.text3
+                        }));
+                        spans.push(Span::styled(
+                            format!("{} — {}", row.provider, row.name),
+                            name_style,
+                        ));
+                        if row.active {
+                            spans.push(Span::raw("  · active").fg(theme.text3));
+                        }
+                    }
+                    ListItem::new(Line::from(spans))
+                })
+                .collect();
+            frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
+        }
         crate::screens::LoginStage::SelectProvider => {
-            // oh-my-pi style: every provider row, connected ones marked
-            // with a green "logged in" tag.
+            // The provider kinds a new instance can be.
             let rows: Vec<ListItem> = PROVIDERS
                 .iter()
                 .map(|entry| {
@@ -138,73 +239,25 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
                     } else {
                         Style::default().fg(theme.text2)
                     };
-                    let registered = match entry.kind {
-                        crate::screens::LoginProvider::Google => {
-                            login.stored.google_api_key.is_some()
-                        }
-                        crate::screens::LoginProvider::LlamaCpp => {
-                            login.stored.llama_cpp_url.is_some()
-                                || login.stored.llama_cpp_api_key.is_some()
-                        }
-                        crate::screens::LoginProvider::OpenRouter => {
-                            login.stored.openrouter_api_key.is_some()
-                        }
-                        crate::screens::LoginProvider::Anthropic => {
-                            login.stored.anthropic_api_key.is_some()
-                        }
-                        crate::screens::LoginProvider::OpenAi => {
-                            login.stored.openai_api_key.is_some()
-                        }
-                        crate::screens::LoginProvider::DeepSeek => {
-                            login.stored.deepseek_api_key.is_some()
-                        }
-                        crate::screens::LoginProvider::Copilot => {
-                            login.stored.copilot_api_key.is_some()
-                        }
-                    };
-                    let mut spans = vec![Span::styled(entry.name.to_string(), name_style)];
-                    if registered {
-                        let what = match entry.kind {
-                            crate::screens::LoginProvider::LlamaCpp => "server",
-                            _ => "api key",
-                        };
-                        spans.push(Span::raw("  ● ").fg(theme.ok));
-                        spans.push(Span::raw(format!("logged in ({what})")).fg(theme.text3));
-                    }
-                    ListItem::new(Line::from(spans))
+                    ListItem::new(Line::from(vec![Span::styled(
+                        entry.name.to_string(),
+                        name_style,
+                    )]))
                 })
                 .collect();
             frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
         }
-        crate::screens::LoginStage::EnterCredential => {
+        crate::screens::LoginStage::NameInstance | crate::screens::LoginStage::EnterCredential => {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
                     Span::raw(login.input_label()).fg(theme.text3),
                     Span::raw(login.masked_input()).bold(),
                 ])),
-                input_area,
+                providers_area,
             );
         }
         crate::screens::LoginStage::Flow => {
-            // The flow's instruction: what to do, the code to enter, the
-            // URL to enter it at, then the latest progress note.
-            let mut lines: Vec<Line> = Vec::new();
-            if let Some(instruction) = &login.flow_instruction {
-                lines.push(Line::from(instruction.text.clone()).fg(theme.text2));
-                if let Some(code) = &instruction.code {
-                    lines.push(Line::from(vec![
-                        Span::raw("code: ").fg(theme.text3),
-                        Span::raw(code.clone()).fg(theme.accent_text).bold(),
-                    ]));
-                }
-                if let Some(url) = &instruction.url {
-                    lines.push(Line::from(url.clone()).fg(theme.text3));
-                }
-            }
-            if let Some(waiting) = &login.flow_waiting {
-                lines.push(Line::from(waiting.clone()).fg(theme.text3));
-            }
-            frame.render_widget(Paragraph::new(lines), input_area);
+            frame.render_widget(Paragraph::new(flow), providers_area);
         }
     }
 
@@ -1294,6 +1347,7 @@ mod tests {
                 .into_iter()
                 .map(|model| CatalogModel {
                     provider: "google",
+                    instance: None,
                     model,
                 })
                 .collect(),
@@ -1329,6 +1383,7 @@ mod tests {
                 .into_iter()
                 .map(|model| CatalogModel {
                     provider: "google",
+                    instance: None,
                     model,
                 })
                 .collect(),
@@ -1354,6 +1409,7 @@ mod tests {
             .map(|i| model(&format!("model-{i:02}")))
             .map(|model| CatalogModel {
                 provider: "google",
+                instance: None,
                 model,
             })
             .collect();
@@ -1512,9 +1568,24 @@ mod scroll_tests {
     #[test]
     fn login_rows_report_the_stored_key_state() {
         let mut login = crate::screens::LoginScreen::new();
-        login.stored.google_api_key = Some("g".into());
-        login.stored.openrouter_api_key = Some("o".into());
-        login.stored.anthropic_api_key = Some("a".into());
+        login.stored.instances.insert(
+            "home".to_owned(),
+            rhema_config::ProviderInstance {
+                provider: "llama-cpp".into(),
+                api_key: None,
+                base_url: Some("http://home:8080".into()),
+            },
+        );
+        login.stored.instances.insert(
+            "work sub".to_owned(),
+            rhema_config::ProviderInstance {
+                provider: "copilot".into(),
+                api_key: Some("g".into()),
+                base_url: None,
+            },
+        );
+        login.stored.provider = Some("copilot".into());
+        login.stored.instance = Some("work sub".into());
 
         let backend = TestBackend::new(60, 14);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1525,14 +1596,40 @@ mod scroll_tests {
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
-        // Connected providers carry the logged-in tag; llama.cpp and
-        // OpenAI have nothing registered in this profile, so their rows
-        // stay bare.
-        assert!(screen.contains("Google Gemini"), "{screen}");
-        assert!(screen.contains("Anthropic"), "{screen}");
-        assert!(screen.contains("OpenAI"), "{screen}");
-        assert_eq!(screen.matches("logged in (api key)").count(), 3);
-        assert!(!screen.contains("logged in (server)"), "{screen}");
+        // One row per instance with its provider, the active one marked;
+        // the add row closes the list.
+        assert!(screen.contains("llama-cpp — home"), "{screen}");
+        assert!(screen.contains("copilot — work sub"), "{screen}");
+        assert_eq!(screen.matches("· active").count(), 1, "{screen}");
+        assert!(screen.contains("+ add a new instance…"), "{screen}");
+    }
+
+    /// The flow's instruction wraps: a device-grant URL and its code
+    /// exceed the box's width, and a cut-off code cannot be typed.
+    #[test]
+    fn the_flow_instruction_wraps_instead_of_cutting_off() {
+        let mut login = crate::screens::LoginScreen::new();
+        login.stage = crate::screens::LoginStage::Flow;
+        login.flow_instruction = Some(rhema_provider::LoginInstruction {
+            text: "open https://github.com/login/device in a browser and enter the code there"
+                .into(),
+            url: None,
+            code: Some("ABCD-1234".into()),
+        });
+        let backend = TestBackend::new(60, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render_login(frame, &login, &crate::palette::DARK))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        // The text's tail made it onto a wrapped second line, and the
+        // code renders whole below it.
+        assert!(screen.contains("enter the"), "{screen}");
+        assert!(screen.contains("code there"), "{screen}");
+        assert!(screen.contains("ABCD-1234"), "{screen}");
     }
 
     #[test]
@@ -1598,6 +1695,7 @@ mod scroll_tests {
         app.options.thinking = rhema_core::request::ThinkingEffort::High;
         app.models.push(CatalogModel {
             provider: "google",
+            instance: None,
             model: ModelCard {
                 id: "m".into(),
                 display_name: "m".into(),
@@ -1798,9 +1896,10 @@ mod scroll_tests {
         let mut app = chat_app();
         app.on_event(crate::events::UiEvent::ModelsLoaded {
             why: crate::events::FetchWhy::Bootstrap,
-            result: vec![(
-                "google",
-                Ok(vec![ModelCard {
+            result: vec![crate::events::CatalogFetch {
+                provider: "google",
+                instance: None,
+                result: Ok(vec![ModelCard {
                     id: "gemini-3.8-flash".into(),
                     display_name: "Gemini 3.8 Flash".into(),
                     description: String::new(),
@@ -1809,7 +1908,7 @@ mod scroll_tests {
                     generation_methods: vec!["generateContent".into()],
                     pricing: None,
                 }]),
-            )],
+            }],
         });
         assert!(!app.models.is_empty(), "the catalog is cached");
         for c in "/model ".chars() {

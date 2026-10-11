@@ -239,6 +239,7 @@ async fn run_headless(args: Args) -> anyhow::Result<()> {
                     "missing API key: set OPENAI_API_KEY (or log in once interactively)"
                 )
             })?,
+            base_url: effective.openai_base_url(),
         },
         ProviderChoice::DeepSeek => Backend::DeepSeek {
             api_key: effective.deepseek_api_key().ok_or_else(|| {
@@ -358,9 +359,10 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         ProviderChoice::Anthropic => effective
             .anthropic_api_key()
             .map(|api_key| Backend::Anthropic { api_key }),
-        ProviderChoice::OpenAi => effective
-            .openai_api_key()
-            .map(|api_key| Backend::OpenAi { api_key }),
+        ProviderChoice::OpenAi => effective.openai_api_key().map(|api_key| Backend::OpenAi {
+            api_key,
+            base_url: effective.openai_base_url(),
+        }),
         ProviderChoice::DeepSeek => effective
             .deepseek_api_key()
             .map(|api_key| Backend::DeepSeek { api_key }),
@@ -559,9 +561,14 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
     match effect {
         Effect::FetchModels(why) => {
             // A login validates one provider; the catalogs otherwise span
-            // every provider the profile holds credentials for.
+            // every instance the profile holds credentials for.
             let backends = match &why {
-                crate::events::FetchWhy::Login { backend } => vec![backend.clone()],
+                crate::events::FetchWhy::Login { backend, .. } => {
+                    vec![crate::app::Candidate {
+                        instance: None,
+                        backend: backend.clone(),
+                    }]
+                }
                 _ => Backend::candidates_from_profile(&app.effective()),
             };
             if backends.is_empty() {

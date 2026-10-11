@@ -45,8 +45,9 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   proxy API driven by a long-lived GitHub OAuth token (the `InteractiveLogin`
   device flow's output) exchanged for a short-lived token the provider
   caches and refreshes; streaming, live model listing
-- `rhema-config` — the XDG config file: stored API key (0600) and
-  last-used model; env vars always win over the stored key
+- `rhema-config` — the XDG config file: named profiles of named
+  provider instances (stored keys, 0600), the active provider/instance
+  pair, and the last-used model; env vars always win over a stored key
 - `rhema-rsd` — resource-scoped dispatch: at most one live handler per
   resource key, a live inbox delivered mid-run, revision-guarded
   checkpoints, leases with TTL and recovery, and a persistent per-key
@@ -132,19 +133,44 @@ Without a resolvable credential, `authenticate` fails naming the fix.
 ### Profiles
 
 Config supports named profiles for contexts like work and personal. A
-profile overrides the top-level settings field-wise, so it only needs the
-fields where it differs:
+profile holds named **provider instances** — logged-in credentials per
+provider kind — plus which provider and instance serve turns:
 
 ```yaml
 profiles:
   personal:
-    provider: google
-    google_api_key: ...
+    provider: llama-cpp
+    instance: gpu box
+    model: qwen3-32b
+    instances:
+      gpu box:
+        provider: llama-cpp
+        base_url: http://gpu:8080
+      home:
+        provider: llama-cpp
+        base_url: http://localhost:8080
+      copilot:
+        provider: copilot
+        api_key: ...
+      openai:
+        provider: openai
+        api_key: ...
+        base_url: https://api.openai.com/v1   # or any compatible server
   work:
-    provider: openrouter
-    openrouter_api_key: ...
-    model: anthropic/claude-sonnet-4
+    provider: copilot
+    instance: work sub
+    instances:
+      work sub:
+        provider: copilot
+        api_key: ...
 ```
+
+A profile may hold any number of instances of the same provider — two
+llama.cpp servers, a personal and a work Copilot sub, several
+OpenAI-compatible endpoints (an `openai` instance's `base_url` may name
+any compatible server; unset means OpenAI itself). Config files written
+before instances existed carry one flat credential field per provider;
+loading folds those into instances named after their provider.
 
 Without `--profile`, sessions run on the profile this workspace last
 used — rhema remembers, per directory, where its last turn ran and what
@@ -154,7 +180,8 @@ usable credentials, on the first profile that does, so a logged-in work
 profile opens straight into the chat instead of the login screen.
 An explicit `--profile` name is always honored as given.
 
-Profiles are isolated: work never sees personal's keys or model. The
+Profiles are isolated: work never sees personal's instances or model.
+The
 selection is per-instance, never a stored global switch — `rhema
 --profile work` in one terminal and plain `rhema` in another run side by
 side, and `/profile` switches a running TUI without touching the other
@@ -214,12 +241,18 @@ and file in the system prompt — when a trigger applies,
 the model loads the body itself with the shell (`cat`), so skills
 need no special tool. `/skills` lists what was discovered.
 
-First launch opens the login screen: pick a provider — Google Gemini by
-API key, a llama.cpp `llama-server` by URL (optional bearer key), or
+First launch opens the login screen: one list of the profile's
+logged-in instances (the active one marked) plus an `add a new
+instance` row. Enter uses the highlighted instance, `d` forgets it, and
+the add flow asks for a provider — Google Gemini by API key, a llama.cpp
+`llama-server` by URL (optional bearer key), or
 OpenRouter, Anthropic, OpenAI, and DeepSeek by API key (DeepSeek rides
 the generic OpenAI-compatible adapter against their
 `api.deepseek.com/v1` endpoint — `reasoning_content` streaming and
-replay work natively for `deepseek-reasoner`). GitHub Copilot runs the
+replay work natively for `deepseek-reasoner`) — then a name for the
+instance, then the credential (an OpenAI-compatible instance may point
+its base URL at any compatible server; empty means OpenAI itself).
+GitHub Copilot runs the
 GitHub device flow instead: the screen shows a URL and a user code to
 authorize once in the browser, the resulting long-lived GitHub token is
 stored like any other key, and the adapter exchanges it for short-lived
@@ -227,11 +260,13 @@ Copilot tokens as it works. The input is validated with a
 real model-list call and stored in `~/.config/rhema/config.yaml` with
 `0600` permissions. Then pick a model from the live list (text chat
 models only — Google rows carry pricing and context window; just type
-to filter, arrows to move). The catalog spans every provider the
+to filter, arrows to move). The catalog spans every instance the
 profile holds credentials for, each row prefixed with its provider,
-and the filter matches provider names too — `openrouter` narrows the
+and the filter matches provider and instance names too — `openrouter`
+narrows the
 list to OpenRouter's whole catalog. Choosing a model from another
-provider switches the session's backend and the choice is stored.
+provider or instance switches the session's backend and the choice is
+stored.
 `/model <text>` narrows inline instead: the input palette lists the
 matching models with the same type-to-filter, arrows, and tab
 completion as the command palette, and enter switches directly.

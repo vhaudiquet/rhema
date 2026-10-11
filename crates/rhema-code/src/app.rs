@@ -65,10 +65,14 @@ pub enum Backend {
         /// The resolved key (`env` first, stored second).
         api_key: String,
     },
-    /// OpenAI, by API key.
+    /// OpenAI, or any OpenAI-compatible server, by API key: an instance
+    /// may name a base URL (a local vLLM, a proxy); `None` speaks to
+    /// OpenAI itself.
     OpenAi {
         /// The resolved key (`env` first, stored second).
         api_key: String,
+        /// The instance's base URL, when it stored one.
+        base_url: Option<String>,
     },
     /// DeepSeek, by API key (their OpenAI-compatible endpoint).
     DeepSeek {
@@ -100,16 +104,24 @@ impl Backend {
             Backend::OpenRouter { api_key } => Arc::new(
                 rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone()),
             ),
-            // The OpenAI backend speaks to OpenAI itself: the adapter's
-            // default base is the only address it gets — custom base
-            // URLs for other compatible servers are a later decision,
-            // not a config field here.
             Backend::Anthropic { api_key } => Arc::new(
                 rhema_provider_anthropic::AnthropicProvider::new(api_key.clone()),
             ),
-            Backend::OpenAi { api_key } => Arc::new(
-                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone()),
-            ),
+            // An instance's base URL points the adapter at any
+            // OpenAI-compatible server; the default is OpenAI itself.
+            Backend::OpenAi { api_key, base_url } => {
+                let mut provider = rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(
+                    api_key.clone(),
+                );
+                if let Some(base_url) = base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                {
+                    provider = provider.with_base_url(base_url.to_owned());
+                }
+                Arc::new(provider)
+            }
             Backend::DeepSeek { api_key } => Arc::new(
                 rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
                     .with_base_url("https://api.deepseek.com/v1"),
@@ -135,22 +147,52 @@ impl Backend {
 
     /// Builds the backend a profile's settings call for; `None` when the
     /// profile has no usable credentials (a keyless google, openrouter,
-    /// anthropic, or openai profile cannot serve turns).
+    /// anthropic, or openai profile cannot serve turns). The active
+    /// instance serves; a profile without instances falls back to the
+    /// legacy flat fields.
     pub fn from_profile(profile: &rhema_config::Profile) -> Option<Backend> {
-        Self::named(profile.provider.as_deref().unwrap_or("google"), profile)
+        let active = profile.provider.as_deref().unwrap_or("google");
+        if let Some((_, instance)) = profile.instance_for_provider(active) {
+            return Self::from_instance(profile, instance);
+        }
+        Self::named(active, profile)
     }
 
-    /// Every backend the profile can serve: the active provider first —
-    /// its catalog is the session's own — then each other provider with
-    /// resolvable credentials, so a profile holding several logins picks
-    /// across providers. llama.cpp joins only when active: a URL is a
-    /// server address, not a login, and the default would probe a server
-    /// the profile never named.
-    pub fn candidates_from_profile(profile: &rhema_config::Profile) -> Vec<Backend> {
+    /// Builds one backend per logged-in instance of the profile — the
+    /// active one first, then the rest in name order — so the picker
+    /// spans every llama.cpp server, OpenAI-compatible endpoint, and
+    /// Copilot sub the profile holds. A profile without instances falls
+    /// back to the legacy flat fields (llama.cpp only when active: a
+    /// URL is a server address, not a login).
+    pub fn candidates_from_profile(profile: &rhema_config::Profile) -> Vec<Candidate> {
         let active = profile.provider.as_deref().unwrap_or("google");
+        let active_entry = profile
+            .instance_for_provider(active)
+            .map(|(name, _)| name.to_owned());
         let mut candidates = Vec::new();
-        if let Some(backend) = Self::named(active, profile) {
-            candidates.push(backend);
+        if let Some((name, instance)) = profile.instance_for_provider(active) {
+            if let Some(backend) = Self::from_instance(profile, instance) {
+                candidates.push(Candidate {
+                    instance: Some(name.to_owned()),
+                    backend,
+                });
+            }
+        } else if let Some(backend) = Self::named(active, profile) {
+            candidates.push(Candidate {
+                instance: None,
+                backend,
+            });
+        }
+        for (name, instance) in profile.instance_entries() {
+            if active_entry.as_deref() == Some(name) {
+                continue;
+            }
+            if let Some(backend) = Self::from_instance(profile, instance) {
+                candidates.push(Candidate {
+                    instance: Some(name.to_owned()),
+                    backend,
+                });
+            }
         }
         for name in [
             "google",
@@ -160,18 +202,61 @@ impl Backend {
             "deepseek",
             "copilot",
         ] {
-            if name == active {
+            if name == active || profile.instance_for_provider(name).is_some() {
                 continue;
             }
             if let Some(backend) = Self::named(name, profile) {
-                candidates.push(backend);
+                candidates.push(Candidate {
+                    instance: None,
+                    backend,
+                });
             }
         }
         candidates
     }
 
-    /// The backend for one provider's config name, `None` when the
-    /// profile carries no usable credentials for it.
+    /// Builds the backend one stored instance calls for; `None` when its
+    /// provider needs a key and neither the environment nor the instance
+    /// carries one.
+    fn from_instance(
+        profile: &rhema_config::Profile,
+        instance: &rhema_config::ProviderInstance,
+    ) -> Option<Backend> {
+        match instance.provider.as_str() {
+            "llama-cpp" => Some(Backend::LlamaCpp {
+                url: profile
+                    .instance_url(instance)
+                    .unwrap_or_else(|| profile.llama_cpp_url()),
+                api_key: profile.instance_api_key(instance),
+            }),
+            "openrouter" => profile
+                .instance_api_key(instance)
+                .map(|api_key| Backend::OpenRouter { api_key }),
+            "anthropic" => profile
+                .instance_api_key(instance)
+                .map(|api_key| Backend::Anthropic { api_key }),
+            "openai" => profile
+                .instance_api_key(instance)
+                .map(|api_key| Backend::OpenAi {
+                    api_key,
+                    base_url: profile.instance_url(instance),
+                }),
+            "deepseek" => profile
+                .instance_api_key(instance)
+                .map(|api_key| Backend::DeepSeek { api_key }),
+            "copilot" => profile
+                .instance_api_key(instance)
+                .map(|api_key| Backend::Copilot { api_key }),
+            _ => profile
+                .instance_api_key(instance)
+                .map(|api_key| Backend::Google { api_key }),
+        }
+    }
+
+    /// The backend for one provider's config name from the legacy flat
+    /// fields, `None` when the profile carries no usable credentials for
+    /// it there. Profiles with instances resolve through
+    /// [`Backend::from_profile`] instead.
     fn named(provider: &str, profile: &rhema_config::Profile) -> Option<Backend> {
         match provider {
             "llama-cpp" => Some(Backend::LlamaCpp {
@@ -184,9 +269,10 @@ impl Backend {
             "anthropic" => profile
                 .anthropic_api_key()
                 .map(|api_key| Backend::Anthropic { api_key }),
-            "openai" => profile
-                .openai_api_key()
-                .map(|api_key| Backend::OpenAi { api_key }),
+            "openai" => profile.openai_api_key().map(|api_key| Backend::OpenAi {
+                api_key,
+                base_url: None,
+            }),
             "deepseek" => profile
                 .deepseek_api_key()
                 .map(|api_key| Backend::DeepSeek { api_key }),
@@ -231,11 +317,18 @@ impl Backend {
                     .await
                     .map_err(|err| err.to_string())
             }
-            Backend::OpenAi { api_key } => {
-                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
-                    .list_models()
-                    .await
-                    .map_err(|err| err.to_string())
+            Backend::OpenAi { api_key, base_url } => {
+                let mut provider = rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(
+                    api_key.clone(),
+                );
+                if let Some(base_url) = base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                {
+                    provider = provider.with_base_url(base_url.to_owned());
+                }
+                provider.list_models().await.map_err(|err| err.to_string())
             }
             Backend::Copilot { api_key } => {
                 rhema_provider_copilot::CopilotProvider::new(api_key.clone())
@@ -269,6 +362,16 @@ impl Backend {
             }
         }
     }
+}
+
+/// One backend a profile can serve, with the instance it came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    /// The instance name in the profile's registry; `None` when the
+    /// backend was built from the legacy flat fields.
+    pub instance: Option<String>,
+    /// The backend to fetch the catalog with.
+    pub backend: Backend,
 }
 
 /// The startup flags that outlive the screens.
@@ -443,9 +546,7 @@ impl App {
                     .clone()
                     .unwrap_or_else(|| "personal".to_owned());
                 Screen::Login(Box::new(
-                    LoginScreen::new()
-                        .with_registry(&setup.config.profiles, &profile_name)
-                        .select_stored_provider(effective.provider.as_deref()),
+                    LoginScreen::new().with_registry(&setup.config.profiles, &profile_name),
                 ))
             }
         };
@@ -530,11 +631,11 @@ impl App {
         self.transcript.push_notice(text);
     }
 
-    /// Opens the login screen bound to the session's profile, preselecting
-    /// its stored provider. The session stays where it is: a successful
-    /// login lands in a picker that rebuilds onto it.
+    /// Opens the login screen bound to the session's profile: its
+    /// logged-in instances, ready to activate, forget, or add to. The
+    /// session stays where it is: a successful login lands in a picker
+    /// that rebuilds onto it.
     pub fn open_login(&mut self) {
-        let effective = self.effective();
         let profile_name = self
             .session_profile
             .clone()
@@ -542,8 +643,7 @@ impl App {
             .unwrap_or_else(|| "personal".to_owned());
         self.screen = Screen::Login(Box::new(
             crate::screens::LoginScreen::for_chat()
-                .with_registry(&self.config.profiles, &profile_name)
-                .select_stored_provider(effective.provider.as_deref()),
+                .with_registry(&self.config.profiles, &profile_name),
         ));
     }
 
@@ -829,6 +929,8 @@ impl App {
         };
         match routed {
             Routed::Login(LoginAction::Validate) => self.validate_login(),
+            Routed::Login(LoginAction::Activate) => self.activate_instance(),
+            Routed::Login(LoginAction::Remove) => self.remove_instance(),
             Routed::Login(LoginAction::StartFlow) => {
                 vec![Effect::StartLoginFlow]
             }
@@ -836,8 +938,12 @@ impl App {
                 self.cancel_login_flow();
                 Vec::new()
             }
-            Routed::Picker(PickerAction::Choose { provider, id }) => {
-                self.choose_model(provider, &id);
+            Routed::Picker(PickerAction::Choose {
+                provider,
+                instance,
+                id,
+            }) => {
+                self.choose_model(provider, instance.as_deref(), &id);
                 Vec::new()
             }
             Routed::Picker(PickerAction::Quit) => {
@@ -970,57 +1076,183 @@ impl App {
         }
     }
 
-    /// The login screen validated a provider's input: fetch the models;
-    /// the fetch is the validation (a wrong key or a dead server both
-    /// surface as the fetch's error).
+    /// The login screen validated a new instance's input: fetch the
+    /// models; the fetch is the validation (a wrong key or a dead server
+    /// both surface as the fetch's error).
     fn validate_login(&mut self) -> Vec<Effect> {
         let Screen::Login(login) = &self.screen else {
             return Vec::new();
         };
-        let backend = match login.selected_provider() {
-            crate::screens::LoginProvider::LlamaCpp => {
-                let url = if login.input.trim().is_empty() {
-                    self.effective().llama_cpp_url()
-                } else {
-                    login.input.trim().to_owned()
-                };
-                Backend::LlamaCpp {
-                    url,
-                    api_key: self.effective().llama_cpp_api_key(),
-                }
-            }
-            crate::screens::LoginProvider::OpenRouter => Backend::OpenRouter {
-                api_key: login.input.clone(),
-            },
-            crate::screens::LoginProvider::Anthropic => Backend::Anthropic {
-                api_key: login.input.clone(),
+        let Some(pending) = login.pending.clone() else {
+            return Vec::new();
+        };
+        let input = login.input.trim().to_owned();
+        let base_url = pending
+            .base_url
+            .clone()
+            .map(|url| url.trim().to_owned())
+            .filter(|url| !url.is_empty());
+        let backend = match pending.provider {
+            crate::screens::LoginProvider::LlamaCpp => Backend::LlamaCpp {
+                // The URL prompt was captured earlier; the current line
+                // is the bearer key, optional on an open server.
+                url: base_url.unwrap_or_default(),
+                api_key: (!input.is_empty()).then_some(input),
             },
             crate::screens::LoginProvider::OpenAi => Backend::OpenAi {
-                api_key: login.input.clone(),
+                api_key: input,
+                base_url,
             },
-            crate::screens::LoginProvider::DeepSeek => Backend::DeepSeek {
-                api_key: login.input.clone(),
-            },
+            crate::screens::LoginProvider::OpenRouter => Backend::OpenRouter { api_key: input },
+            crate::screens::LoginProvider::Anthropic => Backend::Anthropic { api_key: input },
+            crate::screens::LoginProvider::DeepSeek => Backend::DeepSeek { api_key: input },
             // The flow path never validates a typed key: its credential
             // arrives from the flow task, already wrapped in the backend.
             crate::screens::LoginProvider::Copilot => return Vec::new(),
-            crate::screens::LoginProvider::Google => Backend::Google {
-                api_key: login.input.clone(),
-            },
+            crate::screens::LoginProvider::Google => Backend::Google { api_key: input },
         };
-        vec![Effect::FetchModels(FetchWhy::Login { backend })]
+        vec![Effect::FetchModels(FetchWhy::Login {
+            backend,
+            instance: Some(pending.name),
+        })]
     }
 
     /// Esc on the flow stage: end the flow task and return to the
-    /// provider list.
+    /// instance list.
     fn cancel_login_flow(&mut self) {
         self.login_cancel = None;
         if let Screen::Login(login) = &mut self.screen {
-            login.stage = crate::screens::LoginStage::SelectProvider;
+            login.stage = crate::screens::LoginStage::Instances;
             login.status = LoginStatus::Idle;
             login.flow_instruction = None;
             login.flow_waiting = None;
         }
+    }
+
+    /// Enter on a logged-in instance: it becomes the profile's active
+    /// one, the session moves to the login's tab, and the agent rebuilds
+    /// carrying the conversation over — a picker when no model is stored
+    /// yet, the chat otherwise.
+    fn activate_instance(&mut self) -> Vec<Effect> {
+        let Screen::Login(login) = &self.screen else {
+            return Vec::new();
+        };
+        if self.running {
+            self.transcript
+                .push_notice("a turn is running — the switch waits for it to finish");
+            return Vec::new();
+        }
+        let tab = login.profile.clone();
+        let Some(name) = login.selected_instance().map(str::to_owned) else {
+            return Vec::new();
+        };
+        let Some(instance) = self
+            .config
+            .profiles
+            .get(&tab)
+            .and_then(|profile| profile.instances.get(&name).cloned())
+        else {
+            return Vec::new();
+        };
+        // A stored model id only carries over when the provider stayed
+        // the same: gpt-x means nothing to a llama.cpp server.
+        let previous_provider = self.config.effective(Some(&tab)).provider;
+        let keep_model = previous_provider.as_deref() == Some(instance.provider.as_str());
+        self.config.set_for_profile(Some(&tab), |settings| {
+            settings.provider = Some(instance.provider.clone());
+            settings.instance = Some(name.clone());
+            if !keep_model {
+                settings.model = None;
+            }
+        });
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        let effective = self.config.effective(Some(&tab));
+        self.options.thinking = effective.thinking_effort().unwrap_or_default();
+        let Some(backend) = Backend::from_profile(&effective) else {
+            self.error = Some(format!(
+                "no usable credentials for {} — /login first",
+                instance.provider
+            ));
+            return Vec::new();
+        };
+        let session = match &self.agent {
+            Some(agent) => agent.session().clone(),
+            None => self.session.clone(),
+        };
+        let label = format!("{} — {name}", backend.config_name());
+        // The agent builds on the new provider, so it installs first.
+        self.provider = Some(backend.provider());
+        self.backend = Some(backend);
+        match self.build_agent(session) {
+            Ok(agent) => {
+                self.session_profile = Some(tab);
+                self.agent = Some(agent);
+                if let Some(model) = effective.model {
+                    self.screen = Screen::Chat;
+                    self.transcript
+                        .push_notice(&format!("switched to {label} · {model}"));
+                    Vec::new()
+                } else {
+                    self.screen = Screen::Picker(PickerScreen {
+                        status: PickerStatus::Loading,
+                        ..PickerScreen::new(self.models.clone(), PickerPurpose::Initial)
+                    });
+                    vec![Effect::FetchModels(FetchWhy::Bootstrap)]
+                }
+            }
+            Err(err) => {
+                self.error = Some(err.to_string());
+                Vec::new()
+            }
+        }
+    }
+
+    /// `d` on a logged-in instance: forget it. When it was the session
+    /// tab's active one, the backend re-resolves from what remains —
+    /// another instance of the provider, or none.
+    fn remove_instance(&mut self) -> Vec<Effect> {
+        let Screen::Login(login) = &self.screen else {
+            return Vec::new();
+        };
+        let tab = login.profile.clone();
+        let Some(name) = login.selected_instance().map(str::to_owned) else {
+            return Vec::new();
+        };
+        self.config.set_for_profile(Some(&tab), |settings| {
+            settings.remove_instance(&name);
+        });
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        if self.session_profile.as_deref() == Some(tab.as_str()) {
+            let effective = self.config.effective(Some(&tab));
+            match Backend::from_profile(&effective) {
+                Some(backend) => {
+                    self.backend = Some(backend.clone());
+                    self.provider = Some(backend.provider());
+                }
+                None => {
+                    self.backend = None;
+                    self.provider = None;
+                    self.agent = None;
+                }
+            }
+        }
+        // Sync the screen's copy of the profile and keep the selection
+        // inside the shrunken list.
+        if let Screen::Login(login) = &mut self.screen {
+            login.stored = self.config.effective(Some(&tab));
+            let rows = login.instance_rows().len();
+            if login.selected >= rows {
+                login.selected = rows.saturating_sub(1);
+            }
+        }
+        self.transcript.push_notice(&format!("forgot {name}"));
+        Vec::new()
     }
 
     /// A step of the running login flow: render it on the login screen,
@@ -1052,8 +1284,11 @@ impl App {
             rhema_provider::LoginUpdate::Completed(token) => {
                 login.flow_waiting = Some("fetching the model list".to_owned());
                 self.login_cancel = None;
+                // The flow's instance was named before the flow started.
+                let instance = login.pending.as_ref().map(|p| p.name.clone());
                 vec![Effect::FetchModels(FetchWhy::Login {
                     backend: Backend::Copilot { api_key: token },
+                    instance,
                 })]
             }
         }
@@ -1131,13 +1366,9 @@ impl App {
 
     /// Routes a model-list result to the login screen, the open picker,
     /// or the cache.
-    fn on_models_loaded(
-        &mut self,
-        why: FetchWhy,
-        result: Vec<(&'static str, Result<Vec<ModelCard>, String>)>,
-    ) {
+    fn on_models_loaded(&mut self, why: FetchWhy, result: Vec<crate::events::CatalogFetch>) {
         match why {
-            FetchWhy::Login { backend } => {
+            FetchWhy::Login { backend, instance } => {
                 let Screen::Login(login) = &mut self.screen else {
                     return;
                 };
@@ -1145,42 +1376,40 @@ impl App {
                 // knows the way back.
                 let from_chat = login.purpose == LoginPurpose::FromChat;
                 let tab = login.profile.clone();
+                // Every login writes a named instance; a lost name (a
+                // flow that outlived its screen) falls back to the
+                // provider's own.
+                let instance = instance.unwrap_or_else(|| backend.config_name().to_owned());
                 // The login fetch validates one provider: its result is
                 // the catalog's only entry.
-                match result.into_iter().next().map(|(_, result)| result) {
+                match result.into_iter().next().map(|entry| entry.result) {
                     Some(Ok(models)) => {
-                        self.config
-                            .set_for_profile(Some(&tab), |settings| match &backend {
-                                Backend::Google { api_key } => {
-                                    settings.provider = Some("google".to_owned());
-                                    settings.google_api_key = Some(api_key.clone());
-                                }
-                                Backend::LlamaCpp { url, api_key } => {
-                                    settings.provider = Some("llama-cpp".to_owned());
-                                    settings.llama_cpp_url = Some(url.clone());
-                                    settings.llama_cpp_api_key = api_key.clone();
-                                }
-                                Backend::OpenRouter { api_key } => {
-                                    settings.provider = Some("openrouter".to_owned());
-                                    settings.openrouter_api_key = Some(api_key.clone());
-                                }
-                                Backend::DeepSeek { api_key } => {
-                                    settings.provider = Some("deepseek".to_owned());
-                                    settings.deepseek_api_key = Some(api_key.clone());
-                                }
-                                Backend::Anthropic { api_key } => {
-                                    settings.provider = Some("anthropic".to_owned());
-                                    settings.anthropic_api_key = Some(api_key.clone());
-                                }
-                                Backend::OpenAi { api_key } => {
-                                    settings.provider = Some("openai".to_owned());
-                                    settings.openai_api_key = Some(api_key.clone());
-                                }
-                                Backend::Copilot { api_key } => {
-                                    settings.provider = Some("copilot".to_owned());
-                                    settings.copilot_api_key = Some(api_key.clone());
-                                }
-                            });
+                        let provider = backend.config_name();
+                        let (api_key, base_url) = match &backend {
+                            Backend::LlamaCpp { url, api_key } => {
+                                (api_key.clone(), Some(url.clone()))
+                            }
+                            Backend::OpenAi { api_key, base_url } => {
+                                (Some(api_key.clone()), base_url.clone())
+                            }
+                            Backend::Google { api_key }
+                            | Backend::OpenRouter { api_key }
+                            | Backend::Anthropic { api_key }
+                            | Backend::DeepSeek { api_key }
+                            | Backend::Copilot { api_key } => (Some(api_key.clone()), None),
+                        };
+                        self.config.set_for_profile(Some(&tab), |settings| {
+                            settings.provider = Some(provider.to_owned());
+                            settings.instance = Some(instance.clone());
+                            settings.upsert_instance(
+                                &instance,
+                                rhema_config::ProviderInstance {
+                                    provider: provider.to_owned(),
+                                    api_key,
+                                    base_url,
+                                },
+                            );
+                        });
                         if let Err(err) = self.store.save(&self.config) {
                             login.status = LoginStatus::Error(format!("cannot save config: {err}"));
                             return;
@@ -1188,27 +1417,34 @@ impl App {
                         self.session_profile = Some(tab);
                         self.backend = Some(backend.clone());
                         self.provider = Some(backend.provider());
-                        let provider = backend.config_name();
                         // The other logins' catalogs stay: a fresh login
                         // must not blank the picker down to one provider.
-                        // The logged-in provider's slice replaces its own,
-                        // so a stale copy cannot linger.
-                        self.models.retain(|entry| entry.provider != provider);
+                        // The instance's own slice replaces itself, so a
+                        // stale copy cannot linger — a provider may hold
+                        // several.
+                        self.models.retain(|entry| {
+                            entry.provider != provider
+                                || entry.instance.as_deref() != Some(instance.as_str())
+                        });
                         self.models.extend(models.iter().map(|model| {
                             crate::screens::CatalogModel {
                                 provider,
+                                instance: Some(instance.clone()),
                                 model: model.clone(),
                             }
                         }));
                         self.models.sort_by(|a, b| {
-                            a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id))
+                            a.provider
+                                .cmp(b.provider)
+                                .then(a.instance.cmp(&b.instance))
+                                .then(a.model.id.cmp(&b.model.id))
                         });
                         // A single-model server (plain llama-server rather
                         // than a router) has nothing to pick: take it and
                         // go straight to chat.
                         if models.len() == 1 {
                             let id = models[0].id.clone();
-                            self.choose_model(provider, &id);
+                            self.choose_model(provider, Some(&instance), &id);
                             return;
                         }
                         let purpose = if from_chat {
@@ -1226,20 +1462,21 @@ impl App {
                 }
             }
             FetchWhy::Bootstrap | FetchWhy::Refresh => {
-                // One result per queried provider: successes merge into the
+                // One result per queried backend: successes merge into the
                 // catalog; a total failure is the picker's error, and a
                 // partial one is named in its footer — a missing provider
                 // must never look like an empty one.
                 let (catalogs, failed): (Vec<_>, Vec<_>) =
-                    result.into_iter().partition(|(_, result)| result.is_ok());
+                    result.into_iter().partition(|entry| entry.result.is_ok());
                 let models: Vec<crate::screens::CatalogModel> = catalogs
                     .iter()
-                    .flat_map(|(provider, result)| {
-                        let models = result.as_deref().unwrap_or_default();
+                    .flat_map(|entry| {
+                        let models = entry.result.as_deref().unwrap_or_default();
                         models
                             .iter()
                             .map(move |model| crate::screens::CatalogModel {
-                                provider,
+                                provider: entry.provider,
+                                instance: entry.instance.clone(),
                                 model: model.clone(),
                             })
                     })
@@ -1250,12 +1487,12 @@ impl App {
                         let message = failed
                             .into_iter()
                             .next()
-                            .and_then(|(_, result)| result.err())
+                            .and_then(|entry| entry.result.err())
                             .unwrap_or_else(|| "no provider answered".to_owned());
                         picker.status = PickerStatus::Error(message);
                     } else {
                         picker.set_models(self.models.clone());
-                        picker.failed = failed.into_iter().map(|(provider, _)| provider).collect();
+                        picker.failed = failed.into_iter().map(|entry| entry.provider).collect();
                         picker.status = PickerStatus::Ready;
                         // The single-model failover applies at startup
                         // too: a server with one offering has nothing
@@ -1265,7 +1502,11 @@ impl App {
                             // Nothing follows in this arm: the chat
                             // screen choose_model installed stands.
                             let entry = picker.models[0].clone();
-                            self.choose_model(entry.provider, &entry.model.id);
+                            self.choose_model(
+                                entry.provider,
+                                entry.instance.as_deref(),
+                                &entry.model.id,
+                            );
                         }
                     }
                 }
@@ -1278,30 +1519,52 @@ impl App {
     /// switch, or say what went missing. `/model` with no needle opens
     /// the full picker instead.
     pub fn choose_model_by_id(&mut self, needle: &str) {
-        let mut exact: Vec<(&'static str, String)> = self
+        // The active instance wins ties: the same model id may be served
+        // by several instances of one provider.
+        let active = self.effective().instance;
+        let mut tag: Vec<(&'static str, Option<String>, String)> = self
             .models
             .iter()
             .filter(|entry| entry.model.id == needle)
-            .map(|entry| (entry.provider, entry.model.id.clone()))
+            .map(|entry| {
+                (
+                    entry.provider,
+                    entry.instance.clone(),
+                    entry.model.id.clone(),
+                )
+            })
             .collect();
-        let prefix: Vec<(&'static str, String)> = self
+        let prefix: Vec<(&'static str, Option<String>, String)> = self
             .models
             .iter()
             .filter(|entry| entry.model.id.starts_with(needle))
-            .map(|entry| (entry.provider, entry.model.id.clone()))
+            .map(|entry| {
+                (
+                    entry.provider,
+                    entry.instance.clone(),
+                    entry.model.id.clone(),
+                )
+            })
             .collect();
-        let (exact_count, prefix_count) = (exact.len(), prefix.len());
+        let (exact_count, prefix_count) = (tag.len(), prefix.len());
         let resolved = if exact_count == 1 {
-            exact.pop()
+            tag.pop()
+        } else if exact_count > 1 {
+            tag.into_iter().find(|(_, instance, _)| *instance == active)
         } else if prefix_count == 1 {
             prefix.into_iter().next()
+        } else if prefix_count > 1 {
+            prefix
+                .into_iter()
+                .find(|(_, instance, _)| *instance == active)
         } else {
             None
         };
         match resolved {
-            Some((provider, id)) => self.choose_model(provider, &id),
-            None if prefix_count > 1 => self.push_notice(&format!(
-                "{prefix_count} models match {needle:?} — name one fully or use /model"
+            Some((provider, instance, id)) => self.choose_model(provider, instance.as_deref(), &id),
+            None if exact_count > 1 || prefix_count > 1 => self.push_notice(&format!(
+                "{} models match {needle:?} — name one fully or use /model",
+                exact_count.max(prefix_count)
             )),
             None => self.push_notice(&format!(
                 "no model matches {needle:?} in the cached catalog — /model lists them"
@@ -1313,7 +1576,7 @@ impl App {
     /// agent, carrying the current session over. The old agent is only
     /// dropped once the new one built, so a rebuild failure cannot strand
     /// the chat.
-    fn choose_model(&mut self, provider: &'static str, id: &str) {
+    fn choose_model(&mut self, provider: &'static str, instance: Option<&str>, id: &str) {
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -1321,11 +1584,13 @@ impl App {
         // The write follows the session's profile, not the startup flag:
         // after a mid-session /profile the pick must land where effective()
         // reads it back from — profiles never inherit each other's model.
-        // The provider moves with the model: a pick from another login's
-        // catalog switches the backend this session rides on.
+        // The provider — and the instance it came from — moves with the
+        // model: a pick from another login's catalog switches the backend
+        // this session rides on.
         let profile = self.session_profile.as_deref();
         self.config.set_for_profile(profile, |settings| {
             settings.provider = Some(provider.to_owned());
+            settings.instance = instance.map(str::to_owned);
             settings.model = Some(id.to_owned());
         });
         if let Err(err) = self.store.save(&self.config) {
@@ -1693,20 +1958,23 @@ mod tests {
     }
 
     /// A `ModelsLoaded` result of one provider's catalog, the shape the
-    /// fetch task reports per queried backend.
-    fn loaded(
-        provider: &'static str,
-        models: Vec<ModelCard>,
-    ) -> Vec<(&'static str, Result<Vec<ModelCard>, String>)> {
-        vec![(provider, Ok(models))]
+    /// fetch task reports per queried backend. The instance is named
+    /// after the provider, the way a migrated login lands.
+    fn loaded(provider: &'static str, models: Vec<ModelCard>) -> Vec<crate::events::CatalogFetch> {
+        vec![crate::events::CatalogFetch {
+            provider,
+            instance: Some(provider.to_owned()),
+            result: Ok(models),
+        }]
     }
 
     /// A `ModelsLoaded` result of one provider's failure.
-    fn failed(
-        provider: &'static str,
-        message: &str,
-    ) -> Vec<(&'static str, Result<Vec<ModelCard>, String>)> {
-        vec![(provider, Err(message.to_owned()))]
+    fn failed(provider: &'static str, message: &str) -> Vec<crate::events::CatalogFetch> {
+        vec![crate::events::CatalogFetch {
+            provider,
+            instance: Some(provider.to_owned()),
+            result: Err(message.to_owned()),
+        }]
     }
 
     /// A priced card, for cost-math tests: the price rides the row, the
@@ -1781,12 +2049,40 @@ mod tests {
         Harness { app, store }
     }
 
+    /// Drives the login screen's add flow to the credential stage for a
+    /// provider sitting at `row` on the provider list, accepting the
+    /// suggested instance name — ready to type the credential.
+    fn descend_to_credential(h: &mut Harness, row: usize) -> String {
+        use crate::screens::LoginStage;
+        // Down to the add row of the instance list, then enter.
+        let Screen::Login(login) = &h.app.screen else {
+            panic!("expected the login screen");
+        };
+        for _ in 0..login.instance_rows().len().saturating_sub(1) {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        for _ in 0..row {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        let Screen::Login(login) = &h.app.screen else {
+            panic!("expected the login screen");
+        };
+        let name = login.input.clone();
+        assert_eq!(login.stage, LoginStage::NameInstance);
+        // Enter accepts the suggested name; copilot's flow starts
+        // instead of asking for a key, which its own tests drive.
+        h.app.on_key(key(KeyCode::Enter));
+        name
+    }
+
     #[test]
     fn a_paste_on_the_login_screen_fills_the_credential() {
         let mut h = harness(None, None, Session::default());
         assert!(matches!(h.app.screen, Screen::Login(_)));
         // Descend into the credential stage first.
-        h.app.on_key(key(KeyCode::Enter));
+        descend_to_credential(&mut h, 0);
         h.app.on_paste("sk-123");
         match &h.app.screen {
             Screen::Login(login) => assert_eq!(login.input, "sk-123"),
@@ -1836,8 +2132,7 @@ mod tests {
     #[test]
     fn login_success_persists_the_key_and_opens_the_picker() {
         let mut h = harness(None, None, Session::default());
-        // Enter on the provider list descends into the credential stage.
-        h.app.on_key(key(KeyCode::Enter));
+        descend_to_credential(&mut h, 0);
         for c in "secret".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -1848,6 +2143,7 @@ mod tests {
                 backend: Backend::Google {
                     api_key: "secret".into()
                 },
+                instance: Some("google".into()),
             })]
         );
         h.app.on_event(UiEvent::ModelsLoaded {
@@ -1855,6 +2151,7 @@ mod tests {
                 backend: Backend::Google {
                     api_key: "secret".into(),
                 },
+                instance: Some("google".into()),
             },
             result: loaded("google", models()),
         });
@@ -1862,15 +2159,13 @@ mod tests {
             Screen::Picker(picker) => assert_eq!(picker.models.len(), 2),
             _ => panic!("expected the picker after a successful login"),
         }
+        let effective = h.store.load().unwrap().effective(None);
+        assert_eq!(effective.instance.as_deref(), Some("google"));
         assert_eq!(
-            h.store
-                .load()
-                .unwrap()
-                .effective(None)
-                .google_api_key
-                .as_deref(),
+            effective.instances["google"].api_key.as_deref(),
             Some("secret")
         );
+        assert_eq!(effective.google_api_key().as_deref(), Some("secret"));
         assert!(matches!(
             h.app.backend,
             Some(Backend::Google { ref api_key }) if api_key == "secret"
@@ -1884,14 +2179,12 @@ mod tests {
             why: FetchWhy::Bootstrap,
             result: loaded("google", models()),
         });
-        // /login, then select the openrouter row and hand it a key.
+        // /login, then the openrouter row and a key.
         for c in "/login".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
         h.app.on_key(key(KeyCode::Enter));
-        h.app.on_key(key(KeyCode::Down));
-        h.app.on_key(key(KeyCode::Down));
-        h.app.on_key(key(KeyCode::Enter));
+        descend_to_credential(&mut h, 2);
         for c in "o".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -1899,7 +2192,8 @@ mod tests {
         assert!(matches!(
             effects.as_slice(),
             [Effect::FetchModels(FetchWhy::Login {
-                backend: Backend::OpenRouter { .. }
+                backend: Backend::OpenRouter { .. },
+                ..
             })]
         ));
         h.app.on_event(UiEvent::ModelsLoaded {
@@ -1907,6 +2201,7 @@ mod tests {
                 backend: Backend::OpenRouter {
                     api_key: "o".into(),
                 },
+                instance: Some("openrouter".into()),
             },
             result: loaded(
                 "openrouter",
@@ -1926,22 +2221,30 @@ mod tests {
     #[test]
     fn llama_login_validates_by_server_url_and_persists_the_provider() {
         let mut h = harness(None, None, Session::default());
-        // Move to the llama.cpp row, then type the URL (unmasked input).
-        h.app.on_key(key(KeyCode::Down));
+        // The llama.cpp row is second on the add flow's provider list.
+        let name = descend_to_credential(&mut h, 1);
+        assert_eq!(name, "llama-cpp");
         match &h.app.screen {
             Screen::Login(login) => {
                 assert_eq!(
-                    login.selected_provider(),
-                    crate::screens::LoginProvider::LlamaCpp
+                    login.pending.as_ref().map(|p| p.provider),
+                    Some(crate::screens::LoginProvider::LlamaCpp)
                 );
                 assert_eq!(login.input_label(), "server URL: ");
             }
             _ => panic!("expected the login screen"),
         }
-        // Enter descends into the credential stage for the chosen provider.
-        h.app.on_key(key(KeyCode::Enter));
         for c in "http://box:8080".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
+        }
+        // Enter captures the URL; the bearer key prompt follows, and a
+        // blank one is accepted (an open server).
+        h.app.on_key(key(KeyCode::Enter));
+        match &h.app.screen {
+            Screen::Login(login) => {
+                assert_eq!(login.input_label(), "API key: ");
+            }
+            _ => panic!("expected the bearer-key prompt"),
         }
         let effects = h.app.on_key(key(KeyCode::Enter));
         assert_eq!(
@@ -1951,6 +2254,7 @@ mod tests {
                     url: "http://box:8080".into(),
                     api_key: None,
                 },
+                instance: Some("llama-cpp".into()),
             })]
         );
         h.app.on_event(UiEvent::ModelsLoaded {
@@ -1959,6 +2263,7 @@ mod tests {
                     url: "http://box:8080".into(),
                     api_key: None,
                 },
+                instance: Some("llama-cpp".into()),
             },
             result: loaded(
                 "llama-cpp",
@@ -1980,27 +2285,25 @@ mod tests {
         let config = h.store.load().unwrap();
         let effective = config.effective(None);
         assert_eq!(effective.provider.as_deref(), Some("llama-cpp"));
-        assert_eq!(effective.llama_cpp_url.as_deref(), Some("http://box:8080"));
+        assert_eq!(
+            effective.instances["llama-cpp"].base_url.as_deref(),
+            Some("http://box:8080")
+        );
+        assert_eq!(effective.llama_cpp_url(), "http://box:8080");
     }
 
     #[test]
     fn anthropic_login_validates_by_key_and_persists_the_provider() {
         let mut h = harness(None, None, Session::default());
         // Anthropic is the fourth provider row.
-        for _ in 0..3 {
-            h.app.on_key(key(KeyCode::Down));
-        }
+        let name = descend_to_credential(&mut h, 3);
+        assert_eq!(name, "anthropic");
         match &h.app.screen {
             Screen::Login(login) => {
-                assert_eq!(
-                    login.selected_provider(),
-                    crate::screens::LoginProvider::Anthropic
-                );
                 assert_eq!(login.input_label(), "API key: ");
             }
             _ => panic!("expected the login screen"),
         }
-        h.app.on_key(key(KeyCode::Enter));
         for c in "sk-ant-01".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -2011,6 +2314,7 @@ mod tests {
                 backend: Backend::Anthropic {
                     api_key: "sk-ant-01".into(),
                 },
+                instance: Some("anthropic".into()),
             })]
         );
         // The model-list fetch is the validation; success lands in the
@@ -2020,6 +2324,7 @@ mod tests {
                 backend: Backend::Anthropic {
                     api_key: "sk-ant-01".into(),
                 },
+                instance: Some("anthropic".into()),
             },
             result: loaded(
                 "anthropic",
@@ -2043,7 +2348,11 @@ mod tests {
         let config = h.store.load().unwrap();
         let effective = config.effective(None);
         assert_eq!(effective.provider.as_deref(), Some("anthropic"));
-        assert_eq!(effective.anthropic_api_key.as_deref(), Some("sk-ant-01"));
+        assert_eq!(
+            effective.instances["anthropic"].api_key.as_deref(),
+            Some("sk-ant-01")
+        );
+        assert_eq!(effective.anthropic_api_key().as_deref(), Some("sk-ant-01"));
         assert!(matches!(
             h.app.backend,
             Some(Backend::Anthropic { ref api_key }) if api_key == "sk-ant-01"
@@ -2054,9 +2363,9 @@ mod tests {
     fn openai_login_validates_by_key_with_the_default_base() {
         let mut h = harness(None, None, Session::default());
         // OpenAI is the fifth provider row.
-        for _ in 0..4 {
-            h.app.on_key(key(KeyCode::Down));
-        }
+        descend_to_credential(&mut h, 4);
+        // The base URL prompt comes first: an empty one means OpenAI
+        // itself.
         h.app.on_key(key(KeyCode::Enter));
         for c in "sk-proj-01".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
@@ -2067,7 +2376,9 @@ mod tests {
             vec![Effect::FetchModels(FetchWhy::Login {
                 backend: Backend::OpenAi {
                     api_key: "sk-proj-01".into(),
+                    base_url: None,
                 },
+                instance: Some("openai".into()),
             })]
         );
         // A failed validation stays on the login screen and persists
@@ -2076,7 +2387,9 @@ mod tests {
             why: FetchWhy::Login {
                 backend: Backend::OpenAi {
                     api_key: "sk-proj-01".into(),
+                    base_url: None,
                 },
+                instance: Some("openai".into()),
             },
             result: failed("openai", "openai-compatible api error (HTTP 401): denied"),
         });
@@ -2085,14 +2398,7 @@ mod tests {
             _ => panic!("a failed login must stay on the login screen"),
         }
         assert!(h.app.backend.is_none());
-        assert!(
-            h.store
-                .load()
-                .unwrap()
-                .effective(None)
-                .openai_api_key
-                .is_none()
-        );
+        assert!(h.store.load().unwrap().effective(None).instances.is_empty());
     }
 
     #[test]
@@ -2114,7 +2420,7 @@ mod tests {
             .expect("a keyed openai profile serves turns");
         assert_eq!(backend.config_name(), "openai");
         assert!(
-            matches!(backend, Backend::OpenAi { ref api_key } if api_key == "k-o"),
+            matches!(backend, Backend::OpenAi { ref api_key, .. } if api_key == "k-o"),
             "the openai profile builds the openai backend: {backend:?}"
         );
         // No key, no backend — a keyless profile cannot serve turns.
@@ -2142,24 +2448,88 @@ mod tests {
         };
         let names: Vec<&str> = Backend::candidates_from_profile(&profile)
             .iter()
-            .map(Backend::config_name)
+            .map(|candidate| candidate.backend.config_name())
             .collect();
         assert_eq!(names, ["openrouter", "google"], "the active provider leads");
 
-        // llama.cpp stays out: a stored URL is a server address, not a
-        // login, and it only joins as the active provider.
+        // llama.cpp stays out: a flat stored URL is a server address, not
+        // a login, and it only joins as the active provider.
         profile.llama_cpp_url = Some("http://box:8080".into());
         let names: Vec<&str> = Backend::candidates_from_profile(&profile)
             .iter()
-            .map(Backend::config_name)
+            .map(|candidate| candidate.backend.config_name())
             .collect();
         assert_eq!(names, ["openrouter", "google"]);
         profile.provider = Some("llama-cpp".into());
         let names: Vec<&str> = Backend::candidates_from_profile(&profile)
             .iter()
-            .map(Backend::config_name)
+            .map(|candidate| candidate.backend.config_name())
             .collect();
         assert_eq!(names, ["llama-cpp", "google", "openrouter"]);
+    }
+
+    #[test]
+    fn candidates_name_every_stored_instance_and_put_the_active_one_first() {
+        let profile = rhema_config::Profile {
+            provider: Some("llama-cpp".to_owned()),
+            instance: Some("gpu box".to_owned()),
+            instances: BTreeMap::from([
+                (
+                    "gpu box".to_owned(),
+                    rhema_config::ProviderInstance {
+                        provider: "llama-cpp".into(),
+                        api_key: None,
+                        base_url: Some("http://gpu:8080".into()),
+                    },
+                ),
+                (
+                    "home".to_owned(),
+                    rhema_config::ProviderInstance {
+                        provider: "llama-cpp".into(),
+                        api_key: None,
+                        base_url: Some("http://home:8080".into()),
+                    },
+                ),
+                (
+                    "work sub".to_owned(),
+                    rhema_config::ProviderInstance {
+                        provider: "copilot".into(),
+                        api_key: Some("gho-1".into()),
+                        base_url: None,
+                    },
+                ),
+            ]),
+            ..rhema_config::Profile::default()
+        };
+        let candidates = Backend::candidates_from_profile(&profile);
+        let rows: Vec<(Option<&str>, &str)> = candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.instance.as_deref(),
+                    candidate.backend.config_name(),
+                )
+            })
+            .collect();
+        // The active instance leads, the rest follow in name order —
+        // every llama.cpp server joins, a stored URL being an explicit
+        // login now.
+        assert_eq!(
+            rows,
+            [
+                (Some("gpu box"), "llama-cpp"),
+                (Some("home"), "llama-cpp"),
+                (Some("work sub"), "copilot"),
+            ]
+        );
+        assert!(
+            matches!(
+                candidates[0].backend,
+                Backend::LlamaCpp { ref url, .. } if url == "http://gpu:8080"
+            ),
+            "the active instance's own URL serves: {:?}",
+            candidates[0].backend
+        );
     }
 
     #[test]
@@ -2167,20 +2537,22 @@ mod tests {
         let mut h = harness(Some("g"), Some("m-a"), Session::default());
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: vec![
-                ("google", Ok(models())),
-                ("openrouter", Ok(vec![llama_model("openrouter/auto")])),
-            ],
+            result: [
+                loaded("google", models()),
+                loaded("openrouter", vec![llama_model("openrouter/auto")]),
+            ]
+            .concat(),
         });
         h.app.on_key(ctrl('p'));
         // A refresh where google's catalog fails: the openrouter one keeps
         // the picker alive, and the footer names the gap.
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Refresh,
-            result: vec![
-                ("openrouter", Ok(vec![llama_model("openrouter/auto")])),
-                ("google", Err("gemini api error (HTTP 403): denied".into())),
-            ],
+            result: [
+                loaded("openrouter", vec![llama_model("openrouter/auto")]),
+                failed("google", "gemini api error (HTTP 403): denied"),
+            ]
+            .concat(),
         });
         match &h.app.screen {
             Screen::Picker(picker) => {
@@ -2337,10 +2709,11 @@ mod tests {
         });
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
-            result: vec![
-                ("google", Ok(models())),
-                ("openrouter", Ok(vec![llama_model("openrouter/auto")])),
-            ],
+            result: [
+                loaded("google", models()),
+                loaded("openrouter", vec![llama_model("openrouter/auto")]),
+            ]
+            .concat(),
         });
         // Filter by provider, pick the openrouter model.
         h.app.on_key(ctrl('p'));
@@ -2427,10 +2800,13 @@ mod tests {
     #[test]
     fn a_single_model_server_auto_selects_and_skips_the_picker() {
         let mut h = harness(None, None, Session::default());
-        h.app.on_key(key(KeyCode::Down));
+        // The llama.cpp row, the suggested name, the URL, and a blank
+        // bearer key.
+        descend_to_credential(&mut h, 1);
         for c in "http://localhost:8080".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
+        h.app.on_key(key(KeyCode::Enter));
         h.app.on_key(key(KeyCode::Enter));
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Login {
@@ -2438,6 +2814,7 @@ mod tests {
                     url: "http://localhost:8080".into(),
                     api_key: None,
                 },
+                instance: Some("llama-cpp".into()),
             },
             result: loaded("llama-cpp", vec![llama_model("qwen3-8b")]),
         });
@@ -2451,8 +2828,165 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_a_stored_instance_activates_it() {
+        let mut h = harness(None, None, Session::default());
+        h.app.config.set_for_profile(Some("personal"), |settings| {
+            settings.provider = Some("llama-cpp".into());
+            settings.instance = Some("home".into());
+            settings.model = Some("qwen3-8b".into());
+            settings.upsert_instance(
+                "home",
+                rhema_config::ProviderInstance {
+                    provider: "llama-cpp".into(),
+                    api_key: None,
+                    base_url: Some("http://home:8080".into()),
+                },
+            );
+            settings.upsert_instance(
+                "gpu box",
+                rhema_config::ProviderInstance {
+                    provider: "llama-cpp".into(),
+                    api_key: None,
+                    base_url: Some("http://gpu:8080".into()),
+                },
+            );
+        });
+        crate::commands::dispatch(&mut h.app, "/login");
+        // "gpu box" sorts before "home": the first row is it.
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert!(effects.is_empty(), "a stored model goes straight to chat");
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(
+            matches!(&h.app.backend, Some(Backend::LlamaCpp { url, .. }) if url == "http://gpu:8080"),
+            "the activated instance's own URL serves: {:?}",
+            h.app.backend
+        );
+        let effective = h.store.load().unwrap().effective(None);
+        assert_eq!(effective.instance.as_deref(), Some("gpu box"));
+        assert_eq!(
+            effective.model.as_deref(),
+            Some("qwen3-8b"),
+            "the same provider keeps its stored model"
+        );
+    }
+
+    #[test]
+    fn activating_across_providers_drops_the_foreign_model() {
+        let mut h = harness(None, None, Session::default());
+        h.app.config.set_for_profile(Some("personal"), |settings| {
+            settings.provider = Some("openai".into());
+            settings.instance = Some("openai".into());
+            settings.model = Some("gpt-5".into());
+            settings.upsert_instance(
+                "openai",
+                rhema_config::ProviderInstance {
+                    provider: "openai".into(),
+                    api_key: Some("sk".into()),
+                    base_url: None,
+                },
+            );
+            settings.upsert_instance(
+                "home",
+                rhema_config::ProviderInstance {
+                    provider: "llama-cpp".into(),
+                    api_key: None,
+                    base_url: Some("http://home:8080".into()),
+                },
+            );
+        });
+        crate::commands::dispatch(&mut h.app, "/login");
+        // "home" sorts before "openai": the first row is it.
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        // gpt-5 means nothing to a llama.cpp server: the picker opens.
+        assert_eq!(effects, vec![Effect::FetchModels(FetchWhy::Bootstrap)]);
+        assert!(matches!(h.app.screen, Screen::Picker(_)));
+        assert_eq!(
+            h.store.load().unwrap().effective(None).model,
+            None,
+            "the foreign model id did not survive the switch"
+        );
+    }
+
+    #[test]
+    fn d_forgets_the_highlighted_instance() {
+        let mut h = harness(None, None, Session::default());
+        h.app.config.set_for_profile(Some("personal"), |settings| {
+            settings.provider = Some("llama-cpp".into());
+            settings.instance = Some("home".into());
+            settings.upsert_instance(
+                "home",
+                rhema_config::ProviderInstance {
+                    provider: "llama-cpp".into(),
+                    api_key: None,
+                    base_url: Some("http://home:8080".into()),
+                },
+            );
+        });
+        crate::commands::dispatch(&mut h.app, "/login");
+        h.app.on_key(key(KeyCode::Char('d')));
+        assert!(matches!(h.app.screen, Screen::Login(_)));
+        let effective = h.store.load().unwrap().effective(None);
+        assert!(effective.instances.is_empty());
+        assert_eq!(effective.instance, None);
+        // The provider stays llama-cpp, whose keyless server always
+        // constructs — on the default URL now, the way a flat profile
+        // always could.
+        assert!(matches!(
+            h.app.backend,
+            Some(Backend::LlamaCpp { ref url, .. }) if url == "http://localhost:8080"
+        ));
+    }
+
+    #[test]
+    fn a_second_openai_compatible_instance_lands_under_its_own_name() {
+        let mut h = harness(None, None, Session::default());
+        // The openai row: a custom base URL, then the key.
+        descend_to_credential(&mut h, 4);
+        for c in "http://proxy:1234/v1".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        for c in "sk-p".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::OpenAi {
+                    api_key: "sk-p".into(),
+                    base_url: Some("http://proxy:1234/v1".into()),
+                },
+                instance: Some("openai".into()),
+            })]
+        );
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::OpenAi {
+                    api_key: "sk-p".into(),
+                    base_url: Some("http://proxy:1234/v1".into()),
+                },
+                instance: Some("openai".into()),
+            },
+            result: loaded("openai", vec![llama_model("gpt-5")]),
+        });
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(
+            matches!(&h.app.backend, Some(Backend::OpenAi { base_url: Some(url), .. }) if url == "http://proxy:1234/v1"),
+            "the custom base URL serves: {:?}",
+            h.app.backend
+        );
+
+        // A second login of the same provider suggests a fresh name.
+        crate::commands::dispatch(&mut h.app, "/login");
+        let name = descend_to_credential(&mut h, 4);
+        assert_eq!(name, "openai-2", "the suggestion skips the taken name");
+    }
+
+    #[test]
     fn login_failure_renders_inline_and_persists_nothing() {
         let mut h = harness(None, None, Session::default());
+        descend_to_credential(&mut h, 0);
         for c in "bad-key".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -2462,6 +2996,7 @@ mod tests {
                 backend: Backend::Google {
                     api_key: "bad-key".into(),
                 },
+                instance: Some("google".into()),
             },
             result: failed("google", "gemini api error (HTTP 403): denied"),
         });
@@ -2484,16 +3019,22 @@ mod tests {
     #[test]
     fn the_copilot_login_runs_a_flow_and_persists_its_credential() {
         let mut h = harness(None, None, Session::default());
-        // Walk down to the GitHub Copilot row (the last) and enter: the
-        // effect starts the flow, not a credential input.
+        // Walk down to the GitHub Copilot row (the last), name the
+        // instance, and enter: the effect starts the flow, not a
+        // credential input.
+        h.app.on_key(key(KeyCode::Enter));
         for _ in 0..crate::screens::PROVIDERS.len() - 1 {
             h.app.on_key(key(KeyCode::Down));
         }
         h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Enter));
         match &h.app.screen {
             Screen::Login(login) => {
                 assert_eq!(login.stage, crate::screens::LoginStage::Flow);
-                assert_eq!(login.selected_provider(), LoginProvider::Copilot);
+                assert_eq!(
+                    login.pending.as_ref().map(|p| p.provider),
+                    Some(LoginProvider::Copilot)
+                );
             }
             _ => panic!("expected the login screen in its flow stage"),
         }
@@ -2529,6 +3070,7 @@ mod tests {
                 backend: Backend::Copilot {
                     api_key: "gho_token".into(),
                 },
+                instance: Some("copilot".into()),
             })]
         );
         h.app.on_event(UiEvent::ModelsLoaded {
@@ -2536,6 +3078,7 @@ mod tests {
                 backend: Backend::Copilot {
                     api_key: "gho_token".into(),
                 },
+                instance: Some("copilot".into()),
             },
             result: loaded("copilot", models()),
         });
@@ -2548,7 +3091,7 @@ mod tests {
                 .load()
                 .unwrap()
                 .effective(None)
-                .copilot_api_key
+                .copilot_api_key()
                 .as_deref(),
             Some("gho_token")
         );
@@ -2581,15 +3124,15 @@ mod tests {
             stored
                 .profiles
                 .values()
-                .all(|profile| profile.copilot_api_key.is_none())
+                .all(|profile| profile.instances.is_empty() && profile.copilot_api_key.is_none())
         );
-        // Esc returns to the provider list for a retry.
+        // Esc returns to the instance list for a retry.
         h.app.on_key(key(KeyCode::Esc));
         match &h.app.screen {
             Screen::Login(login) => {
-                assert_eq!(login.stage, crate::screens::LoginStage::SelectProvider)
+                assert_eq!(login.stage, crate::screens::LoginStage::Instances)
             }
-            _ => panic!("expected the login screen's provider list"),
+            _ => panic!("expected the login screen's instance list"),
         }
     }
 
@@ -2974,12 +3517,14 @@ mod tests {
             .insert("work".to_owned(), rhema_config::Profile::default());
         // Re-open the login so its registry picks up the new profile.
         crate::commands::dispatch(&mut h.app, "/login");
-        // Tab to the work profile on the login screen (Right cycles tabs).
+        // Tab to the work profile on the login screen (Right cycles tabs),
+        // then add an openrouter instance there.
         h.app.on_key(key(KeyCode::Right));
         match &h.app.screen {
             Screen::Login(login) => assert_eq!(login.profile, "work"),
             _ => panic!("expected the login screen"),
         }
+        descend_to_credential(&mut h, 2);
         for c in "work-key".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -2989,16 +3534,20 @@ mod tests {
                 backend: Backend::OpenRouter {
                     api_key: "work-key".into(),
                 },
+                instance: Some("openrouter".into()),
             },
             result: loaded("google", models()),
         });
         // The session now runs on work, and the key landed in its section.
         assert_eq!(h.app.session_profile.as_deref(), Some("work"));
         let stored = h.store.load().unwrap();
+        let work = stored.effective(Some("work"));
+        assert_eq!(work.instance.as_deref(), Some("openrouter"));
         assert_eq!(
-            stored.effective(Some("work")).openrouter_api_key.as_deref(),
+            work.instances["openrouter"].api_key.as_deref(),
             Some("work-key")
         );
+        assert_eq!(work.openrouter_api_key().as_deref(), Some("work-key"));
     }
 
     #[test]
@@ -3515,6 +4064,7 @@ mod tests {
                 backend: Backend::Google {
                     api_key: "k".into(),
                 },
+                instance: Some("google".into()),
             },
             result: loaded("google", models()),
         });
