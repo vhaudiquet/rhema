@@ -377,7 +377,7 @@ impl App {
                         .map_err(|message| Error::invalid_params().data(message))?
                         .ok_or_else(|| {
                             Error::invalid_params().data(format!(
-                                "no usable credentials for {kind} — log in once with the \
+                                "no usable credentials for {kind}; log in once with the \
                          rhema TUI or set its API key"
                             ))
                         })?
