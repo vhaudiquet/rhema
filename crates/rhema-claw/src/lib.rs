@@ -28,7 +28,9 @@
 //!   devices poll and ack
 //! - [`task_store`] — the task table: scheduled prompts, inert until the
 //!   scheduler detects them due
-//! - [`hub`] — the event hub: per-key broadcast of live turn events
+//! - [`turn_store`] — the turn-history table: what each key's stream
+//!   streamed, flushed per turn, replayed after a restart
+//! - [`hub`] — the event hub: per-key record and broadcast of turn events
 //! - [`identity`] — the agent's presentation identity: name, mark,
 //!   images, served over `/v1/agent`
 //! - [`watch_tools`] — the agent's watch-management tool set
@@ -69,6 +71,7 @@ pub mod settings;
 pub mod task_source;
 pub mod task_store;
 pub mod task_tools;
+pub mod turn_store;
 pub mod watch_store;
 pub mod watch_tools;
 
@@ -91,4 +94,5 @@ pub use notifications::{NotificationRecord, NotificationStore, NotificationStore
 pub use settings::SettingsStore;
 pub use task_source::{TASKS_SOURCE, TaskScheduler};
 pub use task_store::{TaskKind, TaskRecord, TaskStore, TaskStoreError};
+pub use turn_store::{TurnStore, TurnStoreError};
 pub use watch_store::{ClawStore, WatchRecord, WatchStoreError};

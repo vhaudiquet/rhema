@@ -290,6 +290,9 @@ fn stream_response(
                     break;
                 }
                 Ok(TurnEvent::ToolStart { .. } | TurnEvent::ToolResult { .. }) => continue,
+                // The turn's input rides the stream for the claw's own
+                // clients; an OpenAI caller named it in the request.
+                Ok(TurnEvent::UserMessage { .. }) => continue,
                 Err(RecvError::Lagged(dropped)) => Ok(SseEvent::default()
                     .comment(format!("lagged; {dropped} earlier event(s) dropped"))),
                 Err(RecvError::Closed) => break,

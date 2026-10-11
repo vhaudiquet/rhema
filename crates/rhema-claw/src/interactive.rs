@@ -29,8 +29,9 @@
 //! the whole [`rhema_core::Session`] is stashed into
 //! `ctx.session.core.driver_state` before the run returns and restored
 //! from there on the next dispatch (`Null` means fresh). The session is
-//! the record of the conversation; the event hub's stream is
-//! best-effort.
+//! the record of the conversation — the context the model returns to —
+//! and the hub's record is the transcript: the stream is replayable,
+//! the live deltas are the only best-effort part left.
 //!
 //! Deterministic setup first (spec §1, §8): the allowlist — permissive,
 //! v1's starting point — and the resolver chain (the coding toolset over
@@ -271,6 +272,16 @@ impl InteractiveHandler {
         if input.trim().is_empty() {
             return Err(format!("dispatch for {key} carried no text"));
         }
+        // The transcript's question, recorded before anything else can
+        // stream: a replay shows what was asked, not only what was
+        // answered. Raw input — the notification-contract framing below
+        // is the model's business, not the viewer's.
+        self.hub.emit(
+            &ctx.key,
+            TurnEvent::UserMessage {
+                text: input.clone(),
+            },
+        );
         // A non-chat resident key has no subscriber to read the reply:
         // say so in the input, so the model writes for the notification
         // the final message becomes.
@@ -700,7 +711,13 @@ mod tests {
         let outcomes = driver.run_once().await.expect("the run happens");
         assert_eq!(outcomes, vec![RsdOutcome::Handled]);
 
-        // The stream saw the reply and the end marker.
+        // The stream saw the question, the reply, and the end marker.
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::UserMessage {
+                text: "hello".into()
+            }
+        );
         assert_eq!(
             receiver.try_recv().unwrap(),
             TurnEvent::TextDelta {

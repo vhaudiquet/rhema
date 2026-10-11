@@ -26,7 +26,8 @@ use std::time::Duration;
 
 use rhema_autonomous_agent::{Driver, Source, SourceError};
 use rhema_rsd::{
-    DispatchError, Dispatcher, DispatcherConfig, Outcome, SqliteStore, StoreError, SystemClock,
+    DispatchError, Dispatcher, DispatcherConfig, Outcome, ResourceKey, SqliteStore, StoreError,
+    SystemClock,
 };
 
 use crate::config::{ClawConfig, ConfigError, ForgeKind};
@@ -68,6 +69,9 @@ pub enum ClawError {
     /// The task table could not be opened or read.
     #[error(transparent)]
     Tasks(#[from] crate::task_store::TaskStoreError),
+    /// The turn-history table could not be opened or read.
+    #[error(transparent)]
+    TurnHistory(#[from] crate::turn_store::TurnStoreError),
     /// The backend registry could not be built: no provider constructed,
     /// or the configured seed named an unknown kind.
     #[error("backend registry failed: {0}")]
@@ -147,8 +151,8 @@ impl Daemon {
         std::fs::create_dir_all(&interactive_workspace)?;
 
         // One store file, several connections: the dispatcher's records,
-        // the watch table, the notification table, and the task table
-        // live side by side.
+        // the watch table, the notification table, the task table, and
+        // the turn-history table live side by side.
         let store = Arc::new(SqliteStore::open(&db)?);
         // SQLite created the file under the umask; whatever it left
         // wide, tighten. Best-effort: a filesystem that refuses mode
@@ -157,6 +161,7 @@ impl Daemon {
         let watches = Arc::new(ClawStore::open(&db)?);
         let notifications = Arc::new(NotificationStore::open(&db)?);
         let tasks = Arc::new(TaskStore::open(&db)?);
+        let turns = Arc::new(crate::turn_store::TurnStore::open(&db)?);
 
         // The YAML watch list is the one-time seed; the table rules
         // after that.
@@ -193,7 +198,13 @@ impl Daemon {
             Driver::new(forge_dispatcher, Arc::new(forge_handler)).with_holder("rhema-claw"),
         );
 
-        let hub = Arc::new(EventHub::default());
+        // The hub replays what past turns streamed: the table's records
+        // seed it before the surface serves, and the hub flushes each
+        // turn's end marker back — a restart continues the transcript.
+        let hub = Arc::new(EventHub::with_record_store(turns.clone()));
+        for (key, events) in turns.all()? {
+            hub.seed_history(ResourceKey::from(key), events);
+        }
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
         let settings = Arc::new(crate::settings::SettingsStore::open(&db)?);

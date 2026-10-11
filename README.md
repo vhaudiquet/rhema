@@ -443,14 +443,17 @@ tool as you answer; decline and it simply keeps offering, never
 interrogating. Both files stay hand-editable forever; `/v1/bootstrap`
 lets a UI badge setup state.
 
-SSE frames are JSON, `data: {..}
-
-`: `thinking_delta`, `text_delta`,
-`tool_start`, `tool_result`, `turn_done`.
-A chat UI subscribes to
-`/events` once, POSTs messages, and renders the stream per turn; the
-daemon owns the conversation, so the client mirrors replies rather than
-managing history.
+SSE frames are JSON, `data: {..}`: `user_message`, `thinking_delta`,
+`text_delta`, `tool_start`, `tool_result`, `turn_done`. A subscription
+opens with the session's recorded turns replayed first and the live feed
+after, cut atomically daemon-side — the record holds the newest 8192
+events per key, flushed at every turn's end marker, so both a reload and
+a daemon restart rebuild the transcript. A chat UI subscribes once,
+POSTs messages, and resets its mirror whenever the stream (re)opens,
+letting the replay rebuild it; the daemon owns the conversation, so the
+client mirrors the stream rather than managing history. The OpenAI shim
+and the message POST read the live feed only — replay never reaches a
+turn that is starting.
 
 Every provider whose credentials resolve (env, the claw's own stored
 logins, or the stored rhema config) is constructed at boot as a backend

@@ -4,13 +4,17 @@
 //! devices poll, and the health probe that stays open when everything
 //! else is tokened.
 //!
-//! The shape of a chat request, end to end: subscribe the hub FIRST
-//! (nothing emitted before a subscriber exists is ever streamed to it),
-//! ingest the message, then drain the interactive dispatcher — run
-//! passes until one admits nothing and the key has nothing waiting — so
-//! queued follow-ups drain before the HTTP answer returns. The reply
-//! itself arrives on the event stream, not in the POST answer: the POST
-//! only says the message was accepted.
+//! The shape of a chat request: ingest the message, then drain the
+//! interactive dispatcher — run passes until one admits nothing and the
+//! key has nothing waiting — so queued follow-ups drain before the HTTP
+//! answer returns. The reply itself arrives on the event stream, not in
+//! the POST answer: the POST only says the message was accepted. That
+//! stream answers with the key's recorded turns first and the live feed
+//! after, cut atomically in the hub — a (re)connecting client resets its
+//! transcript and lets the replay rebuild it, so a reload is not a blank
+//! page and a dropped stream is not a gap. (The OpenAI shim is the one
+//! caller that still subscribes before ingesting: it consumes the reply
+//! off its own receiver.)
 //!
 //! The drain loop is capped. A pass that runs a foreign key's turn is
 //! still a pass; a pathological backlog stops at
@@ -304,11 +308,10 @@ async fn messages(
             .into_response();
     }
     let key = ResourceKey::from(key);
-    // Subscribe before ingesting: the hub channel exists the moment the
-    // turn may start emitting, and holding the receiver across the drain
-    // keeps it alive for a subscriber that connects mid-turn. The reply
-    // itself is consumed on the event stream, not here.
-    let _session_receiver = state.hub.subscribe(&key);
+    // No subscribe-before-ingest here: the hub records every turn
+    // whether or not anyone is watching, so a chat surface connecting
+    // later replays the whole exchange. The reply itself is consumed on
+    // the event stream, not here.
     if let Err(err) = state
         .dispatcher
         .ingest(crate::interactive::user_event(key.as_str(), &body.text))
@@ -343,7 +346,11 @@ async fn events(State(state): State<ClawState>, Path(key): Path<String>) -> Resp
         )
             .into_response();
     }
-    let mut receiver = state.hub.subscribe(&ResourceKey::from(key));
+    // History first, live second, cut atomically: the snapshot and the
+    // subscription leave the hub under one lock, so a client folding the
+    // replay and then the stream sees every event exactly once. A reload
+    // rebuilds its transcript from this — nothing else backfills it.
+    let (history, mut receiver) = state.hub.subscribe_with_history(&ResourceKey::from(key));
     // The pump decouples the broadcast channel from the SSE body: the
     // client's disconnect closes the body, which fails the send, which
     // ends the pump. The stream never ends on its own — a chat UI
@@ -351,6 +358,11 @@ async fn events(State(state): State<ClawState>, Path(key): Path<String>) -> Resp
     let (sender, body) =
         tokio::sync::mpsc::channel::<Result<SseEvent, std::convert::Infallible>>(64);
     tokio::spawn(async move {
+        for turn in history {
+            if sender.send(Ok(sse_event(turn))).await.is_err() {
+                return;
+            }
+        }
         loop {
             let item = match receiver.recv().await {
                 Ok(turn) => sse_event(turn),
@@ -373,10 +385,10 @@ async fn events(State(state): State<ClawState>, Path(key): Path<String>) -> Resp
 }
 
 /// One `TurnEvent` as an SSE frame: `data: {json}`. A lagged subscriber
-/// gets a comment naming the drop — the stream is best-effort; the
-/// session is the record. A serialization failure is logged with the
-/// event kind instead of vanishing: a dropped frame a client can never
-/// see must at least reach the operator.
+/// gets a comment naming the drop — live delivery is best-effort; the
+/// record replays what completed. A serialization failure is logged with
+/// the event kind instead of vanishing: a dropped frame a client can
+/// never see must at least reach the operator.
 fn sse_event(turn: TurnEvent) -> SseEvent {
     match serde_json::to_string(&turn) {
         Ok(data) => SseEvent::default().data(data),

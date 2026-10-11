@@ -247,6 +247,74 @@ async fn chat_streams_turns_and_remembers_across_messages() {
     assert_eq!(refused.status(), 400, "only resident keys take messages");
 }
 
+/// A turn nobody watched is still replayable: a client arriving after
+/// the fact — a reloaded browser, a reopened phone — subscribes cold and
+/// gets the finished turns back before the live feed. The same holds
+/// across a daemon restart: the flushed record seeds the next boot's
+/// hub.
+#[tokio::test]
+async fn a_cold_subscription_replays_the_turns_it_missed_even_after_a_restart() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config(&dir, None);
+    {
+        let daemon = Daemon::build(
+            &config,
+            mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+            rhema_rsd::DispatcherConfig::default(),
+        )
+        .expect("the daemon assembles");
+        let base = serve(&daemon).await;
+        let client = reqwest::Client::new();
+
+        // The turn runs with nobody watching. The POST's drain finishes
+        // it and flushes the record before the 202 returns.
+        let accepted = client
+            .post(format!("{base}/v1/sessions/interactive:web/messages"))
+            .json(&json!({"text": "hello"}))
+            .send()
+            .await
+            .expect("the message posts");
+        assert_eq!(accepted.status(), 202);
+    }
+
+    // A fresh daemon over the same database — the restart — serves the
+    // same transcript to the first subscriber.
+    let daemon = Daemon::build(
+        &config,
+        mock_registry(Arc::new(MockProvider::new([]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the restarted daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    assert_eq!(events.status(), 200);
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+    read_until(
+        &mut stream,
+        &mut seen,
+        r#""type":"user_message","text":"hello""#,
+    )
+    .await;
+    read_until(
+        &mut stream,
+        &mut seen,
+        r#""type":"text_delta","text":"on it""#,
+    )
+    .await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    assert!(
+        seen.find(r#""type":"user_message""#).unwrap()
+            < seen.find(r#""type":"text_delta""#).unwrap(),
+        "the replay arrives in stream order: {seen}"
+    );
+}
+
 /// The other two resident prefixes take chat messages, and their turns'
 /// replies auto-notify: a `phone:` key delivers to the device its name
 /// carries, a `task:` key to the phone. Forge keys stay refused.
