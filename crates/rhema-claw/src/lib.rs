@@ -29,6 +29,8 @@
 //! - [`task_store`] — the task table: scheduled prompts, inert until the
 //!   scheduler detects them due
 //! - [`hub`] — the event hub: per-key broadcast of live turn events
+//! - [`identity`] — the agent's presentation identity: name, mark,
+//!   images, served over `/v1/agent`
 //! - [`watch_tools`] — the agent's watch-management tool set
 //! - [`notify_tools`] — the `notify` tool: the queue a device polls
 //! - [`task_tools`] — `schedule_task`, `list_tasks`, `cancel_task`
@@ -56,6 +58,7 @@ pub mod forge;
 pub mod handler;
 pub mod http;
 pub mod hub;
+mod identity;
 pub mod interactive;
 #[cfg(feature = "mock")]
 pub mod mock;
@@ -80,6 +83,7 @@ pub use environment::write_report;
 pub use forge::ForgeSource;
 pub use handler::ClawHandler;
 pub use hub::{EventHub, TurnEvent};
+pub use identity::{AgentIdentity, IdentityError, IdentityStore, ImageKind};
 pub use interactive::InteractiveHandler;
 #[cfg(feature = "mock")]
 pub use mock::MockLoop;

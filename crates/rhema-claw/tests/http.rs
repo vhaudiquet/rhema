@@ -1241,3 +1241,136 @@ async fn providers_gain_and_lose_backends_over_the_surface() {
         .expect("the refusal posts");
     assert_eq!(gone.status(), 400);
 }
+
+/// The agent identity surface: the text fields round-trip with
+/// partial-save semantics (an absent field is left alone, an empty one
+/// clears), the avatar uploads and serves back with its content type,
+/// and clearing it 404s the read.
+#[tokio::test]
+async fn the_agent_identity_is_editable_over_the_surface() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let empty: Value = client
+        .get(format!("{base}/v1/agent"))
+        .send()
+        .await
+        .expect("the identity reads")
+        .json()
+        .await
+        .expect("the identity parses");
+    assert_eq!(empty["avatar"], false);
+    assert_eq!(empty["logo"], false);
+
+    // A save names the fields it touches.
+    let saved: Value = client
+        .put(format!("{base}/v1/agent"))
+        .json(&json!({"name": "Kosmos", "mark": "✦", "tagline": "order"}))
+        .send()
+        .await
+        .expect("the save posts")
+        .json()
+        .await
+        .expect("the save parses");
+    assert_eq!(saved["name"], "Kosmos");
+    assert_eq!(saved["mark"], "✦");
+    assert_eq!(saved["avatar"], false);
+
+    // A partial save leaves the fields it omitted.
+    let partial: Value = client
+        .put(format!("{base}/v1/agent"))
+        .json(&json!({"name": "Kosmos Prime"}))
+        .send()
+        .await
+        .expect("the partial save posts")
+        .json()
+        .await
+        .expect("the partial save parses");
+    assert_eq!(partial["name"], "Kosmos Prime");
+    assert_eq!(partial["mark"], "✦", "untouched by the partial save");
+
+    // An empty string clears its field.
+    let cleared: Value = client
+        .put(format!("{base}/v1/agent"))
+        .json(&json!({"mark": ""}))
+        .send()
+        .await
+        .expect("the clear posts")
+        .json()
+        .await
+        .expect("the clear parses");
+    assert_eq!(cleared["mark"], serde_json::Value::Null);
+
+    // An overlong field is a 400.
+    let refused = client
+        .put(format!("{base}/v1/agent"))
+        .json(&json!({"name": "x".repeat(65)}))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(refused.status(), 400);
+
+    // The avatar: upload, serve, clear.
+    let uploaded: Value = client
+        .put(format!("{base}/v1/agent/avatar"))
+        .header("content-type", "image/png")
+        .body(vec![1, 2, 3, 4])
+        .send()
+        .await
+        .expect("the upload posts")
+        .json()
+        .await
+        .expect("the upload parses");
+    assert_eq!(uploaded["avatar"], true);
+
+    let served = client
+        .get(format!("{base}/v1/agent/avatar"))
+        .send()
+        .await
+        .expect("the image reads");
+    assert_eq!(served.status(), 200);
+    assert_eq!(
+        served
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    assert_eq!(
+        served.bytes().await.expect("the bytes read").as_ref(),
+        &[1, 2, 3, 4]
+    );
+
+    // A non-image upload is a 400.
+    let not_image = client
+        .put(format!("{base}/v1/agent/logo"))
+        .header("content-type", "text/html")
+        .body("<b>no</b>")
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(not_image.status(), 400);
+
+    let cleared_image: Value = client
+        .delete(format!("{base}/v1/agent/avatar"))
+        .send()
+        .await
+        .expect("the clear posts")
+        .json()
+        .await
+        .expect("the clear parses");
+    assert_eq!(cleared_image["avatar"], false);
+    let gone = client
+        .get(format!("{base}/v1/agent/avatar"))
+        .send()
+        .await
+        .expect("the read answers");
+    assert_eq!(gone.status(), 404);
+}

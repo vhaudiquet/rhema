@@ -64,6 +64,7 @@ pub struct ClawState {
     hub: Arc<EventHub>,
     backends: Arc<BackendRegistry>,
     settings: Arc<crate::settings::SettingsStore>,
+    identity: Arc<crate::identity::IdentityStore>,
     token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
@@ -76,7 +77,7 @@ impl ClawState {
     /// shared dispatch store, the watch table, the notification table,
     /// the bootstrap store, the event hub, and the configured `model`
     /// (the shim's echo default) and bearer `token`.
-    #[allow(clippy::too_many_arguments)] // nine parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // ten parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
@@ -87,6 +88,7 @@ impl ClawState {
         hub: Arc<EventHub>,
         backends: Arc<BackendRegistry>,
         settings: Arc<crate::settings::SettingsStore>,
+        identity: Arc<crate::identity::IdentityStore>,
         token: Option<String>,
     ) -> Self {
         Self {
@@ -99,6 +101,7 @@ impl ClawState {
             hub,
             backends,
             settings,
+            identity,
             token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
@@ -151,6 +154,11 @@ impl ClawState {
     pub fn token(&self) -> Option<&str> {
         self.token.as_deref()
     }
+
+    /// The agent's presentation identity.
+    pub fn identity(&self) -> &crate::identity::IdentityStore {
+        &self.identity
+    }
 }
 
 /// The app router: `/healthz` open, `/v1` behind the bearer check when
@@ -166,6 +174,13 @@ pub fn router(state: ClawState) -> Router {
         .route("/ingest", post(ingest))
         .route("/notifications", get(notifications_list))
         .route("/notifications/{id}/ack", post(notifications_ack))
+        .route("/agent", get(agent_get).put(agent_put))
+        .route(
+            "/agent/{image}",
+            get(agent_image_get)
+                .put(agent_image_put)
+                .delete(agent_image_delete),
+        )
         .route("/providers", get(providers_list))
         .route("/providers/active", put(providers_active))
         .route(
@@ -792,6 +807,108 @@ async fn providers_models(
         )
     })?;
     Ok(Json(json!({ "models": models })))
+}
+
+/// `GET /v1/agent`: the agent's presentation identity — the text fields
+/// (each absent when unset) and whether the images are set.
+async fn agent_get(
+    State(state): State<ClawState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let identity = state.identity().get().map_err(internal_error)?;
+    Ok(Json(
+        serde_json::to_value(&identity).map_err(internal_error)?,
+    ))
+}
+
+/// `PUT /v1/agent`: save the text fields. A field the body carries is
+/// set (an empty string clears it); an absent field is left alone, so
+/// a partial save cannot wipe what it did not mean to touch.
+async fn agent_put(
+    State(state): State<ClawState>,
+    Json(body): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // Absent fields carry the current value forward (a partial save
+    // touches only what it names); a present empty string clears.
+    let current = state.identity().get().map_err(internal_error)?;
+    let field = |body_value: Option<&str>, stored: &Option<String>| {
+        body_value.map(str::to_owned).or_else(|| stored.clone())
+    };
+    let texts = crate::identity::IdentityTexts {
+        name: field(body["name"].as_str(), &current.name),
+        mark: field(body["mark"].as_str(), &current.mark),
+        initials: field(body["initials"].as_str(), &current.initials),
+        tagline: field(body["tagline"].as_str(), &current.tagline),
+        signoff: field(body["signoff"].as_str(), &current.signoff),
+    };
+    let identity = state.identity().set_texts(&texts).map_err(bad_request)?;
+    Ok(Json(
+        serde_json::to_value(&identity).map_err(internal_error)?,
+    ))
+}
+
+/// `PUT /v1/agent/{image}`: store the avatar or logo from the raw body,
+/// content type from the header. Answers the updated identity.
+async fn agent_image_put(
+    State(state): State<ClawState>,
+    Path(kind): Path<String>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let kind = image_kind(&kind)?;
+    let content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok().map(str::to_owned))
+        .unwrap_or_default();
+    let identity = state
+        .identity()
+        .set_image(kind, &body, &content_type)
+        .map_err(|err| match err {
+            crate::identity::IdentityError::NotAnImage(_)
+            | crate::identity::IdentityError::TooLarge(_, _) => bad_request(err),
+            crate::identity::IdentityError::Backend(_) => internal_error(err),
+        })?;
+    Ok(Json(
+        serde_json::to_value(&identity).map_err(internal_error)?,
+    ))
+}
+
+/// `GET /v1/agent/{image}`: the image bytes back, content type with
+/// them. 404 when unset — the identity document's booleans are how a
+/// client knows before asking.
+async fn agent_image_get(
+    State(state): State<ClawState>,
+    Path(kind): Path<String>,
+) -> Result<Response, (StatusCode, Json<Value>)> {
+    let kind = image_kind(&kind)?;
+    match state.identity().image(kind).map_err(internal_error)? {
+        Some((bytes, content_type)) => {
+            Ok(([(axum::http::header::CONTENT_TYPE, content_type)], bytes).into_response())
+        }
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no image set"})),
+        )),
+    }
+}
+
+/// `DELETE /v1/agent/{image}`: drop the image. Answers the identity.
+async fn agent_image_delete(
+    State(state): State<ClawState>,
+    Path(kind): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let kind = image_kind(&kind)?;
+    let identity = state.identity().clear_image(kind).map_err(internal_error)?;
+    Ok(Json(
+        serde_json::to_value(&identity).map_err(internal_error)?,
+    ))
+}
+
+fn image_kind(name: &str) -> Result<crate::identity::ImageKind, (StatusCode, Json<Value>)> {
+    match name {
+        "avatar" => Ok(crate::identity::ImageKind::Avatar),
+        "logo" => Ok(crate::identity::ImageKind::Logo),
+        _ => Err(bad_request(format!("unknown identity image {name:?}"))),
+    }
 }
 
 /// The 400 shape: the request named a kind or fields the registry

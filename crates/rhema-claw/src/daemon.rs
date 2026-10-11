@@ -190,6 +190,14 @@ impl Daemon {
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
         let settings = Arc::new(crate::settings::SettingsStore::open(&db)?);
+        // The identity store shares the settings table and keeps its
+        // images beside the database.
+        let identity = Arc::new(crate::identity::IdentityStore::new(
+            settings.clone(),
+            db.parent().map(|dir| dir.join("identity")).ok_or_else(|| {
+                ClawError::Backend("the database has no parent directory".to_owned())
+            })?,
+        ));
         // The persisted pair wins over the config seed — it is what a
         // runtime switch wrote. A persisted kind the registry no longer
         // knows (a key removed from the deployment) falls back to the
@@ -240,6 +248,7 @@ impl Daemon {
             hub,
             backends.clone(),
             settings.clone(),
+            identity,
             config.token.clone(),
         );
 
