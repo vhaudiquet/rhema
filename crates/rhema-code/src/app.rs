@@ -631,7 +631,7 @@ impl App {
     /// In-band decline for a slash input no table row matches.
     pub fn unknown_command(&mut self, name: &str) {
         self.transcript
-            .push_notice(&format!("unknown command {name} — /help lists commands"));
+            .push_notice(&format!("unknown command {name}; /help lists commands"));
     }
 
     /// A notice into the transcript, styled by the transcript itself.
@@ -699,7 +699,7 @@ impl App {
     pub fn switch_profile(&mut self, name: &str) {
         if self.running {
             self.transcript
-                .push_notice("a turn is running — /profile waits for it to finish");
+                .push_notice("a turn is running; /profile waits for it to finish");
             return;
         }
         if self.session_profile.as_deref() == Some(name) {
@@ -726,7 +726,7 @@ impl App {
             self.session = session;
             self.screen = Screen::Chat;
             self.transcript.push_notice(&format!(
-                "switched to profile {name} — no API key, /login to add one"
+                "switched to profile {name}; no API key, /login to add one"
             ));
             return;
         };
@@ -744,7 +744,7 @@ impl App {
                 self.remember_profile();
                 if effective.model.is_none() {
                     self.transcript.push_notice(&format!(
-                        "switched to profile {name} — /model to pick a model"
+                        "switched to profile {name}; /model to pick a model"
                     ));
                 } else {
                     self.transcript
@@ -761,7 +761,7 @@ impl App {
     pub fn set_thinking(&mut self, effort: rhema_core::request::ThinkingEffort) {
         if self.running {
             self.transcript
-                .push_notice("a turn is running — /thinking waits for it to finish");
+                .push_notice("a turn is running; /thinking waits for it to finish");
             return;
         }
         self.options.thinking = effort;
@@ -794,7 +794,7 @@ impl App {
         let skills = rhema_coding_agent::skills::discover(global, workspace);
         if skills.is_empty() {
             self.transcript.push_notice(
-                "no skills — a skill is <dir>/SKILL.md with a `description` \
+                "no skills. a skill is <dir>/SKILL.md with a `description` \
                  frontmatter, under the config directory or .rhema/skills",
             );
             return;
@@ -831,7 +831,7 @@ impl App {
     pub fn open_resume_from(&mut self, base: &Path) -> Vec<Effect> {
         if self.running {
             self.transcript
-                .push_notice("a turn is running — /resume waits for it to finish");
+                .push_notice("a turn is running; /resume waits for it to finish");
             return Vec::new();
         }
         let workspace = std::fs::canonicalize(&self.options.workspace)
@@ -859,7 +859,7 @@ impl App {
     pub fn resume_session(&mut self, path: &Path) {
         if self.running {
             self.transcript
-                .push_notice("a turn is running — /resume waits for it to finish");
+                .push_notice("a turn is running; /resume waits for it to finish");
             return;
         }
         let session = match CodingAgent::load_session_from(&path.to_path_buf()) {
@@ -1066,7 +1066,7 @@ impl App {
                     // The text stays: it is the prompt for once the
                     // profile has its key.
                     self.transcript
-                        .push_notice("this profile has no API key — /login to add one");
+                        .push_notice("this profile has no API key; /login to add one");
                     Vec::new()
                 } else {
                     self.chat.input.clear();
@@ -1322,7 +1322,7 @@ impl App {
         // the fetch and the picker would spin on Loading forever.
         if self.backend.is_none() {
             self.transcript
-                .push_notice("no provider on this profile — /login first");
+                .push_notice("no provider on this profile; /login first");
             return Vec::new();
         }
         let mut effects = Vec::new();
@@ -1571,11 +1571,11 @@ impl App {
         match resolved {
             Some((provider, instance, id)) => self.choose_model(provider, instance.as_deref(), &id),
             None if exact_count > 1 || prefix_count > 1 => self.push_notice(&format!(
-                "{} models match {needle:?} — name one fully or use /model",
+                "{} models match {needle:?}; name one fully or use /model",
                 exact_count.max(prefix_count)
             )),
             None => self.push_notice(&format!(
-                "no model matches {needle:?} in the cached catalog — /model lists them"
+                "no model matches {needle:?} in the cached catalog; /model lists them"
             )),
         }
     }
@@ -1609,7 +1609,7 @@ impl App {
             Some(backend) => backend,
             None => {
                 self.error = Some(format!(
-                    "no usable credentials for {provider} — /login first"
+                    "no usable credentials for {provider}; /login first"
                 ));
                 return;
             }
@@ -3443,13 +3443,13 @@ mod tests {
         h.app.running = true;
         h.app.on_event(UiEvent::TurnFinished {
             agent: make_agent(),
-            result: Err("stopped after 4 steps without finishing — send a follow-up to keep going, or raise the step limit".into()),
+            result: Err("stopped after 4 steps without finishing; send a follow-up to keep going, or raise the step limit".into()),
         });
         assert!(!h.app.running);
         assert_eq!(
             h.app.error.as_deref(),
             Some(
-                "stopped after 4 steps without finishing — send a follow-up to keep going, or raise the step limit"
+                "stopped after 4 steps without finishing; send a follow-up to keep going, or raise the step limit"
             )
         );
     }

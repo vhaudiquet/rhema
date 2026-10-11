@@ -199,7 +199,7 @@ fn help(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
         .collect::<Vec<_>>()
         .join(" · ");
     app.push_notice(&format!(
-        "{commands} — keys: ctrl-p model · pgup/pgdn or wheel history · \
+        "{commands}; keys: ctrl-p model · pgup/pgdn or wheel history · \
          shift+drag to copy text · ctrl-c or ctrl-d quit"
     ));
     Vec::new()
@@ -207,7 +207,7 @@ fn help(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
 
 fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
     if app.running {
-        app.push_notice("a turn is running — /model waits for it to finish");
+        app.push_notice("a turn is running; /model waits for it to finish");
         return Vec::new();
     }
     match argument {
@@ -221,7 +221,7 @@ fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
 
 fn resume(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     if app.running {
-        app.push_notice("a turn is running — /resume waits for it to finish");
+        app.push_notice("a turn is running; /resume waits for it to finish");
         return Vec::new();
     }
     app.open_resume()
@@ -240,7 +240,7 @@ fn system(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     let prompt = app.agent.as_ref().map(|agent| agent.system().to_owned());
     match prompt {
         Some(prompt) => app.show_system_prompt(&prompt),
-        None => app.push_notice("no agent yet — /system shows the prompt once one exists"),
+        None => app.push_notice("no agent yet; /system shows the prompt once one exists"),
     }
     Vec::new()
 }
@@ -269,7 +269,7 @@ fn thinking(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
         }
         None => {
             app.push_notice(&format!(
-                "unknown effort {text:?} — use low, medium, high, or default"
+                "unknown effort {text:?}; use low, medium, high, or default"
             ));
             Vec::new()
         }
@@ -278,7 +278,7 @@ fn thinking(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
 
 fn login(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     if app.running {
-        app.push_notice("a turn is running — /login waits for it to finish");
+        app.push_notice("a turn is running; /login waits for it to finish");
         return Vec::new();
     }
     app.open_login();

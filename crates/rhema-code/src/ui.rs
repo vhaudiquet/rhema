@@ -150,7 +150,7 @@ fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &
     let height = 2 + 1 + rows + 1 + 1;
     let area = centered(58, height, frame.area());
     frame.render_widget(Clear, area);
-    let title = format!(" rhema — sign in ({}) ", login.profile);
+    let title = format!(" rhema: sign in ({}) ", login.profile);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -1038,8 +1038,8 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         parts.push(Span::raw(" · ").fg(theme.text3));
     }
     match (&effective.provider, &effective.model) {
-        (None, _) => parts.push(Span::raw("no provider — use /login").fg(theme.text3)),
-        (_, None) => parts.push(Span::raw("no model — use /model").fg(theme.text3)),
+        (None, _) => parts.push(Span::raw("no provider; use /login").fg(theme.text3)),
+        (_, None) => parts.push(Span::raw("no model; use /model").fg(theme.text3)),
         // The id's vendor prefix is picker detail: a footer reads the
         // bare model name.
         (_, Some(model)) => parts.push(Span::raw(footer_model(model).to_owned()).fg(theme.text2)),
@@ -1756,7 +1756,7 @@ mod scroll_tests {
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
-        assert!(screen.contains("no provider — use /login"), "{screen}");
+        assert!(screen.contains("no provider; use /login"), "{screen}");
         assert!(
             !screen.contains("Qwen"),
             "another profile's model must not leak: {screen}"
