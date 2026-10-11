@@ -29,7 +29,7 @@ pub enum AgentError {
     Provider(#[from] ProviderError),
     /// The turn was still requesting tools after `max_iterations` steps.
     #[error(
-        "stopped after {0} steps without finishing — send a follow-up \
+        "stopped after {0} steps without finishing; send a follow-up \
              to keep going, or raise the step limit"
     )]
     MaxIterations(u32),
