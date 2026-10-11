@@ -379,10 +379,9 @@ private fun ToolCard(item: ChatController.ToolCall) {
 
 @Composable
 private fun ReplyBlock(item: ChatController.Reply) {
-    Text(
-        item.text + if (item.streaming) "▊" else "",
-        style = MaterialTheme.typography.bodyLarge,
-        color = JadeiteText,
+    AgentMarkdown(
+        text = item.text,
+        streaming = item.streaming,
     )
 }
 

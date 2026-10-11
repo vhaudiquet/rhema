@@ -28,7 +28,13 @@ notifications.
   composer POSTs `{"text"}`; the claw's documented dance is preserved:
   **subscribe first, then POST**, the reply arrives on the stream. Thinking
   deltas render dim and collapsible, tool rows show name/summary with error
-  coloring, the streaming reply is finalized by `turn_done`.
+  coloring, the streaming reply is finalized by `turn_done`. Replies render
+  as markdown (`com.mikepenz:multiplatform-markdown-renderer`, GFM flavour:
+  raw HTML stays literal, so model output never mounts as markup; the
+  streaming cursor rides the source text). The transcript is a reversed
+  LazyColumn: the newest turn anchors to the bottom edge, so streamed
+  blocks stay on screen and a reader scrolled into history is not yanked
+  back.
 - **Phone status source**: a WorkManager periodic worker (15 min, the OS
   floor, `NetworkType.CONNECTED`) snapshots battery level, charging state,
   network metering (`wifi`/`metered`/`offline`) and DND, and POSTs **only

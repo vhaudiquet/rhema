@@ -56,4 +56,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    // 0.42+ declares minCompileSdk 37 in its AAR metadata; the project's
+    // AGP tops out at 36. Revisit when AGP moves.
+    implementation("com.mikepenz:multiplatform-markdown-renderer:0.41.0")
+    implementation("com.mikepenz:multiplatform-markdown-renderer-m3:0.41.0")
 }
