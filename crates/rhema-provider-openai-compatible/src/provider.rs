@@ -29,9 +29,9 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{ModelCard, Pricing, SseDecoder};
+use rhema_provider::{Allowance, ModelCard, Pricing, SseDecoder};
 
-use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody, is_text};
+use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireBalance, WireErrorBody, is_text};
 
 /// The production OpenAI API base, version segment included.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
@@ -115,6 +115,34 @@ impl OpenAiCompatibleProvider {
             decorate_deepseek(&mut models);
         }
         Ok(models)
+    }
+
+    /// The DeepSeek account's prepaid balance (`GET /user/balance`).
+    /// The endpoint is served beside the versioned base, so the `/v1`
+    /// segment comes off first; every other compatible server has no
+    /// such endpoint and callers only ask it of DeepSeek backends.
+    pub async fn balance(&self) -> Result<Allowance, ProviderError> {
+        let base = self.base_url.strip_suffix("/v1").unwrap_or(&self.base_url);
+        let response = self
+            .http
+            .get(format!("{base}/user/balance"))
+            .authorized(&self.api_key)
+            // A bounded listing-style call, not a stream.
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(api_error(status, &text));
+        }
+        let balance: WireBalance = response
+            .json()
+            .await
+            .map_err(|err| ProviderError::Api(format!("malformed balance response: {err}")))?;
+        crate::wire::allowance(&balance)
+            .ok_or_else(|| ProviderError::Api("balance response carries no balance".into()))
     }
 }
 

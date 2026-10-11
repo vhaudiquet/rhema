@@ -82,7 +82,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
-use rhema_provider::ModelCard;
+use rhema_provider::{Allowance, ModelCard};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -377,6 +377,45 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
             })
         })
         .collect()
+}
+
+// --- Allowance: the DeepSeek balance endpoint -> normalized ---
+
+/// The `GET /user/balance` response of DeepSeek — the one account
+/// endpoint this adapter knows.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireBalance {
+    /// One entry per currency the account holds.
+    #[serde(default)]
+    pub balance_infos: Vec<WireBalanceInfo>,
+}
+
+/// One currency's balance of a [`WireBalance`].
+#[derive(Debug, Default, Deserialize)]
+pub struct WireBalanceInfo {
+    /// The ISO code: `"USD"`, `"CNY"`.
+    #[serde(default)]
+    pub currency: String,
+    /// The total balance, as a decimal string.
+    #[serde(default)]
+    pub total_balance: String,
+}
+
+/// The account's prepaid balance, the first currency entry winning —
+/// the account charges in one. `None` when the body lists no parseable
+/// balance.
+pub fn allowance(balance: &WireBalance) -> Option<Allowance> {
+    let info = balance.balance_infos.first()?;
+    let total: f64 = info.total_balance.parse().ok()?;
+    let amount = match info.currency.as_str() {
+        "USD" => format!("${total:.2}"),
+        "CNY" => format!("¥{total:.2}"),
+        other => format!("{total:.2} {other}"),
+    };
+    Some(Allowance {
+        amount,
+        kind: "credit".to_owned(),
+    })
 }
 
 /// Whether the model is a text chat model. A generic server serves
@@ -1532,5 +1571,35 @@ mod tests {
     fn a_page_without_a_data_array_yields_no_models() {
         let models = normalize_models(&serde_json::json!({ "error": "nope" }));
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn the_balance_reads_the_first_currency_entry() {
+        let balance: WireBalance = serde_json::from_str(
+            r#"{
+                "is_available": true,
+                "balance_infos": [
+                    { "currency": "USD", "total_balance": "110.50", "granted_balance": "5.00" }
+                ]
+            }"#,
+        )
+        .expect("balance parses");
+        assert_eq!(
+            allowance(&balance),
+            Some(Allowance {
+                amount: "$110.50".to_owned(),
+                kind: "credit".to_owned(),
+            })
+        );
+
+        // Another currency keeps its code beside the figure.
+        let cny: WireBalance =
+            serde_json::from_str(r#"{"balance_infos":[{"currency":"CNY","total_balance":"8"}]}"#)
+                .expect("parses");
+        assert_eq!(allowance(&cny).unwrap().amount, "¥8.00".to_owned());
+
+        // No entries, or an unparseable figure: no allowance.
+        let empty: WireBalance = serde_json::from_str(r#"{"balance_infos":[]}"#).expect("parses");
+        assert_eq!(allowance(&empty), None);
     }
 }
