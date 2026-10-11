@@ -32,10 +32,12 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{ModelCard, SseDecoder};
+use rhema_provider::{Allowance, ModelCard, SseDecoder};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler, WireErrorBody};
+use crate::wire::{
+    ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler, WireCopilotUser, WireErrorBody,
+};
 
 /// The GitHub host the OAuth token exchanges at.
 pub const DEFAULT_GITHUB_URL: &str = "https://github.com";
@@ -237,6 +239,37 @@ impl CopilotProvider {
             .await
             .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
         Ok(crate::wire::normalize_models(&page))
+    }
+
+    /// The seat's premium-request allowance (`GET
+    /// {github}/copilot_internal/user`, authenticated with the OAuth
+    /// token — no Copilot-token exchange needed). The endpoint is
+    /// GitHub's internal one, outside any contract; a drifted shape
+    /// maps to an error and the badge simply never shows.
+    pub async fn allowance(&self) -> Result<Allowance, ProviderError> {
+        let response = self
+            .http
+            .get(format!("{}/copilot_internal/user", self.github_url))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                format!("token {}", self.github_token),
+            )
+            .header(reqwest::header::ACCEPT, "application/json")
+            .editor_headers()
+            // A bounded listing-style call, not a stream.
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(api_error(status, &text));
+        }
+        let user: WireCopilotUser = serde_json::from_str(&text)
+            .map_err(|err| ProviderError::Api(format!("malformed user response: {err}")))?;
+        crate::wire::allowance(&user)
+            .ok_or_else(|| ProviderError::Api("user response carries no premium quota".into()))
     }
 }
 

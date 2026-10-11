@@ -79,7 +79,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
-use rhema_provider::ModelCard;
+use rhema_provider::{Allowance, ModelCard};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -746,6 +746,61 @@ fn stop_reason(finish_reason: Option<&str>, has_calls: bool) -> StopReason {
         // "content_filter" and every provider-specific reason land here.
         Some(other) => StopReason::Other(other.to_owned()),
     }
+}
+
+// --- Allowance: the internal user endpoint -> normalized ---
+
+/// The `GET {github}/copilot_internal/user` response. The endpoint is
+/// GitHub's internal one — undocumented, but stable enough that editor
+/// integrations build on it — so only the premium quota this crate
+/// needs is parsed, every field defaulting: a shape drift maps to no
+/// allowance, never to a wrong badge.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireCopilotUser {
+    /// The seat's per-kind quota snapshots, when the response has them.
+    #[serde(default)]
+    pub quota_snapshots: Option<WireQuotaSnapshots>,
+}
+
+/// The `quota_snapshots` object of a [`WireCopilotUser`]. The chat and
+/// completions snapshots are ignored: a coding agent's spend is the
+/// premium one.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireQuotaSnapshots {
+    /// The premium-request quota of the plan cycle.
+    #[serde(default)]
+    pub premium_interactions: Option<WireQuotaSnapshot>,
+}
+
+/// One quota snapshot: the cycle's cap and what is left of it.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireQuotaSnapshot {
+    /// The requests the cycle allots, when the seat is capped.
+    #[serde(default)]
+    pub entitlement: Option<f64>,
+    /// The requests still unspent.
+    #[serde(default)]
+    pub remaining: Option<f64>,
+}
+
+/// The seat's premium-request allowance: `remaining` out of the cycle's
+/// `entitlement`, the cap dropped when the seat reports none. `None`
+/// when the response carries no premium snapshot.
+pub fn allowance(user: &WireCopilotUser) -> Option<Allowance> {
+    let snapshot = user
+        .quota_snapshots
+        .as_ref()?
+        .premium_interactions
+        .as_ref()?;
+    let remaining = snapshot.remaining?;
+    let amount = match snapshot.entitlement {
+        Some(cap) if cap > 0.0 => format!("{remaining:.0}/{cap:.0}"),
+        _ => format!("{remaining:.0}"),
+    };
+    Some(Allowance {
+        amount,
+        kind: "premium".to_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -1488,5 +1543,45 @@ mod tests {
     fn a_page_without_a_data_array_yields_no_models() {
         let models = normalize_models(&serde_json::json!({ "error": "nope" }));
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn the_allowance_reads_the_premium_snapshot() {
+        let user: WireCopilotUser = serde_json::from_str(
+            r#"{
+                "copilot_plan": "individual",
+                "quota_reset_date": "2026-11-01",
+                "quota_snapshots": {
+                    "chat": { "remaining": 0.83 },
+                    "premium_interactions": { "entitlement": 300, "remaining": 237.6 }
+                }
+            }"#,
+        )
+        .expect("user response parses");
+        assert_eq!(
+            allowance(&user),
+            Some(Allowance {
+                amount: "238/300".to_owned(),
+                kind: "premium".to_owned(),
+            })
+        );
+    }
+
+    #[test]
+    fn an_uncapped_or_absent_premium_quota_degrades() {
+        // A seat without a cap still says what is left.
+        let uncapped: WireCopilotUser = serde_json::from_str(
+            r#"{"quota_snapshots":{"premium_interactions":{"remaining":12.0}}}"#,
+        )
+        .expect("parses");
+        assert_eq!(allowance(&uncapped).unwrap().amount, "12".to_owned());
+
+        // No snapshot, or a drifted shape: no allowance, never a wrong
+        // badge.
+        let bare: WireCopilotUser =
+            serde_json::from_str(r#"{"copilot_plan":"free"}"#).expect("parses");
+        assert_eq!(allowance(&bare), None);
+        let empty = WireCopilotUser::default();
+        assert_eq!(allowance(&empty), None);
     }
 }
