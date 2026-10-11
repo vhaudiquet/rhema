@@ -212,10 +212,7 @@ fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
     }
     match argument {
         None => app.open_picker(),
-        Some(needle) => {
-            app.choose_model_by_id(needle);
-            Vec::new()
-        }
+        Some(needle) => app.choose_model_by_id(needle),
     }
 }
 

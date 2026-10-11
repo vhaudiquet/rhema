@@ -746,16 +746,16 @@ impl App {
     /// identity is what moves — but the old provider goes with the old
     /// profile: turns wait for /login rather than leaking the previous
     /// profile's key.
-    pub fn switch_profile(&mut self, name: &str) {
+    pub fn switch_profile(&mut self, name: &str) -> Vec<Effect> {
         if self.running {
             self.transcript
                 .push_notice("a turn is running; /profile waits for it to finish");
-            return;
+            return Vec::new();
         }
         if self.session_profile.as_deref() == Some(name) {
             self.transcript
                 .push_notice(&format!("already on profile {name}"));
-            return;
+            return Vec::new();
         }
         let effective = self.config.effective(Some(name));
         self.options.thinking = effective.thinking_effort().unwrap_or_default();
@@ -778,7 +778,7 @@ impl App {
             self.transcript.push_notice(&format!(
                 "switched to profile {name}; no API key, /login to add one"
             ));
-            return;
+            return Vec::new();
         };
         let agent_config = agent_config(&self.options, effective.model.clone());
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
@@ -800,8 +800,14 @@ impl App {
                     self.transcript
                         .push_notice(&format!("switched to profile {name}"));
                 }
+                // A new profile is a new plan: the allowance badge
+                // fetches now, not at the first turn's end.
+                vec![Effect::FetchUsage]
             }
-            Err(err) => self.error = Some(err.to_string()),
+            Err(err) => {
+                self.error = Some(err.to_string());
+                Vec::new()
+            }
         }
     }
 
@@ -1000,10 +1006,7 @@ impl App {
                 provider,
                 instance,
                 id,
-            }) => {
-                self.choose_model(provider, instance.as_deref(), &id);
-                Vec::new()
-            }
+            }) => self.choose_model(provider, instance.as_deref(), &id),
             Routed::Picker(PickerAction::Quit) => {
                 self.should_quit = true;
                 Vec::new()
@@ -1012,10 +1015,7 @@ impl App {
                 self.screen = Screen::Chat;
                 Vec::new()
             }
-            Routed::Profile(ProfileAction::Switch(name)) => {
-                self.switch_profile(&name);
-                Vec::new()
-            }
+            Routed::Profile(ProfileAction::Switch(name)) => self.switch_profile(&name),
             Routed::Profile(ProfileAction::BackToChat) => {
                 self.screen = Screen::Chat;
                 Vec::new()
@@ -1252,13 +1252,15 @@ impl App {
                     self.screen = Screen::Chat;
                     self.transcript
                         .push_notice(&format!("switched to {label} · {model}"));
-                    Vec::new()
+                    // The session now rides the instance it activated:
+                    // that plan's numbers are the badge's to fetch.
+                    vec![Effect::FetchUsage]
                 } else {
                     self.screen = Screen::Picker(PickerScreen {
                         status: PickerStatus::Loading,
                         ..PickerScreen::new(self.models.clone(), PickerPurpose::Initial)
                     });
-                    vec![Effect::FetchModels(FetchWhy::Bootstrap)]
+                    vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
                 }
             }
             Err(err) => {
@@ -1286,12 +1288,16 @@ impl App {
             self.error = Some(format!("cannot save config: {err}"));
             return Vec::new();
         }
+        let mut effects = Vec::new();
         if self.session_profile.as_deref() == Some(tab.as_str()) {
             let effective = self.config.effective(Some(&tab));
             match Backend::from_profile(&effective) {
                 Some(backend) => {
                     self.backend = Some(backend.clone());
                     self.provider = Some(backend.provider());
+                    // What remains is a different plan: refresh the
+                    // badge against it.
+                    effects.push(Effect::FetchUsage);
                 }
                 None => {
                     self.backend = None;
@@ -1310,7 +1316,7 @@ impl App {
             }
         }
         self.transcript.push_notice(&format!("forgot {name}"));
-        Vec::new()
+        effects
     }
 
     /// A step of the running login flow: render it on the login screen,
@@ -1396,10 +1402,7 @@ impl App {
                 self.transcript.apply(&owned);
                 Vec::new()
             }
-            UiEvent::ModelsLoaded { why, result } => {
-                self.on_models_loaded(why, result);
-                Vec::new()
-            }
+            UiEvent::ModelsLoaded { why, result } => self.on_models_loaded(why, result),
             UiEvent::LoginUpdate(update) => self.on_login_update(update),
             UiEvent::ApprovalRequested { call } => {
                 if self.decline_all {
@@ -1432,11 +1435,15 @@ impl App {
 
     /// Routes a model-list result to the login screen, the open picker,
     /// or the cache.
-    fn on_models_loaded(&mut self, why: FetchWhy, result: Vec<crate::events::CatalogFetch>) {
+    fn on_models_loaded(
+        &mut self,
+        why: FetchWhy,
+        result: Vec<crate::events::CatalogFetch>,
+    ) -> Vec<Effect> {
         match why {
             FetchWhy::Login { backend, instance } => {
                 let Screen::Login(login) = &mut self.screen else {
-                    return;
+                    return Vec::new();
                 };
                 // A login opened from the chat lands in a picker that also
                 // knows the way back.
@@ -1478,7 +1485,7 @@ impl App {
                         });
                         if let Err(err) = self.store.save(&self.config) {
                             login.status = LoginStatus::Error(format!("cannot save config: {err}"));
-                            return;
+                            return Vec::new();
                         }
                         self.session_profile = Some(tab);
                         self.backend = Some(backend.clone());
@@ -1510,8 +1517,7 @@ impl App {
                         // go straight to chat.
                         if models.len() == 1 {
                             let id = models[0].id.clone();
-                            self.choose_model(provider, Some(&instance), &id);
-                            return;
+                            return self.choose_model(provider, Some(&instance), &id);
                         }
                         let purpose = if from_chat {
                             PickerPurpose::FromChat
@@ -1520,11 +1526,20 @@ impl App {
                         };
                         self.screen =
                             Screen::Picker(PickerScreen::new(self.models.clone(), purpose));
+                        // A login installs the backend it validated: that
+                        // plan is the session's numbers now.
+                        vec![Effect::FetchUsage]
                     }
-                    Some(Err(message)) => login.on_validated(&Err(message)),
+                    Some(Err(message)) => {
+                        login.on_validated(&Err(message));
+                        Vec::new()
+                    }
                     // The dispatch always spawns one backend per login;
                     // an empty result cannot arrive.
-                    None => login.on_validated(&Err("no provider answered".to_owned())),
+                    None => {
+                        login.on_validated(&Err("no provider answered".to_owned()));
+                        Vec::new()
+                    }
                 }
             }
             FetchWhy::Bootstrap | FetchWhy::Refresh => {
@@ -1568,7 +1583,7 @@ impl App {
                             // Nothing follows in this arm: the chat
                             // screen choose_model installed stands.
                             let entry = picker.models[0].clone();
-                            self.choose_model(
+                            return self.choose_model(
                                 entry.provider,
                                 entry.instance.as_deref(),
                                 &entry.model.id,
@@ -1576,6 +1591,7 @@ impl App {
                         }
                     }
                 }
+                Vec::new()
             }
         }
     }
@@ -1584,7 +1600,7 @@ impl App {
     /// the cached catalog — exact id first, then a unique prefix — and
     /// switch, or say what went missing. `/model` with no needle opens
     /// the full picker instead.
-    pub fn choose_model_by_id(&mut self, needle: &str) {
+    pub fn choose_model_by_id(&mut self, needle: &str) -> Vec<Effect> {
         // The active instance wins ties: the same model id may be served
         // by several instances of one provider.
         let active = self.effective().instance;
@@ -1628,13 +1644,19 @@ impl App {
         };
         match resolved {
             Some((provider, instance, id)) => self.choose_model(provider, instance.as_deref(), &id),
-            None if exact_count > 1 || prefix_count > 1 => self.push_notice(&format!(
-                "{} models match {needle:?}; name one fully or use /model",
-                exact_count.max(prefix_count)
-            )),
-            None => self.push_notice(&format!(
-                "no model matches {needle:?} in the cached catalog; /model lists them"
-            )),
+            None if exact_count > 1 || prefix_count > 1 => {
+                self.push_notice(&format!(
+                    "{} models match {needle:?}; name one fully or use /model",
+                    exact_count.max(prefix_count)
+                ));
+                Vec::new()
+            }
+            None => {
+                self.push_notice(&format!(
+                    "no model matches {needle:?} in the cached catalog; /model lists them"
+                ));
+                Vec::new()
+            }
         }
     }
 
@@ -1642,7 +1664,12 @@ impl App {
     /// agent, carrying the current session over. The old agent is only
     /// dropped once the new one built, so a rebuild failure cannot strand
     /// the chat.
-    fn choose_model(&mut self, provider: &'static str, instance: Option<&str>, id: &str) {
+    fn choose_model(
+        &mut self,
+        provider: &'static str,
+        instance: Option<&str>,
+        id: &str,
+    ) -> Vec<Effect> {
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -1661,7 +1688,7 @@ impl App {
         });
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
-            return;
+            return Vec::new();
         }
         let backend = match Backend::from_profile(&self.effective()) {
             Some(backend) => backend,
@@ -1669,7 +1696,7 @@ impl App {
                 self.error = Some(format!(
                     "no usable credentials for {provider}; /login first"
                 ));
-                return;
+                return Vec::new();
             }
         };
         self.backend = Some(backend.clone());
@@ -1680,14 +1707,20 @@ impl App {
                 // or a `/model <needle>` typed there — says where it
                 // landed; the login and startup auto-selects stay quiet.
                 let from_chat = matches!(&self.screen, Screen::Picker(picker) if picker.purpose == PickerPurpose::FromChat);
-                if from_chat || matches!(self.screen, Screen::Chat) {
+                if from_chat || matches!(&self.screen, Screen::Chat) {
                     self.transcript
                         .push_notice(&format!("model switched to {provider}/{id}"));
                 }
                 self.agent = Some(agent);
                 self.screen = Screen::Chat;
+                // A new backend counts a new plan: the allowance badge
+                // fetches now, not at the first turn's end.
+                vec![Effect::FetchUsage]
             }
-            Err(err) => self.error = Some(err.to_string()),
+            Err(err) => {
+                self.error = Some(err.to_string());
+                Vec::new()
+            }
         }
     }
 
@@ -2270,6 +2303,15 @@ mod tests {
         assert_eq!(effects, vec![Effect::FetchUsage]);
     }
 
+    /// A model switch lands a new backend: its allowance fetches at
+    /// once, not at the first turn's end.
+    #[test]
+    fn a_model_switch_refreshes_the_allowance() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let effects = h.app.choose_model("google", Some("google"), "m-a");
+        assert_eq!(effects, vec![Effect::FetchUsage]);
+    }
+
     #[test]
     fn login_success_persists_the_key_and_opens_the_picker() {
         let mut h = harness(None, None, Session::default());
@@ -2754,9 +2796,10 @@ mod tests {
             h.app.on_key(key(KeyCode::Char(c)));
         }
         let effects = h.app.on_key(key(KeyCode::Enter));
-        assert!(
-            effects.is_empty(),
-            "a named model rebuilds inline: {effects:?}"
+        assert_eq!(
+            effects,
+            vec![Effect::FetchUsage],
+            "a named model rebuilds inline"
         );
         assert!(matches!(h.app.screen, Screen::Chat));
         assert_eq!(
@@ -2875,7 +2918,7 @@ mod tests {
             h.app.on_key(key(KeyCode::Char(c)));
         }
         let effects = h.app.on_key(key(KeyCode::Enter));
-        assert!(effects.is_empty(), "a pick rebuilds inline: {effects:?}");
+        assert_eq!(effects, vec![Effect::FetchUsage], "a pick rebuilds inline");
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(matches!(
             h.app.backend,
@@ -3008,7 +3051,11 @@ mod tests {
         crate::commands::dispatch(&mut h.app, "/login");
         // "gpu box" sorts before "home": the first row is it.
         let effects = h.app.on_key(key(KeyCode::Enter));
-        assert!(effects.is_empty(), "a stored model goes straight to chat");
+        assert_eq!(
+            effects,
+            vec![Effect::FetchUsage],
+            "a stored model goes straight to chat"
+        );
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(
             matches!(&h.app.backend, Some(Backend::LlamaCpp { url, .. }) if url == "http://gpu:8080"),
@@ -3052,7 +3099,10 @@ mod tests {
         // "home" sorts before "openai": the first row is it.
         let effects = h.app.on_key(key(KeyCode::Enter));
         // gpt-5 means nothing to a llama.cpp server: the picker opens.
-        assert_eq!(effects, vec![Effect::FetchModels(FetchWhy::Bootstrap)]);
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
+        );
         assert!(matches!(h.app.screen, Screen::Picker(_)));
         assert_eq!(
             h.store.load().unwrap().effective(None).model,
@@ -3298,7 +3348,7 @@ mod tests {
             result: loaded("google", models()),
         });
         let effects = h.app.on_key(key(KeyCode::Enter));
-        assert!(effects.is_empty());
+        assert_eq!(effects, vec![Effect::FetchUsage]);
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(h.app.agent.is_some());
         assert_eq!(
