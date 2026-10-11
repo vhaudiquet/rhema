@@ -16,7 +16,11 @@ const props = defineProps<{
   session: ClawSession | null
   activeBackend: { provider: string; model: string } | null
   streamStatus: StreamStatus
+  identity?: { name: string | null; mark: string | null; initials: string | null } | null
+  avatarUrl?: string | null
 }>()
+
+const agentName = computed(() => props.identity?.name?.trim() || 'rhema')
 
 const emit = defineEmits<{ send: [text: string]; openProviders: [] }>()
 
@@ -65,7 +69,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
 <template>
   <section class="chat">
     <header class="head">
-      <div class="avatar agent" aria-hidden="true">R</div>
+      <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="34" />
       <div class="text">
         <h2>{{ displayName }}</h2>
         <p class="mono">
@@ -93,9 +97,9 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           </div>
         </div>
         <div v-else class="msg">
-          <div class="avatar agent" aria-hidden="true">R</div>
+          <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="32" />
           <div class="msg-body">
-            <div class="who">rhema</div>
+            <div class="who">{{ agentName }}</div>
             <details v-if="item.turn.thinking" class="thinking">
               <summary>thinking</summary>
               <pre>{{ item.turn.thinking }}</pre>
@@ -126,9 +130,9 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
       </template>
 
       <div v-if="live" class="msg live">
-        <div class="avatar agent" aria-hidden="true">R</div>
+        <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="32" />
         <div class="msg-body">
-          <div class="who">rhema</div>
+          <div class="who">{{ agentName }}</div>
           <details v-if="live.thinking" class="thinking" open>
             <summary>thinking</summary>
             <pre>{{ live.thinking }}</pre>
@@ -170,7 +174,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
         <input
           v-model="draft"
           type="text"
-          :placeholder="canSend ? 'Message rhema…' : 'only interactive:* sessions accept messages'"
+          :placeholder="canSend ? `Message ${agentName}…` : 'only interactive:* sessions accept messages'"
           :disabled="!canSend"
           @keydown.enter="submit"
         />
@@ -209,11 +213,6 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
   flex: none;
   border-radius: 10px;
   font-weight: 700;
-}
-
-.avatar.agent {
-  background: var(--accent);
-  color: var(--on-accent);
 }
 
 .avatar.user {

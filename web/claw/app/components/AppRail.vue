@@ -6,6 +6,8 @@ defineProps<{
   view: 'chat' | 'settings'
   /** null while /healthz has not answered yet. */
   clawUp: boolean | null
+  identity?: { mark: string | null; initials: string | null; name: string | null } | null
+  avatarUrl?: string | null
 }>()
 
 defineEmits<{ navigate: [view: 'chat' | 'settings'] }>()
@@ -13,7 +15,14 @@ defineEmits<{ navigate: [view: 'chat' | 'settings'] }>()
 
 <template>
   <nav class="rail">
-    <div class="mark" title="rhema — the spoken word">ῥ</div>
+    <AgentAvatar
+      variant="mark"
+      :avatar-url="avatarUrl"
+      :mark="identity?.mark"
+      :size="36"
+      class="mark"
+      title="rhema — the spoken word"
+    />
 
     <button
       class="rail-btn"
@@ -48,7 +57,13 @@ defineEmits<{ navigate: [view: 'chat' | 'settings'] }>()
     >
       <span class="dot" :class="{ up: clawUp === true, down: clawUp === false }" aria-hidden="true" />
     </span>
-    <div class="avatar" title="rhema">R</div>
+    <AgentAvatar
+      :avatar-url="avatarUrl"
+      :initials="identity?.initials ?? identity?.name?.slice(0, 1)"
+      :size="30"
+      class="avatar"
+      title="rhema"
+    />
   </nav>
 </template>
 
@@ -66,16 +81,7 @@ defineEmits<{ navigate: [view: 'chat' | 'settings'] }>()
 }
 
 .mark {
-  display: grid;
-  place-items: center;
-  width: 36px;
-  height: 36px;
   margin-bottom: 10px;
-  border-radius: 10px;
-  background: var(--accent);
-  color: var(--on-accent);
-  font-size: 20px;
-  font-weight: 700;
 }
 
 .rail-btn {
@@ -126,16 +132,6 @@ defineEmits<{ navigate: [view: 'chat' | 'settings'] }>()
 }
 
 .avatar {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
   margin-top: 8px;
-  border-radius: 8px;
-  border: 1px solid var(--border-strong);
-  background: var(--elevated);
-  color: var(--accent-text);
-  font-weight: 700;
-  font-size: 14px;
 }
 </style>

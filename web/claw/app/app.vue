@@ -7,7 +7,10 @@
 // mirror, not a store.
 import { ClawError, clawHealth, isInteractive, useClaw } from '~/composables/useClaw'
 import type {
+  AgentIdentity,
+  AgentImageKind,
   ClawSession,
+  IdentityTexts,
   ModelCard,
   ProviderCredentials,
   ProvidersState,
@@ -43,6 +46,13 @@ function persist(key: string, value: string | null): void {
 type Route = { view: 'chat' } | { view: 'settings'; section: string }
 
 const SETTINGS_SECTIONS: { label: string; entries: { id: string; label: string }[] }[] = [
+  {
+    label: 'Agent',
+    entries: [
+      { id: 'agent/general', label: 'General' },
+      { id: 'agent/accounts', label: 'Accounts' },
+    ],
+  },
   { label: 'Providers', entries: [{ id: 'providers', label: 'Model providers' }] },
   { label: 'System', entries: [{ id: 'about', label: 'About' }] },
 ]
@@ -51,7 +61,9 @@ function parseHash(): Route {
   if (!import.meta.client) return { view: 'chat' }
   const hash = window.location.hash.replace(/^#\/?/, '')
   if (hash.startsWith('settings')) {
-    const section = hash.split('/')[1] ?? 'providers'
+    // Section ids may carry their category ('agent/general'), so the
+    // section is everything after 'settings/', not the second segment.
+    const section = hash.replace(/^settings\/?/, '') || 'agent/general'
     return {
       view: 'settings',
       section: SETTINGS_SECTIONS.some((s) => s.entries.some((e) => e.id === section))
@@ -85,6 +97,99 @@ watch(activeKey, (key) => persist(ACTIVE_STORE_KEY, key))
 const transcript = useTranscript()
 const { items: transcriptItems, live: liveTurn } = transcript
 
+// --- the agent's identity --------------------------------------------
+const identity = ref<AgentIdentity | null>(null)
+const identityAvatarUrl = ref<string | null>(null)
+const identityLogoUrl = ref<string | null>(null)
+
+async function loadImageUrls(): Promise<void> {
+  // A new object URL per fetch; the old one is revoked, not leaked.
+  for (const [kind, url] of [
+    ['avatar', identityAvatarUrl],
+    ['logo', identityLogoUrl],
+  ] as const) {
+    if (!identity.value?.[kind]) {
+      if (url.value) URL.revokeObjectURL(url.value)
+      url.value = null
+      continue
+    }
+    if (url.value) URL.revokeObjectURL(url.value)
+    try {
+      url.value = await claw.agentImage(kind)
+    } catch {
+      url.value = null
+    }
+  }
+}
+
+async function refreshIdentity(): Promise<void> {
+  try {
+    identity.value = await claw.agent()
+    await loadImageUrls()
+  } catch (err) {
+    noteApiError(err)
+  }
+}
+
+async function saveIdentity(texts: IdentityTexts): Promise<void> {
+  savingIdentity.value = true
+  try {
+    identity.value = await claw.setAgent(texts)
+    pushNotice('identity saved')
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    savingIdentity.value = false
+  }
+}
+
+async function uploadIdentityImage(kind: AgentImageKind, file: File): Promise<void> {
+  mutatingIdentity.value = true
+  try {
+    identity.value = await claw.setAgentImage(kind, file)
+    await loadImageUrls()
+    pushNotice(`${kind} updated`)
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    mutatingIdentity.value = false
+  }
+}
+
+async function clearIdentityImage(kind: AgentImageKind): Promise<void> {
+  mutatingIdentity.value = true
+  try {
+    identity.value = await claw.clearAgentImage(kind)
+    await loadImageUrls()
+    pushNotice(`${kind} cleared`)
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    mutatingIdentity.value = false
+  }
+}
+
+// The window title answers to the identity and the view, as the design
+// shows it: "Kosmos — Settings · Model providers".
+const viewTitle = computed(() => {
+  const current = route.value
+  if (current.view === 'chat') return 'Chat'
+  const label = SETTINGS_SECTIONS.flatMap((section) => section.entries).find(
+    (entry) => entry.id === current.section,
+  )?.label
+  return `Settings · ${label ?? current.section}`
+})
+watch(
+  [identity, viewTitle],
+  () => {
+    const name = identity.value?.name?.trim()
+    document.title = name ? `${name} — ${viewTitle.value}` : `rhema claw — ${viewTitle.value}`
+  },
+  { immediate: true },
+)
+
 const clawUp = ref<boolean | null>(null)
 const sessions = ref<ClawSession[]>([])
 const sessionsLoading = ref(false)
@@ -95,6 +200,8 @@ const providerModelsError = ref<string | null>(null)
 const selectedProvider = ref<string | null>(null)
 const savingProviders = ref(false)
 const mutatingProviders = ref(false)
+const savingIdentity = ref(false)
+const mutatingIdentity = ref(false)
 const streamStatus = ref<StreamStatus>('connecting')
 const busy = ref(false)
 const authRequired = ref(false)
@@ -277,6 +384,7 @@ onMounted(() => {
   window.addEventListener('hashchange', onHashChange)
   resubscribe()
   void checkHealth()
+  void refreshIdentity()
   void refreshProviders()
   void refreshSessions()
   healthTimer = setInterval(checkHealth, 30000)
@@ -293,7 +401,13 @@ onUnmounted(() => {
 
 <template>
   <div class="shell">
-    <AppRail :view="route.view" :claw-up="clawUp" @navigate="go($event === 'chat' ? { view: 'chat' } : { view: 'settings', section: 'providers' })" />
+    <AppRail
+      :view="route.view"
+      :claw-up="clawUp"
+      :identity="identity"
+      :avatar-url="identityAvatarUrl"
+      @navigate="go($event === 'chat' ? { view: 'chat' } : { view: 'settings', section: 'providers' })"
+    />
 
     <div class="body">
       <div class="banners">
@@ -334,6 +448,8 @@ onUnmounted(() => {
             :sessions="sessions"
             :active-key="activeKey"
             :loading="sessionsLoading"
+            :identity="identity"
+            :avatar-url="identityAvatarUrl"
             @select="activeKey = $event"
             @refresh="refreshSessions"
           />
@@ -346,6 +462,8 @@ onUnmounted(() => {
             :session="activeSession"
             :active-backend="providersState?.active ?? null"
             :stream-status="streamStatus"
+            :identity="identity"
+            :avatar-url="identityAvatarUrl"
             @send="send"
             @open-providers="go({ view: 'settings', section: 'providers' })"
           />
@@ -358,6 +476,18 @@ onUnmounted(() => {
             :claw-up="clawUp"
             @select="go({ view: 'settings', section: $event })"
           />
+          <SettingsAgentGeneralPage
+            v-show="route.section === 'agent/general'"
+            :identity="identity"
+            :avatar-url="identityAvatarUrl"
+            :logo-url="identityLogoUrl"
+            :saving="savingIdentity"
+            :mutating="mutatingIdentity"
+            @save="saveIdentity"
+            @upload-image="uploadIdentityImage"
+            @clear-image="clearIdentityImage"
+          />
+          <SettingsAgentAccountsPage v-show="route.section === 'agent/accounts'" />
           <SettingsProvidersPage
             v-show="route.section === 'providers'"
             :state="providersState"
@@ -402,6 +532,15 @@ onUnmounted(() => {
               </button>
             </template>
             <p v-else class="detail-note">loading…</p>
+          </DetailPanel>
+          <DetailPanel v-else-if="route.section === 'agent/general'" title="Where identity lives">
+            <p class="detail-note">
+              The name, mark, and images are stored claw-side and served
+              over <code>/v1/agent</code> — every client renders the same
+              identity. Behaviour is a different file: the agent's
+              persona lives in its <code>SOUL.md</code>, written with the
+              agent over onboarding, not here.
+            </p>
           </DetailPanel>
           <DetailPanel v-else-if="route.section === 'about'" title="Where things live">
             <p class="detail-note">

@@ -58,6 +58,31 @@ export interface ProvidersState {
   addable?: AddableKind[]
 }
 
+/** The agent's presentation identity as `GET /v1/agent` serves it:
+ * unset text fields read as null, the images report presence. */
+export interface AgentIdentity {
+  name: string | null
+  mark: string | null
+  initials: string | null
+  tagline: string | null
+  signoff: string | null
+  avatar: boolean
+  logo: boolean
+}
+
+/** The identity's text fields, as a save carries them: an empty
+ * string clears the field. */
+export interface IdentityTexts {
+  name: string
+  mark: string
+  initials: string
+  tagline: string
+  signoff: string
+}
+
+/** One of the two identity images. */
+export type AgentImageKind = 'avatar' | 'logo'
+
 /** The credentials a provider login carries: an API key (a GitHub
  * token for copilot), and a server URL for llama.cpp. */
 export interface ProviderCredentials {
@@ -168,6 +193,20 @@ export interface ClawApi {
   /** `DELETE /v1/providers/{kind}` — remove a backend; answers the new
    * providers state. The last backend is refused claw-side. */
   removeProvider(kind: string): Promise<ProvidersState>
+  /** `GET /v1/agent` — the agent's presentation identity. */
+  agent(): Promise<AgentIdentity>
+  /** `PUT /v1/agent` — save the named text fields (empty clears);
+   * fields left out are untouched claw-side. */
+  setAgent(texts: Partial<IdentityTexts>): Promise<AgentIdentity>
+  /** `PUT /v1/agent/{kind}` — upload the avatar or logo from a file.
+   * The claw refuses non-images and bodies over 2 MiB. */
+  setAgentImage(kind: AgentImageKind, file: File): Promise<AgentIdentity>
+  /** `DELETE /v1/agent/{kind}` — drop the image. */
+  clearAgentImage(kind: AgentImageKind): Promise<AgentIdentity>
+  /** `GET /v1/agent/{kind}` — the image as an object URL for an
+   * `<img>` (the route is bearer-guarded, so a plain src will not do).
+   * The caller revokes the URL when it replaces it. */
+  agentImage(kind: AgentImageKind): Promise<string>
   /**
    * Stream one session's turns. Resolves with a handle once the fetch
    * is started; the claw keeps the stream open forever, and a drop is
@@ -222,6 +261,48 @@ export function useClaw(token: Ref<string | null>): ClawApi {
       method: 'DELETE',
       headers: authHeaders(token.value),
     })) as ProvidersState
+  }
+
+  async function agent(): Promise<AgentIdentity> {
+    return (await get('/v1/agent', token.value)) as AgentIdentity
+  }
+
+  async function setAgent(texts: Partial<IdentityTexts>): Promise<AgentIdentity> {
+    return (await send('/v1/agent', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
+      body: JSON.stringify(texts),
+    })) as AgentIdentity
+  }
+
+  async function setAgentImage(kind: AgentImageKind, file: File): Promise<AgentIdentity> {
+    return (await send(`/v1/agent/${kind}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': file.type || 'application/octet-stream', ...authHeaders(token.value) },
+      body: file,
+    })) as AgentIdentity
+  }
+
+  async function clearAgentImage(kind: AgentImageKind): Promise<AgentIdentity> {
+    return (await send(`/v1/agent/${kind}`, {
+      method: 'DELETE',
+      headers: authHeaders(token.value),
+    })) as AgentIdentity
+  }
+
+  async function agentImage(kind: AgentImageKind): Promise<string> {
+    let response: Response
+    try {
+      response = await fetch(`${base()}/v1/agent/${kind}`, {
+        headers: authHeaders(token.value),
+      })
+    } catch (cause) {
+      throw new ClawError(0, `claw unreachable: ${String(cause)}`)
+    }
+    if (!response.ok) {
+      throw new ClawError(response.status, `HTTP ${response.status}`)
+    }
+    return URL.createObjectURL(await response.blob())
   }
 
   function subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void } {
@@ -298,6 +379,11 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     models,
     setCredentials,
     removeProvider,
+    agent,
+    setAgent,
+    setAgentImage,
+    clearAgentImage,
+    agentImage,
     subscribeEvents,
   }
 }

@@ -8,6 +8,8 @@ const props = defineProps<{
   sessions: ClawSession[]
   activeKey: string
   loading: boolean
+  identity?: { name: string | null; tagline: string | null; mark: string | null; initials: string | null } | null
+  avatarUrl?: string | null
 }>()
 
 defineEmits<{ select: [key: string]; refresh: [] }>()
@@ -46,6 +48,17 @@ function stateTone(state: string): 'ok' | 'warn' | 'idle' {
 
 <template>
   <aside class="sidebar">
+    <header class="agent">
+      <AgentAvatar
+        :avatar-url="avatarUrl"
+        :initials="identity?.initials ?? identity?.name?.slice(0, 1)"
+        :size="34"
+      />
+      <div class="agent-text">
+        <strong>{{ identity?.name?.trim() || 'rhema' }}</strong>
+        <span>{{ identity?.tagline?.trim() || 'the spoken word' }}</span>
+      </div>
+    </header>
     <header class="head">
       <span class="label">Sessions</span>
       <span class="count">{{ sessions.length }}</span>
@@ -89,6 +102,35 @@ function stateTone(state: string): 'ok' | 'warn' | 'idle' {
   border-right: 1px solid var(--border);
   background: var(--surface);
   overflow-y: auto;
+}
+
+.agent {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 8px 12px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 10px;
+}
+
+.agent-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.agent-text strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-text span {
+  color: var(--text3);
+  font-size: 11.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .head {

@@ -72,10 +72,14 @@ Two consequences worth knowing before changing this code:
 ## Layout
 
 The shell is an icon rail plus two views, switched by a tiny hash
-router (`#/chat`, `#/settings/providers`, `#/settings/about`) — no
+router (`#/chat`, `#/settings/agent/general`, `#/settings/agent/
+accounts`, `#/settings/providers`, `#/settings/about`) — no
 vue-router. The chat view is the session inventory plus the live
 transcript; the settings view is a searchable nav plus pages over one
-shared detail panel. Settings pages stage edits into a local draft and
+shared detail panel. The agent's identity (name, mark, avatar) loads
+once and renders everywhere — rail, sidebar, chat, window title —
+through `AgentAvatar`, which owns the precedence: avatar image, then
+mark or initials. Settings pages stage edits into a local draft and
 apply them with an explicit Save (`PUT /v1/providers/active` answers
 the new pair only; the client carries the provider list forward).
 The providers page also manages the roster itself: the add form renders
