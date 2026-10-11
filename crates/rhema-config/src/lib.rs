@@ -1068,6 +1068,7 @@ profiles:
                 ),
             ]),
             icons: None,
+            theme: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         let work = config.effective(Some("work"));
