@@ -17,7 +17,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -68,27 +67,25 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
     BackHandler { onBack() }
 
     var draft by rememberSaveable { mutableStateOf("") }
-    val listState = rememberLazyListState()
 
     Column(modifier = Modifier.fillMaxSize()) {
         ChatHeader(sessionKey, controller.connection, onBack)
         HorizontalDivider(color = JadeiteBorder)
 
+        // Reversed layout: index 0 is the newest turn, pinned to the
+        // bottom edge. A streaming reply grows against that anchor, so
+        // the newest text stays on screen without scroll bookkeeping,
+        // and a reader scrolled into history is never yanked back.
         LazyColumn(
-            state = listState,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
+            reverseLayout = true,
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
-            items(turnGroups(controller.items), key = { it.key }) { group ->
+            items(turnGroups(controller.items).asReversed(), key = { it.key }) { group ->
                 TurnGroupRow(group)
-            }
-        }
-        LaunchedEffect(controller.items.size) {
-            if (controller.items.isNotEmpty()) {
-                listState.animateScrollToItem(controller.items.size - 1)
             }
         }
 
