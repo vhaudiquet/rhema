@@ -7,20 +7,20 @@ notifications.
 
 ## What it does
 
-- **Settings** — first launch lands here until a base URL is saved and
+- **Settings**: first launch lands here until a base URL is saved and
   validated with `GET /healthz`. Stores the claw base URL and bearer token
   (plus a generated, persistent device ID) in app-private DataStore. Once
   connected, the screen also carries the **Model providers** card: the
   backend instances (`GET /v1/providers`), each one's live model
   listing, and the active pair staged as a draft behind an explicit save
-  (`PUT /v1/providers/active` — it applies from the claw's next turn).
+  (`PUT /v1/providers/active`; it applies from the claw's next turn).
   Trade-off: the token is stored in plain DataStore rather than
-  EncryptedSharedPreferences — `androidx.security:security-crypto` is an
+  EncryptedSharedPreferences; `androidx.security:security-crypto` is an
   alpha-quality, unmaintained artifact, and the OS app sandbox already covers
   the realistic threat (other apps). Backups that could exfiltrate the file
   are disabled in the manifest (`allowBackup=false`,
   `dataExtractionRules`, `fullBackupContent`).
-- **Chat** — session list (`GET /v1/sessions`, interactive sessions first)
+- **Chat**: session list (`GET /v1/sessions`, interactive sessions first)
   and one chat screen per session. While a chat screen is open the app holds
   one SSE connection (`GET /v1/sessions/{key}/events`, OkHttp streaming GET
   with the auth header, hand-parsed frames: blank-line delimited `data:`
@@ -29,7 +29,7 @@ notifications.
   **subscribe first, then POST**, the reply arrives on the stream. Thinking
   deltas render dim and collapsible, tool rows show name/summary with error
   coloring, the streaming reply is finalized by `turn_done`.
-- **Phone status source** — a WorkManager periodic worker (15 min, the OS
+- **Phone status source**: a WorkManager periodic worker (15 min, the OS
   floor, `NetworkType.CONNECTED`) snapshots battery level, charging state,
   network metering (`wifi`/`metered`/`offline`) and DND, and POSTs **only
   transitions** vs the last successfully-posted snapshot (persisted in
@@ -41,13 +41,13 @@ notifications.
   refused by the OS (implicit broadcasts, API 26+), so the receiver is
   registered dynamically in the Application and stays dumb: it only
   enqueues work. Location is not touched in v1.
-- **Notifications** — a second periodic worker polls
+- **Notifications**: a second periodic worker polls
   `GET /v1/notifications?device=<id>&since=<cursor>` (cursor in DataStore),
   posts each as a system notification on channel `rhema` (tap opens the app;
   the API carries no session key, so it lands on the session list), then
   `POST`s an ack per id. Acks are best-effort: the cursor means "seen", not
   "acked", so a failed ack does not re-notify.
-- **Permissions** — `INTERNET`, `POST_NOTIFICATIONS` (runtime request on
+- **Permissions**: `INTERNET`, `POST_NOTIFICATIONS` (runtime request on
   API 33+, re-asked per cold start; the OS throttles denials),
   `RECEIVE_BOOT_COMPLETED` (boot receiver re-runs the idempotent KEEP
   schedule; WorkManager also re-enqueues its own work). Nothing else in v1.
@@ -142,7 +142,7 @@ app/src/main/java/rs/rhema/phone/
 ## Cleartext and certificates
 
 The claw is self-hosted, so its address is whatever the operator points
-at — a LAN name (`kosmos.lan`), a bare IP, a Tailscale name — where a
+at: a LAN name (`kosmos.lan`), a bare IP, a Tailscale name, where a
 publicly-trusted certificate is rare. The app therefore permits
 cleartext HTTP app-wide and trusts user-installed CAs (mkcert installs
 into the user store, so a mkcert-secured claw works over HTTPS too).
@@ -152,10 +152,10 @@ certificate.
 
 ## Road notes
 
-- Theming is Jadeite dark, always — the same tokens as the TUI and the
+- Theming is Jadeite dark, always, the same tokens as the TUI and the
   web UI (`crates/rhema-code/src/palette.rs` DARK). No light scheme, no
   dynamic color: the palette is the brand. The screens mirror the web
-  claw's redesign — cards with hairline-divided rows, state dots, badges,
+  claw's redesign: cards with hairline-divided rows, state dots, badges,
   toned callouts, avatar-row transcripts with accent-bar tool cards, and
   the round accent send button; the shared pieces live in
   `ui/Components.kt`, the Compose counterparts of the web's components.
