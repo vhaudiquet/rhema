@@ -1085,34 +1085,37 @@ fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    // The mark, then always the same three facts: model, context footprint
-    // against the model's window, and the session's accumulated cost. Key
-    // hints live in /help, not here.
+    // The mark, then always the same facts: profile, where the session
+    // sits, model, context footprint against the model's window, the
+    // session's accumulated cost. Key hints live in /help, not here.
+    // Every segment owns its leading separator — a trailing one on the
+    // previous segment doubles as soon as an optional segment (folder,
+    // allowance) sits between two others.
     let effective = app.effective();
-    let mut parts = vec![
-        Span::raw(" ῥ").fg(theme.accent_text),
-        Span::raw(" · ").fg(theme.text3),
-    ];
+    let mut parts = vec![Span::raw(" ῥ").fg(theme.accent_text)];
     if let Some((name, color)) = app.active_profile() {
-        parts.push(Span::raw(name).fg(color));
         parts.push(Span::raw(" · ").fg(theme.text3));
+        parts.push(Span::raw(name).fg(color));
     }
     // Where the session sits: the folder badge over the trimmed
     // workspace path, its folder in bold.
     let (prefix, parents, folder) = footer_folder(&app.options.workspace, app.home.as_deref());
-    parts.push(Span::raw(format!(" · {}", app.icons.folder)).fg(theme.text3));
-    parts.push(Span::raw(format!(" {prefix}")).fg(theme.text3));
+    parts.push(Span::raw(format!(" · {} ", app.icons.folder)).fg(theme.text3));
+    parts.push(Span::raw(prefix).fg(theme.text3));
     for parent in parents {
         parts.push(Span::raw(parent).fg(theme.text3));
         parts.push(Span::raw("/").fg(theme.text3));
     }
     parts.push(Span::raw(folder).fg(theme.text2).bold());
     match (&effective.provider, &effective.model) {
-        (None, _) => parts.push(Span::raw("no provider; use /login").fg(theme.text3)),
-        (_, None) => parts.push(Span::raw("no model; use /model").fg(theme.text3)),
+        (None, _) => parts.push(Span::raw(" · no provider; use /login").fg(theme.text3)),
+        (_, None) => parts.push(Span::raw(" · no model; use /model").fg(theme.text3)),
         // The id's vendor prefix is picker detail: a footer reads the
         // bare model name.
-        (_, Some(model)) => parts.push(Span::raw(footer_model(model).to_owned()).fg(theme.text2)),
+        (_, Some(model)) => {
+            parts.push(Span::raw(" · ").fg(theme.text3));
+            parts.push(Span::raw(footer_model(model).to_owned()).fg(theme.text2));
+        }
     }
     // A named thinking effort is session-relevant telemetry: the badge
     // only appears when the level would change the request.
@@ -1804,13 +1807,19 @@ mod scroll_tests {
     }
 
     /// The footer carries the folder badge: the trimmed workspace path
-    /// with its folder at the end.
+    /// with its folder at the end, the model a separator behind it.
     #[test]
     fn the_footer_shows_the_workspace_folder() {
         let mut app = chat_app();
+        // The harness profile names no provider, so the footer would
+        // take the login hint; a provider renders the model instead.
+        app.config.profiles.get_mut("personal").unwrap().provider = Some("google".to_owned());
         app.home = Some(PathBuf::from("/home/u"));
         app.options.workspace = PathBuf::from("/home/u/Documents/prjs/rhema");
-        assert!(screen_text(&mut app).contains("prjs/rhema"));
+        let screen = screen_text(&mut app);
+        assert!(screen.contains("prjs/rhema · m"), "{screen}");
+        // Segments sit one separator apart, never two.
+        assert!(!screen.contains("·  ·"), "{screen}");
     }
 
     /// The allowance badge shows only the active backend's report: a
