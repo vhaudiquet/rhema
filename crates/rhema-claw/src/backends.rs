@@ -456,14 +456,12 @@ pub fn discover(
         let claw_params = claw_stored(kind);
         let api_key = env_key
             .or(claw_params.as_ref().and_then(|p| p.api_key.clone()))
+            // The stored rhema profile's key for the kind: the matching
+            // named instance's, else the legacy flat field. The keyless
+            // llama.cpp backend never takes a key from the profile.
             .or(match kind {
-                "google" => stored.google_api_key.clone(),
-                "anthropic" => stored.anthropic_api_key.clone(),
-                "openai" => stored.openai_api_key.clone(),
-                "openrouter" => stored.openrouter_api_key.clone(),
-                "deepseek" => stored.deepseek_api_key.clone(),
-                "copilot" => stored.copilot_api_key.clone(),
-                _ => None,
+                "llama-cpp" => None,
+                _ => stored.stored_provider_key(kind),
             });
         let url = claw_params.as_ref().and_then(|p| p.url.clone());
         let params = ProviderParams {

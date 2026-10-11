@@ -8,6 +8,13 @@
 //! toggle. What is kept, per workspace, is the last profile that served
 //! it a turn — a directory reopens on the profile it last used, never
 //! overriding an explicit flag.
+//!
+//! A profile holds any number of named [`ProviderInstance`]s — two
+//! llama.cpp servers, a work and a personal Copilot sub — with one of
+//! them active (`provider` + `instance`). Files written before
+//! instances existed carry one flat credential field per provider;
+//! loading folds those into instances named after their provider.
+//!
 //! Environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`,
 //! `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 //! `DEEPSEEK_API_KEY`, `GITHUB_COPILOT_TOKEN`) always win over a stored
@@ -37,33 +44,75 @@ pub enum ConfigError {
     Yaml(#[from] serde_yaml::Error),
 }
 
+/// One logged-in provider instance: a named credential set for a single
+/// provider kind. A profile may hold any number of them — two llama.cpp
+/// servers, two OpenAI-compatible endpoints, a work and a personal
+/// Copilot sub — keyed by a user-chosen name; the instance's `provider`
+/// says which adapter speaks for it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case")]
+pub struct ProviderInstance {
+    /// Which adapter serves this instance: `google`, `llama-cpp`,
+    /// `openrouter`, `anthropic`, `openai`, `deepseek`, or `copilot`.
+    pub provider: String,
+    /// The API key (the bearer key for a llama.cpp server), when the
+    /// instance needs one. Environment variables still win at use time.
+    pub api_key: Option<String>,
+    /// The server base URL: the llama.cpp address, or an OpenAI-compatible
+    /// endpoint's base. Unset means the provider's own default.
+    pub base_url: Option<String>,
+}
+
 /// One named set of provider settings. Profiles are isolated: work never
 /// inherits personal's model or keys, and vice versa.
+///
+/// Credentials live in [`Profile::instances`] — named
+/// [`ProviderInstance`]s. The pre-instance flat key fields below are
+/// legacy: [`Config::load_from`] folds them into instances and clears
+/// them, and the per-provider accessors read the instance first, the
+/// flat field second, so profiles built by hand (tests, older callers)
+/// keep working.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case")]
 pub struct Profile {
     /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
     /// `anthropic`, `openai`, `deepseek`, or `copilot`.
     pub provider: Option<String>,
-    /// The Google API key entered at login, when one is stored.
-    pub google_api_key: Option<String>,
+    /// The name of the active instance in [`Profile::instances`] — the
+    /// one whose backend serves turns. Must name an instance of
+    /// `provider` to count.
+    pub instance: Option<String>,
+    /// The logged-in provider instances, keyed by a user-chosen name.
+    pub instances: BTreeMap<String, ProviderInstance>,
     /// The last-used model, when one was picked.
     pub model: Option<String>,
-    /// The llama.cpp server base URL (e.g. `http://localhost:8080`).
+    /// Legacy Google API key; migrated into an instance on load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub google_api_key: Option<String>,
+    /// Legacy llama.cpp server base URL; migrated into an instance on
+    /// load.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub llama_cpp_url: Option<String>,
-    /// Optional bearer key for the llama.cpp server, when it asks for one.
+    /// Legacy llama.cpp bearer key; migrated into an instance on load.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub llama_cpp_api_key: Option<String>,
-    /// The OpenRouter API key entered at login, when one is stored.
+    /// Legacy OpenRouter API key; migrated into an instance on load.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub openrouter_api_key: Option<String>,
-    /// The Anthropic API key entered at login, when one is stored.
+    /// Legacy Anthropic API key; migrated into an instance on load.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic_api_key: Option<String>,
-    /// The OpenAI API key entered at login, when one is stored.
+    /// Legacy OpenAI API key; migrated into an instance on load.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub openai_api_key: Option<String>,
-    /// The DeepSeek API key entered at login, when one is stored.
+    /// Legacy DeepSeek API key; migrated into an instance on load.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deepseek_api_key: Option<String>,
-    /// The GitHub OAuth token the Copilot adapter runs on — the device
-    /// flow's long-lived output, stored like any other key; the
-    /// short-lived Copilot token it exchanges for never touches disk.
+    /// Legacy GitHub OAuth token the Copilot adapter runs on — the
+    /// device flow's long-lived output; migrated into an instance on
+    /// load. The short-lived Copilot token it exchanges for never
+    /// touches disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub copilot_api_key: Option<String>,
     /// The color this profile's name wears in the UI, as `#RRGGBB`.
     /// Unset means the UI picks a tone from the theme by profile name.
@@ -76,81 +125,69 @@ pub struct Profile {
 
 impl Profile {
     /// The Google API key to use: `GEMINI_API_KEY`, then `GOOGLE_API_KEY`,
-    /// then the stored key. Whitespace-only values count as unset.
+    /// then the stored key of the profile's Google instance (legacy flat
+    /// field last). Whitespace-only values count as unset.
     pub fn google_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-            self.google_api_key.clone(),
-        )
+        self.provider_key("google", self.google_api_key.clone())
     }
 
-    /// The llama.cpp server URL to use: `LLAMA_CPP_URL`, then the stored
-    /// URL, then `http://localhost:8080`.
+    /// The llama.cpp server URL to use: `LLAMA_CPP_URL`, then the llama
+    /// instance's URL, then `http://localhost:8080`.
     pub fn llama_cpp_url(&self) -> String {
         resolve_key(
             |name| std::env::var(name).ok(),
             &["LLAMA_CPP_URL"],
-            self.llama_cpp_url.clone(),
+            self.llama_url().or(self.llama_cpp_url.clone()),
         )
         .unwrap_or_else(|| "http://localhost:8080".to_owned())
     }
 
     /// The llama.cpp bearer key to use: `LLAMA_CPP_API_KEY`, then the
-    /// stored key; `None` when the server is open.
+    /// llama instance's key (legacy flat field last); `None` when the
+    /// server is open.
     pub fn llama_cpp_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["LLAMA_CPP_API_KEY"],
-            self.llama_cpp_api_key.clone(),
-        )
+        self.provider_key("llama-cpp", self.llama_cpp_api_key.clone())
     }
 
-    /// The OpenRouter key to use: `OPENROUTER_API_KEY`, then the stored
-    /// key.
+    /// The OpenRouter key to use: `OPENROUTER_API_KEY`, then the
+    /// OpenRouter instance's key (legacy flat field last).
     pub fn openrouter_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["OPENROUTER_API_KEY"],
-            self.openrouter_api_key.clone(),
-        )
+        self.provider_key("openrouter", self.openrouter_api_key.clone())
     }
 
-    /// The Anthropic key to use: `ANTHROPIC_API_KEY`, then the stored
-    /// key.
+    /// The Anthropic key to use: `ANTHROPIC_API_KEY`, then the Anthropic
+    /// instance's key (legacy flat field last).
     pub fn anthropic_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["ANTHROPIC_API_KEY"],
-            self.anthropic_api_key.clone(),
-        )
+        self.provider_key("anthropic", self.anthropic_api_key.clone())
     }
 
-    /// The OpenAI key to use: `OPENAI_API_KEY`, then the stored key.
+    /// The OpenAI key to use: `OPENAI_API_KEY`, then the OpenAI
+    /// instance's key (legacy flat field last).
     pub fn openai_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["OPENAI_API_KEY"],
-            self.openai_api_key.clone(),
-        )
+        self.provider_key("openai", self.openai_api_key.clone())
     }
 
-    /// The DeepSeek key to use: `DEEPSEEK_API_KEY`, then the stored key.
+    /// The DeepSeek key to use: `DEEPSEEK_API_KEY`, then the DeepSeek
+    /// instance's key (legacy flat field last).
     pub fn deepseek_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["DEEPSEEK_API_KEY"],
-            self.deepseek_api_key.clone(),
-        )
+        self.provider_key("deepseek", self.deepseek_api_key.clone())
     }
 
     /// The GitHub token the Copilot adapter runs on:
-    /// `GITHUB_COPILOT_TOKEN`, then the stored token.
+    /// `GITHUB_COPILOT_TOKEN`, then the Copilot instance's token (legacy
+    /// flat field last).
     pub fn copilot_api_key(&self) -> Option<String> {
-        resolve_key(
-            |name| std::env::var(name).ok(),
-            &["GITHUB_COPILOT_TOKEN"],
-            self.copilot_api_key.clone(),
+        self.provider_key("copilot", self.copilot_api_key.clone())
+    }
+
+    /// The OpenAI-compatible base URL of the profile's OpenAI instance:
+    /// the stored base, or `https://api.openai.com/v1`. `None` when the
+    /// profile holds no OpenAI instance.
+    pub fn openai_base_url(&self) -> Option<String> {
+        self.instance_for_provider("openai")?;
+        Some(
+            self.instance_url_for("openai")
+                .unwrap_or_else(|| "https://api.openai.com/v1".to_owned()),
         )
     }
 
@@ -172,6 +209,212 @@ impl Profile {
             Some("copilot") => self.copilot_api_key().is_some(),
             _ => self.google_api_key().is_some(),
         }
+    }
+
+    /// The stored instances, sorted by name.
+    pub fn instance_entries(&self) -> Vec<(&str, &ProviderInstance)> {
+        self.instances
+            .iter()
+            .map(|(name, instance)| (name.as_str(), instance))
+            .collect()
+    }
+
+    /// The instance that serves `provider`: the active one when the
+    /// profile's active instance is of that provider, else the first
+    /// stored instance of it, else `None`.
+    pub fn instance_for_provider(&self, provider: &str) -> Option<(&str, &ProviderInstance)> {
+        if self.provider.as_deref() == Some(provider) {
+            if let Some((name, instance)) = self.active_instance() {
+                return Some((name, instance));
+            }
+        }
+        self.instances
+            .iter()
+            .find(|(_, instance)| instance.provider == provider)
+            .map(|(name, instance)| (name.as_str(), instance))
+    }
+
+    /// The active instance: the one `instance` names when it exists and
+    /// serves `provider`, else the first instance of `provider`, else
+    /// `None`.
+    pub fn active_instance(&self) -> Option<(&str, &ProviderInstance)> {
+        let provider = self.provider.as_deref()?;
+        if let Some(name) = self.instance.as_deref() {
+            if let Some(instance) = self.instances.get(name) {
+                if instance.provider == provider {
+                    return Some((name, instance));
+                }
+            }
+        }
+        self.instances
+            .iter()
+            .find(|(_, instance)| instance.provider == provider)
+            .map(|(name, instance)| (name.as_str(), instance))
+    }
+
+    /// Inserts or replaces the named instance. The caller keeps
+    /// `provider`/`instance` coherent — a new active instance must be
+    /// named in `instance` and its kind in `provider`.
+    pub fn upsert_instance(&mut self, name: &str, instance: ProviderInstance) {
+        self.instances.insert(name.to_owned(), instance);
+    }
+
+    /// Removes the named instance, returning it. When it was the active
+    /// one, `instance` is cleared; `provider` stays until the caller
+    /// names a replacement.
+    pub fn remove_instance(&mut self, name: &str) -> Option<ProviderInstance> {
+        let removed = self.instances.remove(name);
+        if removed.is_some() && self.instance.as_deref() == Some(name) {
+            self.instance = None;
+        }
+        removed
+    }
+
+    /// The stored key for `provider` without the environment tier: the
+    /// matching instance's key, else the legacy flat field. Callers that
+    /// run their own environment precedence (the claw's discovery) read
+    /// this instead of the env-aware accessors.
+    pub fn stored_provider_key(&self, provider: &str) -> Option<String> {
+        match self.instance_for_provider(provider) {
+            Some((_, instance)) => instance
+                .api_key
+                .clone()
+                .map(|key| key.trim().to_owned())
+                .filter(|key| !key.is_empty()),
+            None => match provider {
+                "google" => self.google_api_key.clone(),
+                "llama-cpp" => self.llama_cpp_api_key.clone(),
+                "openrouter" => self.openrouter_api_key.clone(),
+                "anthropic" => self.anthropic_api_key.clone(),
+                "openai" => self.openai_api_key.clone(),
+                "deepseek" => self.deepseek_api_key.clone(),
+                "copilot" => self.copilot_api_key.clone(),
+                _ => None,
+            }
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty()),
+        }
+    }
+
+    /// The key an instance serves: the provider's environment variables
+    /// first, then the stored key. Whitespace-only values count as
+    /// unset.
+    pub fn instance_api_key(&self, instance: &ProviderInstance) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            provider_env_names(&instance.provider),
+            instance.api_key.clone(),
+        )
+    }
+
+    /// The base URL an instance serves: `LLAMA_CPP_URL` over the stored
+    /// URL for llama.cpp; the stored base for OpenAI-compatible
+    /// instances (the caller defaults OpenAI itself, so its own default
+    /// stays in one place); `None` for key-only providers.
+    pub fn instance_url(&self, instance: &ProviderInstance) -> Option<String> {
+        match instance.provider.as_str() {
+            "llama-cpp" => Some(
+                resolve_key(
+                    |name| std::env::var(name).ok(),
+                    &["LLAMA_CPP_URL"],
+                    instance.base_url.clone(),
+                )
+                .unwrap_or_else(|| "http://localhost:8080".to_owned()),
+            ),
+            "openai" => instance
+                .base_url
+                .clone()
+                .filter(|url| !url.trim().is_empty()),
+            _ => None,
+        }
+    }
+
+    /// The instance URL for `provider`, via [`Profile::instance_url`].
+    fn instance_url_for(&self, provider: &str) -> Option<String> {
+        let (_, instance) = self.instance_for_provider(provider)?;
+        self.instance_url(instance)
+    }
+
+    /// The llama instance's URL, without the legacy fallback default.
+    fn llama_url(&self) -> Option<String> {
+        self.instance_url_for("llama-cpp")
+    }
+
+    /// The key `provider` serves: the matching instance's key (env
+    /// included), or `fallback` — the legacy flat field — when the
+    /// profile holds no instance of it.
+    fn provider_key(&self, provider: &str, fallback: Option<String>) -> Option<String> {
+        match self.instance_for_provider(provider) {
+            Some((_, instance)) => self.instance_api_key(instance),
+            None => resolve_key(
+                |name| std::env::var(name).ok(),
+                provider_env_names(provider),
+                fallback,
+            ),
+        }
+    }
+
+    /// Folds the legacy flat credential fields into named instances (one
+    /// per provider, named after it) and clears them, keeping `provider`
+    /// as the active instance. Only fires on instance-less profiles, so
+    /// a partially-new file is never rewritten by guesswork.
+    fn migrate_legacy_credentials(&mut self) {
+        if !self.instances.is_empty() {
+            return;
+        }
+        let legacy = [
+            ("google", self.google_api_key.take(), None),
+            ("openrouter", self.openrouter_api_key.take(), None),
+            ("anthropic", self.anthropic_api_key.take(), None),
+            ("openai", self.openai_api_key.take(), None),
+            ("deepseek", self.deepseek_api_key.take(), None),
+            ("copilot", self.copilot_api_key.take(), None),
+        ];
+        for (provider, key, base) in legacy {
+            if let Some(api_key) = key {
+                self.instances.insert(
+                    provider.to_owned(),
+                    ProviderInstance {
+                        provider: provider.to_owned(),
+                        api_key: Some(api_key),
+                        base_url: base,
+                    },
+                );
+            }
+        }
+        let llama_key = self.llama_cpp_api_key.take();
+        let llama_url = self.llama_cpp_url.take();
+        if llama_key.is_some() || llama_url.is_some() {
+            self.instances.insert(
+                "llama-cpp".to_owned(),
+                ProviderInstance {
+                    provider: "llama-cpp".to_owned(),
+                    api_key: llama_key,
+                    base_url: llama_url,
+                },
+            );
+        }
+        if self.instance.is_none() {
+            self.instance = self
+                .provider
+                .clone()
+                .filter(|provider| self.instances.contains_key(provider));
+        }
+    }
+}
+
+/// The environment variables whose values override a stored key for
+/// `provider`, in precedence order.
+fn provider_env_names(provider: &str) -> &'static [&'static str] {
+    match provider {
+        "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "llama-cpp" => &["LLAMA_CPP_API_KEY"],
+        "openrouter" => &["OPENROUTER_API_KEY"],
+        "anthropic" => &["ANTHROPIC_API_KEY"],
+        "openai" => &["OPENAI_API_KEY"],
+        "deepseek" => &["DEEPSEEK_API_KEY"],
+        "copilot" => &["GITHUB_COPILOT_TOKEN"],
+        _ => &[],
     }
 }
 
@@ -312,7 +555,9 @@ impl Config {
     }
 
     /// [`Config::load`] against an explicit file (missing file is the
-    /// default config).
+    /// default config). Profiles carrying the legacy flat credential
+    /// fields are migrated into named instances, so a caller saving the
+    /// loaded config back out writes the new shape.
     pub fn load_from(path: &impl AsRef<Path>) -> Result<Config, ConfigError> {
         let raw = match std::fs::read_to_string(path) {
             Ok(raw) => raw,
@@ -321,7 +566,11 @@ impl Config {
             }
             Err(err) => return Err(err.into()),
         };
-        Ok(serde_yaml::from_str(&raw)?)
+        let mut config: Config = serde_yaml::from_str(&raw)?;
+        for profile in config.profiles.values_mut() {
+            profile.migrate_legacy_credentials();
+        }
+        Ok(config)
     }
 
     /// [`Config::save`] to an explicit file, with the same `0600` handling.
@@ -463,17 +712,45 @@ mod tests {
                 "personal".to_owned(),
                 Profile {
                     provider: Some("llama-cpp".into()),
-                    google_api_key: Some("key-123".into()),
+                    instance: Some("home server".into()),
+                    instances: BTreeMap::from([
+                        (
+                            "home server".to_owned(),
+                            ProviderInstance {
+                                provider: "llama-cpp".into(),
+                                api_key: None,
+                                base_url: Some("http://localhost:8080".into()),
+                            },
+                        ),
+                        (
+                            "anthropic".to_owned(),
+                            ProviderInstance {
+                                provider: "anthropic".into(),
+                                api_key: Some("sk-ant-123".into()),
+                                base_url: None,
+                            },
+                        ),
+                        (
+                            "copilot".to_owned(),
+                            ProviderInstance {
+                                provider: "copilot".into(),
+                                api_key: Some("gho-123".into()),
+                                base_url: None,
+                            },
+                        ),
+                        (
+                            "deepseek".to_owned(),
+                            ProviderInstance {
+                                provider: "deepseek".into(),
+                                api_key: Some("sk-dsk-123".into()),
+                                base_url: None,
+                            },
+                        ),
+                    ]),
                     model: Some("gemini-3.8-flash".into()),
-                    llama_cpp_url: Some("http://localhost:8080".into()),
-                    llama_cpp_api_key: None,
-                    openrouter_api_key: None,
-                    anthropic_api_key: Some("sk-ant-123".into()),
-                    openai_api_key: None,
-                    deepseek_api_key: Some("sk-dsk-123".into()),
-                    copilot_api_key: Some("gho-123".into()),
                     color: None,
                     thinking: Some("low".into()),
+                    ..Profile::default()
                 },
             )]),
             icons: None,
@@ -481,10 +758,10 @@ mod tests {
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(raw.contains("google_api_key:"), "yaml on disk: {raw}");
-        assert!(raw.contains("anthropic_api_key:"), "yaml on disk: {raw}");
-        assert!(raw.contains("deepseek_api_key:"), "yaml on disk: {raw}");
-        assert!(raw.contains("copilot_api_key:"), "yaml on disk: {raw}");
+        assert!(raw.contains("instances:"), "yaml on disk: {raw}");
+        assert!(raw.contains("sk-ant-123"), "yaml on disk: {raw}");
+        assert!(raw.contains("gho-123"), "yaml on disk: {raw}");
+        assert!(raw.contains("sk-dsk-123"), "yaml on disk: {raw}");
         assert!(!raw.contains('{'), "not json: {raw}");
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, config);
@@ -504,6 +781,184 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "credentials file must be 0600");
         }
+    }
+
+    #[test]
+    fn a_legacy_config_migrates_its_flat_keys_into_named_instances() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "\
+profiles:
+  personal:
+    provider: openai
+    model: gpt-5
+    google_api_key: g-key
+    openai_api_key: o-key
+    llama_cpp_url: http://box:8080
+    llama_cpp_api_key: bearer
+  work:
+    provider: copilot
+    copilot_api_key: gho-1
+",
+        )
+        .unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+
+        let personal = &loaded.profiles["personal"];
+        assert_eq!(personal.provider.as_deref(), Some("openai"));
+        assert_eq!(personal.instance.as_deref(), Some("openai"));
+        let entries: Vec<(String, Option<String>)> = personal
+            .instance_entries()
+            .into_iter()
+            .map(|(name, i)| (name.to_owned(), i.base_url.clone().or(i.api_key.clone())))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                ("google".into(), Some("g-key".into())),
+                ("llama-cpp".into(), Some("http://box:8080".into())),
+                ("openai".into(), Some("o-key".into())),
+            ]
+        );
+        // The llama bearer rode along with the URL.
+        assert_eq!(
+            personal.instances["llama-cpp"].api_key.as_deref(),
+            Some("bearer")
+        );
+        // The flat fields are gone: the next save writes the new shape.
+        let saved = dir.path().join("rewritten.yaml");
+        Config::save_to(&saved, &loaded).unwrap();
+        let raw = std::fs::read_to_string(&saved).unwrap();
+        assert!(!raw.contains("google_api_key"), "yaml on disk: {raw}");
+        assert!(!raw.contains("llama_cpp_url"), "yaml on disk: {raw}");
+        // The legacy accessors read the migrated instances back.
+        assert_eq!(personal.google_api_key().as_deref(), Some("g-key"));
+        assert_eq!(personal.openai_api_key().as_deref(), Some("o-key"));
+        assert_eq!(personal.llama_cpp_url(), "http://box:8080");
+        assert_eq!(personal.llama_cpp_api_key().as_deref(), Some("bearer"));
+
+        // work migrates too, and keeps its own section.
+        let work = &loaded.profiles["work"];
+        assert_eq!(work.instance.as_deref(), Some("copilot"));
+        assert_eq!(work.copilot_api_key().as_deref(), Some("gho-1"));
+    }
+
+    #[test]
+    fn the_active_instance_resolves_through_instance_name_then_provider() {
+        let profile = Profile {
+            provider: Some("llama-cpp".into()),
+            instance: Some("gpu box".into()),
+            instances: BTreeMap::from([
+                (
+                    "gpu box".to_owned(),
+                    ProviderInstance {
+                        provider: "llama-cpp".into(),
+                        api_key: None,
+                        base_url: Some("http://gpu:8080".into()),
+                    },
+                ),
+                (
+                    "home".to_owned(),
+                    ProviderInstance {
+                        provider: "llama-cpp".into(),
+                        api_key: None,
+                        base_url: Some("http://home:8080".into()),
+                    },
+                ),
+            ]),
+            ..Profile::default()
+        };
+        let (name, instance) = profile.active_instance().unwrap();
+        assert_eq!(name, "gpu box");
+        assert_eq!(
+            profile.instance_url(instance).as_deref(),
+            Some("http://gpu:8080")
+        );
+        // A dangling `instance` name falls back to the first instance of
+        // the active provider.
+        let mut dangling = profile.clone();
+        dangling.instance = Some("nope".into());
+        assert_eq!(dangling.active_instance().unwrap().0, "gpu box");
+        // The same provider with a different active provider set: the
+        // first stored llama instance serves.
+        let mut elsewhere = profile.clone();
+        elsewhere.provider = Some("openai".into());
+        elsewhere.instance = Some("gpu box".into());
+        assert_eq!(elsewhere.active_instance(), None);
+        assert_eq!(
+            elsewhere.instance_for_provider("llama-cpp").unwrap().0,
+            "gpu box"
+        );
+
+        // Removing the active instance clears the pointer, not the
+        // provider.
+        let mut removed = profile.clone();
+        assert!(removed.remove_instance("gpu box").is_some());
+        assert_eq!(removed.instance, None);
+        assert_eq!(removed.provider.as_deref(), Some("llama-cpp"));
+        assert_eq!(removed.active_instance().unwrap().0, "home");
+        // Removing a name that is not there removes nothing.
+        assert!(removed.remove_instance("gpu box").is_none());
+    }
+
+    #[test]
+    fn two_instances_of_one_provider_hold_their_own_keys() {
+        let mut profile = Profile {
+            provider: Some("openai".into()),
+            instance: Some("personal".into()),
+            ..Profile::default()
+        };
+        profile.upsert_instance(
+            "personal",
+            ProviderInstance {
+                provider: "openai".into(),
+                api_key: Some("sk-personal".into()),
+                base_url: None,
+            },
+        );
+        profile.upsert_instance(
+            "proxy",
+            ProviderInstance {
+                provider: "openai".into(),
+                api_key: Some("sk-proxy".into()),
+                base_url: Some("http://localhost:1234/v1".into()),
+            },
+        );
+        assert_eq!(profile.openai_api_key().as_deref(), Some("sk-personal"));
+        assert_eq!(
+            profile.openai_base_url().as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        // Activating the proxy instance moves both the key and the base.
+        profile.instance = Some("proxy".into());
+        assert_eq!(profile.openai_api_key().as_deref(), Some("sk-proxy"));
+        assert_eq!(
+            profile.openai_base_url().as_deref(),
+            Some("http://localhost:1234/v1")
+        );
+        assert!(profile.has_credentials());
+        // Pointing at a missing name falls back to the first openai
+        // instance rather than failing open.
+        profile.instance = Some("nope".into());
+        assert_eq!(profile.openai_api_key().as_deref(), Some("sk-personal"));
+
+        // The env-free read serves callers with their own precedence.
+        profile.instance = Some("proxy".into());
+        assert_eq!(
+            profile.stored_provider_key("openai").as_deref(),
+            Some("sk-proxy")
+        );
+        // Legacy flat fields back it when no instance matches.
+        let legacy = Profile {
+            openai_api_key: Some(" sk-flat ".into()),
+            ..Profile::default()
+        };
+        assert_eq!(
+            legacy.stored_provider_key("openai").as_deref(),
+            Some("sk-flat")
+        );
     }
 
     #[test]
