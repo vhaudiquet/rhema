@@ -25,9 +25,13 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{ModelCard, SseDecoder};
+use rhema_provider::{Allowance, ModelCard, SseDecoder};
+use serde::de::DeserializeOwned;
 
-use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody, WireModelsPage, is_text};
+use crate::wire::{
+    ChatCompletionChunk, ChunkAssembler, WireCredits, WireErrorBody, WireKey, WireModelsPage,
+    is_text,
+};
 
 /// The production OpenRouter API base.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -123,6 +127,40 @@ impl OpenRouterProvider {
             }
             offset += fetched as u32;
         }
+    }
+
+    /// The account's prepaid credit: `GET /credits` for the account's
+    /// total and spend, `GET /auth/key` for the calling key's own cap —
+    /// the [`Allowance`] is the smaller headroom of the two. Both
+    /// endpoints authenticate with the API key; an empty key answers
+    /// 401 and the call fails.
+    pub async fn allowance(&self) -> Result<Allowance, ProviderError> {
+        let credits: WireCredits = self.get_json("/credits").await?;
+        let key: WireKey = self.get_json("/auth/key").await?;
+        crate::wire::allowance(&credits, &key)
+            .ok_or_else(|| ProviderError::Api("credit response carries no total".to_owned()))
+    }
+
+    /// GETs one authenticated JSON body off the base URL, under the
+    /// listing-style 20s overall timeout.
+    async fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T, ProviderError> {
+        let response = self
+            .http
+            .get(format!("{}{path}", self.base_url))
+            .attributed(&self.api_key)
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(api_error(status, &text));
+        }
+        response
+            .json()
+            .await
+            .map_err(|err| ProviderError::Api(format!("malformed {path} response: {err}")))
     }
 }
 

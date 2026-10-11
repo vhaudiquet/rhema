@@ -59,6 +59,9 @@
 //!   `pricing.prompt`/`pricing.completion` are STRINGS of USD per single
 //!   token; they are converted to per-MTok f64s, with absent, unparseable,
 //!   or negative ("-1"-style sentinel) values meaning "not priced".
+//! - Allowance: `GET /credits` reports the account's prepaid credit and
+//!   its spend, `GET /auth/key` the calling key's own cap and spend; the
+//!   allowance is the smaller headroom of the two.
 
 use std::collections::BTreeMap;
 
@@ -68,7 +71,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
-use rhema_provider::{ModelCard, Pricing};
+use rhema_provider::{Allowance, ModelCard, Pricing};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -436,6 +439,66 @@ pub fn is_text(model: &ModelCard) -> bool {
         "video",
     ];
     !NON_TEXT.iter().any(|marker| model.id.contains(marker))
+}
+
+// --- Allowance: account endpoints -> normalized ---
+
+/// One page of the `GET /credits` response: the account's prepaid
+/// credit and what it has spent.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireCredits {
+    /// The credit figures; `None` when the body is an error envelope.
+    #[serde(default)]
+    pub data: Option<WireCreditsData>,
+}
+
+/// The `data` object of a [`WireCredits`].
+#[derive(Debug, Default, Deserialize)]
+pub struct WireCreditsData {
+    /// Total credit ever granted the account, in USD.
+    #[serde(default)]
+    pub total_credits: Option<f64>,
+    /// What the account has spent so far, in USD.
+    #[serde(default)]
+    pub total_usage: f64,
+}
+
+/// The `GET /auth/key` response: the calling key's own cap and spend.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireKey {
+    /// The key figures; `None` when the body is an error envelope.
+    #[serde(default)]
+    pub data: Option<WireKeyData>,
+}
+
+/// The `data` object of a [`WireKey`].
+#[derive(Debug, Default, Deserialize)]
+pub struct WireKeyData {
+    /// The credit cap this key may spend, in USD; `None` means the key
+    /// is limited only by the account.
+    #[serde(default)]
+    pub limit: Option<f64>,
+    /// What the key has spent so far, in USD.
+    #[serde(default)]
+    pub usage: f64,
+}
+
+/// The allowance the account endpoints report: the prepaid credit
+/// still available, bounded by the key's own cap when it has one —
+/// spending stops at the smaller of the two. `None` when the credits
+/// body carries no total; an unbounded key just lifts the cap.
+pub fn allowance(credits: &WireCredits, key: &WireKey) -> Option<Allowance> {
+    let data = credits.data.as_ref()?;
+    let account_left = (data.total_credits? - data.total_usage).max(0.0);
+    let key_left = key
+        .data
+        .as_ref()
+        .and_then(|data| data.limit.map(|limit| (limit - data.usage).max(0.0)));
+    let left = key_left.map_or(account_left, |key_left| account_left.min(key_left));
+    Some(Allowance {
+        amount: format!("${left:.2}"),
+        kind: "credit".to_owned(),
+    })
 }
 
 // --- Mapping: ModelRequest -> wire ---
@@ -1595,5 +1658,45 @@ mod tests {
 
         let last: WireModelsPage = serde_json::from_str("{\"data\":[]}").unwrap();
         assert!(!last.next_page());
+    }
+
+    #[test]
+    fn the_allowance_is_the_smaller_of_account_and_key_headroom() {
+        let credits: WireCredits =
+            serde_json::from_str(r#"{"data":{"total_credits":20.0,"total_usage":7.5}}"#)
+                .expect("credits parse");
+        // A capped key: 20.0 - 7.5 = 12.50 account-side, 10.0 - 1.0 = 9.00
+        // key-side — the key binds first.
+        let key: WireKey =
+            serde_json::from_str(r#"{"data":{"limit":10.0,"usage":1.0,"label":"ci"}}"#)
+                .expect("key parses");
+        assert_eq!(
+            allowance(&credits, &key),
+            Some(Allowance {
+                amount: "$9.00".to_owned(),
+                kind: "credit".to_owned(),
+            })
+        );
+
+        // An unlimited key lifts the cap: only the account binds.
+        let unlimited: WireKey =
+            serde_json::from_str(r#"{"data":{"limit":null,"usage":1.0}}"#).expect("key parses");
+        assert_eq!(
+            allowance(&credits, &unlimited).unwrap().amount,
+            "$12.50".to_owned()
+        );
+
+        // Spent past a cap never reads negative.
+        let spent: WireCredits =
+            serde_json::from_str(r#"{"data":{"total_credits":5.0,"total_usage":9.0}}"#)
+                .expect("credits parse");
+        assert_eq!(allowance(&spent, &unlimited).unwrap().amount, "$0.00");
+    }
+
+    #[test]
+    fn a_credit_body_without_a_total_reports_no_allowance() {
+        let empty: WireCredits = serde_json::from_str(r#"{"data":null}"#).expect("parses");
+        let key: WireKey = serde_json::from_str(r#"{"data":{"limit":10.0}}"#).expect("parses");
+        assert_eq!(allowance(&empty, &key), None);
     }
 }
