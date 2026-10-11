@@ -72,8 +72,11 @@ pub fn save_session(
     if session.history.is_empty() {
         return Ok(None);
     }
+    // Conversation content: the base and the workspace directory are
+    // `0700`, the file `0600`, re-asserted on every save.
+    rhema_config::privacy::private_dir(base)?;
     let dir = base.join(encode_workspace(workspace));
-    std::fs::create_dir_all(&dir)?;
+    rhema_config::privacy::private_dir(&dir)?;
     let millis = now_millis();
     // Same-millisecond saves pick the next free suffix; names sort by
     // time because the millis field is fixed-width.
@@ -90,11 +93,12 @@ pub fn save_session(
 }
 
 /// Writes `session` to `path` — the in-place update a resumed session
-/// gets on exit, so continuing it never grows a second entry.
+/// gets on exit, so continuing it never grows a second entry. The file
+/// is written `0600` and an existing wider file tightens again.
 pub fn write_session(path: &Path, session: &Session) -> io::Result<()> {
     let json = serde_json::to_string_pretty(session)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    std::fs::write(path, json)
+    rhema_config::privacy::private_write(path, json.as_bytes())
 }
 
 /// The saved sessions for `workspace`, newest first. A missing directory
@@ -313,6 +317,29 @@ mod tests {
             Some("prompt and more"),
             "the row previews the continued session"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_saved_session_lands_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, base) = temp_base();
+        let workspace = Path::new("/home/u/proj");
+        let path = save_session(&base, workspace, &session_with("prompt"))
+            .unwrap()
+            .unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&base), 0o700, "the sessions base is 0700");
+        assert_eq!(
+            mode(&base.join(encode_workspace(workspace))),
+            0o700,
+            "the workspace directory is 0700"
+        );
+        assert_eq!(mode(&path), 0o600, "the session file is 0600");
+        // The in-place update keeps the file private too.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_session(&path, &session_with("prompt again")).unwrap();
+        assert_eq!(mode(&path), 0o600);
     }
 
     #[test]
