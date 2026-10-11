@@ -117,8 +117,9 @@ stream back as session updates, and every `bash` call asks through the
 client's own permission UI. Sessions persist under the cache dir and
 `session/load` restores one with a full replay.
 
-The backend resolves once from `--profile`/`--provider`/`--model` and
-the stored config, the same resolution the TUI and one-shot use. On
+The backend resolves once from `--profile`/`-m` and the stored config
+(`RHEMA_PROVIDER` included), the same resolution the TUI and one-shot
+use. On
 `session/new` and `session/load`, the agent advertises a `Model` select
 (`config_options`): the model it is running is the current value, in
 the `<provider>/<model>` shape every choice value carries, and the
@@ -314,12 +315,16 @@ keyed backends. Tool
 calls run auto-approved for now; command allowlists are planned.
 
 The TUI paints the Jadeite design system — jade-tinted dark ground,
-one green accent, status colors reserved for meaning. `--theme light`
-(or `theme: light` in config.yaml) switches to the light token set for
-light terminals; dark is the design's primary.
+one green accent, status colors reserved for meaning. `theme: light` in
+config.yaml switches to the light token set for light terminals; dark
+is the design's primary.
 
-`--provider llama-cpp --llama-url http://box:8080` starts on the llama.cpp
-backend without logging in; `ctrl-p` still lists that server's models.
+The backend is a stored decision, not a flag: the profile's `provider`
+picks it (a `RHEMA_PROVIDER` environment variable overrides), and the
+model comes from the picker or the profile's `model`. Storing
+`provider: llama-cpp` (with the server in `LLAMA_CPP_URL` or the
+profile's `llama_cpp_url`) starts on the llama.cpp backend without
+logging in; `ctrl-p` still lists that server's models.
 Keys: `enter` sends · `shift-enter` (kitty-protocol terminals;
 Ghostty's default xterm-style sequence parses through the vendored
 crossterm), `alt-enter`, or `ctrl-j` adds a line — the box grows with
@@ -340,10 +345,9 @@ prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 The footer's badges are plain-Unicode icons — `⁂` names the thinking
 level, and the context gauge (`◔◑◕●`) fills with the window so the fill
 is readable at a glance. Terminals carrying a Nerd Font can switch to
-the brain and database glyphs with `--icons nerd` or `icons: nerd` in
-config.yaml.
-Flags: `--workspace`, `--resume`/`--save` (session checkpointing),
-`--max-steps`, `--icons unicode|nerd`, `--thinking low|medium|high`
+the brain and database glyphs with `icons: nerd` in config.yaml.
+Flags: `--profile`, `-m/--model`, `--workspace`, `--resume`/`--save`
+(session checkpointing), `--max-steps`, `--thinking low|medium|high`
 (reasoning effort; mapped
 per provider — `reasoning_effort` on OpenAI-compatible endpoints (the
 Copilot proxy included), `reasoning.effort` on OpenRouter, a thinking

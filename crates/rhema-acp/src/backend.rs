@@ -185,16 +185,19 @@ fn catalog_fetch(
 
 /// Resolves the backend the profile's settings call for. `provider`
 /// overrides the stored choice; `model` the stored model; `llama_url`
-/// the stored server URL. `None` when the chosen kind has no usable
-/// credentials (or an explicit choice names a kind that does not
-/// resolve).
+/// the stored server URL. The stored choice reads through
+/// [`Profile::provider_name`], so `RHEMA_PROVIDER` wins over the stored
+/// `provider`, the same env-wins convention the keys follow. `None`
+/// when the chosen kind has no usable credentials (or an explicit
+/// choice names a kind that does not resolve).
 pub fn resolve(
     profile: &Profile,
     provider: Option<&str>,
     model: Option<&str>,
     llama_url: Option<&str>,
 ) -> Option<Resolved> {
-    let kind = canonical(provider.or(profile.provider.as_deref()).unwrap_or("google"));
+    let stored = profile.provider_name();
+    let kind = canonical(provider.or(stored.as_deref()).unwrap_or("google"));
     let model = model
         .map(str::to_owned)
         .or_else(|| profile.model.clone())

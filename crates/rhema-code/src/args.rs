@@ -1,7 +1,8 @@
 //! The command-line surface, parsed with clap's derive API. Deliberately
-//! narrower than the rhema CLI: the model is owned by the picker and
-//! credentials by the login screen, so neither is accepted as a flag.
-//! Subcommands switch the frontend: `run` is the pipeable one-shot,
+//! narrow: the model is owned by the picker and credentials by the login
+//! screen, so neither is accepted as a flag, and the provider is a
+//! stored-profile or `RHEMA_PROVIDER` decision, not a per-invocation
+//! one. Subcommands switch the frontend: `run` is the pipeable one-shot,
 //! `acp` serves the Agent Client Protocol; its flags mirror the run
 //! subset minus the workspace (the client names it per session).
 
@@ -10,7 +11,9 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand, ValueEnum};
 use rhema_coding_agent::CodingAgentConfig;
 
-/// Which Jadeite theme paints the screen.
+/// Which Jadeite theme paints the screen. Parsed from the stored config
+/// (`theme: dark|light`), not a flag — a theme is a machine choice, not
+/// a per-invocation one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ThemeKind {
     /// The primary dark theme.
@@ -19,8 +22,8 @@ pub enum ThemeKind {
     Light,
 }
 
-/// Which model backend serves turns. Defaults to the stored choice, then
-/// google.
+/// Which model backend serves turns, by the stored config's provider
+/// names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum ProviderChoice {
     /// Google Gemini, by API key.
@@ -93,16 +96,6 @@ pub struct Args {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Model backend for turns. Defaults to the stored choice, then
-    /// google.
-    #[arg(long, value_enum)]
-    pub provider: Option<ProviderChoice>,
-
-    /// llama.cpp server base URL (provider llama-cpp). Defaults to the
-    /// stored URL, then http://localhost:8080.
-    #[arg(long)]
-    pub llama_url: Option<String>,
-
     /// Workspace root for tools.
     #[arg(long, default_value = ".")]
     pub workspace: PathBuf,
@@ -123,15 +116,6 @@ pub struct Args {
     /// setting stands, and absent there too, the provider's default.
     #[arg(long)]
     pub thinking: Option<ThinkingKind>,
-
-    /// The footer's icon flavor: `nerd` needs a Nerd Font installed.
-    #[arg(long)]
-    pub icons: Option<crate::icons::Flavor>,
-
-    /// Color theme. Dark is the design's primary; light exists for
-    /// light-terminal users.
-    #[arg(long, value_enum, default_value_t = ThemeKind::Dark)]
-    pub theme: ThemeKind,
 
     /// A subcommand switches the frontend; without one, rhema runs the
     /// terminal UI.
@@ -164,20 +148,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Model backend for turns. Defaults to the stored choice, then
-    /// google.
-    #[arg(long, value_enum)]
-    pub provider: Option<ProviderChoice>,
-
     /// Model name. Defaults to the stored choice, then the backend's
     /// default.
     #[arg(short = 'm', long)]
     pub model: Option<String>,
-
-    /// llama.cpp server base URL (provider llama-cpp). Defaults to the
-    /// stored URL, then http://localhost:8080.
-    #[arg(long)]
-    pub llama_url: Option<String>,
 
     /// Workspace root for tools.
     #[arg(long, default_value = ".")]
@@ -211,20 +185,10 @@ pub struct AcpArgs {
     #[arg(long)]
     pub profile: Option<String>,
 
-    /// Model backend for turns. Defaults to the stored choice, then
-    /// google.
-    #[arg(long, value_enum)]
-    pub provider: Option<ProviderChoice>,
-
     /// Model name. Defaults to the stored choice, then the backend's
     /// default.
     #[arg(short = 'm', long)]
     pub model: Option<String>,
-
-    /// llama.cpp server base URL (provider llama-cpp). Defaults to the
-    /// stored URL, then http://localhost:8080.
-    #[arg(long)]
-    pub llama_url: Option<String>,
 
     /// Max steps per turn.
     #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
@@ -272,22 +236,22 @@ mod tests {
     #[test]
     fn defaults_match_the_spec() {
         let args = parse(&[]);
-        assert_eq!(args.provider, None);
-        assert_eq!(args.llama_url, None);
+        assert_eq!(args.model, None);
+        assert_eq!(args.profile, None);
         assert_eq!(args.workspace, PathBuf::from("."));
         assert_eq!(args.resume, None);
         assert_eq!(args.save, None);
         assert_eq!(args.max_steps, CodingAgentConfig::DEFAULT_MAX_TURN_STEPS);
-        assert_eq!(args.theme, ThemeKind::Dark);
+        assert_eq!(args.thinking, None);
     }
 
     #[test]
     fn flags_parse() {
         let args = parse(&[
-            "--provider",
-            "llama-cpp",
-            "--llama-url",
-            "http://box:8080",
+            "--profile",
+            "work",
+            "-m",
+            "m1",
             "--workspace",
             "/tmp/ws",
             "--resume",
@@ -296,16 +260,16 @@ mod tests {
             "s.json",
             "--max-steps",
             "4",
-            "--theme",
-            "light",
+            "--thinking",
+            "low",
         ]);
-        assert_eq!(args.provider, Some(ProviderChoice::LlamaCpp));
-        assert_eq!(args.llama_url.as_deref(), Some("http://box:8080"));
+        assert_eq!(args.profile.as_deref(), Some("work"));
+        assert_eq!(args.model.as_deref(), Some("m1"));
         assert_eq!(args.workspace, PathBuf::from("/tmp/ws"));
         assert_eq!(args.resume, Some(PathBuf::from("s.json")));
         assert_eq!(args.save, Some(PathBuf::from("s.json")));
         assert_eq!(args.max_steps, 4);
-        assert_eq!(args.theme, ThemeKind::Light);
+        assert_eq!(args.thinking, Some(ThinkingKind::Low));
     }
 
     #[test]
@@ -335,15 +299,36 @@ mod tests {
 
     #[test]
     fn the_new_providers_parse_as_cli_values_matching_the_stored_names() {
-        let args = parse(&["--provider", "anthropic"]);
-        assert_eq!(args.provider, Some(ProviderChoice::Anthropic));
-        let args = parse(&["--provider", "openai"]);
-        assert_eq!(args.provider, Some(ProviderChoice::OpenAi));
-        let args = parse(&["--provider", "deepseek"]);
-        assert_eq!(args.provider, Some(ProviderChoice::DeepSeek));
-        let args = parse(&["--provider", "copilot"]);
-        assert_eq!(args.provider, Some(ProviderChoice::Copilot));
+        // The provider is a stored choice (or RHEMA_PROVIDER), not a
+        // flag: the spellings round-trip through from_stored.
+        assert_eq!(
+            ProviderChoice::from_stored(Some("anthropic")),
+            ProviderChoice::Anthropic
+        );
+        assert_eq!(
+            ProviderChoice::from_stored(Some("openai")),
+            ProviderChoice::OpenAi
+        );
+        assert_eq!(
+            ProviderChoice::from_stored(Some("deepseek")),
+            ProviderChoice::DeepSeek
+        );
+        assert_eq!(
+            ProviderChoice::from_stored(Some("copilot")),
+            ProviderChoice::Copilot
+        );
         assert_eq!(ProviderChoice::Copilot.stored_name(), "copilot");
+    }
+
+    #[test]
+    fn no_provider_or_llama_flag_exists() {
+        // The provider is a profile decision, the llama.cpp server a
+        // stored URL (or LLAMA_CPP_URL) — neither is a flag.
+        assert!(try_parse(&["--provider", "anthropic"]).is_err());
+        assert!(try_parse(&["--llama-url", "http://box:8080"]).is_err());
+        // Same for the machine-owned look and feel: config.yaml owns it.
+        assert!(try_parse(&["--theme", "light"]).is_err());
+        assert!(try_parse(&["--icons", "nerd"]).is_err());
     }
 
     #[test]
@@ -380,10 +365,6 @@ mod tests {
             "run",
             "--profile",
             "work",
-            "--provider",
-            "llama-cpp",
-            "--llama-url",
-            "http://box:8080",
             "-m",
             "m1",
             "--workspace",
@@ -399,9 +380,8 @@ mod tests {
         ]);
         match args.command {
             Some(Command::Run(run)) => {
+                assert_eq!(run.prompt, None);
                 assert_eq!(run.profile.as_deref(), Some("work"));
-                assert_eq!(run.provider, Some(ProviderChoice::LlamaCpp));
-                assert_eq!(run.llama_url.as_deref(), Some("http://box:8080"));
                 assert_eq!(run.model.as_deref(), Some("m1"));
                 assert_eq!(run.workspace, PathBuf::from("/tmp/ws"));
                 assert_eq!(run.resume, Some(PathBuf::from("s.json")));
@@ -420,9 +400,7 @@ mod tests {
             args.command,
             Some(Command::Acp(AcpArgs {
                 profile: None,
-                provider: None,
                 model: None,
-                llama_url: None,
                 max_steps: CodingAgentConfig::DEFAULT_MAX_TURN_STEPS,
                 thinking: None,
             }))
@@ -433,8 +411,6 @@ mod tests {
             "acp",
             "--profile",
             "work",
-            "--provider",
-            "anthropic",
             "-m",
             "claude-sonnet-4-5",
             "--max-steps",
@@ -445,7 +421,6 @@ mod tests {
         match args.command {
             Some(Command::Acp(acp)) => {
                 assert_eq!(acp.profile.as_deref(), Some("work"));
-                assert_eq!(acp.provider, Some(ProviderChoice::Anthropic));
                 assert_eq!(acp.model.as_deref(), Some("claude-sonnet-4-5"));
                 assert_eq!(acp.max_steps, 16);
                 assert_eq!(acp.thinking, Some(ThinkingKind::High));

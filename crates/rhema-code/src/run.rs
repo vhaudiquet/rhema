@@ -159,9 +159,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
 fn run_acp(args: crate::args::AcpArgs) -> anyhow::Result<()> {
     rhema_acp::serve(rhema_acp::AcpOptions {
         profile: args.profile,
-        provider: args.provider.map(|choice| choice.stored_name().to_owned()),
         model: args.model,
-        llama_url: args.llama_url,
         max_steps: Some(args.max_steps),
         thinking: args.thinking.map(From::from),
         ..AcpOptions::default()
@@ -202,9 +200,9 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| startup_profile(&config, &workspace));
     let effective = config.effective(Some(&profile));
-    let provider_choice = args
-        .provider
-        .unwrap_or_else(|| ProviderChoice::from_stored(effective.provider.as_deref()));
+    // RHEMA_PROVIDER (inside provider_name) wins over the stored
+    // profile, the same env-wins convention the keys follow.
+    let provider_choice = ProviderChoice::from_stored(effective.provider_name().as_deref());
     // No login screen exists headless: a missing credential is an error
     // naming the fix.
     let backend = match provider_choice {
@@ -213,14 +211,11 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
             .map(|api_key| Backend::Google { api_key })
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "missing API key: set GEMINI_API_KEY (or log in once interactively)"
+                    "missing API key: set GEMINI_API_KEY (or log in once interactically)"
                 )
             })?,
         ProviderChoice::LlamaCpp => Backend::LlamaCpp {
-            url: args
-                .llama_url
-                .clone()
-                .unwrap_or_else(|| effective.llama_cpp_url()),
+            url: effective.llama_cpp_url(),
             api_key: effective.llama_cpp_api_key(),
         },
         ProviderChoice::OpenRouter => Backend::OpenRouter {
@@ -341,18 +336,15 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| startup_profile(&config, &workspace));
     let effective = config.effective(Some(&profile));
-    let provider_choice = args
-        .provider
-        .unwrap_or_else(|| ProviderChoice::from_stored(effective.provider.as_deref()));
+    // RHEMA_PROVIDER (inside provider_name) wins over the stored
+    // profile, the same env-wins convention the keys follow.
+    let provider_choice = ProviderChoice::from_stored(effective.provider_name().as_deref());
     let backend = match provider_choice {
         ProviderChoice::Google => effective
             .google_api_key()
             .map(|api_key| Backend::Google { api_key }),
         ProviderChoice::LlamaCpp => Some(Backend::LlamaCpp {
-            url: args
-                .llama_url
-                .clone()
-                .unwrap_or_else(|| effective.llama_cpp_url()),
+            url: effective.llama_cpp_url(),
             api_key: effective.llama_cpp_api_key(),
         }),
         ProviderChoice::OpenRouter => effective
@@ -383,17 +375,20 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .map(rhema_core::request::ThinkingEffort::from)
         .or_else(|| config.effective(Some(&profile)).thinking_effort())
         .unwrap_or(rhema_core::request::ThinkingEffort::Default);
-    let icons = args
+    // The look and feel is a machine choice, not a per-invocation one:
+    // the stored theme and icon flavor decide, unparseable values read
+    // as the defaults.
+    let theme = match config.theme.as_deref() {
+        Some("light") => crate::args::ThemeKind::Light,
+        _ => crate::args::ThemeKind::Dark,
+    };
+    let icons = config
         .icons
-        .or_else(|| {
-            config
-                .icons
-                .as_deref()
-                .and_then(crate::icons::Flavor::parse)
-        })
+        .as_deref()
+        .and_then(crate::icons::Flavor::parse)
         .unwrap_or_default();
     let options = RunOptions {
-        theme: args.theme,
+        theme,
         icons,
         profile: Some(profile),
         workspace: workspace.clone(),
