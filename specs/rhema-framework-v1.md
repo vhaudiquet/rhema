@@ -407,10 +407,10 @@ mechanism:
 - **`rhema-autonomous-agent`** — the resident (the claw): long-lived
   sessions, durable cross-session memory (the `memory_*` tools over
   the memory module, pulled by the model per §9), full context
-  accumulation. The powerful tier — all of that context is blast
-  radius, so it is deployment-gated (§7: hardened, single-node,
-  owned) and earns the permissive §8 default only where the
-  deployment says so.
+  accumulation. The resident tier carries the most context, so a
+  change to it affects the most; it is deployment-gated (§7:
+  hardened, single-node, owned) and earns the permissive §8 default
+  only where the deployment says so.
 
 The tiers share every mechanism — one dispatcher, one notion of
 Session, one resolver seam; a simple agent is a handler profile, not a
