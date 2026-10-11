@@ -7,7 +7,11 @@
 //! llama-cpp backend is always constructible, so a daemon can always
 //! boot. The same construction runs over HTTP: credentials saved
 //! through the surface insert (or replace) a backend in the live
-//! registry and persist in the settings store. One backend is *active*; handlers read the registry per
+//! registry and persist in the settings store. A backend is one
+//! *instance*, named by its `id` — the kind unless a login named it,
+//! so two llama.cpp servers coexist under two ids; ids of instances
+//! discovered from env or the config are always their kind. One
+//! backend is *active*; handlers read the registry per
 //! dispatch, so a switch takes effect on the next turn without a
 //! restart. The active pair is deployment state: seeded from the config
 //! file, persisted in the settings store, changeable over `/v1/providers`
@@ -52,9 +56,14 @@ pub fn default_model_for(kind: &str) -> &'static str {
 /// backend without one (the mock, llama's raw id list) carries `None`.
 pub type ModelListing = Pin<Box<dyn Future<Output = Result<Vec<ModelCard>, ProviderError>> + Send>>;
 
-/// One constructible backend: the provider seam, its kind, its model
-/// fallback, and how to list its models.
+/// One constructible backend instance: the provider seam, the id the
+/// registry keys it under, its kind, its model fallback, and how to
+/// list its models.
 pub struct Backend {
+    /// The instance id: the kind unless the login named it. The
+    /// registry's key, the credentials row's suffix, and the active
+    /// pair's first half are all this string.
+    pub id: String,
     /// The backend kind: `"google"`, `"llama-cpp"`, `"openrouter"`,
     /// `"anthropic"`, `"openai"`, `"mock"`.
     pub kind: String,
@@ -67,10 +76,13 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// A backend without a live listing (the mock).
+    /// A backend without a live listing (the mock). The id doubles as
+    /// the kind: the registry-injected kinds are singletons.
     pub fn headless(kind: impl Into<String>, provider: Arc<dyn ModelProvider>) -> Self {
+        let kind = kind.into();
         Self {
-            kind: kind.into(),
+            id: kind.clone(),
+            kind,
             provider,
             default_model: "mock".to_owned(),
             list_models: None,
@@ -78,15 +90,29 @@ impl Backend {
     }
 }
 
-/// The currently active backend: kind plus the model turns run on.
+/// The currently active backend instance: id plus the model turns run on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Active {
-    kind: String,
+    id: String,
     model: String,
 }
 
+/// One row of the registry listing: the instance id, its kind, and the
+/// model fallback.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendRow {
+    /// The instance id.
+    pub id: String,
+    /// The backend kind.
+    pub kind: String,
+    /// The model used when none is set for this instance.
+    pub default_model: String,
+}
+
 /// The deployment's providers and the active pair, shared by every
-/// handler so a switch takes effect on the next dispatch.
+/// handler so a switch takes effect on the next dispatch. The map is
+/// keyed by instance id, not kind — two instances of one kind are two
+/// rows.
 pub struct BackendRegistry {
     backends: RwLock<BTreeMap<String, Arc<Backend>>>,
     active: RwLock<Active>,
@@ -94,8 +120,8 @@ pub struct BackendRegistry {
 
 impl BackendRegistry {
     /// A registry over `backends`. The active pair is `seed` when that
-    /// kind exists, else the first backend's kind and default model.
-    /// An empty list is a construction error: the registry exists so
+    /// id exists, else the first backend's id and default model. An
+    /// empty list is a construction error: the registry exists so
     /// handlers never face an absent backend.
     pub fn new(
         backends: Vec<Backend>,
@@ -108,20 +134,20 @@ impl BackendRegistry {
         }
         let map: BTreeMap<String, Arc<Backend>> = backends
             .into_iter()
-            .map(|backend| (backend.kind.clone(), Arc::new(backend)))
+            .map(|backend| (backend.id.clone(), Arc::new(backend)))
             .collect();
         let active = match seed {
-            Some((kind, model)) if map.contains_key(&kind) => {
-                let default = map[&kind].default_model.clone();
+            Some((id, model)) if map.contains_key(&id) => {
+                let default = map[&id].default_model.clone();
                 Active {
-                    kind,
+                    id,
                     model: model.unwrap_or(default),
                 }
             }
             _ => {
                 let first = map.values().next().expect("non-empty above");
                 Active {
-                    kind: first.kind.clone(),
+                    id: first.id.clone(),
                     model: first.default_model.clone(),
                 }
             }
@@ -132,32 +158,38 @@ impl BackendRegistry {
         })
     }
 
-    /// Inserts (or replaces) `backend` in the live registry: the write
-    /// behind the credentials routes. The active pair is untouched — a
-    /// replaced backend keeps serving under its kind.
+    /// Inserts (or replaces) `backend` under its id in the live
+    /// registry: the write behind the credentials routes. The active
+    /// pair is untouched — a replaced backend keeps serving under its
+    /// id.
     pub fn insert(&self, backend: Backend) {
         let mut backends = self.backends_lock();
-        backends.insert(backend.kind.clone(), Arc::new(backend));
+        backends.insert(backend.id.clone(), Arc::new(backend));
     }
 
-    /// Removes `kind` from the live registry. Removing the last backend
-    /// is refused: handlers never face an absent backend. When the
-    /// removed kind was active, the first remaining backend (ascending)
-    /// takes over with its default model — the caller re-persists the
-    /// pair it reads back from [`Self::active`].
-    pub fn remove(&self, kind: &str) -> Result<(), String> {
+    /// The backend registered under `id`, when one is.
+    pub fn get(&self, id: &str) -> Option<Arc<Backend>> {
+        self.backends_lock().get(id).cloned()
+    }
+
+    /// Removes the instance `id` from the live registry. Removing the
+    /// last backend is refused: handlers never face an absent backend.
+    /// When the removed instance was active, the first remaining
+    /// backend (ascending) takes over with its default model — the
+    /// caller re-persists the pair it reads back from [`Self::active`].
+    pub fn remove(&self, id: &str) -> Result<(), String> {
         let mut backends = self.backends_lock();
-        if backends.len() == 1 && backends.contains_key(kind) {
+        if backends.len() == 1 && backends.contains_key(id) {
             return Err("cannot remove the last provider backend".to_owned());
         }
-        let removed_was_active = self.active_lock().kind == kind;
-        if backends.remove(kind).is_none() {
-            return Err(format!("unknown provider kind {kind:?}"));
+        let removed_was_active = self.active_lock().id == id;
+        if backends.remove(id).is_none() {
+            return Err(format!("unknown provider backend {id:?}"));
         }
         if removed_was_active {
             let first = backends.values().next().expect("a backend remains");
             *self.active_lock() = Active {
-                kind: first.kind.clone(),
+                id: first.id.clone(),
                 model: first.default_model.clone(),
             };
         }
@@ -167,45 +199,50 @@ impl BackendRegistry {
     /// The provider and model the next dispatch runs on.
     pub fn current(&self) -> (Arc<dyn ModelProvider>, String) {
         let active = self.active_lock();
-        let backend = self.backends_lock()[&active.kind].clone();
+        let backend = self.backends_lock()[&active.id].clone();
         (backend.provider.clone(), active.model.clone())
     }
 
-    /// The active pair as data: kind and model.
+    /// The active pair as data: instance id and model.
     pub fn active(&self) -> (String, String) {
         let active = self.active_lock();
-        (active.kind.clone(), active.model.clone())
+        (active.id.clone(), active.model.clone())
     }
 
-    /// Switches the active pair. An unknown kind is an error; a model
-    /// left unset falls back to that kind's default.
-    pub fn set_active(&self, kind: &str, model: Option<&str>) -> Result<(), String> {
+    /// Switches the active pair. An unknown instance id is an error; a
+    /// model left unset falls back to that instance's default.
+    pub fn set_active(&self, id: &str, model: Option<&str>) -> Result<(), String> {
         let default = {
             let backends = self.backends_lock();
             let backend = backends
-                .get(kind)
-                .ok_or_else(|| format!("unknown provider kind {kind:?}"))?;
+                .get(id)
+                .ok_or_else(|| format!("unknown provider backend {id:?}"))?;
             backend.default_model.clone()
         };
         let model = model.map(str::to_owned).unwrap_or_else(|| default);
         *self.active_lock() = Active {
-            kind: kind.to_owned(),
+            id: id.to_owned(),
             model,
         };
         Ok(())
     }
 
-    /// Every constructible backend: kind and model fallback, ascending.
-    pub fn list(&self) -> Vec<(String, String)> {
+    /// Every constructible backend as listing rows, ascending by id.
+    pub fn list(&self) -> Vec<BackendRow> {
         self.backends_lock()
             .values()
-            .map(|backend| (backend.kind.clone(), backend.default_model.clone()))
+            .map(|backend| BackendRow {
+                id: backend.id.clone(),
+                kind: backend.kind.clone(),
+                default_model: backend.default_model.clone(),
+            })
             .collect()
     }
 
-    /// The live model listing of `kind`, when the backend carries one.
-    pub fn list_models(&self, kind: &str) -> Option<ModelListing> {
-        let backend = self.backends_lock().get(kind)?.clone();
+    /// The live model listing of the instance `id`, when the backend
+    /// carries one.
+    pub fn list_models(&self, id: &str) -> Option<ModelListing> {
+        let backend = self.backends_lock().get(id)?.clone();
         backend.list_models.as_ref().map(|list| list())
     }
 
@@ -323,28 +360,52 @@ fn env_vars_for(kind: &str) -> &'static [&'static str] {
 /// DeepSeek speaks the OpenAI-compatible dialect at its own base.
 const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
 
-/// The settings-store key prefix under which a kind's credentials
-/// persist: `provider.<kind>` holds a [`ProviderParams`] JSON.
+/// The settings-store key prefix under which a backend instance's
+/// credentials persist: `provider.<id>` holds a [`ProviderParams`]
+/// JSON. Legacy rows stored `provider.<kind>` — the id doubling as the
+/// kind, which is what ids default to.
 pub const PROVIDER_KEY_PREFIX: &str = "provider.";
 
-/// The settings key for one kind's stored credentials.
-pub fn provider_settings_key(kind: &str) -> String {
-    format!("{PROVIDER_KEY_PREFIX}{kind}")
+/// The settings key for one backend instance's stored credentials.
+pub fn provider_settings_key(id: &str) -> String {
+    format!("{PROVIDER_KEY_PREFIX}{id}")
 }
 
-/// The credentials a keyed backend constructs from, as the settings
-/// store persists them: an API key, and for server-addressed kinds the
-/// URL. `api_key` never logs and never round-trips through the list
-/// route — the list says only where a credential came from.
+/// Whether `id` may name a backend instance: trimmed already by the
+/// caller, non-empty, no whitespace, no `/`, at most 64 chars.
+/// Comparisons are exact.
+pub fn valid_instance_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && !id.chars().any(|c| c.is_whitespace() || c == '/')
+}
+
+/// The credentials a backend instance constructs from, as the settings
+/// store persists them: the kind the params construct, an API key, and
+/// for server-addressed kinds the URL. `api_key` never logs and never
+/// round-trips through the list route — the list says only where a
+/// credential came from.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderParams {
+    /// The kind these params construct. Absent in legacy rows (stored
+    /// under `provider.<kind>` before instances existed): the id then
+    /// doubles as the kind, which is what those rows always meant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// The API key (or GitHub token for copilot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// The server address (llama.cpp).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+impl ProviderParams {
+    /// The kind these params construct: the stored kind when the row
+    /// carries one, else the id — the legacy shape, where ids were
+    /// kinds.
+    pub fn kind_or<'a>(&'a self, id: &'a str) -> &'a str {
+        self.kind.as_deref().unwrap_or(id)
+    }
 }
 
 /// Every kind a runtime login can construct, ascending: the addable
@@ -395,10 +456,11 @@ pub fn param_fields_for(kind: &str) -> &'static [ParamField] {
     }
 }
 
-/// Constructs one backend from `params`. The per-kind requirements:
-/// keyed kinds want an `api_key`; llama.cpp wants a `url` (the keyless
-/// default still applies when neither is given). Unknown kinds are an
-/// error — "mock" is registry-injected, never constructed.
+/// Constructs one backend from `params`, its id defaulting to the
+/// kind. The per-kind requirements: keyed kinds want an `api_key`;
+/// llama.cpp wants a `url` (the keyless default still applies when
+/// neither is given). Unknown kinds are an error — "mock" is
+/// registry-injected, never constructed.
 pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String> {
     let provider = match kind {
         "google" => AnyProvider::Google(GoogleProvider::new(require_key(kind, params)?)),
@@ -431,6 +493,7 @@ pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String>
     let default_model = default_model_for(kind).to_owned();
     let provider = Arc::new(provider);
     Ok(Backend {
+        id: kind.to_owned(),
         kind: kind.to_owned(),
         provider: provider.clone(),
         default_model,
@@ -447,21 +510,54 @@ fn require_key(kind: &str, params: &ProviderParams) -> Result<String, String> {
         .ok_or_else(|| format!("{kind} needs an api_key"))
 }
 
-/// Discovers every constructible backend from the environment, the
-/// claw's own stored credentials, and the stored rhema config — in that
-/// precedence, mirroring the frontend's env-wins rule. The keyless
-/// llama.cpp backend always constructs, so the registry is never empty;
-/// a keyed backend joins when any source resolves for it. The config's
-/// `provider`/`model` pair is the caller's seed for the active backend —
-/// deployment defaults, not a constraint. `claw_stored` reads the
-/// daemon's settings store (the credentials the HTTP surface wrote).
+/// Discovers every constructible backend instance from the claw's own
+/// stored credentials, the environment, and the stored rhema config.
+/// Stored instances — the `provider.<id>` rows the HTTP surface wrote —
+/// boot under the id they were saved with, the row's inner `kind`
+/// naming what to construct (a legacy row without one keeps its id
+/// doubling as the kind). For each kind, the env credential outranks
+/// everything: it constructs the kind's own id, pushing a stored twin
+/// of the same id aside while the row stays persisted for a
+/// post-restart return. A stored instance of a kind outranks the
+/// profile fallback, which only constructs when neither env nor a
+/// stored row resolved. The keyless llama.cpp backend always
+/// constructs while no stored row of its kind exists, so the registry
+/// is never empty. The config's `provider`/`model` pair is the
+/// caller's seed for the active backend — deployment defaults, not a
+/// constraint. `stored_rows` reads the daemon's settings store, every
+/// `provider.*` row as `(id, params)`; a row that no longer constructs
+/// never blocks the boot.
 pub fn discover(
     config: &crate::config::ClawConfig,
     stored: &rhema_config::Profile,
     env: &dyn Fn(&str) -> Option<String>,
-    claw_stored: &dyn Fn(&str) -> Option<ProviderParams>,
+    stored_rows: &dyn Fn() -> Vec<(String, ProviderParams)>,
 ) -> Vec<Backend> {
+    let rows = stored_rows();
     let mut backends = Vec::new();
+
+    // The env credential each kind resolves from, if any.
+    let env_key = |kind: &str| {
+        env_vars_for(kind)
+            .iter()
+            .find_map(|name| env(name))
+            .filter(|key| !key.trim().is_empty())
+    };
+
+    // Stored instances first, under the id their row names. An
+    // env-backed kind takes the id back from a stored twin of the same
+    // id below — env wins the per-kind slot, the row stays persisted.
+    for (id, params) in &rows {
+        let kind = params.kind_or(id);
+        if id == kind && env_key(kind).is_some() {
+            continue;
+        }
+        if let Ok(mut backend) = construct(kind, params) {
+            backend.id = id.clone();
+            seed_llama_model(&mut backend, config);
+            backends.push(backend);
+        }
+    }
 
     for kind in [
         "llama-cpp",
@@ -472,30 +568,43 @@ pub fn discover(
         "deepseek",
         "copilot",
     ] {
-        // Env first, the claw's stored credentials second, the stored
-        // rhema profile third.
-        let env_key = env_vars_for(kind)
-            .iter()
-            .find_map(|name| env(name))
-            .filter(|key| !key.trim().is_empty());
-        let claw_params = claw_stored(kind);
-        let api_key = env_key
-            .or(claw_params.as_ref().and_then(|p| p.api_key.clone()))
+        let stored_of_kind = rows.iter().any(|(id, params)| params.kind_or(id) == kind);
+        let params = if kind == "llama-cpp" {
+            if stored_of_kind {
+                // The stored rows own the kind now; the keyless default
+                // would undo a removal of the kind's own id.
+                continue;
+            }
+            // The keyless server backend always constructs, so the
+            // registry is never empty.
+            ProviderParams {
+                kind: Some(kind.to_owned()),
+                api_key: None,
+                url: Some(stored.llama_cpp_url()),
+            }
+        } else if let Some(api_key) = env_key(kind) {
+            ProviderParams {
+                kind: Some(kind.to_owned()),
+                api_key: Some(api_key),
+                url: None,
+            }
+        } else if stored_of_kind {
+            // The stored instance of the kind wins over the profile
+            // fallback — the surface's login is the newer decision.
+            continue;
+        } else {
             // The stored rhema profile's key for the kind: the matching
             // named instance's, else the legacy flat field. The keyless
             // llama.cpp backend never takes a key from the profile.
-            .or(match kind {
+            let api_key = match kind {
                 "llama-cpp" => None,
                 _ => stored.stored_provider_key(kind),
-            });
-        let url = claw_params.as_ref().and_then(|p| p.url.clone());
-        let params = ProviderParams {
-            api_key,
-            url: if kind == "llama-cpp" {
-                Some(url.unwrap_or_else(|| stored.llama_cpp_url()))
-            } else {
-                None
-            },
+            };
+            ProviderParams {
+                kind: Some(kind.to_owned()),
+                api_key,
+                url: None,
+            }
         };
         let has_creds = match kind {
             // The keyless server backend always constructs.
@@ -507,14 +616,7 @@ pub fn discover(
         }
         match construct(kind, &params) {
             Ok(mut backend) => {
-                if kind == "llama-cpp" {
-                    // The config file's model seeds llama's fallback, as
-                    // discovery always has: it names the deployment's
-                    // local model when it names one at all.
-                    if let Some(model) = &config.model {
-                        backend.default_model = model.clone();
-                    }
-                }
+                seed_llama_model(&mut backend, config);
                 backends.push(backend);
             }
             // An unconstructible kind (a blank key) never blocks the boot.
@@ -522,6 +624,16 @@ pub fn discover(
         }
     }
     backends
+}
+
+/// The config file's model seeds llama's fallback, as discovery always
+/// has: it names the deployment's local model when it names one at all.
+fn seed_llama_model(backend: &mut Backend, config: &crate::config::ClawConfig) {
+    if backend.kind == "llama-cpp" {
+        if let Some(model) = &config.model {
+            backend.default_model = model.clone();
+        }
+    }
 }
 
 #[cfg(test)]
@@ -551,6 +663,7 @@ mod tests {
         // The real per-kind default, not headless's mock placeholder —
         // the fallback assertions depend on it.
         Backend {
+            id: kind.to_owned(),
             kind: kind.to_owned(),
             provider: Arc::new(Stub),
             default_model: default_model_for(kind).to_owned(),
@@ -606,9 +719,45 @@ mod tests {
 
     fn params(api_key: Option<&str>, url: Option<&str>) -> ProviderParams {
         ProviderParams {
+            kind: None,
             api_key: api_key.map(str::to_owned),
             url: url.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn a_legacy_row_defaults_its_kind_to_the_id() {
+        assert_eq!(params(Some("k"), None).kind_or("google"), "google");
+        let named = ProviderParams {
+            kind: Some("llama-cpp".to_owned()),
+            ..params(None, None)
+        };
+        assert_eq!(named.kind_or("local-llama"), "llama-cpp");
+    }
+
+    #[test]
+    fn instance_ids_exclude_whitespace_slashes_and_excess_length() {
+        assert!(valid_instance_id("local-llama"));
+        assert!(valid_instance_id(&"x".repeat(64)));
+        assert!(!valid_instance_id(""));
+        assert!(!valid_instance_id("a b"));
+        assert!(!valid_instance_id("a/b"));
+        assert!(!valid_instance_id(&"x".repeat(65)));
+    }
+
+    #[test]
+    fn two_instances_of_a_kind_coexist_under_their_ids() {
+        let mut local_a = backend("llama-cpp");
+        local_a.id = "local-a".to_owned();
+        let mut local_b = backend("llama-cpp");
+        local_b.id = "local-b".to_owned();
+        let registry = BackendRegistry::new(vec![local_a, local_b], None).unwrap();
+        assert_eq!(registry.list().len(), 2);
+        registry.set_active("local-b", None).unwrap();
+        assert_eq!(registry.active().0, "local-b");
+        // Removing the active id hands the pair to the remaining one.
+        registry.remove("local-b").unwrap();
+        assert_eq!(registry.active().0, "local-a");
     }
 
     #[test]
@@ -630,8 +779,8 @@ mod tests {
         let config = test_config();
         let profile = profile_with_google();
         let env = |_name: &str| None;
-        let claw_stored = |kind: &str| (kind == "deepseek").then(|| params(Some("cd"), None));
-        let backends = discover(&config, &profile, &env, &claw_stored);
+        let stored_rows = || vec![("deepseek".to_owned(), params(Some("cd"), None))];
+        let backends = discover(&config, &profile, &env, &stored_rows);
         let mut kinds: Vec<&str> = backends.iter().map(|b| b.kind.as_str()).collect();
         kinds.sort_unstable();
         assert_eq!(kinds, vec!["deepseek", "google", "llama-cpp"]);
@@ -642,9 +791,69 @@ mod tests {
         let config = test_config();
         let profile = rhema_config::Profile::default();
         let env = |_name: &str| None;
-        let backends = discover(&config, &profile, &env, &|_kind| None);
+        let backends = discover(&config, &profile, &env, &|| Vec::new());
         assert_eq!(backends.len(), 1);
         assert_eq!(backends[0].kind, "llama-cpp");
+    }
+
+    #[test]
+    fn a_named_row_boots_under_its_id_and_keeps_the_default_slot_empty() {
+        let config = test_config();
+        let profile = profile_with_google();
+        let env = |_name: &str| None;
+        let stored_rows = || {
+            vec![(
+                "local-llama".to_owned(),
+                ProviderParams {
+                    kind: Some("llama-cpp".to_owned()),
+                    ..params(None, Some("http://h:1"))
+                },
+            )]
+        };
+        let backends = discover(&config, &profile, &env, &stored_rows);
+        let mut ids: Vec<&str> = backends.iter().map(|b| b.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, vec!["google", "local-llama"]);
+        // The stored row owns the kind: the keyless default id does not
+        // resurrect beside it.
+        assert!(!ids.contains(&"llama-cpp"));
+        let llama = backends.iter().find(|b| b.id == "local-llama").unwrap();
+        assert_eq!(llama.kind, "llama-cpp");
+    }
+
+    #[test]
+    fn env_takes_the_kind_id_back_from_a_stored_twin() {
+        let config = test_config();
+        let profile = rhema_config::Profile::default();
+        let env = |name: &str| (name == "GOOGLE_API_KEY").then(|| "from-env".to_owned());
+        let stored_rows = || {
+            vec![(
+                "google".to_owned(),
+                ProviderParams {
+                    kind: Some("google".to_owned()),
+                    ..params(Some("stored"), None)
+                },
+            )]
+        };
+        let backends = discover(&config, &profile, &env, &stored_rows);
+        let google: Vec<&Backend> = backends.iter().filter(|b| b.kind == "google").collect();
+        assert_eq!(google.len(), 1, "env wins the id, no twin survives");
+        assert_eq!(google[0].id, "google");
+    }
+
+    #[test]
+    fn a_legacy_row_without_an_inner_kind_boots_as_its_kind() {
+        let config = test_config();
+        let profile = rhema_config::Profile::default();
+        let env = |_name: &str| None;
+        let stored_rows = || vec![("anthropic".to_owned(), params(Some("legacy"), None))];
+        let backends = discover(&config, &profile, &env, &stored_rows);
+        let anthropic = backends
+            .iter()
+            .find(|b| b.id == "anthropic")
+            .expect("the legacy row boots");
+        assert_eq!(anthropic.kind, "anthropic");
+        assert_eq!(anthropic.default_model, "claude-sonnet-4-5");
     }
 
     #[test]

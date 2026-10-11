@@ -131,17 +131,26 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
     // unopenable store boots the daemon without them rather than not at
     // all — the same grace the rhema config gets above.
     let claw_creds = rhema_claw::SettingsStore::open(config.db_path()?).ok();
-    let claw_stored = |kind: &str| {
-        claw_creds.as_ref().and_then(|store| {
-            store
-                .get(&rhema_claw::backends::provider_settings_key(kind))
-                .ok()
-                .flatten()
-                .and_then(|json| serde_json::from_str(&json).ok())
-        })
+    let claw_rows = move || {
+        claw_creds
+            .as_ref()
+            .and_then(|store| {
+                store
+                    .get_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)
+                    .ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, json)| {
+                let id = key.strip_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)?;
+                serde_json::from_str(&json)
+                    .ok()
+                    .map(|params| (id.to_owned(), params))
+            })
+            .collect::<Vec<_>>()
     };
     let env = |name: &str| std::env::var(name).ok();
-    let backends = rhema_claw::backends::discover(config, &profile, &env, &claw_stored);
+    let backends = rhema_claw::backends::discover(config, &profile, &env, &claw_rows);
     let seed = config
         .provider
         .as_deref()

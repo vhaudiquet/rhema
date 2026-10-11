@@ -87,10 +87,11 @@ from the `addable` kinds the claw serves — each kind's `fields` carry
 `{name, required}`, `required` marking what the daemon refuses the login
 without (llama.cpp needs neither of its fields, it serves keyless on a
 default url); the form demands only those and marks the rest optional.
-A login is `PUT .../credentials` — apply immediately,
-credentials persist; rows carry the credential's `source`
-badge (env-backed kinds return on restart after a removal), and the
-remove button (`DELETE /v1/providers/{kind}`) refuses the last backend
+A login is `PUT .../credentials` — apply immediately, credentials
+persist; roster rows are backend instances (`id`, the kind unless the
+login named it, plus the credential's `source`
+badge — env-backed kinds return on restart after a removal), and the
+remove button (`DELETE /v1/providers/{id}`) refuses the last backend
 claw-side.
 
 ```

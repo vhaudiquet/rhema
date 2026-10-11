@@ -1164,10 +1164,11 @@ async fn providers_gain_and_lose_backends_over_the_surface() {
     let base = serve(&daemon).await;
     let client = reqwest::Client::new();
 
-    // A login: llama.cpp takes a url, no key, and joins the registry.
+    // A login: llama.cpp takes a url, no key, and joins the registry
+    // under its kind's id.
     let added: Value = client
         .put(format!("{base}/v1/providers/llama-cpp/credentials"))
-        .json(&json!({"url": "http://127.0.0.1:9999"}))
+        .json(&json!({"kind": "llama-cpp", "url": "http://127.0.0.1:9999"}))
         .send()
         .await
         .expect("the login posts")
@@ -1181,11 +1182,12 @@ async fn providers_gain_and_lose_backends_over_the_surface() {
         .find(|p| p["kind"] == "llama-cpp")
         .expect("the new backend listed")
         .clone();
+    assert_eq!(row["id"], "llama-cpp");
     assert_eq!(row["source"], "stored");
     assert_eq!(row["default_model"], "local");
     assert_eq!(added["active"]["provider"], "mock", "the pair is untouched");
 
-    // A re-add replaces the kind in place instead of duplicating it.
+    // A re-add replaces the id in place instead of duplicating it.
     let replaced: Value = client
         .put(format!("{base}/v1/providers/llama-cpp/credentials"))
         .json(&json!({"url": "http://127.0.0.1:10000"}))
@@ -1206,7 +1208,7 @@ async fn providers_gain_and_lose_backends_over_the_surface() {
     // A keyed kind without its key is a 400, and nothing was added.
     let refused = client
         .put(format!("{base}/v1/providers/google/credentials"))
-        .json(&json!({}))
+        .json(&json!({"kind": "google"}))
         .send()
         .await
         .expect("the refusal posts");
@@ -1227,16 +1229,21 @@ async fn providers_gain_and_lose_backends_over_the_surface() {
             .any(|p| p["kind"] == "google")
     );
 
-    // An unknown kind is a 400 too.
-    let unknown = client
-        .put(format!("{base}/v1/providers/nope/credentials"))
-        .json(&json!({"api_key": "k"}))
-        .send()
-        .await
-        .expect("the refusal posts");
-    assert_eq!(unknown.status(), 400);
+    // An unknown kind is a 400 too, with or without the key.
+    for body in [
+        json!({"api_key": "k"}),
+        json!({"kind": "nope", "api_key": "k"}),
+    ] {
+        let unknown = client
+            .put(format!("{base}/v1/providers/nope/credentials"))
+            .json(&body)
+            .send()
+            .await
+            .expect("the refusal posts");
+        assert_eq!(unknown.status(), 400, "{body}");
+    }
 
-    // Removal: the active kind going away moves the pair to what
+    // Removal: the active instance going away moves the pair to what
     // remains, and the persisted pair moves with it.
     let removed: Value = client
         .delete(format!("{base}/v1/providers/mock"))
@@ -1396,4 +1403,195 @@ async fn the_agent_identity_is_editable_over_the_surface() {
         .await
         .expect("the read answers");
     assert_eq!(gone.status(), 404);
+}
+
+/// The registry a rebuilt daemon boots over the same db: discovery's
+/// stored instances plus the scripted mock, so a persisted active pair
+/// referencing a named instance restores against it.
+fn discovered_registry(dir: &tempfile::TempDir) -> Arc<rhema_claw::BackendRegistry> {
+    let cfg = config(dir, None);
+    let profile = rhema_config::Profile::default();
+    let stored_rows = || {
+        rhema_claw::SettingsStore::open(dir.path().join("dispatch.db"))
+            .ok()
+            .and_then(|store| {
+                store
+                    .get_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)
+                    .ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|(key, json)| {
+                let id = key.strip_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)?;
+                serde_json::from_str(&json).ok().map(|p| (id.to_owned(), p))
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut backends = rhema_claw::backends::discover(&cfg, &profile, &|_| None, &stored_rows);
+    backends.push(rhema_claw::Backend::headless(
+        "mock",
+        Arc::new(MockProvider::new([reply("on it")])),
+    ));
+    Arc::new(
+        rhema_claw::BackendRegistry::new(backends, None)
+            .expect("the discovered registry always constructs"),
+    )
+}
+
+/// Named instances: two logins of one kind coexist under two ids, an
+/// id replaces in place (kind optional), kind mismatches and kindless
+/// new ids and bad names are refused, and the active pair pointing at
+/// a named instance survives a daemon rebuild over the same store.
+#[tokio::test]
+async fn named_provider_instances_share_the_surface() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    // Two llama.cpp servers under two names, two urls.
+    for (name, url) in [
+        ("local-a", "http://127.0.0.1:9001"),
+        ("local-b", "http://127.0.0.1:9002"),
+    ] {
+        let added: Value = client
+            .put(format!("{base}/v1/providers/{name}/credentials"))
+            .json(&json!({"kind": "llama-cpp", "url": url}))
+            .send()
+            .await
+            .expect("the login posts")
+            .json()
+            .await
+            .expect("the state parses");
+        let row = added["providers"]
+            .as_array()
+            .expect("the providers array")
+            .iter()
+            .find(|p| p["id"] == name)
+            .unwrap_or_else(|| panic!("{name} listed: {added}"));
+        assert_eq!(row["kind"], "llama-cpp", "{row}");
+        assert_eq!(row["source"], "stored", "{row}");
+    }
+
+    // Replace in place by id, kind omitted: still one local-a, still a
+    // llama.cpp.
+    let replaced: Value = client
+        .put(format!("{base}/v1/providers/local-a/credentials"))
+        .json(&json!({"url": "http://127.0.0.1:9003"}))
+        .send()
+        .await
+        .expect("the re-add posts")
+        .json()
+        .await
+        .expect("the state parses");
+    let rows = replaced["providers"]
+        .as_array()
+        .expect("the providers array");
+    assert_eq!(rows.iter().filter(|p| p["id"] == "local-a").count(), 1);
+    assert_eq!(
+        rows.iter().filter(|p| p["kind"] == "llama-cpp").count(),
+        2,
+        "both named instances still serve: {rows:?}"
+    );
+
+    // A kind mismatch on replace is a 400.
+    let mismatched = client
+        .put(format!("{base}/v1/providers/local-a/credentials"))
+        .json(&json!({"kind": "google", "api_key": "k"}))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(mismatched.status(), 400);
+
+    // A new id without a kind is a 400: the first login must say what
+    // it is constructing.
+    let kindless = client
+        .put(format!("{base}/v1/providers/newone/credentials"))
+        .json(&json!({"api_key": "k"}))
+        .send()
+        .await
+        .expect("the refusal posts");
+    assert_eq!(kindless.status(), 400);
+
+    // Bad names are refused: whitespace, a slash, over the length cap.
+    let long = "x".repeat(65);
+    for name in ["bad%20name", "a%2Fb", long.as_str()] {
+        let refused = client
+            .put(format!("{base}/v1/providers/{name}/credentials"))
+            .json(&json!({"kind": "llama-cpp"}))
+            .send()
+            .await
+            .expect("the refusal posts");
+        assert_eq!(refused.status(), 400, "{name}");
+    }
+
+    // The active pair moves to a named instance and persists.
+    let switched: Value = client
+        .put(format!("{base}/v1/providers/active"))
+        .json(&json!({"provider": "local-b"}))
+        .send()
+        .await
+        .expect("the switch posts")
+        .json()
+        .await
+        .expect("the switch parses");
+    assert_eq!(switched["active"]["provider"], "local-b");
+
+    drop(base);
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        discovered_registry(&dir),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon reassembles");
+    assert_eq!(
+        daemon.backends().active().0,
+        "local-b",
+        "the named instance is still active after the rebuild"
+    );
+}
+
+/// A legacy credentials row — `provider.<kind>` with no kind inside —
+/// still boots, as its kind, under its own id.
+#[tokio::test]
+async fn a_legacy_credentials_row_without_an_inner_kind_still_boots() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store =
+        rhema_claw::SettingsStore::open(dir.path().join("dispatch.db")).expect("the store opens");
+    store
+        .set("provider.anthropic", r#"{"api_key":"legacy-key"}"#)
+        .expect("the legacy row persists");
+    drop(store);
+
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        discovered_registry(&dir),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let listed: Value = client
+        .get(format!("{base}/v1/providers"))
+        .send()
+        .await
+        .expect("the list reads")
+        .json()
+        .await
+        .expect("the list parses");
+    let row = listed["providers"]
+        .as_array()
+        .expect("the providers array")
+        .iter()
+        .find(|p| p["id"] == "anthropic")
+        .expect("the legacy row boots as its kind")
+        .clone();
+    assert_eq!(row["kind"], "anthropic");
+    assert_eq!(row["source"], "stored");
 }

@@ -402,9 +402,11 @@ GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{for
 GET  /v1/bootstrap                     {"soul": bool, "user": bool}
 POST /v1/ingest                         {"source","key","payload"} -> 202
 GET  /v1/notifications?device=&since=   POST /v1/notifications/{id}/ack
-GET  /v1/providers                      the backends + the active pair
+GET  /v1/providers                      the backend instances + the active pair
 PUT  /v1/providers/active               {"provider","model"?} — switch, persisted
-GET  /v1/providers/{kind}/models        the live model listing
+PUT  /v1/providers/{id}/credentials     add or replace an instance, persisted
+DELETE /v1/providers/{id}               remove one (the last is refused)
+GET  /v1/providers/{id}/models          the live model listing
 ```
 
 ### Identity and first-run
@@ -430,9 +432,12 @@ SSE frames are JSON, `data: {..}
 daemon owns the conversation, so the client mirrors replies rather than
 managing history.
 
-Every provider whose credentials resolve (env or the stored rhema
-config) is constructed at boot; one is active, and switching —
-`PUT /v1/providers/active` — is runtime state persisted in SQLite: the
+Every provider whose credentials resolve (env, the claw's own stored
+logins, or the stored rhema config) is constructed at boot as a backend
+*instance* named by an id — the kind unless a login named it, so two
+llama.cpp servers (or two keys of one cloud) coexist under two names.
+One is active, and switching — `PUT /v1/providers/active` — is runtime
+state persisted in SQLite: the
 config's `provider`/`model` pair is only the seed, so the chart pins
 nothing and a switch never needs a restart.
 

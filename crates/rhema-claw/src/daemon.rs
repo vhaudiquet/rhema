@@ -199,13 +199,13 @@ impl Daemon {
             })?,
         ));
         // The persisted pair wins over the config seed — it is what a
-        // runtime switch wrote. A persisted kind the registry no longer
-        // knows (a key removed from the deployment) falls back to the
-        // seed silently: the daemon still boots.
+        // runtime switch wrote. A persisted id the registry no longer
+        // knows (a backend removed from the deployment) falls back to
+        // the seed silently: the daemon still boots.
         let persisted_provider = settings.get(crate::settings::ACTIVE_PROVIDER_KEY)?;
         let persisted_model = settings.get(crate::settings::ACTIVE_MODEL_KEY)?;
-        if let Some(kind) = persisted_provider {
-            let _ = backends.set_active(&kind, persisted_model.as_deref());
+        if let Some(id) = persisted_provider {
+            let _ = backends.set_active(&id, persisted_model.as_deref());
         }
         // The environment report is detection, not conversation: generated
         // at every boot by deterministic discovery, never by the model,

@@ -184,11 +184,11 @@ pub fn router(state: ClawState) -> Router {
         .route("/providers", get(providers_list))
         .route("/providers/active", put(providers_active))
         .route(
-            "/providers/{kind}/credentials",
+            "/providers/{id}/credentials",
             put(providers_set_credentials),
         )
-        .route("/providers/{kind}", delete(providers_remove))
-        .route("/providers/{kind}/models", get(providers_models))
+        .route("/providers/{id}", delete(providers_remove))
+        .route("/providers/{id}/models", get(providers_models))
         .route("/chat/completions", post(crate::openai::chat_completions))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
@@ -644,9 +644,10 @@ pub(crate) async fn drain(
 
 /// `GET /v1/providers`: every constructible backend and the active pair.
 /// The active pair is runtime state — the config file seeded it, the
-/// settings store owns it now. Each provider carries `source`, where its
-/// credential resolves from: `env` (returns on restart even after a
-/// removal), `stored` (the credentials this surface persisted),
+/// settings store owns it now. Each provider is one instance, named by
+/// its `id` (the kind unless a login named it), and carries `source`,
+/// where its credential resolves from: `env` (returns on restart even
+/// after a removal), `stored` (the credentials this surface persisted),
 /// `profile` (the stored rhema config), or `keyless`. `addable` lists
 /// the kinds a runtime login can add and the fields their form takes.
 async fn providers_list(State(state): State<ClawState>) -> Json<Value> {
@@ -661,10 +662,11 @@ fn providers_json(state: &ClawState) -> Value {
         "active": {"provider": provider, "model": model},
         "providers": state.backends().list()
             .into_iter()
-            .map(|(kind, default_model)| json!({
-                "kind": kind,
-                "default_model": default_model,
-                "source": credential_source(state, &kind),
+            .map(|row| json!({
+                "id": row.id,
+                "kind": row.kind,
+                "default_model": row.default_model,
+                "source": credential_source(state, &row.id, &row.kind),
             }))
             .collect::<Vec<_>>(),
         "addable": crate::backends::addable_kinds()
@@ -677,10 +679,10 @@ fn providers_json(state: &ClawState) -> Value {
     })
 }
 
-/// Where a kind's credential resolves from, at this moment: env wins,
-/// then the surface's stored credentials, then the stored rhema config;
-/// llama.cpp serves keyless. Never the key itself.
-fn credential_source(state: &ClawState, kind: &str) -> &'static str {
+/// Where an instance's credential resolves from, at this moment: env
+/// wins, then the surface's stored credentials, then the stored rhema
+/// config; llama.cpp serves keyless. Never the key itself.
+fn credential_source(state: &ClawState, id: &str, kind: &str) -> &'static str {
     if crate::backends::env_key_names(kind)
         .iter()
         .any(|name| std::env::var(name).is_ok())
@@ -689,7 +691,7 @@ fn credential_source(state: &ClawState, kind: &str) -> &'static str {
     }
     if state
         .settings()
-        .get(&crate::backends::provider_settings_key(kind))
+        .get(&crate::backends::provider_settings_key(id))
         .ok()
         .flatten()
         .is_some()
@@ -702,47 +704,82 @@ fn credential_source(state: &ClawState, kind: &str) -> &'static str {
     "profile"
 }
 
-/// `PUT /v1/providers/{kind}/credentials`: add a backend at runtime, or
-/// replace an existing kind's credentials. The body carries the kind's
-/// fields (`api_key`, and `url` for llama.cpp). The backend constructs
-/// immediately — an unreachable server or a wrong key surfaces on the
-/// next turn, not here — and the credentials persist in the settings
-/// store, so the next boot discovers them. The active pair is untouched.
+/// `PUT /v1/providers/{id}/credentials`: add a backend instance at
+/// runtime, or replace an existing id's credentials. The body carries
+/// the kind's fields (`api_key`, and `url` for llama.cpp) plus the
+/// `kind` — required when the id is new and refused when it names an
+/// instance of another kind. The backend constructs immediately — an
+/// unreachable server or a wrong key surfaces on the next turn, not
+/// here — and the credentials persist in the settings store, so the
+/// next boot discovers them. The active pair is untouched.
 async fn providers_set_credentials(
     State(state): State<ClawState>,
-    Path(kind): Path<String>,
+    Path(id): Path<String>,
     Json(body): Json<Value>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    if !crate::backends::addable_kinds().contains(&kind.as_str()) {
-        return Err(bad_request(format!("unknown provider kind {kind:?}")));
+    let id = id.trim();
+    if !crate::backends::valid_instance_id(id) {
+        return Err(bad_request(
+            "provider name must be 1-64 chars with no whitespace or '/'",
+        ));
     }
-    let params = crate::backends::ProviderParams {
-        api_key: body["api_key"].as_str().map(str::to_owned),
-        url: body["url"].as_str().map(str::to_owned),
+    let kind = match state.backends().get(id) {
+        Some(existing) => {
+            if let Some(kind) = body["kind"].as_str() {
+                if kind != existing.kind {
+                    return Err(bad_request(format!(
+                        "provider {id:?} is a {} backend, not {kind:?}",
+                        existing.kind
+                    )));
+                }
+            }
+            existing.kind.clone()
+        }
+        None => match body["kind"].as_str() {
+            Some(kind) if crate::backends::addable_kinds().contains(&kind) => kind.to_owned(),
+            Some(kind) => return Err(bad_request(format!("unknown provider kind {kind:?}"))),
+            None => {
+                return Err(bad_request(format!(
+                    "unknown provider {id:?}: its first login must carry a kind"
+                )));
+            }
+        },
     };
-    let backend = crate::backends::construct(&kind, &params).map_err(bad_request)?;
+    let blank_is_absent = |value: Option<&str>| {
+        value
+            .map(str::to_owned)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let params = crate::backends::ProviderParams {
+        kind: Some(kind.clone()),
+        api_key: blank_is_absent(body["api_key"].as_str()),
+        url: blank_is_absent(body["url"].as_str()),
+    };
+    let mut backend = crate::backends::construct(&kind, &params).map_err(bad_request)?;
+    backend.id = id.to_owned();
     state.backends().insert(backend);
     let stored = serde_json::to_string(&params).map_err(internal_error)?;
     state
         .settings()
-        .set(&crate::backends::provider_settings_key(&kind), &stored)
+        .set(&crate::backends::provider_settings_key(id), &stored)
         .map_err(internal_error)?;
     Ok(Json(providers_json(&state)))
 }
 
-/// `DELETE /v1/providers/{kind}`: remove a backend from the live
+/// `DELETE /v1/providers/{id}`: remove a backend instance from the live
 /// registry and drop its stored credentials. An env-resolved credential
 /// re-discovers on restart — the list's `source` says so. Removing the
-/// last backend is refused; when the removed kind was active, the first
-/// remaining backend takes over and the persisted pair moves with it.
+/// last backend is refused; when the removed instance was active, the
+/// first remaining backend takes over and the persisted pair moves with
+/// it.
 async fn providers_remove(
     State(state): State<ClawState>,
-    Path(kind): Path<String>,
+    Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    state.backends().remove(&kind).map_err(bad_request)?;
+    state.backends().remove(&id).map_err(bad_request)?;
     state
         .settings()
-        .delete(&crate::backends::provider_settings_key(&kind))
+        .delete(&crate::backends::provider_settings_key(&id))
         .map_err(internal_error)?;
     let (provider, model) = state.backends().active();
     state
@@ -756,9 +793,9 @@ async fn providers_remove(
     Ok(Json(providers_json(&state)))
 }
 
-/// `PUT /v1/providers/active`: switch the backend the next dispatch
-/// runs on, and persist the choice across restarts. An unknown kind is
-/// a 400; a model left unset falls back to the kind's default.
+/// `PUT /v1/providers/active`: switch the backend instance the next
+/// dispatch runs on, and persist the choice across restarts. An unknown
+/// instance id is a 400; a model left unset falls back to its default.
 async fn providers_active(
     State(state): State<ClawState>,
     Json(body): Json<Value>,
@@ -787,17 +824,17 @@ async fn providers_active(
     )))
 }
 
-/// `GET /v1/providers/{kind}/models`: the kind's live listing, straight
-/// from the provider. A kind without a listing (unknown, or the mock)
-/// is a 404.
+/// `GET /v1/providers/{id}/models`: the instance's live listing,
+/// straight from the provider. An id without a listing (unknown, or the
+/// mock) is a 404.
 async fn providers_models(
     State(state): State<ClawState>,
-    Path(kind): Path<String>,
+    Path(id): Path<String>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let Some(listing) = state.backends().list_models(&kind) else {
+    let Some(listing) = state.backends().list_models(&id) else {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(json!({"error": format!("no live listing for provider {kind:?}")})),
+            Json(json!({"error": format!("no live listing for provider {id:?}")})),
         ));
     };
     let models = listing.await.map_err(|err| {

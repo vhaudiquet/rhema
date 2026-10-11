@@ -71,6 +71,23 @@ impl SettingsStore {
         Ok(value)
     }
 
+    /// Every `(key, value)` whose key starts with `prefix`, ascending
+    /// by key — discovery's view of the stored provider rows.
+    pub fn get_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, SettingsError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut statement = conn
+            .prepare("SELECT key, value FROM settings WHERE key LIKE (?1 || '%') ORDER BY key")
+            .map_err(|err| SettingsError::Backend(err.to_string()))?;
+        let rows = statement
+            .query_map(params![prefix], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|err| SettingsError::Backend(err.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| SettingsError::Backend(err.to_string()))?;
+        Ok(rows)
+    }
+
     /// Sets `key` to `value`, replacing any previous value.
     pub fn set(&self, key: &str, value: &str) -> Result<(), SettingsError> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
