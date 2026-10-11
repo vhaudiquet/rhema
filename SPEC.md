@@ -1,9 +1,9 @@
-# Rhema — v1 spec
+# Rhema v1 spec
 
 > **Status:** v1, 2026-10-06. Supersedes the morning draft.
 > **System-level companion:** `specs/rhema-framework-v1.md`
 > **Primitive deep-dive:** `specs/resource-scoped-dispatch.md`
-> **One-line promise:** a small, embeddable, *generic* step engine in Rust — no coding-agent assumptions, no dispatch, no I/O baked in.
+> **One-line promise:** a small, embeddable, *generic* step engine in Rust. No coding-agent assumptions, no dispatch, no I/O baked in.
 
 ---
 
@@ -14,8 +14,8 @@ Crate 1 is **the step engine plus its seams**. It runs *one exchange* with a mod
 **In v1:** the step primitive, its types, a model seam, a tool seam, an event/streaming seam, a caller-owned `Session`, and a mock for offline tests.
 
 **OUT of v1** (each is deliberately a *driver* or a later crate, not a core concern):
-- ❌ The turn loop (`run_turn`) — a thin provided driver, see §5.
-- ❌ Sessions-as-storage, checkpointing, SQLite — the driver persists; see §6.
+- ❌ The turn loop (`run_turn`), a thin provided driver; see §5.
+- ❌ Sessions-as-storage, checkpointing, SQLite. The driver persists; see §6.
 - ❌ RSD dispatch: `ResourceKey`, `KeyFn`, `ClassifyFn`, `Lease`, `Inbox`, `Revision`, concurrency, admission queue. Crate 2.
 - ❌ Provider adapters / HTTP. The `ModelProvider` trait is the only seam.
 - ❌ Tool *registry*, discovery, `checkpoint()`, approvals.
@@ -23,7 +23,7 @@ Crate 1 is **the step engine plus its seams**. It runs *one exchange* with a mod
 
 ---
 
-## 1. The two consumers — and the discipline
+## 1. The two consumers, and the discipline
 
 The crate has exactly two intended consumers, and they impose opposite pressures. Name both; build for one.
 
@@ -36,7 +36,7 @@ The crate has exactly two intended consumers, and they impose opposite pressures
 
 **The discipline:** crate 1 is built for the coding agent. The RSD agent is a **falsification test on the seams**, never a second feature set. If crate 1 later supports an RSD driver *without adding anything to crate 1*, the seam is correct. If supporting it requires `Lease`/`Inbox`/`Revision`/`KeyFn` to enter crate 1, the boundary is wrong.
 
-This is testable, not aspirational — see §7 test 5.
+This is testable, not aspirational; see §7 test 5.
 
 Corollary from RSD §10: these are not two mechanisms. The interactive loop *is* an RSD session with a fixed key. One notion of "session", one dispatcher contract (crate 2), the loop as its first permanent consumer.
 
@@ -74,13 +74,13 @@ rhema/
         step_demo.rs
 ```
 
-Project codename **Rhema** (ῥῆμα, "the spoken word" — words that do things). Crate 1 is **`rhema-core`**.
+Project codename **Rhema** (ῥῆμα, "the spoken word": words that do things). Crate 1 is **`rhema-core`**.
 
 ---
 
 ## 3. Public API
 
-`serde`-friendly. `thiserror`. `#![forbid(unsafe_code)]`. Trait names align with the framework spec (`ModelProvider`, `Session`, `ToolSpec`) — one vocabulary, no synonyms.
+`serde`-friendly. `thiserror`. `#![forbid(unsafe_code)]`. Trait names align with the framework spec (`ModelProvider`, `Session`, `ToolSpec`): one vocabulary, no synonyms.
 
 ```rust
 // message.rs
@@ -177,14 +177,14 @@ return Step { output: out }
 
 - **No loop, no `max_iterations`, no `Final`.** Those belong to a driver.
 - **One exchange, but tool calls are resolved within it.** A step that requested tools returns with the results already appended, so the next step sees them. This is the loop's half of tool-use, and it is the minimum that makes it an agent rather than a chat call.
-- Tool errors never abort — in-band `is_error` the model can react to. Unknown tool name is an error result, not a panic.
+- Tool errors never abort; they surface as in-band `is_error` the model can react to. Unknown tool name is an error result, not a panic.
 - No resolver configured → `specs()` is empty; a `ToolUse` stop with no resolver appends an error result.
 
 ---
 
 ## 5. Drivers (not crate 1)
 
-The provided turn loop is ~15 lines; ship it in core as a convenience or in a sibling crate — either is fine, it is not the primitive.
+The provided turn loop is ~15 lines; ship it in core as a convenience or in a sibling crate, either is fine, it is not the primitive.
 
 ```rust
 pub async fn run_turn(agent: &mut Agent, session: &mut Session, input: Message, sink: &mut dyn EventSink)
@@ -198,7 +198,7 @@ pub async fn run_turn(agent: &mut Agent, session: &mut Session, input: Message, 
 }
 ```
 
-The RSD driver (crate 2) is the same shape with different scaffolding: `acquire()` loads a `Session` from storage, steps, `poll_inbox()` between steps and appends delivered items to `history`, `checkpoint()` after each step, `release()` — all using the RSD contract, none of it visible to crate 1.
+The RSD driver (crate 2) is the same shape with different scaffolding: `acquire()` loads a `Session` from storage, steps, `poll_inbox()` between steps and appends delivered items to `history`, `checkpoint()` after each step, `release()`, all using the RSD contract, none of it visible to crate 1.
 
 ---
 
@@ -212,32 +212,32 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
 | Loading a `Session` on acquire | driver |
 | Lease, inbox, revision, debounce | crate 2 (RSD) |
 
-`Session` is plain data and fully serializable — no hidden engine state, no open stream, so a driver can checkpoint it at any step boundary. That property is the whole reason crate 1 can serve the RSD consumer later without growing.
+`Session` is plain data and fully serializable: no hidden engine state, no open stream, so a driver can checkpoint it at any step boundary. That property is the whole reason crate 1 can serve the RSD consumer later without growing.
 
 ---
 
 ## 7. How we know it works
 
 1. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
-2. **`step_tool_call.rs`** — `MockProvider` scripted to call a tool then answer: one `step()` dispatches the tool once and appends both the assistant message and the `Tool` result; event order `StepStart, ToolCallStart, ToolCallArgsDelta*, ToolResult, StepEnd`.
+2. **`step_tool_call.rs`**: `MockProvider` is scripted to call a tool then answer; one `step()` dispatches the tool once and appends both the assistant message and the `Tool` result; event order `StepStart, ToolCallStart, ToolCallArgsDelta*, ToolResult, StepEnd`.
 3. **Failing tool** → `is_error:true`, no panic, `step()` still returns `Ok`.
-4. **`driver_code_agent.rs`** — the turn loop drives `step()` to completion; asserts bounded iterations.
-5. **`driver_rsd_style.rs`** — **the falsification test.** A fake dispatcher holds a `Session`, runs a step, appends a synthetic "inbox" item to `history` *between* steps (as a `User` message), runs the next step, and round-trips the `Session` through serde to prove it is checkpointable. If this test is expressible **without touching crate 1**, the seam holds. If it needs a new type in crate 1, the boundary is wrong — fix the boundary, don't add the type.
-6. `examples/step_demo.rs` runs against `MockProvider` — zero network.
+4. **`driver_code_agent.rs`**: the turn loop drives `step()` to completion; asserts bounded iterations.
+5. **`driver_rsd_style.rs`**, **the falsification test.** A fake dispatcher holds a `Session`, runs a step, appends a synthetic "inbox" item to `history` *between* steps (as a `User` message), runs the next step, and round-trips the `Session` through serde to prove it is checkpointable. If this test is expressible **without touching crate 1**, the seam holds. If it needs a new type in crate 1, the boundary is wrong; fix the boundary, don't add the type.
+6. `examples/step_demo.rs` runs against `MockProvider`, zero network.
 7. `#![forbid(unsafe_code)]`; public items documented.
 
 ---
 
 ## 8. Open decisions
 
-- ~~**Crate name**~~ — **decided:** `rhema-core` (project codename **Rhema**).
-- **`driver_state` shape** — opaque `serde_json::Value` (recommended, crate 1 stays ignorant) vs typed/generic `Session<T>`.
-- **Streaming** — sink callback (recommended) vs `Stream` return; sink adapter is trivial.
-- **`run_turn` home** — core convenience vs sibling crate.
-- **Provider naming** — `ModelProvider` aligned to the framework spec (chosen) vs shorter `Llm`.
-- **Whether `ToolContext` is created by the driver or the engine** — driver, so permissions/cwd are fixed before the step.
-- ~~**Where the adapters' shared catalog types live**~~ — **decided:** `rhema-provider`, the adapter-family base crate: `ModelCard` (the normalized listing row), `Pricing`, and the `SseDecoder`. What varies per backend stays in the adapter — each owns its text-chat filter over its own ids and bakes its prices into the rows it hands out, so `list_models` only ever returns models a coding agent can drive. No adapter depends on another.
-- ~~**How a provider runs an interactive login**~~ — **decided:** the `InteractiveLogin` seam in `rhema-provider` (`login.rs`). An adapter declares the flow (device codes, polling, expiry — all inside the flow) and reports `LoginUpdate`s to a sink; a frontend renders the updates generically and persists the `Completed` credential — one opaque string, the same shape a static API key takes — into the profile field it maps the provider to. Cancellation is dropping the flow's task; the flow keeps no state a retry would trip over. First consumer: the GitHub Copilot device flow.
+- ~~**Crate name**~~, **decided:** `rhema-core` (project codename **Rhema**).
+- **`driver_state` shape**: opaque `serde_json::Value` (recommended, crate 1 stays ignorant) vs typed/generic `Session<T>`.
+- **Streaming**: sink callback (recommended) vs `Stream` return; sink adapter is trivial.
+- **`run_turn` home**: core convenience vs sibling crate.
+- **Provider naming**: `ModelProvider` aligned to the framework spec (chosen) vs shorter `Llm`.
+- **Whether `ToolContext` is created by the driver or the engine**: driver, so permissions/cwd are fixed before the step.
+- ~~**Where the adapters' shared catalog types live**~~, **decided:** `rhema-provider`, the adapter-family base crate: `ModelCard` (the normalized listing row), `Pricing`, and the `SseDecoder`. What varies per backend stays in the adapter; each owns its text-chat filter over its own ids and bakes its prices into the rows it hands out, so `list_models` only ever returns models a coding agent can drive. No adapter depends on another.
+- ~~**How a provider runs an interactive login**~~, **decided:** the `InteractiveLogin` seam in `rhema-provider` (`login.rs`). An adapter declares the flow (device codes, polling, expiry, all inside the flow) and reports `LoginUpdate`s to a sink; a frontend renders the updates generically and persists the `Completed` credential, one opaque string, the same shape a static API key takes, into the profile field it maps the provider to. Cancellation is dropping the flow's task; the flow keeps no state a retry would trip over. First consumer: the GitHub Copilot device flow.
 
 ---
 
@@ -247,7 +247,7 @@ Crate 2: RSD `SessionManager` (dispatch, leases, inbox, revisions, SQLite). Then
 
 Later arrivals: `rhema-acp` serves the Agent Client Protocol (the
 coding agent as an editor subprocess; the third `CodingAgent`
-consumer, after the TUI and the one-shot) — a falsification pass on
+consumer, after the TUI and the one-shot), a falsification pass on
 the driver seams that demanded no core changes and one justified
 approval-bridge addition (`repair_dangling_calls` shared with the
 TUI). Structured file tools remain the gate for ACP's diff and
