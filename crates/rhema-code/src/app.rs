@@ -151,7 +151,7 @@ impl Backend {
     /// flow runs, no default backend substitutes. `RHEMA_PROVIDER` wins
     /// over the stored `provider`, the same env-wins convention the keys
     /// follow. The active instance serves; a profile without instances
-    /// falls back to the legacy flat fields.
+    /// falls back to the environment alone.
     pub fn from_profile(profile: &rhema_config::Profile) -> Option<Backend> {
         let active = profile.provider_name()?;
         if let Some((_, instance)) = profile.instance_for_provider(&active) {
@@ -164,7 +164,7 @@ impl Backend {
     /// active one first, then the rest in name order — so the picker
     /// spans every llama.cpp server, OpenAI-compatible endpoint, and
     /// Copilot sub the profile holds. A profile without instances falls
-    /// back to the legacy flat fields (llama.cpp only when active: a
+    /// back to the environment alone (llama.cpp only when active: a
     /// URL is a server address, not a login).
     pub fn candidates_from_profile(profile: &rhema_config::Profile) -> Vec<Candidate> {
         let active = profile.provider_name();
@@ -260,9 +260,9 @@ impl Backend {
         }
     }
 
-    /// The backend for one provider's config name from the legacy flat
-    /// fields, `None` when the profile carries no usable credentials for
-    /// it there. Profiles with instances resolve through
+    /// The backend for one provider's config name from the environment
+    /// alone, `None` when the environment carries no usable credential
+    /// for it. Profiles with a stored instance resolve through
     /// [`Backend::from_profile`] instead.
     fn named(provider: &str, profile: &rhema_config::Profile) -> Option<Backend> {
         match provider {
@@ -376,7 +376,7 @@ impl Backend {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Candidate {
     /// The instance name in the profile's registry; `None` when the
-    /// backend was built from the legacy flat fields.
+    /// backend was built from the environment alone.
     pub instance: Option<String>,
     /// The backend to fetch the catalog with.
     pub backend: Backend,
@@ -2021,19 +2021,50 @@ mod tests {
         store: Arc<MemoryStore>,
     }
 
+    /// Stores `key` as `provider`'s instance on `profile` — the login
+    /// flow's write shape.
+    fn store_key(profile: &mut rhema_config::Profile, provider: &str, key: &str) {
+        profile.upsert_instance(
+            provider,
+            rhema_config::ProviderInstance {
+                provider: provider.to_owned(),
+                api_key: Some(key.to_owned()),
+                base_url: None,
+            },
+        );
+    }
+
+    /// A profile serving turns on `provider` through one stored instance
+    /// named after it.
+    fn keyed_profile(provider: &str, key: &str) -> rhema_config::Profile {
+        let mut profile = rhema_config::Profile {
+            provider: Some(provider.to_owned()),
+            ..rhema_config::Profile::default()
+        };
+        store_key(&mut profile, provider, key);
+        profile
+    }
+
     fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
-        let config = Config {
-            profiles: BTreeMap::from([(
-                "personal".to_owned(),
-                rhema_config::Profile {
-                    // The key alone never served a turn: a usable
-                    // profile names its provider too.
-                    provider: Some("google".into()),
-                    google_api_key: api_key.map(str::to_owned),
-                    model: model.map(str::to_owned),
-                    ..rhema_config::Profile::default()
+        let mut personal = rhema_config::Profile {
+            // The key alone never served a turn: a usable
+            // profile names its provider too.
+            provider: Some("google".into()),
+            model: model.map(str::to_owned),
+            ..rhema_config::Profile::default()
+        };
+        if let Some(key) = api_key {
+            personal.upsert_instance(
+                "google",
+                rhema_config::ProviderInstance {
+                    provider: "google".into(),
+                    api_key: Some(key.to_owned()),
+                    base_url: None,
                 },
-            )]),
+            );
+        }
+        let config = Config {
+            profiles: BTreeMap::from([("personal".to_owned(), personal)]),
             ..Default::default()
         };
         let store = Arc::new(MemoryStore::new(config.clone()));
@@ -2414,20 +2445,24 @@ mod tests {
 
     #[test]
     fn anthropic_and_openai_profiles_build_their_own_backends() {
-        let keyed = |provider: &str, field: &str| rhema_config::Profile {
-            provider: Some(provider.to_owned()),
-            anthropic_api_key: (field == "anthropic").then(|| "k-a".to_owned()),
-            openai_api_key: (field == "openai").then(|| "k-o".to_owned()),
-            ..rhema_config::Profile::default()
+        let keyed = |provider: &str, key: Option<&str>| {
+            let mut profile = rhema_config::Profile {
+                provider: Some(provider.to_owned()),
+                ..rhema_config::Profile::default()
+            };
+            if let Some(key) = key {
+                store_key(&mut profile, provider, key);
+            }
+            profile
         };
-        let backend = Backend::from_profile(&keyed("anthropic", "anthropic"))
+        let backend = Backend::from_profile(&keyed("anthropic", Some("k-a")))
             .expect("a keyed anthropic profile serves turns");
         assert_eq!(backend.config_name(), "anthropic");
         assert!(
             matches!(backend, Backend::Anthropic { ref api_key } if api_key == "k-a"),
             "the anthropic profile builds the anthropic backend: {backend:?}"
         );
-        let backend = Backend::from_profile(&keyed("openai", "openai"))
+        let backend = Backend::from_profile(&keyed("openai", Some("k-o")))
             .expect("a keyed openai profile serves turns");
         assert_eq!(backend.config_name(), "openai");
         assert!(
@@ -2435,8 +2470,13 @@ mod tests {
             "the openai profile builds the openai backend: {backend:?}"
         );
         // No key, no backend — a keyless profile cannot serve turns.
+        let mut cross = rhema_config::Profile {
+            provider: Some("anthropic".into()),
+            ..rhema_config::Profile::default()
+        };
+        store_key(&mut cross, "openai", "k-o");
         assert_eq!(
-            Backend::from_profile(&keyed("anthropic", "openai")),
+            Backend::from_profile(&cross),
             None,
             "an anthropic profile is not served by an openai key"
         );
@@ -2455,12 +2495,13 @@ mod tests {
             None,
             "a provider-less profile opens the login flow"
         );
+        let mut nonsense = rhema_config::Profile {
+            provider: Some("nonsense".into()),
+            ..rhema_config::Profile::default()
+        };
+        store_key(&mut nonsense, "google", "k");
         assert_eq!(
-            Backend::from_profile(&rhema_config::Profile {
-                provider: Some("nonsense".into()),
-                google_api_key: Some("k".into()),
-                ..rhema_config::Profile::default()
-            }),
+            Backend::from_profile(&nonsense),
             None,
             "an unknown spelling never falls back to google"
         );
@@ -2468,26 +2509,16 @@ mod tests {
 
     #[test]
     fn candidates_span_every_provider_the_profile_holds_keys_for() {
-        let mut profile = rhema_config::Profile {
-            provider: Some("openrouter".to_owned()),
-            google_api_key: Some("g".into()),
-            openrouter_api_key: Some("o".into()),
-            ..rhema_config::Profile::default()
-        };
+        let mut profile = keyed_profile("openrouter", "o");
+        store_key(&mut profile, "google", "g");
         let names: Vec<&str> = Backend::candidates_from_profile(&profile)
             .iter()
             .map(|candidate| candidate.backend.config_name())
             .collect();
         assert_eq!(names, ["openrouter", "google"], "the active provider leads");
 
-        // llama.cpp stays out: a flat stored URL is a server address, not
-        // a login, and it only joins as the active provider.
-        profile.llama_cpp_url = Some("http://box:8080".into());
-        let names: Vec<&str> = Backend::candidates_from_profile(&profile)
-            .iter()
-            .map(|candidate| candidate.backend.config_name())
-            .collect();
-        assert_eq!(names, ["openrouter", "google"]);
+        // llama.cpp joins only as the active provider: a server address
+        // is a login, not a catalog to browse.
         profile.provider = Some("llama-cpp".into());
         let names: Vec<&str> = Backend::candidates_from_profile(&profile)
             .iter()
@@ -2707,16 +2738,12 @@ mod tests {
     fn slash_profile_switches_to_a_named_profile() {
         let mut h = harness(Some("g"), Some("m-a"), Session::default());
         h.app.config.set_for_profile(Some("personal"), |settings| {
-            settings.openrouter_api_key = Some("o".into());
+            store_key(settings, "openrouter", "o");
         });
-        h.app.config.profiles.insert(
-            "work".to_owned(),
-            rhema_config::Profile {
-                provider: Some("openrouter".to_owned()),
-                openrouter_api_key: Some("o".into()),
-                ..rhema_config::Profile::default()
-            },
-        );
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), keyed_profile("openrouter", "o"));
         for c in "/profile work".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
@@ -2733,7 +2760,7 @@ mod tests {
     fn choosing_from_another_provider_switches_the_backend() {
         let mut h = harness(Some("g"), Some("m-a"), Session::default());
         h.app.config.set_for_profile(Some("personal"), |settings| {
-            settings.openrouter_api_key = Some("o".into());
+            store_key(settings, "openrouter", "o");
         });
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
@@ -3040,7 +3067,7 @@ mod tests {
             stored
                 .profiles
                 .values()
-                .all(|profile| profile.google_api_key.is_none())
+                .all(|profile| profile.instances.is_empty())
         );
     }
 
@@ -3152,7 +3179,7 @@ mod tests {
             stored
                 .profiles
                 .values()
-                .all(|profile| profile.instances.is_empty() && profile.copilot_api_key.is_none())
+                .all(|profile| profile.instances.is_empty())
         );
         // Esc returns to the instance list for a retry.
         h.app.on_key(key(KeyCode::Esc));
@@ -3584,10 +3611,8 @@ mod tests {
         h.app.config.profiles.insert(
             "work".to_owned(),
             rhema_config::Profile {
-                provider: Some("openrouter".into()),
-                openrouter_api_key: Some("work-key".into()),
                 model: Some("work-model".into()),
-                ..rhema_config::Profile::default()
+                ..keyed_profile("openrouter", "work-key")
             },
         );
         crate::commands::dispatch(&mut h.app, "/profile work");
@@ -3616,10 +3641,8 @@ mod tests {
     #[test]
     fn startup_without_a_flag_starts_on_a_ready_profile() {
         let work_ready = rhema_config::Profile {
-            provider: Some("openrouter".into()),
-            openrouter_api_key: Some("work-key".into()),
             model: Some("work-model".into()),
-            ..rhema_config::Profile::default()
+            ..keyed_profile("openrouter", "work-key")
         };
         // personal is empty, work is logged in: the session starts on
         // work instead of the login screen.
@@ -3634,14 +3657,7 @@ mod tests {
         // personal can serve turns: the default stands.
         let config = Config {
             profiles: BTreeMap::from([
-                (
-                    "personal".to_owned(),
-                    rhema_config::Profile {
-                        provider: Some("google".into()),
-                        google_api_key: Some("k".into()),
-                        ..rhema_config::Profile::default()
-                    },
-                ),
+                ("personal".to_owned(), keyed_profile("google", "k")),
                 ("work".to_owned(), work_ready.clone()),
             ]),
             ..Default::default()
@@ -3656,15 +3672,11 @@ mod tests {
         // A key without a provider name is not usable either: nothing
         // defaults to google, so the logged-out-looking profile loses to
         // the ready one.
+        let mut keyed = rhema_config::Profile::default();
+        store_key(&mut keyed, "google", "k");
         let config = Config {
             profiles: BTreeMap::from([
-                (
-                    "personal".to_owned(),
-                    rhema_config::Profile {
-                        google_api_key: Some("k".into()),
-                        ..rhema_config::Profile::default()
-                    },
-                ),
+                ("personal".to_owned(), keyed),
                 ("work".to_owned(), work_ready),
             ]),
             ..Default::default()
@@ -3674,11 +3686,7 @@ mod tests {
 
     #[test]
     fn a_workspace_reopens_on_the_profile_it_last_used() {
-        let ready = |key: &str| rhema_config::Profile {
-            provider: Some("google".into()),
-            google_api_key: Some(key.to_owned()),
-            ..rhema_config::Profile::default()
-        };
+        let ready = |key: &str| keyed_profile("google", key);
         let mut config = Config {
             profiles: BTreeMap::from([
                 ("personal".to_owned(), ready("k")),
@@ -3770,10 +3778,8 @@ mod tests {
                 (
                     "work".to_owned(),
                     rhema_config::Profile {
-                        provider: Some("openrouter".into()),
-                        openrouter_api_key: Some("work-key".into()),
                         model: Some("work-model".into()),
-                        ..rhema_config::Profile::default()
+                        ..keyed_profile("openrouter", "work-key")
                     },
                 ),
             ]),
@@ -3988,14 +3994,10 @@ mod tests {
         // Started with no --profile (so personal), then switched to work:
         // the pick must follow the session, not the startup flag.
         let mut h = harness(Some("k"), None, Session::default());
-        h.app.config.profiles.insert(
-            "work".to_owned(),
-            rhema_config::Profile {
-                provider: Some("openrouter".into()),
-                openrouter_api_key: Some("work-key".into()),
-                ..rhema_config::Profile::default()
-            },
-        );
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), keyed_profile("openrouter", "work-key"));
         crate::commands::dispatch(&mut h.app, "/profile work");
         crate::commands::dispatch(&mut h.app, "/model");
         h.app.on_event(UiEvent::ModelsLoaded {

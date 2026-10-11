@@ -782,7 +782,7 @@ async fn providers_set_credentials(
             .filter(|value| !value.trim().is_empty())
     };
     let params = crate::backends::ProviderParams {
-        kind: Some(kind.clone()),
+        kind: kind.clone(),
         api_key: blank_is_absent(body["api_key"].as_str()),
         url: blank_is_absent(body["url"].as_str()),
     };

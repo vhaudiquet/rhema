@@ -1594,6 +1594,24 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
+    /// A profile holding one stored instance of `provider`, named after
+    /// it, carrying `key`.
+    fn keyed_profile(provider: &str, key: &str) -> rhema_config::Profile {
+        let mut profile = rhema_config::Profile {
+            provider: Some(provider.to_owned()),
+            ..rhema_config::Profile::default()
+        };
+        profile.upsert_instance(
+            provider,
+            rhema_config::ProviderInstance {
+                provider: provider.to_owned(),
+                api_key: Some(key.to_owned()),
+                base_url: None,
+            },
+        );
+        profile
+    }
+
     fn model(id: &str, display: &str, chat: bool) -> ModelCard {
         ModelCard {
             id: id.into(),
@@ -1704,29 +1722,23 @@ mod tests {
     fn tab_keys_cycle_the_profile_tabs_and_carry_the_stored_section() {
         let mut login = LoginScreen::new().with_registry(
             &BTreeMap::from([
-                (
-                    "personal".to_owned(),
-                    rhema_config::Profile {
-                        google_api_key: Some("p-key".into()),
-                        ..rhema_config::Profile::default()
-                    },
-                ),
-                (
-                    "work".to_owned(),
-                    rhema_config::Profile {
-                        openrouter_api_key: Some("w-key".into()),
-                        ..rhema_config::Profile::default()
-                    },
-                ),
+                ("personal".to_owned(), keyed_profile("google", "p-key")),
+                ("work".to_owned(), keyed_profile("openrouter", "w-key")),
             ]),
             "personal",
         );
         assert_eq!(login.profile, "personal");
-        assert_eq!(login.stored.google_api_key.as_deref(), Some("p-key"));
+        assert_eq!(
+            login.stored.stored_provider_key("google").as_deref(),
+            Some("p-key")
+        );
 
         login.handle_key(key(KeyCode::Tab));
         assert_eq!(login.profile, "work");
-        assert_eq!(login.stored.openrouter_api_key.as_deref(), Some("w-key"));
+        assert_eq!(
+            login.stored.stored_provider_key("openrouter").as_deref(),
+            Some("w-key")
+        );
 
         login.handle_key(key(KeyCode::Left));
         assert_eq!(login.profile, "personal");

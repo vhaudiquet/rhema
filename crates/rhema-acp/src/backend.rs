@@ -297,6 +297,7 @@ pub fn split_switch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_config::ProviderInstance;
 
     fn profile(provider: Option<&str>, model: Option<&str>) -> Profile {
         Profile {
@@ -392,11 +393,18 @@ mod tests {
 
     #[test]
     fn the_copilot_kind_resolves_from_a_stored_token() {
-        let profile = Profile {
+        let mut profile = Profile {
             provider: Some("copilot".into()),
-            copilot_api_key: Some("gho_token".into()),
             ..Profile::default()
         };
+        profile.upsert_instance(
+            "copilot",
+            ProviderInstance {
+                provider: "copilot".into(),
+                api_key: Some("gho_token".into()),
+                base_url: None,
+            },
+        );
         let resolved = resolve(&profile, None, None, None)
             .expect("a stored token resolves")
             .expect("a stored token resolves");
@@ -406,10 +414,15 @@ mod tests {
 
     #[test]
     fn a_provider_for_an_unknown_kind_is_an_error_not_google() {
-        let keyed = Profile {
-            google_api_key: Some("g".into()),
-            ..Profile::default()
-        };
+        let mut keyed = Profile::default();
+        keyed.upsert_instance(
+            "google",
+            ProviderInstance {
+                provider: "google".into(),
+                api_key: Some("g".into()),
+                base_url: None,
+            },
+        );
         let err = match provider_for("nonsense", &keyed, None) {
             Ok(_) => panic!("an unknown kind built a provider"),
             Err(err) => err,

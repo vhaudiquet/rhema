@@ -1523,15 +1523,20 @@ mod scroll_tests {
     use std::sync::Arc;
 
     fn chat_app() -> App {
+        let mut personal = rhema_config::Profile {
+            model: Some("m".into()),
+            ..rhema_config::Profile::default()
+        };
+        personal.upsert_instance(
+            "google",
+            rhema_config::ProviderInstance {
+                provider: "google".into(),
+                api_key: Some("k".into()),
+                base_url: None,
+            },
+        );
         let config = rhema_config::Config {
-            profiles: BTreeMap::from([(
-                "personal".to_owned(),
-                rhema_config::Profile {
-                    google_api_key: Some("k".into()),
-                    model: Some("m".into()),
-                    ..rhema_config::Profile::default()
-                },
-            )]),
+            profiles: BTreeMap::from([("personal".to_owned(), personal)]),
             ..Default::default()
         };
         App::new(AppSetup {

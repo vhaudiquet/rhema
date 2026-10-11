@@ -401,26 +401,14 @@ pub fn valid_instance_id(id: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub struct ProviderParams {
-    /// The kind these params construct. Absent in legacy rows (stored
-    /// under `provider.<kind>` before instances existed): the id then
-    /// doubles as the kind, which is what those rows always meant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kind: Option<String>,
+    /// The kind these params construct.
+    pub kind: String,
     /// The API key (or GitHub token for copilot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     /// The server address (llama.cpp).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-}
-
-impl ProviderParams {
-    /// The kind these params construct: the stored kind when the row
-    /// carries one, else the id — the legacy shape, where ids were
-    /// kinds.
-    pub fn kind_or<'a>(&'a self, id: &'a str) -> &'a str {
-        self.kind.as_deref().unwrap_or(id)
-    }
 }
 
 /// Every kind a runtime login can construct, ascending: the addable
@@ -563,11 +551,10 @@ pub fn discover(
     // env-backed kind takes the id back from a stored twin of the same
     // id below — env wins the per-kind slot, the row stays persisted.
     for (id, params) in &rows {
-        let kind = params.kind_or(id);
-        if id == kind && env_key(kind).is_some() {
+        if id == &params.kind && env_key(&params.kind).is_some() {
             continue;
         }
-        if let Ok(mut backend) = construct(kind, params) {
+        if let Ok(mut backend) = construct(&params.kind, params) {
             backend.id = id.clone();
             seed_llama_model(&mut backend, config);
             backends.push(backend);
@@ -583,7 +570,7 @@ pub fn discover(
         "deepseek",
         "copilot",
     ] {
-        let stored_of_kind = rows.iter().any(|(id, params)| params.kind_or(id) == kind);
+        let stored_of_kind = rows.iter().any(|(_, params)| params.kind == kind);
         let params = if kind == "llama-cpp" {
             if stored_of_kind {
                 // The stored rows own the kind now; the keyless default
@@ -593,13 +580,13 @@ pub fn discover(
             // The keyless server backend always constructs, so the
             // registry is never empty.
             ProviderParams {
-                kind: Some(kind.to_owned()),
+                kind: kind.to_owned(),
                 api_key: None,
                 url: Some(stored.llama_cpp_url()),
             }
         } else if let Some(api_key) = env_key(kind) {
             ProviderParams {
-                kind: Some(kind.to_owned()),
+                kind: kind.to_owned(),
                 api_key: Some(api_key),
                 url: None,
             }
@@ -609,14 +596,14 @@ pub fn discover(
             continue;
         } else {
             // The stored rhema profile's key for the kind: the matching
-            // named instance's, else the legacy flat field. The keyless
-            // llama.cpp backend never takes a key from the profile.
+            // named instance's. The keyless llama.cpp backend never
+            // takes a key from the profile.
             let api_key = match kind {
                 "llama-cpp" => None,
                 _ => stored.stored_provider_key(kind),
             };
             ProviderParams {
-                kind: Some(kind.to_owned()),
+                kind: kind.to_owned(),
                 api_key,
                 url: None,
             }
@@ -763,22 +750,12 @@ mod tests {
         assert!(BackendRegistry::new(vec![], None).is_err());
     }
 
-    fn params(api_key: Option<&str>, url: Option<&str>) -> ProviderParams {
+    fn params(kind: &str, api_key: Option<&str>, url: Option<&str>) -> ProviderParams {
         ProviderParams {
-            kind: None,
+            kind: kind.to_owned(),
             api_key: api_key.map(str::to_owned),
             url: url.map(str::to_owned),
         }
-    }
-
-    #[test]
-    fn a_legacy_row_defaults_its_kind_to_the_id() {
-        assert_eq!(params(Some("k"), None).kind_or("google"), "google");
-        let named = ProviderParams {
-            kind: Some("llama-cpp".to_owned()),
-            ..params(None, None)
-        };
-        assert_eq!(named.kind_or("local-llama"), "llama-cpp");
     }
 
     #[test]
@@ -809,15 +786,15 @@ mod tests {
     #[test]
     fn construct_demands_what_each_kind_needs() {
         // Keyed kinds want a non-blank key.
-        assert!(construct("google", &params(None, None)).is_err());
-        assert!(construct("google", &params(Some("  "), None)).is_err());
-        assert!(construct("google", &params(Some("k"), None)).is_ok());
-        assert!(construct("deepseek", &params(Some("k"), None)).is_ok());
-        assert!(construct("copilot", &params(Some("t"), None)).is_ok());
-        assert!(construct("nope", &params(Some("k"), None)).is_err());
+        assert!(construct("google", &params("google", None, None)).is_err());
+        assert!(construct("google", &params("google", Some("  "), None)).is_err());
+        assert!(construct("google", &params("google", Some("k"), None)).is_ok());
+        assert!(construct("deepseek", &params("deepseek", Some("k"), None)).is_ok());
+        assert!(construct("copilot", &params("copilot", Some("t"), None)).is_ok());
+        assert!(construct("nope", &params("nope", Some("k"), None)).is_err());
         // llama.cpp serves keyless on its default url.
-        assert!(construct("llama-cpp", &params(None, None)).is_ok());
-        assert!(construct("llama-cpp", &params(None, Some("http://h:1"))).is_ok());
+        assert!(construct("llama-cpp", &params("llama-cpp", None, None)).is_ok());
+        assert!(construct("llama-cpp", &params("llama-cpp", None, Some("http://h:1"))).is_ok());
     }
 
     #[test]
@@ -825,7 +802,7 @@ mod tests {
         let config = test_config();
         let profile = profile_with_google();
         let env = |_name: &str| None;
-        let stored_rows = || vec![("deepseek".to_owned(), params(Some("cd"), None))];
+        let stored_rows = || vec![("deepseek".to_owned(), params("deepseek", Some("cd"), None))];
         let backends = discover(&config, &profile, &env, &stored_rows);
         let mut kinds: Vec<&str> = backends.iter().map(|b| b.kind.as_str()).collect();
         kinds.sort_unstable();
@@ -850,10 +827,7 @@ mod tests {
         let stored_rows = || {
             vec![(
                 "local-llama".to_owned(),
-                ProviderParams {
-                    kind: Some("llama-cpp".to_owned()),
-                    ..params(None, Some("http://h:1"))
-                },
+                params("llama-cpp", None, Some("http://h:1")),
             )]
         };
         let backends = discover(&config, &profile, &env, &stored_rows);
@@ -872,15 +846,7 @@ mod tests {
         let config = test_config();
         let profile = rhema_config::Profile::default();
         let env = |name: &str| (name == "GOOGLE_API_KEY").then(|| "from-env".to_owned());
-        let stored_rows = || {
-            vec![(
-                "google".to_owned(),
-                ProviderParams {
-                    kind: Some("google".to_owned()),
-                    ..params(Some("stored"), None)
-                },
-            )]
-        };
+        let stored_rows = || vec![("google".to_owned(), params("google", Some("stored"), None))];
         let backends = discover(&config, &profile, &env, &stored_rows);
         let google: Vec<&Backend> = backends.iter().filter(|b| b.kind == "google").collect();
         assert_eq!(google.len(), 1, "env wins the id, no twin survives");
@@ -888,16 +854,16 @@ mod tests {
     }
 
     #[test]
-    fn a_legacy_row_without_an_inner_kind_boots_as_its_kind() {
+    fn a_row_stored_under_its_kind_id_boots_as_its_kind() {
         let config = test_config();
         let profile = rhema_config::Profile::default();
         let env = |_name: &str| None;
-        let stored_rows = || vec![("anthropic".to_owned(), params(Some("legacy"), None))];
+        let stored_rows = || vec![("anthropic".to_owned(), params("anthropic", Some("k"), None))];
         let backends = discover(&config, &profile, &env, &stored_rows);
         let anthropic = backends
             .iter()
             .find(|b| b.id == "anthropic")
-            .expect("the legacy row boots");
+            .expect("the stored row boots");
         assert_eq!(anthropic.kind, "anthropic");
         assert_eq!(anthropic.default_model, "claude-sonnet-4-5");
     }
@@ -938,7 +904,15 @@ mod tests {
     }
 
     fn profile_with_google() -> rhema_config::Profile {
-        serde_json::from_value(serde_json::json!({ "google_api_key": "pg" }))
-            .expect("a profile with a google key")
+        let mut profile = rhema_config::Profile::default();
+        profile.upsert_instance(
+            "google",
+            rhema_config::ProviderInstance {
+                provider: "google".into(),
+                api_key: Some("pg".into()),
+                base_url: None,
+            },
+        );
+        profile
     }
 }

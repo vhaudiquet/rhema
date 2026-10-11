@@ -37,8 +37,8 @@ pub struct CatalogFetch {
     /// The backend's provider config name.
     pub provider: &'static str,
     /// The profile instance the backend was built from, when it has a
-    /// name — every stored instance does; only a legacy flat login
-    /// fetches unnamed.
+    /// name — every stored instance does; only an environment-only
+    /// fetch is unnamed.
     pub instance: Option<String>,
     /// The models, or the provider's error text.
     pub result: Result<Vec<ModelCard>, String>,

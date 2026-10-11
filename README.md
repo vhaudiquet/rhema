@@ -330,7 +330,7 @@ model comes from the picker or the profile's `model`. Nothing is
 defaulted: a session with no configured provider opens the login
 screen to pick one. Storing
 `provider: llama-cpp` (with the server in `LLAMA_CPP_URL` or the
-profile's `llama_cpp_url`) starts on the llama.cpp backend without
+llama-cpp instance's `base_url`) starts on the llama.cpp backend without
 logging in; `ctrl-p` still lists that server's models.
 Keys: `enter` sends · `shift-enter` (kitty-protocol terminals;
 Ghostty's default xterm-style sequence parses through the vendored
