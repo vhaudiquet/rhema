@@ -894,33 +894,46 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 /// Rows the reasoning preview may show.
 const THINKING_PREVIEW_ROWS: usize = 3;
 
-/// The reasoning preview rows: the tail of the accumulated trace,
-/// wrapped and dim. Empty while the buffer is — the buffer clears the
-/// moment the model's real output starts.
+/// The reasoning preview rows at `width`: the trace's completed lines,
+/// each wrapped, the tail capped. Both the strip's layout and its
+/// drawing come from here, so the reserve matches what's on screen.
+fn thinking_preview_rows(app: &App, width: usize) -> Vec<Line<'static>> {
+    let width = width.saturating_sub(1).max(1);
+    let mut rows: Vec<Line<'static>> = completed_thinking(&app.thinking)
+        .flat_map(|line| wrap_line(&Line::from(Span::raw(line.to_owned())), width))
+        .collect();
+    let skip = rows.len().saturating_sub(THINKING_PREVIEW_ROWS);
+    rows.drain(..skip);
+    rows
+}
+
+/// The trace's completed lines: everything the buffer holds before the
+/// line still streaming. The preview reveals a line at a time, never a
+/// word at a time. Blank lines drop out — the preview has three rows
+/// to spend and a blank one carries nothing.
+fn completed_thinking(thinking: &str) -> impl Iterator<Item = &str> {
+    let complete = match thinking.rfind('\n') {
+        Some(end) => &thinking[..end],
+        None => "",
+    };
+    complete.split('\n').filter(|line| !line.is_empty())
+}
+
+/// The reasoning preview rows: the tail of the trace's completed lines,
+/// wrapped and dim. Empty until a line completes — the buffer clears
+/// the moment the model's real output starts.
 fn thinking_preview(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
-    if app.thinking.is_empty() {
-        return Vec::new();
-    }
-    let source = Line::from(Span::raw(app.thinking.clone()));
-    let wrapped = wrap_line(&source, width.saturating_sub(1).max(1));
-    let skip = wrapped.len().saturating_sub(THINKING_PREVIEW_ROWS);
-    wrapped
+    let style = Style::default().fg(theme.text3).italic();
+    thinking_preview_rows(app, width)
         .into_iter()
-        .skip(skip)
-        .map(|line| line.style(Style::default().fg(theme.text3).italic()))
+        .map(|line| line.style(style))
         .collect()
 }
 
 /// How many rows the preview occupies at `width` — the same wrap the
 /// render applies, so the strip reserves exactly what it draws.
 fn thinking_rows(app: &App, width: usize) -> u16 {
-    if app.thinking.is_empty() {
-        return 0;
-    }
-    let source = Line::from(Span::raw(app.thinking.clone()));
-    wrap_line(&source, width.saturating_sub(1).max(1))
-        .len()
-        .min(THINKING_PREVIEW_ROWS) as u16
+    thinking_preview_rows(app, width).len() as u16
 }
 
 /// The dim telemetry strip under the input: last turn's tokens, and the
@@ -1836,7 +1849,9 @@ mod scroll_tests {
     fn the_reasoning_preview_shows_and_vanishes_with_output() {
         let mut app = chat_app();
         app.running = true;
-        app.thinking = "reasoning about the tree state".to_owned();
+        // The line ends with its newline: the preview only shows
+        // completed lines.
+        app.thinking = "reasoning about the tree state\n".to_owned();
         let draw = |app: &mut App| {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -1857,6 +1872,35 @@ mod scroll_tests {
         app.thinking.clear();
         let screen = draw(&mut app);
         assert!(!screen.contains("reasoning about"), "{screen}");
+    }
+
+    /// The preview reveals a line only once its newline has streamed:
+    /// the row still in progress stays hidden until it completes.
+    #[test]
+    fn the_reasoning_preview_reveals_complete_lines_only() {
+        let mut app = chat_app();
+        app.running = true;
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+
+        app.thinking = "first thought\nhalf a second".to_owned();
+        let screen = draw(&mut app);
+        assert!(screen.contains("first thought"), "{screen}");
+        assert!(!screen.contains("half a second"), "{screen}");
+
+        // The newline lands: the held-back line shows whole.
+        app.thinking.push('\n');
+        let screen = draw(&mut app);
+        assert!(screen.contains("half a second"), "{screen}");
     }
 
     #[test]

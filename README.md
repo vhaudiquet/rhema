@@ -342,9 +342,10 @@ the paste's place (icon, index, size, erase mark; `backspace` or
 submit · `ctrl-p` re-opens the model picker (the
 session is kept across a model switch) · `esc` cancels the running
 turn, or asks to quit when idle · `ctrl-c` or `ctrl-d` quit immediately.
-While a model streams its reasoning, the status strip previews its last
-rows (dimmed, three at most); the block vanishes the moment the reply
-starts, and the trace is never stored in the session.
+While a model streams its reasoning, the status strip previews the last
+rows of its completed lines (dimmed, three at most; the line still
+streaming shows only once it ends); the block vanishes the moment the
+reply starts, and the trace is never stored in the session.
 Commands: `/help`, `/clear` or
 `/new` (fresh session), `/resume`, `/skills`, `/system` (the system
 prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
