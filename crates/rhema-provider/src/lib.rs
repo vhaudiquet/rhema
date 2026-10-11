@@ -4,6 +4,7 @@
 //! seam against one backend API; this crate holds only what they all
 //! share: the [`ModelCard`] their catalog listings normalize into, the
 //! [`Pricing`](crate::pricing::Pricing) record attached to priced rows,
+//! the [`Allowance`](crate::allowance::Allowance) their account reports,
 //! and the [`SseDecoder`](crate::stream::SseDecoder) their SSE streams
 //! decode through. What varies per backend stays in the adapter —
 //! including which of its listed models count as text chat models, so a
@@ -15,17 +16,20 @@
 //! Layout:
 //! - [`card`] — the normalized catalog row
 //! - [`pricing`] — the per-MTok price record
+//! - [`allowance`] — the subscription allowance a backend reports
 //! - [`stream`] — the SSE byte-stream decoder
 //! - [`login`] — the interactive login flow seam
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod allowance;
 pub mod card;
 pub mod login;
 pub mod pricing;
 pub mod stream;
 
+pub use allowance::Allowance;
 pub use card::ModelCard;
 pub use login::{InteractiveLogin, LoginInstruction, LoginSink, LoginUpdate};
 pub use pricing::Pricing;
