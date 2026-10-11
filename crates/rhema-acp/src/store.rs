@@ -46,12 +46,13 @@ pub fn valid_id(id: &str) -> bool {
 }
 
 /// Writes `session` as the file for `id`, replacing any prior save.
+/// The base is `0700` and the file `0600`: conversation content.
 pub fn save_session(base: &Path, id: &str, session: &Session) -> io::Result<()> {
     debug_assert!(valid_id(id), "session ids are validated at the boundary");
-    std::fs::create_dir_all(base)?;
+    rhema_config::privacy::private_dir(base)?;
     let json = serde_json::to_string_pretty(session)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    std::fs::write(base.join(format!("{id}.json")), json)
+    rhema_config::privacy::private_write(&base.join(format!("{id}.json")), json.as_bytes())
 }
 
 /// Reads the session saved for `id`.
@@ -85,6 +86,19 @@ mod tests {
         save_session(&base, "rhema-abc-001", &session_with("hello")).unwrap();
         let loaded = load_session(&base, "rhema-abc-001").unwrap();
         assert_eq!(loaded.history.len(), 1);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_saved_session_lands_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().join("acp-sessions");
+        let path = base.join("rhema-abc-001.json");
+        save_session(&base, "rhema-abc-001", &session_with("hello")).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&base), 0o700, "the session base is 0700");
+        assert_eq!(mode(&path), 0o600, "the session file is 0600");
     }
 
     #[test]
