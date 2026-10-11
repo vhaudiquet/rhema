@@ -46,10 +46,17 @@ export interface ClawProvider {
   source?: 'env' | 'stored' | 'profile' | 'keyless'
 }
 
+/** One field of a kind's login form: the name the credentials body
+ * spells it with, and whether the daemon refuses the login without it. */
+export interface ProviderField {
+  name: string
+  required: boolean
+}
+
 /** One kind a runtime login can add, with the fields its form takes. */
 export interface AddableKind {
   kind: string
-  fields: string[]
+  fields: ProviderField[]
 }
 
 export interface ProvidersState {

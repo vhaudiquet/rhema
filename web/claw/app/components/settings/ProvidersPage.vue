@@ -114,6 +114,11 @@ const keyLabel = computed(() =>
   addKind.value === 'copilot' ? 'GitHub token' : 'API key',
 )
 
+/** A field the daemon does not demand reads as optional, not hidden. */
+function label(name: string, base: string): string {
+  return required(name) ? base : `${base} (optional)`
+}
+
 const loginOpen = ref(false)
 const addKind = ref<string>('')
 const addApiKey = ref('')
@@ -126,24 +131,42 @@ const addFields = computed(() => {
   return entry?.fields ?? []
 })
 
+/** Whether the selected kind's form declares this field at all. */
+function declared(name: string): boolean {
+  return addFields.value.some((field) => field.name === name)
+}
+
+/** Whether the daemon refuses the login without this field. */
+function required(name: string): boolean {
+  return addFields.value.find((field) => field.name === name)?.required ?? false
+}
+
+function fieldValue(name: string): string {
+  return name === 'url' ? addUrl.value : name === 'api_key' ? addApiKey.value : ''
+}
+
 const addKindPresent = computed(() =>
   props.state?.providers.some((p) => p.kind === addKind.value) ?? false,
 )
 
 const addReady = computed(() => {
   if (!addKind.value) return false
-  if (addFields.value.includes('url') && addUrl.value.trim() === '') return false
-  if (addFields.value.includes('api_key') && addApiKey.value.trim() === '') {
-    return false
-  }
-  return true
+  return addFields.value
+    .filter((field) => field.required)
+    .every((field) => fieldValue(field.name).trim() !== '')
 })
 
 function submitAdd(): void {
   if (!addReady.value || props.mutating) return
+  // Only declared fields go out, and only filled ones: the claw treats
+  // an empty string as the value it was handed, not as "absent".
   const credentials: ProviderCredentials = {}
-  if (addFields.value.includes('api_key')) credentials.api_key = addApiKey.value.trim()
-  if (addFields.value.includes('url')) credentials.url = addUrl.value.trim()
+  if (declared('api_key') && addApiKey.value.trim() !== '') {
+    credentials.api_key = addApiKey.value.trim()
+  }
+  if (declared('url') && addUrl.value.trim() !== '') {
+    credentials.url = addUrl.value.trim()
+  }
   emit('add', addKind.value, credentials)
 }
 
@@ -273,8 +296,8 @@ watch(
             </option>
           </select>
         </div>
-        <div v-if="addFields.includes('url')" class="add-row">
-          <label class="add-label" for="add-url">Server URL</label>
+        <div v-if="declared('url')" class="add-row">
+          <label class="add-label" for="add-url">{{ label('url', 'Server URL') }}</label>
           <input
             id="add-url"
             v-model="addUrl"
@@ -285,8 +308,8 @@ watch(
             class="mono"
           />
         </div>
-        <div v-if="addFields.includes('api_key')" class="add-row">
-          <label class="add-label" for="add-key">{{ keyLabel }}</label>
+        <div v-if="declared('api_key')" class="add-row">
+          <label class="add-label" for="add-key">{{ label('api_key', keyLabel) }}</label>
           <input
             id="add-key"
             v-model="addApiKey"
