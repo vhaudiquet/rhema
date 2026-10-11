@@ -15,10 +15,11 @@
 //! instances existed carry one flat credential field per provider;
 //! loading folds those into instances named after their provider.
 //!
-//! Environment variables (`GEMINI_API_KEY`, `GOOGLE_API_KEY`,
-//! `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-//! `DEEPSEEK_API_KEY`, `GITHUB_COPILOT_TOKEN`) always win over a stored
-//! key — a stored key is the fallback, not the override.
+//! Environment variables (`RHEMA_PROVIDER`, `GEMINI_API_KEY`,
+//! `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
+//! `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GITHUB_COPILOT_TOKEN`) always
+//! win over the stored value — a stored entry is the fallback, not the
+//! override.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -124,6 +125,18 @@ pub struct Profile {
 }
 
 impl Profile {
+    /// The provider this profile serves turns on: `RHEMA_PROVIDER`, then
+    /// the stored `provider`. Whitespace-only values count as unset. The
+    /// name is returned as given — unknown spellings are the consumer's
+    /// to resolve or reject.
+    pub fn provider_name(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["RHEMA_PROVIDER"],
+            self.provider.clone(),
+        )
+    }
+
     /// The Google API key to use: `GEMINI_API_KEY`, then `GOOGLE_API_KEY`,
     /// then the stored key of the profile's Google instance (legacy flat
     /// field last). Whitespace-only values count as unset.
@@ -433,6 +446,11 @@ pub struct Config {
     /// Nerd Font glyphs. Anything unparseable reads as the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<String>,
+    /// The color theme: `dark` (the default) or `light`. Validated by
+    /// the consumer, not here — anything unparseable reads as the
+    /// default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub theme: Option<String>,
     /// The last profile that served each workspace a turn, keyed by the
     /// workspace's absolute path. Startup reopens a directory on its
     /// last-used profile — a per-directory memory, never a global
@@ -458,6 +476,7 @@ impl Default for Config {
         Self {
             profiles: default_profiles(),
             icons: None,
+            theme: None,
             last_profile_by_workspace: BTreeMap::new(),
         }
     }
@@ -704,6 +723,36 @@ mod tests {
     }
 
     #[test]
+    fn the_provider_name_follows_the_same_env_wins_convention() {
+        // A blank RHEMA_PROVIDER counts as unset: the stored provider
+        // serves. The real env is only read when the suite does not
+        // export the var itself; the pure resolver carries the rest of
+        // the env-wins coverage (a test setting it would race the run).
+        let blank = |name: &str| (name == "RHEMA_PROVIDER").then(String::new);
+        assert_eq!(
+            resolve_key(blank, &["RHEMA_PROVIDER"], Some("openrouter".into())),
+            Some("openrouter".into())
+        );
+        assert_eq!(
+            resolve_key(
+                |_| Some("openrouter".into()),
+                &["RHEMA_PROVIDER"],
+                Some("google".into())
+            ),
+            Some("openrouter".into())
+        );
+        assert_eq!(resolve_key(|_| None, &["RHEMA_PROVIDER"], None), None);
+        if std::env::var_os("RHEMA_PROVIDER").is_none() {
+            let profile = Profile {
+                provider: Some("openrouter".into()),
+                ..Profile::default()
+            };
+            assert_eq!(profile.provider_name().as_deref(), Some("openrouter"));
+            assert_eq!(Profile::default().provider_name(), None);
+        }
+    }
+
+    #[test]
     fn config_round_trips_through_disk_as_yaml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -754,6 +803,7 @@ mod tests {
                 },
             )]),
             icons: None,
+            theme: Some("light".into()),
             last_profile_by_workspace: BTreeMap::new(),
         };
         Config::save_to(&path, &config).unwrap();

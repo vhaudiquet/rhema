@@ -47,7 +47,8 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   caches and refreshes; streaming, live model listing
 - `rhema-config` — the XDG config file: named profiles of named
   provider instances (stored keys, 0600), the active provider/instance
-  pair, and the last-used model; env vars always win over a stored key
+  pair, the last-used model, and UI settings; env vars (`RHEMA_PROVIDER`,
+  the per-provider key vars) always win over the stored value
 - `rhema-rsd` — resource-scoped dispatch: at most one live handler per
   resource key, a live inbox delivered mid-run, revision-guarded
   checkpoints, leases with TTL and recovery, and a persistent per-key
@@ -187,6 +188,9 @@ selection is per-instance, never a stored global switch — `rhema
 side, and `/profile` switches a running TUI without touching the other
 instance. Logins and model picks write into the session's profile
 section, so the same provider can hold different keys per profile.
+A `RHEMA_PROVIDER` environment variable overrides the profile's stored
+`provider` the same way the key env vars override stored keys — handy
+for one terminal on another backend without editing the config.
 
 Inside the TUI, `/profile` switches mid-session: it lists the profiles
 (each in its configured color, with its provider, model, and credential
@@ -307,8 +311,8 @@ calls run auto-approved for now; command allowlists are planned.
 
 The TUI paints the Jadeite design system — jade-tinted dark ground,
 one green accent, status colors reserved for meaning. `--theme light`
-switches to the light token set for light terminals; dark is the
-design's primary.
+(or `theme: light` in config.yaml) switches to the light token set for
+light terminals; dark is the design's primary.
 
 `--provider llama-cpp --llama-url http://box:8080` starts on the llama.cpp
 backend without logging in; `ctrl-p` still lists that server's models.
