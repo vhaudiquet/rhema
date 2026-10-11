@@ -201,6 +201,15 @@ jobs:
           cd android
           ./gradlew :app:assembleDebug :app:lintDebug
 
+      # The artifact must install over any previous debug build, so the
+      # identity is part of the contract: pin the committed keystore's
+      # certificate, not merely "some debug key".
+      - name: Verify the APK signature
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)
+          "$APKSIGNER" verify --print-certs android/app/build/outputs/apk/debug/app-debug.apk \
+            | grep -q 13e65a1e4fb828318077784c029e8f2664dba5ef8feece01b950b6bc2b015b64
+
       - name: Upload the debug APK
         uses: https://gitea.com/actions/gitea-upload-artifact@v4
         with:
