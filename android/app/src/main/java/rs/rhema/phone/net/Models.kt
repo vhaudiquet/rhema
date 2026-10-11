@@ -79,10 +79,16 @@ data class RhemaNotification(
 )
 
 // Frames of GET /v1/sessions/{key}/events; "type" is the discriminator.
+// The stream opens with the session's recorded turns replayed before the
+// live feed, so a screen (re)builds its transcript from the replay.
 // Unknown types fail the per-frame parse and are skipped, so the API can grow
 // without breaking older clients.
 @Serializable
 sealed interface ClawEvent {
+    @Serializable
+    @SerialName("user_message")
+    data class UserMessage(val text: String = "") : ClawEvent
+
     @Serializable
     @SerialName("thinking_delta")
     data class ThinkingDelta(val text: String = "") : ClawEvent
@@ -103,7 +109,10 @@ sealed interface ClawEvent {
         val summary: String? = null,
     ) : ClawEvent
 
+    // The reply is null when the turn ended without producing text —
+    // a failed turn, mostly. Nullable on purpose: a dropped frame would
+    // hide exactly the turns a viewer needs the outcome tag for.
     @Serializable
     @SerialName("turn_done")
-    data class TurnDone(val reply: String = "", val outcome: String? = null) : ClawEvent
+    data class TurnDone(val reply: String? = null, val outcome: String? = null) : ClawEvent
 }

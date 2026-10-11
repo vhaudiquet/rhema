@@ -68,7 +68,14 @@ class ChatController(
             while (isActive) {
                 api.eventStream(sessionKey).collect { frame ->
                     when (frame) {
-                        SseFrame.Opened -> connection = Conn.Live
+                        // Every (re)connection opens with the claw's replay of
+                        // the recorded turns, then the live feed: drop the
+                        // mirror and let the replay rebuild it, or the replay
+                        // would double everything already on screen.
+                        SseFrame.Opened -> {
+                            items = emptyList()
+                            connection = Conn.Live
+                        }
                         is SseFrame.Event -> apply(frame.event)
                         SseFrame.Closed -> Unit
                         is SseFrame.Failed -> connection = Conn.Failed(frame.code, frame.message)
@@ -90,7 +97,10 @@ class ChatController(
 
     // The stream is already collecting by the time the user can press send,
     // so this preserves the claw's subscribe-then-post order. A failed POST
-    // restores the draft in the UI; nothing optimistic is appended before 202.
+    // restores the draft in the UI. The turn's user_message event is the
+    // transcript's own record of the question — replayed on a reload, and
+    // echoed live right about when this returns — so the local row is only
+    // appended when the echo has not already landed.
     suspend fun send(text: String): Boolean {
         sending = true
         sendError = null
@@ -98,7 +108,10 @@ class ChatController(
         sending = false
         return when (result) {
             is ClawResult.Ok -> {
-                items = items + UserMessage(newId(), text)
+                val last = items.lastOrNull()
+                if (!(last is UserMessage && last.text == text)) {
+                    items = items + UserMessage(newId(), text)
+                }
                 true
             }
             is ClawResult.HttpError -> {
@@ -115,6 +128,15 @@ class ChatController(
 
     private fun apply(event: ClawEvent) {
         when (event) {
+            is ClawEvent.UserMessage -> {
+                // The recorded question — replayed on reload, echoed live
+                // for a message this surface just sent. An identical last
+                // row is that echo's stand-in; skip it.
+                val last = items.lastOrNull()
+                if (!(last is UserMessage && last.text == event.text)) {
+                    items = items + UserMessage(newId(), event.text)
+                }
+            }
             is ClawEvent.ThinkingDelta -> {
                 val last = items.lastOrNull()
                 items = if (last is Thinking) {
@@ -160,7 +182,7 @@ class ChatController(
                 items = kept.mapIndexed { i, item ->
                     if (item !is Reply) {
                         item
-                    } else if (i == replyIndex && event.reply.isNotEmpty()) {
+                    } else if (i == replyIndex && !event.reply.isNullOrEmpty()) {
                         item.copy(text = event.reply, streaming = false)
                     } else {
                         item.copy(streaming = false)

@@ -25,6 +25,9 @@ notifications.
   one SSE connection (`GET /v1/sessions/{key}/events`, OkHttp streaming GET
   with the auth header, hand-parsed frames: blank-line delimited `data:`
   lines, `:` comment keep-alives skipped, unknown event types skipped). The
+  stream opens with the claw's replay of the session's recorded turns before
+  the live feed, so every (re)connection resets the transcript and rebuilds
+  it from the replay. The
   composer POSTs `{"text"}`; the claw's documented dance is preserved:
   **subscribe first, then POST**, the reply arrives on the stream. Thinking
   deltas render dim and collapsible, tool rows show name/summary with error
@@ -71,7 +74,7 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `PUT /v1/providers/active` | switch the backend instance, persisted |
 | `GET /v1/sessions` | session list |
 | `POST /v1/sessions/{key}/messages` | `{"text"}` → 202; reply via stream |
-| `GET /v1/sessions/{key}/events` | SSE: `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done` |
+| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done` |
 | `POST /v1/ingest` | `{"source","key","payload"}` |
 | `GET /v1/notifications?device=&since=` | ascending notification list |
 | `POST /v1/notifications/{id}/ack` | best-effort ack |
