@@ -21,7 +21,7 @@ defineEmits<{ navigate: [view: 'chat' | 'settings'] }>()
       :mark="identity?.mark"
       :size="36"
       class="mark"
-      title="rhema — the spoken word"
+      title="rhema, the spoken word"
     />
 
     <button

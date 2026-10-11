@@ -31,7 +31,7 @@ const routes = [
         <div class="avatar" aria-hidden="true">R</div>
         <div>
           <h2>Rhema</h2>
-          <p>ῥῆμα — "the spoken word": words that do things.</p>
+          <p>ῥῆμα, "the spoken word": words that do things.</p>
         </div>
       </div>
 
@@ -48,7 +48,7 @@ const routes = [
         <SettingRow title="Engine" description="The step engine every turn runs through.">
           <span class="mono">rhema-core</span>
         </SettingRow>
-        <SettingRow title="Web client" description="This dashboard — Nuxt 4, one static bundle.">
+        <SettingRow title="Web client" description="This dashboard: Nuxt 4, one static bundle.">
           <span class="mono">rhema-claw-web 0.1.0</span>
         </SettingRow>
         <SettingRow title="Claw status" description="What /healthz last answered.">

@@ -1,9 +1,9 @@
-# rhema claw — web
+# rhema claw web
 
 A small, hand-rolled web client for the claw (`rhema-claw`): a live
 transcript of one session, the session inventory, and a settings area
 (model providers, about). Nuxt 4 + Vue 3 + TypeScript, no component
-library, no store — it is strictly **one client** of the claw's public
+library, no store. It is strictly **one client** of the claw's public
 `/v1` HTTP surface.
 
 ## Run it against a locally running claw
@@ -40,7 +40,7 @@ npm run build      # nuxt generate -> .output/public, fully static
 npm run typecheck  # vue-tsc over the whole app
 ```
 
-`npm run build` produces a static SPA in `.output/public` — the artifact
+`npm run build` produces a static SPA in `.output/public`, the artifact
 an ingress serves. The ingress owns routing: same-origin `/v1` and
 `/healthz` to the claw. `runtimeConfig.public.clawBase` can point the
 client at another base, but the claw sends no CORS headers, so
@@ -51,7 +51,7 @@ cross-origin use needs a proxy, not a different origin.
 The claw's `/v1` API is the contract (`crates/rhema-claw/src/http.rs`):
 sessions, messages, events, providers. This client uses only public
 routes, speaks the wire shapes the Rust side serializes, and adds
-nothing server-side. UI needs never justify private endpoints — they
+nothing server-side. UI needs never justify private endpoints; they
 justify claw API changes, argued in the Rust tree.
 
 Two consequences worth knowing before changing this code:
@@ -73,7 +73,7 @@ Two consequences worth knowing before changing this code:
 
 The shell is an icon rail plus two views, switched by a tiny hash
 router (`#/chat`, `#/settings/agent/general`, `#/settings/agent/
-accounts`, `#/settings/providers`, `#/settings/about`) — no
+accounts`, `#/settings/providers`, `#/settings/about`), no
 vue-router. The chat view is the session inventory plus the live
 transcript; the settings view is a searchable nav plus pages over one
 shared detail panel. The agent's identity (name, mark, avatar) loads
@@ -83,15 +83,15 @@ mark or initials. Settings pages stage edits into a local draft and
 apply them with an explicit Save (`PUT /v1/providers/active` answers
 the new pair only; the client carries the provider list forward).
 The providers page also manages the roster itself: the add form renders
-from the `addable` kinds the claw serves — each kind's `fields` carry
+from the `addable` kinds the claw serves; each kind's `fields` carry
 `{name, required}`, `required` marking what the daemon refuses the login
 without (llama.cpp needs neither of its fields, it serves keyless on a
 default url); the form demands only those, marks the rest optional, and
-takes an optional instance name — unnamed, the id is the kind. A login
-is `PUT /v1/providers/{id}/credentials` — apply immediately,
+takes an optional instance name; unnamed, the id is the kind. A login
+is `PUT /v1/providers/{id}/credentials`: apply immediately,
 credentials persist; roster rows are backend instances (`id`, the kind
 unless the login named it, plus the credential's `source`
-badge — env-backed kinds return on restart after a removal), and the
+badge, env-backed kinds return on restart after a removal), and the
 remove button (`DELETE /v1/providers/{id}`) refuses the last backend
 claw-side.
 

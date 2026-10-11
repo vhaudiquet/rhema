@@ -188,7 +188,7 @@ function submitAdd(): void {
 function sourceTitle(source: string): string {
   switch (source) {
     case 'env':
-      return 'credential from the environment — a removal lasts until restart'
+      return 'credential from the environment; a removal lasts until restart'
     case 'stored':
       return 'credential stored claw-side through this surface'
     case 'profile':
@@ -218,7 +218,7 @@ watch(
 
 <template>
   <div class="page">
-    <PageHeader title="Model providers" subtitle="The backends the claw can answer with — logins apply immediately; the pair switch persists.">
+    <PageHeader title="Model providers" subtitle="The backends the claw can answer with. Logins apply immediately; the pair switch persists.">
       <template #actions>
         <button :disabled="mutating" @click="loginOpen = true">Add provider</button>
         <button :disabled="!dirty || saving" @click="discard">Discard</button>
@@ -230,7 +230,7 @@ watch(
 
     <div class="scroll">
       <AppCallout v-if="dirty" variant="warn" title="1 change not applied">
-        The staged pair takes effect on the claw's next turn — no restart
+        The staged pair takes effect on the claw's next turn, no restart
         involved. Save to apply it, Discard to keep the running backend.
       </AppCallout>
       <p v-if="!state" class="muted">loading providers…</p>
@@ -313,7 +313,7 @@ watch(
           <select id="add-kind" v-model="addKind" :disabled="mutating">
             <option value="" disabled>choose a provider…</option>
             <option v-for="entry in addable" :key="entry.kind" :value="entry.kind">
-              {{ kindLabel(entry.kind) }}{{ state.providers.some((p) => p.id === entry.kind) ? ' — replaces its credentials' : '' }}
+              {{ kindLabel(entry.kind) }}{{ state.providers.some((p) => p.id === entry.kind) ? '; replaces its credentials' : '' }}
             </option>
           </select>
         </div>
@@ -356,7 +356,7 @@ watch(
           a name carries no whitespace or '/' and stays under 64 characters.
         </p>
         <p v-else-if="addIdPresent" class="add-note">
-          {{ resultingId }} is already serving — saving replaces its
+          {{ resultingId }} is already serving. saving replaces its
           credentials and restarts nothing; the active pair is untouched.
         </p>
         <p v-else-if="addKind" class="add-note">

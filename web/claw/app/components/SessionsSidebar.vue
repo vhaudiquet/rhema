@@ -68,7 +68,7 @@ function stateTone(state: string): 'ok' | 'warn' | 'idle' {
     </header>
 
     <p v-if="sessions.length === 0" class="empty">
-      {{ loading ? 'loading…' : 'no sessions yet — send the first message' }}
+      {{ loading ? 'loading…' : 'no sessions yet; send the first message' }}
     </p>
 
     <div v-for="group in groups" :key="group.label" class="group">

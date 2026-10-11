@@ -85,7 +85,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
 
     <div ref="scroller" class="stream-area" @scroll.passive="onScroll">
       <p v-if="items.length === 0 && !live" class="empty">
-        nothing streamed yet — messages post to the claw and replies arrive here live
+        nothing streamed yet; messages post to the claw and replies arrive here live
       </p>
 
       <template v-for="item in items" :key="item.id">

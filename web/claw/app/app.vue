@@ -427,7 +427,7 @@ onUnmounted(() => {
           </template>
         </ClawBanner>
         <ClawBanner v-if="clawUp === false" variant="error">
-          the claw is unreachable at {{ config.public.clawBase || 'same origin (dev proxy → 127.0.0.1:7799)' }} —
+          the claw is unreachable at {{ config.public.clawBase || 'same origin (dev proxy → 127.0.0.1:7799)' }};
           start it with <code>rhema-claw</code>
         </ClawBanner>
         <ClawBanner v-if="apiError" variant="error" dismissible @dismiss="apiError = null">
@@ -520,8 +520,8 @@ onUnmounted(() => {
                 </AppBadge>
               </div>
               <p v-if="providerModelsError" class="detail-note">
-                {{ providerModelsError }} — the backend still switches; its
-                default model applies.
+                {{ providerModelsError }}; the backend still switches and
+                its default model applies.
               </p>
               <div v-if="providerModels.length > 0" class="detail-models">
                 <span class="label">Live listing</span>
