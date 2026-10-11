@@ -24,6 +24,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod privacy;
+
+use crate::privacy::{private_dir, private_write};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -565,11 +568,13 @@ impl Config {
         }
     }
 
-    /// Persists the config, creating the directory; the file is written
-    /// with `0600` permissions on Unix because it holds credentials.
+    /// Persists the config, creating the directory `0700` and the file
+    /// `0600` on Unix because it holds credentials. Both modes are
+    /// re-asserted on every save, so a config that predates the rule —
+    /// or was widened elsewhere — tightens again.
     pub fn save(&self) -> Result<(), ConfigError> {
         let dir = Self::dir()?;
-        std::fs::create_dir_all(&dir)?;
+        private_dir(&dir)?;
         Self::save_to(&dir.join("config.yaml"), self)
     }
 
@@ -592,37 +597,12 @@ impl Config {
         Ok(config)
     }
 
-    /// [`Config::save`] to an explicit file, with the same `0600` handling.
+    /// [`Config::save`] to an explicit file, with the same `0600`
+    /// handling.
     pub fn save_to(path: &impl AsRef<Path>, config: &Config) -> Result<(), ConfigError> {
         let yaml = serde_yaml::to_string(config)?;
-        // Mode applies at create time so the credentials never touch disk
-        // world-readable.
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode_0600_on_unix()
-            .open(path)?;
-        use std::io::Write;
-        file.write_all(yaml.as_bytes())?;
+        private_write(path.as_ref(), yaml.as_bytes())?;
         Ok(())
-    }
-}
-
-trait OpenOptionsExt0600 {
-    fn mode_0600_on_unix(&mut self) -> &mut Self;
-}
-
-impl OpenOptionsExt0600 for std::fs::OpenOptions {
-    #[cfg(unix)]
-    fn mode_0600_on_unix(&mut self) -> &mut Self {
-        use std::os::unix::fs::OpenOptionsExt;
-        self.mode(0o600)
-    }
-
-    #[cfg(not(unix))]
-    fn mode_0600_on_unix(&mut self) -> &mut Self {
-        self
     }
 }
 
@@ -1009,6 +989,16 @@ profiles:
             legacy.stored_provider_key("openai").as_deref(),
             Some("sk-flat")
         );
+    #[cfg(unix)]
+    fn a_widened_config_file_tightens_on_the_next_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "stale").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        Config::save_to(&path, &Config::default()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "credentials file must be 0600");
     }
 
     #[test]
