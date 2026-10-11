@@ -13,6 +13,7 @@ use crate::app::{App, Screen};
 use crate::screens::{PROVIDERS, PickerScreen, PickerStatus, format_tokens};
 use crate::transcript::{self, pretty_args};
 use rhema_provider::ModelCard;
+use std::path::Path;
 
 /// Renders one frame.
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -611,6 +612,52 @@ fn footer_model(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
+/// Parents the footer's folder may show beside the folder itself.
+const FOOTER_FOLDER_PARENTS: usize = 3;
+
+/// The workspace as the footer shows it: `(prefix, parents, folder)`.
+/// The home prefix is trimmed away — and the home's `Documents` with
+/// it, where projects live, the word carries nothing — then at most
+/// [`FOOTER_FOLDER_PARENTS`] parents ride beside the folder itself so a
+/// deep path stays small. `prefix` is `/` for a whole absolute path,
+/// `…/` when parents fell off. A path with nothing left after the trim
+/// (the home itself, its `Documents`) falls back to its own name.
+fn footer_folder(workspace: &Path, home: Option<&Path>) -> (String, Vec<String>, String) {
+    let mut rel = workspace.to_path_buf();
+    if let Some(home) = home {
+        if let Ok(stripped) = rel.strip_prefix(home) {
+            rel = stripped.to_path_buf();
+        }
+        if let Ok(stripped) = rel.strip_prefix("Documents") {
+            rel = stripped.to_path_buf();
+        }
+    }
+    let text = rel.to_string_lossy();
+    let absolute = text.starts_with('/');
+    let names: Vec<&str> = text.split('/').filter(|name| !name.is_empty()).collect();
+    let Some(folder) = names.last() else {
+        let fallback = workspace
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_owned());
+        return (String::new(), Vec::new(), fallback);
+    };
+    let truncated = names.len() > FOOTER_FOLDER_PARENTS + 1;
+    let keep = names.len().min(FOOTER_FOLDER_PARENTS + 1);
+    let parents: Vec<String> = names[names.len() - keep..names.len() - 1]
+        .iter()
+        .map(|name| (*name).to_owned())
+        .collect();
+    let prefix = if truncated {
+        "…/".to_owned()
+    } else if absolute {
+        "/".to_owned()
+    } else {
+        String::new()
+    };
+    (prefix, parents, (*folder).to_owned())
+}
+
 /// Greedy word wrap over styled spans. A word wider than `width` is
 /// hard-split at the display-width boundary, so the returned row count is
 /// exact for the given width — the transcript scroll math depends on it.
@@ -1050,6 +1097,16 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         parts.push(Span::raw(name).fg(color));
         parts.push(Span::raw(" · ").fg(theme.text3));
     }
+    // Where the session sits: the folder badge over the trimmed
+    // workspace path, its folder in bold.
+    let (prefix, parents, folder) = footer_folder(&app.options.workspace, app.home.as_deref());
+    parts.push(Span::raw(format!(" · {}", app.icons.folder)).fg(theme.text3));
+    parts.push(Span::raw(format!(" {prefix}")).fg(theme.text3));
+    for parent in parents {
+        parts.push(Span::raw(parent).fg(theme.text3));
+        parts.push(Span::raw("/").fg(theme.text3));
+    }
+    parts.push(Span::raw(folder).fg(theme.text2).bold());
     match (&effective.provider, &effective.model) {
         (None, _) => parts.push(Span::raw("no provider; use /login").fg(theme.text3)),
         (_, None) => parts.push(Span::raw("no model; use /model").fg(theme.text3)),
@@ -1519,7 +1576,7 @@ mod tests {
 
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
-    use super::{cursor_at_rows, input_layout, input_rows, render, wrap_line};
+    use super::{cursor_at_rows, footer_folder, input_layout, input_rows, render, wrap_line};
     use crate::app::{App, AppSetup, RunOptions};
     use crate::args::ThemeKind;
     use crate::events::OwnedEvent;
@@ -1532,7 +1589,7 @@ mod scroll_tests {
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_core::Usage;
     use rhema_provider::ModelCard;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     fn chat_app() -> App {
@@ -1686,6 +1743,60 @@ mod scroll_tests {
             columns.iter().all(|(_, pos)| *pos == columns[0].1),
             "descriptions misaligned: {columns:?}"
         );
+    }
+
+    /// The footer's folder: the home and its `Documents` trim away, and
+    /// at most three parents ride beside the folder itself.
+    #[test]
+    fn the_footer_folder_trims_home_and_caps_parents() {
+        let home = Path::new("/home/u");
+        // The home-trimmed workspace reads as its projects path.
+        assert_eq!(
+            footer_folder(Path::new("/home/u/Documents/prjs/rhema"), Some(home)),
+            (String::new(), vec!["prjs".to_owned()], "rhema".to_owned())
+        );
+        // Deeper than three parents: what fell off leaves the ellipsis.
+        assert_eq!(
+            footer_folder(Path::new("/home/u/prjs/a/b/c/d/e"), Some(home)),
+            (
+                "…/".to_owned(),
+                vec!["b".to_owned(), "c".to_owned(), "d".to_owned()],
+                "e".to_owned()
+            )
+        );
+        // Outside the home, a whole absolute path keeps its root slash.
+        assert_eq!(
+            footer_folder(Path::new("/var/log/app"), None),
+            (
+                "/".to_owned(),
+                vec!["var".to_owned(), "log".to_owned()],
+                "app".to_owned()
+            )
+        );
+        // Nothing left after the trim: the name itself.
+        assert_eq!(
+            footer_folder(Path::new("/home/u"), Some(home)),
+            (String::new(), Vec::new(), "u".to_owned())
+        );
+        assert_eq!(
+            footer_folder(Path::new("/home/u/Documents"), Some(home)),
+            (String::new(), Vec::new(), "Documents".to_owned())
+        );
+        // Filesystem root: a bare slash, no parents.
+        assert_eq!(
+            footer_folder(Path::new("/"), Some(home)),
+            (String::new(), Vec::new(), "/".to_owned())
+        );
+    }
+
+    /// The footer carries the folder badge: the trimmed workspace path
+    /// with its folder at the end.
+    #[test]
+    fn the_footer_shows_the_workspace_folder() {
+        let mut app = chat_app();
+        app.home = Some(PathBuf::from("/home/u"));
+        app.options.workspace = PathBuf::from("/home/u/Documents/prjs/rhema");
+        assert!(screen_text(&mut app).contains("prjs/rhema"));
     }
 
     #[test]

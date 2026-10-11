@@ -351,9 +351,12 @@ Commands: `/help`, `/clear` or
 prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 The footer's badges are plain-Unicode icons: `⁂` names the thinking
-level, and the context gauge (`◔◑◕●`) fills with the window so the fill
-is readable at a glance. Terminals carrying a Nerd Font can switch to
-the brain and database glyphs with `icons: nerd` in config.yaml.
+level, the context gauge (`◔◑◕●`) fills with the window so the fill
+is readable at a glance, and `❐` prefixes the workspace folder (the
+home — and its `Documents` — trimmed away, at most three parents
+beside the folder itself). Terminals carrying a Nerd Font can switch
+to the brain, database, and folder glyphs with `icons: nerd` in
+config.yaml.
 Flags: `--profile`, `-m/--model`, `--workspace`, `--resume`/`--save`
 (session checkpointing), `--max-steps`, `--thinking low|medium|high`
 (reasoning effort; mapped

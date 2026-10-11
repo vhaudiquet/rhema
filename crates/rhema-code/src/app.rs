@@ -446,6 +446,9 @@ pub struct App {
     pub provider: Option<Arc<dyn ModelProvider>>,
     /// The startup flags.
     pub options: RunOptions,
+    /// The home directory, when the environment names one: the footer
+    /// trims it (and its `Documents`) off the workspace path it shows.
+    pub home: Option<PathBuf>,
     /// The profile this session runs under: the `--profile` flag over the
     /// stored active profile. `/profile` switches it mid-session.
     pub session_profile: Option<String>,
@@ -577,6 +580,7 @@ impl App {
                     .unwrap_or_else(|| "personal".to_owned()),
             ),
             options: setup.options,
+            home: std::env::var("HOME").ok().map(PathBuf::from),
             session,
             screen,
             models: Vec::new(),

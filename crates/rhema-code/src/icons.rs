@@ -10,20 +10,25 @@ pub struct Icons {
     pub thinking: &'static str,
     /// The context gauge for a fill fraction in `0.0..=1.0`.
     pub context: fn(fraction: f64) -> &'static str,
+    /// The current-folder badge.
+    pub folder: &'static str,
 }
 
 /// The plain set: every glyph renders in any terminal font. The thinking
-/// badge is the typographic asterism — a break for reflection.
+/// badge is the typographic asterism — a break for reflection; the
+/// folder badge is an open tray.
 pub const UNICODE: Icons = Icons {
     thinking: "⁂",
     context: unicode_gauge,
+    folder: "❐",
 };
 
-/// The Nerd Font set: FontAwesome brain and database — needs a patched
-/// font installed, or the badges read as tofu.
+/// The Nerd Font set: FontAwesome brain, database, and folder — needs a
+/// patched font installed, or the badges read as tofu.
 pub const NERD: Icons = Icons {
     thinking: "\u{f5dc}",
     context: nerd_gauge,
+    folder: "\u{f07b}",
 };
 
 /// Which flavor the footer draws with.
