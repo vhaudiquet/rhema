@@ -137,7 +137,10 @@ impl Daemon {
         config.validate()?;
         let db = config.db_path()?;
         if let Some(parent) = db.parent() {
-            std::fs::create_dir_all(parent)?;
+            // The store holds provider keys and forge tokens: `0700` on
+            // the directory, `0600` on the file (below), both
+            // re-asserted on every boot.
+            rhema_config::privacy::private_dir(parent)?;
         }
         let workspace_root = config.workspace_root()?;
         let interactive_workspace = workspace_root.join("interactive");
@@ -147,6 +150,10 @@ impl Daemon {
         // the watch table, the notification table, and the task table
         // live side by side.
         let store = Arc::new(SqliteStore::open(&db)?);
+        // SQLite created the file under the umask; whatever it left
+        // wide, tighten. Best-effort: a filesystem that refuses mode
+        // changes must not stop the boot.
+        rhema_config::privacy::tighten_file(&db);
         let watches = Arc::new(ClawStore::open(&db)?);
         let notifications = Arc::new(NotificationStore::open(&db)?);
         let tasks = Arc::new(TaskStore::open(&db)?);
