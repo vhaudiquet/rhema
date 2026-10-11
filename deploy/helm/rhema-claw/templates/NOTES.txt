@@ -21,7 +21,9 @@ The daemon is single-node by design: one SQLite store, one dispatcher
 3. Credentials: injected from the Secret into the environment.
 {{- end }}
 
-4. Token: /v1 routes are {{ if .Values.token }}protected by the token set in values{{ else }}OPEN (no token set) — set `token` in values if this port is reachable beyond loopback{{ end }}; /healthz stays open either way.
+4. Token: /v1 routes are protected by the token set in values; /healthz
+   stays open either way. The render refuses an empty token — the daemon
+   binds all interfaces in-cluster and will not serve unguarded.
 {{- if not .Values.persistence.enabled }}
 
 WARNING: persistence.enabled=false — the SQLite store and workspaces live in

@@ -14,9 +14,10 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
-# Bearer token for the /v1 routes, rendered into claw.yaml. Empty leaves
-# the surface open on its interface — set one whenever the port is
-# reachable from beyond loopback. /healthz stays open either way.
+# Bearer token for the /v1 routes, rendered into claw.yaml. Required:
+# the daemon binds all interfaces in-cluster (the Service needs it) and
+# refuses to serve a non-loopback surface without a token, so the render
+# fails when this is empty. /healthz stays open either way.
 token: ""
 
 # The claw.yaml content. db, workspace_root, and listen are pinned by the

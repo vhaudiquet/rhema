@@ -1,4 +1,10 @@
 {{- include "rhema-claw.assertSingleReplica" . }}
+{{- /* The daemon binds 0.0.0.0 in-cluster (the Service needs every
+       interface) and refuses to serve a non-loopback surface without a
+       bearer token — fail the render here, before the pod does. */ -}}
+{{- if not .Values.token }}
+{{- fail "token is required: the daemon binds all interfaces in-cluster, and it refuses to serve a non-loopback surface without a bearer token (set `token` in values)" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
