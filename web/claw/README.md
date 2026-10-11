@@ -104,9 +104,12 @@ app/
     AppRail.vue                  the icon rail: views, claw pulse
     AppBadge.vue                 the status/tag pill
     AppCallout.vue               the toned inline note (info/ok/warn/error)
+    AppMarkdown.vue              agent replies as markdown (markdown-it,
+                                 raw HTML escaped, styles in main.css .md)
     ClawBanner.vue               the one error/notice banner surface
     ChatPanel.vue                transcript: sent lines, streamed turns,
-                                 composer with the backend chip
+                                 composer with the backend chip; agent
+                                 replies render through AppMarkdown
     SessionsSidebar.vue          every dispatch key, interactive first
     DetailPanel.vue              the right-hand detail column
     PageHeader.vue               title + subtitle + page actions

@@ -93,7 +93,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           <div class="avatar user" aria-hidden="true">·</div>
           <div class="msg-body">
             <div class="who">you</div>
-            <div class="reply">{{ item.text }}</div>
+            <div class="reply plain">{{ item.text }}</div>
           </div>
         </div>
         <div v-else class="msg">
@@ -117,7 +117,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
                 <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
               </li>
             </ul>
-            <div v-if="item.turn.reply" class="reply">{{ item.turn.reply }}</div>
+            <AppMarkdown v-if="item.turn.reply" :text="item.turn.reply" class="reply" />
             <div
               v-if="item.turn.outcome"
               class="outcome mono"
@@ -150,10 +150,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
               <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
             </li>
           </ul>
-          <div v-if="live.reply" class="reply">{{ live.reply }}<span
-            class="cursor"
-            aria-hidden="true"
-          >▊</span></div>
+          <AppMarkdown v-if="live.reply" :text="live.reply" streaming class="reply" />
         </div>
       </div>
     </div>
@@ -353,19 +350,13 @@ li.error .glyph {
 
 .reply {
   color: var(--text);
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
-.cursor {
-  color: var(--accent-text);
-  animation: blink 1.1s steps(1) infinite;
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
+/* User lines are verbatim input; agent replies render markdown (see
+   main.css .md) and wrap by its rules instead. */
+.plain {
+  white-space: pre-wrap;
 }
 
 .outcome {
