@@ -488,7 +488,7 @@ impl Config {
     /// ISOLATION: a profile's section is authoritative — work never
     /// inherits personal's model or keys. An unknown name resolves to an
     /// empty profile; the caller decides how to present that (the TUI
-    /// says "no provider — use /login").
+    /// says "no provider; use /login").
     pub fn effective(&self, flag: Option<&str>) -> Profile {
         self.profiles
             .get(flag.unwrap_or("personal"))
