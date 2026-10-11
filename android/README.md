@@ -163,6 +163,14 @@ APK lands at `app/build/outputs/apk/debug/app-debug.apk`. Install and run:
 adb install app/build/outputs/apk/debug/app-debug.apk
 ```
 
+Debug builds are signed with the committed `debug.keystore` (the standard
+Android Debug identity: store/key password `android`, alias
+`androiddebugkey`), so any build installs over any other: a CI artifact
+updates a locally-built install and vice versa. The key is deliberately
+not a secret — debug keys guard nothing — a stable signature across
+machines is the whole point. The build never touches
+`~/.android/debug.keystore`, so other projects keep their own key.
+
 Pinned toolchain: Gradle 9.3.1 (wrapper), AGP 8.13.2, Kotlin 2.2.21
 (`org.jetbrains.kotlin.plugin.compose` + `plugin.serialization`), Compose
 BOM 2025.12.01, minSdk 26 / target & compileSdk 36.

@@ -19,6 +19,21 @@ android {
         versionName = "0.1.0"
     }
 
+    signingConfigs {
+        // Debug builds must install over each other, so the signing key
+        // may not depend on the machine that ran the build: CI artifacts
+        // share the identity of every local build via the committed
+        // android/debug.keystore. A debug key guards nothing — this is
+        // the conventional Android Debug identity, password "android" —
+        // while a stable signature is what makes the artifacts updatable.
+        getByName("debug") {
+            storeFile = rootProject.file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+
     buildTypes {
         release {
             // v1 ships debug builds only; keep release plain until there is a keystore.
