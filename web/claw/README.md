@@ -86,10 +86,11 @@ The providers page also manages the roster itself: the add form renders
 from the `addable` kinds the claw serves — each kind's `fields` carry
 `{name, required}`, `required` marking what the daemon refuses the login
 without (llama.cpp needs neither of its fields, it serves keyless on a
-default url); the form demands only those and marks the rest optional.
-A login is `PUT .../credentials` — apply immediately, credentials
-persist; roster rows are backend instances (`id`, the kind unless the
-login named it, plus the credential's `source`
+default url); the form demands only those, marks the rest optional, and
+takes an optional instance name — unnamed, the id is the kind. A login
+is `PUT /v1/providers/{id}/credentials` — apply immediately,
+credentials persist; roster rows are backend instances (`id`, the kind
+unless the login named it, plus the credential's `source`
 badge — env-backed kinds return on restart after a removal), and the
 remove button (`DELETE /v1/providers/{id}`) refuses the last backend
 claw-side.

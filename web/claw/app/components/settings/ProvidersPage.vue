@@ -3,10 +3,10 @@
 // with, plus the provider roster itself. Pair edits stage into a local
 // draft; Save PUTs it (the claw applies the pair on the next turn and
 // persists it), Discard reverts to what the claw reports. Logins apply
-// immediately: adding a kind constructs its backend claw-side and
+// immediately: adding an instance constructs its backend claw-side and
 // persists its credentials, removing one drops it (env-backed kinds
 // re-discover on restart — the source badge says which). The live
-// model listing comes from the provider itself; a kind without one
+// model listing comes from the provider itself; a backend without one
 // still switches — its default model applies.
 // Presentational: data flows in as props, intent flows up as events.
 import type { ModelCard, ProviderCredentials, ProvidersState } from '~/composables/useClaw'
@@ -16,7 +16,7 @@ const props = defineProps<{
   models: ModelCard[]
   modelsLoading: boolean
   modelsError: string | null
-  /** The kind whose listing is loaded/shown in the detail panel. */
+  /** The instance whose listing is loaded/shown in the detail panel. */
   selectedProvider: string | null
   saving: boolean
   /** A login or a removal is in flight. */
@@ -24,24 +24,24 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
-  /** Load (or reload) the selected kind's live listing. */
-  inspect: [kind: string]
+  /** Load (or reload) the selected instance's live listing. */
+  inspect: [id: string]
   save: [provider: string, model?: string]
   refresh: []
-  /** Add a backend (or replace a kind's credentials). */
-  add: [kind: string, credentials: ProviderCredentials]
-  /** Remove a backend from the claw's roster. */
-  remove: [kind: string]
+  /** Add a backend instance (or replace an id's credentials). */
+  add: [id: string, credentials: ProviderCredentials]
+  /** Remove a backend instance from the claw's roster. */
+  remove: [id: string]
 }>()
 
-// The draft pair. An empty model string means "the kind's default" —
+// The draft pair. An empty model string means "the provider's default" —
 // the PUT omits the model and the claw falls back.
 const draftProvider = ref<string | null>(null)
 const draftModel = ref('')
 
 const defaultModel = computed(() => {
-  const kind = draftProvider.value
-  return props.state?.providers.find((p) => p.kind === kind)?.default_model ?? ''
+  const id = draftProvider.value
+  return props.state?.providers.find((p) => p.id === id)?.default_model ?? ''
 })
 
 const effectiveModel = computed(() => draftModel.value || defaultModel.value)
@@ -69,20 +69,21 @@ function syncDraft(): void {
 watch(
   () => props.state,
   (state) => {
-    // A removal can take the staged kind with it: the draft re-grounds
-    // even when dirty, because staging a gone provider saves nothing.
+    // A removal can take the staged instance with it: the draft
+    // re-grounds even when dirty, because staging a gone provider
+    // saves nothing.
     const stagedGone =
       draftProvider.value !== null &&
-      !state?.providers.some((p) => p.kind === draftProvider.value)
+      !state?.providers.some((p) => p.id === draftProvider.value)
     if (!dirty.value || stagedGone) syncDraft()
   },
   { immediate: true },
 )
 
-function pickProvider(kind: string): void {
-  draftProvider.value = kind
+function pickProvider(id: string): void {
+  draftProvider.value = id
   draftModel.value = ''
-  emit('inspect', kind)
+  emit('inspect', id)
 }
 
 function discard(): void {
@@ -121,8 +122,12 @@ function label(name: string, base: string): string {
 
 const loginOpen = ref(false)
 const addKind = ref<string>('')
+const addName = ref('')
 const addApiKey = ref('')
 const addUrl = ref('')
+/** Set when a login is posted; the state swap that answers it closes
+ * the form (a failure leaves the state, and the form, as they were). */
+const pendingAdd = ref<string | null>(null)
 
 const addable = computed(() => props.state?.addable ?? [])
 
@@ -145,12 +150,20 @@ function fieldValue(name: string): string {
   return name === 'url' ? addUrl.value : name === 'api_key' ? addApiKey.value : ''
 }
 
-const addKindPresent = computed(() =>
-  props.state?.providers.some((p) => p.kind === addKind.value) ?? false,
+/** The id the login lands under: the name, or the kind unnamed. */
+const resultingId = computed(() => addName.value.trim() || addKind.value)
+
+const nameValid = computed(() => {
+  const name = addName.value.trim()
+  return name === '' || (name.length <= 64 && !/\s/.test(name) && !name.includes('/'))
+})
+
+const addIdPresent = computed(() =>
+  props.state?.providers.some((p) => p.id === resultingId.value) ?? false,
 )
 
 const addReady = computed(() => {
-  if (!addKind.value) return false
+  if (!addKind.value || !nameValid.value) return false
   return addFields.value
     .filter((field) => field.required)
     .every((field) => fieldValue(field.name).trim() !== '')
@@ -160,14 +173,16 @@ function submitAdd(): void {
   if (!addReady.value || props.mutating) return
   // Only declared fields go out, and only filled ones: the claw treats
   // an empty string as the value it was handed, not as "absent".
-  const credentials: ProviderCredentials = {}
+  const credentials: ProviderCredentials = { kind: addKind.value }
+  if (addName.value.trim() !== '') credentials.name = addName.value.trim()
   if (declared('api_key') && addApiKey.value.trim() !== '') {
     credentials.api_key = addApiKey.value.trim()
   }
   if (declared('url') && addUrl.value.trim() !== '') {
     credentials.url = addUrl.value.trim()
   }
-  emit('add', addKind.value, credentials)
+  pendingAdd.value = resultingId.value
+  emit('add', resultingId.value, credentials)
 }
 
 function sourceTitle(source: string): string {
@@ -183,15 +198,16 @@ function sourceTitle(source: string): string {
   }
 }
 
-// A login landed: the kind joined the roster, the form forgets the
-// secret it held.
+// A login landed: the claw answered with a new state object (a failed
+// one leaves the old, and the banner names the error), so the form
+// forgets what it held and closes.
 watch(
-  () => props.state?.providers.map((p) => p.kind).join(','),
-  (roster, previous) => {
-    if (addKind.value && roster && roster !== previous && roster.includes(addKind.value)) {
-      // The login landed: forget the secret, close the modal. A failed
-      // one leaves both up — the banner names the error.
+  () => props.state,
+  (state, previous) => {
+    if (pendingAdd.value !== null && state !== previous) {
+      pendingAdd.value = null
       loginOpen.value = false
+      addName.value = ''
       addApiKey.value = ''
       addUrl.value = ''
       addKind.value = ''
@@ -223,15 +239,15 @@ watch(
         <SettingCard title="Primary model" meta="what the agent answers with">
           <SettingRow
             title="Provider"
-            description="The constructible backend kind the claw dispatches turns on."
+            description="The backend instance the claw dispatches turns on."
           >
             <select
               :value="draftProvider ?? undefined"
               :disabled="saving"
               @change="pickProvider(($event.target as HTMLSelectElement).value)"
             >
-              <option v-for="p in state.providers" :key="p.kind" :value="p.kind">
-                {{ p.kind }}
+              <option v-for="p in state.providers" :key="p.id" :value="p.id">
+                {{ p.id }}
               </option>
             </select>
           </SettingRow>
@@ -254,28 +270,33 @@ watch(
         >
           <div
             v-for="p in state.providers"
-            :key="p.kind"
+            :key="p.id"
             class="backend"
-            :class="{ staged: p.kind === draftProvider, active: p.kind === state.active.provider }"
+            :class="{ staged: p.id === draftProvider, active: p.id === state.active.provider }"
             role="button"
             tabindex="0"
-            @click="pickProvider(p.kind)"
-            @keydown.enter="pickProvider(p.kind)"
+            @click="pickProvider(p.id)"
+            @keydown.enter="pickProvider(p.id)"
           >
-            <span class="kind mono">{{ p.kind }}</span>
+            <span class="kind mono">{{ p.id }}</span>
+            <AppBadge
+              v-if="p.kind !== p.id"
+              variant="dim"
+              :title="`a ${p.kind} backend`"
+            >{{ p.kind }}</AppBadge>
             <span class="model mono">{{ p.default_model }}</span>
             <AppBadge
               v-if="p.source"
               variant="dim"
               :title="sourceTitle(p.source)"
             >{{ p.source }}</AppBadge>
-            <AppBadge v-if="p.kind === state.active.provider" variant="accent">active</AppBadge>
-            <AppBadge v-else-if="p.kind === draftProvider && dirty">staged</AppBadge>
+            <AppBadge v-if="p.id === state.active.provider" variant="accent">active</AppBadge>
+            <AppBadge v-else-if="p.id === draftProvider && dirty">staged</AppBadge>
             <button
               class="ghost remove"
-              :title="`remove ${p.kind}`"
+              :title="`remove ${p.id}`"
               :disabled="mutating || state.providers.length <= 1"
-              @click.stop="emit('remove', p.kind)"
+              @click.stop="emit('remove', p.id)"
             >
               ×
             </button>
@@ -292,9 +313,21 @@ watch(
           <select id="add-kind" v-model="addKind" :disabled="mutating">
             <option value="" disabled>choose a provider…</option>
             <option v-for="entry in addable" :key="entry.kind" :value="entry.kind">
-              {{ kindLabel(entry.kind) }}{{ state.providers.some((p) => p.kind === entry.kind) ? ' — replaces its credentials' : '' }}
+              {{ kindLabel(entry.kind) }}{{ state.providers.some((p) => p.id === entry.kind) ? ' — replaces its credentials' : '' }}
             </option>
           </select>
+        </div>
+        <div class="add-row">
+          <label class="add-label" for="add-name">Name</label>
+          <input
+            id="add-name"
+            v-model="addName"
+            type="text"
+            placeholder="name (optional, defaults to the provider kind)"
+            autocomplete="off"
+            :disabled="mutating"
+            class="mono"
+          />
         </div>
         <div v-if="declared('url')" class="add-row">
           <label class="add-label" for="add-url">{{ label('url', 'Server URL') }}</label>
@@ -319,15 +352,21 @@ watch(
             :disabled="mutating"
           />
         </div>
-        <p v-if="addKindPresent" class="add-note">
-          {{ kindLabel(addKind) }} is already serving — saving replaces its
+        <p v-if="addName.trim() && !nameValid" class="add-note">
+          a name carries no whitespace or '/' and stays under 64 characters.
+        </p>
+        <p v-else-if="addIdPresent" class="add-note">
+          {{ resultingId }} is already serving — saving replaces its
           credentials and restarts nothing; the active pair is untouched.
+        </p>
+        <p v-else-if="addKind" class="add-note">
+          saving adds a new {{ kindLabel(addKind) }} backend{{ addName.trim() ? ` named ${resultingId}` : '' }}.
         </p>
       </div>
       <template #actions>
         <button @click="loginOpen = false">Cancel</button>
         <button class="primary" :disabled="!addReady || mutating" @click="submitAdd">
-          {{ mutating ? 'Working…' : addKindPresent ? 'Replace credentials' : 'Add provider' }}
+          {{ mutating ? 'Working…' : addIdPresent ? 'Replace credentials' : 'Add provider' }}
         </button>
       </template>
     </AppModal>

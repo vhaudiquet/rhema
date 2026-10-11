@@ -257,15 +257,15 @@ async function refreshProviders(): Promise<void> {
   }
 }
 
-async function loadProviderModels(kind: string): Promise<void> {
-  selectedProvider.value = kind
+async function loadProviderModels(id: string): Promise<void> {
+  selectedProvider.value = id
   providerModelsLoading.value = true
   providerModelsError.value = null
   try {
-    providerModels.value = await claw.models(kind)
+    providerModels.value = await claw.models(id)
   } catch (err) {
     // A backend without a live listing is normal (404): the operator
-    // still sees the switch go through on the kind's default model.
+    // still sees the switch go through on the default model.
     providerModels.value = []
     providerModelsError.value = err instanceof Error ? err.message : String(err)
   } finally {
@@ -291,15 +291,16 @@ async function saveProviders(provider: string, model?: string): Promise<void> {
   }
 }
 
-async function addProvider(kind: string, credentials: ProviderCredentials): Promise<void> {
+async function addProvider(id: string, credentials: ProviderCredentials): Promise<void> {
   mutatingProviders.value = true
+  const existed = providersState.value?.providers.some((p) => p.id === id) ?? false
   try {
     // The login answers the whole state: the roster with the new (or
-    // replaced) backend on it.
-    providersState.value = await claw.setCredentials(kind, credentials)
-    selectedProvider.value = kind
-    await loadProviderModels(kind)
-    pushNotice(`provider ${kind} added`)
+    // replaced) backend instance on it.
+    providersState.value = await claw.setCredentials(id, credentials)
+    selectedProvider.value = id
+    await loadProviderModels(id)
+    pushNotice(existed ? `provider ${id} replaced` : `provider ${id} added`)
     apiError.value = null
   } catch (err) {
     noteApiError(err)
@@ -308,17 +309,18 @@ async function addProvider(kind: string, credentials: ProviderCredentials): Prom
   }
 }
 
-async function removeProvider(kind: string): Promise<void> {
+async function removeProvider(id: string): Promise<void> {
   mutatingProviders.value = true
   try {
-    providersState.value = await claw.removeProvider(kind)
-    // The removal may have moved the active pair, and the removed kind
-    // cannot keep the detail panel: both re-ground on what remains.
-    if (selectedProvider.value === kind) {
+    providersState.value = await claw.removeProvider(id)
+    // The removal may have moved the active pair, and the removed
+    // instance cannot keep the detail panel: both re-ground on what
+    // remains.
+    if (selectedProvider.value === id) {
       selectedProvider.value = providersState.value.active.provider
       await loadProviderModels(selectedProvider.value)
     }
-    pushNotice(`provider ${kind} removed`)
+    pushNotice(`provider ${id} removed`)
     apiError.value = null
   } catch (err) {
     noteApiError(err)
@@ -518,7 +520,7 @@ onUnmounted(() => {
                 </AppBadge>
               </div>
               <p v-if="providerModelsError" class="detail-note">
-                {{ providerModelsError }} — the kind still switches; its
+                {{ providerModelsError }} — the backend still switches; its
                 default model applies.
               </p>
               <div v-if="providerModels.length > 0" class="detail-models">

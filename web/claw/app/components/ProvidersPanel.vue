@@ -1,7 +1,7 @@
 <script setup lang="ts">
-// The backend switch: the constructible providers, the active pair, and
-// each provider's live model listing. Switching is a PUT the claw
-// persists — no restart, and the next turn runs on the new pair.
+// The backend switch: the constructible provider instances, the active
+// pair, and each instance's live model listing. Switching is a PUT the
+// claw persists — no restart, and the next turn runs on the new pair.
 // Presentational: data flows in as props, intent flows up as events.
 import type { ClawProvider, ModelCard, ProvidersState } from '~/composables/useClaw'
 
@@ -16,7 +16,7 @@ defineProps<{
 
 const emit = defineEmits<{
   refresh: []
-  select: [kind: string]
+  select: [id: string]
   switch: [provider: string, model?: string]
 }>()
 </script>
@@ -39,13 +39,13 @@ const emit = defineEmits<{
       <div class="providers">
         <button
           v-for="p in state.providers as ClawProvider[]"
-          :key="p.kind"
+          :key="p.id"
           class="provider"
-          :class="{ current: p.kind === state.active.provider }"
+          :class="{ current: p.id === state.active.provider }"
           :disabled="loading"
-          @click="emit('select', p.kind)"
+          @click="emit('select', p.id)"
         >
-          {{ p.kind }}
+          {{ p.id }}
         </button>
       </div>
 

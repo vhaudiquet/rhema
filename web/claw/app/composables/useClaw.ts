@@ -37,7 +37,12 @@ export interface ModelCard {
   input_token_limit?: number | null
 }
 
+/** One backend instance of the providers roster: named by its `id` —
+ * the kind unless a login named it — with the credential's origin. */
 export interface ClawProvider {
+  /** The instance id: the kind unless the login named it. */
+  id: string
+  /** The backend kind the instance serves as. */
   kind: string
   default_model: string
   /** Where the credential resolves from: `env` (survives a removal
@@ -60,6 +65,7 @@ export interface AddableKind {
 }
 
 export interface ProvidersState {
+  /** `provider` is the active instance's id. */
   active: { provider: string; model: string }
   providers: ClawProvider[]
   addable?: AddableKind[]
@@ -90,9 +96,13 @@ export interface IdentityTexts {
 /** One of the two identity images. */
 export type AgentImageKind = 'avatar' | 'logo'
 
-/** The credentials a provider login carries: an API key (a GitHub
- * token for copilot), and a server URL for llama.cpp. */
+/** The credentials a provider login carries: the instance name (the
+ * kind when omitted), the kind (required on an id's first login), an
+ * API key (a GitHub token for copilot), and a server URL for
+ * llama.cpp. Empty optionals are omitted, never sent as "" strings. */
 export interface ProviderCredentials {
+  name?: string
+  kind?: string
   api_key?: string
   url?: string
 }
@@ -192,14 +202,15 @@ export interface ClawApi {
   providers(): Promise<ProvidersState>
   /** `PUT /v1/providers/active` — switch the backend, persisted claw-side. Answers the new active pair only. */
   setActive(provider: string, model?: string): Promise<ActiveBackend>
-  /** `GET /v1/providers/{kind}/models` — the live listing; 404 when none. */
-  models(kind: string): Promise<ModelCard[]>
-  /** `PUT /v1/providers/{kind}/credentials` — add a backend (or replace
-   * its credentials) at runtime; answers the new providers state. */
-  setCredentials(kind: string, credentials: ProviderCredentials): Promise<ProvidersState>
-  /** `DELETE /v1/providers/{kind}` — remove a backend; answers the new
-   * providers state. The last backend is refused claw-side. */
-  removeProvider(kind: string): Promise<ProvidersState>
+  /** `GET /v1/providers/{id}/models` — the live listing; 404 when none. */
+  models(id: string): Promise<ModelCard[]>
+  /** `PUT /v1/providers/{id}/credentials` — add a backend instance (or
+   * replace an id's credentials) at runtime; answers the new providers
+   * state. */
+  setCredentials(id: string, credentials: ProviderCredentials): Promise<ProvidersState>
+  /** `DELETE /v1/providers/{id}` — remove a backend instance; answers
+   * the new providers state. The last backend is refused claw-side. */
+  removeProvider(id: string): Promise<ProvidersState>
   /** `GET /v1/agent` — the agent's presentation identity. */
   agent(): Promise<AgentIdentity>
   /** `PUT /v1/agent` — save the named text fields (empty clears);
@@ -248,23 +259,23 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     })) as ActiveBackend
   }
 
-  async function models(kind: string): Promise<ModelCard[]> {
-    const body = (await get(`/v1/providers/${encodeURIComponent(kind)}/models`, token.value)) as {
+  async function models(id: string): Promise<ModelCard[]> {
+    const body = (await get(`/v1/providers/${encodeURIComponent(id)}/models`, token.value)) as {
       models: ModelCard[]
     }
     return body.models
   }
 
-  async function setCredentials(kind: string, credentials: ProviderCredentials): Promise<ProvidersState> {
-    return (await send(`/v1/providers/${encodeURIComponent(kind)}/credentials`, {
+  async function setCredentials(id: string, credentials: ProviderCredentials): Promise<ProvidersState> {
+    return (await send(`/v1/providers/${encodeURIComponent(id)}/credentials`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
       body: JSON.stringify(credentials),
     })) as ProvidersState
   }
 
-  async function removeProvider(kind: string): Promise<ProvidersState> {
-    return (await send(`/v1/providers/${encodeURIComponent(kind)}`, {
+  async function removeProvider(id: string): Promise<ProvidersState> {
+    return (await send(`/v1/providers/${encodeURIComponent(id)}`, {
       method: 'DELETE',
       headers: authHeaders(token.value),
     })) as ProvidersState
