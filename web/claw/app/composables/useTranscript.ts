@@ -1,7 +1,10 @@
 // The client-side mirror of a claw session's turns. The daemon owns the
 // conversation — this composable only accumulates what the event stream
-// delivers: nothing backfills a reload, and the session on the claw is
-// the record.
+// delivers, and the stream now opens with the session's recorded turns
+// replayed before the live feed. So a reload (and every reconnect)
+// rebuilds the transcript from the replay alone: the consumer resets the
+// mirror when the stream reopens and folds what arrives, never the other
+// way around.
 import { ref } from 'vue'
 import type { TurnEvent } from './useClaw'
 
@@ -42,6 +45,15 @@ export function useTranscript() {
   /** Folds one stream event into the mirror. */
   function applyEvent(event: TurnEvent): void {
     switch (event.type) {
+      case 'user_message': {
+        // The replayed question. A live echo of a message this surface
+        // just sent arrives after the optimistic `sent` row: identical
+        // text as the last item means the row already stands in for it.
+        const last = items.value[items.value.length - 1]
+        if (last?.kind === 'sent' && last.text === event.text) return
+        items.value.push({ kind: 'sent', id: nextId++, text: event.text })
+        break
+      }
       case 'thinking_delta':
         ensureLive().thinking += event.text
         break
@@ -89,7 +101,8 @@ export function useTranscript() {
     items.value.push({ kind: 'sent', id: nextId++, text })
   }
 
-  /** Session switched: the mirror is per-key, so it empties. */
+  /** Session switched, or the stream reopened: the mirror is per-key,
+   * and the replay that follows rebuilds it either way. */
   function reset(): void {
     items.value = []
     live.value = null

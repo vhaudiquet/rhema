@@ -371,6 +371,10 @@ function resubscribe(): void {
     onEvent: (event) => transcript.applyEvent(event),
     onStatus: (status) => {
       streamStatus.value = status
+      // A retry reopens the stream with the claw's replay of the
+      // recorded turns: drop the mirror and let it rebuild, or the
+      // replay would double everything already on screen.
+      if (status === 'reconnecting') transcript.reset()
       if (status === 'open') void refreshSessions()
     },
     onNotice: pushNotice,

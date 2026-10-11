@@ -59,8 +59,10 @@ Two consequences worth knowing before changing this code:
 - **The daemon owns the conversation.** `POST .../messages` is
   fire-and-forget (202); the reply streams back on
   `GET /v1/sessions/{key}/events`. The transcript here is a mirror of
-  the stream: a reload starts empty, and history lives in the claw's
-  session, not in the browser.
+  the stream, and the stream opens with the claw's replay of the
+  session's recorded turns before the live feed — a reload and every
+  reconnect reset the mirror and rebuild from the replay, so the
+  transcript survives the browser, not just the claw.
 - **SSE goes over fetch, not `EventSource`.** The claw's auth reads
   only the `Authorization: Bearer` header (`http.rs` `require_auth`); it
   has no query-param fallback, and `EventSource` cannot set headers. So

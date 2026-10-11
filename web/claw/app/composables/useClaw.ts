@@ -13,6 +13,7 @@ import type { Ref } from 'vue'
 
 /** One turn event, exactly `hub.rs`'s `TurnEvent` (serde type tag, snake case). */
 export type TurnEvent =
+  | { type: 'user_message'; text: string }
   | { type: 'thinking_delta'; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; name: string }
@@ -228,7 +229,10 @@ export interface ClawApi {
   /**
    * Stream one session's turns. Resolves with a handle once the fetch
    * is started; the claw keeps the stream open forever, and a drop is
-   * retried with backoff until `close()` is called.
+   * retried with backoff until `close()` is called. Every (re)connection
+   * opens with the session's recorded turns replayed first, then the
+   * live feed — so a consumer resets its mirror on reconnect and lets
+   * the stream rebuild it.
    */
   subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void }
 }
@@ -458,6 +462,7 @@ function parseTurnEvent(data: string): TurnEvent | null {
   try {
     const raw = JSON.parse(data) as Record<string, unknown>
     switch (raw.type) {
+      case 'user_message':
       case 'thinking_delta':
       case 'text_delta':
         return { type: raw.type, text: String(raw.text ?? '') }
