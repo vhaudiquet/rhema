@@ -136,8 +136,8 @@ Without a resolvable credential, `authenticate` fails naming the fix.
 ### Profiles
 
 Config supports named profiles for contexts like work and personal. A
-profile holds named **provider instances** — logged-in credentials per
-provider kind — plus which provider and instance serve turns:
+profile holds named **provider instances** (logged-in credentials per
+provider kind) plus which provider and instance serve turns:
 
 ```yaml
 profiles:
@@ -168,7 +168,7 @@ profiles:
         api_key: ...
 ```
 
-A profile may hold any number of instances of the same provider — two
+A profile may hold any number of instances of the same provider: two
 llama.cpp servers, a personal and a work Copilot sub, several
 OpenAI-compatible endpoints (an `openai` instance's `base_url` may name
 any compatible server; unset means OpenAI itself). Config files written
@@ -400,7 +400,7 @@ The surface refuses to start on a non-loopback `listen` with no
 token is what stands between it and the agent's tools. Set a token, or
 bind a loopback address. Resident sessions run the coding agent with
 its approval seam auto-approved: tool calls, the shell included,
-execute without a prompt — the daemon says so at startup, and the
+execute without a prompt. The daemon says so at startup, and the
 bearer-gated surface plus the watch list are the trust boundary.
 
 The native surface:
@@ -452,7 +452,7 @@ One is active, and switching with `PUT /v1/providers/active` is runtime
 state persisted in SQLite: the
 config's `provider`/`model` pair is only the seed, and when the config
 names no provider the first credential discovery actually finds (a
-stored login, an env key, or the stored rhema config) is active — the
+stored login, an env key, or the stored rhema config) is active; the
 keyless llama.cpp fallback never wins a seed, so the chart pins
 nothing and a switch never needs a restart.
 
@@ -505,7 +505,7 @@ load-bearing); the chart runs exactly one replica, the claw is
 single-node by design: one SQLite store, one dispatcher. The
 store and workspaces live on a PVC, `claw.yaml` in a ConfigMap (db and
 workspace paths are pinned to the mounted volume), credentials in a
-Secret, and the bearer token is the `token` value — required, since the
+Secret, and the bearer token is the `token` value, required since the
 daemon binds all interfaces in-cluster. `persistence.enabled=false`
 trades restart survival for disposability.
 

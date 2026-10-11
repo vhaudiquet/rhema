@@ -363,12 +363,10 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             ProviderChoice::Anthropic => effective
                 .anthropic_api_key()
                 .map(|api_key| Backend::Anthropic { api_key }),
-            ProviderChoice::OpenAi => effective
-                .openai_api_key()
-                .map(|api_key| Backend::OpenAi {
-                    api_key,
-                    base_url: effective.openai_base_url(),
-                }),
+            ProviderChoice::OpenAi => effective.openai_api_key().map(|api_key| Backend::OpenAi {
+                api_key,
+                base_url: effective.openai_base_url(),
+            }),
             ProviderChoice::DeepSeek => effective
                 .deepseek_api_key()
                 .map(|api_key| Backend::DeepSeek { api_key }),
