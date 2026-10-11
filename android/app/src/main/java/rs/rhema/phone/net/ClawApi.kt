@@ -69,7 +69,7 @@ class ClawApi(
         }
     }
 
-    // GET /v1/providers: every constructible backend and the active pair.
+    // GET /v1/providers: every backend instance and the active pair.
     suspend fun providers(): ClawResult<ProvidersState> {
         val builder = v1("providers") ?: return ClawResult.Network("no base URL configured")
         return execute(builder.get().build()) { response ->
@@ -77,18 +77,19 @@ class ClawApi(
         }
     }
 
-    // GET /v1/providers/{kind}/models: the kind's live listing. A kind
+    // GET /v1/providers/{id}/models: the instance's live listing. An id
     // without one (unknown, or the mock) is a 404 — an ordinary result,
-    // not a failure: the kind still switches on its default model.
-    suspend fun providerModels(kind: String): ClawResult<ModelListing> {
-        val builder = v1("providers", kind, "models")
+    // not a failure: the instance still switches on its default model.
+    suspend fun providerModels(id: String): ClawResult<ModelListing> {
+        val builder = v1("providers", id, "models")
             ?: return ClawResult.Network("no base URL configured")
         return execute(builder.get().build()) { response ->
             json.decodeFromString<ModelListing>(response.body?.string() ?: "{}")
         }
     }
 
-    // PUT /v1/providers/active: switch the backend, persisted claw-side;
+    // PUT /v1/providers/active: switch the backend instance (by id),
+    // persisted claw-side;
     // it applies from the next turn. The answer carries the new pair only.
     suspend fun setActiveProvider(provider: String, model: String?): ClawResult<ActiveBackend> {
         val builder = v1("providers", "active")

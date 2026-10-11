@@ -11,7 +11,7 @@ notifications.
   validated with `GET /healthz`. Stores the claw base URL and bearer token
   (plus a generated, persistent device ID) in app-private DataStore. Once
   connected, the screen also carries the **Model providers** card: the
-  constructible backends (`GET /v1/providers`), each kind's live model
+  backend instances (`GET /v1/providers`), each one's live model
   listing, and the active pair staged as a draft behind an explicit save
   (`PUT /v1/providers/active` — it applies from the claw's next turn).
   Trade-off: the token is stored in plain DataStore rather than
@@ -60,9 +60,9 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | Endpoint | Used for |
 |---|---|
 | `GET /healthz` | settings gate (no auth) |
-| `GET /v1/providers` | constructible backends + active pair |
-| `GET /v1/providers/{kind}/models` | a kind's live model listing |
-| `PUT /v1/providers/active` | switch the backend, persisted |
+| `GET /v1/providers` | backend instances + active pair |
+| `GET /v1/providers/{id}/models` | an instance's live model listing |
+| `PUT /v1/providers/active` | switch the backend instance, persisted |
 | `GET /v1/sessions` | session list |
 | `POST /v1/sessions/{key}/messages` | `{"text"}` → 202; reply via stream |
 | `GET /v1/sessions/{key}/events` | SSE: `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done` |

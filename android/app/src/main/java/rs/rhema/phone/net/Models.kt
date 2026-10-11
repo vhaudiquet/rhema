@@ -22,9 +22,12 @@ data class SessionInfo(
 @Serializable
 data class MessageRequest(val text: String)
 
-// GET /v1/providers — the constructible backends and the active pair.
+// GET /v1/providers — the backend instances and the active pair. Each
+// row is one instance, named by its id: the kind unless a login named
+// it, so two instances of one kind coexist under two ids.
 @Serializable
 data class ProviderInfo(
+    val id: String,
     val kind: String,
     @SerialName("default_model") val defaultModel: String,
 )
@@ -35,7 +38,7 @@ data class ActivePair(val provider: String, val model: String)
 @Serializable
 data class ProvidersState(val active: ActivePair, val providers: List<ProviderInfo>)
 
-// GET /v1/providers/{kind}/models — a kind's live listing; 404 when none.
+// GET /v1/providers/{id}/models — an instance's live listing; 404 when none.
 @Serializable
 data class ModelCard(
     val id: String,
@@ -46,8 +49,8 @@ data class ModelCard(
 @Serializable
 data class ModelListing(val models: List<ModelCard> = emptyList())
 
-// PUT /v1/providers/active — answers the new pair only; the provider
-// list is not echoed and the caller carries it forward.
+// PUT /v1/providers/active — answers the new pair only (provider is the
+// instance id); the list is not echoed and the caller carries it forward.
 @Serializable
 data class ActiveRequest(val provider: String, val model: String? = null)
 

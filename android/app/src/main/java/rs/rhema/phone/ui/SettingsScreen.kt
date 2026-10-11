@@ -180,17 +180,17 @@ private fun ProvidersCard(container: AppContainer) {
     var savedPair by remember { mutableStateOf<ActivePair?>(null) }
     var saveError by remember { mutableStateOf<String?>(null) }
 
-    fun defaultOf(kind: String?): String =
-        state?.providers?.firstOrNull { it.kind == kind }?.defaultModel ?: ""
+    fun defaultOf(id: String?): String =
+        state?.providers?.firstOrNull { it.id == id }?.defaultModel ?: ""
 
-    fun loadModels(kind: String) {
+    fun loadModels(id: String) {
         listing = ListingState.Loading
         scope.launch {
-            when (val result = container.api.providerModels(kind)) {
+            when (val result = container.api.providerModels(id)) {
                 is ClawResult.Ok -> listing = ListingState.Available(result.value.models)
                 is ClawResult.HttpError ->
                     // A 404 is the documented "no live listing", not a
-                    // failure: the kind still switches on its default model.
+                    // failure: the instance still switches on its default model.
                     listing = ListingState.Unavailable("HTTP ${result.code}")
                 is ClawResult.Network -> listing = ListingState.Unavailable(result.message)
             }
@@ -247,12 +247,12 @@ private fun ProvidersCard(container: AppContainer) {
                     )
                     RhemaSelect(
                         selected = draftProvider,
-                        options = currentState.providers.map { it.kind to it.kind },
+                        options = currentState.providers.map { it.id to it.id },
                         enabled = !saving,
-                        onSelect = { kind ->
-                            draftProvider = kind
+                        onSelect = { id ->
+                            draftProvider = id
                             draftModel = DEFAULT_MODEL
-                            loadModels(kind)
+                            loadModels(id)
                         },
                     )
 
