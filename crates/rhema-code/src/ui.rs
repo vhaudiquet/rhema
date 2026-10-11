@@ -1149,6 +1149,20 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         format!("${:.4}", app.session_cost)
     };
     parts.push(Span::raw(format!(" · {cost}")).fg(theme.text3));
+    // The plan's remaining allowance, when the active backend reports
+    // one: the adapter owns the figures, the footer only prints them.
+    let active = app.backend.as_ref().map(crate::app::Backend::config_name);
+    if let Some((provider, Some(allowance))) = &app.subscription {
+        if Some(*provider) == active {
+            parts.push(
+                Span::raw(format!(
+                    " · {} {} {}",
+                    app.icons.allowance, allowance.amount, allowance.kind
+                ))
+                .fg(theme.text3),
+            );
+        }
+    }
     if app.chat.scroll > 0 && app.error.is_none() {
         parts.push(Span::raw(" · viewing history").fg(theme.text3));
     }
@@ -1797,6 +1811,38 @@ mod scroll_tests {
         app.home = Some(PathBuf::from("/home/u"));
         app.options.workspace = PathBuf::from("/home/u/Documents/prjs/rhema");
         assert!(screen_text(&mut app).contains("prjs/rhema"));
+    }
+
+    /// The allowance badge shows only the active backend's report: a
+    /// fetch from a backend the session has since left never shows.
+    #[test]
+    fn the_footer_shows_only_the_active_backend_allowance() {
+        let mut app = chat_app();
+        app.subscription = Some((
+            "openrouter",
+            Some(rhema_provider::Allowance {
+                amount: "$4.12".to_owned(),
+                kind: "credit".to_owned(),
+            }),
+        ));
+        // The report names openrouter; the session rides google.
+        assert!(!screen_text(&mut app).contains("$4.12"));
+
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(80, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+        app.backend = Some(crate::app::Backend::OpenRouter {
+            api_key: "k".into(),
+        });
+        assert!(draw(&mut app).contains("$4.12 credit"), "badge shows");
     }
 
     #[test]

@@ -139,6 +139,15 @@ pub enum UiEvent {
         /// models or the provider's error text.
         result: Vec<CatalogFetch>,
     },
+    /// A subscription-allowance fetch completed.
+    UsageLoaded {
+        /// The backend's config name the fetch ran for: a report of a
+        /// backend the session has since left never shows.
+        provider: &'static str,
+        /// The allowance, `None` when the backend reports no such
+        /// thing; `Err` when the fetch failed.
+        result: Result<Option<rhema_provider::Allowance>, String>,
+    },
     /// A step of the running login flow: an instruction to render, a
     /// progress note, the credential to persist, or the failure. The
     /// protocol specifics stay in the flow; the app only routes these.

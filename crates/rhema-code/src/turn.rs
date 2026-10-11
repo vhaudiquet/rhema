@@ -130,6 +130,20 @@ pub fn spawn_model_fetch(
     })
 }
 
+/// Spawns the subscription-allowance fetch on a tokio task. The result
+/// is tagged with the backend's config name, so a report of a backend
+/// the session has since switched away from never shows.
+pub fn spawn_usage_fetch(
+    backend: crate::app::Backend,
+    events: UnboundedSender<UiEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let provider = backend.config_name();
+        let result = backend.subscription_usage().await;
+        let _ = events.send(UiEvent::UsageLoaded { provider, result });
+    })
+}
+
 /// Spawns the interactive login flow, forwarding its updates as
 /// [`UiEvent::LoginUpdate`]. The task ends when the flow does; a change
 /// on `cancelled` (the Esc path's `true`) or a dropped sender (the
@@ -171,6 +185,7 @@ pub async fn drive_turn_for_test(
             UiEvent::TurnFinished { agent, result } => return (agent, result),
             UiEvent::TurnCancelled { .. }
             | UiEvent::ModelsLoaded { .. }
+            | UiEvent::UsageLoaded { .. }
             | UiEvent::ApprovalRequested { .. }
             | UiEvent::LoginUpdate(_) => {}
         }

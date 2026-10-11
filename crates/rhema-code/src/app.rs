@@ -12,7 +12,7 @@ use rhema_config::Config;
 use rhema_core::{
     AgentError, Content, Message, ModelOutput, ModelProvider, Session, ToolCall, Usage,
 };
-use rhema_provider::ModelCard;
+use rhema_provider::{Allowance, ModelCard};
 
 use crate::approval::ApprovalAnswerer;
 use crate::events::{FetchWhy, OwnedEvent, UiEvent};
@@ -293,6 +293,43 @@ impl Backend {
         }
     }
 
+    /// The backend's subscription allowance, when its provider reports
+    /// one: prepaid credit on OpenRouter and DeepSeek, the seat's
+    /// premium requests on Copilot. `Ok(None)` for the providers with
+    /// no such endpoint — the footer just never shows their badge.
+    pub async fn subscription_usage(&self) -> Result<Option<Allowance>, String> {
+        match self {
+            Backend::OpenRouter { api_key } => {
+                rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone())
+                    .allowance()
+                    .await
+                    .map(Some)
+                    .map_err(|err| err.to_string())
+            }
+            Backend::Copilot { api_key } => {
+                rhema_provider_copilot::CopilotProvider::new(api_key.clone())
+                    .allowance()
+                    .await
+                    .map(Some)
+                    .map_err(|err| err.to_string())
+            }
+            Backend::DeepSeek { api_key } => {
+                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
+                    .with_base_url("https://api.deepseek.com/v1")
+                    .balance()
+                    .await
+                    .map(Some)
+                    .map_err(|err| err.to_string())
+            }
+            // No balance endpoint to ask: Google keys, local servers,
+            // Anthropic, and the generic OpenAI-compatible family.
+            Backend::Google { .. }
+            | Backend::LlamaCpp { .. }
+            | Backend::Anthropic { .. }
+            | Backend::OpenAi { .. } => Ok(None),
+        }
+    }
+
     /// The models the backend offers, normalized to the picker's row type.
     pub async fn list_models(&self) -> Result<Vec<ModelCard>, String> {
         match self {
@@ -426,6 +463,9 @@ pub enum Screen {
 pub enum Effect {
     /// Fetch the model list for `why`.
     FetchModels(FetchWhy),
+    /// Fetch the active backend's subscription allowance, if its
+    /// provider reports one.
+    FetchUsage,
     /// Start one turn with this prompt.
     StartTurn(String),
     /// Spawn the interactive login flow the login screen chose (its
@@ -449,6 +489,11 @@ pub struct App {
     /// The home directory, when the environment names one: the footer
     /// trims it (and its `Documents`) off the workspace path it shows.
     pub home: Option<PathBuf>,
+    /// The active backend's subscription allowance, when one was
+    /// fetched: the backend's config name rides along, so a report of a
+    /// backend the session has since left never shows. A failed fetch
+    /// clears the badge — a stale figure reads as truth.
+    pub subscription: Option<(&'static str, Option<Allowance>)>,
     /// The profile this session runs under: the `--profile` flag over the
     /// stored active profile. `/profile` switches it mid-session.
     pub session_profile: Option<String>,
@@ -581,6 +626,7 @@ impl App {
             ),
             options: setup.options,
             home: std::env::var("HOME").ok().map(PathBuf::from),
+            subscription: None,
             session,
             screen,
             models: Vec::new(),
@@ -608,7 +654,7 @@ impl App {
     /// Effects the runner must perform once, before the first draw.
     pub fn initial_effects(&self) -> Vec<Effect> {
         if self.backend.is_some() {
-            vec![Effect::FetchModels(FetchWhy::Bootstrap)]
+            vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
         } else {
             Vec::new()
         }
@@ -1365,13 +1411,21 @@ impl App {
                 }
                 Vec::new()
             }
+            UiEvent::UsageLoaded { provider, result } => {
+                // Err or a switched-away backend both degrade to a
+                // smaller badge, never to a stale figure.
+                self.subscription = result.ok().map(|allowance| (provider, allowance));
+                Vec::new()
+            }
             UiEvent::TurnFinished { agent, result } => {
                 self.end_turn(agent, result);
-                Vec::new()
+                // The turn just moved the account's counters; the badge
+                // is only as good as its last fetch.
+                vec![Effect::FetchUsage]
             }
             UiEvent::TurnCancelled { agent } => {
                 self.cancel_finished(agent);
-                Vec::new()
+                vec![Effect::FetchUsage]
             }
         }
     }
@@ -2149,7 +2203,7 @@ mod tests {
         assert!(matches!(h.app.screen, Screen::Picker(_)));
         assert_eq!(
             h.app.initial_effects(),
-            vec![Effect::FetchModels(FetchWhy::Bootstrap)]
+            vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
         );
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
@@ -2171,8 +2225,49 @@ mod tests {
         assert!(h.app.agent.is_some());
         assert_eq!(
             h.app.initial_effects(),
-            vec![Effect::FetchModels(FetchWhy::Bootstrap)]
+            vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
         );
+    }
+
+    /// A landed allowance rides with the backend that fetched it; a
+    /// failed fetch clears the badge rather than leaving a stale
+    /// figure that reads as truth.
+    #[test]
+    fn the_allowance_lands_and_a_failed_fetch_clears_it() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::UsageLoaded {
+            provider: "google",
+            result: Ok(Some(rhema_provider::Allowance {
+                amount: "$4.12".to_owned(),
+                kind: "credit".to_owned(),
+            })),
+        });
+        let (provider, allowance) = h.app.subscription.as_ref().expect("allowance landed");
+        assert_eq!(*provider, "google");
+        assert_eq!(allowance.as_ref().expect("present").amount, "$4.12");
+
+        h.app.on_event(UiEvent::UsageLoaded {
+            provider: "google",
+            result: Err("network error".to_owned()),
+        });
+        assert!(h.app.subscription.is_none());
+    }
+
+    /// The turn just moved the account's counters: finishing (or
+    /// cancelling) one schedules the allowance refresh.
+    #[test]
+    fn a_finished_turn_refreshes_the_allowance() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let agent = Box::new(h.app.agent.take().unwrap());
+        let effects = h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+        });
+        assert_eq!(effects, vec![Effect::FetchUsage]);
     }
 
     #[test]

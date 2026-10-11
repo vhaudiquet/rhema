@@ -31,7 +31,7 @@ use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
 use crate::args::{Args, ProviderChoice, RunArgs};
 use crate::sessions;
 use crate::store::{ConfigStore, DiskStore};
-use crate::turn::{spawn_model_fetch, spawn_turn};
+use crate::turn::{spawn_model_fetch, spawn_turn, spawn_usage_fetch};
 use crate::{events::UiEvent, ui};
 
 /// How long the loop waits for a crossterm event before it re-drains the
@@ -583,6 +583,14 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
                 return;
             }
             spawn_model_fetch(backends, why, tx.clone());
+        }
+        Effect::FetchUsage => {
+            // One allowance per session: the active backend's only, and
+            // the fetch failing just keeps the badge off.
+            let Some(backend) = app.backend.clone() else {
+                return;
+            };
+            spawn_usage_fetch(backend, tx.clone());
         }
         Effect::StartTurn(input) => {
             let Some(agent) = app.agent.take() else {

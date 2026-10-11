@@ -352,11 +352,15 @@ prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 The footer's badges are plain-Unicode icons: `⁂` names the thinking
 level, the context gauge (`◔◑◕●`) fills with the window so the fill
-is readable at a glance, and `❐` prefixes the workspace folder (the
+is readable at a glance, `❐` prefixes the workspace folder (the
 home — and its `Documents` — trimmed away, at most three parents
-beside the folder itself). Terminals carrying a Nerd Font can switch
-to the brain, database, and folder glyphs with `icons: nerd` in
-config.yaml.
+beside the folder itself), and `◎` prefixes the subscription
+allowance when the active backend reports one (prepaid credit on
+OpenRouter and DeepSeek, the premium-request quota of the plan cycle
+on Copilot; the badge refreshes with each turn and stays hidden when
+the fetch fails or the provider reports nothing). Terminals carrying
+a Nerd Font can switch to the brain, database, folder, and coins
+glyphs with `icons: nerd` in config.yaml.
 Flags: `--profile`, `-m/--model`, `--workspace`, `--resume`/`--save`
 (session checkpointing), `--max-steps`, `--thinking low|medium|high`
 (reasoning effort; mapped
