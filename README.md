@@ -94,7 +94,7 @@ completions` shim for stock UIs), watch management by agent tool or
   the client's permission UI, `session/load` restores a saved
   conversation with a full replay
 - `rhema` — the frontend binary: a full-screen terminal UI when attached
-  to a terminal, a pipeable one-shot runner when not, and `rhema acp`
+  to a terminal, `rhema run` for the pipeable one-shot, and `rhema acp`
   for editors
 
 ## The frontend: `rhema`
@@ -298,11 +298,15 @@ Pipeable one-shot mode — plain text on stdout, tool events on stderr,
 non-zero exit on failure:
 
 ```sh
-rhema -p "summarize this diff"            # one turn, then exit
-git diff | rhema --print -                # prompt from stdin
+rhema run "summarize this diff"           # one turn, then exit
+git diff | rhema run -                    # prompt from stdin
 ```
 
-Headless backends resolve from config and environment only (there is no
+A piped stdin is the prompt when no argument gives one (`git diff |
+rhema run`); with a terminal attached, `rhema run` without a prompt
+errors instead of waiting. Bare `rhema` on a non-terminal stdout errors
+too — headless runs are explicit now. Headless backends resolve from
+config and environment only (there is no
 login prompt): log in once interactively, or set the key env vars —
 `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
 `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, or `GITHUB_COPILOT_TOKEN` for the

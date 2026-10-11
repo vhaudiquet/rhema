@@ -1,8 +1,9 @@
 //! The command-line surface, parsed with clap's derive API. Deliberately
 //! narrower than the rhema CLI: the model is owned by the picker and
 //! credentials by the login screen, so neither is accepted as a flag.
-//! The `acp` subcommand serves the Agent Client Protocol instead of a
-//! terminal; its flags mirror the headless subset.
+//! Subcommands switch the frontend: `run` is the pipeable one-shot,
+//! `acp` serves the Agent Client Protocol; its flags mirror the run
+//! subset minus the workspace (the client names it per session).
 
 use std::path::PathBuf;
 
@@ -73,7 +74,7 @@ impl ProviderChoice {
 }
 
 /// `rhema` — the rhema frontend: a full-screen terminal UI when attached
-/// to a terminal, a pipeable one-shot runner otherwise.
+/// to a terminal, and one-shot or ACP serving through a subcommand.
 #[derive(Debug, Parser)]
 #[command(
     name = "rhema",
@@ -81,12 +82,6 @@ impl ProviderChoice {
     about = "Full-screen terminal UI for the rhema coding agent"
 )]
 pub struct Args {
-    /// Run one prompt headless — no full-screen UI, plain text on stdout,
-    /// tool events on stderr, exit 0 on success. `-` reads the prompt from
-    /// stdin, so pipelines work: `git diff | rhema --print -`.
-    #[arg(short = 'p', long)]
-    pub print: Option<String>,
-
     /// Model name. Defaults to the stored choice, then the backend's
     /// default.
     #[arg(short = 'm', long)]
@@ -139,7 +134,7 @@ pub struct Args {
     pub theme: ThemeKind,
 
     /// A subcommand switches the frontend; without one, rhema runs the
-    /// terminal UI (or the headless one-shot when piped).
+    /// terminal UI.
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -147,9 +142,63 @@ pub struct Args {
 /// The alternate frontends.
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
+    /// Run one prompt headless — no full-screen UI, plain text on
+    /// stdout, tool events on stderr, exit 0 on success.
+    Run(RunArgs),
     /// Serve the Agent Client Protocol over stdio: the coding agent as
     /// an editor-launched subprocess (Zed, Neovim, JetBrains, Emacs).
     Acp(AcpArgs),
+}
+
+/// Flags of `rhema run`, the headless one-shot built for pipes.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+pub struct RunArgs {
+    /// The prompt. `-` reads it from stdin, so pipelines work:
+    /// `git diff | rhema run -`. Omitted, a piped stdin is the prompt;
+    /// with a terminal stdin and no prompt rhema errors.
+    pub prompt: Option<String>,
+
+    /// Which config profile to use (e.g. work, personal). Without it the
+    /// session starts on the default profile, or the first one holding
+    /// usable credentials.
+    #[arg(long)]
+    pub profile: Option<String>,
+
+    /// Model backend for turns. Defaults to the stored choice, then
+    /// google.
+    #[arg(long, value_enum)]
+    pub provider: Option<ProviderChoice>,
+
+    /// Model name. Defaults to the stored choice, then the backend's
+    /// default.
+    #[arg(short = 'm', long)]
+    pub model: Option<String>,
+
+    /// llama.cpp server base URL (provider llama-cpp). Defaults to the
+    /// stored URL, then http://localhost:8080.
+    #[arg(long)]
+    pub llama_url: Option<String>,
+
+    /// Workspace root for tools.
+    #[arg(long, default_value = ".")]
+    pub workspace: PathBuf,
+
+    /// Resume a previously saved session file.
+    #[arg(long)]
+    pub resume: Option<PathBuf>,
+
+    /// Checkpoint the session after every turn.
+    #[arg(long)]
+    pub save: Option<PathBuf>,
+
+    /// Max steps per turn.
+    #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
+    pub max_steps: u32,
+
+    /// How much reasoning the model should do. Absent, the profile's
+    /// setting stands, and absent there too, the provider's default.
+    #[arg(long)]
+    pub thinking: Option<ThinkingKind>,
 }
 
 /// Flags of `rhema acp`. The workspace comes from the client's
@@ -305,11 +354,63 @@ mod tests {
     }
 
     #[test]
-    fn the_print_flag_parses_forms() {
-        let args = parse(&["--print", "fix the tests"]);
-        assert_eq!(args.print.as_deref(), Some("fix the tests"));
-        let args = parse(&["-p", "-"]);
-        assert_eq!(args.print.as_deref(), Some("-"));
+    fn the_run_subcommand_takes_the_prompt() {
+        let args = parse(&["run", "fix the tests"]);
+        match args.command {
+            Some(Command::Run(run)) => {
+                assert_eq!(run.prompt.as_deref(), Some("fix the tests"));
+                assert_eq!(run.workspace, PathBuf::from("."));
+            }
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
+        // `-` reads the prompt from stdin, so pipelines work.
+        let args = parse(&["run", "-"]);
+        match args.command {
+            Some(Command::Run(run)) => assert_eq!(run.prompt.as_deref(), Some("-")),
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
+        // The prompt is optional at parse time; with a terminal stdin and
+        // nothing piped the runner errors instead of opening a REPL.
+        assert!(matches!(parse(&["run"]).command, Some(Command::Run(_))));
+    }
+
+    #[test]
+    fn the_run_subcommand_takes_the_headless_flags() {
+        let args = parse(&[
+            "run",
+            "--profile",
+            "work",
+            "--provider",
+            "llama-cpp",
+            "--llama-url",
+            "http://box:8080",
+            "-m",
+            "m1",
+            "--workspace",
+            "/tmp/ws",
+            "--resume",
+            "s.json",
+            "--save",
+            "s.json",
+            "--max-steps",
+            "4",
+            "--thinking",
+            "low",
+        ]);
+        match args.command {
+            Some(Command::Run(run)) => {
+                assert_eq!(run.profile.as_deref(), Some("work"));
+                assert_eq!(run.provider, Some(ProviderChoice::LlamaCpp));
+                assert_eq!(run.llama_url.as_deref(), Some("http://box:8080"));
+                assert_eq!(run.model.as_deref(), Some("m1"));
+                assert_eq!(run.workspace, PathBuf::from("/tmp/ws"));
+                assert_eq!(run.resume, Some(PathBuf::from("s.json")));
+                assert_eq!(run.save, Some(PathBuf::from("s.json")));
+                assert_eq!(run.max_steps, 4);
+                assert_eq!(run.thinking, Some(ThinkingKind::Low));
+            }
+            other => panic!("expected the run subcommand, got {other:?}"),
+        }
     }
 
     #[test]
@@ -359,7 +460,9 @@ mod tests {
         // before the subcommand name, where it would be ambiguous with
         // the TUI's.
         assert!(try_parse(&["acp", "--workspace", "/tmp"]).is_err());
-        // And the default frontend still parses as before.
-        assert!(try_parse(&["--print", "hi"]).is_ok());
+        // And the default frontend still parses as before — headless is
+        // the `run` subcommand's job now, not a flag.
+        assert!(try_parse(&["--print", "hi"]).is_err());
+        assert!(try_parse(&["-m", "m"]).is_ok());
     }
 }

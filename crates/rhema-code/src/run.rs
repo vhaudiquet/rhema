@@ -28,7 +28,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Backend;
 use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
-use crate::args::{Args, ProviderChoice};
+use crate::args::{Args, ProviderChoice, RunArgs};
 use crate::sessions;
 use crate::store::{ConfigStore, DiskStore};
 use crate::turn::{spawn_model_fetch, spawn_turn};
@@ -113,6 +113,15 @@ fn format_tokens(limit: u32) -> String {
     }
 }
 
+/// The whole of stdin, as the `run -` prompt form and a piped stdin
+/// read it.
+fn read_prompt_from_stdin() -> anyhow::Result<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    std::io::stdin().read_to_string(&mut text)?;
+    Ok(text)
+}
+
 /// The user's SYSTEM.md as the base prompt when the file exists;
 /// `None` falls back to the built-in default. Nothing is ever written:
 /// the file is an opt-in override, not a created one.
@@ -121,22 +130,25 @@ fn resolve_base_system(path: Option<&std::path::Path>) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// Runs the frontend: the ACP server when the subcommand asks for it,
-/// headless one-shot when a prompt or a pipe asks for it, the
-/// full-screen TUI otherwise.
+/// Runs the frontend: the ACP server, the `run` one-shot, or the
+/// full-screen TUI — the subcommand decides, and bare `rhema` is the TUI
+/// only when a terminal is attached.
 pub async fn run(args: Args) -> anyhow::Result<()> {
     // The ACP branch first: stdin/stdout are the protocol wire, so no
     // terminal detection may run — a served agent never has a tty.
-    if let Some(crate::args::Command::Acp(acp)) = args.command {
-        return run_acp(acp);
+    match args.command {
+        Some(crate::args::Command::Acp(acp)) => return run_acp(acp),
+        Some(crate::args::Command::Run(run)) => return run_headless(run).await,
+        None => {}
     }
-    let headless = args.print.is_some()
-        || args.print == Some("-".to_owned())
-        || !std::io::stdout().is_terminal();
-    // A piped stdin is a prompt source, not a REPL: without a prompt and
-    // without a terminal there is nothing interactive to do.
-    if headless {
-        return run_headless(args).await;
+    // Headless is explicit now: a piped stdout alone is not an
+    // instruction to run a prompt, it is usually a mistake worth
+    // catching early.
+    if !stdout().is_terminal() {
+        anyhow::bail!(
+            "stdout is not a terminal: nothing to start interactively — \
+             use `rhema run` for the one-shot runner"
+        );
     }
     run_tui(args).await
 }
@@ -158,24 +170,14 @@ fn run_acp(args: crate::args::AcpArgs) -> anyhow::Result<()> {
 
 /// The headless one-shot: resolve the backend, run one turn, print the
 /// reply to stdout and everything else to stderr. Built for pipes.
-async fn run_headless(args: Args) -> anyhow::Result<()> {
-    let prompt = match args.print.as_deref() {
-        Some("-") => {
-            use std::io::Read;
-            let mut text = String::new();
-            std::io::stdin().read_to_string(&mut text)?;
-            text
-        }
+async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
+    let prompt = match args.prompt.as_deref() {
+        Some("-") => read_prompt_from_stdin()?,
         Some(text) => text.to_owned(),
-        None if !std::io::stdin().is_terminal() => {
-            use std::io::Read;
-            let mut text = String::new();
-            std::io::stdin().read_to_string(&mut text)?;
-            text
-        }
-        None => anyhow::bail!(
-            "no prompt: pass --print \"text\" (or --print - with the prompt on stdin)"
-        ),
+        // A piped stdin is a prompt source, not a REPL: with a terminal
+        // stdin and no prompt there is nothing to run.
+        None if !std::io::stdin().is_terminal() => read_prompt_from_stdin()?,
+        None => anyhow::bail!("no prompt: pass a prompt or pipe one on stdin"),
     };
     if prompt.trim().is_empty() {
         anyhow::bail!("empty prompt");
