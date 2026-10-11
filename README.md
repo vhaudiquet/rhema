@@ -398,7 +398,10 @@ watches:                         # a seed: imported while the table is empty
 The surface refuses to start on a non-loopback `listen` with no
 `token`: anything beyond loopback can reach the port, and the bearer
 token is what stands between it and the agent's tools. Set a token, or
-bind a loopback address.
+bind a loopback address. Resident sessions run the coding agent with
+its approval seam auto-approved: tool calls, the shell included,
+execute without a prompt — the daemon says so at startup, and the
+bearer-gated surface plus the watch list are the trust boundary.
 
 The native surface:
 

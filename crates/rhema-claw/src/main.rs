@@ -71,6 +71,12 @@ async fn run(args: Args) -> Result<(), ClawError> {
     );
 
     if args.once {
+        // The approval posture is deliberate (spec §8): say it once at
+        // startup so the operator reads it next to the config that
+        // turns it on, not in a README three weeks in.
+        if !config.watches.is_empty() {
+            eprintln!("[claw] note: forge dispatches run tool calls without approval prompts");
+        }
         let report = run_once(&config, backends.clone()).await?;
         // A cron pass reports its failures through the exit code.
         if report
@@ -85,8 +91,11 @@ async fn run(args: Args) -> Result<(), ClawError> {
         // The resident daemon always serves HTTP: the chat surface is
         // how it is talked to. Only `--once` runs headless. The
         // surface's posture is checked before anything binds: a wide
-        // listen with no token never comes up.
+        // listen with no token never comes up. The approval posture is
+        // deliberate (spec §8): say it once at startup so the operator
+        // reads it next to the config that turns it on.
         config.validate_surface()?;
+        eprintln!("[claw] note: resident sessions run tool calls without approval prompts");
         let daemon = Daemon::build(&config, backends, DispatcherConfig::default())?;
         daemon.run().await
     }
