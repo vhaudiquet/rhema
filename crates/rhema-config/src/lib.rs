@@ -54,7 +54,7 @@ pub enum ConfigError {
 /// Copilot sub — keyed by a user-chosen name; the instance's `provider`
 /// says which adapter speaks for it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProviderInstance {
     /// Which adapter serves this instance: `google`, `llama-cpp`,
     /// `openrouter`, `anthropic`, `openai`, `deepseek`, or `copilot`.
@@ -75,9 +75,10 @@ pub struct ProviderInstance {
 /// legacy: [`Config::load_from`] folds them into instances and clears
 /// them, and the per-provider accessors read the instance first, the
 /// flat field second, so profiles built by hand (tests, older callers)
-/// keep working.
+/// keep working. Unknown keys are rejected: a typo'd `model` must not
+/// silently read as unset.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct Profile {
     /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
     /// `anthropic`, `openai`, `deepseek`, or `copilot`.
@@ -434,9 +435,10 @@ fn provider_env_names(provider: &str) -> &'static [&'static str] {
     }
 }
 
-/// The persisted settings: the registry of named profiles.
+/// The persisted settings: the registry of named profiles. Unknown keys
+/// are rejected: a typo'd key must not silently read as its default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct Config {
     /// Named profiles; each stands alone. Fresh setups ship `personal`
     /// and `work`.
@@ -989,6 +991,9 @@ profiles:
             legacy.stored_provider_key("openai").as_deref(),
             Some("sk-flat")
         );
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_widened_config_file_tightens_on_the_next_save() {
         use std::os::unix::fs::PermissionsExt;
@@ -1016,11 +1021,27 @@ profiles:
         // A loaded file missing the key gets the same seeding.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "model: m\n").unwrap();
+        std::fs::write(&path, "theme: light\n").unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert!(loaded.profiles.contains_key("work"));
-        // The stray top-level key is ignored: profiles are the only shape.
-        assert!(loaded.profiles["personal"].model.is_none());
+        assert_eq!(loaded.theme.as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn an_unknown_key_is_rejected_and_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "modle: claude-sonnet-4-5\n").unwrap();
+        let err = Config::load_from(&path).expect_err("a typo'd key must not read as a default");
+        let message = err.to_string();
+        assert!(
+            message.contains("modle") && message.contains("expected one of"),
+            "the error names the key: {message}"
+        );
+        // The same strictness inside a profile.
+        std::fs::write(&path, "profiles:\n  personal:\n    provder: anthropic\n").unwrap();
+        let err = Config::load_from(&path).expect_err("a typo'd profile key is loud too");
+        assert!(err.to_string().contains("provder"), "got: {err}");
     }
 
     #[test]

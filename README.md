@@ -192,6 +192,9 @@ section, so the same provider can hold different keys per profile.
 A `RHEMA_PROVIDER` environment variable overrides the profile's stored
 `provider` the same way the key env vars override stored keys. That is
 handy for one terminal on another backend without editing the config.
+Unknown keys in `config.yaml` (and `claw.yaml`) are rejected at load:
+a typo'd key fails loudly with its name instead of silently reading as
+its default.
 
 Inside the TUI, `/profile` switches mid-session: it lists the profiles
 (each in its configured color, with its provider, model, and credential

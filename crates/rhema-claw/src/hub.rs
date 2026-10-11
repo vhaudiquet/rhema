@@ -66,6 +66,20 @@ pub enum TurnEvent {
     },
 }
 
+impl TurnEvent {
+    /// The event's kind, spelled the way the wire's `type` tag spells
+    /// it — for logs that name what they dropped.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::ThinkingDelta { .. } => "thinking_delta",
+            Self::TextDelta { .. } => "text_delta",
+            Self::ToolStart { .. } => "tool_start",
+            Self::ToolResult { .. } => "tool_result",
+            Self::TurnDone { .. } => "turn_done",
+        }
+    }
+}
+
 /// The per-key broadcast of [`TurnEvent`]s.
 pub struct EventHub {
     channels: Mutex<HashMap<ResourceKey, broadcast::Sender<TurnEvent>>>,
@@ -150,6 +164,22 @@ mod tests {
             })
             .unwrap(),
             r#"{"type":"turn_done","reply":"done","outcome":"handled"}"#
+        );
+    }
+
+    #[test]
+    fn the_kind_is_the_wire_type_tag() {
+        assert_eq!(
+            TurnEvent::TextDelta { text: "x".into() }.kind(),
+            "text_delta"
+        );
+        assert_eq!(
+            TurnEvent::TurnDone {
+                reply: None,
+                outcome: "handled".into()
+            }
+            .kind(),
+            "turn_done"
         );
     }
 

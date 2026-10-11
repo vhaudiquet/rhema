@@ -333,10 +333,16 @@ async fn messages(
         .into_response()
 }
 
-async fn events(
-    State(state): State<ClawState>,
-    Path(key): Path<String>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<SseEvent, std::convert::Infallible>>> {
+async fn events(State(state): State<ClawState>, Path(key): Path<String>) -> Response {
+    // The same resident-key rule the messages route applies: an SSE
+    // subscription to a forge key is a misuse, not a stream.
+    if !crate::interactive::is_resident_key(&key) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "key must start with interactive:, task:, or phone:"})),
+        )
+            .into_response();
+    }
     let mut receiver = state.hub.subscribe(&ResourceKey::from(key));
     // The pump decouples the broadcast channel from the SSE body: the
     // client's disconnect closes the body, which fails the send, which
@@ -357,20 +363,30 @@ async fn events(
             }
         }
     });
-    Sse::new(ReceiverStream::new(body)).keep_alive(
-        KeepAlive::default()
-            .interval(KEEP_ALIVE_INTERVAL)
-            .text("keep-alive"),
-    )
+    Sse::new(ReceiverStream::new(body))
+        .keep_alive(
+            KeepAlive::default()
+                .interval(KEEP_ALIVE_INTERVAL)
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 /// One `TurnEvent` as an SSE frame: `data: {json}`. A lagged subscriber
 /// gets a comment naming the drop — the stream is best-effort; the
-/// session is the record.
+/// session is the record. A serialization failure is logged with the
+/// event kind instead of vanishing: a dropped frame a client can never
+/// see must at least reach the operator.
 fn sse_event(turn: TurnEvent) -> SseEvent {
     match serde_json::to_string(&turn) {
         Ok(data) => SseEvent::default().data(data),
-        Err(_) => SseEvent::default().comment("unserializable event dropped"),
+        Err(err) => {
+            eprintln!(
+                "[claw] warning: dropped unserializable {} event: {err}",
+                turn.kind()
+            );
+            SseEvent::default().comment("unserializable event dropped")
+        }
     }
 }
 
@@ -972,10 +988,11 @@ fn bad_request(reason: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     )
 }
 
-/// The 502 shape: the upstream provider failed.
+/// The 500 shape: the daemon's own machinery failed — no upstream
+/// exists for these routes, so a 502 would misname the failure.
 fn internal_error(err: impl std::fmt::Display) -> (StatusCode, Json<Value>) {
     (
-        StatusCode::BAD_GATEWAY,
+        StatusCode::INTERNAL_SERVER_ERROR,
         Json(json!({"error": err.to_string()})),
     )
 }
