@@ -124,9 +124,10 @@ impl ForgeKind {
     }
 }
 
-/// One watched repository.
+/// One watched repository. Unknown keys are rejected: a typo'd key
+/// must not silently read as unset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub struct Watch {
     /// Which forge this watch polls.
     pub forge: ForgeKind,
@@ -215,9 +216,11 @@ pub fn is_loopback_listen(listen: &str) -> bool {
         .is_ok_and(|ip| ip.is_loopback())
 }
 
-/// The daemon's config file.
+/// The daemon's config file. Unknown keys are rejected: a typo'd key
+/// must not silently read as its default, and a daemon is the worst
+/// place to learn that three weeks late.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, rename_all = "snake_case")]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct ClawConfig {
     /// The dispatcher's SQLite database. Under the XDG state dir when
     /// unset (`$XDG_STATE_HOME/rhema/claw/dispatch.db`).
@@ -471,6 +474,22 @@ watches:
             config.watches[2].repo_ref().expect("parses").path(),
             "group/subgroup/widgets"
         );
+    }
+
+    #[test]
+    fn an_unknown_key_is_rejected_and_named() {
+        let err = serde_yaml::from_str::<ClawConfig>("listne: 127.0.0.1:7799\n")
+            .expect_err("a typo'd key must not read as its default");
+        assert!(
+            err.to_string().contains("listne") && err.to_string().contains("expected one of"),
+            "the error names the key: {err}"
+        );
+        // The same strictness inside a watch.
+        let err = serde_yaml::from_str::<ClawConfig>(
+            "watches:\n  - forge: github\n    repo: acme/widgets\n    hst: https://git.example.net\n",
+        )
+        .expect_err("a typo'd watch key is loud too");
+        assert!(err.to_string().contains("hst"), "got: {err}");
     }
 
     #[test]
