@@ -83,8 +83,11 @@ mark or initials. Settings pages stage edits into a local draft and
 apply them with an explicit Save (`PUT /v1/providers/active` answers
 the new pair only; the client carries the provider list forward).
 The providers page also manages the roster itself: the add form renders
-from the `addable` kinds the claw serves (`PUT .../credentials` — apply
-immediately, credentials persist), rows carry the credential's `source`
+from the `addable` kinds the claw serves — each kind's `fields` carry
+`{name, required}`, `required` marking what the daemon refuses the login
+without (llama.cpp needs neither of its fields, it serves keyless on a
+default url). A login is `PUT .../credentials` — apply immediately,
+credentials persist; rows carry the credential's `source`
 badge (env-backed kinds return on restart after a removal), and the
 remove button (`DELETE /v1/providers/{kind}`) refuses the last backend
 claw-side.

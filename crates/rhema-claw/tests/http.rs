@@ -1083,6 +1083,29 @@ async fn providers_are_listed_switched_and_persisted() {
         .collect();
     assert_eq!(kinds, vec!["mock"]);
 
+    // The addable kinds name their login fields with what the daemon
+    // demands: keyed kinds cannot construct without an api_key, and
+    // llama.cpp serves keyless on a default url, so nothing gates it.
+    let addable = listed["addable"].as_array().expect("the addable array");
+    let fields_of = |kind: &str| {
+        addable
+            .iter()
+            .find(|entry| entry["kind"] == kind)
+            .expect("the kind is addable")["fields"]
+            .clone()
+    };
+    assert_eq!(
+        fields_of("google"),
+        json!([{ "name": "api_key", "required": true }])
+    );
+    assert_eq!(
+        fields_of("llama-cpp"),
+        json!([
+            { "name": "url", "required": false },
+            { "name": "api_key", "required": false }
+        ])
+    );
+
     // A switch to a model within the same backend.
     let switched: Value = client
         .put(format!("{base}/v1/providers/active"))

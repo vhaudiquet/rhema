@@ -361,12 +361,37 @@ pub fn addable_kinds() -> &'static [&'static str] {
     ]
 }
 
+/// One field of a kind's login form: the name the credentials body
+/// spells it with, and whether the daemon refuses the login without it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct ParamField {
+    /// The field name as the credentials route reads it.
+    pub name: &'static str,
+    /// Whether constructing without the field fails.
+    pub required: bool,
+}
+
 /// The parameter fields a kind's login takes, in form order — the wire
-/// shape under `addable` the UI builds its inputs from.
-pub fn param_fields_for(kind: &str) -> &'static [&'static str] {
+/// shape under `addable` the UI builds its inputs from. `required`
+/// states what the daemon demands, not what the form shows: llama.cpp
+/// serves keyless on a default url, so neither of its fields gates the
+/// login; the six keyed kinds cannot construct without an `api_key`.
+pub fn param_fields_for(kind: &str) -> &'static [ParamField] {
     match kind {
-        "llama-cpp" => &["url", "api_key"],
-        _ => &["api_key"],
+        "llama-cpp" => &[
+            ParamField {
+                name: "url",
+                required: false,
+            },
+            ParamField {
+                name: "api_key",
+                required: false,
+            },
+        ],
+        _ => &[ParamField {
+            name: "api_key",
+            required: true,
+        }],
     }
 }
 
