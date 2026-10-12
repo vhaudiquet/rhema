@@ -22,8 +22,10 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-# Subprocess execution for the command tool
-tokio = { workspace = true, features = ["process", "time"] }
+# Subprocess execution for the command tool; its streams read line by
+# line (io-util) and hand their lines to the resolver's progress
+# callback across reader tasks (sync).
+tokio = { workspace = true, features = ["process", "time", "io-util", "sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

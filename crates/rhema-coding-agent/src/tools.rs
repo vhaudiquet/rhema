@@ -18,6 +18,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use tokio::io::{AsyncBufReadExt, BufReader};
 
 use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 
@@ -85,7 +86,11 @@ impl CodingTools {
         }
     }
 
-    async fn bash(&self, call: ToolCall) -> ToolResult {
+    async fn bash(
+        &self,
+        call: ToolCall,
+        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> ToolResult {
         if let Some(rejection) = self.approval_gate(&call) {
             return rejection;
         }
@@ -94,7 +99,7 @@ impl CodingTools {
         };
         // kill_on_drop so the timeout dropping the child handle kills the
         // process; without it an expired command would keep running.
-        let child = match tokio::process::Command::new("bash")
+        let mut child = match tokio::process::Command::new("bash")
             .arg("-c")
             .arg(&command)
             .current_dir(&self.workspace)
@@ -108,27 +113,68 @@ impl CodingTools {
                 return ToolResult::failure(call.id, format!("failed to spawn bash: {err}"));
             }
         };
-        match tokio::time::timeout(BASH_TIMEOUT, child.wait_with_output()).await {
-            Ok(Ok(output)) => {
-                let content = format_command_output(&output.status, &output.stdout, &output.stderr);
-                let result = if output.status.success() {
-                    ToolResult::success(call.id, content)
-                } else {
-                    ToolResult::failure(call.id, content)
-                };
-                match output.status.code() {
-                    Some(code) => result.with_code(code),
-                    None => result,
+        // One reader per stream, complete lines into one channel: each
+        // line streams live through `progress` and lands in its
+        // stream's tail for the result.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        if let Some(stdout) = child.stdout.take() {
+            pump(stdout, false, tx.clone());
+        }
+        if let Some(stderr) = child.stderr.take() {
+            pump(stderr, true, tx.clone());
+        }
+        drop(tx);
+        let deadline = tokio::time::Instant::now() + BASH_TIMEOUT;
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return ToolResult::failure(
+                        call.id,
+                        format!(
+                            "command timed out after {}s and was killed",
+                            BASH_TIMEOUT.as_secs()
+                        ),
+                    );
+                }
+                line = rx.recv() => match line {
+                    Some((is_stderr, line)) => {
+                        let sink = if is_stderr { &mut stderr } else { &mut stdout };
+                        sink.extend_from_slice(line.as_bytes());
+                        sink.push(b'\n');
+                        progress(&format!("{line}\n"));
+                    }
+                    // Both streams closed: only the exit status is left.
+                    None => break,
                 }
             }
-            Ok(Err(err)) => ToolResult::failure(call.id, format!("command failed: {err}")),
-            Err(_) => ToolResult::failure(
-                call.id,
-                format!(
-                    "command timed out after {}s and was killed",
-                    BASH_TIMEOUT.as_secs()
-                ),
-            ),
+        }
+        let status = match tokio::time::timeout(BASH_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => status,
+            // A process that closed its streams but never exits dies with
+            // the handle; the caller reads a timeout like any other.
+            _ => {
+                return ToolResult::failure(
+                    call.id,
+                    format!(
+                        "command timed out after {}s and was killed",
+                        BASH_TIMEOUT.as_secs()
+                    ),
+                );
+            }
+        };
+        let content = format_command_output(&status, &stdout, &stderr);
+        let result = if status.success() {
+            ToolResult::success(call.id, content)
+        } else {
+            ToolResult::failure(call.id, content)
+        };
+        match status.code() {
+            Some(code) => result.with_code(code),
+            None => result,
         }
     }
 }
@@ -156,13 +202,24 @@ impl ToolResolver for CodingTools {
     }
 
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
+        // A fn item, not a closure: its lifetime-generic signature is
+        // what the higher-ranked progress bound needs.
+        self.resolve_streaming(call, ctx, &mut silent).await
+    }
+
+    async fn resolve_streaming(
+        &self,
+        call: ToolCall,
+        ctx: &ToolContext,
+        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> ToolResult {
         if ctx.cancelled.load(Ordering::Relaxed) {
             return ToolResult::failure(call.id, "cancelled");
         }
         // The name is cloned out because the match arms move `call`.
         let name = call.name.clone();
         match name.as_str() {
-            "bash" => self.bash(call).await,
+            "bash" => self.bash(call, progress).await,
             other => ToolResult::failure(call.id, format!("unknown tool: {other}")),
         }
     }
@@ -170,6 +227,31 @@ impl ToolResolver for CodingTools {
 
 fn arg_str(args: &Value, key: &str) -> Option<String> {
     args.get(key).and_then(Value::as_str).map(str::to_owned)
+}
+
+/// The no-op progress: the plain `resolve` path runs the same streaming
+/// code with nobody listening.
+fn silent(_: &str) {}
+
+/// Reads `stream` line by line into `tx`, tagged with its stream, until
+/// EOF — the live side of the command's output. Detached: it ends with
+/// the pipe, whether the command finishes, times out, or is killed.
+fn pump<R>(
+    stream: R,
+    is_stderr: bool,
+    tx: tokio::sync::mpsc::UnboundedSender<(bool, String)>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx.send((is_stderr, line)).is_err() {
+                break; // the resolver is gone; nothing to stream to
+            }
+        }
+    })
 }
 
 /// Canonicalizes `path`, falling back to the input when it does not exist
@@ -258,5 +340,72 @@ mod tests {
     #[test]
     fn output_within_the_limits_passes_untouched() {
         assert_eq!(render_truncated(b"clean\n", 10, 2000), "clean\n");
+    }
+
+    #[tokio::test]
+    async fn a_command_streams_its_lines_before_its_result() {
+        let tools = CodingTools::new(std::env::temp_dir());
+        tools.install_approval(Arc::new(crate::approval::AllowAll));
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            args: json!({ "command": "printf 'one\\ntwo\\n'; echo three" }),
+            provider_data: Value::Null,
+        };
+        let streamed = Arc::new(Mutex::new(Vec::new()));
+        let collector = streamed.clone();
+        let mut progress = move |chunk: &str| {
+            collector
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(chunk.to_owned());
+        };
+        let result = tools
+            .resolve_streaming(call, &ToolContext::default(), &mut progress)
+            .await;
+
+        // Every line rode the progress live, newline included.
+        assert_eq!(
+            *streamed.lock().unwrap_or_else(PoisonError::into_inner),
+            vec!["one\n".to_owned(), "two\n".to_owned(), "three\n".to_owned()]
+        );
+        // The result still carries the whole output, stdout and stderr
+        // in their own sections.
+        assert!(!result.is_error);
+        assert!(result.content.contains("--- stdout ---\n"));
+        assert!(result.content.contains("one\ntwo\nthree"));
+        tools.clear_approval();
+    }
+
+    #[tokio::test]
+    async fn stderr_streams_too_and_the_exit_code_rides_the_result() {
+        let tools = CodingTools::new(std::env::temp_dir());
+        tools.install_approval(Arc::new(crate::approval::AllowAll));
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            args: json!({ "command": "echo oops >&2; exit 3" }),
+            provider_data: Value::Null,
+        };
+        let streamed = Arc::new(Mutex::new(Vec::new()));
+        let collector = streamed.clone();
+        let mut progress = move |chunk: &str| {
+            collector
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(chunk.to_owned());
+        };
+        let result = tools
+            .resolve_streaming(call, &ToolContext::default(), &mut progress)
+            .await;
+
+        assert_eq!(
+            *streamed.lock().unwrap_or_else(PoisonError::into_inner),
+            vec!["oops\n".to_owned()]
+        );
+        assert!(result.is_error);
+        assert_eq!(result.code, Some(3));
+        assert!(result.content.contains("oops"));
+        tools.clear_approval();
     }
 }
