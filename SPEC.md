@@ -168,8 +168,8 @@ session.history.push(out.message)                          # assistant message (
 if out.stop_reason == ToolUse:
     for call in out.message's ToolCall(s), in order:
         emit ToolCallStart
-        result = resolver.resolve(call, ctx)               # errors → ToolResult{is_error:true}
-        emit ToolResult
+        result = resolver.resolve_streaming(call, ctx, progress)  # errors → ToolResult{is_error:true}
+        emit ToolResult                                    # progress rode the sink as ephemeral ToolOutputDelta
         session.history.push(Message{ role: Tool, content: [result] })
 emit StepEnd
 return Step { output: out }
