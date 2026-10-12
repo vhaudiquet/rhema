@@ -11,7 +11,8 @@ pub struct Allowance {
     /// What the account may still spend, unit included: `"$4.12"`,
     /// `"238/300"`.
     pub amount: String,
-    /// What the unit is, one word: `"credit"` for prepaid balance,
-    /// `"premium"` for a cycle's metered requests.
+    /// What the unit is, one word: `"premium"` for a cycle's metered
+    /// requests. Empty when the amount speaks for itself — a badge
+    /// already drawn beside it says money.
     pub kind: String,
 }

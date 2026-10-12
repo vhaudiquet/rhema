@@ -497,7 +497,7 @@ pub fn allowance(credits: &WireCredits, key: &WireKey) -> Option<Allowance> {
     let left = key_left.map_or(account_left, |key_left| account_left.min(key_left));
     Some(Allowance {
         amount: format!("${left:.2}"),
-        kind: "credit".to_owned(),
+        kind: String::new(),
     })
 }
 
@@ -1674,7 +1674,7 @@ mod tests {
             allowance(&credits, &key),
             Some(Allowance {
                 amount: "$9.00".to_owned(),
-                kind: "credit".to_owned(),
+                kind: String::new(),
             })
         );
 

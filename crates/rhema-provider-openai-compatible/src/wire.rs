@@ -414,7 +414,7 @@ pub fn allowance(balance: &WireBalance) -> Option<Allowance> {
     };
     Some(Allowance {
         amount,
-        kind: "credit".to_owned(),
+        kind: String::new(),
     })
 }
 
@@ -1588,7 +1588,7 @@ mod tests {
             allowance(&balance),
             Some(Allowance {
                 amount: "$110.50".to_owned(),
-                kind: "credit".to_owned(),
+                kind: String::new(),
             })
         );
 
