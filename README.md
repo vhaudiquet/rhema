@@ -354,8 +354,8 @@ prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
 The footer's badges are plain-Unicode icons: `⁂` names the thinking
 level, the context gauge (`◔◑◕●`) fills with the window so the fill
 is readable at a glance, `❐` prefixes the workspace folder (the
-home — and its `Documents` — trimmed away, at most three parents
-beside the folder itself), and `◎` prefixes the subscription
+home — and its `Documents` — trimmed away, at most three folders:
+the folder and two parents), and `◎` prefixes the subscription
 allowance when the active backend reports one (prepaid credit on
 OpenRouter and DeepSeek, the premium-request quota of the plan cycle
 on Copilot; the badge refreshes with each turn and stays hidden when

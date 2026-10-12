@@ -635,8 +635,9 @@ fn footer_model(model: &str) -> &str {
     model.rsplit('/').next().unwrap_or(model)
 }
 
-/// Parents the footer's folder may show beside the folder itself.
-const FOOTER_FOLDER_PARENTS: usize = 3;
+/// Parents the footer's folder may show beside the folder itself —
+/// three folders in all.
+const FOOTER_FOLDER_PARENTS: usize = 2;
 
 /// The workspace as the footer shows it: `(prefix, parents, folder)`.
 /// The home prefix is trimmed away — and the home's `Documents` with
@@ -1945,7 +1946,8 @@ mod scroll_tests {
     }
 
     /// The footer's folder: the home and its `Documents` trim away, and
-    /// at most three parents ride beside the folder itself.
+    /// at most two parents ride beside the folder itself — three
+    /// folders in all.
     #[test]
     fn the_footer_folder_trims_home_and_caps_parents() {
         let home = Path::new("/home/u");
@@ -1954,12 +1956,12 @@ mod scroll_tests {
             footer_folder(Path::new("/home/u/Documents/prjs/rhema"), Some(home)),
             (String::new(), vec!["prjs".to_owned()], "rhema".to_owned())
         );
-        // Deeper than three parents: what fell off leaves the ellipsis.
+        // Deeper than three folders: what fell off leaves the ellipsis.
         assert_eq!(
             footer_folder(Path::new("/home/u/prjs/a/b/c/d/e"), Some(home)),
             (
                 "…/".to_owned(),
-                vec!["b".to_owned(), "c".to_owned(), "d".to_owned()],
+                vec!["c".to_owned(), "d".to_owned()],
                 "e".to_owned()
             )
         );
