@@ -1,18 +1,40 @@
 # Rhema
 
-ῥῆμα, "the spoken word": words that do things.
+<div align="center">
+<b>ῥῆμα, "the spoken word": words that do things.</b>
 
-Rhema is a small, embeddable, **generic** step engine in Rust for exchanges
-with language models. No coding-agent assumptions, no dispatch, no I/O baked
-in. The primitive is `step`: ONE exchange, build request → stream → append
-assistant message → resolve tool calls → append results. Drivers (a turn
-loop, or crate 2's RSD dispatcher) decide everything else.
+<br>
 
-Spec: [SPEC.md](SPEC.md).
+<img src=".github/img/a1-breath-dark.png" width="100">
+</div>
+
+<br>
+
+Rhema is a small, embeddable agent framework in Rust.
+
+It consists of multiple components, going from `rhema-code`, a terminal-based coding agent frontend, down to `rhema-core`, a simple library allowing step-based interactions with LLMs.
+
+## Components
+
+<img align="center" src=".github/img/graph.png">
+
+### Rhema Code (Terminal UI)
+
+<img align="center" src=".github/img/rhema-code.png">
+
+Get Rhema Code: 
+```
+curl -fsSL https://get.rhema.rs/code | sh
+```
+
+See <a href="./crates/rhema-code/README.md">Rhema Code README.md</a> for more.
+
+### Rhema Claw
+
+Still Work-In-Progress.
+See [Rhema Claw README.md](rhema-claw/README.md) for more.
 
 ## Status
-
-v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
 
 - `rhema-core`, the step engine and its seams:
   - `Agent::step`: the one-exchange primitive, exact semantics in SPEC.md §4
