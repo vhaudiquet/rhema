@@ -294,9 +294,9 @@ impl SettingsSection {
     }
 }
 
-/// What Esc means on the settings screen: opened at startup with no
-/// usable backend there is no chat behind it, so leaving leaves the app;
-/// opened from the chat, it goes back.
+/// What Esc and `q` mean on the settings screen: opened at startup
+/// with no usable backend there is no chat behind it, so leaving
+/// leaves the app; opened from the chat, they go back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPurpose {
     /// Startup without a usable backend: Esc quits.
@@ -310,8 +310,8 @@ pub enum SettingsPurpose {
 pub enum SettingsAction {
     /// Nothing to do.
     None,
-    /// Esc: back to the chat — or quit, when the settings are the
-    /// startup screen.
+    /// Esc or `q` (outside the add dialog): back to the chat — or
+    /// quit, when the settings are the startup screen.
     Back,
     /// Enter on a logged-in instance: it becomes the active one.
     ActivateInstance,
@@ -772,7 +772,7 @@ impl AddInstanceDialog {
 /// the app state and this screen so the page keeps telling the truth.
 #[derive(Debug)]
 pub struct SettingsScreen {
-    /// What Esc does here.
+    /// What Esc and `q` do here.
     pub purpose: SettingsPurpose,
     /// The section whose page is showing.
     pub section: SettingsSection,
@@ -926,10 +926,10 @@ impl SettingsScreen {
     }
 
     /// Handles one keypress. The left/right arrows and tabs move the
-    /// sidebar, the vertical arrows move the page's rows, esc backs out
-    /// (dialog first, then the screen), enter acts on the selected row,
-    /// `d` forgets an instance, and the Appearance page carries `t`/`i`
-    /// as shortcuts for its toggles.
+    /// sidebar, the vertical arrows move the page's rows, esc or `q`
+    /// backs out (dialog first, then the screen), enter acts on the
+    /// selected row, `d` forgets an instance, and the Appearance page
+    /// carries `t`/`i` as shortcuts for its toggles.
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         if let Some(action) = self.dialog.as_mut().map(|dialog| dialog.handle_key(key)) {
             // Esc closes the dialog from any stage; the app drops the
@@ -964,7 +964,7 @@ impl SettingsScreen {
                 self.move_row(true);
                 SettingsAction::None
             }
-            KeyCode::Esc => SettingsAction::Back,
+            KeyCode::Esc | KeyCode::Char('q') => SettingsAction::Back,
             KeyCode::Enter => self.enter_action(),
             KeyCode::Char('d') if self.selected_instance().is_some() => {
                 SettingsAction::RemoveInstance
@@ -1288,8 +1288,11 @@ impl PickerScreen {
     }
 
     /// Handles one keypress. Typing filters by default: printable keys
-    /// extend the filter, arrows navigate, enter picks. Esc clears a
-    /// non-empty filter first and only then quits or returns to the chat.
+    /// extend the filter, arrows navigate, enter picks. Esc always
+    /// leaves — the filter is transient, nothing to clear first —
+    /// quitting at the startup gate and returning to the chat
+    /// otherwise. `q` stays a filter character on purpose: models are
+    /// named (qwen).
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return PickerAction::None;
@@ -1317,11 +1320,6 @@ impl PickerScreen {
                 }
                 KeyCode::Enter => return self.choose(),
                 KeyCode::Esc => {
-                    if !self.filter.is_empty() {
-                        self.filter.clear();
-                        self.clamp_selection();
-                        return PickerAction::None;
-                    }
                     return match self.purpose {
                         PickerPurpose::Initial => PickerAction::Quit,
                         PickerPurpose::FromChat => PickerAction::BackToChat,
@@ -1804,6 +1802,21 @@ mod tests {
         let name = settings.dialog.as_ref().unwrap().input.clone();
         settings.handle_key(key(KeyCode::Enter));
         (settings, name)
+    }
+
+    #[test]
+    fn q_leaves_the_settings_like_escape() {
+        let mut settings = settings_screen();
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('q'))),
+            SettingsAction::Back
+        );
+        // Inside the add dialog `q` is text, not a leave key: the
+        // dialog takes every key while it is open.
+        let (mut settings, _) = descend_to_credential(0);
+        settings.handle_key(key(KeyCode::Char('q')));
+        let dialog = settings.dialog.as_ref().expect("the dialog stands");
+        assert!(dialog.input.ends_with('q'), "q is text: {:?}", dialog.input);
     }
 
     #[test]
@@ -2375,12 +2388,12 @@ mod tests {
     }
 
     #[test]
-    fn esc_clears_a_non_empty_filter_before_quitting() {
+    fn esc_leaves_directly_even_with_a_filter() {
         let mut picker = picker();
         picker.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::None);
-        assert_eq!(picker.filter, "");
         assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::Quit);
+        // The filter is transient; leaving does not bother with it.
+        assert_eq!(picker.filter, "t");
     }
 
     #[test]
