@@ -119,8 +119,19 @@ impl Agent {
                         name: &call.name,
                     });
                 }
+                // The call's live output rides the sink as ephemeral
+                // deltas, the call's id stamped on by the engine — the
+                // resolver knows only its own progress lines.
+                let id = call.id.clone();
+                let mut progress = |chunk: &str| {
+                    events.emit(Event::ToolOutputDelta { id: &id, chunk });
+                };
                 let result = match &self.resolver {
-                    Some(resolver) => resolver.resolve(call.clone(), ctx).await,
+                    Some(resolver) => {
+                        resolver
+                            .resolve_streaming(call.clone(), ctx, &mut progress)
+                            .await
+                    }
                     None => ToolResult::failure(&call.id, "no tool resolver is configured"),
                 };
                 events.emit(Event::ToolResult {

@@ -43,6 +43,10 @@ enum Recorded {
         name: String,
     },
     ToolCallArgsDelta(String),
+    ToolOutputDelta {
+        id: String,
+        chunk: String,
+    },
     ToolResult {
         id: String,
         content: String,
@@ -66,6 +70,10 @@ impl From<Event<'_>> for Recorded {
                 name: name.to_owned(),
             },
             Event::ToolCallArgsDelta(args) => Self::ToolCallArgsDelta(args.to_owned()),
+            Event::ToolOutputDelta { id, chunk } => Self::ToolOutputDelta {
+                id: id.to_owned(),
+                chunk: chunk.to_owned(),
+            },
             Event::ToolResult {
                 id,
                 content,
@@ -258,6 +266,74 @@ async fn a_tool_use_without_a_resolver_appends_an_error_result() {
     let result = tool_result_of(&session.history[1]);
     assert!(result.is_error);
     assert_eq!(result.content, "no tool resolver is configured");
+}
+
+#[tokio::test]
+async fn a_streaming_tool_rides_the_sink_as_deltas_before_its_result() {
+    /// Streams two progress lines, then answers.
+    struct Streaming;
+
+    #[rhema_core::async_trait]
+    impl ToolResolver for Streaming {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec::new("slow", "streams its work", json!({}))]
+        }
+
+        async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
+            ToolResult::success(call.id, "done")
+        }
+
+        async fn resolve_streaming(
+            &self,
+            call: ToolCall,
+            _ctx: &ToolContext,
+            progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> ToolResult {
+            progress("working\n");
+            progress("still working\n");
+            ToolResult::success(call.id, "done")
+        }
+    }
+
+    let mut agent = Agent::builder()
+        .provider(Arc::new(MockProvider::new(vec![tool_use_output(call(
+            "call_1",
+            "slow",
+            json!({}),
+        ))])))
+        .resolver(Arc::new(Streaming))
+        .build()
+        .unwrap();
+    let mut session = Session::default();
+    let mut sink = RecordSink::default();
+    let ctx = ToolContext::default();
+
+    agent.step(&mut session, &mut sink, &ctx).await.unwrap();
+
+    // The engine stamps the call's id on the progress lines, and the
+    // result follows them — never the other way around. (StepStart,
+    // ToolCallStart, and the mock's args delta come first.)
+    assert_eq!(
+        sink.events[3..6],
+        [
+            Recorded::ToolOutputDelta {
+                id: "call_1".into(),
+                chunk: "working\n".into(),
+            },
+            Recorded::ToolOutputDelta {
+                id: "call_1".into(),
+                chunk: "still working\n".into(),
+            },
+            Recorded::ToolResult {
+                id: "call_1".into(),
+                content: "done".into(),
+                is_error: false,
+                code: None,
+            },
+        ]
+    );
+    // Progress is ephemeral: the session carries only the result.
+    assert_eq!(session.history.len(), 2);
 }
 
 #[tokio::test]

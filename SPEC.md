@@ -179,6 +179,7 @@ return Step { output: out }
 - **One exchange, but tool calls are resolved within it.** A step that requested tools returns with the results already appended, so the next step sees them. This is the loop's half of tool-use, and it is the minimum that makes it an agent rather than a chat call.
 - Tool errors never abort; they surface as in-band `is_error` the model can react to. Unknown tool name is an error result, not a panic.
 - No resolver configured → `specs()` is empty; a `ToolUse` stop with no resolver appends an error result.
+- Tool progress (`ToolOutputDelta`) is ephemeral like reasoning: streamed around the resolver's optional progress callback, never appended to history — the full text arrives in the result.
 
 ---
 

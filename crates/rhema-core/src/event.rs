@@ -32,6 +32,18 @@ pub enum Event<'a> {
     },
     /// A piece of a tool call's JSON arguments, in stream order.
     ToolCallArgsDelta(&'a str),
+    /// A chunk of a running tool's human-facing output — a command's
+    /// completed lines — in stream order. Ephemeral like
+    /// [`Event::ThinkingDelta`]: never appended to the session history;
+    /// sinks render it live, and the full text arrives in the call's
+    /// `ToolResult`.
+    ToolOutputDelta {
+        /// The running call's correlation id.
+        id: &'a str,
+        /// A chunk of the tool's output; complete lines, newline
+        /// included.
+        chunk: &'a str,
+    },
     /// A tool result was appended to the session history.
     ToolResult {
         /// The answered call's id.

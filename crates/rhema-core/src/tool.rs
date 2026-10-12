@@ -110,6 +110,21 @@ pub trait ToolResolver: Send + Sync {
     /// implementations must not panic and must not abort on unknown names
     /// or bad arguments — return [`ToolResult::failure`] instead.
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult;
+
+    /// Resolve with progress: an implementation running something long —
+    /// a shell command — calls `progress` with human-facing output
+    /// chunks (complete lines) as they land, so a sink can render them
+    /// live; the full text still arrives in the returned result. The
+    /// default ignores progress and resolves as usual.
+    async fn resolve_streaming(
+        &self,
+        call: ToolCall,
+        ctx: &ToolContext,
+        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> ToolResult {
+        let _ = progress;
+        self.resolve(call, ctx).await
+    }
 }
 
 #[cfg(test)]

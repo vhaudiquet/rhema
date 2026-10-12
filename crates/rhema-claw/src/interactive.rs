@@ -457,9 +457,11 @@ impl EventSink for HubSink {
                 is_error,
                 summary: snippet(content),
             },
-            // Step bookkeeping is the engine's business, not the wire's.
+            // Step bookkeeping is the engine's business, not the wire's;
+            // a running tool's live output lands with its result.
             ModelEvent::StepStart { .. }
             | ModelEvent::ToolCallArgsDelta(_)
+            | ModelEvent::ToolOutputDelta { .. }
             | ModelEvent::StepEnd { .. } => return,
         };
         self.hub.emit(&self.key, turn);

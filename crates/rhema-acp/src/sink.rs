@@ -67,6 +67,9 @@ impl EventSink for AcpSink {
                     args.push_str(delta);
                 }
             }
+            // A running tool's live output has no ACP update of its own;
+            // the full text arrives with the result.
+            Event::ToolOutputDelta { .. } => {}
             Event::ToolResult {
                 id,
                 content,
