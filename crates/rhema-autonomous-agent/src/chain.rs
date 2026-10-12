@@ -43,6 +43,20 @@ impl ToolResolver for ResolverChain {
         }
         ToolResult::failure(&call.id, format!("unknown tool: {}", call.name))
     }
+
+    async fn resolve_streaming(
+        &self,
+        call: ToolCall,
+        ctx: &ToolContext,
+        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> ToolResult {
+        for resolver in &self.resolvers {
+            if resolver.specs().iter().any(|spec| spec.name == call.name) {
+                return resolver.resolve_streaming(call, ctx, progress).await;
+            }
+        }
+        ToolResult::failure(&call.id, format!("unknown tool: {}", call.name))
+    }
 }
 
 #[cfg(test)]
