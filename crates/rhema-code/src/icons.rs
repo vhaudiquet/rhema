@@ -14,20 +14,25 @@ pub struct Icons {
     pub folder: &'static str,
     /// The subscription-allowance badge.
     pub allowance: &'static str,
+    /// The settings badge.
+    pub settings: &'static str,
 }
 
 /// The plain set: every glyph renders in any terminal font. The thinking
 /// badge is the typographic asterism — a break for reflection; the
-/// folder badge is an open tray; the allowance badge a bullseye.
+/// folder badge is an open tray; the allowance badge the generic
+/// currency mark; the settings badge a gear pinned to its text
+/// presentation so it never arrives as color emoji.
 pub const UNICODE: Icons = Icons {
     thinking: "⁂",
     context: unicode_gauge,
     folder: "❐",
-    allowance: "◎",
+    allowance: "¤",
+    settings: "\u{2699}\u{fe0e}",
 };
 
 /// The Nerd Font set: FontAwesome lightbulb, database, folder, and
-/// banknote — needs a patched font installed, or the badges read as
+/// credit card — needs a patched font installed, or the badges read as
 /// tofu. Every glyph sits in the FA core range (F000–F2E0) the oldest
 /// patches carry; the brain this set once used sits where Nerd Fonts
 /// v3 dropped Material Design, and v3 fonts render nothing there.
@@ -35,7 +40,8 @@ pub const NERD: Icons = Icons {
     thinking: "\u{f0eb}",
     context: nerd_gauge,
     folder: "\u{f07b}",
-    allowance: "\u{f0d6}",
+    allowance: "\u{f09d}",
+    settings: "\u{f013}",
 };
 
 /// Which flavor the footer draws with.
@@ -108,5 +114,11 @@ mod tests {
         assert_eq!(Flavor::default(), Flavor::Unicode);
         assert_eq!(Flavor::Nerd.set().thinking, "\u{f0eb}");
         assert_eq!(Flavor::Unicode.set().thinking, "⁂");
+        // Both sets name the allowance with a money glyph…
+        assert_eq!(Flavor::Unicode.set().allowance, "¤");
+        assert_eq!(Flavor::Nerd.set().allowance, "\u{f09d}");
+        // …and the settings screen with a gear.
+        assert_eq!(Flavor::Unicode.set().settings, "\u{2699}\u{fe0e}");
+        assert_eq!(Flavor::Nerd.set().settings, "\u{f013}");
     }
 }

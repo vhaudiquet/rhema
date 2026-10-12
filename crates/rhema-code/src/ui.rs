@@ -1192,16 +1192,17 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     parts.push(Span::raw(format!(" · {cost}")).fg(theme.text3));
     // The plan's remaining allowance, when the active backend reports
     // one: the adapter owns the figures, the footer only prints them.
+    // A kind names the unit where the amount alone would read as
+    // noise ("238/300"); a money amount needs no word beside it.
     let active = app.backend.as_ref().map(crate::app::Backend::config_name);
     if let Some((provider, Some(allowance))) = &app.subscription {
         if Some(*provider) == active {
-            parts.push(
-                Span::raw(format!(
-                    " · {} {} {}",
-                    app.icons.allowance, allowance.amount, allowance.kind
-                ))
-                .fg(theme.text3),
-            );
+            let mut badge = format!("{} {}", app.icons.allowance, allowance.amount);
+            if !allowance.kind.is_empty() {
+                badge.push(' ');
+                badge.push_str(&allowance.kind);
+            }
+            parts.push(Span::raw(format!(" · {badge}")).fg(theme.text3));
         }
     }
     if app.chat.scroll > 0 && app.error.is_none() {
@@ -2035,7 +2036,22 @@ mod scroll_tests {
         app.backend = Some(crate::app::Backend::OpenRouter {
             api_key: "k".into(),
         });
-        assert!(draw(&mut app).contains("$4.12 credit"), "badge shows");
+        let screen = draw(&mut app);
+        assert!(screen.contains("¤ $4.12"), "badge shows: {screen}");
+        assert!(
+            !screen.contains("$4.12 credit"),
+            "no word on money: {screen}"
+        );
+
+        // A metered quota names its unit; the word is the read.
+        app.subscription = Some((
+            "openrouter",
+            Some(rhema_provider::Allowance {
+                amount: "238/300".to_owned(),
+                kind: "premium".to_owned(),
+            }),
+        ));
+        assert!(draw(&mut app).contains("¤ 238/300 premium"), "kind shows");
     }
 
     #[test]

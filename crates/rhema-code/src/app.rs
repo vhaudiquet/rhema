@@ -2274,7 +2274,7 @@ mod tests {
             provider: "google",
             result: Ok(Some(rhema_provider::Allowance {
                 amount: "$4.12".to_owned(),
-                kind: "credit".to_owned(),
+                kind: String::new(),
             })),
         });
         let (provider, allowance) = h.app.subscription.as_ref().expect("allowance landed");
