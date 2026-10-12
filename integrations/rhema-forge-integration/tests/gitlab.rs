@@ -1,7 +1,7 @@
 //! Offline integration tests: the GitLab backend against an in-process
 //! wiremock server. Zero network.
 
-use rhema_forge_agent::{EventKind, Forge, ForgeError, GitLabForge, RepoRef, Timestamp};
+use rhema_forge_integration::{EventKind, Forge, ForgeError, GitLabForge, RepoRef, Timestamp};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -408,7 +408,7 @@ async fn snapshot_prefers_issues_and_falls_back_to_merge_requests() {
         .snapshot(&repo, 7)
         .await
         .expect("issue snapshot");
-    assert_eq!(issue.state, rhema_forge_agent::ThreadState::Open);
+    assert_eq!(issue.state, rhema_forge_integration::ThreadState::Open);
     assert!(!issue.is_pr);
     assert_eq!(issue.labels, vec!["bug".to_owned(), "critical".to_owned()]);
 
@@ -416,7 +416,7 @@ async fn snapshot_prefers_issues_and_falls_back_to_merge_requests() {
         .snapshot(&repo, 3)
         .await
         .expect("mr snapshot");
-    assert_eq!(mr.state, rhema_forge_agent::ThreadState::Merged);
+    assert_eq!(mr.state, rhema_forge_integration::ThreadState::Merged);
     assert!(mr.is_pr);
     assert_eq!(mr.title, "fix crash");
 }

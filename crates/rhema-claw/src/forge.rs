@@ -14,10 +14,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rhema_autonomous_agent::{Source, SourceError, async_trait};
-use rhema_forge_agent::{Forge, GitHubForge, GitLabForge, GiteaForge, Watcher, register_forge};
-// `forge_key_fn` is public in the watcher module but not re-exported at
-// the crate root, unlike its siblings — reached through the module path.
-use rhema_forge_agent::forge_key_fn;
+use rhema_forge_integration::forge_key_fn;
+use rhema_forge_integration::{
+    Forge, GitHubForge, GitLabForge, GiteaForge, Watcher, register_forge,
+};
 use rhema_rsd::{Dispatcher, KeyFn};
 
 use crate::config::{ForgeKind, resolve_token};

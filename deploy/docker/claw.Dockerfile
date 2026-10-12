@@ -17,7 +17,6 @@ COPY crates/rhema-code/Cargo.toml crates/rhema-code/Cargo.toml
 COPY crates/rhema-coding-agent/Cargo.toml crates/rhema-coding-agent/Cargo.toml
 COPY crates/rhema-config/Cargo.toml crates/rhema-config/Cargo.toml
 COPY crates/rhema-core/Cargo.toml crates/rhema-core/Cargo.toml
-COPY crates/rhema-forge-agent/Cargo.toml crates/rhema-forge-agent/Cargo.toml
 COPY crates/rhema-memory/Cargo.toml crates/rhema-memory/Cargo.toml
 COPY crates/rhema-provider/Cargo.toml crates/rhema-provider/Cargo.toml
 COPY crates/rhema-provider-anthropic/Cargo.toml crates/rhema-provider-anthropic/Cargo.toml
@@ -27,6 +26,7 @@ COPY crates/rhema-provider-llama-cpp/Cargo.toml crates/rhema-provider-llama-cpp/
 COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-openai-compatible/Cargo.toml
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
+COPY integrations/rhema-forge-integration/Cargo.toml integrations/rhema-forge-integration/Cargo.toml
 
 # Resolution reads the vendored crossterm (the root manifest path-patches
 # to it) even though the image builds the daemon, which does not link it.
@@ -36,11 +36,12 @@ COPY vendor/ vendor/
 # paths at manifest-parse time, so the fetch needs stub files at every
 # declared target path: src/ for every member, plus examples/tests/benches
 # as declared (default path from the target name, or the explicit `path`).
-# The loop drives off the crates/*/ glob because crates/*/src matches
-# nothing until the stub exists — an unmatched glob would hand mkdir a
-# literal path. The real sources land below. (The awk program must stay on
-# one line: a Dockerfile line not ending in a backslash ends the RUN.)
-RUN for crate in crates/*/; do \
+# The loop drives off the crates/*/ and integrations/*/ globs because
+# neither glob's */src matches anything until the stub exists — an
+# unmatched glob would hand mkdir a literal path. The real sources land
+# below. (The awk program must stay on one line: a Dockerfile line not
+# ending in a backslash ends the RUN.)
+RUN for crate in crates/*/ integrations/*/; do \
            mkdir -p "$crate/src"; \
            touch "$crate/src/lib.rs" "$crate/src/main.rs"; \
            awk -F'"' '/^\[/ { d = ""; p = 0; if ($0 == "[[example]]") { d = "examples" } else if ($0 == "[[test]]") { d = "tests" } else if ($0 == "[[bench]]") { d = "benches" }; next } d == "" { next } /^name = / && p == 0 { print d "/" $2 ".rs" } /^path = / { p = 1; print $2 }' "$crate/Cargo.toml" \

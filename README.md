@@ -62,10 +62,6 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   itself, never injected context; the search interface hides the
   ranking method, so a semantic ranker can replace the keyword one
   without a signature change
-- `rhema-forge-agent` is the forge-watching bot: GitHub, Gitea, and
-  GitLab clients normalizing issues/PRs/comments into one event
-  vocabulary, a watcher feeding them to the dispatcher, and a bot that
-  turns admitted keys into handler runs
 - `rhema-autonomous-agent` is the resident-agent core tier: the `Source`
   contract for deterministic model-free detection, the lease-driven
   `Driver` loop (live inbox batches, per-round checkpoints), and a tool
@@ -97,6 +93,14 @@ completions` shim for stock UIs), watch management by agent tool or
 - `rhema` is the frontend binary: a full-screen terminal UI when attached
   to a terminal, `rhema run` for the pipeable one-shot, and `rhema acp`
   for editors
+
+The crate list stays deliberately generic: integrations live outside
+it. The first is `integrations/rhema-forge-integration` — GitHub,
+Gitea, and GitLab clients normalizing issues/PRs/comments into one
+event vocabulary, and a watcher feeding them to the dispatcher. It is
+a library for any agent consumer to compose, not a driver: the claw
+daemon watches repos and answers threads through it, touching public
+API only.
 
 ## The frontend: `rhema`
 
@@ -338,11 +342,11 @@ Keys: `enter` sends · `shift-enter` (kitty-protocol terminals;
 Ghostty's default xterm-style sequence parses through the vendored
 crossterm), `alt-enter`, or `ctrl-j` adds a line, the box grows with
 the text ·
-a paste longer than three lines attaches: an inline chip (▣1 5L — id,
+a paste longer than three lines attaches: an inline chip (`▣1 5L` — id,
 size) in the box at the paste's place, one character to the cursor
 (`backspace` and `delete` included), and it stays a chip in the
 transcript after sending — the model alone sees the full text ·
-submit · `ctrl-p` re-opens the model picker (the
+`ctrl-p` re-opens the model picker (the
 session is kept across a model switch) · `esc` cancels the running
 turn, or asks to quit when idle · `ctrl-c` or `ctrl-d` quit immediately.
 While a model streams its reasoning, the status strip previews the last

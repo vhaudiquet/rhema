@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use rhema_forge_agent::RepoRef;
+use rhema_forge_integration::RepoRef;
 use serde::{Deserialize, Serialize};
 
 /// How often the resident loop runs a detect pass, when
@@ -117,9 +117,9 @@ impl ForgeKind {
     /// The production base URL; `None` for the self-hosted-only forges.
     pub fn default_base(self) -> Option<&'static str> {
         match self {
-            ForgeKind::GitHub => Some(rhema_forge_agent::github::DEFAULT_BASE_URL),
+            ForgeKind::GitHub => Some(rhema_forge_integration::github::DEFAULT_BASE_URL),
             ForgeKind::Gitea => None,
-            ForgeKind::GitLab => Some(rhema_forge_agent::gitlab::DEFAULT_BASE_URL),
+            ForgeKind::GitLab => Some(rhema_forge_integration::gitlab::DEFAULT_BASE_URL),
         }
     }
 }

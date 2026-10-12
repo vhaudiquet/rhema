@@ -62,8 +62,9 @@ Rules:
     stores, and the memory tools (`crates/rhema-memory/`)
   - `rsd` — resource-scoped dispatch: the dispatcher and its stores
     (`crates/rhema-rsd/`)
-  - `forge-agent` — the forge-watching bot: GitHub/Gitea/GitLab clients,
-    the watcher, and handler runs (`crates/rhema-forge-agent/`)
+  - `forge` — the forge integration: GitHub/Gitea/GitLab clients, the
+    normalized event vocabulary, and the RSD ingest path
+    (`integrations/rhema-forge-integration/`)
   - `autonomous-agent` — the resident-agent core tier: sources, the
     lease-driven driver, and the tool registry
     (`crates/rhema-autonomous-agent/`)

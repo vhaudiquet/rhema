@@ -19,7 +19,7 @@ use std::path::Path;
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rhema_forge_agent::RepoRef;
+use rhema_forge_integration::RepoRef;
 use rusqlite::params;
 use serde::Serialize;
 

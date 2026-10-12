@@ -70,7 +70,7 @@ pub struct RepoRef {
 
 impl RepoRef {
     /// Coordinates for `owner`/`name`. Neither is validated: callers pass
-    /// forge-correct names (the bot builds these from forge data).
+    /// forge-correct names (the adapters build these from forge data).
     pub fn new(owner: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             owner: owner.into(),

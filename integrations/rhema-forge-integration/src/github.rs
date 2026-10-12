@@ -47,7 +47,7 @@ use crate::forge::{Forge, ForgePage};
 pub const DEFAULT_BASE_URL: &str = "https://api.github.com";
 
 /// GitHub rejects requests without a `User-Agent` outright.
-const USER_AGENT: &str = concat!("rhema-forge-agent/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("rhema-forge-integration/", env!("CARGO_PKG_VERSION"));
 
 /// Rows requested per page.
 const PER_PAGE: usize = 100;

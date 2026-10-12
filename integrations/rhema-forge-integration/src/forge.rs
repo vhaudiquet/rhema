@@ -1,9 +1,9 @@
-//! The bot's client contract: one trait, three calls.
+//! The forge client contract: one trait, three calls.
 //!
-//! [`Forge`] is the whole surface the watcher (a later layer in this
-//! crate) needs: poll a repo's activity against a cursor, post a comment,
-//! and fetch a thread snapshot so a handler can orient without a second
-//! API round-trip. Implementations are cheap to clone and share — the
+//! [`Forge`] is the whole surface a consumer needs: poll a repo's
+//! activity against a cursor, post a comment, and fetch a thread
+//! snapshot so an answering handler can orient without a second API
+//! round-trip. Implementations are cheap to clone and share — the
 //! reqwest client inside is reference-counted — and object-safe so a
 //! backend can be swapped without generics.
 //!
@@ -46,7 +46,7 @@ impl ForgePage {
     }
 }
 
-/// A forge backend: the bot's client for one REST dialect.
+/// A forge backend: the client for one REST dialect.
 #[async_trait]
 pub trait Forge: Send + Sync {
     /// Recent activity for `repo`, oldest first, all pages collected.

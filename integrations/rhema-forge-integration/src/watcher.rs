@@ -1,5 +1,5 @@
-//! The watch step: poll a forge feed, hand the events to the RSD
-//! dispatcher.
+//! The dispatcher seam: poll a forge feed into the RSD dispatcher, and
+//! decode a delivered inbox item back into the forge event it carried.
 //!
 //! The [`Watcher`] owns one cursor per repo (the newest event time fed to
 //! the dispatcher) and turns forge events into
@@ -16,10 +16,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rhema_rsd::{Clock, Dispatcher, Event, KeyFn, ResourceKey, SystemClock};
+use rhema_rsd::{Clock, Dispatcher, Event, InboxItem, KeyFn, ResourceKey, SystemClock};
 
 use crate::error::ForgeError;
-use crate::event::{RepoRef, Timestamp};
+use crate::event::{ForgeEvent, RepoRef, Timestamp};
 use crate::forge::Forge;
 
 /// Why a watch step failed: the forge call, or the dispatcher seam behind
@@ -150,6 +150,14 @@ impl Watcher {
         }
         Ok(fed)
     }
+}
+
+/// Decodes a delivered inbox item back into the forge event the watcher
+/// fed. A payload this crate did not build is a loud parse error, never a
+/// silently skipped event.
+pub fn decode(item: &InboxItem) -> Result<ForgeEvent, ForgeError> {
+    serde_json::from_value(item.event.payload.clone())
+        .map_err(|err| ForgeError::Parse(format!("inbox payload is not a forge event: {err}")))
 }
 
 #[cfg(test)]

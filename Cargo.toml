@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = ["crates/*", "integrations/*"]
 # The vendored crossterm rides under [patch.crates-io] below; excluding
 # it keeps cargo from claiming the tree when run from inside it.
 exclude = ["vendor/crossterm"]

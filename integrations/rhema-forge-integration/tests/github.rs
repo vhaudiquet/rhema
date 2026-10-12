@@ -1,7 +1,7 @@
 //! Offline integration tests: the GitHub backend against an in-process
 //! wiremock server. Zero network.
 
-use rhema_forge_agent::{EventKind, Forge, ForgeError, GitHubForge, RepoRef, Timestamp};
+use rhema_forge_integration::{EventKind, Forge, ForgeError, GitHubForge, RepoRef, Timestamp};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -358,7 +358,7 @@ async fn snapshot_reads_prs_through_the_pulls_row() {
         .snapshot(&repo, 7)
         .await
         .expect("issue snapshot");
-    assert_eq!(issue.state, rhema_forge_agent::ThreadState::Open);
+    assert_eq!(issue.state, rhema_forge_integration::ThreadState::Open);
     assert!(!issue.is_pr);
     assert_eq!(issue.labels, vec!["bug".to_owned()]);
     assert_eq!(issue.author.as_deref(), Some("alice"));
@@ -367,7 +367,7 @@ async fn snapshot_reads_prs_through_the_pulls_row() {
         .snapshot(&repo, 8)
         .await
         .expect("pull snapshot");
-    assert_eq!(pull.state, rhema_forge_agent::ThreadState::Merged);
+    assert_eq!(pull.state, rhema_forge_integration::ThreadState::Merged);
     assert!(pull.is_pr);
     assert_eq!(pull.title, "fix crash");
 }
