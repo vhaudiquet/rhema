@@ -69,6 +69,9 @@ pub struct ClawState {
     backends: Arc<BackendRegistry>,
     settings: Arc<crate::settings::SettingsStore>,
     identity: Arc<crate::identity::IdentityStore>,
+    /// The accounts layer the identity routes serve. Like every consumer
+    /// of the store, the routes only ever see redacted records.
+    accounts: Arc<dyn rhema_identity::IdentityStore>,
     token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
@@ -79,9 +82,9 @@ pub struct ClawState {
 impl ClawState {
     /// The state over the interactive dispatcher and its driver, the
     /// shared dispatch store, the watch table, the notification table,
-    /// the bootstrap store, the event hub, and the configured `model`
-    /// (the shim's echo default) and bearer `token`.
-    #[allow(clippy::too_many_arguments)] // ten parts, each load-bearing
+    /// the bootstrap store, the event hub, the account store, and the
+    /// configured bearer `token`.
+    #[allow(clippy::too_many_arguments)] // eleven parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
@@ -93,6 +96,7 @@ impl ClawState {
         backends: Arc<BackendRegistry>,
         settings: Arc<crate::settings::SettingsStore>,
         identity: Arc<crate::identity::IdentityStore>,
+        accounts: Arc<dyn rhema_identity::IdentityStore>,
         token: Option<String>,
     ) -> Self {
         Self {
@@ -106,6 +110,7 @@ impl ClawState {
             backends,
             settings,
             identity,
+            accounts,
             token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
@@ -163,6 +168,17 @@ impl ClawState {
     pub fn identity(&self) -> &crate::identity::IdentityStore {
         &self.identity
     }
+
+    /// The accounts layer: the identity routes list, save, and forget
+    /// through it, redacted records only.
+    pub fn accounts(&self) -> &dyn rhema_identity::IdentityStore {
+        self.accounts.as_ref()
+    }
+
+    /// The watch table: a saved account's forge watch registers here.
+    pub fn watches(&self) -> &ClawStore {
+        &self.watches
+    }
 }
 
 /// The app router: `/healthz` open, `/v1` behind the bearer check when
@@ -175,6 +191,8 @@ pub fn router(state: ClawState) -> Router {
         .route("/bootstrap", get(bootstrap_status))
         .route("/watches", get(watches_list).post(watches_add))
         .route("/watches/{forge}/{*repo}", delete(watches_remove))
+        .route("/accounts", get(accounts_list).post(accounts_add))
+        .route("/accounts/{id}", delete(accounts_remove))
         .route("/ingest", post(ingest))
         .route("/notifications", get(notifications_list))
         .route("/notifications/{id}/ack", post(notifications_ack))
@@ -206,7 +224,7 @@ pub fn router(state: ClawState) -> Router {
                     "service": "rhema-claw",
                     "chat": "/v1/sessions",
                     "api": ["/v1/sessions", "/v1/providers", "/v1/watches",
-                            "/v1/notifications", "/v1/bootstrap", "/v1/ingest"],
+                            "/v1/accounts", "/v1/notifications", "/v1/bootstrap", "/v1/ingest"],
                 }))
             }),
         )
@@ -484,6 +502,85 @@ async fn watches_remove(
             Json(json!({"error": err})),
         )
             .into_response(),
+    }
+}
+
+/// `{"label", "service", "url"?, "username"?, "secret", "secret_kind"?,
+/// "watch"?}` — an account to store. The secret is write-only: it is
+/// stored and never served back, by the shape of the store's records.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountBody {
+    /// The display name.
+    pub label: String,
+    /// The service, lowercase: `github`, `gitlab`, `gitea`, or any name.
+    pub service: String,
+    /// Base URL, for self-hosted instances.
+    pub url: Option<String>,
+    /// The login name on the service.
+    pub username: Option<String>,
+    /// The credential to store; never echoed back.
+    pub secret: String,
+    /// `token` (default) or `password`.
+    pub secret_kind: Option<String>,
+    /// Also follow this forge identity's notifications. Default false.
+    pub watch: Option<bool>,
+}
+
+async fn accounts_list(State(state): State<ClawState>) -> Response {
+    match state.accounts().list() {
+        Ok(accounts) => (StatusCode::OK, Json(json!({ "accounts": accounts }))).into_response(),
+        Err(err) => internal_error(err.to_string()).into_response(),
+    }
+}
+
+async fn accounts_add(State(state): State<ClawState>, Json(body): Json<AccountBody>) -> Response {
+    let kind = match crate::accounts_tools::parse_kind(body.secret_kind.as_deref()) {
+        Ok(kind) => kind,
+        Err(reason) => return bad_request(reason).into_response(),
+    };
+    let mut draft = rhema_identity::AccountDraft::new(
+        body.label,
+        body.service,
+        rhema_identity::Secret::new(kind, body.secret),
+    );
+    if let Some(url) = body.url {
+        draft = draft.with_url(url);
+    }
+    if let Some(username) = body.username {
+        draft = draft.with_username(username);
+    }
+    match crate::accounts_tools::save_account(
+        state.accounts(),
+        state.watches(),
+        draft,
+        body.watch.unwrap_or(false),
+    ) {
+        Ok(saved) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "saved": true,
+                "id": saved.account.id,
+                "label": saved.account.label,
+                "service": saved.account.service,
+                "secret_kind": saved.account.secret_kind,
+                "watched": saved.watch_added,
+                "watchable_forge": saved.forge_known,
+            })),
+        )
+            .into_response(),
+        Err(reason) => bad_request(reason).into_response(),
+    }
+}
+
+async fn accounts_remove(State(state): State<ClawState>, Path(id): Path<String>) -> Response {
+    match crate::accounts_tools::forget_account(state.accounts(), state.watches(), &id) {
+        Ok((forgot, watches_removed)) => (
+            StatusCode::OK,
+            Json(json!({ "forgot": forgot, "watches_removed": watches_removed })),
+        )
+            .into_response(),
+        Err(reason) => internal_error(reason).into_response(),
     }
 }
 

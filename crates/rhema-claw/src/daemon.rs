@@ -181,13 +181,29 @@ impl Daemon {
             store.clone(),
         ));
 
+        // The account store the forge sources poll through: an account
+        // watch authenticates as its identity, and the secret reaches
+        // the forge client's constructor and nowhere else.
+        let accounts: Arc<dyn rhema_identity::IdentityStore> = Arc::new(
+            rhema_identity::SqliteIdentityStore::open(&db)
+                .map_err(|err| ClawError::Backend(err.to_string()))?,
+        );
+
         // One source per known forge kind, whatever the table currently
         // holds: a watch added later (chat tool, HTTP route) of a kind
         // nobody watched at startup still has its key function
         // registered. A source over zero watches detects nothing.
         let sources = [ForgeKind::GitHub, ForgeKind::Gitea, ForgeKind::GitLab]
             .into_iter()
-            .map(|kind| ForgeSource::new(&forge_dispatcher, kind.name(), watches.clone()))
+            .map(|kind| {
+                ForgeSource::new(
+                    &forge_dispatcher,
+                    kind.name(),
+                    watches.clone(),
+                    accounts.clone(),
+                    notifications.clone(),
+                )
+            })
             .collect();
 
         // The forge handler resolves its watches through the table at
@@ -238,6 +254,7 @@ impl Daemon {
             hub.clone(),
             notifications.clone(),
             tasks.clone(),
+            accounts.clone(),
         );
         let interactive_driver = Arc::new(
             Driver::new(
@@ -267,6 +284,7 @@ impl Daemon {
             backends.clone(),
             settings.clone(),
             identity,
+            accounts,
             config.token.clone(),
         );
 

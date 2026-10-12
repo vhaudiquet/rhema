@@ -158,6 +158,10 @@ pub struct InteractiveHandler {
     workspace: PathBuf,
     tools: Arc<CodingTools>,
     watch_resolver: Arc<dyn rhema_core::ToolResolver>,
+    /// The identity tools: interactive-only by construction — the forge
+    /// handler never resolves them, so a forge comment cannot reach the
+    /// accounts.
+    accounts_resolver: Arc<dyn rhema_core::ToolResolver>,
     notify_resolver: Arc<dyn rhema_core::ToolResolver>,
     task_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// The durable cross-session store the memory tools act on; the
@@ -181,7 +185,7 @@ impl InteractiveHandler {
     /// v1-permissive — the shell is the point of a resident coding
     /// agent — installed once, since resolution is synchronous within a
     /// turn.
-    #[allow(clippy::too_many_arguments)] // nine parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // ten parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -191,12 +195,15 @@ impl InteractiveHandler {
         hub: Arc<EventHub>,
         notifications: Arc<NotificationStore>,
         tasks: Arc<crate::task_store::TaskStore>,
+        accounts: Arc<dyn rhema_identity::IdentityStore>,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(CodingTools::new(&workspace));
         tools.install_approval(Arc::new(AllowAll));
         let watch_resolver =
-            crate::watch_tools::registry(watches).resolver_for(&Allowlist::permissive());
+            crate::watch_tools::registry(watches.clone()).resolver_for(&Allowlist::permissive());
+        let accounts_resolver = crate::accounts_tools::registry(accounts, watches)
+            .resolver_for(&Allowlist::permissive());
         let notify_resolver = crate::notify_tools::registry(notifications.clone())
             .resolver_for(&Allowlist::permissive());
         let task_resolver =
@@ -208,6 +215,7 @@ impl InteractiveHandler {
             workspace,
             tools,
             watch_resolver,
+            accounts_resolver,
             notify_resolver,
             task_resolver,
             memory,
@@ -240,6 +248,7 @@ impl InteractiveHandler {
                 self.notify_resolver.clone(),
                 self.task_resolver.clone(),
                 self.watch_resolver.clone(),
+                self.accounts_resolver.clone(),
             ])))
             .system(system)
             .params(ChatParams::new(model))
@@ -497,6 +506,12 @@ mod tests {
         Arc::new(TaskStore::in_memory().expect("store opens"))
     }
 
+    /// A throwaway account store: the identity tools need something to
+    /// stand in, and the dispatch tests never touch it.
+    fn accounts() -> Arc<dyn rhema_identity::IdentityStore> {
+        Arc::new(rhema_identity::VolatileIdentityStore::new())
+    }
+
     fn test_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<BackendRegistry> {
         Arc::new(
             BackendRegistry::new(vec![Backend::headless("mock", provider)], None)
@@ -690,6 +705,7 @@ mod tests {
             hub.clone(),
             notifications(),
             tasks(),
+            accounts(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -770,6 +786,7 @@ mod tests {
             hub,
             notifications(),
             tasks(),
+            accounts(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -859,6 +876,7 @@ mod tests {
             hub,
             notifications(),
             tasks(),
+            accounts(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -924,6 +942,7 @@ mod tests {
             hub,
             notifications(),
             tasks(),
+            accounts(),
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -991,6 +1010,7 @@ mod tests {
             hub,
             notifications.clone(),
             tasks(),
+            accounts(),
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(

@@ -25,7 +25,11 @@ use serde::Serialize;
 
 use crate::config::{ForgeKind, Watch};
 
-/// The watch table.
+/// The watch table, and the account-watch table beside it: one row per
+/// identity whose forge notifications the daemon polls. An account watch
+/// is derived state — it names the [`rhema_identity`] account the
+/// notifications belong to, and its token is resolved through the
+/// identity store at poll time, never stored here.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS watches (
     id         INTEGER PRIMARY KEY,
@@ -35,6 +39,14 @@ CREATE TABLE IF NOT EXISTS watches (
     token      TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
     UNIQUE(forge, repo)
+);
+CREATE TABLE IF NOT EXISTS account_watches (
+    id         INTEGER PRIMARY KEY,
+    forge      TEXT NOT NULL,
+    host       TEXT,
+    account_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    UNIQUE(forge, account_id)
 );
 ";
 
@@ -87,6 +99,24 @@ impl WatchRecord {
 /// SQLite file. Shareable behind an `Arc`; every operation takes `&self`.
 pub struct ClawStore {
     conn: Mutex<rusqlite::Connection>,
+}
+
+/// One watched identity: the daemon polls this forge's notifications as
+/// the named account. `account_id` is the [`rhema_identity`] store's id —
+/// the credential stays there, never in this table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AccountWatchRecord {
+    /// The row id.
+    pub id: i64,
+    /// The forge's source name: `github`, `gitea`, or `gitlab`.
+    pub forge: String,
+    /// The instance base URL; `None` for the forges with production
+    /// bases. Required for gitea, which is self-hosted only.
+    pub host: Option<String>,
+    /// The identity store's account id the watch polls as.
+    pub account_id: String,
+    /// Creation time, milliseconds since the Unix epoch.
+    pub created_at: i64,
 }
 
 impl ClawStore {
@@ -207,6 +237,84 @@ impl ClawStore {
             }
         }
         Ok(seeded)
+    }
+
+    /// Registers the account watch: the daemon polls `forge`'s
+    /// notifications as the account. `false` when the account is already
+    /// watched on that forge. The identity's own secret is *not* passed
+    /// here — the watch names the account, and the token is resolved
+    /// through the identity store at poll time.
+    pub fn add_account_watch(
+        &self,
+        forge: &str,
+        host: Option<&str>,
+        account_id: &str,
+    ) -> Result<bool, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let inserted = conn.execute(
+            "INSERT INTO account_watches (forge, host, account_id, created_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(forge, account_id) DO NOTHING",
+            params![
+                forge.trim(),
+                host.map(str::trim),
+                account_id.trim(),
+                now_millis()
+            ],
+        )?;
+        Ok(inserted == 1)
+    }
+
+    /// Removes the account watch for `(forge, account_id)`; `false` when
+    /// there was none.
+    pub fn remove_account_watch(
+        &self,
+        forge: &str,
+        account_id: &str,
+    ) -> Result<bool, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let removed = conn.execute(
+            "DELETE FROM account_watches WHERE forge = ?1 AND account_id = ?2",
+            params![forge.trim(), account_id.trim()],
+        )?;
+        Ok(removed == 1)
+    }
+
+    /// Removes every account watch of one account — the cascade its
+    /// `identity_forget` runs. Returns how many rows went.
+    pub fn remove_account_watches_for(&self, account_id: &str) -> Result<usize, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let removed = conn.execute(
+            "DELETE FROM account_watches WHERE account_id = ?1",
+            params![account_id.trim()],
+        )?;
+        Ok(removed)
+    }
+
+    /// Every account watch, oldest first. Read fresh by every detect
+    /// pass, like the repo watches.
+    pub fn list_account_watches(&self) -> Result<Vec<AccountWatchRecord>, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, forge, host, account_id, created_at
+                 FROM account_watches ORDER BY id ASC",
+            )
+            .map_err(WatchStoreError::from)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(AccountWatchRecord {
+                    id: row.get(0)?,
+                    forge: row.get(1)?,
+                    host: row.get(2)?,
+                    account_id: row.get(3)?,
+                    created_at: row.get(4)?,
+                })
+            })
+            .map_err(WatchStoreError::from)?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(WatchStoreError::from)?;
+        Ok(rows)
     }
 }
 

@@ -27,6 +27,9 @@ rhema-coding-agent = { path = "../rhema-coding-agent" }
 rhema-config = { path = "../rhema-config" }
 rhema-core = { path = "../rhema-core" }
 rhema-forge-integration = { path = "../../integrations/rhema-forge-integration" }
+# The accounts layer: identities hold the forge tokens the watches poll
+# with, and the identity tools manage them over chat
+rhema-identity = { path = "../rhema-identity" }
 rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
 rhema-provider-copilot = { path = "../rhema-provider-copilot" }
 rhema-provider-google = { path = "../rhema-provider-google" }

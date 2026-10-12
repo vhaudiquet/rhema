@@ -22,22 +22,26 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::config::ForgeKind;
 use crate::forge::record_client;
+use crate::triage::Role;
 use crate::watch_store::ClawStore;
 use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
 use rhema_coding_agent::{AllowAll, CodingAgent, CodingAgentConfig};
 use rhema_core::{Content, Event as ModelEvent, EventSink, Message, Session};
 use rhema_forge_integration::{
-    EventKind, Forge, ForgeEvent, RepoRef, Snapshot, ThreadState, decode, parse_key,
+    EventKind, Forge, ForgeError, ForgeEvent, Notification, RepoRef, Snapshot, ThreadState, decode,
+    parse_key,
 };
-use rhema_rsd::{Outcome, ResourceKey};
+use rhema_rsd::{InboxItem, Outcome, ResourceKey};
 
 use crate::backends::BackendRegistry;
 
 /// The handler's tool permissions, resolved deterministically before the
 /// agent's first step (spec §8) — never by the model, never mid-run. V1
 /// is permissive, the spec's starting point; a profile-to-permissions
-/// mapping lands here as a per-deployment policy, and a policy that
-/// refuses the shell refuses the run (see [`ClawHandler::dispatch`]).
+/// mapping lands here as a per-deployment policy — the triage's
+/// [`Role`] is the seam it hangs on, a reviewer dispatch deserving a
+/// narrower policy than an implementer's — and a policy that refuses the
+/// shell refuses the run (see [`ClawHandler::dispatch`]).
 fn allowlist() -> rhema_autonomous_agent::Allowlist {
     rhema_autonomous_agent::Allowlist::permissive()
 }
@@ -112,7 +116,8 @@ impl ClawHandler {
             .snapshot(&repo, number)
             .await
             .map_err(|err| format!("snapshot of {key} failed: {err}"))?;
-        let events = self.drain_events(ctx, &key).await?;
+        let news = self.drain_news(ctx, &key).await?;
+        let role = dominant_role(&news);
 
         // The permission check is load-bearing: this handler's one tool
         // is the agent's shell, so a policy without it is a run that
@@ -127,7 +132,7 @@ impl ClawHandler {
         let workspace = self.workspace_for(&key, &repo, number)?;
         let mut agent = self.resume(ctx, &workspace, &key)?;
 
-        let prompt = build_prompt(&key, &snapshot, &events, &workspace);
+        let prompt = build_prompt(&key, &snapshot, &news, workspace.as_path(), role);
         let mut sink = TurnSink;
         let output = agent
             .turn(prompt, &mut sink, Arc::new(AllowAll))
@@ -147,21 +152,23 @@ impl ClawHandler {
         Ok(Outcome::Handled)
     }
 
-    /// Renews the lease and drains the inbox, decoding every item back
-    /// into its forge event. A payload that does not decode is loud: a
-    /// shape break must surface, not silently shrink the prompt.
-    async fn drain_events(
+    /// Renews the lease and drains the inbox, decoding every item into
+    /// the news it carries: a repo-watch forge event, or a triaged
+    /// account notification with its role. A payload that decodes to
+    /// neither is loud: a shape break must surface, not silently shrink
+    /// the prompt.
+    async fn drain_news(
         &self,
         ctx: &mut SessionContext,
         key: &str,
-    ) -> Result<Vec<ForgeEvent>, String> {
+    ) -> Result<Vec<InboxNews>, String> {
         let items = ctx
             .poll_inbox()
             .await
             .map_err(|err| format!("inbox poll for {key} failed: {err}"))?;
         items
             .iter()
-            .map(decode)
+            .map(decode_news)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|err| format!("an inbox item for {key} does not decode: {err}"))
     }
@@ -243,11 +250,109 @@ pub fn workspace_name(key: &str, repo: &RepoRef, number: u64) -> String {
         .collect()
 }
 
-/// The agent's prompt for one dispatch: the thread's standing state, the
-/// new events, and the posting contract. The final assistant message is
-/// the comment — everything else is orientation for the investigation.
-fn build_prompt(key: &str, snapshot: &Snapshot, events: &[ForgeEvent], workspace: &Path) -> String {
-    let mut prompt = format!(
+/// One drained inbox item: a plain repo-watch forge event, or a triaged
+/// account notification carrying the role the triage assigned it.
+#[derive(Debug, Clone)]
+enum InboxNews {
+    Event(ForgeEvent),
+    Notified {
+        role: Role,
+        notification: Notification,
+    },
+}
+
+/// The triaged payload [`crate::forge::ForgeSource`] ingests: `repo` and
+/// `number` ride at the top level for the key function, the rest is the
+/// notification and the role its triage earned.
+#[derive(serde::Deserialize)]
+struct TriagedPayload {
+    role: Role,
+    notification: Notification,
+}
+
+/// Decodes one inbox item into its news. A triaged notification is tried
+/// first — a plain forge event has none of its fields — and the plain
+/// event second; anything else is a loud parse error.
+fn decode_news(item: &InboxItem) -> Result<InboxNews, ForgeError> {
+    if let Ok(triaged) = serde_json::from_value::<TriagedPayload>(item.event.payload.clone()) {
+        return Ok(InboxNews::Notified {
+            role: triaged.role,
+            notification: triaged.notification,
+        });
+    }
+    decode(item).map(InboxNews::Event)
+}
+
+/// The batch's dominant role, for the prompt's persona framing:
+/// implementing subsumes reviewing — a batch that asks for both is a
+/// dispatch where the work is the point. Plain events imply no persona:
+/// the default framing runs.
+fn dominant_role(news: &[InboxNews]) -> Option<Role> {
+    if news.iter().any(|news| {
+        matches!(
+            news,
+            InboxNews::Notified {
+                role: Role::Implementer,
+                ..
+            }
+        )
+    }) {
+        Some(Role::Implementer)
+    } else if news.iter().any(|news| {
+        matches!(
+            news,
+            InboxNews::Notified {
+                role: Role::Reviewer,
+                ..
+            }
+        )
+    }) {
+        Some(Role::Reviewer)
+    } else {
+        None
+    }
+}
+
+/// The persona framing a dispatched role opens the prompt with. The key
+/// stays the thread, so a role change across dispatches is the session's
+/// continuity, not a new conversation.
+fn persona_text(role: Role) -> &'static str {
+    match role {
+        Role::Reviewer => {
+            "You are acting as this pull request's reviewer. Check the change \
+out in the workspace when you can, read the diff, and judge it: correctness, \
+tests, edge cases, fit with the surrounding code. Your final reply is the \
+review — findings first, ordered by severity, concrete and actionable; if \
+there is nothing to fix, say so plainly and say what you checked."
+        }
+        Role::Implementer => {
+            "You are acting as this thread's implementer. Do the work the new \
+activity asks for: address the review feedback or the assigned issue by \
+changing the code in the workspace — build and test what you change. Your \
+final reply is a short report of what you changed and why, or, when the \
+whole change does not fit one turn, what landed now and the concrete plan \
+for the rest."
+        }
+    }
+}
+
+/// The agent's prompt for one dispatch: the persona framing (when the
+/// triage dispatched a role), the thread's standing state, the new news,
+/// and the posting contract. The final assistant message is the comment
+/// — everything else is orientation for the investigation.
+fn build_prompt(
+    key: &str,
+    snapshot: &Snapshot,
+    news: &[InboxNews],
+    workspace: &Path,
+    role: Option<Role>,
+) -> String {
+    let mut prompt = String::new();
+    if let Some(role) = role {
+        prompt.push_str(persona_text(role));
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(&format!(
         "You are responding to new activity on forge thread {key}.\n\n\
          Thread: {}\nKind: {}; state: {}\nOpened by: {}\nLabels: {}\nOpening body:\n{}\n\n",
         snapshot.title,
@@ -269,20 +374,35 @@ fn build_prompt(key: &str, snapshot: &Snapshot, events: &[ForgeEvent], workspace
             .map(str::trim)
             .filter(|body| !body.is_empty())
             .unwrap_or("(none)"),
-    );
+    ));
     prompt.push_str("New activity to respond to:\n");
-    for event in events {
-        prompt.push_str(&format!(
-            "- {} by {}: {}\n",
-            kind_text(event.kind),
-            event.actor.as_deref().unwrap_or("unknown"),
-            event
-                .body
-                .as_deref()
-                .map(str::trim)
-                .filter(|body| !body.is_empty())
-                .unwrap_or("(no text)"),
-        ));
+    for news in news {
+        match news {
+            InboxNews::Event(event) => prompt.push_str(&format!(
+                "- {} by {}: {}\n",
+                kind_text(event.kind),
+                event.actor.as_deref().unwrap_or("unknown"),
+                event
+                    .body
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|body| !body.is_empty())
+                    .unwrap_or("(no text)"),
+            )),
+            InboxNews::Notified { notification, .. } => prompt.push_str(&format!(
+                "- notification ({}) on {} #{} by {}: {}\n",
+                notification.reason.as_str(),
+                thread_kind(notification.is_pr),
+                notification.number,
+                notification.actor.as_deref().unwrap_or("unknown"),
+                notification
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .unwrap_or("(no title)"),
+            )),
+        }
     }
     prompt.push_str(&format!(
         "\nThe workspace is at {}: investigate there with your shell tools (read\n\
@@ -294,6 +414,11 @@ fn build_prompt(key: &str, snapshot: &Snapshot, events: &[ForgeEvent], workspace
         workspace.display(),
     ));
     prompt
+}
+
+/// "pull request" or "issue", for the notification lines.
+fn thread_kind(is_pr: bool) -> &'static str {
+    if is_pr { "pull request" } else { "issue" }
 }
 
 /// The thread state, in words.
@@ -368,6 +493,7 @@ fn first_line(content: &str) -> String {
 mod tests {
     use super::*;
     use rhema_core::ModelProvider;
+    use rhema_forge_integration::NotificationReason;
 
     fn snapshot() -> Snapshot {
         serde_json::from_value(serde_json::json!({
@@ -404,8 +530,13 @@ mod tests {
         let prompt = build_prompt(
             "github:acme/widgets#7",
             &snapshot(),
-            &[event(EventKind::Comment, "dave", Some("any progress?"))],
+            &[InboxNews::Event(event(
+                EventKind::Comment,
+                "dave",
+                Some("any progress?"),
+            ))],
             Path::new("/tmp/workspaces/github-acme-widgets-7"),
+            None,
         );
         assert!(prompt.contains("github:acme/widgets#7"), "key: {prompt}");
         assert!(prompt.contains("crash on save"), "title: {prompt}");
@@ -426,12 +557,136 @@ mod tests {
         let prompt = build_prompt(
             "github:acme/widgets#7",
             &snapshot(),
-            &[event(EventKind::Opened, "alice", None)],
+            &[InboxNews::Event(event(EventKind::Opened, "alice", None))],
             Path::new("/tmp/w"),
+            None,
         );
         assert!(
             prompt.contains("- opened by alice: (no text)"),
             "got: {prompt}"
+        );
+    }
+
+    fn notification(reason: NotificationReason) -> Notification {
+        serde_json::from_value(serde_json::json!({
+            "id": "github:notification:42188@2026-10-03T09:00:00Z",
+            "reason": reason,
+            "repo": { "owner": "acme", "name": "widgets" },
+            "number": 142,
+            "is_pr": true,
+            "actor": "alice",
+            "title": "Add the widget flange",
+            "url": null,
+            "timestamp": "2026-10-03T09:00:00Z",
+            "raw": {},
+        }))
+        .expect("notification fixture parses")
+    }
+
+    fn triaged_item(role: Role, reason: NotificationReason) -> InboxItem {
+        InboxItem {
+            event: rhema_rsd::Event {
+                id: "github:notification:42188@2026-10-03T09:00:00Z".to_owned(),
+                source: "github".to_owned(),
+                payload: serde_json::json!({
+                    "repo": "acme/widgets",
+                    "number": 142,
+                    "role": role,
+                    "notification": notification(reason),
+                }),
+                received_at: 0,
+            },
+            delivered_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_triaged_item_decodes_to_its_role_and_a_plain_event_to_its_event() {
+        let news = decode_news(&triaged_item(
+            Role::Reviewer,
+            NotificationReason::ReviewRequested,
+        ))
+        .expect("decodes");
+        assert!(matches!(
+            news,
+            InboxNews::Notified {
+                role: Role::Reviewer,
+                ..
+            }
+        ));
+        let plain = InboxItem {
+            event: rhema_rsd::Event {
+                id: "github:comment:8001".to_owned(),
+                source: "github".to_owned(),
+                payload: serde_json::to_value(event(EventKind::Comment, "dave", None))
+                    .expect("serializes"),
+                received_at: 0,
+            },
+            delivered_at: 0,
+        };
+        assert!(matches!(decode_news(&plain), Ok(InboxNews::Event(_))));
+        let garbage = InboxItem {
+            event: rhema_rsd::Event {
+                id: "x".to_owned(),
+                source: "github".to_owned(),
+                payload: serde_json::json!({"neither": true}),
+                received_at: 0,
+            },
+            delivered_at: 0,
+        };
+        assert!(decode_news(&garbage).is_err(), "an unknown shape is loud");
+    }
+
+    #[test]
+    fn the_batchs_dominant_role_subordinates_implementing_to_nothing() {
+        assert_eq!(dominant_role(&[]), None);
+        assert_eq!(
+            dominant_role(&[InboxNews::Event(event(EventKind::Comment, "dave", None))]),
+            None,
+            "plain events imply no persona"
+        );
+        let review = InboxNews::Notified {
+            role: Role::Reviewer,
+            notification: notification(NotificationReason::ReviewRequested),
+        };
+        let work = InboxNews::Notified {
+            role: Role::Implementer,
+            notification: notification(NotificationReason::Assigned),
+        };
+        assert_eq!(
+            dominant_role(std::slice::from_ref(&review)),
+            Some(Role::Reviewer)
+        );
+        assert_eq!(
+            dominant_role(std::slice::from_ref(&work)),
+            Some(Role::Implementer)
+        );
+        assert_eq!(
+            dominant_role(&[review, work]),
+            Some(Role::Implementer),
+            "doing the work subsumes judging it"
+        );
+    }
+
+    #[test]
+    fn a_reviewer_dispatch_frames_the_prompt_as_a_review() {
+        let prompt = build_prompt(
+            "github:acme/widgets#142",
+            &snapshot(),
+            &[InboxNews::Notified {
+                role: Role::Reviewer,
+                notification: notification(NotificationReason::ReviewRequested),
+            }],
+            Path::new("/tmp/w"),
+            Some(Role::Reviewer),
+        );
+        assert!(
+            prompt.contains("acting as this pull request's reviewer"),
+            "persona: {prompt}"
+        );
+        assert!(
+            prompt.contains("notification (review_requested) on pull request #142"),
+            "news line: {prompt}"
         );
     }
 
