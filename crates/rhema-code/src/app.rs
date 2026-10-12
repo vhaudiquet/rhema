@@ -541,6 +541,15 @@ pub struct App {
     /// previews its last rows, and it clears the moment real output
     /// starts. Never part of the transcript or the session history.
     pub thinking: String,
+    /// The running command's output, tail only: the status strip
+    /// previews its completed lines while the command runs, and the
+    /// whole text lands with the tool result. Never part of the
+    /// transcript or the session history.
+    pub tool_output: String,
+    /// When the running command's first output chunk landed: the
+    /// preview stays hidden until the command has earned it — a second
+    /// of runtime or a second line.
+    pub tool_output_at: Option<std::time::Instant>,
     /// The file this session was resumed from, if any: the exit save
     /// updates it in place instead of growing a second entry in /resume.
     pub resumed_from: Option<PathBuf>,
@@ -644,6 +653,8 @@ impl App {
             login_cancel: None,
             processing: false,
             thinking: String::new(),
+            tool_output: String::new(),
+            tool_output_at: None,
             resumed_from: None,
             should_quit: false,
             chat: ChatState::new(),
@@ -1742,6 +1753,7 @@ impl App {
         self.answers = answers;
         self.processing = false;
         self.thinking.clear();
+        self.clear_tool_output();
         self.remember_profile();
     }
 
@@ -1769,7 +1781,9 @@ impl App {
     /// leaves the phase alone — the next call or step moves it, so the
     /// label never flickers between back-to-back commands. Reasoning
     /// deltas fill the preview buffer; real output or a tool call clears
-    /// it — the thinking block vanishes once the answer starts.
+    /// it — the thinking block vanishes once the answer starts. A
+    /// running command's lines fill the tool preview; its result or the
+    /// next call clears that.
     fn track_phase(&mut self, owned: &OwnedEvent) {
         match owned {
             OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => {
@@ -1778,11 +1792,15 @@ impl App {
             }
             OwnedEvent::ThinkingDelta(delta) => self.push_thinking(delta),
             // A tool call means a command runs. Its arguments often never
-            // stream as deltas, so the label stays phase-only.
+            // stream as deltas, so the label stays phase-only; the last
+            // command's preview goes with it.
             OwnedEvent::ToolCallStart { .. } => {
                 self.processing = true;
                 self.thinking.clear();
+                self.clear_tool_output();
             }
+            OwnedEvent::ToolOutputDelta { chunk, .. } => self.push_tool_output(chunk),
+            OwnedEvent::ToolResult { .. } => self.clear_tool_output(),
             _ => {}
         }
     }
@@ -1800,6 +1818,31 @@ impl App {
             }
             self.thinking.drain(..cut);
         }
+    }
+
+    /// Appends one output chunk of the running command to the tool
+    /// preview buffer, tail-capped like the reasoning buffer; the first
+    /// chunk starts the reveal clock.
+    fn push_tool_output(&mut self, chunk: &str) {
+        const TAIL_CAP: usize = 2048;
+        if self.tool_output_at.is_none() {
+            self.tool_output_at = Some(std::time::Instant::now());
+        }
+        self.tool_output.push_str(chunk);
+        if self.tool_output.len() > TAIL_CAP {
+            let mut cut = self.tool_output.len() - TAIL_CAP;
+            while !self.tool_output.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.tool_output.drain(..cut);
+        }
+    }
+
+    /// The running command's preview goes: its result landed, or the
+    /// next call started.
+    fn clear_tool_output(&mut self) {
+        self.tool_output.clear();
+        self.tool_output_at = None;
     }
 
     /// Answers the modal, if the approval hook is listening.
@@ -3681,6 +3724,44 @@ mod tests {
             h.app.transcript.lines().first(),
             Some(&Line::User(embedded))
         );
+    }
+
+    /// A running command's output fills the preview buffer from its
+    /// first chunk; the next call or the result takes it back.
+    #[test]
+    fn a_running_commands_output_previews_and_goes_with_its_result() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolCallStart {
+            id: "c1".into(),
+            name: "bash".into(),
+        }));
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolOutputDelta {
+            id: "c1".into(),
+            chunk: "one\n".into(),
+        }));
+        assert_eq!(h.app.tool_output, "one\n");
+        assert!(h.app.tool_output_at.is_some(), "the first chunk clocks in");
+
+        // The next command takes the last one's preview with it.
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolCallStart {
+            id: "c2".into(),
+            name: "bash".into(),
+        }));
+        assert!(h.app.tool_output.is_empty());
+        assert!(h.app.tool_output_at.is_none());
+
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolOutputDelta {
+            id: "c2".into(),
+            chunk: "two\n".into(),
+        }));
+        h.app.on_event(UiEvent::Engine(OwnedEvent::ToolResult {
+            id: "c2".into(),
+            content: "ok".into(),
+            is_error: false,
+            code: Some(0),
+        }));
+        assert!(h.app.tool_output.is_empty());
+        assert!(h.app.tool_output_at.is_none());
     }
 
     #[test]

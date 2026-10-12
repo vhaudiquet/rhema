@@ -950,8 +950,9 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     } else {
         Vec::new()
     };
-    // The reasoning preview rides under the spinner: the trace's tail,
-    // at most three dim rows — gone the moment real output starts,
+    // The live preview rides under the spinner — the reasoning trace's
+    // tail, or a running command's earned output — at most three dim
+    // rows. The reasoning half is gone the moment real output starts,
     // because the buffer clears then.
     if app.running && app.error.is_none() {
         lines.extend(thinking_preview(app, width, theme));
@@ -976,15 +977,33 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Rows the reasoning preview may show.
+/// Rows the live preview may show.
 const THINKING_PREVIEW_ROWS: usize = 3;
 
-/// The reasoning preview rows at `width`: the trace's completed lines,
-/// each wrapped, the tail capped. Both the strip's layout and its
-/// drawing come from here, so the reserve matches what's on screen.
+/// A running command's output earns its preview after this long.
+const TOOL_PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether the tool preview shows: a second of runtime or a second
+/// completed line — an instant command never flashes its output.
+fn tool_preview_ready(app: &App) -> bool {
+    let Some(started) = app.tool_output_at else {
+        return false;
+    };
+    started.elapsed() >= TOOL_PREVIEW_DELAY || app.tool_output.matches('\n').count() >= 2
+}
+
+/// The live preview's rows at `width`: a running command's output while
+/// it has earned the screen, the reasoning trace's tail otherwise. Both
+/// the strip's layout and its drawing come from here, so the reserve
+/// matches what's on screen.
 fn thinking_preview_rows(app: &App, width: usize) -> Vec<Line<'static>> {
+    let text = if tool_preview_ready(app) {
+        &app.tool_output
+    } else {
+        &app.thinking
+    };
     let width = width.saturating_sub(1).max(1);
-    let mut rows: Vec<Line<'static>> = completed_thinking(&app.thinking)
+    let mut rows: Vec<Line<'static>> = completed_thinking(text)
         .flat_map(|line| wrap_line(&Line::from(Span::raw(line.to_owned())), width))
         .collect();
     let skip = rows.len().saturating_sub(THINKING_PREVIEW_ROWS);
@@ -992,7 +1011,7 @@ fn thinking_preview_rows(app: &App, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// The trace's completed lines: everything the buffer holds before the
+/// The buffer's completed lines: everything the buffer holds before the
 /// line still streaming. The preview reveals a line at a time, never a
 /// word at a time. Blank lines drop out — the preview has three rows
 /// to spend and a blank one carries nothing.
@@ -1004,9 +1023,8 @@ fn completed_thinking(thinking: &str) -> impl Iterator<Item = &str> {
     complete.split('\n').filter(|line| !line.is_empty())
 }
 
-/// The reasoning preview rows: the tail of the trace's completed lines,
-/// wrapped and dim. Empty until a line completes — the buffer clears
-/// the moment the model's real output starts.
+/// The live preview rows: the tail of the chosen buffer's completed
+/// lines, wrapped and dim. Empty until a line completes.
 fn thinking_preview(app: &App, width: usize, theme: &Theme) -> Vec<Line<'static>> {
     let style = Style::default().fg(theme.text3).italic();
     thinking_preview_rows(app, width)
@@ -2251,6 +2269,61 @@ mod scroll_tests {
         app.processing = true;
         chunk(&mut app, "c1", "compiling foo\n");
         app.tool_output_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        assert!(draw(&mut app).contains("compiling foo"));
+
+        // The result takes the preview back off.
+        app.on_event(crate::events::UiEvent::Engine(OwnedEvent::ToolResult {
+            id: "c1".into(),
+            content: "ok".into(),
+            is_error: false,
+            code: Some(0),
+        }));
+        assert!(!draw(&mut app).contains("compiling foo"));
+    }
+
+    /// A running command's output earns the preview at a second line —
+    /// an instant command never flashes — or at a second of runtime,
+    /// and goes when the result lands.
+    #[test]
+    fn a_running_command_previews_its_lines_once_earned() {
+        let mut app = chat_app();
+        app.running = true;
+        app.processing = true;
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+        let chunk = |app: &mut App, id: &str, text: &str| {
+            app.on_event(crate::events::UiEvent::Engine(
+                crate::events::OwnedEvent::ToolOutputDelta {
+                    id: id.into(),
+                    chunk: text.into(),
+                },
+            ));
+        };
+
+        // One fresh line: the command has not earned the screen yet.
+        chunk(&mut app, "c1", "compiling foo\n");
+        assert!(!draw(&mut app).contains("compiling foo"));
+
+        // A second line earns it immediately.
+        chunk(&mut app, "c1", "linking bar\n");
+        assert!(draw(&mut app).contains("linking bar"));
+
+        // One line earns it once the command has run long enough.
+        let mut app = chat_app();
+        app.running = true;
+        app.processing = true;
+        chunk(&mut app, "c1", "compiling foo\n");
+        app.tool_output_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
         assert!(draw(&mut app).contains("compiling foo"));
 
         // The result takes the preview back off.

@@ -149,6 +149,10 @@ impl Transcript {
             // Reasoning is ephemeral: it renders live in the status strip
             // and never lands in the transcript or the session history.
             OwnedEvent::ThinkingDelta(_) => {}
+            // A running command's output is ephemeral the same way: the
+            // strip previews it, and the whole text lands with the
+            // result.
+            OwnedEvent::ToolOutputDelta { .. } => {}
             OwnedEvent::TextDelta(delta) => self.append_assistant(delta),
             OwnedEvent::ToolCallStart { id, name } => {
                 self.lines.push(Line::ToolCall {
