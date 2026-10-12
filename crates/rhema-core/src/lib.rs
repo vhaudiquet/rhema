@@ -9,6 +9,7 @@
 //!
 //! Layout:
 //! - [`message`] — `Role`, `Content`, `Message`
+//! - [`paste`] — embedded pastes in message text: the chip codec
 //! - [`session`] — the caller-owned, serializable `Session`
 //! - [`request`] — `ModelRequest`, `ChatParams`, `ToolSpec`
 //! - [`output`] — `ModelOutput`, `StopReason`, `Usage`, `Step`
@@ -27,6 +28,7 @@ pub mod message;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod output;
+pub mod paste;
 pub mod provider;
 pub mod request;
 pub mod session;
