@@ -1225,7 +1225,10 @@ pub enum ChatAction {
     /// Nothing to do.
     None,
     /// Enter on the (possibly empty) input; the app drops empty and
-    /// suppresses submits while a turn runs.
+    /// suppresses submits while a turn runs. The text is the session
+    /// form — attachments embedded at their anchors — which the app
+    /// pushes to the transcript as-is and expands only where plain
+    /// text is wanted (commands, the provider).
     Submit(String),
 }
 
@@ -1262,8 +1265,11 @@ impl ChatState {
     pub const PASTE_INLINE_LINES: usize = 3;
     /// The object-replacement character: one attachment anchor in
     /// `input`. It is one cursor step, and backspace or delete on it
-    /// removes the chip and its payload together.
-    pub const MARK: char = '\u{FFFC}';
+    /// removes the chip and its payload together. Only [`Self::paste`]
+    /// mints it, always paired with a payload — text arriving with
+    /// marks of its own loses them, so a chip glyph copied back out of
+    /// the box can never anchor empty.
+    pub const MARK: char = rhema_core::paste::MARK;
 
     /// A fresh input box.
     pub fn new() -> Self {
@@ -1287,16 +1293,23 @@ impl ChatState {
     }
 
     /// A paste landed. Short enough, it joins the input inline; longer,
-    /// it becomes an attachment anchored at the cursor — one chip in the
+    /// it becomes an attachment anchored at the cursor — one cell in the
     /// box at the paste's place, full content on submit.
     pub fn paste(&mut self, text: &str) {
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let normalized = Self::normalize(text);
         if normalized.lines().count() > Self::PASTE_INLINE_LINES {
             self.attachments.push(normalized);
             self.insert_char(Self::MARK);
         } else {
             self.insert_str(&normalized);
         }
+    }
+
+    /// Terminal text made insertable: carriage returns normalize to
+    /// newlines, and anchor marks are dropped — a mark is only ever
+    /// minted by [`Self::paste`], paired with a payload.
+    fn normalize(text: &str) -> String {
+        rhema_core::paste::normalize(text)
     }
 
     /// Inserts one character at the cursor.
@@ -1318,27 +1331,20 @@ impl ChatState {
         self.input.replace_range(start..end, "");
     }
 
-    /// The text a submit sends: the typed input with every attachment's
-    /// full content expanded at its anchor — the paste lands where it
-    /// was made.
+    /// The text a submit sends: the typed input with every attachment
+    /// embedded at its anchor — the session's record of the prompt. The
+    /// transcript renders each embed as its chip, and the model sees the
+    /// plain expansion (`rhema_core::paste::expand`, applied at the
+    /// provider seam), never the encoding.
     fn submission(&self) -> String {
-        let mut full = String::new();
-        let mut payloads = self.attachments.iter();
-        for c in self.input.chars() {
-            if c == Self::MARK {
-                full.push_str(payloads.next().map(String::as_str).unwrap_or_default());
-            } else {
-                full.push(c);
-            }
-        }
-        full
+        rhema_core::paste::embed(&self.input, &self.attachments)
     }
 
     /// Inserts `text` at the cursor, newlines and all — the bracketed
     /// paste path. Carriage returns normalize to newlines, since a
     /// terminal paste may carry either.
     pub fn insert_str(&mut self, text: &str) {
-        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let normalized = Self::normalize(text);
         let count = normalized.chars().count();
         self.input.insert_str(self.byte_offset(), &normalized);
         self.cursor += count;
@@ -1470,6 +1476,12 @@ impl ChatState {
         }
         match key.code {
             KeyCode::Char(c) => {
+                // A terminal without bracketed paste delivers a paste as
+                // plain char keys: a mark arriving this way is a copied
+                // chip glyph, and must not anchor without a payload.
+                if c == Self::MARK {
+                    return ChatAction::None;
+                }
                 // A terminal reporting every key but omitting the
                 // shifted-alternate field leaves SHIFT on an unshifted
                 // char; the case is ours to fix then.
@@ -2249,13 +2261,17 @@ mod tests {
             "the box shows a chip anchored at the paste, not the text"
         );
 
-        // Enter expands the attachment at its anchor — where the paste
-        // was made; clearing happens app-side when the submit is
-        // accepted.
+        // Enter submits the session form: the payload embedded at its
+        // anchor, for the transcript to render as a chip and the
+        // provider seam to expand.
         chat.insert_str(" closely");
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter), &[], &[]),
-            ChatAction::Submit(format!("look at {long} closely"))
+            ChatAction::Submit(format!(
+                "look at {}{long}{} closely",
+                ChatState::MARK,
+                ChatState::MARK
+            ))
         );
         assert_eq!(
             chat.input,
@@ -2293,6 +2309,37 @@ mod tests {
         chat.paste("l1\nl2\nl3");
         assert!(chat.attachments.is_empty());
         assert_eq!(chat.input, "l1\nl2\nl3");
+    }
+
+    #[test]
+    fn an_arriving_anchor_mark_never_mints_a_payloadless_chip() {
+        let mut chat = ChatState::new();
+        // A chip glyph copied back out of the box — via a terminal
+        // selection or the clipboard — must not anchor without a
+        // payload: the mark↔payload pairing is what backspace, delete,
+        // and submit all index into.
+        chat.paste(&format!("a{}b", ChatState::MARK));
+        assert_eq!(chat.input, "ab");
+        assert!(chat.attachments.is_empty());
+        chat.insert_str(&ChatState::MARK.to_string());
+        assert_eq!(chat.input, "ab");
+
+        // A terminal without bracketed paste delivers the same glyph as
+        // a plain char key; it is dropped as well.
+        chat.handle_key(
+            KeyEvent::new(KeyCode::Char(ChatState::MARK), KeyModifiers::NONE),
+            &[],
+            &[],
+        );
+        assert_eq!(chat.input, "ab");
+
+        // A real chip survives beside the stripped text: backspace
+        // still removes the last payload, and nothing else.
+        chat.paste("l1\nl2\nl3\nl4");
+        assert_eq!(chat.input, format!("ab{}", ChatState::MARK));
+        chat.handle_key(key(KeyCode::Backspace), &[], &[]);
+        assert_eq!(chat.input, "ab");
+        assert!(chat.attachments.is_empty());
     }
 
     #[test]

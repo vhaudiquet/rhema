@@ -434,6 +434,18 @@ mod tests {
         assert_eq!(rebuilt.lines(), streamed.lines());
     }
 
+    /// A submitted paste travels embedded in the session text; a resume
+    /// rebuild reads the same line the live stream pushed, so the chip
+    /// survives across sessions.
+    #[test]
+    fn an_embedded_paste_rebuilds_identically() {
+        let text = rhema_core::paste::embed("look", &["l1\nl2\nl3\nl4".to_owned()]);
+        let mut streamed = Transcript::new();
+        streamed.push_user(&text);
+        let rebuilt = Transcript::from_history(&[Message::text(Role::User, &text)]);
+        assert_eq!(rebuilt.lines(), streamed.lines());
+    }
+
     #[test]
     fn a_failed_result_carries_the_error_mark() {
         let mut transcript = Transcript::new();

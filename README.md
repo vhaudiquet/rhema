@@ -336,9 +336,10 @@ Keys: `enter` sends · `shift-enter` (kitty-protocol terminals;
 Ghostty's default xterm-style sequence parses through the vendored
 crossterm), `alt-enter`, or `ctrl-j` adds a line, the box grows with
 the text ·
-a paste longer than three lines attaches: a compact chip in the box at
-the paste's place (icon, index, size, erase mark; `backspace` or
-`delete` removes a chip like any character), expanded in place on
+a paste longer than three lines attaches: an inline chip (▣1 5L — id,
+size) in the box at the paste's place, one character to the cursor
+(`backspace` and `delete` included), and it stays a chip in the
+transcript after sending — the model alone sees the full text ·
 submit · `ctrl-p` re-opens the model picker (the
 session is kept across a model switch) · `esc` cancels the running
 turn, or asks to quit when idle · `ctrl-c` or `ctrl-d` quit immediately.

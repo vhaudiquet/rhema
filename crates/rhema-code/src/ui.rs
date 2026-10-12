@@ -542,13 +542,36 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
                     // A multi-line prompt renders as the lines it is:
                     // a raw \n inside one row's spans would vanish. The
                     // prompt glyph marks only the first row; the rest
-                    // speak for themselves.
-                    for (index, segment) in text.split('\n').enumerate() {
-                        let mut spans = Vec::new();
-                        if index == 0 {
-                            spans.push(Span::raw("❯ ").fg(theme.text3));
+                    // speak for themselves. An embedded paste renders
+                    // as its chip — id and size, the body hidden.
+                    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+                    let mut pastes = 0usize;
+                    for part in rhema_core::paste::parts(text) {
+                        match part {
+                            rhema_core::paste::Part::Text(segment) => {
+                                for (index, line_text) in segment.split('\n').enumerate() {
+                                    if index > 0 {
+                                        rows.push(Vec::new());
+                                    }
+                                    if !line_text.is_empty() {
+                                        rows.last_mut()
+                                            .unwrap()
+                                            .push(Span::raw(line_text.to_owned()));
+                                    }
+                                }
+                            }
+                            rhema_core::paste::Part::Paste(payload) => {
+                                rows.last_mut()
+                                    .unwrap()
+                                    .extend(chip_spans(payload, pastes, theme));
+                                pastes += 1;
+                            }
                         }
-                        spans.push(Span::raw(segment.to_owned()));
+                    }
+                    for (index, mut spans) in rows.into_iter().enumerate() {
+                        if index == 0 {
+                            spans.insert(0, Span::raw("❯ ").fg(theme.text3));
+                        }
                         lines.push(Line::from(spans));
                     }
                 } else if let transcript::Line::ToolCall { args, ok, code, .. } = other {
@@ -776,10 +799,24 @@ fn flush_response_group(
 
 fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
     match line {
-        transcript::Line::User(text) => Line::from(vec![
-            Span::raw("❯ ").fg(theme.text3),
-            Span::raw(text.clone()),
-        ]),
+        transcript::Line::User(text) => {
+            // Embedded pastes collapse to their chips here too — this
+            // arm is the fallback off the transcript's multi-row path.
+            let mut spans = vec![Span::raw("❯ ").fg(theme.text3)];
+            let mut pastes = 0usize;
+            for part in rhema_core::paste::parts(text) {
+                match part {
+                    rhema_core::paste::Part::Text(text) => {
+                        spans.push(Span::raw(text.replace('\n', " ")));
+                    }
+                    rhema_core::paste::Part::Paste(payload) => {
+                        spans.extend(chip_spans(payload, pastes, theme));
+                        pastes += 1;
+                    }
+                }
+            }
+            Line::from(spans)
+        }
         transcript::Line::Assistant(text) => Line::from(Span::raw(text.clone())),
         transcript::Line::ToolCall {
             name,
@@ -1195,8 +1232,8 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // row under the box until the next keystroke grew it.
     let width = inner.width as usize;
     let prompt = "❯ ";
-    // The layout is the render's source of truth: text rows and chip
-    // rows interleaved exactly as the anchors sit in the input.
+    // The layout is the render's source of truth: text rows with the
+    // anchors inline, as chips, exactly as they sit in the input.
     let layout = input_layout(&app.chat.input, &app.chat.attachments, width, theme);
     let cursor_at = cursor_at_rows(&layout, app.chat.cursor);
     // The window keeps the cursor's row visible; with no cursor (a
@@ -1245,9 +1282,13 @@ const INPUT_MAX_CONTENT_ROWS: usize = 8;
 #[derive(Debug, Clone)]
 struct InputRow {
     line: Line<'static>,
-    /// Source characters of `input` this row accounts for — a chip row
+    /// Source characters of `input` this row accounts for — a chip
     /// accounts for its single anchor character.
     source_chars: usize,
+    /// Placed chips as `(source offset, display column, display width)`
+    /// within the row's text: a chip is one source step but spans
+    /// several cells, and the cursor mapping crosses it in one step.
+    chips: Vec<(usize, usize, usize)>,
     /// Whether the row carries the two-cell logical-line marker.
     marker: bool,
     /// Whether the row ends its logical line — the newline character is
@@ -1255,25 +1296,166 @@ struct InputRow {
     newline: bool,
 }
 
-/// One attachment chip's rendered row: icon, one-based index, line
-/// count, and the erase mark styled dim.
-fn chip_row(paste: &str, index: usize, theme: &Theme) -> Line<'static> {
-    let text = format!("▣{} {}L ✕", index + 1, paste.lines().count());
-    let head = text.strip_suffix('✕').unwrap_or(&text);
-    Line::from(vec![
-        Span::raw(head.to_owned()).fg(theme.info),
-        Span::raw("✕").fg(theme.text3),
-    ])
+/// One laid-out unit of an input row.
+#[derive(Debug)]
+enum Segment {
+    /// A word or whitespace run of the typed text.
+    Text(Span<'static>),
+    /// One attachment chip: its boxed label, atomic — one source
+    /// character, one step, never split across rows.
+    Chip(Vec<Span<'static>>),
+}
+
+impl Segment {
+    /// The segment's display width.
+    fn width(&self) -> usize {
+        match self {
+            Segment::Text(span) => span.content.width(),
+            Segment::Chip(spans) => spans.iter().map(|span| span.content.width()).sum(),
+        }
+    }
+
+    /// The segment's source characters — a chip is one.
+    fn source(&self) -> usize {
+        match self {
+            Segment::Text(span) => span.content.chars().count(),
+            Segment::Chip(_) => 1,
+        }
+    }
+
+    /// The segment's rendered spans.
+    fn spans(&self) -> Vec<Span<'static>> {
+        match self {
+            Segment::Text(span) => vec![span.clone()],
+            Segment::Chip(spans) => spans.clone(),
+        }
+    }
+}
+
+/// One wrapped input row's segments: the spans, the source count, and
+/// where each chip landed.
+#[derive(Debug, Default)]
+struct RowSegs {
+    spans: Vec<Span<'static>>,
+    source: usize,
+    chips: Vec<(usize, usize, usize)>,
+}
+
+/// Word-wraps laid-out segments to a display width, mirroring
+/// [`wrap_line`]: a whitespace run never opens a row, an overflowing
+/// one is dropped, a word wider than the row hard-splits. A chip moves
+/// whole instead of splitting.
+fn wrap_segments(segments: Vec<Segment>, width: usize) -> Vec<RowSegs> {
+    let mut rows: Vec<RowSegs> = Vec::new();
+    let mut row = RowSegs::default();
+    let mut row_width = 0usize;
+    for segment in segments {
+        let seg_width = segment.width();
+        match &segment {
+            Segment::Text(span) if span.content.chars().all(char::is_whitespace) => {
+                if row_width == 0 {
+                    continue; // no leading whitespace on a row
+                }
+                if row_width + seg_width <= width {
+                    row_width += seg_width;
+                    row.spans.extend(segment.spans());
+                    row.source += segment.source();
+                } else {
+                    // Overflowing whitespace is dropped; the next word
+                    // breaks.
+                    rows.push(std::mem::take(&mut row));
+                    row_width = 0;
+                }
+            }
+            Segment::Text(span) => {
+                // Hard-split a word wider than the row into
+                // display-width pieces.
+                let mut piece = String::new();
+                let mut piece_width = 0usize;
+                for ch in span.content.chars() {
+                    let char_width = ch.width().unwrap_or(0);
+                    if piece_width + char_width > width && !piece.is_empty() {
+                        if row_width + piece_width > width {
+                            rows.push(std::mem::take(&mut row));
+                            row_width = 0;
+                        }
+                        row.source += piece.chars().count();
+                        row.spans
+                            .push(Span::styled(std::mem::take(&mut piece), span.style));
+                        row_width += piece_width;
+                        piece_width = 0;
+                    }
+                    piece.push(ch);
+                    piece_width += char_width;
+                }
+                if !piece.is_empty() {
+                    if row_width + piece_width > width {
+                        rows.push(std::mem::take(&mut row));
+                        row_width = 0;
+                    }
+                    row.source += piece.chars().count();
+                    row.spans.push(Span::styled(piece, span.style));
+                    row_width += piece_width;
+                }
+            }
+            Segment::Chip(_) => {
+                if row_width > 0 && row_width + seg_width > width {
+                    rows.push(std::mem::take(&mut row));
+                    row_width = 0;
+                }
+                row.chips.push((row.source, row_width, seg_width));
+                row_width += seg_width;
+                row.source += segment.source();
+                row.spans.extend(segment.spans());
+                if seg_width > width {
+                    // Wider than the row alone: it overflows and the
+                    // next segment starts fresh.
+                    rows.push(std::mem::take(&mut row));
+                    row_width = 0;
+                }
+            }
+        }
+    }
+    rows.push(row);
+    rows
+}
+
+/// A chip's inline label: `▣1 5L` — the anchor's one-based id and the
+/// payload's line count.
+fn chip_label(paste: &str, index: usize) -> String {
+    format!("▣{} {}L", index + 1, paste.lines().count())
+}
+
+/// One attachment chip's span: the label padded one cell each side on
+/// a surface-colored card — a thing apart from the typed text around
+/// it, no border glyphs needed.
+fn chip_spans(paste: &str, index: usize, theme: &Theme) -> Vec<Span<'static>> {
+    vec![Span::styled(
+        format!(" {} ", chip_label(paste, index)),
+        Style::default().fg(theme.info).bg(theme.surface),
+    )]
 }
 
 /// Maps the cursor's source index onto (row, column) of the layout.
-/// Columns are pure input columns — the render adds the marker's two
-/// cells on marked rows; chips account for their single anchor.
+/// Columns are display columns of the row's text — the render adds the
+/// marker's two cells. Chips passed on the way widen the column; a
+/// cursor sitting at a chip's source position lands on its first cell,
+/// so the whole label crosses in one step.
 fn cursor_at_rows(layout: &[InputRow], cursor: usize) -> Option<(usize, usize)> {
     let mut consumed = 0usize;
     for (index, row) in layout.iter().enumerate() {
         if cursor >= consumed && cursor <= consumed + row.source_chars {
-            return Some((index, cursor - consumed));
+            let in_row = cursor - consumed;
+            let mut col = in_row;
+            for (source, start, width) in &row.chips {
+                if in_row == *source {
+                    return Some((index, *start));
+                }
+                if in_row > *source {
+                    col += width - 1;
+                }
+            }
+            return Some((index, col));
         }
         consumed += row.source_chars + usize::from(row.newline);
     }
@@ -1281,60 +1463,60 @@ fn cursor_at_rows(layout: &[InputRow], cursor: usize) -> Option<(usize, usize)> 
 }
 
 /// The input box's visual rows: every logical line wraps as before, and
-/// each attachment anchor renders as its own chip row exactly where the
-/// paste landed. Shared by the render and the height math so both
-/// always agree.
+/// each attachment anchor renders as its inline chip — id and size —
+/// exactly where the paste landed. A chip is one character to the
+/// cursor, wrapping, and backspace alike, whatever its label's width.
+/// Shared by the render and the height math so both always agree.
 fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme) -> Vec<InputRow> {
     let mut rows: Vec<InputRow> = Vec::new();
-    let mut anchor = 0usize;
+    let text_width = width.saturating_sub(2).max(1);
     let lines: Vec<&str> = input.split('\n').collect();
+    // The anchor index runs across the whole input: a chip's id and
+    // payload follow their position in `input`, newline or not.
+    let mut anchor = 0usize;
     for (li, line) in lines.iter().enumerate() {
-        let pieces: Vec<&str> = line.split(crate::screens::ChatState::MARK).collect();
-        let marks = pieces.len() - 1;
-        for (pi, piece) in pieces.iter().enumerate() {
-            // A bare logical line renders as one marker row; empty
-            // pieces around anchors carry no rows of their own. Every
-            // row hangs under the two-cell gutter — the prompt glyph on
-            // the very first row, two spaces everywhere else — so wraps
-            // and anchors align with the text, not the box edge.
-            if !piece.is_empty() || marks == 0 {
-                let text_width = width.saturating_sub(2);
-                let wrapped =
-                    wrap_line(&Line::from(Span::raw(piece.to_owned())), text_width.max(1));
-                for row in wrapped.into_iter() {
-                    let lead = if rows.is_empty() { "❯ " } else { "  " };
-                    let mut spans = vec![Span::raw(lead).fg(theme.text3)];
-                    spans.extend(row.spans);
-                    let source_chars: usize = spans
-                        .iter()
-                        .skip(1)
-                        .map(|span| span.content.chars().count())
-                        .sum();
-                    rows.push(InputRow {
-                        source_chars,
-                        marker: true,
-                        newline: false,
-                        line: Line::from(spans),
-                    });
-                }
-            }
-            if pi < marks {
-                let lead = if rows.is_empty() { "❯ " } else { "  " };
-                let chip = chip_row(
+        // The logical line lays out into segments: word and whitespace
+        // runs, and each anchor as one atomic chip.
+        let mut segments: Vec<Segment> = Vec::new();
+        for (pi, piece) in line.split(crate::screens::ChatState::MARK).enumerate() {
+            if pi > 0 {
+                segments.push(Segment::Chip(chip_spans(
                     attachments.get(anchor).map(String::as_str).unwrap_or(""),
                     anchor,
                     theme,
-                );
-                let mut spans = vec![Span::raw(lead).fg(theme.text3)];
-                spans.extend(chip.spans);
-                rows.push(InputRow {
-                    source_chars: 1,
-                    marker: true,
-                    newline: false,
-                    line: Line::from(spans),
-                });
+                )));
                 anchor += 1;
             }
+            // Split the piece into maximal word and whitespace runs, as
+            // `wrap_line` would see them.
+            let mut current = String::new();
+            let mut current_space: Option<bool> = None;
+            let flush = |current: &mut String, segments: &mut Vec<Segment>| {
+                if !current.is_empty() {
+                    segments.push(Segment::Text(Span::raw(std::mem::take(current))));
+                }
+            };
+            for ch in piece.chars() {
+                let space = ch.is_whitespace();
+                if Some(space) != current_space && !current.is_empty() {
+                    flush(&mut current, &mut segments);
+                }
+                current_space = Some(space);
+                current.push(ch);
+            }
+            flush(&mut current, &mut segments);
+        }
+        for row in wrap_segments(segments, text_width) {
+            let lead = if rows.is_empty() { "❯ " } else { "  " };
+            let mut spans = vec![Span::raw(lead).fg(theme.text3)];
+            spans.extend(row.spans);
+            rows.push(InputRow {
+                source_chars: row.source,
+                chips: row.chips,
+                marker: true,
+                newline: false,
+                line: Line::from(spans),
+            });
         }
         // Every logical line pushes at least one row: its last row ends
         // in a newline unless it is the input's final line.
@@ -1971,7 +2153,7 @@ mod scroll_tests {
     }
 
     #[test]
-    fn a_long_paste_renders_as_one_chip() {
+    fn a_long_paste_renders_as_one_inline_cell() {
         let mut app = chat_app();
         app.chat.paste("l1\nl2\nl3\nl4\nl5");
         let backend = TestBackend::new(40, 24);
@@ -1981,8 +2163,86 @@ mod scroll_tests {
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
-        assert!(screen.contains("▣1 5L ✕"), "{screen}");
+        assert!(
+            screen.contains("❯  ▣1 5L"),
+            "the chip sits on the prompt row: {screen}"
+        );
         assert!(!screen.contains("l1"), "the body stays hidden: {screen}");
+    }
+
+    #[test]
+    fn a_submitted_paste_renders_as_a_chip_in_the_transcript() {
+        let mut app = chat_app();
+        let long = "l1\nl2\nl3\nl4\nl5";
+        app.transcript.push_user(&rhema_core::paste::embed(
+            &format!("look at {} this", ChatState::MARK),
+            &[long.to_owned()],
+        ));
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        // The chip rides inline in the prompt; the payload's body
+        // and its newlines never show.
+        assert!(screen.contains("look at  ▣1 5L  this"), "{screen}");
+        assert!(!screen.contains("l1"), "{screen}");
+    }
+
+    /// A running command's output earns the preview at a second line —
+    /// an instant command never flashes — or at a second of runtime,
+    /// and goes when the result lands.
+    #[test]
+    fn a_running_command_previews_its_lines_once_earned() {
+        let mut app = chat_app();
+        app.running = true;
+        app.processing = true;
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(80, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+        let chunk = |app: &mut App, id: &str, text: &str| {
+            app.on_event(crate::events::UiEvent::Engine(
+                crate::events::OwnedEvent::ToolOutputDelta {
+                    id: id.into(),
+                    chunk: text.into(),
+                },
+            ));
+        };
+
+        // One fresh line: the command has not earned the screen yet.
+        chunk(&mut app, "c1", "compiling foo\n");
+        assert!(!draw(&mut app).contains("compiling foo"));
+
+        // A second line earns it immediately.
+        chunk(&mut app, "c1", "linking bar\n");
+        assert!(draw(&mut app).contains("linking bar"));
+
+        // One line earns it once the command has run long enough.
+        let mut app = chat_app();
+        app.running = true;
+        app.processing = true;
+        chunk(&mut app, "c1", "compiling foo\n");
+        app.tool_output_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        assert!(draw(&mut app).contains("compiling foo"));
+
+        // The result takes the preview back off.
+        app.on_event(crate::events::UiEvent::Engine(OwnedEvent::ToolResult {
+            id: "c1".into(),
+            content: "ok".into(),
+            is_error: false,
+            code: Some(0),
+        }));
+        assert!(!draw(&mut app).contains("compiling foo"));
     }
 
     #[test]
@@ -2184,14 +2444,14 @@ mod scroll_tests {
 
     #[test]
     fn the_input_box_grows_and_caps() {
-        let paste = |lines: usize| "x\n".repeat(lines).trim_end().to_owned();
         assert_eq!(input_rows("", &[], 40, &DARK), 3, "empty: one content row");
         assert_eq!(input_rows("one line", &[], 40, &DARK), 3);
         assert_eq!(input_rows("a\nb\nc", &[], 40, &DARK), 5, "one row per line");
-        // Each anchor renders as its own row: two chips between text
-        // cost two rows, wherever they sit.
+        // Chips render inline: two of them between text cost no rows of
+        // their own.
         let marked = format!("a{}{}b", ChatState::MARK, ChatState::MARK);
-        assert_eq!(input_rows(&marked, &[paste(4), paste(4)], 40, &DARK), 6);
+        let pastes = vec!["x\ny\nz\nw".to_owned(); 2];
+        assert_eq!(input_rows(&marked, &pastes, 40, &DARK), 3);
         let wall = "x\n".repeat(20);
         assert_eq!(input_rows(&wall, &[], 40, &DARK), 10, "the cap holds");
     }
@@ -2205,49 +2465,95 @@ mod scroll_tests {
         assert_eq!(cursor_at_rows(&layout, 3), Some((1, 0)));
         assert_eq!(cursor_at_rows(&layout, 5), Some((1, 2)));
 
-        // An anchor is one step on its own row: before it, on it,
-        // after it.
+        // A chip is one step whatever its label's width: the cursor
+        // lands on the border's first cell, then crosses the whole chip
+        // in one step onto the next character.
         let marked = format!("a{}b", ChatState::MARK);
         let layout = input_layout(&marked, &["x\ny".to_owned()], 40, &DARK);
-        assert_eq!(cursor_at_rows(&layout, 1), Some((0, 1)));
-        assert_eq!(cursor_at_rows(&layout, 2), Some((1, 1)));
+        assert_eq!(cursor_at_rows(&layout, 1), Some((0, 1)), "on the chip");
         assert_eq!(
-            cursor_at_rows(&layout, 3),
-            Some((2, 1)),
-            "after b: its row's end"
+            cursor_at_rows(&layout, 2),
+            Some((0, 8)),
+            "after the chip: chip width crossed in one step"
         );
     }
 
     #[test]
-    fn attachment_chips_render_where_they_were_pasted() {
-        let paste = "l1\nl2\nl3\nl4\nl5".to_owned();
+    fn chips_number_across_lines_with_their_own_payload() {
+        // Anchors on different logical lines: the ids run across the
+        // whole input, and each chip shows its own paste's size.
+        let input = format!("a{}\nb{}", ChatState::MARK, ChatState::MARK);
+        let rows = input_layout(
+            &input,
+            &["l1\nl2\nl3\nl4".to_owned(), "m1\nm2\nm3\nm4\nm5".to_owned()],
+            40,
+            &DARK,
+        );
+        let rendered: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                row.line
+                    .spans
+                    .iter()
+                    .map(|span| span.content.to_string())
+                    .collect()
+            })
+            .collect();
+        assert!(rendered[0].contains(" ▣1 4L "), "{rendered:?}");
+        assert!(rendered[1].contains(" ▣2 5L "), "{rendered:?}");
+    }
+
+    #[test]
+    fn a_chip_never_splits_across_rows() {
+        // The chip sits exactly past the wrap edge: it moves whole to
+        // the next row rather than splitting.
+        let marked = format!("wordy {}", ChatState::MARK);
+        let layout = input_layout(&marked, &["x\ny".to_owned()], 12, &DARK);
+        assert_eq!(layout.len(), 2, "the word's row, then the chip alone");
+        let chip: String = layout[1]
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(chip, "   ▣1 2L ");
+        // The boundary binds to the earlier row, as with a newline; one
+        // step on and the cursor has crossed the whole chip.
+        assert_eq!(cursor_at_rows(&layout, 6), Some((0, 6)));
+        assert_eq!(cursor_at_rows(&layout, 7), Some((1, 7)), "past the chip");
+    }
+
+    #[test]
+    fn attachment_chips_render_inline_where_they_were_pasted() {
         let input = format!("before{} after", ChatState::MARK);
-        let rows = input_layout(&input, &[paste], 40, &DARK);
-        // The chip owns the middle row: text, chip, text — in prompt
-        // order, each chip row accounting for its one anchor character.
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1].source_chars, 1);
-        let chip: String = rows[1]
+        let rows = input_layout(&input, &["l1\nl2\nl3\nl4\nl5".to_owned()], 40, &DARK);
+        // One row, text and chip in prompt order: the chip costs no row
+        // of its own and accounts for its one source character.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_chars, 13);
+        let rendered: String = rows[0]
             .line
             .spans
             .iter()
             .map(|span| span.content.to_string())
             .collect();
-        assert_eq!(chip, "  ▣1 5L ✕", "the chip hangs under the prompt gutter");
-        let head: String = rows[0]
+        assert_eq!(rendered, "❯ before ▣1 5L  after");
+        let chip = rows[0]
             .line
             .spans
             .iter()
-            .map(|span| span.content.to_string())
-            .collect();
-        assert!(head.contains("before"), "{head}");
-        let tail: String = rows[2]
-            .line
-            .spans
-            .iter()
-            .map(|span| span.content.to_string())
-            .collect();
-        assert!(tail.contains("after"), "{tail}");
+            .find(|span| span.content.contains("▣1 5L"))
+            .expect("the chip renders");
+        assert_eq!(chip.style.fg, Some(DARK.info), "the label reads as content");
+        assert_eq!(
+            chip.style.bg,
+            Some(DARK.surface),
+            "the label sits on a card"
+        );
+        // The cursor crosses the seven-cell chip in one step: before it
+        // on its first cell, after it on the following character.
+        assert_eq!(cursor_at_rows(&rows, 6), Some((0, 6)));
+        assert_eq!(cursor_at_rows(&rows, 7), Some((0, 13)));
     }
 
     #[test]

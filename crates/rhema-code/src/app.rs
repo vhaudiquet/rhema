@@ -1111,7 +1111,9 @@ impl App {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
                     self.chat.attachments.clear();
-                    crate::commands::dispatch(self, text.trim())
+                    // Commands read plain text: a paste embedded in the
+                    // line expands for them, as it would for the model.
+                    crate::commands::dispatch(self, rhema_core::paste::expand(&text).trim())
                 } else if self.provider.is_none() {
                     // The text stays: it is the prompt for once the
                     // profile has its key.
@@ -3661,6 +3663,24 @@ mod tests {
             Some(&Line::User("hi".into()))
         );
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
+    }
+
+    #[test]
+    fn a_submit_travels_embedded_and_lands_in_the_transcript() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let long = "l1\nl2\nl3\nl4\nl5";
+        h.app.chat.paste(long);
+        let embedded = rhema_core::paste::embed(&ChatState::MARK.to_string(), &[long.to_owned()]);
+        // The turn starts on the session form, and the transcript line
+        // carries it — the chip survives the send.
+        assert_eq!(
+            h.app.on_key(key(KeyCode::Enter)),
+            vec![Effect::StartTurn(embedded.clone())]
+        );
+        assert_eq!(
+            h.app.transcript.lines().first(),
+            Some(&Line::User(embedded))
+        );
     }
 
     #[test]
