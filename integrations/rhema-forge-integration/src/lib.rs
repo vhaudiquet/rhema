@@ -57,7 +57,10 @@ pub mod watcher;
 // without adding the crate themselves.
 pub use async_trait::async_trait;
 pub use error::ForgeError;
-pub use event::{EventKind, ForgeEvent, RepoRef, Snapshot, ThreadState, Timestamp};
+pub use event::{
+    EventKind, ForgeEvent, Notification, NotificationPage, NotificationReason, RepoRef, Snapshot,
+    ThreadState, Timestamp,
+};
 pub use forge::{Forge, ForgePage};
 pub use gitea::GiteaForge;
 pub use github::GitHubForge;

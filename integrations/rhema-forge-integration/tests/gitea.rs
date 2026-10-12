@@ -1,7 +1,9 @@
 //! Offline integration tests: the Gitea backend against an in-process
 //! wiremock server. Zero network.
 
-use rhema_forge_integration::{EventKind, Forge, ForgeError, GiteaForge, RepoRef, Timestamp};
+use rhema_forge_integration::{
+    EventKind, Forge, ForgeError, GiteaForge, NotificationReason, RepoRef, Timestamp,
+};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -429,4 +431,44 @@ async fn a_transport_failure_maps_to_network() {
         .await
         .expect_err("connection refused is an error");
     assert!(matches!(err, ForgeError::Network(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn notifications_poll_maps_the_subject_feed() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/notifications"))
+        .and(query_param("status-types", "unread"))
+        .and(query_param("since", SINCE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": 91,
+                "unread": true,
+                "updated_at": "2026-10-05T12:00:00Z",
+                "subject": {
+                    "title": "Fix the gate",
+                    "url": "https://forge.example/api/v1/repos/acme/widgets/pulls/9",
+                    "type": "Pull"
+                },
+                "repository": { "full_name": "acme/widgets" }
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let since = Timestamp::parse(SINCE).expect("cursor parses");
+    let page = forge(&server)
+        .notifications(Some(&since))
+        .await
+        .expect("poll succeeds");
+
+    assert_eq!(page.notifications.len(), 1);
+    let note = &page.notifications[0];
+    assert_eq!(note.id, "gitea:notification:91@2026-10-05T12:00:00Z");
+    // Gitea's feed names no per-row reason: the fixed fallback spelling.
+    assert_eq!(note.reason, NotificationReason::Other("gitea".to_owned()));
+    assert_eq!(note.number, 9);
+    assert!(note.is_pr);
+    assert_eq!(note.repo, RepoRef::new("acme", "widgets"));
+    assert_eq!(note.title.as_deref(), Some("Fix the gate"));
 }

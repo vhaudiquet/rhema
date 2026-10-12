@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 
 use crate::error::ForgeError;
-use crate::event::{ForgeEvent, RepoRef, Snapshot, Timestamp};
+use crate::event::{ForgeEvent, NotificationPage, RepoRef, Snapshot, Timestamp};
 
 /// One poll's worth of activity, with the cursor to continue from.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +67,17 @@ pub trait Forge: Send + Sync {
     /// The thread's current state, so a handler can orient without a
     /// second API round-trip.
     async fn snapshot(&self, repo: &RepoRef, number: u64) -> Result<Snapshot, ForgeError>;
+
+    /// The account's notification feed: everything addressed to the
+    /// account this client authenticates as, across every repository it
+    /// can see — the account-scoped counterpart of [`Forge::poll`],
+    /// whose feeds are repo-scoped. `since` anchors the poll with the
+    /// same at-least-once semantics as `poll`: boundary rows repeat, and
+    /// the stable ids make the repetition dedupable downstream.
+    async fn notifications(
+        &self,
+        since: Option<&Timestamp>,
+    ) -> Result<NotificationPage, ForgeError>;
 }
 
 #[cfg(test)]

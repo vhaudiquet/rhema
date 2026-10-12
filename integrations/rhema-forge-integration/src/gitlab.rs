@@ -40,7 +40,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{ForgeError, ensure_success, required};
-use crate::event::{EventKind, ForgeEvent, RepoRef, Snapshot, ThreadState, Timestamp};
+use crate::event::{
+    EventKind, ForgeEvent, Notification, NotificationPage, NotificationReason, RepoRef, Snapshot,
+    ThreadState, Timestamp,
+};
 use crate::forge::{Forge, ForgePage};
 
 /// The production GitLab base.
@@ -185,7 +188,7 @@ fn encode_project_path(path: &str) -> String {
 // --- untouched row under `raw`.
 
 /// A GitLab author object; the login field is spelled `username` here.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct WireAuthor {
     username: Option<String>,
 }
@@ -235,6 +238,89 @@ struct WireNote {
     created_at: Option<Timestamp>,
     #[serde(flatten)]
     raw: serde_json::Map<String, Value>,
+}
+
+/// One row of the account's todo list — GitLab's notification feed.
+#[derive(Debug, Clone, Deserialize)]
+struct WireTodo {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    project: Option<WireTodoProject>,
+    #[serde(default)]
+    target_type: Option<String>,
+    #[serde(default)]
+    target: Option<WireTodoTarget>,
+    #[serde(default)]
+    action_name: Option<String>,
+    /// Human-facing URL of the target thread.
+    #[serde(default)]
+    target_url: Option<String>,
+    #[serde(default)]
+    updated_at: Option<Timestamp>,
+    #[serde(flatten)]
+    raw: serde_json::Map<String, Value>,
+}
+
+/// The project a todo's thread lives in.
+#[derive(Debug, Clone, Deserialize)]
+struct WireTodoProject {
+    #[serde(default)]
+    path_with_namespace: Option<String>,
+}
+
+/// The thread a todo points at.
+#[derive(Debug, Clone, Deserialize)]
+struct WireTodoTarget {
+    #[serde(default)]
+    iid: Option<u64>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    author: Option<WireAuthor>,
+}
+
+/// GitLab's `action_name` strings, reduced to the shared vocabulary.
+fn gitlab_reason(action: Option<&str>) -> NotificationReason {
+    match action {
+        Some("review_requested") | Some("approval_required") => NotificationReason::ReviewRequested,
+        Some("assigned") => NotificationReason::Assigned,
+        Some("mentioned") | Some("directly_addressed") => NotificationReason::Mention,
+        Some("build_failed") | Some("build_success") => NotificationReason::CiActivity,
+        Some(other) => NotificationReason::Other(other.to_owned()),
+        None => NotificationReason::Other("unactioned".to_owned()),
+    }
+}
+
+/// The notification a todo row carries. The todo list has no server-side
+/// time filter, so the poll refetches every pending todo and the dedup
+/// ids absorb the repetition; the cursor is advisory only here.
+fn todo_notification(row: &WireTodo) -> Result<Option<Notification>, ForgeError> {
+    let id = required(row.id, "todo id")?;
+    let updated = required(row.updated_at.clone(), "todo updated_at")?;
+    let project = required(row.project.clone(), "todo project")?;
+    let path = required(project.path_with_namespace, "todo project path")?;
+    let (owner, name) = path
+        .rsplit_once('/')
+        .ok_or_else(|| ForgeError::Parse(format!("todo project path without a slash: {path}")))?;
+    let target = required(row.target.clone(), "todo target")?;
+    let iid = required(target.iid, "todo target iid")?;
+    let is_pr = row.target_type.as_deref() == Some("MergeRequest");
+    Ok(Some(Notification {
+        id: format!("gitlab:notification:{id}@{}", updated.raw()),
+        reason: gitlab_reason(row.action_name.as_deref()),
+        repo: RepoRef::new(owner, name),
+        number: iid,
+        is_pr,
+        actor: target
+            .author
+            .as_ref()
+            .and_then(|author| author.username.clone()),
+        title: target.title.clone(),
+        url: row.target_url.clone(),
+        timestamp: updated,
+        raw: Value::Object(row.raw.clone()),
+    }))
 }
 
 // --- Mapping: wire rows -> normalized events. Pure, so the async
@@ -450,6 +536,24 @@ impl Forge for GitLabForge {
             Err(other) => return Err(other),
         };
         Ok(snapshot_from_row(&row, is_pr)?)
+    }
+
+    async fn notifications(
+        &self,
+        since: Option<&Timestamp>,
+    ) -> Result<NotificationPage, ForgeError> {
+        // The pending-todo feed: everything addressed to the account,
+        // every project it can see. The endpoint has no time filter, so
+        // `since` only shapes the returned cursor; the refetch is
+        // absorbed by the dedup ids.
+        let rows = self.paged::<WireTodo>("/todos", &[]).await?;
+        let mut notifications = Vec::new();
+        for row in &rows {
+            if let Some(notification) = todo_notification(row)? {
+                notifications.push(notification);
+            }
+        }
+        Ok(NotificationPage::finish(notifications, since))
     }
 }
 

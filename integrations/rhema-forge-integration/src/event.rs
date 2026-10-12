@@ -145,6 +145,111 @@ pub struct ForgeEvent {
     pub raw: serde_json::Value,
 }
 
+/// Why the account was notified. The forges' own reason vocabularies,
+/// reduced to the handful a triage can act on; whatever a forge says that
+/// does not map rides as [`NotificationReason::Other`] with the forge's
+/// own spelling.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationReason {
+    /// The account was asked to review a pull/merge request.
+    ReviewRequested,
+    /// New feedback landed on a thread the account authored or
+    /// participates in (a submitted review or a conversation comment).
+    ReviewFeedback,
+    /// The account was assigned the thread.
+    Assigned,
+    /// The account was mentioned or directly addressed.
+    Mention,
+    /// CI status on a thread the account is involved in.
+    CiActivity,
+    /// Activity on a thread the account authored.
+    Author,
+    /// Anything else, in the forge's own spelling.
+    Other(String),
+}
+
+impl NotificationReason {
+    /// The forge-independent spelling, for triage matching and prompts.
+    pub fn as_str(&self) -> &str {
+        match self {
+            NotificationReason::ReviewRequested => "review_requested",
+            NotificationReason::ReviewFeedback => "review_feedback",
+            NotificationReason::Assigned => "assigned",
+            NotificationReason::Mention => "mention",
+            NotificationReason::CiActivity => "ci_activity",
+            NotificationReason::Author => "author",
+            NotificationReason::Other(raw) => raw,
+        }
+    }
+}
+
+/// One account-scoped notification: something happened on a thread that
+/// concerns the account the client authenticates as. Distinct from a
+/// [`ForgeEvent`], which is a thread-level fact lifted from a
+/// repo-scoped feed — the notification says *why the account cares*.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Notification {
+    /// Stable dedup id, `{source}:notification:{id}@{updated time}`
+    /// (e.g. `github:notification:42188@2026-10-08T12:00:00Z`): a
+    /// notification row that stays put produces the same id across
+    /// polls; a row that moves produces a new one.
+    pub id: String,
+    /// Why the account was notified.
+    pub reason: NotificationReason,
+    /// The repository the thread lives in.
+    pub repo: RepoRef,
+    /// The thread's number (GitLab: the iid).
+    pub number: u64,
+    /// Whether the thread is a pull/merge request rather than an issue.
+    pub is_pr: bool,
+    /// Who acted, when the forge names it.
+    pub actor: Option<String>,
+    /// The thread's title, when the row carries it.
+    pub title: Option<String>,
+    /// Human-facing URL of the thread, when the row carries one.
+    pub url: Option<String>,
+    /// When the notification row was last touched. The poll cursor
+    /// advances to the newest of these.
+    pub timestamp: Timestamp,
+    /// The untouched wire row, minus the keys the notification lifts.
+    pub raw: serde_json::Value,
+}
+
+/// One notifications poll's worth, with the cursor to continue from.
+/// Same fold rules as [`ForgePage`]: oldest first, id-broken ties, and
+/// the cursor never goes backwards.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NotificationPage {
+    /// The notifications, oldest first, ties broken by id — a
+    /// deterministic order regardless of which feed produced a row.
+    pub notifications: Vec<Notification>,
+    /// The cursor for the next poll: the newest event time seen, never
+    /// earlier than the poll's `since`. A backend with no server-side
+    /// time filter ignores the cursor; repetition is harmless under the
+    /// dedup ids.
+    pub cursor: Option<Timestamp>,
+}
+
+impl NotificationPage {
+    /// Folds collected notifications into a page: sorts them and advances
+    /// the cursor past everything seen.
+    pub(crate) fn finish(mut notifications: Vec<Notification>, since: Option<&Timestamp>) -> Self {
+        notifications.sort_by(|a, b| (&a.timestamp, &a.id).cmp(&(&b.timestamp, &b.id)));
+        let mut cursor = since.cloned();
+        for timestamp in notifications.iter().map(|row| &row.timestamp) {
+            cursor = Some(match cursor {
+                Some(current) if current >= *timestamp => current,
+                _ => timestamp.clone(),
+            });
+        }
+        Self {
+            notifications,
+            cursor,
+        }
+    }
+}
+
 /// An RFC 3339 timestamp, kept in the forge's own spelling.
 ///
 /// The raw string is what travels: it round-trips onto cursors and into

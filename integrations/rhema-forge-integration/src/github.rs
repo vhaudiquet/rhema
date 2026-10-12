@@ -40,7 +40,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{ForgeError, ensure_success, required};
-use crate::event::{EventKind, ForgeEvent, RepoRef, Snapshot, ThreadState, Timestamp};
+use crate::event::{
+    EventKind, ForgeEvent, Notification, NotificationPage, NotificationReason, RepoRef, Snapshot,
+    ThreadState, Timestamp,
+};
 use crate::forge::{Forge, ForgePage};
 
 /// The production GitHub API base.
@@ -281,6 +284,43 @@ struct WireComment {
     raw: serde_json::Map<String, Value>,
 }
 
+/// One row of the account notifications feed.
+#[derive(Debug, Clone, Deserialize)]
+struct WireNotification {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    subject: Option<WireNotificationSubject>,
+    #[serde(default)]
+    repository: Option<WireNotificationRepo>,
+    #[serde(default)]
+    updated_at: Option<Timestamp>,
+    #[serde(flatten)]
+    raw: serde_json::Map<String, Value>,
+}
+
+/// The subject a notification is about.
+#[derive(Debug, Clone, Deserialize)]
+struct WireNotificationSubject {
+    #[serde(default)]
+    title: Option<String>,
+    /// API URL of the thread; its trailing segment is the thread number.
+    #[serde(default)]
+    url: Option<String>,
+    /// `PullRequest`, `Issue`, `Release`, ...
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+}
+
+/// The repository a notification's thread lives in.
+#[derive(Debug, Clone, Deserialize)]
+struct WireNotificationRepo {
+    #[serde(default)]
+    full_name: Option<String>,
+}
+
 // --- Mapping: wire rows -> normalized events. Pure, so the async
 // --- transport stays thin and the derivations are unit-testable.
 
@@ -410,6 +450,56 @@ fn comment_event(row: &WireComment, repo: &RepoRef) -> Result<Option<ForgeEvent>
 /// The parent thread number: a forge thread URL's trailing segment.
 fn parent_number(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
+}
+
+/// The notification a notifications row carries. GitHub's `reason` field
+/// is the row's whole why; the subject's API URL yields the thread.
+fn notification_event(row: &WireNotification) -> Result<Option<Notification>, ForgeError> {
+    let id = required(row.id, "notification id")?;
+    let updated = required(row.updated_at.clone(), "notification updated_at")?;
+    let subject = required(row.subject.clone(), "notification subject")?;
+    let repo_row = required(row.repository.clone(), "notification repository")?;
+    let full_name = required(repo_row.full_name, "notification repository full_name")?;
+    let (owner, name) = full_name.split_once('/').ok_or_else(|| {
+        ForgeError::Parse(format!(
+            "notification repository full_name without a slash: {full_name}"
+        ))
+    })?;
+    let subject_url = subject.url.clone().unwrap_or_default();
+    let number = parent_number(&subject_url).ok_or_else(|| {
+        ForgeError::Parse(format!(
+            "notification subject url without a thread number: {subject_url}"
+        ))
+    })?;
+    Ok(Some(Notification {
+        id: format!("github:notification:{id}@{}", updated.raw()),
+        reason: github_reason(row.reason.as_deref()),
+        repo: RepoRef::new(owner, name),
+        number,
+        is_pr: subject.kind.as_deref() == Some("PullRequest"),
+        actor: None,
+        title: subject.title.clone(),
+        url: None,
+        timestamp: updated,
+        raw: Value::Object(row.raw.clone()),
+    }))
+}
+
+/// GitHub's reason strings, reduced to the shared vocabulary. `comment`
+/// means "activity on a thread you participate in" — for the account
+/// this client authenticates as, that is overwhelmingly feedback on its
+/// own threads, so it maps to [`NotificationReason::ReviewFeedback`].
+fn github_reason(reason: Option<&str>) -> NotificationReason {
+    match reason {
+        Some("review_requested") => NotificationReason::ReviewRequested,
+        Some("assign") => NotificationReason::Assigned,
+        Some("mention") | Some("team_mention") => NotificationReason::Mention,
+        Some("ci_activity") => NotificationReason::CiActivity,
+        Some("author") => NotificationReason::Author,
+        Some("comment") => NotificationReason::ReviewFeedback,
+        Some(other) => NotificationReason::Other(other.to_owned()),
+        None => NotificationReason::Other("unreasoned".to_owned()),
+    }
 }
 
 /// The snapshot an issues-list row yields.
@@ -567,6 +657,29 @@ impl Forge for GitHubForge {
         } else {
             Ok(snapshot_from_issue(&issue)?)
         }
+    }
+
+    async fn notifications(
+        &self,
+        since: Option<&Timestamp>,
+    ) -> Result<NotificationPage, ForgeError> {
+        // The unread-notifications feed: everything addressed to the
+        // account, every repository it can see. `since` filters on the
+        // row's updated time; boundary rows repeat, ids dedup them.
+        let mut query = Vec::new();
+        if let Some(since) = since {
+            query.push(("since".to_owned(), since.raw().to_owned()));
+        }
+        let rows = self
+            .paged::<WireNotification>("/notifications", &query)
+            .await?;
+        let mut notifications = Vec::new();
+        for row in &rows {
+            if let Some(notification) = notification_event(row)? {
+                notifications.push(notification);
+            }
+        }
+        Ok(NotificationPage::finish(notifications, since))
     }
 }
 

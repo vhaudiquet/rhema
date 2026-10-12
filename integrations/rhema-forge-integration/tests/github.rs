@@ -1,7 +1,9 @@
 //! Offline integration tests: the GitHub backend against an in-process
 //! wiremock server. Zero network.
 
-use rhema_forge_integration::{EventKind, Forge, ForgeError, GitHubForge, RepoRef, Timestamp};
+use rhema_forge_integration::{
+    EventKind, Forge, ForgeError, GitHubForge, NotificationReason, RepoRef, Timestamp,
+};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -427,4 +429,100 @@ async fn a_transport_failure_maps_to_network() {
         .await
         .expect_err("connection refused is an error");
     assert!(matches!(err, ForgeError::Network(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn notifications_poll_maps_reasons_and_subjects() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/notifications"))
+        .and(query_param("since", SINCE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": 42188,
+                "unread": true,
+                "reason": "review_requested",
+                "updated_at": "2026-10-05T12:00:00Z",
+                "subject": {
+                    "title": "Add the widget flange",
+                    "url": "https://api.github.com/repos/acme/widgets/pulls/142",
+                    "type": "PullRequest"
+                },
+                "repository": { "full_name": "acme/widgets" }
+            },
+            {
+                "id": 42189,
+                "unread": true,
+                "reason": "assign",
+                "updated_at": "2026-10-04T08:00:00Z",
+                "subject": {
+                    "title": "Ship the barn door",
+                    "url": "https://api.github.com/repos/acme/widgets/issues/7",
+                    "type": "Issue"
+                },
+                "repository": { "full_name": "acme/widgets" }
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let since = Timestamp::parse(SINCE).expect("cursor parses");
+    let page = forge(&server)
+        .notifications(Some(&since))
+        .await
+        .expect("poll succeeds");
+
+    assert_eq!(page.notifications.len(), 2);
+    // Oldest first: the assignment predates the review request.
+    let assignment = &page.notifications[0];
+    assert_eq!(
+        assignment.id,
+        "github:notification:42189@2026-10-04T08:00:00Z"
+    );
+    assert_eq!(assignment.reason, NotificationReason::Assigned);
+    assert_eq!(assignment.number, 7);
+    assert!(!assignment.is_pr);
+    assert_eq!(assignment.repo, RepoRef::new("acme", "widgets"));
+    let review = &page.notifications[1];
+    assert_eq!(review.id, "github:notification:42188@2026-10-05T12:00:00Z");
+    assert_eq!(review.reason, NotificationReason::ReviewRequested);
+    assert_eq!(review.number, 142);
+    assert!(review.is_pr);
+    assert_eq!(
+        page.cursor,
+        Some(Timestamp::parse("2026-10-05T12:00:00Z").expect("parses"))
+    );
+}
+
+#[tokio::test]
+async fn notifications_without_a_cursor_still_return_the_newest_seen() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/notifications"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": 7,
+                "reason": "mention",
+                "updated_at": "2026-10-02T00:00:00Z",
+                "subject": {
+                    "title": "Hello",
+                    "url": "https://api.github.com/repos/acme/widgets/issues/1",
+                    "type": "Issue"
+                },
+                "repository": { "full_name": "acme/widgets" }
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let page = forge(&server)
+        .notifications(None)
+        .await
+        .expect("poll succeeds");
+    assert_eq!(page.notifications.len(), 1);
+    assert_eq!(page.notifications[0].reason, NotificationReason::Mention);
+    assert_eq!(
+        page.cursor,
+        Some(Timestamp::parse("2026-10-02T00:00:00Z").expect("parses"))
+    );
 }

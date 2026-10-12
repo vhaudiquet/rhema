@@ -39,7 +39,10 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{ForgeError, ensure_success, required};
-use crate::event::{EventKind, ForgeEvent, RepoRef, Snapshot, ThreadState, Timestamp};
+use crate::event::{
+    EventKind, ForgeEvent, Notification, NotificationPage, NotificationReason, RepoRef, Snapshot,
+    ThreadState, Timestamp,
+};
 use crate::forge::{Forge, ForgePage};
 
 /// Rows requested per page: Gitea's default response cap.
@@ -278,6 +281,41 @@ struct WireComment {
     raw: serde_json::Map<String, Value>,
 }
 
+/// One row of the account notifications feed.
+#[derive(Debug, Clone, Deserialize)]
+struct WireNotification {
+    #[serde(default)]
+    id: Option<i64>,
+    #[serde(default)]
+    subject: Option<WireNotificationSubject>,
+    #[serde(default)]
+    repository: Option<WireNotificationRepo>,
+    #[serde(default)]
+    updated_at: Option<Timestamp>,
+    #[serde(flatten)]
+    raw: serde_json::Map<String, Value>,
+}
+
+/// The subject a notification is about.
+#[derive(Debug, Clone, Deserialize)]
+struct WireNotificationSubject {
+    #[serde(default)]
+    title: Option<String>,
+    /// API URL of the thread; its trailing segment is the thread number.
+    #[serde(default)]
+    url: Option<String>,
+    /// `Pull` or `Issue`.
+    #[serde(rename = "type", default)]
+    kind: Option<String>,
+}
+
+/// The repository a notification's thread lives in.
+#[derive(Debug, Clone, Deserialize)]
+struct WireNotificationRepo {
+    #[serde(default)]
+    full_name: Option<String>,
+}
+
 // --- Mapping: wire rows -> normalized events. Pure, so the async
 // --- transport stays thin and the derivations are unit-testable.
 
@@ -415,6 +453,41 @@ fn comment_event(row: &WireComment, repo: &RepoRef) -> Result<Option<ForgeEvent>
 /// The parent thread number: a forge thread URL's trailing segment.
 fn parent_number(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
+}
+
+/// The notification a notifications row carries. Gitea's feed names no
+/// per-row reason — the thread subject is all a row carries — so every
+/// notification maps to [`NotificationReason::Other`] with a fixed
+/// spelling, and the consumer's triage treats it as its default role.
+fn notification_event(row: &WireNotification) -> Result<Option<Notification>, ForgeError> {
+    let id = required(row.id, "notification id")?;
+    let updated = required(row.updated_at.clone(), "notification updated_at")?;
+    let subject = required(row.subject.clone(), "notification subject")?;
+    let repo_row = required(row.repository.clone(), "notification repository")?;
+    let full_name = required(repo_row.full_name, "notification repository full_name")?;
+    let (owner, name) = full_name.split_once('/').ok_or_else(|| {
+        ForgeError::Parse(format!(
+            "notification repository full_name without a slash: {full_name}"
+        ))
+    })?;
+    let subject_url = subject.url.clone().unwrap_or_default();
+    let number = parent_number(&subject_url).ok_or_else(|| {
+        ForgeError::Parse(format!(
+            "notification subject url without a thread number: {subject_url}"
+        ))
+    })?;
+    Ok(Some(Notification {
+        id: format!("gitea:notification:{id}@{}", updated.raw()),
+        reason: NotificationReason::Other("gitea".to_owned()),
+        repo: RepoRef::new(owner, name),
+        number,
+        is_pr: subject.kind.as_deref() == Some("Pull"),
+        actor: None,
+        title: subject.title.clone(),
+        url: None,
+        timestamp: updated,
+        raw: Value::Object(row.raw.clone()),
+    }))
 }
 
 /// The snapshot an issues-list row yields.
@@ -569,6 +642,29 @@ impl Forge for GiteaForge {
         } else {
             Ok(snapshot_from_issue(&issue)?)
         }
+    }
+
+    async fn notifications(
+        &self,
+        since: Option<&Timestamp>,
+    ) -> Result<NotificationPage, ForgeError> {
+        // The unread-notifications feed: everything addressed to the
+        // account, every repository it can see. `since` filters on the
+        // row's updated time; boundary rows repeat, ids dedup them.
+        let mut query = vec![("status-types".to_owned(), "unread".to_owned())];
+        if let Some(since) = since {
+            query.push(("since".to_owned(), since.raw().to_owned()));
+        }
+        let rows = self
+            .paged::<WireNotification>("/notifications", &query)
+            .await?;
+        let mut notifications = Vec::new();
+        for row in &rows {
+            if let Some(notification) = notification_event(row)? {
+                notifications.push(notification);
+            }
+        }
+        Ok(NotificationPage::finish(notifications, since))
     }
 }
 

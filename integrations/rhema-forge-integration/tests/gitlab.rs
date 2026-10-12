@@ -1,7 +1,9 @@
 //! Offline integration tests: the GitLab backend against an in-process
 //! wiremock server. Zero network.
 
-use rhema_forge_integration::{EventKind, Forge, ForgeError, GitLabForge, RepoRef, Timestamp};
+use rhema_forge_integration::{
+    EventKind, Forge, ForgeError, GitLabForge, NotificationReason, RepoRef, Timestamp,
+};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -455,4 +457,67 @@ async fn a_transport_failure_maps_to_network() {
         .await
         .expect_err("connection refused is an error");
     assert!(matches!(err, ForgeError::Network(_)), "got: {err:?}");
+}
+
+#[tokio::test]
+async fn todos_poll_maps_actions_targets_and_projects() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/todos"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "id": 501,
+                "action_name": "review_requested",
+                "target_type": "MergeRequest",
+                "target_url": "https://gitlab.com/acme/widgets/-/merge_requests/12",
+                "updated_at": "2026-10-05T12:00:00Z",
+                "project": { "path_with_namespace": "group/acme/widgets" },
+                "target": {
+                    "iid": 12,
+                    "title": "Add the flange",
+                    "author": { "username": "alice" }
+                }
+            },
+            {
+                "id": 502,
+                "action_name": "assigned",
+                "target_type": "Issue",
+                "target_url": "https://gitlab.com/acme/widgets/-/issues/3",
+                "updated_at": "2026-10-04T08:00:00Z",
+                "project": { "path_with_namespace": "acme/widgets" },
+                "target": {
+                    "iid": 3,
+                    "title": "Ship the barn door",
+                    "author": { "username": "bob" }
+                }
+            }
+        ])))
+        .mount(&server)
+        .await;
+
+    let page = forge(&server)
+        .notifications(None)
+        .await
+        .expect("poll succeeds");
+
+    assert_eq!(page.notifications.len(), 2);
+    let assignment = &page.notifications[0];
+    assert_eq!(
+        assignment.id,
+        "gitlab:notification:502@2026-10-04T08:00:00Z"
+    );
+    assert_eq!(assignment.reason, NotificationReason::Assigned);
+    assert_eq!(assignment.repo, RepoRef::new("acme", "widgets"));
+    assert!(!assignment.is_pr);
+    assert_eq!(assignment.actor.as_deref(), Some("bob"));
+    let review = &page.notifications[1];
+    assert_eq!(review.reason, NotificationReason::ReviewRequested);
+    // The namespace path is the owner, the project slug the name.
+    assert_eq!(review.repo, RepoRef::new("group/acme", "widgets"));
+    assert!(review.is_pr);
+    assert_eq!(review.number, 12);
+    assert_eq!(
+        review.url.as_deref(),
+        Some("https://gitlab.com/acme/widgets/-/merge_requests/12")
+    );
 }
