@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rhema_coding_agent::{Approval, CodingAgent, repair_dangling_calls};
 use rhema_core::{Event, EventSink};
@@ -14,6 +15,12 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::events::{FetchWhy, OwnedEvent, UiEvent};
+
+/// The wall-clock bound on one backend's catalog fetch, DNS included:
+/// name resolution sits outside the adapters' request timeouts, so one
+/// unreachable instance (a `.lan` server that is off) must not hold
+/// the picker's whole answer past this.
+const CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A sink that forwards every engine event to the UI loop.
 struct ChannelSink {
@@ -111,7 +118,18 @@ pub fn spawn_model_fetch(
         for candidate in backends {
             set.spawn(async move {
                 let provider = candidate.backend.config_name();
-                let result = candidate.backend.list_models().await;
+                let result = match tokio::time::timeout(
+                    CATALOG_FETCH_TIMEOUT,
+                    candidate.backend.list_models(),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(format!(
+                        "no answer within {} s — is the server up?",
+                        CATALOG_FETCH_TIMEOUT.as_secs()
+                    )),
+                };
                 crate::events::CatalogFetch {
                     provider,
                     instance: candidate.instance,
