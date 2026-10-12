@@ -62,6 +62,14 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   itself, never injected context; the search interface hides the
   ranking method, so a semantic ranker can replace the keyword one
   without a signature change
+- `rhema-identity` is the accounts layer: one record per identity the
+  deployment holds on a service (a label, the service, its URL, a
+  username) with one secret each, behind an `IdentityStore` contract
+  with an in-process and a SQLite backend. The contract is
+  use-never-read: `secret()` exists for *code* that acts with a
+  credential — a forge client authenticating — and the crate ships no
+  model surface that can reach it; `Account` has no secret field to
+  leak
 - `rhema-autonomous-agent` is the resident-agent core tier: the `Source`
   contract for deterministic model-free detection, the lease-driven
   `Driver` loop (live inbox batches, per-round checkpoints), and a tool
@@ -72,14 +80,21 @@ v1: `rhema-core`, the step engine plus its seams, plus the first consumers.
   tools, a chat surface over HTTP
   (native routes with SSE, plus an OpenAI-compatible `/v1/chat/
 completions` shim for stock UIs), watch management by agent tool or
-  HTTP, runtime provider management over the same surface (log in with
-  a kind's credentials, key or server address, or remove a backend;
-  the roster re-discovers from environment, stored credentials, and
-  the rhema config at every boot), the agent's presentation identity
-  served over `/v1/agent` (name, mark, avatar, what every client
-  renders), and forge threads answered with one coding-agent turn
-  posted as the thread's reply; `--once` for cron-driven ephemeral
-  machines
+  HTTP, the accounts it holds on external services
+  (`identity_save`/`identity_list`/`identity_forget` over chat, the
+  same over `/v1/accounts`, the web UI's accounts page — the secret is
+  write-only everywhere), runtime provider management over the same
+  surface (log in with a kind's credentials, key or server address, or
+  remove a backend; the roster re-discovers from environment, stored
+  credentials, and the rhema config at every boot), the agent's
+  presentation identity served over `/v1/agent` (name, mark, avatar,
+  what every client renders), and forge threads answered with one
+  coding-agent turn posted as the thread's reply — a watched forge
+  *identity* feeds its notifications in too, triaged deterministically:
+  a review request dispatches a reviewer, an assignment or feedback an
+  implementer (the thread's key, session, and voice stay one; the role
+  frames the turn), and a mention just surfaces to you; `--once` for
+  cron-driven ephemeral machines
 - `rhema-coding-agent` is the coding-agent driver: one built-in tool
   (`bash`, running commands via `bash -c` in the workspace), an
   approval seam (auto-approved for now; allowlists planned), session
@@ -97,10 +112,10 @@ completions` shim for stock UIs), watch management by agent tool or
 The crate list stays deliberately generic: integrations live outside
 it. The first is `integrations/rhema-forge-integration` — GitHub,
 Gitea, and GitLab clients normalizing issues/PRs/comments into one
-event vocabulary, and a watcher feeding them to the dispatcher. It is
-a library for any agent consumer to compose, not a driver: the claw
-daemon watches repos and answers threads through it, touching public
-API only.
+event vocabulary, a watcher feeding them to the dispatcher, and each
+account's notifications feed beside it. It is a library for any agent
+consumer to compose, not a driver: the claw daemon watches repos and
+answers threads through it, touching public API only.
 
 ## The frontend: `rhema`
 

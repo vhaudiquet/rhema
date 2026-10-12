@@ -60,6 +60,9 @@ Rules:
     (`crates/rhema-provider-copilot/`)
   - `memory` — the agent memory layer: the `MemoryStore` contract, its
     stores, and the memory tools (`crates/rhema-memory/`)
+  - `identity` — the agent accounts layer: the `IdentityStore`
+    contract, its stores, and the use-never-read secret rule
+    (`crates/rhema-identity/`)
   - `rsd` — resource-scoped dispatch: the dispatcher and its stores
     (`crates/rhema-rsd/`)
   - `forge` — the forge integration: GitHub/Gitea/GitLab clients, the

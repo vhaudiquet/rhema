@@ -249,6 +249,21 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   (its pre-tier driver half, `ForgeBot`, was deleted); consumers such
   as the claw daemon compose it. It stays a workspace member — one
   gate, one lockfile — and can extract to its own repo at release.
+- ~~**Where agent accounts live, and what a watched forge identity
+  earns**~~, **decided:** `rhema-identity`, a peer of `rhema-memory` in
+  the service tier: accounts with one secret each behind a
+  use-never-read contract — `IdentityStore::secret` exists for *code*
+  that acts with a credential, the crate ships no model surface, and
+  consumers keep tools off it (claw's identity tools join the
+  interactive chain only, so a forge comment cannot reach the
+  accounts). A forge identity watched at creation feeds the
+  integration's account-scoped notifications poll (`Forge::
+  notifications`, the counterpart of the repo-scoped `poll`), and
+  claw's triage turns each notification into a role-tagged thread
+  event: the RSD key stays the thread — one session, one voice per
+  thread — and the triaged role (reviewer, implementer) selects the
+  dispatch's persona framing at handler time; mentions surface to the
+  human instead of dispatching an agent.
 
 ---
 
