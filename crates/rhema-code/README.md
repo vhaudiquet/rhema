@@ -5,6 +5,8 @@ curl -fsSL https://get.rhema.rs/code | sh
 rhema
 ```
 
+Or packaged: `snapcraft` from the repo root builds the classic-confinement snap (`snap/snapcraft.yaml`). Classic because the agent's shell is your host `bash` in your workspace; and the recipe packages the committed tree (`source-type: git`), so land your work before building it.
+
 Rhema Code is a terminal-based coding agent, built on the Rhema agent framework.
 
 <img align="center" src="../../.github/img/rhema-code.png">

@@ -1,0 +1,51 @@
+name: rhema
+base: core24
+title: Rhema
+# The version of record: the release workflow rewrites it from the tag
+# before building, so a tag ships exactly its number (the chart's pattern).
+version: "0.1.0"
+summary: The rhema coding agent — terminal UI, one-shot, and ACP
+description: |
+  A coding agent in your terminal: a full-screen TUI over streamed
+  model replies, `rhema run` for pipeable one-shots, and `rhema acp`
+  so editors drive rhema over the Agent Client Protocol.
+
+  Classic confinement on purpose: the agent's one tool is bash, run
+  in your workspace with your real toolchain, and every profile,
+  login, and saved session lives under your normal ~/.config and
+  ~/.cache paths.
+license: MIT
+contact: vhaudiquet343@hotmail.fr
+issues: https://git.vhaudiquet.fr/vhaudiquet/rhema/issues
+source-code: https://git.vhaudiquet.fr/vhaudiquet/rhema
+website: https://git.vhaudiquet.fr/vhaudiquet/rhema
+grade: stable
+confinement: classic
+platforms:
+  amd64:
+
+apps:
+  rhema:
+    command: bin/rhema
+
+parts:
+  rhema:
+    plugin: rust
+    # Package the committed tree, not the working directory: a git
+    # pull carries only tracked files, which keeps the (gigantic)
+    # cargo target dir out of the build and makes a local `snapcraft`
+    # match what CI would build. Land your work before packaging it.
+    source: .
+    source-type: git
+    # One member of the workspace; cargo walks up to the root, so the
+    # vendored crossterm ([patch.crates-io]) rides along.
+    rust-path: [crates/rhema-code]
+    # rust-toolchain.toml picks the toolchain; the plugin honors it.
+    # Point the ELF interpreter and rpath at the base: the binary links
+    # the core24 glibc, and a classic snap would otherwise look it up on
+    # the host and refuse to start where the host's is older.
+    build-attributes: [enable-patchelf]
+    build-packages:
+      # reqwest's native-tls ends in openssl-sys
+      - pkg-config
+      - libssl-dev
