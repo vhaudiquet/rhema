@@ -2287,6 +2287,7 @@ mod scroll_tests {
                 api_key: "k".into(),
             }),
             session: rhema_core::Session::default(),
+            secrets: None,
             options: RunOptions {
                 theme: ThemeKind::Dark,
                 icons: crate::icons::Flavor::Unicode,

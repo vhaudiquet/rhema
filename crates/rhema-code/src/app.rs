@@ -37,6 +37,10 @@ pub struct AppSetup {
     pub session: Session,
     /// The startup flags.
     pub options: RunOptions,
+    /// The keychain fresh logins place keys in and removed logins
+    /// clean up after; `None` keeps every key in the file (tests, or a
+    /// runner that opted out).
+    pub secrets: Option<Arc<dyn rhema_config::secrets::SecretStore>>,
 }
 
 /// The model backend a session runs on: which provider, and whatever
@@ -509,6 +513,8 @@ pub enum Effect {
 pub struct App {
     /// Config persistence seam.
     pub store: Arc<dyn ConfigStore>,
+    /// The keychain logins place keys in; `None` keeps them in the file.
+    pub secrets: Option<Arc<dyn rhema_config::secrets::SecretStore>>,
     /// The config as currently held; mutations persist through `store`.
     pub config: Config,
     /// The backend resolved at login (or startup), if any.
@@ -649,6 +655,7 @@ impl App {
             ))),
         };
         Ok(Self {
+            secrets: setup.secrets,
             // Read before `options` moves into the struct.
             theme: match setup.options.theme {
                 crate::args::ThemeKind::Dark => &crate::palette::DARK,
@@ -719,7 +726,7 @@ impl App {
         self.screen = Screen::Profile(crate::screens::ProfileScreen::new(
             &self.config.profiles,
             self.session_profile.as_deref(),
-            None,
+            self.secret_store(),
         ));
         Vec::new()
     }
@@ -896,7 +903,7 @@ impl App {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
-        let Some(backend) = Backend::from_profile(&effective, None) else {
+        let Some(backend) = Backend::from_profile(&effective, self.secret_store()) else {
             // Never recorded: startup re-validates usability, so the
             // memory naming a keyless profile would only fall through.
             // The agent drops with the provider: a turn here would run
@@ -1446,7 +1453,7 @@ impl App {
         }
         let effective = self.config.effective(Some(&tab));
         self.options.thinking = effective.thinking_effort().unwrap_or_default();
-        let Some(backend) = Backend::from_profile(&effective, None) else {
+        let Some(backend) = Backend::from_profile(&effective, self.secret_store()) else {
             self.error = Some(format!(
                 "no usable credentials for {} — /login first",
                 instance.provider
@@ -1501,9 +1508,18 @@ impl App {
         }) else {
             return Vec::new();
         };
+        // The keychain entry goes with the instance: a removed login
+        // must not leave its key in the chain. Best effort — a store
+        // that refuses leaves the entry; it holds no live reference.
+        let mut removed = None;
         self.config.set_for_profile(Some(&tab), |settings| {
-            settings.remove_instance(&name);
+            removed = settings.remove_instance(&name);
         });
+        if let Some(id) = removed.and_then(|old| old.secret_ref) {
+            if let Some(store) = self.secret_store() {
+                let _ = store.delete(&id);
+            }
+        }
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
             return Vec::new();
@@ -1511,7 +1527,7 @@ impl App {
         let mut effects = Vec::new();
         if self.session_profile.as_deref() == Some(tab.as_str()) {
             let effective = self.config.effective(Some(&tab));
-            match Backend::from_profile(&effective, None) {
+            match Backend::from_profile(&effective, self.secret_store()) {
                 Some(backend) => {
                     self.backend = Some(backend.clone());
                     self.provider = Some(backend.provider());
@@ -1697,18 +1713,34 @@ impl App {
                             | Backend::DeepSeek { api_key }
                             | Backend::Copilot { api_key } => (Some(api_key.clone()), None),
                         };
+                        // The key rides the keychain when the store takes
+                        // it — the instance keeps only the entry's ref —
+                        // and the file when it does not.
+                        let secrets = self.secrets.as_deref();
                         self.config.set_for_profile(Some(&tab), |settings| {
+                            // A re-login replaces the instance wholesale;
+                            // its old keychain entry must not linger.
+                            if let Some(old) = settings.instances.get(&instance) {
+                                if let Some(id) = old.secret_ref.as_deref() {
+                                    if let Some(store) = secrets {
+                                        let _ = store.delete(id);
+                                    }
+                                }
+                            }
                             settings.provider = Some(provider.to_owned());
                             settings.instance = Some(instance.clone());
                             settings.upsert_instance(
                                 &instance,
                                 rhema_config::ProviderInstance {
                                     provider: provider.to_owned(),
-                                    api_key,
+                                    api_key: None,
                                     secret_ref: None,
                                     base_url,
                                 },
                             );
+                            if let Some(key) = api_key.as_deref() {
+                                settings.place_key(&instance, key, secrets);
+                            }
                         });
                         if let Err(err) = self.store.save(&self.config) {
                             if let Screen::Settings(settings) = &mut self.screen {
@@ -1931,7 +1963,7 @@ impl App {
             self.error = Some(format!("cannot save config: {err}"));
             return Vec::new();
         }
-        let backend = match Backend::from_profile(&self.effective(), None) {
+        let backend = match Backend::from_profile(&self.effective(), self.secret_store()) {
             Some(backend) => backend,
             None => {
                 self.error = Some(format!(
@@ -2158,6 +2190,12 @@ impl App {
         self.config.effective(self.session_profile.as_deref())
     }
 
+    /// The keychain this session resolves stored keys through, as the
+    /// resolution tier under the environment; `None` reads literals only.
+    pub fn secret_store(&self) -> Option<&dyn rhema_config::secrets::SecretStore> {
+        self.secrets.as_deref()
+    }
+
     /// The profiles the input palette completes `/profile` with: the
     /// config registry's rows, the session's own marked.
     pub fn palette_profiles(&self) -> Vec<crate::screens::PaletteProfile> {
@@ -2268,13 +2306,17 @@ fn estimate_history_tokens(history: &[Message]) -> u64 {
 /// profile must not open the login screen. Isolation still holds: this
 /// only picks the section up front, and nothing reads across profiles
 /// afterwards. An explicit flag never reaches here.
-pub(crate) fn startup_profile(config: &rhema_config::Config, workspace: &Path) -> String {
+pub(crate) fn startup_profile(
+    config: &rhema_config::Config,
+    workspace: &Path,
+    secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+) -> String {
     let default = "personal";
     let ready = |name: &str| {
         config
             .profiles
             .get(name)
-            .map(|profile| Backend::from_profile(profile, None).is_some())
+            .map(|profile| Backend::from_profile(profile, secrets).is_some())
             .unwrap_or(false)
     };
     if let Some(last) = config.last_profile_in(workspace).filter(|name| ready(name)) {
@@ -2300,6 +2342,7 @@ mod tests {
     use crate::store::MemoryStore;
     use crate::transcript::Line;
     use rhema_coding_agent::{Approval, CodingAgentConfig};
+    use rhema_config::secrets::SecretStore as _;
     use rhema_core::{Message, Role, Session, StopReason, ToolCall, Usage};
     use rhema_provider::ModelCard;
     use rhema_provider_google::GoogleProvider;
@@ -2383,6 +2426,9 @@ mod tests {
     struct Harness {
         app: App,
         store: Arc<MemoryStore>,
+        /// The keychain the app places logins in, when the test gave it
+        /// one.
+        secrets: Option<Arc<rhema_config::secrets::VolatileSecretStore>>,
     }
 
     /// Stores `key` as `provider`'s instance on `profile` — the login
@@ -2411,6 +2457,29 @@ mod tests {
     }
 
     fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
+        harness_inner(api_key, model, session, None)
+    }
+
+    /// A harness whose app places logins in a volatile keychain.
+    fn harness_with_secrets(
+        api_key: Option<&str>,
+        model: Option<&str>,
+        session: Session,
+    ) -> Harness {
+        harness_inner(
+            api_key,
+            model,
+            session,
+            Some(Arc::new(rhema_config::secrets::VolatileSecretStore::new())),
+        )
+    }
+
+    fn harness_inner(
+        api_key: Option<&str>,
+        model: Option<&str>,
+        session: Session,
+        secrets: Option<Arc<rhema_config::secrets::VolatileSecretStore>>,
+    ) -> Harness {
         let mut personal = rhema_config::Profile {
             // The key alone never served a turn: a usable
             // profile names its provider too.
@@ -2442,6 +2511,9 @@ mod tests {
             config,
             backend,
             session,
+            secrets: secrets
+                .clone()
+                .map(|store| store as Arc<dyn rhema_config::secrets::SecretStore>),
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
                 thinking: rhema_core::request::ThinkingEffort::Default,
@@ -2454,7 +2526,11 @@ mod tests {
             },
         })
         .unwrap();
-        Harness { app, store }
+        Harness {
+            app,
+            store,
+            secrets,
+        }
     }
 
     /// Drives the settings' add-instance dialog to the credential stage
@@ -2637,6 +2713,65 @@ mod tests {
             h.app.backend,
             Some(Backend::Google { ref api_key }) if api_key == "secret"
         ));
+    }
+
+    #[test]
+    fn a_login_places_its_key_in_the_keychain_and_the_file_stays_clean() {
+        let mut h = harness_with_secrets(None, None, Session::default());
+        let secrets = Arc::clone(h.secrets.as_ref().unwrap());
+        descend_to_credential(&mut h, 0);
+        for c in "secret".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let _ = h.app.on_key(key(KeyCode::Enter));
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::Google {
+                    api_key: "secret".into(),
+                },
+                instance: Some("google".into()),
+            },
+            result: loaded("google", models()),
+        });
+        let effective = h.store.load().unwrap().effective(None);
+        let instance = &effective.instances["google"];
+        assert_eq!(instance.api_key, None, "the file holds no key");
+        let id = instance.secret_ref.as_deref().expect("the keychain ref");
+        assert_eq!(secrets.get(id).unwrap().as_deref(), Some("secret"));
+        // The session's own resolution reads the chain: the login
+        // serves turns with no literal anywhere.
+        assert_eq!(
+            h.app
+                .effective()
+                .api_key("google", h.app.secret_store())
+                .as_deref(),
+            Some("secret")
+        );
+    }
+
+    #[test]
+    fn removing_an_instance_deletes_its_keychain_entry() {
+        let mut h = harness_with_secrets(Some("g"), Some("m"), Session::default());
+        let secrets = Arc::clone(h.secrets.as_ref().unwrap());
+        // The profile's one instance logs in through the chain: the
+        // ref is live, the literal is gone.
+        secrets.set("ref-1", "g").unwrap();
+        h.app.config.set_for_profile(Some("personal"), |p| {
+            let instance = p.instances.get_mut("google").unwrap();
+            instance.secret_ref = Some("ref-1".into());
+            instance.api_key = None;
+        });
+        // /login opens the providers page over the session's profile;
+        // the instance row is selected, `d` forgets it.
+        for c in "/login".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(h.app.screen, Screen::Settings(_)));
+        let _ = h.app.on_key(key(KeyCode::Char('d')));
+        let effective = h.store.load().unwrap().effective(None);
+        assert!(!effective.instances.contains_key("google"), "forgotten");
+        assert_eq!(secrets.get("ref-1").unwrap(), None, "the entry went too");
     }
 
     #[test]
@@ -4164,7 +4299,10 @@ mod tests {
             ]),
             ..Default::default()
         };
-        assert_eq!(startup_profile(&config, Path::new("/nowhere")), "work");
+        assert_eq!(
+            startup_profile(&config, Path::new("/nowhere"), None),
+            "work"
+        );
         // personal can serve turns: the default stands.
         let config = Config {
             profiles: BTreeMap::from([
@@ -4173,11 +4311,14 @@ mod tests {
             ]),
             ..Default::default()
         };
-        assert_eq!(startup_profile(&config, Path::new("/nowhere")), "personal");
+        assert_eq!(
+            startup_profile(&config, Path::new("/nowhere"), None),
+            "personal"
+        );
         // Nothing can: the default stands and the login screen opens on
         // it.
         assert_eq!(
-            startup_profile(&Config::default(), Path::new("/nowhere")),
+            startup_profile(&Config::default(), Path::new("/nowhere"), None),
             "personal"
         );
         // A key without a provider name is not usable either: nothing
@@ -4192,7 +4333,10 @@ mod tests {
             ]),
             ..Default::default()
         };
-        assert_eq!(startup_profile(&config, Path::new("/nowhere")), "work");
+        assert_eq!(
+            startup_profile(&config, Path::new("/nowhere"), None),
+            "work"
+        );
     }
 
     #[test]
@@ -4208,16 +4352,22 @@ mod tests {
         // Both profiles can serve turns, and proj last ran on work: the
         // workspace memory wins over the personal default.
         config.note_profile_in(Path::new("/proj"), "work");
-        assert_eq!(startup_profile(&config, Path::new("/proj")), "work");
+        assert_eq!(startup_profile(&config, Path::new("/proj"), None), "work");
         // Another directory has no memory: the default stands.
-        assert_eq!(startup_profile(&config, Path::new("/other")), "personal");
+        assert_eq!(
+            startup_profile(&config, Path::new("/other"), None),
+            "personal"
+        );
         // A memory naming a profile that can no longer serve turns falls
         // through to the default — never the login screen by surprise.
         config
             .profiles
             .insert("empty".to_owned(), rhema_config::Profile::default());
         config.note_profile_in(Path::new("/proj"), "empty");
-        assert_eq!(startup_profile(&config, Path::new("/proj")), "personal");
+        assert_eq!(
+            startup_profile(&config, Path::new("/proj"), None),
+            "personal"
+        );
     }
 
     #[test]
@@ -4296,13 +4446,14 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let profile = startup_profile(&config, Path::new("/nowhere"));
+        let profile = startup_profile(&config, Path::new("/nowhere"), None);
         let backend = Backend::from_profile(&config.effective(Some(&profile)), None);
         let app = App::new(AppSetup {
             store: Arc::new(MemoryStore::new(config.clone())),
             config,
             backend,
             session: Session::default(),
+            secrets: None,
             options: RunOptions {
                 theme: crate::args::ThemeKind::Dark,
                 thinking: rhema_core::request::ThinkingEffort::Default,

@@ -23,6 +23,7 @@ use ratatui::backend::CrosstermBackend;
 use rhema_acp::AcpOptions;
 use rhema_coding_agent::{AllowAll, Approval, CodingAgent};
 use rhema_config::Config;
+use rhema_config::secrets::KeyringSecretStore;
 use rhema_core::{Event as ModelEvent, EventSink, Session};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -130,6 +131,21 @@ fn resolve_base_system(path: Option<&std::path::Path>) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
+/// Moves the config's stored literal keys into the system keychain,
+/// best effort, rewriting the file so the move is recorded. Machines
+/// without a keychain keep their literals — the pre-keychain behavior,
+/// retried here on every start.
+fn migrate_stored_keys(config: &mut Config) {
+    let moved = config.migrate_secrets(&KeyringSecretStore::new());
+    if moved == 0 {
+        return;
+    }
+    eprintln!("· moved {moved} provider key(s) into the system keychain");
+    if let Err(err) = config.save() {
+        eprintln!("warning: the config file still names the moved keys: {err}");
+    }
+}
+
 /// Runs the frontend: the ACP server, the `run` one-shot, or the
 /// full-screen TUI — the subcommand decides, and bare `rhema` is the TUI
 /// only when a terminal is attached.
@@ -188,6 +204,8 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
             Config::default()
         }
     };
+    migrate_stored_keys(&mut config);
+    let secrets = KeyringSecretStore::new();
     // Same profile resolution as the TUI: an explicit --profile is
     // honored as named, a directory with a remembered profile reopens on
     // it, an absent one starts on a profile that can serve turns. No
@@ -198,7 +216,7 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
     let profile = args
         .profile
         .clone()
-        .unwrap_or_else(|| startup_profile(&config, &workspace));
+        .unwrap_or_else(|| startup_profile(&config, &workspace, Some(&secrets)));
     let effective = config.effective(Some(&profile));
     // RHEMA_PROVIDER (inside provider_name) wins over the stored
     // profile, the same env-wins convention the keys follow. Nothing
@@ -215,7 +233,7 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
     // naming the fix.
     let backend = match provider_choice {
         ProviderChoice::Google => effective
-            .api_key("google", None)
+            .api_key("google", Some(&secrets))
             .map(|api_key| Backend::Google { api_key })
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -224,22 +242,24 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
             })?,
         ProviderChoice::LlamaCpp => Backend::LlamaCpp {
             url: effective.llama_cpp_url(),
-            api_key: effective.api_key("llama-cpp", None),
+            api_key: effective.api_key("llama-cpp", Some(&secrets)),
         },
         ProviderChoice::OpenRouter => Backend::OpenRouter {
             api_key: effective
-                .api_key("openrouter", None)
+                .api_key("openrouter", Some(&secrets))
                 .ok_or_else(|| anyhow::anyhow!("missing API key: set OPENROUTER_API_KEY"))?,
         },
         ProviderChoice::Anthropic => Backend::Anthropic {
-            api_key: effective.api_key("anthropic", None).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)"
-                )
-            })?,
+            api_key: effective
+                .api_key("anthropic", Some(&secrets))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)"
+                    )
+                })?,
         },
         ProviderChoice::OpenAi => Backend::OpenAi {
-            api_key: effective.api_key("openai", None).ok_or_else(|| {
+            api_key: effective.api_key("openai", Some(&secrets)).ok_or_else(|| {
                 anyhow::anyhow!(
                     "missing API key: set OPENAI_API_KEY (or log in once interactively)"
                 )
@@ -247,18 +267,22 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
             base_url: effective.openai_base_url(),
         },
         ProviderChoice::DeepSeek => Backend::DeepSeek {
-            api_key: effective.api_key("deepseek", None).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)"
-                )
-            })?,
+            api_key: effective
+                .api_key("deepseek", Some(&secrets))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)"
+                    )
+                })?,
         },
         ProviderChoice::Copilot => Backend::Copilot {
-            api_key: effective.api_key("copilot", None).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)"
-                )
-            })?,
+            api_key: effective
+                .api_key("copilot", Some(&secrets))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)"
+                    )
+                })?,
         },
     };
     let model = args.model.clone().unwrap_or_else(|| {
@@ -324,10 +348,14 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // Credential and session resolution happens BEFORE the terminal setup,
     // so early failures print as plain errors on a normal terminal.
     let store: Arc<dyn ConfigStore> = Arc::new(DiskStore);
-    let config = store.load().unwrap_or_else(|err| {
+    let mut config = store.load().unwrap_or_else(|err| {
         eprintln!("warning: ignoring unreadable rhema config: {err}");
         Config::default()
     });
+    migrate_stored_keys(&mut config);
+    // The session's keychain: startup resolution reads it, and the app
+    // places fresh logins in it and cleans up after removals.
+    let secrets: Arc<dyn rhema_config::secrets::SecretStore> = Arc::new(KeyringSecretStore::new());
     // Without an explicit --profile the session starts on the profile
     // this workspace last used, or on the default/first one that can
     // serve turns — a logged-in profile never opens the login screen.
@@ -342,7 +370,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     let profile = args
         .profile
         .clone()
-        .unwrap_or_else(|| startup_profile(&config, &workspace));
+        .unwrap_or_else(|| startup_profile(&config, &workspace, Some(&*secrets)));
     let effective = config.effective(Some(&profile));
     // RHEMA_PROVIDER (inside provider_name) wins over the stored
     // profile, the same env-wins convention the keys follow. Nothing
@@ -351,31 +379,31 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     let backend = ProviderChoice::from_stored(effective.provider_name().as_deref()).and_then(
         |provider_choice| match provider_choice {
             ProviderChoice::Google => effective
-                .api_key("google", None)
+                .api_key("google", Some(&*secrets))
                 .map(|api_key| Backend::Google { api_key }),
             ProviderChoice::LlamaCpp => Some(Backend::LlamaCpp {
                 url: effective.llama_cpp_url(),
-                api_key: effective.api_key("llama-cpp", None),
+                api_key: effective.api_key("llama-cpp", Some(&*secrets)),
             }),
             ProviderChoice::OpenRouter => effective
-                .api_key("openrouter", None)
+                .api_key("openrouter", Some(&*secrets))
                 .map(|api_key| Backend::OpenRouter { api_key }),
             ProviderChoice::Anthropic => effective
-                .api_key("anthropic", None)
+                .api_key("anthropic", Some(&*secrets))
                 .map(|api_key| Backend::Anthropic { api_key }),
             ProviderChoice::OpenAi => {
                 effective
-                    .api_key("openai", None)
+                    .api_key("openai", Some(&*secrets))
                     .map(|api_key| Backend::OpenAi {
                         api_key,
                         base_url: effective.openai_base_url(),
                     })
             }
             ProviderChoice::DeepSeek => effective
-                .api_key("deepseek", None)
+                .api_key("deepseek", Some(&*secrets))
                 .map(|api_key| Backend::DeepSeek { api_key }),
             ProviderChoice::Copilot => effective
-                .api_key("copilot", None)
+                .api_key("copilot", Some(&*secrets))
                 .map(|api_key| Backend::Copilot { api_key }),
         },
     );
@@ -419,6 +447,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             backend,
             session,
             options,
+            secrets: Some(Arc::clone(&secrets)),
         })?;
         let effects = app.initial_effects();
         (app, effects)
@@ -588,7 +617,7 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
                         backend: backend.clone(),
                     }]
                 }
-                _ => Backend::candidates_from_profile(&app.effective(), None),
+                _ => Backend::candidates_from_profile(&app.effective(), app.secret_store()),
             };
             if backends.is_empty() {
                 return;
