@@ -38,6 +38,8 @@ An editor launches the above command and directly talks ACP with Rhema Code.
 
 Rhema Code ships with two default profiles `work` and `personal` that allows you to manage your different subscription contexts. Each profile can store any amount of subscription instances.
 
+Login keys are stored in your system keychain (macOS Keychain, Windows Credential Manager, or the freedesktop Secret Service) whenever one is reachable — the config file then holds only an opaque reference to the entry — and fall back to the file itself on machines without one (containers, headless boxes). Logging in again replaces the keychain entry; forgetting the instance deletes it. Environment variables still outrank everything stored.
+
 ### Skills, sessions, etc.
 
 Regular coding agent features are supported, while maintaining a simplicity balance. Right now, no MCPs.

@@ -264,6 +264,25 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   thread — and the triaged role (reviewer, implementer) selects the
   dispatch's persona framing at handler time; mentions surface to the
   human instead of dispatching an agent.
+- ~~**Where provider API keys live**~~, **decided:** the OS keychain
+  behind a tiny `SecretStore` seam in `rhema-config` (`secrets`):
+  get/set/delete of one opaque value per id, over the `keyring` crate
+  (macOS Keychain, Windows Credential Manager, the Linux Secret
+  Service). An instance holds either the literal `api_key` — the
+  fallback where no keychain answers (containers, headless boxes) — or
+  an opaque `secret_ref` naming its entry under the `rhema` service;
+  resolution reads the environment, then the keychain, then the
+  literal, and an unreachable store reads as "not in the store",
+  never as a lost key. `Profile::place_key` (logins) and
+  `Config::migrate_secrets` (frontend startup) prefer the chain and
+  fall back to the file; forgetting an instance deletes its entry.
+  `rhema-identity` is deliberately not the home: its accounts are the
+  deployment's identities behind use-never-read, its SQLite backend
+  stores secrets as plaintext columns, and a provider key is the
+  user's per-profile credential, not an account. When identity grows
+  its promised keychain backend, that backend consumes the `keyring`
+  crate directly, as its SQLite backend consumes `rusqlite` — a
+  shared mechanism, not a shared crate.
 
 ---
 
