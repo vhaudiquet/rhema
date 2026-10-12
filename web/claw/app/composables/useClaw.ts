@@ -38,6 +38,51 @@ export interface ModelCard {
   input_token_limit?: number | null
 }
 
+/** One account of `GET /v1/accounts` (rhema-identity's `Account`):
+ * redacted by construction — the wire shape has no secret field. */
+export interface ClawAccount {
+  id: string
+  label: string
+  service: string
+  url: string | null
+  username: string | null
+  secret_kind: 'token' | 'password'
+  created_at: number
+  updated_at: number
+}
+
+/** The payload `POST /v1/accounts` takes. The secret is write-only: it
+ * is stored and never served back. */
+export interface NewAccount {
+  label: string
+  service: string
+  url?: string
+  username?: string
+  secret: string
+  secret_kind?: 'token' | 'password'
+  /** Also follow this forge identity's notifications. */
+  watch?: boolean
+}
+
+/** The `POST /v1/accounts` answer: the save verdict plus whether the
+ * forge watch got registered. */
+export interface SavedAccount {
+  saved: boolean
+  id: string
+  label: string
+  service: string
+  secret_kind: 'token' | 'password'
+  watched: boolean
+  watchable_forge: boolean
+}
+
+/** The `DELETE /v1/accounts/{id}` answer: whether the account existed,
+ * and how many derived watches went with it. */
+export interface ForgotAccount {
+  forgot: boolean
+  watches_removed: number
+}
+
 /** One backend instance of the providers roster: named by its `id` —
  * the kind unless a login named it — with the credential's origin. */
 export interface ClawProvider {
@@ -212,6 +257,14 @@ export interface ClawApi {
   /** `DELETE /v1/providers/{id}` — remove a backend instance; answers
    * the new providers state. The last backend is refused claw-side. */
   removeProvider(id: string): Promise<ProvidersState>
+  /** `GET /v1/accounts` — the stored accounts, redacted. */
+  accounts(): Promise<ClawAccount[]>
+  /** `POST /v1/accounts` — store an account (the secret is write-only),
+   * optionally registering its forge notifications watch. */
+  addAccount(account: NewAccount): Promise<SavedAccount>
+  /** `DELETE /v1/accounts/{id}` — forget an account; its derived
+   * watches go with it. */
+  removeAccount(id: string): Promise<ForgotAccount>
   /** `GET /v1/agent` — the agent's presentation identity. */
   agent(): Promise<AgentIdentity>
   /** `PUT /v1/agent` — save the named text fields (empty clears);
@@ -283,6 +336,26 @@ export function useClaw(token: Ref<string | null>): ClawApi {
       method: 'DELETE',
       headers: authHeaders(token.value),
     })) as ProvidersState
+  }
+
+  async function accounts(): Promise<ClawAccount[]> {
+    const body = (await get('/v1/accounts', token.value)) as { accounts: ClawAccount[] }
+    return body.accounts
+  }
+
+  async function addAccount(account: NewAccount): Promise<SavedAccount> {
+    return (await send('/v1/accounts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
+      body: JSON.stringify(account),
+    })) as SavedAccount
+  }
+
+  async function removeAccount(id: string): Promise<ForgotAccount> {
+    return (await send(`/v1/accounts/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: authHeaders(token.value),
+    })) as ForgotAccount
   }
 
   async function agent(): Promise<AgentIdentity> {
@@ -401,6 +474,9 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     models,
     setCredentials,
     removeProvider,
+    accounts,
+    addAccount,
+    removeAccount,
     agent,
     setAgent,
     setAgentImage,

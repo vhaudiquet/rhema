@@ -9,9 +9,11 @@ import { ClawError, clawHealth, isInteractive, useClaw } from '~/composables/use
 import type {
   AgentIdentity,
   AgentImageKind,
+  ClawAccount,
   ClawSession,
   IdentityTexts,
   ModelCard,
+  NewAccount,
   ProviderCredentials,
   ProvidersState,
   StreamStatus,
@@ -202,6 +204,9 @@ const savingProviders = ref(false)
 const mutatingProviders = ref(false)
 const savingIdentity = ref(false)
 const mutatingIdentity = ref(false)
+const accounts = ref<ClawAccount[] | null>(null)
+const accountsLoading = ref(false)
+const mutatingAccounts = ref(false)
 const streamStatus = ref<StreamStatus>('connecting')
 const busy = ref(false)
 const authRequired = ref(false)
@@ -270,6 +275,54 @@ async function loadProviderModels(id: string): Promise<void> {
     providerModelsError.value = err instanceof Error ? err.message : String(err)
   } finally {
     providerModelsLoading.value = false
+  }
+}
+
+async function refreshAccounts(): Promise<void> {
+  accountsLoading.value = true
+  try {
+    accounts.value = await claw.accounts()
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    accountsLoading.value = false
+  }
+}
+
+async function addAccount(account: NewAccount): Promise<void> {
+  mutatingAccounts.value = true
+  try {
+    const saved = await claw.addAccount(account)
+    pushNotice(
+      saved.watchable_forge
+        ? saved.watched
+          ? `account ${saved.label} saved — following ${saved.service} notifications`
+          : `account ${saved.label} saved (already watched)`
+        : `account ${saved.label} saved — ${saved.service} is not a watchable forge`,
+    )
+    await refreshAccounts()
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    mutatingAccounts.value = false
+  }
+}
+
+async function removeAccount(account: ClawAccount): Promise<void> {
+  mutatingAccounts.value = true
+  try {
+    const forgot = await claw.removeAccount(account.id)
+    pushNotice(
+      forgot.forgot
+        ? `account ${account.label} forgotten${forgot.watches_removed ? ` — ${forgot.watches_removed} watch(es) removed` : ''}`
+        : `account ${account.label} was already gone`,
+    )
+    await refreshAccounts()
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    mutatingAccounts.value = false
   }
 }
 
@@ -392,6 +445,7 @@ onMounted(() => {
   void checkHealth()
   void refreshIdentity()
   void refreshProviders()
+  void refreshAccounts()
   void refreshSessions()
   healthTimer = setInterval(checkHealth, 30000)
   sessionsTimer = setInterval(() => void refreshSessions(), 20000)
@@ -493,7 +547,14 @@ onUnmounted(() => {
             @upload-image="uploadIdentityImage"
             @clear-image="clearIdentityImage"
           />
-          <SettingsAgentAccountsPage v-show="route.section === 'agent/accounts'" />
+          <SettingsAgentAccountsPage
+            v-show="route.section === 'agent/accounts'"
+            :accounts="accounts"
+            :loading="accountsLoading"
+            :mutating="mutatingAccounts"
+            @add="addAccount"
+            @remove="removeAccount"
+          />
           <SettingsProvidersPage
             v-show="route.section === 'providers'"
             :state="providersState"
