@@ -54,8 +54,8 @@ pub use events::{FetchWhy, OwnedEvent, UiEvent};
 pub use palette::{DARK, LIGHT, Theme, parse_hex_color};
 pub use run::run;
 pub use screens::{
-    ChatAction, ChatState, LoginAction, LoginScreen, PickerAction, PickerScreen, ResumeAction,
-    ResumeScreen,
+    AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, ResumeAction,
+    ResumeScreen, SettingsAction, SettingsPurpose, SettingsScreen, SettingsSection,
 };
 pub use store::{ConfigStore, DiskStore, MemoryStore};
 pub use transcript::{Line, Transcript};

@@ -17,8 +17,9 @@ use rhema_provider::{Allowance, ModelCard};
 use crate::approval::ApprovalAnswerer;
 use crate::events::{FetchWhy, OwnedEvent, UiEvent};
 use crate::screens::{
-    ChatAction, ChatState, LoginAction, LoginPurpose, LoginScreen, LoginStatus, PickerAction,
-    PickerPurpose, PickerScreen, PickerStatus, ProfileAction, ProfileScreen,
+    AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerPurpose, PickerScreen,
+    PickerStatus, ProfileAction, ProfileScreen, SettingsAction, SettingsPurpose, SettingsScreen,
+    SettingsSection, SkillRow,
 };
 use crate::store::ConfigStore;
 use crate::transcript::Transcript;
@@ -442,20 +443,35 @@ pub struct RunOptions {
     pub save: Option<PathBuf>,
 }
 
-/// The current screen. The login screen is boxed: it is by far the
-/// largest state (profile registry plus stored section) and `Screen`
-/// sits in the hot keypath.
+/// The current screen. The settings screen is boxed: its live providers
+/// page plus its snapshots outweigh the hot keypath's taste for a small
+/// `Screen` (the same reason the login it absorbed was boxed once).
 pub enum Screen {
-    /// No resolvable API key: log in first.
-    Login(Box<LoginScreen>),
     /// Choose a model.
     Picker(PickerScreen),
     /// Switch the profile the session runs under.
     Profile(ProfileScreen),
     /// Pick a saved session of this workspace to continue.
     Resume(crate::screens::ResumeScreen),
+    /// The settings screen: a sidebar of sections; the Providers page
+    /// carries the login flow, the appearance page the theme.
+    Settings(Box<SettingsScreen>),
     /// The conversation.
     Chat,
+}
+
+/// What a left click on the settings screen landed on. The renderer
+/// registers the rects every frame; the app matches the position of the
+/// click against them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsHit {
+    /// A sidebar row: jump to this section.
+    Sidebar(SettingsSection),
+    /// A page row (an instance, the add row, an appearance toggle):
+    /// select it and act.
+    PageRow(usize),
+    /// A provider row of the add-instance dialog.
+    DialogProvider(usize),
 }
 
 /// A side effect the runner must perform (network or task spawn).
@@ -561,15 +577,18 @@ pub struct App {
     pub icons: &'static crate::icons::Icons,
     /// The chat input state.
     pub chat: ChatState,
+    /// The clickable rects of the settings screen, re-registered by
+    /// every frame's render and matched against click positions.
+    pub settings_hits: Vec<(ratatui::layout::Rect, SettingsHit)>,
     answers: Option<ApprovalAnswerer>,
 }
 
 /// One keypress routed to the active screen.
 enum Routed {
-    Login(LoginAction),
     Picker(PickerAction),
     Profile(ProfileAction),
     Resume(crate::screens::ResumeAction),
+    Settings(SettingsAction),
     Chat(ChatAction),
 }
 
@@ -604,16 +623,15 @@ impl App {
                 status: PickerStatus::Loading,
                 ..PickerScreen::new(Vec::new(), PickerPurpose::Initial)
             }),
-            (None, _) => {
-                let profile_name = setup
-                    .options
-                    .profile
-                    .clone()
-                    .unwrap_or_else(|| "personal".to_owned());
-                Screen::Login(Box::new(
-                    LoginScreen::new().with_registry(&setup.config.profiles, &profile_name),
-                ))
-            }
+            // No usable backend: the settings' providers page is the
+            // front door now. Esc there quits — there is no chat behind
+            // it to return to.
+            (None, _) => Screen::Settings(Box::new(Self::build_settings_screen(
+                &setup.config,
+                &setup.options,
+                setup.options.profile.as_deref(),
+                SettingsPurpose::Initial,
+            ))),
         };
         Ok(Self {
             // Read before `options` moves into the struct.
@@ -658,6 +676,7 @@ impl App {
             resumed_from: None,
             should_quit: false,
             chat: ChatState::new(),
+            settings_hits: Vec::new(),
             answers: None,
         })
     }
@@ -700,20 +719,107 @@ impl App {
         self.transcript.push_notice(text);
     }
 
-    /// Opens the login screen bound to the session's profile: its
-    /// logged-in instances, ready to activate, forget, or add to. The
-    /// session stays where it is: a successful login lands in a picker
-    /// that rebuilds onto it.
-    pub fn open_login(&mut self) {
-        let profile_name = self
-            .session_profile
-            .clone()
-            .or_else(|| self.options.profile.clone())
-            .unwrap_or_else(|| "personal".to_owned());
-        self.screen = Screen::Login(Box::new(
-            crate::screens::LoginScreen::for_chat()
-                .with_registry(&self.config.profiles, &profile_name),
-        ));
+    /// Opens the settings screen on `section`. `/settings` and `/login`
+    /// both land on Providers — the login flow lives there now. The
+    /// Providers page edits the session's profile live; the other pages
+    /// read snapshots of this moment. Openable mid-turn: only the
+    /// instance actions wait for an idle session.
+    pub fn open_settings_at(&mut self, section: SettingsSection, purpose: SettingsPurpose) {
+        let mut settings = Self::build_settings_screen(
+            &self.config,
+            &self.options,
+            self.session_profile.as_deref(),
+            purpose,
+        );
+        settings.section = section;
+        settings.allowance = self.subscription.clone();
+        settings.last_turn = self.usage;
+        settings.session_cost = self.session_cost;
+        self.screen = Screen::Settings(Box::new(settings));
+    }
+
+    /// Assembles the settings screen: the live Providers page over the
+    /// session's profile, plus the other pages' snapshots.
+    fn build_settings_screen(
+        config: &Config,
+        options: &RunOptions,
+        session_profile: Option<&str>,
+        purpose: SettingsPurpose,
+    ) -> SettingsScreen {
+        let effective = config.effective(session_profile);
+        let workspace =
+            std::fs::canonicalize(&options.workspace).unwrap_or_else(|_| options.workspace.clone());
+        let global_skills = rhema_config::Config::skills_dir().ok();
+        let skills = rhema_coding_agent::skills::discover(global_skills.as_deref(), &workspace)
+            .into_iter()
+            .map(|skill| SkillRow {
+                name: skill.name,
+                description: skill.description,
+            })
+            .collect();
+        let mut settings = SettingsScreen::new(purpose);
+        settings.theme_dark = options.theme == crate::args::ThemeKind::Dark;
+        settings.icons_nerd = options.icons == crate::icons::Flavor::Nerd;
+        settings.profile = session_profile.unwrap_or("personal").to_owned();
+        settings.stored = effective;
+        settings.skills = skills;
+        settings.skills_global_dir = global_skills.map(|dir| dir.to_string_lossy().into_owned());
+        settings.skills_workspace_dir = workspace
+            .join(".rhema")
+            .join("skills")
+            .to_string_lossy()
+            .into_owned();
+        settings.config_path = rhema_config::Config::path()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned());
+        settings.workspace = workspace.to_string_lossy().into_owned();
+        settings.profile_count = config.profiles.len();
+        settings
+    }
+
+    /// Flips the theme and persists the choice: the swap is live (the
+    /// tokens change this frame), and the config records it for the next
+    /// startup. The open settings page follows, so it keeps telling the
+    /// truth.
+    fn toggle_theme(&mut self) {
+        let dark = *self.theme == crate::palette::DARK;
+        self.theme = if dark {
+            &crate::palette::LIGHT
+        } else {
+            &crate::palette::DARK
+        };
+        self.options.theme = if dark {
+            crate::args::ThemeKind::Light
+        } else {
+            crate::args::ThemeKind::Dark
+        };
+        self.config.theme = Some(if dark { "light" } else { "dark" }.to_owned());
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.theme_dark = !dark;
+        }
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+        }
+    }
+
+    /// Flips the footer's icon flavor and persists the choice, live like
+    /// the theme toggle.
+    fn toggle_icons(&mut self) {
+        let nerd = self.options.icons != crate::icons::Flavor::Nerd;
+        let flavor = if nerd {
+            crate::icons::Flavor::Nerd
+        } else {
+            crate::icons::Flavor::Unicode
+        };
+        self.options.icons = flavor;
+        self.icons = flavor.set();
+        self.config.icons = Some(if nerd { "nerd" } else { "unicode" }.to_owned());
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.icons_nerd = nerd;
+        }
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+        }
     }
 
     /// Drops the conversation: a fresh transcript and a fresh session.
@@ -959,12 +1065,16 @@ impl App {
     }
 
     /// A bracketed paste landed: into the input, newlines included —
-    /// pasting multi-line text must not fire submits. The login's
-    /// credential line takes its own, single-line shape.
+    /// pasting multi-line text must not fire submits. The add-instance
+    /// dialog's credential line takes its own, single-line shape.
     pub fn on_paste(&mut self, text: &str) {
         match &mut self.screen {
             Screen::Chat => self.chat.paste(text),
-            Screen::Login(login) => login.paste(text),
+            Screen::Settings(settings) => {
+                if let Some(dialog) = &mut settings.dialog {
+                    dialog.paste(text);
+                }
+            }
             _ => {}
         }
     }
@@ -976,6 +1086,60 @@ impl App {
             let step = crate::screens::ChatState::SCROLL_STEP as isize;
             self.chat.scroll_by(if up { step } else { -step });
         }
+    }
+
+    /// A left click landed. The settings menu answers clicks — sidebar
+    /// rows switch sections, page rows select-and-act, the add dialog's
+    /// provider rows pick — everywhere else the keyboard rules. The hit
+    /// rects are re-registered by every frame's render, so a click can
+    /// only land on what was last drawn.
+    pub fn on_click(&mut self, x: u16, y: u16) -> Vec<Effect> {
+        if !matches!(self.screen, Screen::Settings(_)) {
+            return Vec::new();
+        }
+        let hit = self
+            .settings_hits
+            .iter()
+            .find(|(area, _)| area.contains(ratatui::layout::Position::new(x, y)))
+            .map(|(_, hit)| *hit);
+        let Some(hit) = hit else {
+            return Vec::new();
+        };
+        let action = match hit {
+            SettingsHit::Sidebar(section) => {
+                let Screen::Settings(settings) = &mut self.screen else {
+                    return Vec::new();
+                };
+                if settings.dialog.is_some() {
+                    // The dialog is modal: clicks behind it do nothing.
+                    return Vec::new();
+                }
+                settings.section = section;
+                settings.row = 0;
+                return Vec::new();
+            }
+            SettingsHit::PageRow(index) => {
+                let Screen::Settings(settings) = &mut self.screen else {
+                    return Vec::new();
+                };
+                if settings.dialog.is_some() {
+                    return Vec::new();
+                }
+                settings.row = index;
+                settings.enter_action()
+            }
+            SettingsHit::DialogProvider(index) => {
+                let Screen::Settings(settings) = &mut self.screen else {
+                    return Vec::new();
+                };
+                let Some(dialog) = &mut settings.dialog else {
+                    return Vec::new();
+                };
+                dialog.select_provider_row(index);
+                return Vec::new();
+            }
+        };
+        self.perform_settings(action)
     }
 
     /// Routes one keypress to the current screen, then the app-level
@@ -993,26 +1157,17 @@ impl App {
             return Vec::new();
         }
         let routed = match &mut self.screen {
-            Screen::Login(login) => Routed::Login(login.handle_key(key)),
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
             Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
             Screen::Resume(resume) => Routed::Resume(resume.handle_key(key)),
+            Screen::Settings(settings) => Routed::Settings(settings.handle_key(key)),
             Screen::Chat => {
                 let profiles = self.palette_profiles();
                 Routed::Chat(self.chat.handle_key(key, &self.models, &profiles))
             }
         };
         match routed {
-            Routed::Login(LoginAction::Validate) => self.validate_login(),
-            Routed::Login(LoginAction::Activate) => self.activate_instance(),
-            Routed::Login(LoginAction::Remove) => self.remove_instance(),
-            Routed::Login(LoginAction::StartFlow) => {
-                vec![Effect::StartLoginFlow]
-            }
-            Routed::Login(LoginAction::CancelFlow) => {
-                self.cancel_login_flow();
-                Vec::new()
-            }
+            Routed::Settings(action) => self.perform_settings(action),
             Routed::Picker(PickerAction::Choose {
                 provider,
                 instance,
@@ -1040,24 +1195,56 @@ impl App {
                 Vec::new()
             }
             Routed::Picker(PickerAction::Retry) => self.retry_fetch(),
-            Routed::Login(LoginAction::Quit) => {
-                // With a session behind the login, Esc means "back".
-                let from_chat = matches!(
+            Routed::Picker(PickerAction::None)
+            | Routed::Profile(ProfileAction::None)
+            | Routed::Resume(crate::screens::ResumeAction::None) => Vec::new(),
+            Routed::Chat(chat_action) => self.on_chat_key(key, chat_action),
+        }
+    }
+
+    /// Performs one settings action, from a keypress or a click.
+    fn perform_settings(&mut self, action: SettingsAction) -> Vec<Effect> {
+        match action {
+            SettingsAction::None => Vec::new(),
+            SettingsAction::Back => {
+                // With a session behind the settings, Esc means "back";
+                // at the startup gate it quits.
+                if matches!(
                     &self.screen,
-                    Screen::Login(login) if login.purpose == LoginPurpose::FromChat
-                );
-                if from_chat {
+                    Screen::Settings(settings) if settings.purpose == SettingsPurpose::FromChat
+                ) {
                     self.screen = Screen::Chat;
                 } else {
                     self.should_quit = true;
                 }
                 Vec::new()
             }
-            Routed::Picker(PickerAction::None)
-            | Routed::Profile(ProfileAction::None)
-            | Routed::Resume(crate::screens::ResumeAction::None)
-            | Routed::Login(LoginAction::None) => Vec::new(),
-            Routed::Chat(chat_action) => self.on_chat_key(key, chat_action),
+            SettingsAction::ActivateInstance => self.activate_instance(),
+            SettingsAction::RemoveInstance => self.remove_instance(),
+            SettingsAction::OpenDialog => {
+                let Screen::Settings(settings) = &mut self.screen else {
+                    return Vec::new();
+                };
+                settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+                Vec::new()
+            }
+            SettingsAction::Validate => self.validate_login(),
+            SettingsAction::StartFlow => vec![Effect::StartLoginFlow],
+            SettingsAction::CloseDialog => {
+                // The dialog is already gone from the screen; dropping
+                // the handle ends the flow task (the watch receiver
+                // errors out) — what Esc and a completed flow both want.
+                self.login_cancel = None;
+                Vec::new()
+            }
+            SettingsAction::ToggleTheme => {
+                self.toggle_theme();
+                Vec::new()
+            }
+            SettingsAction::ToggleIcons => {
+                self.toggle_icons();
+                Vec::new()
+            }
         }
     }
 
@@ -1147,17 +1334,28 @@ impl App {
         }
     }
 
-    /// The login screen validated a new instance's input: fetch the
-    /// models; the fetch is the validation (a wrong key or a dead server
-    /// both surface as the fetch's error).
+    /// The add-instance dialog validated a new instance's input: fetch
+    /// the models; the fetch is the validation (a wrong key or a dead
+    /// server both surface as the fetch's error).
     fn validate_login(&mut self) -> Vec<Effect> {
-        let Screen::Login(login) = &self.screen else {
+        let pending = match &self.screen {
+            Screen::Settings(settings) => settings
+                .dialog
+                .as_ref()
+                .and_then(|dialog| dialog.pending.clone()),
+            _ => None,
+        };
+        let Some(pending) = pending else {
             return Vec::new();
         };
-        let Some(pending) = login.pending.clone() else {
-            return Vec::new();
+        let input = match &self.screen {
+            Screen::Settings(settings) => settings
+                .dialog
+                .as_ref()
+                .map(|dialog| dialog.input.trim().to_owned())
+                .unwrap_or_default(),
+            _ => String::new(),
         };
-        let input = login.input.trim().to_owned();
         let base_url = pending
             .base_url
             .clone()
@@ -1188,33 +1386,23 @@ impl App {
         })]
     }
 
-    /// Esc on the flow stage: end the flow task and return to the
-    /// instance list.
-    fn cancel_login_flow(&mut self) {
-        self.login_cancel = None;
-        if let Screen::Login(login) = &mut self.screen {
-            login.stage = crate::screens::LoginStage::Instances;
-            login.status = LoginStatus::Idle;
-            login.flow_instruction = None;
-            login.flow_waiting = None;
-        }
-    }
-
     /// Enter on a logged-in instance: it becomes the profile's active
-    /// one, the session moves to the login's tab, and the agent rebuilds
-    /// carrying the conversation over — a picker when no model is stored
-    /// yet, the chat otherwise.
+    /// one, and the agent rebuilds carrying the conversation over — a
+    /// picker when no model is stored yet, the chat otherwise.
     fn activate_instance(&mut self) -> Vec<Effect> {
-        let Screen::Login(login) = &self.screen else {
-            return Vec::new();
-        };
         if self.running {
             self.transcript
                 .push_notice("a turn is running — the switch waits for it to finish");
             return Vec::new();
         }
-        let tab = login.profile.clone();
-        let Some(name) = login.selected_instance().map(str::to_owned) else {
+        let tab = match &self.screen {
+            Screen::Settings(settings) => settings.profile.clone(),
+            _ => return Vec::new(),
+        };
+        let Some(name) = (match &self.screen {
+            Screen::Settings(settings) => settings.selected_instance().map(str::to_owned),
+            _ => None,
+        }) else {
             return Vec::new();
         };
         let Some(instance) = self
@@ -1283,15 +1471,18 @@ impl App {
         }
     }
 
-    /// `d` on a logged-in instance: forget it. When it was the session
-    /// tab's active one, the backend re-resolves from what remains —
-    /// another instance of the provider, or none.
+    /// `d` on a logged-in instance: forget it. When it was the active
+    /// one, the backend re-resolves from what remains — another instance
+    /// of the provider, or none.
     fn remove_instance(&mut self) -> Vec<Effect> {
-        let Screen::Login(login) = &self.screen else {
-            return Vec::new();
+        let tab = match &self.screen {
+            Screen::Settings(settings) => settings.profile.clone(),
+            _ => return Vec::new(),
         };
-        let tab = login.profile.clone();
-        let Some(name) = login.selected_instance().map(str::to_owned) else {
+        let Some(name) = (match &self.screen {
+            Screen::Settings(settings) => settings.selected_instance().map(str::to_owned),
+            _ => None,
+        }) else {
             return Vec::new();
         };
         self.config.set_for_profile(Some(&tab), |settings| {
@@ -1321,48 +1512,52 @@ impl App {
         }
         // Sync the screen's copy of the profile and keep the selection
         // inside the shrunken list.
-        if let Screen::Login(login) = &mut self.screen {
-            login.stored = self.config.effective(Some(&tab));
-            let rows = login.instance_rows().len();
-            if login.selected >= rows {
-                login.selected = rows.saturating_sub(1);
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.stored = self.config.effective(Some(&tab));
+            let rows = settings.instance_rows().len();
+            if settings.row >= rows {
+                settings.row = rows.saturating_sub(1);
             }
         }
         self.transcript.push_notice(&format!("forgot {name}"));
         effects
     }
 
-    /// A step of the running login flow: render it on the login screen,
-    /// and on completion validate the credential it produced through the
-    /// same fetch path a typed key takes.
+    /// A step of the running login flow: render it on the add-instance
+    /// dialog, and on completion validate the credential it produced
+    /// through the same fetch path a typed key takes.
     fn on_login_update(&mut self, update: rhema_provider::LoginUpdate) -> Vec<Effect> {
-        let Screen::Login(login) = &mut self.screen else {
+        let Screen::Settings(settings) = &mut self.screen else {
             // The flow was left behind (Esc raced a completed update):
             // drop the credential with the screen it belonged to.
             self.login_cancel = None;
             return Vec::new();
         };
+        let Some(dialog) = &mut settings.dialog else {
+            self.login_cancel = None;
+            return Vec::new();
+        };
         match update {
             rhema_provider::LoginUpdate::Instruct(instruction) => {
-                login.flow_instruction = Some(instruction);
-                login.flow_waiting = None;
+                dialog.flow_instruction = Some(instruction);
+                dialog.flow_waiting = None;
                 Vec::new()
             }
             rhema_provider::LoginUpdate::Waiting(text) => {
-                login.flow_waiting = Some(text);
+                dialog.flow_waiting = Some(text);
                 Vec::new()
             }
             rhema_provider::LoginUpdate::Failed(message) => {
-                login.status = LoginStatus::Error(message);
+                dialog.status = crate::screens::DialogStatus::Error(message);
                 // The flow task has ended; the handle can go.
                 self.login_cancel = None;
                 Vec::new()
             }
             rhema_provider::LoginUpdate::Completed(token) => {
-                login.flow_waiting = Some("fetching the model list".to_owned());
+                dialog.flow_waiting = Some("fetching the model list".to_owned());
                 self.login_cancel = None;
                 // The flow's instance was named before the flow started.
-                let instance = login.pending.as_ref().map(|p| p.name.clone());
+                let instance = dialog.pending.as_ref().map(|p| p.name.clone());
                 vec![Effect::FetchModels(FetchWhy::Login {
                     backend: Backend::Copilot { api_key: token },
                     instance,
@@ -1455,13 +1650,15 @@ impl App {
     ) -> Vec<Effect> {
         match why {
             FetchWhy::Login { backend, instance } => {
-                let Screen::Login(login) = &mut self.screen else {
-                    return Vec::new();
+                let (from_chat, tab) = match &self.screen {
+                    Screen::Settings(settings) => (
+                        settings.purpose == SettingsPurpose::FromChat,
+                        settings.profile.clone(),
+                    ),
+                    // The dialog was left behind (Esc raced a completed
+                    // fetch): the login has nowhere to land.
+                    _ => return Vec::new(),
                 };
-                // A login opened from the chat lands in a picker that also
-                // knows the way back.
-                let from_chat = login.purpose == LoginPurpose::FromChat;
-                let tab = login.profile.clone();
                 // Every login writes a named instance; a lost name (a
                 // flow that outlived its screen) falls back to the
                 // provider's own.
@@ -1497,7 +1694,13 @@ impl App {
                             );
                         });
                         if let Err(err) = self.store.save(&self.config) {
-                            login.status = LoginStatus::Error(format!("cannot save config: {err}"));
+                            if let Screen::Settings(settings) = &mut self.screen {
+                                if let Some(dialog) = &mut settings.dialog {
+                                    dialog.status = crate::screens::DialogStatus::Error(format!(
+                                        "cannot save config: {err}"
+                                    ));
+                                }
+                            }
                             return Vec::new();
                         }
                         self.session_profile = Some(tab);
@@ -1544,13 +1747,21 @@ impl App {
                         vec![Effect::FetchUsage]
                     }
                     Some(Err(message)) => {
-                        login.on_validated(&Err(message));
+                        if let Screen::Settings(settings) = &mut self.screen {
+                            if let Some(dialog) = &mut settings.dialog {
+                                dialog.on_validated(&Err(message));
+                            }
+                        }
                         Vec::new()
                     }
                     // The dispatch always spawns one backend per login;
                     // an empty result cannot arrive.
                     None => {
-                        login.on_validated(&Err("no provider answered".to_owned()));
+                        if let Screen::Settings(settings) = &mut self.screen {
+                            if let Some(dialog) = &mut settings.dialog {
+                                dialog.on_validated(&Err("no provider answered".to_owned()));
+                            }
+                        }
                         Vec::new()
                     }
                 }
@@ -2227,16 +2438,20 @@ mod tests {
         Harness { app, store }
     }
 
-    /// Drives the login screen's add flow to the credential stage for a
-    /// provider sitting at `row` on the provider list, accepting the
-    /// suggested instance name — ready to type the credential.
+    /// Drives the settings' add-instance dialog to the credential stage
+    /// for a provider sitting at `row` on the provider list, accepting
+    /// the suggested instance name — ready to type the credential. The
+    /// settings must be open (or `/login` dispatchable) first.
     fn descend_to_credential(h: &mut Harness, row: usize) -> String {
-        use crate::screens::LoginStage;
-        // Down to the add row of the instance list, then enter.
-        let Screen::Login(login) = &h.app.screen else {
-            panic!("expected the login screen");
+        use crate::screens::DialogStage;
+        if !matches!(h.app.screen, Screen::Settings(_)) {
+            crate::commands::dispatch(&mut h.app, "/login");
+        }
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
         };
-        for _ in 0..login.instance_rows().len().saturating_sub(1) {
+        // Down to the add row of the instance list, then enter.
+        for _ in 0..settings.instance_rows().len().saturating_sub(1) {
             h.app.on_key(key(KeyCode::Down));
         }
         h.app.on_key(key(KeyCode::Enter));
@@ -2244,11 +2459,12 @@ mod tests {
             h.app.on_key(key(KeyCode::Down));
         }
         h.app.on_key(key(KeyCode::Enter));
-        let Screen::Login(login) = &h.app.screen else {
-            panic!("expected the login screen");
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
         };
-        let name = login.input.clone();
-        assert_eq!(login.stage, LoginStage::NameInstance);
+        let dialog = settings.dialog.as_ref().expect("the add dialog");
+        let name = dialog.input.clone();
+        assert_eq!(dialog.stage, DialogStage::NameInstance);
         // Enter accepts the suggested name; copilot's flow starts
         // instead of asking for a key, which its own tests drive.
         h.app.on_key(key(KeyCode::Enter));
@@ -2256,22 +2472,26 @@ mod tests {
     }
 
     #[test]
-    fn a_paste_on_the_login_screen_fills_the_credential() {
+    fn a_paste_on_the_add_dialog_fills_the_credential() {
         let mut h = harness(None, None, Session::default());
-        assert!(matches!(h.app.screen, Screen::Login(_)));
+        assert!(matches!(h.app.screen, Screen::Settings(_)));
         // Descend into the credential stage first.
         descend_to_credential(&mut h, 0);
         h.app.on_paste("sk-123");
-        match &h.app.screen {
-            Screen::Login(login) => assert_eq!(login.input, "sk-123"),
-            _ => panic!("expected the login screen"),
-        }
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.dialog.as_ref().unwrap().input, "sk-123");
     }
 
     #[test]
-    fn no_resolvable_key_opens_the_login_screen() {
+    fn no_resolvable_key_opens_the_settings_gate() {
         let h = harness(None, None, Session::default());
-        assert!(matches!(h.app.screen, Screen::Login(_)));
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.section, crate::screens::SettingsSection::Providers);
+        assert_eq!(settings.purpose, SettingsPurpose::Initial);
         assert!(h.app.initial_effects().is_empty());
     }
 
@@ -2453,7 +2673,8 @@ mod tests {
         let name = descend_to_credential(&mut h, 1);
         assert_eq!(name, "llama-cpp");
         match &h.app.screen {
-            Screen::Login(login) => {
+            Screen::Settings(s) => {
+                let login = s.dialog.as_ref().unwrap();
                 assert_eq!(
                     login.pending.as_ref().map(|p| p.provider),
                     Some(crate::screens::LoginProvider::LlamaCpp)
@@ -2469,7 +2690,8 @@ mod tests {
         // blank one is accepted (an open server).
         h.app.on_key(key(KeyCode::Enter));
         match &h.app.screen {
-            Screen::Login(login) => {
+            Screen::Settings(s) => {
+                let login = s.dialog.as_ref().unwrap();
                 assert_eq!(login.input_label(), "API key: ");
             }
             _ => panic!("expected the bearer-key prompt"),
@@ -2527,7 +2749,8 @@ mod tests {
         let name = descend_to_credential(&mut h, 3);
         assert_eq!(name, "anthropic");
         match &h.app.screen {
-            Screen::Login(login) => {
+            Screen::Settings(s) => {
+                let login = s.dialog.as_ref().unwrap();
                 assert_eq!(login.input_label(), "API key: ");
             }
             _ => panic!("expected the login screen"),
@@ -2622,7 +2845,10 @@ mod tests {
             result: failed("openai", "openai-compatible api error (HTTP 401): denied"),
         });
         match &h.app.screen {
-            Screen::Login(login) => assert!(matches!(login.status, LoginStatus::Error(_))),
+            Screen::Settings(s) => assert!(matches!(
+                s.dialog.as_ref().unwrap().status,
+                crate::screens::DialogStatus::Error(_)
+            )),
             _ => panic!("a failed login must stay on the login screen"),
         }
         assert!(h.app.backend.is_none());
@@ -3173,7 +3399,7 @@ mod tests {
         });
         crate::commands::dispatch(&mut h.app, "/login");
         h.app.on_key(key(KeyCode::Char('d')));
-        assert!(matches!(h.app.screen, Screen::Login(_)));
+        assert!(matches!(h.app.screen, Screen::Settings(_)));
         let effective = h.store.load().unwrap().effective(None);
         assert!(effective.instances.is_empty());
         assert_eq!(effective.instance, None);
@@ -3250,9 +3476,9 @@ mod tests {
             result: failed("google", "gemini api error (HTTP 403): denied"),
         });
         match &h.app.screen {
-            Screen::Login(login) => assert_eq!(
-                login.status,
-                crate::screens::LoginStatus::Error("gemini api error (HTTP 403): denied".into())
+            Screen::Settings(s) => assert_eq!(
+                s.dialog.as_ref().unwrap().status,
+                crate::screens::DialogStatus::Error("gemini api error (HTTP 403): denied".into())
             ),
             _ => panic!("a failed login must stay on the login screen"),
         }
@@ -3278,8 +3504,9 @@ mod tests {
         h.app.on_key(key(KeyCode::Enter));
         h.app.on_key(key(KeyCode::Enter));
         match &h.app.screen {
-            Screen::Login(login) => {
-                assert_eq!(login.stage, crate::screens::LoginStage::Flow);
+            Screen::Settings(s) => {
+                let login = s.dialog.as_ref().unwrap();
+                assert_eq!(login.stage, crate::screens::DialogStage::Flow);
                 assert_eq!(
                     login.pending.as_ref().map(|p| p.provider),
                     Some(LoginProvider::Copilot)
@@ -3302,7 +3529,8 @@ mod tests {
                 "waiting".into(),
             )));
         match &h.app.screen {
-            Screen::Login(login) => {
+            Screen::Settings(s) => {
+                let login = s.dialog.as_ref().unwrap();
                 assert_eq!(login.flow_waiting.as_deref(), Some("waiting"));
                 assert!(login.flow_instruction.is_some());
             }
@@ -3362,9 +3590,9 @@ mod tests {
                 "authorization was denied on GitHub".into(),
             )));
         match &h.app.screen {
-            Screen::Login(login) => assert_eq!(
-                login.status,
-                crate::screens::LoginStatus::Error("authorization was denied on GitHub".into())
+            Screen::Settings(s) => assert_eq!(
+                s.dialog.as_ref().unwrap().status,
+                crate::screens::DialogStatus::Error("authorization was denied on GitHub".into())
             ),
             _ => panic!("expected the login screen"),
         }
@@ -3375,14 +3603,12 @@ mod tests {
                 .values()
                 .all(|profile| profile.instances.is_empty())
         );
-        // Esc returns to the instance list for a retry.
+        // Esc closes the dialog back onto the Providers page for a retry.
         h.app.on_key(key(KeyCode::Esc));
-        match &h.app.screen {
-            Screen::Login(login) => {
-                assert_eq!(login.stage, crate::screens::LoginStage::Instances)
-            }
-            _ => panic!("expected the login screen's instance list"),
-        }
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert!(settings.dialog.is_none());
     }
 
     #[test]
@@ -3820,15 +4046,14 @@ mod tests {
             .config
             .profiles
             .insert("work".to_owned(), rhema_config::Profile::default());
-        // Re-open the login so its registry picks up the new profile.
+        // The session moves to the work profile, whose Providers page
+        // the settings then edit, and an openrouter instance lands there.
+        crate::commands::dispatch(&mut h.app, "/profile work");
         crate::commands::dispatch(&mut h.app, "/login");
-        // Tab to the work profile on the login screen (Right cycles tabs),
-        // then add an openrouter instance there.
-        h.app.on_key(key(KeyCode::Right));
-        match &h.app.screen {
-            Screen::Login(login) => assert_eq!(login.profile, "work"),
-            _ => panic!("expected the login screen"),
-        }
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.profile, "work");
         descend_to_credential(&mut h, 2);
         for c in "work-key".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
@@ -4058,6 +4283,104 @@ mod tests {
         assert_eq!(app.session_profile.as_deref(), Some("work"));
         // The session reads work's section, so the footer shows its model.
         assert_eq!(app.effective().model.as_deref(), Some("work-model"));
+    }
+
+    #[test]
+    fn slash_settings_opens_the_live_providers_page() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/settings");
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.section, SettingsSection::Providers);
+        assert_eq!(settings.profile, "personal");
+        assert_eq!(settings.stored.provider_name().as_deref(), Some("google"));
+        assert_eq!(settings.stored.model.as_deref(), Some("m-a"));
+        let rows = settings.instance_rows();
+        assert_eq!(rows.len(), 2, "the google instance plus the add row");
+        assert!(!rows[0].add);
+        assert!(rows[0].active, "the only instance is the serving one");
+        assert!(rows[1].add);
+        assert!(!settings.workspace.is_empty(), "the About page names it");
+    }
+
+    #[test]
+    fn settings_enter_on_the_add_row_opens_the_dialog() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/settings");
+        // Down to the add row, enter: the pop-in dialog comes up.
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Enter));
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert!(settings.dialog.is_some());
+        // Esc closes the dialog, then leaves the settings for the chat.
+        h.app.on_key(key(KeyCode::Esc));
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert!(settings.dialog.is_none());
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(matches!(h.app.screen, Screen::Chat));
+    }
+
+    #[test]
+    fn settings_enter_on_an_instance_reactivates_it_and_lands_in_the_chat() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/settings");
+        // Enter on the highlighted instance re-activates it; with the
+        // model stored, the session lands back in the chat.
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(h.app.screen, Screen::Chat));
+    }
+
+    #[test]
+    fn settings_instance_activation_waits_for_a_running_turn() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/settings");
+        h.app.running = true;
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(
+            matches!(h.app.screen, Screen::Settings(_)),
+            "the switch waits for an idle session"
+        );
+        // The screen itself still answers: esc leaves.
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(matches!(h.app.screen, Screen::Chat));
+    }
+
+    #[test]
+    fn settings_toggles_the_theme_live_and_persists_it() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        assert_eq!(h.app.theme, &crate::palette::DARK);
+        crate::commands::dispatch(&mut h.app, "/settings");
+        h.app.on_key(key(KeyCode::Tab));
+        h.app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(h.app.theme, &crate::palette::LIGHT, "the swap is live");
+        assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("light"));
+        // And back.
+        h.app.on_key(key(KeyCode::Char('t')));
+        assert_eq!(h.app.theme, &crate::palette::DARK);
+        assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("dark"));
+    }
+
+    #[test]
+    fn settings_toggles_the_icon_flavor_and_persists_it() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/settings");
+        h.app.on_key(key(KeyCode::Tab));
+        h.app.on_key(key(KeyCode::Char('i')));
+        assert_eq!(h.app.options.icons, crate::icons::Flavor::Nerd);
+        assert!(
+            std::ptr::eq(h.app.icons, crate::icons::Flavor::Nerd.set()),
+            "the swap is live"
+        );
+        assert_eq!(h.store.load().unwrap().icons.as_deref(), Some("nerd"));
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert!(settings.icons_nerd, "the page follows the toggle");
     }
 
     #[test]
@@ -4340,18 +4663,67 @@ mod tests {
     }
 
     #[test]
-    fn slash_login_opens_the_login_and_esc_returns_without_quitting() {
+    fn slash_login_opens_the_providers_page_and_esc_returns_without_quitting() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/login");
-        match &h.app.screen {
-            Screen::Login(login) => {
-                assert_eq!(login.purpose, LoginPurpose::FromChat);
-            }
-            _ => panic!("expected the login screen"),
-        }
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.purpose, SettingsPurpose::FromChat);
+        assert_eq!(settings.section, SettingsSection::Providers);
         h.app.on_key(key(KeyCode::Esc));
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(!h.app.should_quit, "esc goes back, not out");
+    }
+
+    #[test]
+    fn esc_on_the_startup_settings_gate_quits() {
+        let mut h = harness(None, None, Session::default());
+        assert!(matches!(h.app.screen, Screen::Settings(_)));
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(h.app.should_quit, "no chat behind the gate: esc quits");
+    }
+
+    #[test]
+    fn a_click_on_the_sidebar_switches_sections_and_a_row_acts() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/settings");
+        // Draw one frame so the renderer registers the hit rects, then
+        // click the Appearance row (the sidebar's second section row).
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(&mut h.app, frame))
+            .unwrap();
+        let row_y = h
+            .app
+            .settings_hits
+            .iter()
+            .find_map(|(area, hit)| {
+                matches!(
+                    hit,
+                    crate::app::SettingsHit::Sidebar(crate::screens::SettingsSection::Appearance)
+                )
+                .then_some(area.y)
+            })
+            .expect("the appearance row is clickable");
+        h.app.on_click(4, row_y);
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.section, SettingsSection::Appearance);
+        // A click on a toggle row acts: the theme flips and persists.
+        let (row_x, row_y) = h
+            .app
+            .settings_hits
+            .iter()
+            .find_map(|(area, hit)| {
+                matches!(hit, crate::app::SettingsHit::PageRow(0)).then_some((area.x, area.y))
+            })
+            .expect("the theme row is clickable");
+        h.app.on_click(row_x, row_y);
+        assert_eq!(h.app.theme, &crate::palette::LIGHT);
+        assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("light"));
     }
 
     #[test]

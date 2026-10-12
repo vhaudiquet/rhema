@@ -9,8 +9,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Screen};
-use crate::screens::{PROVIDERS, PickerScreen, PickerStatus, format_tokens};
+use crate::app::{App, Screen, SettingsHit};
+use crate::screens::{PROVIDERS, PickerScreen, PickerStatus, SettingsSection, format_tokens};
 use crate::transcript::{self, pretty_args};
 use rhema_provider::ModelCard;
 use std::path::Path;
@@ -18,17 +18,19 @@ use std::path::Path;
 /// Renders one frame.
 pub fn render(app: &mut App, frame: &mut Frame) {
     let theme = app.theme;
+    let icons = app.icons;
     // The canvas: one background everywhere, the model output's. Nothing
     // in the chat screen sits on a different panel.
     frame.render_widget(
         Block::default().style(Style::default().bg(theme.sunken).fg(theme.text)),
         frame.area(),
     );
+    let mut hits = Vec::new();
     match &app.screen {
-        Screen::Login(login) => render_login(frame, login, theme),
         Screen::Picker(picker) => render_picker(frame, picker, theme),
         Screen::Profile(profile) => render_profile_picker(frame, profile, theme),
         Screen::Resume(resume) => render_resume_picker(frame, resume, theme),
+        Screen::Settings(settings) => render_settings(frame, settings, theme, icons, &mut hits),
         Screen::Chat => {
             // An error wraps, so its strip grows to the wrapped height.
             // Either strip — error or spinner — carries a blank row above
@@ -68,6 +70,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             }
         }
     }
+    // The hit rects land after the match: `settings` borrows the screen.
+    app.settings_hits = hits;
 }
 
 /// A centered box clipped to `area`.
@@ -84,13 +88,13 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
 /// and its code exceed the box's width, and a cut-off code cannot be
 /// typed — then the code, the URL, and the latest progress note. Each
 /// part wears its own tone.
-fn flow_lines(
-    login: &crate::screens::LoginScreen,
+fn dialog_flow_lines(
+    dialog: &crate::screens::AddInstanceDialog,
     theme: &Theme,
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    if let Some(instruction) = &login.flow_instruction {
+    if let Some(instruction) = &dialog.flow_instruction {
         lines.extend(
             wrap_line(&Line::from(instruction.text.clone()), width)
                 .into_iter()
@@ -120,7 +124,7 @@ fn flow_lines(
             );
         }
     }
-    if let Some(waiting) = &login.flow_waiting {
+    if let Some(waiting) = &dialog.flow_waiting {
         lines.extend(
             wrap_line(&Line::from(waiting.clone()), width)
                 .into_iter()
@@ -135,149 +139,104 @@ fn flow_lines(
     lines
 }
 
-fn render_login(frame: &mut Frame, login: &crate::screens::LoginScreen, theme: &Theme) {
+/// The add-instance dialog: a pop-in box over the Providers page with
+/// the provider list, the name and credential inputs, or the running
+/// flow. The provider rows register click targets.
+fn render_add_dialog(
+    frame: &mut Frame,
+    dialog: &crate::screens::AddInstanceDialog,
+    theme: &Theme,
+    hits: &mut Vec<(Rect, SettingsHit)>,
+) {
     // The inner width of the centered box: the text lines wrap to it.
     const INNER_WIDTH: usize = 56;
-    // Two border rows plus tabs, one row per list entry (instances on
-    // the home stage, providers while adding), input, status. The flow
-    // stage grows with its wrapped instruction instead.
-    let flow = flow_lines(login, theme, INNER_WIDTH);
-    let rows = match login.stage {
-        crate::screens::LoginStage::Instances => login.instance_rows().len(),
-        crate::screens::LoginStage::SelectProvider => PROVIDERS.len(),
-        crate::screens::LoginStage::NameInstance | crate::screens::LoginStage::EnterCredential => 1,
-        crate::screens::LoginStage::Flow => flow.len().max(1),
+    let flow = dialog_flow_lines(dialog, theme, INNER_WIDTH);
+    let rows = match dialog.stage {
+        crate::screens::DialogStage::SelectProvider => PROVIDERS.len(),
+        crate::screens::DialogStage::NameInstance
+        | crate::screens::DialogStage::EnterCredential => 1,
+        crate::screens::DialogStage::Flow => flow.len().max(1),
     } as u16;
-    let height = 2 + 1 + rows + 1 + 1;
+    let height = 2 + rows + 1 + 1;
     let area = centered(58, height, frame.area());
     frame.render_widget(Clear, area);
-    let title = format!(" rhema: sign in ({}) ", login.profile);
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(theme.border))
         .style(Style::default().bg(theme.sunken).fg(theme.text))
-        .title(title);
+        .title(" add a login ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let [tabs_area, providers_area, _input_area, status_area] = Layout::vertical([
-        Constraint::Length(1),
+    let [body_area, _input_area, status_area] = Layout::vertical([
         Constraint::Length(rows),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
     .areas(inner);
 
-    // The profile tabs: the selected tab in accent, others secondary.
-    let names = login.tab_names();
-    let tabs: Vec<Span> = names
-        .iter()
-        .enumerate()
-        .flat_map(|(index, name)| {
-            let style = if *name == login.profile {
-                Style::default().fg(theme.accent_text).bold()
-            } else {
-                Style::default().fg(theme.text3)
-            };
-            let separator = if index + 1 == names.len() {
-                Vec::new()
-            } else {
-                vec![Span::raw(" | ").fg(theme.border_strong)]
-            };
-            let mut spans = vec![Span::styled(name.clone(), style)];
-            spans.extend(separator);
-            spans
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(Line::from(tabs)), tabs_area);
-
-    match login.stage {
-        crate::screens::LoginStage::Instances => {
-            // One row per logged-in instance — the active one marked —
-            // then the add row.
-            let rows: Vec<ListItem> = login
-                .instance_rows()
-                .into_iter()
-                .enumerate()
-                .map(|(index, row)| {
-                    let selected = index == login.selected;
-                    let name_style = if selected {
-                        Style::default().fg(theme.text).bold()
-                    } else {
-                        Style::default().fg(theme.text2)
-                    };
-                    let mut spans = Vec::new();
-                    if row.add {
-                        spans.push(Span::raw("+ add a new instance…").fg(theme.text2));
-                    } else {
-                        spans.push(Span::raw("● ").fg(if row.active {
-                            theme.ok
-                        } else {
-                            theme.text3
-                        }));
-                        spans.push(Span::styled(
-                            format!("{} — {}", row.provider, row.name),
-                            name_style,
-                        ));
-                        if row.active {
-                            spans.push(Span::raw("  · active").fg(theme.text3));
-                        }
-                    }
-                    ListItem::new(Line::from(spans))
-                })
-                .collect();
-            frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
-        }
-        crate::screens::LoginStage::SelectProvider => {
-            // The provider kinds a new instance can be.
+    match dialog.stage {
+        crate::screens::DialogStage::SelectProvider => {
+            // The provider kinds a new instance can be, each row a click
+            // target; enter (or a second click's enter) confirms.
             let rows: Vec<ListItem> = PROVIDERS
                 .iter()
-                .map(|entry| {
-                    let selected = entry.kind == login.selected_provider();
+                .enumerate()
+                .map(|(index, entry)| {
+                    let selected = index == dialog.selected;
+                    hits.push((
+                        Rect {
+                            x: body_area.x,
+                            y: body_area.y + index as u16,
+                            width: body_area.width,
+                            height: 1,
+                        },
+                        SettingsHit::DialogProvider(index),
+                    ));
                     let name_style = if selected {
                         Style::default().fg(theme.text).bold()
                     } else {
                         Style::default().fg(theme.text2)
                     };
-                    ListItem::new(Line::from(vec![Span::styled(
-                        entry.name.to_string(),
-                        name_style,
-                    )]))
+                    ListItem::new(Line::from(vec![
+                        Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                        Span::styled(entry.name.to_string(), name_style),
+                    ]))
                 })
                 .collect();
-            frame.render_widget(ratatui::widgets::List::new(rows), providers_area);
+            frame.render_widget(ratatui::widgets::List::new(rows), body_area);
         }
-        crate::screens::LoginStage::NameInstance | crate::screens::LoginStage::EnterCredential => {
+        crate::screens::DialogStage::NameInstance
+        | crate::screens::DialogStage::EnterCredential => {
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::raw(login.input_label()).fg(theme.text3),
-                    Span::raw(login.masked_input()).bold(),
+                    Span::raw(dialog.input_label()).fg(theme.text3),
+                    Span::raw(dialog.masked_input()).bold(),
                 ])),
-                providers_area,
+                body_area,
             );
         }
-        crate::screens::LoginStage::Flow => {
-            frame.render_widget(Paragraph::new(flow), providers_area);
+        crate::screens::DialogStage::Flow => {
+            frame.render_widget(Paragraph::new(flow), body_area);
         }
     }
 
-    let status = match (&login.stage, &login.status) {
+    let status = match (&dialog.stage, &dialog.status) {
         // The flow stage renders its own progress; the status line stays
         // the way out.
-        (crate::screens::LoginStage::Flow, crate::screens::LoginStatus::Error(message)) => {
+        (crate::screens::DialogStage::Flow, crate::screens::DialogStatus::Error(message)) => {
             Line::from(message.clone()).fg(theme.error)
         }
-        (crate::screens::LoginStage::Flow, _) => Line::from(login.input_hint()).fg(theme.text3),
-        (_, crate::screens::LoginStatus::Idle) => Line::from(login.input_hint()).fg(theme.text3),
-        (_, crate::screens::LoginStatus::Validating) => Line::from("validating…").fg(theme.text3),
-        (_, crate::screens::LoginStatus::Error(message)) => {
+        (crate::screens::DialogStage::Flow, _) => Line::from(dialog.input_hint()).fg(theme.text3),
+        (_, crate::screens::DialogStatus::Idle) => Line::from(dialog.input_hint()).fg(theme.text3),
+        (_, crate::screens::DialogStatus::Validating) => Line::from("validating…").fg(theme.text3),
+        (_, crate::screens::DialogStatus::Error(message)) => {
             Line::from(message.clone()).fg(theme.error)
         }
     };
     frame.render_widget(Paragraph::new(status), status_area);
 }
-
 fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
     let area = frame.area();
     let block = Block::default()
@@ -473,6 +432,391 @@ fn render_resume_picker(frame: &mut Frame, screen: &crate::screens::ResumeScreen
     );
 }
 
+/// The settings screen: the sidebar of sections on the left, the selected
+/// section's page on the right, its key hints pinned to the bottom row.
+/// The settings screen: the sidebar of sections on the left, the
+/// selected section's page — titled, ruled, padded — on the right, its
+/// key hints pinned to the bottom row, and the add-instance dialog
+/// popped over it all. Sidebar rows and interactive page rows register
+/// click targets — the rects are what a click is matched against, so
+/// only what was drawn is clickable.
+fn render_settings(
+    frame: &mut Frame,
+    settings: &crate::screens::SettingsScreen,
+    theme: &Theme,
+    icons: &crate::icons::Icons,
+    hits: &mut Vec<(Rect, SettingsHit)>,
+) {
+    let area = frame.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken).fg(theme.text));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [sidebar_area, page_area] =
+        Layout::horizontal([Constraint::Length(16), Constraint::Min(24)]).areas(inner);
+    let [content_area, footer_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(page_area);
+    // The content pane wraps at its true text width: two cells of
+    // padding on each side.
+    let text_width = content_area.width.saturating_sub(4) as usize;
+
+    // The sidebar: the gear heading, a rule, then one row per section,
+    // the selected one marked and lit. Every row is a click target; the
+    // rows sit under the top padding, the heading, and the rule.
+    let rule = "─".repeat(sidebar_area.width.saturating_sub(2) as usize);
+    let mut sidebar = vec![
+        Line::from(vec![
+            Span::raw(icons.settings).fg(theme.accent_text),
+            Span::raw(" Settings").bold(),
+        ]),
+        Line::from(Span::raw(rule).fg(theme.border_strong)),
+    ];
+    for section in SettingsSection::ALL {
+        let selected = *section == settings.section;
+        let style = if selected {
+            Style::default().fg(theme.accent_text).bold()
+        } else {
+            Style::default().fg(theme.text2)
+        };
+        sidebar.push(Line::from(vec![
+            Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+            Span::styled(section.label().to_owned(), style),
+        ]));
+    }
+    for (index, section) in SettingsSection::ALL.iter().enumerate() {
+        hits.push((
+            Rect {
+                x: sidebar_area.x + 1,
+                y: sidebar_area.y + 3 + index as u16,
+                width: sidebar_area.width.saturating_sub(2),
+                height: 1,
+            },
+            SettingsHit::Sidebar(*section),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(sidebar).block(Block::default().padding(Padding::new(1, 1, 1, 0))),
+        sidebar_area,
+    );
+
+    let (page, footer, row_hits) = settings_page(settings, theme, text_width);
+    frame.render_widget(
+        Paragraph::new(page).block(Block::default().padding(Padding::new(2, 2, 1, 0))),
+        content_area,
+    );
+    // The interactive rows sit at their rendered line indices — every
+    // line the page builder produced is already wrapped to the pane's
+    // text width, and the top padding offsets them one row down.
+    for (line_index, hit) in row_hits {
+        hits.push((
+            Rect {
+                x: content_area.x + 2,
+                y: content_area.y + 1 + line_index as u16,
+                width: text_width as u16,
+                height: 1,
+            },
+            hit,
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(Line::from(footer)).block(Block::default().padding(Padding::horizontal(2))),
+        footer_area,
+    );
+
+    if let Some(dialog) = &settings.dialog {
+        render_add_dialog(frame, dialog, theme, hits);
+    }
+}
+
+/// One `label  value` row of a settings page; the label column reads
+/// dim. Wrapped to the pane, so the rendered line count is the
+/// builder's to know.
+fn settings_field(
+    label: &str,
+    value: Span<'static>,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    wrap_line(
+        &Line::from(vec![
+            Span::raw(format!("{:<12}", label)).fg(theme.text3),
+            value,
+        ]),
+        width,
+    )
+}
+
+/// A secondary note, wrapped to the pane.
+fn settings_hint(text: &str, theme: &Theme, width: usize) -> Vec<Line<'static>> {
+    wrap_line(
+        &Line::from(Span::raw(text.to_owned()).fg(theme.text3)),
+        width,
+    )
+}
+
+/// A selectable page row: the ❯ marker, the line lit when selected.
+fn settings_row(line: Line<'static>, selected: bool, theme: &Theme) -> Line<'static> {
+    if selected {
+        line.style(Style::default().bg(theme.elevated))
+    } else {
+        line
+    }
+}
+
+/// A settings page: its content lines, its footer hints, and the click
+/// targets of its interactive rows as rendered line indices — the text
+/// is wrapped to the pane's width, so the indices are exact.
+fn settings_page(
+    settings: &crate::screens::SettingsScreen,
+    theme: &Theme,
+    width: usize,
+) -> (
+    Vec<Line<'static>>,
+    Vec<Span<'static>>,
+    Vec<(usize, SettingsHit)>,
+) {
+    let footer = |hints: &str| vec![Span::raw(hints.to_owned()).fg(theme.text3)];
+    // Every page opens with its title and a rule, mirroring the
+    // sidebar's heading, then one row of air before the content. The
+    // interactive row indices count these header lines in.
+    let mut lines = vec![
+        Line::from(Span::raw(settings.section.label()).bold()),
+        Line::from(Span::raw("─".repeat(width)).fg(theme.border_strong)),
+        Line::default(),
+    ];
+    match settings.section {
+        SettingsSection::Providers => {
+            let provider_value = match settings.stored.provider_name() {
+                None => Span::raw("none — add a login below".to_owned()).fg(theme.warn),
+                Some(provider) => match &settings.stored.instance {
+                    Some(instance) => Span::raw(format!("{provider} · {instance}")).fg(theme.text),
+                    None => Span::raw(provider).fg(theme.text),
+                },
+            };
+            let model_value = match &settings.stored.model {
+                Some(model) => Span::raw(model.clone()).fg(theme.text),
+                None => Span::raw("none picked".to_owned()).fg(theme.text3),
+            };
+            lines.extend(settings_field(
+                "profile",
+                Span::raw(settings.profile.clone()).fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.extend(settings_field("provider", provider_value, theme, width));
+            lines.extend(settings_field("model", model_value, theme, width));
+            lines.push(Line::default());
+            lines.push(Line::from(Span::raw("logins").bold()));
+            // One interactive row per instance plus the add row.
+            let mut row_hits = Vec::new();
+            for (index, row) in settings.instance_rows().into_iter().enumerate() {
+                let selected = index == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                let marker = Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text);
+                let line =
+                    if row.add {
+                        Line::from(vec![
+                            marker,
+                            Span::raw("+ add a new instance…").fg(theme.text2),
+                        ])
+                    } else {
+                        Line::from(vec![
+                            marker,
+                            Span::raw("● ").fg(if row.active { theme.ok } else { theme.text3 }),
+                            Span::raw(format!("{} — {}", row.provider, row.name))
+                                .fg(if row.active { theme.text } else { theme.text2 }),
+                            if row.active {
+                                Span::raw("  · active").fg(theme.text3)
+                            } else {
+                                Span::raw("").fg(theme.text)
+                            },
+                        ])
+                    };
+                lines.push(settings_row(line, selected, theme));
+            }
+            (
+                lines,
+                footer("enter uses it · d forgets · enter on + adds · esc back"),
+                row_hits,
+            )
+        }
+        SettingsSection::Appearance => {
+            let mut row_hits = Vec::new();
+            let toggles = [
+                ("theme", if settings.theme_dark { "dark" } else { "light" }),
+                (
+                    "icons",
+                    if settings.icons_nerd {
+                        "nerd"
+                    } else {
+                        "unicode"
+                    },
+                ),
+            ];
+            for (index, (label, value)) in toggles.iter().enumerate() {
+                let selected = index == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                let line = Line::from(vec![
+                    Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                    Span::raw(format!("{:<10}", label)).fg(theme.text3),
+                    Span::raw((*value).to_owned()).fg(theme.text),
+                ]);
+                lines.push(settings_row(line, selected, theme));
+            }
+            lines.push(Line::default());
+            lines.extend(settings_hint(
+                "enter toggles · t theme · i icons",
+                theme,
+                width,
+            ));
+            lines.extend(settings_hint(
+                "applies live and is saved to config.yaml",
+                theme,
+                width,
+            ));
+            (lines, footer("enter toggle · esc back"), row_hits)
+        }
+        SettingsSection::Memory => {
+            lines.extend(wrap_line(
+                &Line::from(
+                    Span::raw(
+                        "Cross-session memory is not wired into this coding agent yet.".to_owned(),
+                    )
+                    .fg(theme.text),
+                ),
+                width,
+            ));
+            lines.push(Line::default());
+            lines.extend(settings_hint(
+                "the memory_save/search/forget tools and their MemoryStore serve the \
+                 claw daemon today; wiring them into this agent is on the roadmap",
+                theme,
+                width,
+            ));
+            (lines, footer("esc back"), Vec::new())
+        }
+        SettingsSection::Skills => {
+            lines.extend(settings_field(
+                "global",
+                Span::raw(
+                    settings
+                        .skills_global_dir
+                        .clone()
+                        .unwrap_or_else(|| "none".into()),
+                )
+                .fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.extend(settings_field(
+                "workspace",
+                Span::raw(settings.skills_workspace_dir.clone()).fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.push(Line::default());
+            if settings.skills.is_empty() {
+                lines.extend(settings_hint("no skills discovered", theme, width));
+            }
+            for skill in &settings.skills {
+                lines.extend(wrap_line(
+                    &Line::from(vec![
+                        Span::raw(format!("{} — ", skill.name)).fg(theme.text),
+                        Span::raw(skill.description.clone()).fg(theme.text3),
+                    ]),
+                    width,
+                ));
+            }
+            (lines, footer("esc back"), Vec::new())
+        }
+        SettingsSection::Usage => {
+            let allowance_value: Vec<Span<'static>> = match &settings.allowance {
+                Some((backend, Some(allowance))) => {
+                    let mut spans = vec![
+                        Span::raw(format!("{backend} · ")).fg(theme.text),
+                        Span::raw(allowance.amount.clone()).fg(theme.text),
+                    ];
+                    if !allowance.kind.is_empty() {
+                        spans.push(Span::raw(format!(" {}", allowance.kind)).fg(theme.text3));
+                    }
+                    spans
+                }
+                Some((backend, None)) => {
+                    vec![Span::raw(format!("{backend} · nothing reported")).fg(theme.text3)]
+                }
+                None => {
+                    vec![Span::raw("no allowance from this backend".to_owned()).fg(theme.text3)]
+                }
+            };
+            let cost = if settings.session_cost >= 0.01 || settings.session_cost == 0.0 {
+                format!("${:.2}", settings.session_cost)
+            } else {
+                format!("${:.4}", settings.session_cost)
+            };
+            let last_turn = match settings.last_turn {
+                Some(usage) => Span::raw(format!(
+                    "{} in · {} cached · {} out",
+                    format_tokens(Some(u64::from(usage.input_tokens))),
+                    format_tokens(Some(u64::from(usage.cached_input_tokens))),
+                    format_tokens(Some(u64::from(usage.output_tokens))),
+                ))
+                .fg(theme.text),
+                None => Span::raw("no turn finished yet".to_owned()).fg(theme.text3),
+            };
+            lines.extend(wrap_line(
+                &Line::from(
+                    std::iter::once(Span::raw(format!("{:<12}", "allowance")).fg(theme.text3))
+                        .chain(allowance_value)
+                        .collect::<Vec<_>>(),
+                ),
+                width,
+            ));
+            lines.extend(settings_field(
+                "session",
+                Span::raw(cost).fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.extend(settings_field("last turn", last_turn, theme, width));
+            (lines, footer("esc back"), Vec::new())
+        }
+        SettingsSection::About => {
+            lines.push(Line::from(
+                Span::raw(format!("rhema {}", env!("CARGO_PKG_VERSION"))).bold(),
+            ));
+            lines.extend(settings_field(
+                "repository",
+                Span::raw(env!("CARGO_PKG_REPOSITORY").to_owned()).fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.extend(settings_field(
+                "config",
+                Span::raw(settings.config_path.clone().unwrap_or_else(|| "—".into()))
+                    .fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.extend(settings_field(
+                "workspace",
+                Span::raw(settings.workspace.clone()).fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.extend(settings_field(
+                "profiles",
+                Span::raw(settings.profile_count.to_string()).fg(theme.text),
+                theme,
+                width,
+            ));
+            (lines, footer("esc back"), Vec::new())
+        }
+    }
+}
 fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let inner = Rect {
         x: area.x + 1,
@@ -1011,10 +1355,10 @@ fn thinking_preview_rows(app: &App, width: usize) -> Vec<Line<'static>> {
     rows
 }
 
-/// The buffer's completed lines: everything the buffer holds before the
-/// line still streaming. The preview reveals a line at a time, never a
-/// word at a time. Blank lines drop out — the preview has three rows
-/// to spend and a blank one carries nothing.
+/// The buffer's completed lines: everything it holds before the line
+/// still streaming. The preview reveals a line at a time, never a word
+/// at a time. Blank lines drop out — the preview has three rows to
+/// spend and a blank one carries nothing.
 fn completed_thinking(thinking: &str) -> impl Iterator<Item = &str> {
     let complete = match thinking.rfind('\n') {
         Some(end) => &thinking[..end],
@@ -1627,6 +1971,112 @@ mod tests {
         }
     }
 
+    /// The settings screen draws the whole sidebar with the selected
+    /// section marked, and the Providers page carries the live instance
+    /// list with its add row.
+    #[test]
+    fn the_settings_screen_draws_the_sidebar_and_the_page() {
+        let mut settings =
+            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        settings.profile = "personal".into();
+        settings.stored.upsert_instance(
+            "google",
+            rhema_config::ProviderInstance {
+                provider: "google".into(),
+                api_key: Some("k".into()),
+                base_url: None,
+            },
+        );
+        settings.stored.provider = Some("google".into());
+        settings.stored.instance = Some("google".into());
+
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        let rows: Vec<String> = (0..16)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        let text = rows.join("\n");
+        // The border is whole: no title breaks the top edge, and the
+        // gear heads the sidebar instead.
+        assert!(!rows[0].contains("settings"), "no border title: {text}");
+        assert!(rows[0].trim().starts_with('╭'), "full border: {text}");
+        assert!(text.contains("⚙"), "the gear heads the sidebar: {text}");
+        assert!(text.contains("Settings"), "the sidebar heading: {text}");
+        for section in SettingsSection::ALL {
+            assert!(
+                text.contains(section.label()),
+                "{} sits in the sidebar: {text}",
+                section.label()
+            );
+        }
+        assert!(text.contains("❯ Providers"), "the selection marked: {text}");
+        // The content pane opens with the section's own title over a
+        // rule, aligned with the sidebar heading's row.
+        let heading_row = rows.iter().find(|row| row.contains("⚙")).expect("gear row");
+        assert!(
+            heading_row.contains("Providers"),
+            "the content titles beside the heading: {heading_row}"
+        );
+        assert!(text.contains("profile"), "the page's rows: {text}");
+        assert!(text.contains("personal"), "{text}");
+        assert!(text.contains("google — google"), "the instance row: {text}");
+        assert!(
+            text.contains("+ add a new instance…"),
+            "the add row: {text}"
+        );
+        assert!(text.contains("enter on + adds"), "the footer hints: {text}");
+        // Every sidebar row plus the instance and add rows are clickable.
+        assert_eq!(
+            hits.len(),
+            SettingsSection::ALL.len() + 2,
+            "sidebar rows and the two page rows register: {hits:?}"
+        );
+    }
+
+    /// The add dialog pops over the settings: its provider list draws,
+    /// and its rows register as click targets while it shows.
+    #[test]
+    fn the_add_dialog_draws_its_provider_list() {
+        let mut settings =
+            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        settings.dialog = Some(crate::screens::AddInstanceDialog::new(&settings.stored));
+
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        let rows: Vec<String> = (0..16)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect()
+            })
+            .collect();
+        let text = rows.join("\n");
+        assert!(text.contains("add a login"), "the dialog title: {text}");
+        assert!(
+            text.contains("GitHub Copilot"),
+            "the provider list renders: {text}"
+        );
+        let provider_hits = hits
+            .iter()
+            .filter(|(_, hit)| matches!(hit, SettingsHit::DialogProvider(_)))
+            .count();
+        assert_eq!(provider_hits, PROVIDERS.len(), "each provider is clickable");
+    }
+
     /// The selection must be visible: the highlighted row carries the
     /// marker, the others do not.
     #[test]
@@ -1859,10 +2309,14 @@ mod scroll_tests {
             .collect()
     }
 
+    /// The providers page reports the stored key state: one row per
+    /// instance with its provider, the active one marked, the add row
+    /// closing the list.
     #[test]
-    fn login_rows_report_the_stored_key_state() {
-        let mut login = crate::screens::LoginScreen::new();
-        login.stored.instances.insert(
+    fn the_providers_page_reports_the_stored_key_state() {
+        let mut settings =
+            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        settings.stored.instances.insert(
             "home".to_owned(),
             rhema_config::ProviderInstance {
                 provider: "llama-cpp".into(),
@@ -1870,7 +2324,7 @@ mod scroll_tests {
                 base_url: Some("http://home:8080".into()),
             },
         );
-        login.stored.instances.insert(
+        settings.stored.instances.insert(
             "work sub".to_owned(),
             rhema_config::ProviderInstance {
                 provider: "copilot".into(),
@@ -1878,33 +2332,46 @@ mod scroll_tests {
                 base_url: None,
             },
         );
-        login.stored.provider = Some("copilot".into());
-        login.stored.instance = Some("work sub".into());
+        settings.stored.provider = Some("copilot".into());
+        settings.stored.instance = Some("work sub".into());
 
-        let backend = TestBackend::new(60, 14);
+        let backend = TestBackend::new(60, 17);
         let mut terminal = Terminal::new(backend).unwrap();
+        let mut hits = Vec::new();
         terminal
-            .draw(|frame| crate::ui::render_login(frame, &login, &crate::palette::DARK))
+            .draw(|frame| {
+                crate::ui::render_settings(
+                    frame,
+                    &settings,
+                    &crate::palette::DARK,
+                    &crate::icons::UNICODE,
+                    &mut hits,
+                )
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
-        // One row per instance with its provider, the active one marked;
-        // the add row closes the list.
         assert!(screen.contains("llama-cpp — home"), "{screen}");
         assert!(screen.contains("copilot — work sub"), "{screen}");
         assert_eq!(screen.matches("· active").count(), 1, "{screen}");
         assert!(screen.contains("+ add a new instance…"), "{screen}");
+        // One click target per rendered row: the three instance rows.
+        let page_rows = hits
+            .iter()
+            .filter(|(_, hit)| matches!(hit, crate::app::SettingsHit::PageRow(_)))
+            .count();
+        assert_eq!(page_rows, 3, "two instances plus the add row: {hits:?}");
     }
 
     /// The flow's instruction wraps: a device-grant URL and its code
     /// exceed the box's width, and a cut-off code cannot be typed.
     #[test]
     fn the_flow_instruction_wraps_instead_of_cutting_off() {
-        let mut login = crate::screens::LoginScreen::new();
-        login.stage = crate::screens::LoginStage::Flow;
-        login.flow_instruction = Some(rhema_provider::LoginInstruction {
+        let mut dialog = crate::screens::AddInstanceDialog::new(&rhema_config::Profile::default());
+        dialog.stage = crate::screens::DialogStage::Flow;
+        dialog.flow_instruction = Some(rhema_provider::LoginInstruction {
             text: "open https://github.com/login/device in a browser and enter the code there"
                 .into(),
             url: None,
@@ -1913,7 +2380,9 @@ mod scroll_tests {
         let backend = TestBackend::new(60, 20);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|frame| crate::ui::render_login(frame, &login, &crate::palette::DARK))
+            .draw(|frame| {
+                crate::ui::render_add_dialog(frame, &dialog, &crate::palette::DARK, &mut Vec::new())
+            })
             .unwrap();
         let buffer = terminal.backend().buffer();
         let screen: String = (0..buffer.area.height)
@@ -2026,7 +2495,9 @@ mod scroll_tests {
     }
 
     /// The allowance badge shows only the active backend's report: a
-    /// fetch from a backend the session has since left never shows.
+    /// fetch from a backend the session has since left never shows. A
+    /// money amount rides bare — the icon says the unit — while a
+    /// metered quota keeps its word.
     #[test]
     fn the_footer_shows_only_the_active_backend_allowance() {
         let mut app = chat_app();
@@ -2034,7 +2505,7 @@ mod scroll_tests {
             "openrouter",
             Some(rhema_provider::Allowance {
                 amount: "$4.12".to_owned(),
-                kind: "credit".to_owned(),
+                kind: String::new(),
             }),
         ));
         // The report names openrouter; the session rides google.
@@ -2281,61 +2752,6 @@ mod scroll_tests {
         assert!(!draw(&mut app).contains("compiling foo"));
     }
 
-    /// A running command's output earns the preview at a second line —
-    /// an instant command never flashes — or at a second of runtime,
-    /// and goes when the result lands.
-    #[test]
-    fn a_running_command_previews_its_lines_once_earned() {
-        let mut app = chat_app();
-        app.running = true;
-        app.processing = true;
-        let draw = |app: &mut App| {
-            let backend = TestBackend::new(80, 24);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal.draw(|frame| render(app, frame)).unwrap();
-            let buffer = terminal.backend().buffer();
-            (0..buffer.area.height)
-                .flat_map(|y| {
-                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
-                })
-                .collect::<String>()
-        };
-        let chunk = |app: &mut App, id: &str, text: &str| {
-            app.on_event(crate::events::UiEvent::Engine(
-                crate::events::OwnedEvent::ToolOutputDelta {
-                    id: id.into(),
-                    chunk: text.into(),
-                },
-            ));
-        };
-
-        // One fresh line: the command has not earned the screen yet.
-        chunk(&mut app, "c1", "compiling foo\n");
-        assert!(!draw(&mut app).contains("compiling foo"));
-
-        // A second line earns it immediately.
-        chunk(&mut app, "c1", "linking bar\n");
-        assert!(draw(&mut app).contains("linking bar"));
-
-        // One line earns it once the command has run long enough.
-        let mut app = chat_app();
-        app.running = true;
-        app.processing = true;
-        chunk(&mut app, "c1", "compiling foo\n");
-        app.tool_output_at =
-            Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
-        assert!(draw(&mut app).contains("compiling foo"));
-
-        // The result takes the preview back off.
-        app.on_event(crate::events::UiEvent::Engine(OwnedEvent::ToolResult {
-            id: "c1".into(),
-            content: "ok".into(),
-            is_error: false,
-            code: Some(0),
-        }));
-        assert!(!draw(&mut app).contains("compiling foo"));
-    }
-
     #[test]
     fn the_status_line_names_the_phase() {
         let mut app = chat_app();
@@ -2502,13 +2918,13 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // Ten commands, six visible rows: seven downs put the selection
-        // on /resume (the /thinking row sits mid-table now), and the
-        // window must have followed it.
-        for _ in 0..7 {
+        // Thirteen commands, six visible rows: eight downs put the
+        // selection on /resume (the /settings row sits mid-table now),
+        // and the window must have followed it.
+        for _ in 0..8 {
             app.chat.handle_key(key(KeyCode::Down), &[], &[]);
         }
-        assert_eq!(app.chat.palette_index, 7);
+        assert_eq!(app.chat.palette_index, 8);
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();

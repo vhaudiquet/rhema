@@ -554,6 +554,13 @@ async fn event_loop(
                 Event::Mouse(mouse) => match mouse.kind {
                     crossterm::event::MouseEventKind::ScrollUp => app.on_mouse_scroll(true),
                     crossterm::event::MouseEventKind::ScrollDown => app.on_mouse_scroll(false),
+                    // A click is the button's release: press-drag-release
+                    // lands once, on the row the user let go over.
+                    crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
+                        for effect in app.on_click(mouse.column, mouse.row) {
+                            dispatch(app, tx, effect);
+                        }
+                    }
                     _ => {}
                 },
                 Event::Paste(text) => app.on_paste(&text),
@@ -611,14 +618,18 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
             );
         }
         Effect::StartLoginFlow => {
-            let crate::app::Screen::Login(login) = &app.screen else {
-                return;
+            let provider = match &app.screen {
+                crate::app::Screen::Settings(settings) => settings
+                    .dialog
+                    .as_ref()
+                    .map(|dialog| dialog.selected_provider()),
+                _ => None,
             };
-            // The screen already flipped to the flow stage; the effect
+            // The dialog already flipped to the flow stage; the effect
             // only builds the flow. Copilot's device grant is the first
             // user; further flow providers join behind the same arm.
-            let flow: Box<dyn rhema_provider::InteractiveLogin> = match login.selected_provider() {
-                crate::screens::LoginProvider::Copilot => {
+            let flow: Box<dyn rhema_provider::InteractiveLogin> = match provider {
+                Some(crate::screens::LoginProvider::Copilot) => {
                     Box::new(rhema_provider_copilot::CopilotLogin::new())
                 }
                 _ => return,

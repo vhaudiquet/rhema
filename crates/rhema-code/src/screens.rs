@@ -246,6 +246,736 @@ impl ResumeScreen {
     }
 }
 
+// --- Settings ---
+
+/// A section of the settings screen, in sidebar order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsSection {
+    /// The profile's provider, model, and logged-in instances — the
+    /// login flow lives here now.
+    Providers,
+    /// The theme and the footer's icon flavor.
+    Appearance,
+    /// Cross-session memory: a status page today.
+    Memory,
+    /// The discovered skills.
+    Skills,
+    /// The allowance, the session's cost, the last turn's tokens.
+    Usage,
+    /// Version, repository, paths.
+    About,
+}
+
+impl SettingsSection {
+    /// Every section, in sidebar order.
+    pub const ALL: &'static [SettingsSection] = &[
+        SettingsSection::Providers,
+        SettingsSection::Appearance,
+        SettingsSection::Memory,
+        SettingsSection::Skills,
+        SettingsSection::Usage,
+        SettingsSection::About,
+    ];
+
+    /// The label the sidebar draws for this section.
+    pub fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Providers => "Providers",
+            SettingsSection::Appearance => "Appearance",
+            SettingsSection::Memory => "Memory",
+            SettingsSection::Skills => "Skills",
+            SettingsSection::Usage => "Usage",
+            SettingsSection::About => "About",
+        }
+    }
+}
+
+/// What Esc means on the settings screen: opened at startup with no
+/// usable backend there is no chat behind it, so leaving leaves the app;
+/// opened from the chat, it goes back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPurpose {
+    /// Startup without a usable backend: Esc quits.
+    Initial,
+    /// Opened from the chat: Esc returns there.
+    FromChat,
+}
+
+/// What one settings keypress means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsAction {
+    /// Nothing to do.
+    None,
+    /// Esc: back to the chat — or quit, when the settings are the
+    /// startup screen.
+    Back,
+    /// Enter on a logged-in instance: it becomes the active one.
+    ActivateInstance,
+    /// `d` on a logged-in instance: forget it.
+    RemoveInstance,
+    /// Enter on the add row: the add-instance dialog opens.
+    OpenDialog,
+    /// The dialog validated a typed key: the fetch is the validation.
+    Validate,
+    /// The dialog named a flow provider: the app spawns its flow.
+    StartFlow,
+    /// The dialog closed (esc at any stage); a running flow task dies
+    /// with it.
+    CloseDialog,
+    /// Toggle the theme.
+    ToggleTheme,
+    /// Toggle the icon flavor.
+    ToggleIcons,
+}
+
+/// One row of the Providers page's instance list: a stored instance, or
+/// the add row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstanceRow<'a> {
+    /// The instance's name (empty on the add row).
+    pub name: &'a str,
+    /// The provider config name (empty on the add row).
+    pub provider: &'a str,
+    /// Whether this instance's backend serves the profile.
+    pub active: bool,
+    /// Whether this is the add-a-new-instance row.
+    pub add: bool,
+}
+
+/// One discovered skill row of the Skills page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillRow {
+    /// The skill's folder name.
+    pub name: String,
+    /// The frontmatter description the model triggers on.
+    pub description: String,
+}
+
+/// What one add-dialog keypress means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogAction {
+    /// Nothing to do.
+    None,
+    /// Validate the entered key against the provider.
+    Validate,
+    /// The named provider logs in through an interactive flow: spawn it
+    /// (the stage already flipped on the dialog).
+    StartFlow,
+    /// Esc left the dialog from a quiet stage: close it.
+    Close,
+    /// Esc left the dialog while its flow ran: close it and drop the
+    /// flow task.
+    CloseCancelFlow,
+}
+
+/// Which half of the add-instance dialog is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogStage {
+    /// The provider list: arrows to choose, enter to continue.
+    SelectProvider,
+    /// The name input for the instance being added.
+    NameInstance,
+    /// The credential input — llama.cpp and OpenAI ask a URL first,
+    /// then a key.
+    EnterCredential,
+    /// An interactive flow (device code and friends) is running: its
+    /// instruction and progress render from the dialog's `flow_*`
+    /// fields, Esc cancels, and the credential arrives through the
+    /// app — the dialog never sees the protocol.
+    Flow,
+}
+
+/// Where the add-instance dialog stands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DialogStatus {
+    /// Waiting for input.
+    Idle,
+    /// A key was submitted; validation is in flight. Enter is inert
+    /// until the outcome arrives.
+    Validating,
+    /// The last validation failed; the text is the provider's error.
+    Error(String),
+}
+
+/// The instance the add flow is collecting: the provider kind, the name
+/// it will land under, and the URL captured on the credential stage's
+/// first prompt (llama.cpp's server address, OpenAI-compatible base).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingInstance {
+    /// The provider kind being logged into.
+    pub provider: LoginProvider,
+    /// The name the instance will carry in the profile.
+    pub name: String,
+    /// The URL from the first credential prompt, when the provider asks
+    /// for one.
+    pub base_url: Option<String>,
+}
+
+/// The pop-in dialog over the Providers page: the provider list for a
+/// new instance, then its name, then its key or server URL — the login
+/// flow, mounted on the settings menu.
+#[derive(Debug)]
+pub struct AddInstanceDialog {
+    /// Which half of the dialog is showing.
+    pub stage: DialogStage,
+    /// The highlighted row on the provider list.
+    pub selected: usize,
+    /// The line being typed: the instance name on `NameInstance`, the
+    /// credential on `EnterCredential`.
+    pub input: String,
+    /// Current status.
+    pub status: DialogStatus,
+    /// The instance being added, from the provider pick through
+    /// validation.
+    pub pending: Option<PendingInstance>,
+    /// The credential stage's second prompt: llama.cpp and openai ask a
+    /// URL first, then a key — when set, the input line is that key.
+    pub second_input: bool,
+    /// The flow's instruction, once the running flow has reported one
+    /// (the Flow stage renders from this).
+    pub flow_instruction: Option<rhema_provider::LoginInstruction>,
+    /// The flow's latest progress note, when it has sent one.
+    pub flow_waiting: Option<String>,
+    /// The instance names taken when the dialog opened: the name
+    /// suggestion dedupes against them. A snapshot, not a window — the
+    /// dialog is modal, nothing else can rename under it.
+    instances: BTreeMap<String, rhema_config::ProviderInstance>,
+}
+
+impl AddInstanceDialog {
+    /// A dialog at the provider list, deduping name suggestions against
+    /// the profile's stored instances.
+    pub fn new(stored: &rhema_config::Profile) -> Self {
+        Self {
+            stage: DialogStage::SelectProvider,
+            selected: 0,
+            input: String::new(),
+            status: DialogStatus::Idle,
+            pending: None,
+            second_input: false,
+            flow_instruction: None,
+            flow_waiting: None,
+            instances: stored.instances.clone(),
+        }
+    }
+
+    /// The backend the highlighted provider row configures.
+    pub fn selected_provider(&self) -> LoginProvider {
+        PROVIDERS[self.selected.min(PROVIDERS.len() - 1)].kind
+    }
+
+    /// Moves the provider-list selection to `index` (a click); out-of-
+    /// range clicks clamp to the list.
+    pub fn select_provider_row(&mut self, index: usize) {
+        if self.stage == DialogStage::SelectProvider {
+            self.selected = index.min(PROVIDERS.len() - 1);
+        }
+    }
+
+    /// Enter (or a click) on the provider list: descend into the name
+    /// input — or the interactive flow, for the providers that log in
+    /// that way.
+    pub fn choose_provider(&mut self) -> DialogAction {
+        let provider = self.selected_provider();
+        self.pending = Some(PendingInstance {
+            provider,
+            name: self.name_suggestion(provider),
+            base_url: None,
+        });
+        self.input = self.pending_name();
+        self.status = DialogStatus::Idle;
+        self.stage = DialogStage::NameInstance;
+        DialogAction::None
+    }
+
+    /// The hint under the input, per the stage.
+    pub fn input_hint(&self) -> String {
+        match self.stage {
+            DialogStage::SelectProvider => {
+                "arrows choose · enter to log in · esc cancels".to_owned()
+            }
+            DialogStage::NameInstance => {
+                "name this login · enter to continue · esc back".to_owned()
+            }
+            DialogStage::EnterCredential => {
+                let what = match (self.pending.as_ref().map(|p| p.provider), self.second_input) {
+                    (Some(LoginProvider::LlamaCpp), false) => "enter the server URL",
+                    (Some(LoginProvider::LlamaCpp), true) => {
+                        "enter the bearer key (empty for none)"
+                    }
+                    (Some(LoginProvider::OpenAi), false) => {
+                        "enter the base URL (empty for api.openai.com)"
+                    }
+                    _ => "enter the API key",
+                };
+                format!("{what} · ctrl-v paste · enter when done · esc back")
+            }
+            DialogStage::Flow => "esc cancels the login".to_owned(),
+        }
+    }
+
+    /// The input's label, per the stage's prompt.
+    pub fn input_label(&self) -> &'static str {
+        match self.stage {
+            DialogStage::NameInstance => "name: ",
+            DialogStage::EnterCredential => {
+                match (self.pending.as_ref().map(|p| p.provider), self.second_input) {
+                    (Some(LoginProvider::LlamaCpp), false) => "server URL: ",
+                    (Some(LoginProvider::OpenAi), false) => "base URL: ",
+                    _ => "API key: ",
+                }
+            }
+            _ => "",
+        }
+    }
+
+    /// The rendered echo of the input: secrets mask to bullets (no key
+    /// material ever rendered); a URL or an instance name is not secret,
+    /// so it shows.
+    pub fn masked_input(&self) -> String {
+        let secret = match self.stage {
+            DialogStage::NameInstance => false,
+            DialogStage::EnterCredential => match self.pending.as_ref().map(|p| p.provider) {
+                Some(LoginProvider::LlamaCpp) => self.second_input,
+                Some(LoginProvider::OpenAi) => self.second_input,
+                _ => true,
+            },
+            _ => true,
+        };
+        if secret {
+            "\u{2022}".repeat(self.input.chars().count())
+        } else {
+            self.input.clone()
+        }
+    }
+
+    /// A bracketed paste landed on a text input. A name, a key, or a
+    /// server URL is a single line: control characters — newlines above
+    /// all, the trailing one a stray copy loves to carry — are dropped.
+    pub fn paste(&mut self, text: &str) {
+        if matches!(
+            self.stage,
+            DialogStage::NameInstance | DialogStage::EnterCredential
+        ) {
+            self.input.extend(text.chars().filter(|c| !c.is_control()));
+        }
+    }
+
+    /// Handles one keypress.
+    pub fn handle_key(&mut self, key: KeyEvent) -> DialogAction {
+        // ctrl-v and ctrl-shift-v are paste in terminals that leave them
+        // unbound: the key reads the clipboard, carrying the text a
+        // bracketed paste would have. Only on the text lines.
+        if key.code == KeyCode::Char('v')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(
+                self.stage,
+                DialogStage::NameInstance | DialogStage::EnterCredential
+            )
+        {
+            if let Some(text) = crate::clipboard::read() {
+                self.paste(&text);
+            }
+            return DialogAction::None;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return DialogAction::None;
+        }
+        match self.stage {
+            DialogStage::SelectProvider => self.handle_provider_key(key),
+            DialogStage::NameInstance => self.handle_name_key(key),
+            DialogStage::EnterCredential => self.handle_credential_key(key),
+            DialogStage::Flow => self.handle_flow_key(key),
+        }
+    }
+
+    /// Keys on the provider list: arrows choose, enter descends into the
+    /// name input, esc closes the dialog.
+    fn handle_provider_key(&mut self, key: KeyEvent) -> DialogAction {
+        match key.code {
+            KeyCode::Up | KeyCode::Down => {
+                let count = PROVIDERS.len() as isize;
+                let step = if key.code == KeyCode::Down { 1 } else { -1 };
+                self.selected = ((self.selected as isize + step).rem_euclid(count)) as usize;
+                DialogAction::None
+            }
+            KeyCode::Enter => self.choose_provider(),
+            KeyCode::Esc => DialogAction::Close,
+            _ => DialogAction::None,
+        }
+    }
+
+    /// Keys while naming the instance: enter accepts a non-blank name
+    /// and descends into the credential input — or starts the provider's
+    /// interactive flow, for the providers that log in that way — esc
+    /// returns to the provider list.
+    fn handle_name_key(&mut self, key: KeyEvent) -> DialogAction {
+        match key.code {
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                DialogAction::None
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                DialogAction::None
+            }
+            KeyCode::Enter => {
+                if self.input.trim().is_empty() {
+                    return DialogAction::None;
+                }
+                if let Some(pending) = self.pending.as_mut() {
+                    pending.name = self.input.trim().to_owned();
+                }
+                self.input.clear();
+                if self.pending.as_ref().map(|p| p.provider) == Some(LoginProvider::Copilot) {
+                    // A flow provider has no key to type: the stage
+                    // flips and the app spawns the flow.
+                    self.status = DialogStatus::Validating;
+                    self.flow_instruction = None;
+                    self.flow_waiting = None;
+                    self.stage = DialogStage::Flow;
+                    return DialogAction::StartFlow;
+                }
+                self.second_input = false;
+                self.stage = DialogStage::EnterCredential;
+                DialogAction::None
+            }
+            KeyCode::Esc => {
+                self.input.clear();
+                self.status = DialogStatus::Idle;
+                self.pending = None;
+                self.stage = DialogStage::SelectProvider;
+                DialogAction::None
+            }
+            _ => DialogAction::None,
+        }
+    }
+
+    /// Keys while typing the credential: enter validates — after
+    /// capturing the first prompt's URL for the providers that ask one —
+    /// esc returns to the name input.
+    fn handle_credential_key(&mut self, key: KeyEvent) -> DialogAction {
+        match key.code {
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                DialogAction::None
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                DialogAction::None
+            }
+            KeyCode::Enter => {
+                let provider = self.pending.as_ref().map(|p| p.provider);
+                if !self.second_input
+                    && matches!(
+                        provider,
+                        Some(LoginProvider::LlamaCpp | LoginProvider::OpenAi)
+                    )
+                {
+                    // The URL prompt: captured, then the key is asked.
+                    if let Some(pending) = self.pending.as_mut() {
+                        pending.base_url = Some(self.input.trim().to_owned());
+                    }
+                    self.second_input = true;
+                    self.input.clear();
+                    self.status = DialogStatus::Idle;
+                    return DialogAction::None;
+                }
+                self.submit()
+            }
+            KeyCode::Esc => {
+                self.input = self.pending_name();
+                self.second_input = false;
+                self.status = DialogStatus::Idle;
+                self.stage = DialogStage::NameInstance;
+                DialogAction::None
+            }
+            _ => DialogAction::None,
+        }
+    }
+
+    /// Keys while a flow runs: esc cancels the dialog; everything else
+    /// is inert — the flow has no input of its own.
+    fn handle_flow_key(&mut self, key: KeyEvent) -> DialogAction {
+        match key.code {
+            KeyCode::Esc => DialogAction::CloseCancelFlow,
+            _ => DialogAction::None,
+        }
+    }
+
+    /// The name the pending instance will land under; empty outside the
+    /// add flow.
+    fn pending_name(&self) -> String {
+        self.pending
+            .as_ref()
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    }
+
+    /// A deduped default name for a new instance of `provider`: the
+    /// provider's own name, numbered when taken.
+    fn name_suggestion(&self, provider: LoginProvider) -> String {
+        let base = match provider {
+            LoginProvider::Google => "google",
+            LoginProvider::LlamaCpp => "llama-cpp",
+            LoginProvider::OpenRouter => "openrouter",
+            LoginProvider::Anthropic => "anthropic",
+            LoginProvider::OpenAi => "openai",
+            LoginProvider::DeepSeek => "deepseek",
+            LoginProvider::Copilot => "copilot",
+        };
+        if !self.instances.contains_key(base) {
+            return base.to_owned();
+        }
+        (2..)
+            .map(|n| format!("{base}-{n}"))
+            .find(|name| !self.instances.contains_key(name))
+            .unwrap_or_else(|| format!("{base}-{}", self.instances.len() + 1))
+    }
+
+    /// Enter on the final credential prompt: validate, unless a
+    /// validation is already in flight. A llama.cpp bearer key may be
+    /// blank (an open server); every other key must be filled.
+    fn submit(&mut self) -> DialogAction {
+        if matches!(self.status, DialogStatus::Validating) {
+            return DialogAction::None;
+        }
+        let blank = self.input.trim().is_empty();
+        let key_optional = self.second_input
+            && self.pending.as_ref().map(|p| p.provider) == Some(LoginProvider::LlamaCpp);
+        if blank && !key_optional {
+            return DialogAction::None;
+        }
+        self.status = DialogStatus::Validating;
+        DialogAction::Validate
+    }
+
+    /// Records the validation outcome: an error renders inline and
+    /// allows retrying; success leaves the transition to the app (it
+    /// needs the models and the store).
+    pub fn on_validated(&mut self, result: &Result<Vec<ModelCard>, String>) {
+        if let Err(message) = result {
+            self.status = DialogStatus::Error(message.clone());
+        }
+    }
+}
+
+/// The settings screen: a sidebar of sections on the left, the selected
+/// section's page on the right, and — over the Providers page — the
+/// pop-in dialog that adds a login. The Providers page is live (its
+/// instance list mirrors the config as it edits it); the other pages
+/// read snapshots taken at open time. The appearance toggles write both
+/// the app state and this screen so the page keeps telling the truth.
+#[derive(Debug)]
+pub struct SettingsScreen {
+    /// What Esc does here.
+    pub purpose: SettingsPurpose,
+    /// The section whose page is showing.
+    pub section: SettingsSection,
+    /// The selected row within the page's interactive rows (the
+    /// Providers page's instance list, the Appearance page's toggles).
+    pub row: usize,
+    /// Appearance: whether the dark theme is the one on screen.
+    pub theme_dark: bool,
+    /// Appearance: whether the icons are the Nerd Font set.
+    pub icons_nerd: bool,
+    // The Providers page — live.
+    /// The profile this screen edits: the session's.
+    pub profile: String,
+    /// The profile's stored settings, synced from the config whenever
+    /// the app mutates it.
+    pub stored: rhema_config::Profile,
+    /// The add-instance dialog, when it is up.
+    pub dialog: Option<AddInstanceDialog>,
+    // The Skills page's snapshot.
+    /// The discovered skills, global and workspace merged.
+    pub skills: Vec<SkillRow>,
+    /// The global skills directory, when one resolves.
+    pub skills_global_dir: Option<String>,
+    /// The workspace's own skills directory.
+    pub skills_workspace_dir: String,
+    // The Usage page's snapshot.
+    /// The active backend's subscription allowance, tagged with the
+    /// backend's config name.
+    pub allowance: Option<(&'static str, Option<rhema_provider::Allowance>)>,
+    /// The last finished turn's token accounting.
+    pub last_turn: Option<rhema_core::Usage>,
+    /// The session's accumulated cost in USD.
+    pub session_cost: f64,
+    // The About page's snapshot.
+    /// The config file's path, when one resolves.
+    pub config_path: Option<String>,
+    /// The workspace root.
+    pub workspace: String,
+    /// How many profiles the config holds.
+    pub profile_count: usize,
+}
+
+impl SettingsScreen {
+    /// A settings screen on the Providers page: dark theme, plain
+    /// icons, empty snapshots — the opener fills the rest.
+    pub fn new(purpose: SettingsPurpose) -> Self {
+        Self {
+            purpose,
+            section: SettingsSection::Providers,
+            row: 0,
+            theme_dark: true,
+            icons_nerd: false,
+            profile: "personal".to_owned(),
+            stored: rhema_config::Profile::default(),
+            dialog: None,
+            skills: Vec::new(),
+            skills_global_dir: None,
+            skills_workspace_dir: String::new(),
+            allowance: None,
+            last_turn: None,
+            session_cost: 0.0,
+            config_path: None,
+            workspace: String::new(),
+            profile_count: 0,
+        }
+    }
+
+    /// Steps the sidebar one section, wrapping at the ends. The page's
+    /// row selection restarts at the top: the rows move with the page.
+    fn step_section(&mut self, forward: bool) {
+        let count = SettingsSection::ALL.len() as isize;
+        let current = SettingsSection::ALL
+            .iter()
+            .position(|section| *section == self.section)
+            .unwrap_or(0) as isize;
+        let step = if forward { 1 } else { -1 };
+        self.section = SettingsSection::ALL[(current + step).rem_euclid(count) as usize];
+        self.row = 0;
+    }
+
+    /// The instance list as rendered rows: the stored instances in name
+    /// order, then the add row. The flag marks the instance whose
+    /// backend serves the profile.
+    pub fn instance_rows(&self) -> Vec<InstanceRow<'_>> {
+        let active = self.stored.active_instance().map(|(name, _)| name);
+        let mut rows: Vec<InstanceRow<'_>> = self
+            .stored
+            .instance_entries()
+            .into_iter()
+            .map(|(name, instance)| InstanceRow {
+                name,
+                provider: instance.provider.as_str(),
+                active: active == Some(name),
+                add: false,
+            })
+            .collect();
+        rows.push(InstanceRow {
+            name: "",
+            provider: "",
+            active: false,
+            add: true,
+        });
+        rows
+    }
+
+    /// The name of the highlighted instance row; `None` on the add row
+    /// or anywhere but the Providers page.
+    pub fn selected_instance(&self) -> Option<&str> {
+        if self.section != SettingsSection::Providers || self.dialog.is_some() {
+            return None;
+        }
+        self.instance_rows()
+            .get(self.row)
+            .and_then(|row| (!row.add).then_some(row.name))
+    }
+
+    /// How many interactive rows the page holds; zero means the arrows
+    /// have nothing to move through.
+    fn row_count(&self) -> usize {
+        match self.section {
+            SettingsSection::Providers => self.instance_rows().len(),
+            SettingsSection::Appearance => 2,
+            _ => 0,
+        }
+    }
+
+    /// Moves the row selection among the page's rows, wrapping.
+    fn move_row(&mut self, down: bool) {
+        let count = self.row_count();
+        if count == 0 {
+            return;
+        }
+        let count = count as isize;
+        let step = if down { 1 } else { -1 };
+        self.row = ((self.row as isize + step).rem_euclid(count)) as usize;
+    }
+
+    /// What Enter (or a click) does on the page's selected row.
+    pub fn enter_action(&self) -> SettingsAction {
+        match self.section {
+            SettingsSection::Providers => match self.selected_instance() {
+                Some(_) => SettingsAction::ActivateInstance,
+                None => SettingsAction::OpenDialog,
+            },
+            SettingsSection::Appearance => match self.row {
+                0 => SettingsAction::ToggleTheme,
+                _ => SettingsAction::ToggleIcons,
+            },
+            _ => SettingsAction::None,
+        }
+    }
+
+    /// Handles one keypress. The left/right arrows and tabs move the
+    /// sidebar, the vertical arrows move the page's rows, esc backs out
+    /// (dialog first, then the screen), enter acts on the selected row,
+    /// `d` forgets an instance, and the Appearance page carries `t`/`i`
+    /// as shortcuts for its toggles.
+    pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
+        if let Some(action) = self.dialog.as_mut().map(|dialog| dialog.handle_key(key)) {
+            // Esc closes the dialog from any stage; the app drops the
+            // flow task's handle when it sees the CloseDialog action.
+            if matches!(action, DialogAction::Close | DialogAction::CloseCancelFlow) {
+                self.dialog = None;
+            }
+            return match action {
+                DialogAction::None => SettingsAction::None,
+                DialogAction::Validate => SettingsAction::Validate,
+                DialogAction::StartFlow => SettingsAction::StartFlow,
+                DialogAction::Close | DialogAction::CloseCancelFlow => SettingsAction::CloseDialog,
+            };
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return SettingsAction::None;
+        }
+        match key.code {
+            KeyCode::Left | KeyCode::BackTab => {
+                self.step_section(false);
+                SettingsAction::None
+            }
+            KeyCode::Right | KeyCode::Tab => {
+                self.step_section(true);
+                SettingsAction::None
+            }
+            KeyCode::Up => {
+                self.move_row(false);
+                SettingsAction::None
+            }
+            KeyCode::Down => {
+                self.move_row(true);
+                SettingsAction::None
+            }
+            KeyCode::Esc => SettingsAction::Back,
+            KeyCode::Enter => self.enter_action(),
+            KeyCode::Char('d') if self.selected_instance().is_some() => {
+                SettingsAction::RemoveInstance
+            }
+            KeyCode::Char('t') if self.section == SettingsSection::Appearance => {
+                SettingsAction::ToggleTheme
+            }
+            KeyCode::Char('i') if self.section == SettingsSection::Appearance => {
+                SettingsAction::ToggleIcons
+            }
+            _ => SettingsAction::None,
+        }
+    }
+}
+
 // --- Slash commands ---
 
 /// The commands whose names start with the slash token in `input`, in
@@ -406,597 +1136,6 @@ pub(crate) fn format_tokens(limit: Option<u64>) -> String {
         }
         Some(limit) if limit >= 10_000 => format!("{}k", limit / 1_000),
         Some(limit) => format!("{limit}"),
-    }
-}
-
-// --- Login ---
-
-/// What Esc means on the login screen: with no session behind it, leaving
-/// the login leaves the app; opened from the chat with `/login`, it goes
-/// back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoginPurpose {
-    /// Startup without a usable backend: Esc quits.
-    Initial,
-    /// Opened from the chat via `/login`: Esc returns to the chat, and a
-    /// successful login lands in a picker that also knows the way back.
-    FromChat,
-}
-
-/// Which half of the two-stage login is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoginStage {
-    /// The profile's logged-in instances plus the add row: enter
-    /// activates, `d` forgets, enter on the add row starts a new login.
-    Instances,
-    /// The provider list for a new instance: arrows to choose, enter to
-    /// continue.
-    SelectProvider,
-    /// The name input for the instance being added.
-    NameInstance,
-    /// The credential input(s) for the chosen provider — llama.cpp and
-    /// OpenAI ask a URL first, then a key.
-    EnterCredential,
-    /// An interactive flow (device code and friends) is running: its
-    /// instruction and progress render from the screen's `flow_*`
-    /// fields, Esc cancels, and the credential arrives through the
-    /// app — the screen never sees the protocol.
-    Flow,
-}
-
-/// Where the login screen stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoginStatus {
-    /// Waiting for input.
-    Idle,
-    /// A key was submitted; validation is in flight. Enter is inert until
-    /// the outcome arrives.
-    Validating,
-    /// The last validation failed; the text is the provider's error.
-    Error(String),
-}
-
-/// One row of the instance list: a stored instance, or the add row.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InstanceRow<'a> {
-    /// The instance's name (empty on the add row).
-    pub name: &'a str,
-    /// The provider config name (empty on the add row).
-    pub provider: &'a str,
-    /// Whether this instance's backend serves the profile.
-    pub active: bool,
-    /// Whether this is the add-a-new-instance row.
-    pub add: bool,
-}
-
-/// What one login keypress means.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LoginAction {
-    /// Nothing to do.
-    None,
-    /// The highlighted instance becomes the profile's active one.
-    Activate,
-    /// The highlighted instance is forgotten.
-    Remove,
-    /// Validate the entered key against the provider.
-    Validate,
-    /// The highlighted provider logs in through an interactive flow:
-    /// spawn it (the stage transition already happened on the screen).
-    StartFlow,
-    /// Cancel the running flow; the app drops its task handle.
-    CancelFlow,
-    /// Leave the app (no key to log in with, nothing else to show).
-    Quit,
-}
-
-/// The login screen: profile tabs, the logged-in instance list, and the
-/// add-instance flow (provider, name, key or server URL), plus the
-/// validation status.
-#[derive(Debug)]
-pub struct LoginScreen {
-    /// Which half of the two-stage login is showing.
-    pub stage: LoginStage,
-    /// The highlighted row: an instance on the `Instances` stage, a
-    /// provider on `SelectProvider`.
-    pub selected: usize,
-    /// The line being typed: the instance name on `NameInstance`, the
-    /// credential on `EnterCredential`.
-    pub input: String,
-    /// Current status.
-    pub status: LoginStatus,
-    /// What Esc does here.
-    pub purpose: LoginPurpose,
-    /// The registry of profiles; the tabs cycle through its keys.
-    pub profiles: BTreeMap<String, rhema_config::Profile>,
-    /// The profile this login writes into — the selected tab.
-    pub profile: String,
-    /// The stored settings of that profile: the instance list and what
-    /// each provider row reports as registered.
-    pub stored: rhema_config::Profile,
-    /// The instance being added, from the provider pick through
-    /// validation.
-    pub pending: Option<PendingInstance>,
-    /// The credential stage's second prompt: llama.cpp and openai ask a
-    /// URL first, then a key — when set, the input line is that key.
-    pub second_input: bool,
-    /// The flow's instruction, once the running flow has reported one
-    /// (the Flow stage renders from this).
-    pub flow_instruction: Option<rhema_provider::LoginInstruction>,
-    /// The flow's latest progress note, when it has sent one.
-    pub flow_waiting: Option<String>,
-}
-
-/// The instance the add flow is collecting: the provider kind, the name
-/// it will land under, and the URL captured on the credential stage's
-/// first prompt (llama.cpp's server address, OpenAI-compatible base).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingInstance {
-    /// The provider kind being logged into.
-    pub provider: LoginProvider,
-    /// The name the instance will carry in the profile.
-    pub name: String,
-    /// The URL from the first credential prompt, when the provider asks
-    /// for one.
-    pub base_url: Option<String>,
-}
-
-impl Default for LoginScreen {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl LoginScreen {
-    /// A fresh login screen: the instance list, nothing highlighted
-    /// beyond the first row, Esc quits.
-    pub fn new() -> Self {
-        Self {
-            input: String::new(),
-            selected: 0,
-            stage: LoginStage::Instances,
-            status: LoginStatus::Idle,
-            purpose: LoginPurpose::Initial,
-            profiles: BTreeMap::new(),
-            profile: "personal".to_owned(),
-            stored: rhema_config::Profile::default(),
-            pending: None,
-            second_input: false,
-            flow_instruction: None,
-            flow_waiting: None,
-        }
-    }
-
-    /// Sets the profile registry (the tabs) and carries the stored
-    /// settings of the initially selected tab.
-    pub fn with_registry(
-        self,
-        profiles: &BTreeMap<String, rhema_config::Profile>,
-        initial: &str,
-    ) -> Self {
-        let stored = profiles.get(initial).cloned().unwrap_or_default();
-        Self {
-            profiles: profiles.clone(),
-            profile: initial.to_owned(),
-            stored,
-            ..self
-        }
-    }
-
-    /// The names of the profile tabs, sorted.
-    pub fn tab_names(&self) -> Vec<String> {
-        self.profiles.keys().cloned().collect()
-    }
-
-    /// Switches to a profile tab and carries its stored settings.
-    pub fn select_profile(&mut self, name: &str) {
-        self.profile = name.to_owned();
-        self.stored = self.profiles.get(name).cloned().unwrap_or_default();
-    }
-
-    /// A login screen opened from the chat: Esc returns there.
-    pub fn for_chat() -> Self {
-        Self {
-            purpose: LoginPurpose::FromChat,
-            ..Self::new()
-        }
-    }
-
-    /// The hint under the input, per the stage and what Esc does.
-    pub fn input_hint(&self) -> String {
-        let base = match self.stage {
-            LoginStage::Instances => {
-                "enter uses it · d forgets · enter on + adds a login".to_owned()
-            }
-            LoginStage::SelectProvider => "arrows choose · enter to log in".to_owned(),
-            LoginStage::NameInstance => "name this login · enter to continue".to_owned(),
-            LoginStage::EnterCredential => {
-                let what = match (self.pending.as_ref().map(|p| p.provider), self.second_input) {
-                    (Some(LoginProvider::LlamaCpp), false) => "the server URL",
-                    (Some(LoginProvider::LlamaCpp), true) => "the bearer key (empty for none)",
-                    (Some(LoginProvider::OpenAi), false) => {
-                        "the base URL (empty for api.openai.com)"
-                    }
-                    _ => "the API key",
-                };
-                format!("enter {what} · ctrl-v paste · enter when done")
-            }
-            LoginStage::Flow => "esc cancels the login".to_owned(),
-        };
-        match self.purpose {
-            LoginPurpose::FromChat => format!("{base} · esc back"),
-            LoginPurpose::Initial => base,
-        }
-    }
-
-    /// The backend the highlighted row configures, on the provider list.
-    pub fn selected_provider(&self) -> LoginProvider {
-        PROVIDERS[self.selected.min(PROVIDERS.len() - 1)].kind
-    }
-
-    /// The instance list as rendered rows: the stored instances in name
-    /// order, then the add row. The flag marks the instance whose
-    /// backend serves the profile.
-    pub fn instance_rows(&self) -> Vec<InstanceRow<'_>> {
-        let active = self.stored.active_instance().map(|(name, _)| name);
-        let mut rows: Vec<InstanceRow<'_>> = self
-            .stored
-            .instance_entries()
-            .into_iter()
-            .map(|(name, instance)| InstanceRow {
-                name,
-                provider: instance.provider.as_str(),
-                active: active == Some(name),
-                add: false,
-            })
-            .collect();
-        rows.push(InstanceRow {
-            name: "",
-            provider: "",
-            active: false,
-            add: true,
-        });
-        rows
-    }
-
-    /// The name of the highlighted instance row; `None` on the add row.
-    pub fn selected_instance(&self) -> Option<&str> {
-        if self.stage != LoginStage::Instances {
-            return None;
-        }
-        self.instance_rows()
-            .get(self.selected)
-            .and_then(|row| (!row.add).then_some(row.name))
-    }
-
-    /// The input's label, per the stage's prompt.
-    pub fn input_label(&self) -> &'static str {
-        match self.stage {
-            LoginStage::NameInstance => "name: ",
-            LoginStage::EnterCredential => {
-                match (self.pending.as_ref().map(|p| p.provider), self.second_input) {
-                    (Some(LoginProvider::LlamaCpp), false) => "server URL: ",
-                    (Some(LoginProvider::OpenAi), false) => "base URL: ",
-                    _ => "API key: ",
-                }
-            }
-            _ => "",
-        }
-    }
-
-    /// The rendered echo of the input: secrets mask to bullets (no key
-    /// material ever rendered); a URL or an instance name is not secret,
-    /// so it shows.
-    pub fn masked_input(&self) -> String {
-        let secret = match self.stage {
-            LoginStage::NameInstance => false,
-            LoginStage::EnterCredential => match self.pending.as_ref().map(|p| p.provider) {
-                Some(LoginProvider::LlamaCpp) => self.second_input,
-                Some(LoginProvider::OpenAi) => self.second_input,
-                _ => true,
-            },
-            _ => true,
-        };
-        if secret {
-            "\u{2022}".repeat(self.input.chars().count())
-        } else {
-            self.input.clone()
-        }
-    }
-
-    /// A bracketed paste landed on a text input. A name, a key, or a
-    /// server URL is a single line: control characters — newlines above
-    /// all, the trailing one a stray copy loves to carry — are dropped.
-    pub fn paste(&mut self, text: &str) {
-        if matches!(
-            self.stage,
-            LoginStage::NameInstance | LoginStage::EnterCredential
-        ) {
-            self.input.extend(text.chars().filter(|c| !c.is_control()));
-        }
-    }
-
-    /// Handles one keypress.
-    pub fn handle_key(&mut self, key: KeyEvent) -> LoginAction {
-        // ctrl-v and ctrl-shift-v are paste in terminals that leave them
-        // unbound: the key reads the clipboard, carrying the text a
-        // bracketed paste would have. Only on the text lines.
-        if key.code == KeyCode::Char('v')
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(
-                self.stage,
-                LoginStage::NameInstance | LoginStage::EnterCredential
-            )
-        {
-            if let Some(text) = crate::clipboard::read() {
-                self.paste(&text);
-            }
-            return LoginAction::None;
-        }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            return LoginAction::None;
-        }
-        match self.stage {
-            LoginStage::Instances => self.handle_instance_key(key),
-            LoginStage::SelectProvider => self.handle_provider_key(key),
-            LoginStage::NameInstance => self.handle_name_key(key),
-            LoginStage::EnterCredential => self.handle_credential_key(key),
-            LoginStage::Flow => self.handle_flow_key(key),
-        }
-    }
-
-    /// Keys on the instance list: arrows choose, enter activates — or
-    /// descends into the add flow on the add row — `d` forgets, the
-    /// tabs cycle profiles, esc leaves the login.
-    fn handle_instance_key(&mut self, key: KeyEvent) -> LoginAction {
-        match key.code {
-            KeyCode::Up | KeyCode::Down => {
-                let count = self.instance_rows().len();
-                self.move_selection(key.code == KeyCode::Down, count);
-                LoginAction::None
-            }
-            KeyCode::Enter => {
-                if self.selected_instance().is_some() {
-                    LoginAction::Activate
-                } else {
-                    self.input.clear();
-                    self.status = LoginStatus::Idle;
-                    self.second_input = false;
-                    self.pending = None;
-                    self.selected = 0;
-                    self.stage = LoginStage::SelectProvider;
-                    LoginAction::None
-                }
-            }
-            KeyCode::Char('d') if self.selected_instance().is_some() => LoginAction::Remove,
-            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                self.cycle_profile_tab(key.code == KeyCode::Right || key.code == KeyCode::Tab);
-                LoginAction::None
-            }
-            KeyCode::Esc => LoginAction::Quit,
-            _ => LoginAction::None,
-        }
-    }
-
-    /// Keys on the provider list: arrows choose, enter descends into the
-    /// name input, esc returns to the instance list.
-    fn handle_provider_key(&mut self, key: KeyEvent) -> LoginAction {
-        match key.code {
-            KeyCode::Up | KeyCode::Down => {
-                self.move_selection(key.code == KeyCode::Down, PROVIDERS.len());
-                LoginAction::None
-            }
-            KeyCode::Enter => {
-                let provider = self.selected_provider();
-                self.pending = Some(PendingInstance {
-                    provider,
-                    name: self.name_suggestion(provider),
-                    base_url: None,
-                });
-                self.input = self.pending_name();
-                self.status = LoginStatus::Idle;
-                self.stage = LoginStage::NameInstance;
-                LoginAction::None
-            }
-            KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
-                self.cycle_profile_tab(key.code == KeyCode::Right || key.code == KeyCode::Tab);
-                LoginAction::None
-            }
-            KeyCode::Esc => {
-                self.status = LoginStatus::Idle;
-                self.selected = 0;
-                self.stage = LoginStage::Instances;
-                LoginAction::None
-            }
-            _ => LoginAction::None,
-        }
-    }
-
-    /// Keys while naming the instance: enter accepts a non-blank name and
-    /// descends into the credential input — or starts the provider's
-    /// interactive flow, for the providers that log in that way — esc
-    /// returns to the provider list.
-    fn handle_name_key(&mut self, key: KeyEvent) -> LoginAction {
-        match key.code {
-            KeyCode::Char(c) => {
-                self.input.push(c);
-                LoginAction::None
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
-                LoginAction::None
-            }
-            KeyCode::Enter => {
-                if self.input.trim().is_empty() {
-                    return LoginAction::None;
-                }
-                if let Some(pending) = self.pending.as_mut() {
-                    pending.name = self.input.trim().to_owned();
-                }
-                self.input.clear();
-                if self.pending.as_ref().map(|p| p.provider) == Some(LoginProvider::Copilot) {
-                    // A flow provider has no key to type: the stage
-                    // flips and the app spawns the flow.
-                    self.status = LoginStatus::Validating;
-                    self.flow_instruction = None;
-                    self.flow_waiting = None;
-                    self.stage = LoginStage::Flow;
-                    return LoginAction::StartFlow;
-                }
-                self.second_input = false;
-                self.stage = LoginStage::EnterCredential;
-                LoginAction::None
-            }
-            KeyCode::Esc => {
-                self.input.clear();
-                self.status = LoginStatus::Idle;
-                self.pending = None;
-                self.stage = LoginStage::SelectProvider;
-                LoginAction::None
-            }
-            _ => LoginAction::None,
-        }
-    }
-
-    /// Keys while typing the credential: enter validates — after
-    /// capturing the first prompt's URL for the providers that ask one —
-    /// esc returns to the name input.
-    fn handle_credential_key(&mut self, key: KeyEvent) -> LoginAction {
-        match key.code {
-            KeyCode::Char(c) => {
-                self.input.push(c);
-                LoginAction::None
-            }
-            KeyCode::Backspace => {
-                self.input.pop();
-                LoginAction::None
-            }
-            KeyCode::Enter => {
-                let provider = self.pending.as_ref().map(|p| p.provider);
-                if !self.second_input
-                    && matches!(
-                        provider,
-                        Some(LoginProvider::LlamaCpp | LoginProvider::OpenAi)
-                    )
-                {
-                    // The URL prompt: captured, then the key is asked.
-                    if let Some(pending) = self.pending.as_mut() {
-                        pending.base_url = Some(self.input.trim().to_owned());
-                    }
-                    self.second_input = true;
-                    self.input.clear();
-                    self.status = LoginStatus::Idle;
-                    return LoginAction::None;
-                }
-                self.submit()
-            }
-            KeyCode::Esc => {
-                self.input = self.pending_name();
-                self.second_input = false;
-                self.status = LoginStatus::Idle;
-                self.stage = LoginStage::NameInstance;
-                LoginAction::None
-            }
-            _ => LoginAction::None,
-        }
-    }
-
-    /// Keys while a flow runs: esc cancels back to the instance list;
-    /// everything else is inert — the flow has no input of its own.
-    fn handle_flow_key(&mut self, key: KeyEvent) -> LoginAction {
-        match key.code {
-            KeyCode::Esc => {
-                self.status = LoginStatus::Idle;
-                self.flow_instruction = None;
-                self.flow_waiting = None;
-                self.pending = None;
-                self.second_input = false;
-                self.selected = 0;
-                self.stage = LoginStage::Instances;
-                LoginAction::CancelFlow
-            }
-            _ => LoginAction::None,
-        }
-    }
-
-    /// The name the pending instance will land under; empty outside the
-    /// add flow.
-    fn pending_name(&self) -> String {
-        self.pending
-            .as_ref()
-            .map(|p| p.name.clone())
-            .unwrap_or_default()
-    }
-
-    /// A deduped default name for a new instance of `provider`: the
-    /// provider's own name, numbered when taken.
-    fn name_suggestion(&self, provider: LoginProvider) -> String {
-        let base = match provider {
-            LoginProvider::Google => "google",
-            LoginProvider::LlamaCpp => "llama-cpp",
-            LoginProvider::OpenRouter => "openrouter",
-            LoginProvider::Anthropic => "anthropic",
-            LoginProvider::OpenAi => "openai",
-            LoginProvider::DeepSeek => "deepseek",
-            LoginProvider::Copilot => "copilot",
-        };
-        if !self.stored.instances.contains_key(base) {
-            return base.to_owned();
-        }
-        (2..)
-            .map(|n| format!("{base}-{n}"))
-            .find(|name| !self.stored.instances.contains_key(name))
-            .unwrap_or_else(|| format!("{base}-{}", self.stored.instances.len() + 1))
-    }
-
-    /// Cycles the profile tab.
-    fn cycle_profile_tab(&mut self, forward: bool) {
-        let names: Vec<String> = self.profiles.keys().cloned().collect();
-        if names.is_empty() {
-            return;
-        }
-        let current = names
-            .iter()
-            .position(|name| *name == self.profile)
-            .unwrap_or(0);
-        let count = names.len() as isize;
-        let step = if forward { 1 } else { -1 };
-        let next = (current as isize + step).rem_euclid(count) as usize;
-        self.select_profile(&names[next]);
-        // The row count moves with the tab: restart at the top.
-        self.selected = 0;
-    }
-
-    /// Moves the selection among `count` rows, wrapping.
-    fn move_selection(&mut self, down: bool, count: usize) {
-        let count = count.max(1) as isize;
-        let step = if down { 1 } else { -1 };
-        self.selected = ((self.selected as isize + step).rem_euclid(count)) as usize;
-    }
-
-    /// Enter on the final credential prompt: validate, unless a
-    /// validation is already in flight. A llama.cpp bearer key may be
-    /// blank (an open server); every other key must be filled.
-    fn submit(&mut self) -> LoginAction {
-        if matches!(self.status, LoginStatus::Validating) {
-            return LoginAction::None;
-        }
-        let blank = self.input.trim().is_empty();
-        let key_optional = self.second_input
-            && self.pending.as_ref().map(|p| p.provider) == Some(LoginProvider::LlamaCpp);
-        if blank && !key_optional {
-            return LoginAction::None;
-        }
-        self.status = LoginStatus::Validating;
-        LoginAction::Validate
-    }
-
-    /// Records the validation outcome: an error renders inline and allows
-    /// retrying; success leaves the transition to the app (it needs the
-    /// models and the store).
-    pub fn on_validated(&mut self, result: &Result<Vec<ModelCard>, String>) {
-        if let Err(message) = result {
-            self.status = LoginStatus::Error(message.clone());
-        }
     }
 }
 
@@ -1640,164 +1779,287 @@ mod tests {
         }
     }
 
-    // --- Slash commands ---
+    // --- Settings ---
 
-    /// Every chat command: the name (with the slash) and what it does. This
-    /// table is the single source of truth for the completion palette, the
-    /// `/help` notice, and nothing else needs to list them.
-    #[test]
-    fn login_buffers_typing_and_masks_it() {
-        let mut login = LoginScreen::new();
-        // The add flow down to the credential line: add row, google's
-        // row, the suggested name.
-        login.handle_key(key(KeyCode::Enter));
-        login.handle_key(key(KeyCode::Enter));
-        login.handle_key(key(KeyCode::Enter));
-        for c in "sk-abc".chars() {
-            login.handle_key(key(KeyCode::Char(c)));
+    fn settings_screen() -> SettingsScreen {
+        let mut settings = SettingsScreen::new(SettingsPurpose::FromChat);
+        settings.profile = "personal".into();
+        settings
+    }
+
+    /// The dialog opened and descended to the credential line for the
+    /// provider at `row`, accepting the suggested name.
+    fn descend_to_credential(row: usize) -> (SettingsScreen, String) {
+        let mut settings = settings_screen();
+        settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+        for _ in 0..row {
+            settings.handle_key(key(KeyCode::Down));
         }
-        assert_eq!(login.input, "sk-abc");
-        login.handle_key(key(KeyCode::Backspace));
-        assert_eq!(login.input, "sk-ab");
+        settings.handle_key(key(KeyCode::Enter));
+        let name = settings.dialog.as_ref().unwrap().input.clone();
+        settings.handle_key(key(KeyCode::Enter));
+        (settings, name)
+    }
+
+    #[test]
+    fn settings_arrows_move_the_sidebar_and_wrap() {
+        let mut settings = settings_screen();
+        assert_eq!(settings.section, SettingsSection::Providers);
+        // The horizontal keys and tabs move the sidebar; both ends wrap.
+        settings.handle_key(key(KeyCode::Left));
         assert_eq!(
-            login.masked_input(),
-            "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"
+            settings.section,
+            SettingsSection::About,
+            "left wraps to the last section"
         );
-        assert!(!login.masked_input().contains("sk"));
+        settings.handle_key(key(KeyCode::Right));
+        assert_eq!(
+            settings.section,
+            SettingsSection::Providers,
+            "right wraps back"
+        );
+        settings.handle_key(key(KeyCode::Tab));
+        assert_eq!(settings.section, SettingsSection::Appearance);
+        settings.handle_key(key(KeyCode::Left));
+        assert_eq!(settings.section, SettingsSection::Providers);
+        // The row selection restarts with the page.
+        settings.row = 1;
+        settings.handle_key(key(KeyCode::Right));
+        assert_eq!(settings.row, 0);
     }
 
     #[test]
-    fn login_enter_with_a_blank_credential_does_nothing() {
-        let mut login = LoginScreen::new();
-        login.stage = LoginStage::EnterCredential;
-        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
-        assert_eq!(login.status, LoginStatus::Idle);
-        login.input = "   ".into();
-        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
+    fn settings_rows_move_within_the_providers_page_and_wrap() {
+        let mut settings = settings_screen();
+        settings.stored = keyed_profile("google", "g-key");
+        settings.stored.upsert_instance(
+            "openrouter",
+            rhema_config::ProviderInstance {
+                provider: "openrouter".into(),
+                api_key: Some("o-key".into()),
+                base_url: None,
+            },
+        );
+        // Rows: google, openrouter, the add row.
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(settings.row, 1);
+        for _ in 0..5 {
+            settings.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(settings.row, 0, "down wraps at the end");
+        settings.handle_key(key(KeyCode::Up));
+        assert_eq!(settings.row, 2, "up wraps to the add row");
     }
 
     #[test]
-    fn login_enter_validates_and_locks_until_the_outcome() {
-        let mut login = LoginScreen::new();
-        login.stage = LoginStage::EnterCredential;
-        login.input = " key ".into();
-        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::Validate);
-        assert_eq!(login.status, LoginStatus::Validating);
+    fn settings_enter_and_d_act_on_the_providers_rows() {
+        let mut settings = settings_screen();
+        settings.stored = keyed_profile("google", "g-key");
+        // An instance row: enter activates, d forgets.
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::ActivateInstance
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('d'))),
+            SettingsAction::RemoveInstance
+        );
+        // The add row: enter opens the dialog, d is nothing.
+        settings.row = 1;
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::OpenDialog
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('d'))),
+            SettingsAction::None
+        );
+    }
+
+    #[test]
+    fn settings_appearance_rows_toggle_and_carry_the_shortcuts() {
+        let mut settings = settings_screen();
+        settings.section = SettingsSection::Appearance;
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(settings.row, 1);
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::ToggleIcons
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('t'))),
+            SettingsAction::ToggleTheme
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('i'))),
+            SettingsAction::ToggleIcons
+        );
+    }
+
+    #[test]
+    fn settings_esc_backs_out_and_ctrl_combos_stay_with_the_app() {
+        let mut settings = settings_screen();
+        assert_eq!(settings.handle_key(key(KeyCode::Esc)), SettingsAction::Back);
+        assert_eq!(
+            settings.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
+            SettingsAction::None
+        );
+    }
+
+    #[test]
+    fn the_dialog_buffers_typing_and_masks_it() {
+        let (mut settings, _) = descend_to_credential(0);
+        for c in "sk-abc".chars() {
+            settings.handle_key(key(KeyCode::Char(c)));
+        }
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.input, "sk-abc");
+        settings.handle_key(key(KeyCode::Backspace));
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.input, "sk-ab");
+        assert_eq!(dialog.masked_input(), "\u{2022}".repeat(5));
+        assert!(!dialog.masked_input().contains("sk"));
+    }
+
+    #[test]
+    fn the_dialog_enter_with_a_blank_credential_does_nothing() {
+        let mut settings = settings_screen();
+        settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+        settings.dialog.as_mut().unwrap().stage = DialogStage::EnterCredential;
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::None
+        );
+        assert_eq!(settings.dialog.as_ref().unwrap().status, DialogStatus::Idle);
+        settings.dialog.as_mut().unwrap().input = "   ".into();
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::None
+        );
+    }
+
+    #[test]
+    fn the_dialog_enter_validates_and_locks_until_the_outcome() {
+        let (mut settings, _) = descend_to_credential(0);
+        settings.dialog.as_mut().unwrap().input = " key ".into();
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::Validate
+        );
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().status,
+            DialogStatus::Validating
+        );
         // A validation in flight swallows Enter.
-        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
-        assert_eq!(login.status, LoginStatus::Validating);
-    }
-
-    #[test]
-    fn the_copilot_row_starts_the_flow_instead_of_a_credential_input() {
-        let mut login = LoginScreen::new();
-        // The add flow down to Copilot's row, then the name stage: enter
-        // starts the flow, not a credential input.
-        login.handle_key(key(KeyCode::Enter));
-        login.selected = PROVIDERS.len() - 1;
-        assert_eq!(login.selected_provider(), LoginProvider::Copilot);
-        login.handle_key(key(KeyCode::Enter));
-        assert_eq!(login.stage, LoginStage::NameInstance);
         assert_eq!(
-            login.handle_key(key(KeyCode::Enter)),
-            LoginAction::StartFlow
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::None
         );
-        assert_eq!(login.stage, LoginStage::Flow);
-        assert_eq!(login.status, LoginStatus::Validating);
-        // A running flow swallows every key but esc.
-        assert_eq!(login.handle_key(key(KeyCode::Char('x'))), LoginAction::None);
-        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::None);
-        // Esc cancels back to the instance list, stage state cleared.
-        assert_eq!(login.handle_key(key(KeyCode::Esc)), LoginAction::CancelFlow);
-        assert_eq!(login.stage, LoginStage::Instances);
-        assert_eq!(login.status, LoginStatus::Idle);
-        assert_eq!(login.flow_instruction, None);
-        assert_eq!(login.flow_waiting, None);
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().status,
+            DialogStatus::Validating
+        );
     }
 
     #[test]
-    fn login_error_renders_inline_and_allows_retry() {
-        let mut login = LoginScreen::new();
-        login.stage = LoginStage::EnterCredential;
-        login.input = "bad-key".into();
-        login.status = LoginStatus::Validating;
-        login.on_validated(&Err("gemini api error (HTTP 403): denied".into()));
+    fn the_copilot_row_starts_the_flow_and_esc_closes_the_dialog() {
+        let mut settings = settings_screen();
+        settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+        // Down to Copilot's row, then the name stage: enter starts the
+        // flow, not a credential input.
+        settings.dialog.as_mut().unwrap().selected = PROVIDERS.len() - 1;
         assert_eq!(
-            login.status,
-            LoginStatus::Error("gemini api error (HTTP 403): denied".into())
+            settings.dialog.as_ref().unwrap().selected_provider(),
+            LoginProvider::Copilot
+        );
+        settings.handle_key(key(KeyCode::Enter));
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().stage,
+            DialogStage::NameInstance
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::StartFlow
+        );
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.stage, DialogStage::Flow);
+        assert_eq!(dialog.status, DialogStatus::Validating);
+        // A running flow swallows every key but esc.
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('x'))),
+            SettingsAction::None
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::None
+        );
+        // Esc cancels the flow and closes the dialog with it.
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Esc)),
+            SettingsAction::CloseDialog
+        );
+        assert!(settings.dialog.is_none());
+    }
+
+    #[test]
+    fn the_dialog_error_renders_inline_and_allows_retry() {
+        let (mut settings, _) = descend_to_credential(0);
+        let dialog = settings.dialog.as_mut().unwrap();
+        dialog.input = "bad-key".into();
+        dialog.status = DialogStatus::Validating;
+        dialog.on_validated(&Err("gemini api error (HTTP 403): denied".into()));
+        assert_eq!(
+            dialog.status,
+            DialogStatus::Error("gemini api error (HTTP 403): denied".into())
         );
         // Error state accepts Enter again (retry).
-        assert_eq!(login.handle_key(key(KeyCode::Enter)), LoginAction::Validate);
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::Validate
+        );
     }
 
     #[test]
-    fn tab_keys_cycle_the_profile_tabs_and_carry_the_stored_section() {
-        let mut login = LoginScreen::new().with_registry(
-            &BTreeMap::from([
-                ("personal".to_owned(), keyed_profile("google", "p-key")),
-                ("work".to_owned(), keyed_profile("openrouter", "w-key")),
-            ]),
-            "personal",
-        );
-        assert_eq!(login.profile, "personal");
-        assert_eq!(
-            login.stored.stored_provider_key("google").as_deref(),
-            Some("p-key")
-        );
-
-        login.handle_key(key(KeyCode::Tab));
-        assert_eq!(login.profile, "work");
-        assert_eq!(
-            login.stored.stored_provider_key("openrouter").as_deref(),
-            Some("w-key")
-        );
-
-        login.handle_key(key(KeyCode::Left));
-        assert_eq!(login.profile, "personal");
-    }
-
-    #[test]
-    fn login_selection_wraps_across_the_providers() {
-        let mut login = LoginScreen::new();
-        // The provider list lives behind the add row.
-        login.handle_key(key(KeyCode::Enter));
+    fn the_dialog_selection_wraps_across_the_providers() {
+        let mut settings = settings_screen();
+        settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
         for _ in 0..PROVIDERS.len() {
-            login.handle_key(key(KeyCode::Down));
+            settings.handle_key(key(KeyCode::Down));
         }
-        assert_eq!(login.selected, 0, "down wraps at the end");
-        login.handle_key(key(KeyCode::Up));
-        assert_eq!(login.selected, PROVIDERS.len() - 1, "up wraps at the start");
+        assert_eq!(settings.dialog.as_ref().unwrap().selected, 0, "down wraps");
+        settings.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().selected,
+            PROVIDERS.len() - 1,
+            "up wraps"
+        );
     }
 
     #[test]
-    fn the_new_providers_take_masked_api_keys_and_the_stored_row() {
-        // The add flow: google's row, down three to Anthropic, the
-        // suggested name, then the key.
-        let mut login = LoginScreen::new();
-        login.handle_key(key(KeyCode::Enter));
-        login.handle_key(key(KeyCode::Down));
-        login.handle_key(key(KeyCode::Down));
-        login.handle_key(key(KeyCode::Down));
-        assert_eq!(login.selected_provider(), LoginProvider::Anthropic);
-        login.handle_key(key(KeyCode::Enter));
-        login.handle_key(key(KeyCode::Enter));
-        assert_eq!(login.input_label(), "API key: ");
+    fn the_dialog_takes_a_masked_api_key_for_the_new_providers() {
+        // The add flow: down three to Anthropic, the suggested name,
+        // then the key.
+        let (mut settings, _) = descend_to_credential(3);
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.selected_provider(), LoginProvider::Anthropic);
+        assert_eq!(dialog.input_label(), "API key: ");
         for c in "sk-ant-01".chars() {
-            login.handle_key(key(KeyCode::Char(c)));
+            settings.handle_key(key(KeyCode::Char(c)));
         }
-        assert_eq!(login.input, "sk-ant-01");
-        assert_eq!(login.masked_input(), "\u{2022}".repeat(9));
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.input, "sk-ant-01");
+        assert_eq!(dialog.masked_input(), "\u{2022}".repeat(9));
         assert!(
-            !login.masked_input().contains("sk"),
+            !dialog.masked_input().contains("sk"),
             "no key material is rendered"
         );
     }
 
     #[test]
     fn the_name_suggestion_skips_taken_names() {
-        let mut login = LoginScreen::new();
+        let mut stored = rhema_config::Profile::default();
         for name in ["openai", "openai-2"] {
-            login.stored.instances.insert(
+            stored.instances.insert(
                 name.to_owned(),
                 rhema_config::ProviderInstance {
                     provider: "openai".into(),
@@ -1806,33 +2068,77 @@ mod tests {
                 },
             );
         }
-        // Down past the two stored instances to the add row, then into
-        // the provider list.
-        login.handle_key(key(KeyCode::Down));
-        login.handle_key(key(KeyCode::Down));
-        login.handle_key(key(KeyCode::Enter));
+        let mut settings = settings_screen();
+        settings.stored = stored;
+        settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+        // Down to openai's row, then into the name input.
         for _ in 0..4 {
-            login.handle_key(key(KeyCode::Down));
+            settings.handle_key(key(KeyCode::Down));
         }
-        login.handle_key(key(KeyCode::Enter));
-        assert_eq!(login.input, "openai-3");
+        settings.handle_key(key(KeyCode::Enter));
+        assert_eq!(settings.dialog.as_ref().unwrap().input, "openai-3");
         // Renaming is free: clear and type.
         for _ in 0..8 {
-            login.handle_key(key(KeyCode::Backspace));
+            settings.handle_key(key(KeyCode::Backspace));
         }
         for c in "proxy".chars() {
-            login.handle_key(key(KeyCode::Char(c)));
+            settings.handle_key(key(KeyCode::Char(c)));
         }
-        login.handle_key(key(KeyCode::Enter));
+        settings.handle_key(key(KeyCode::Enter));
+        let dialog = settings.dialog.as_ref().unwrap();
         assert_eq!(
-            login.pending.as_ref().map(|p| p.name.as_str()),
+            dialog.pending.as_ref().map(|p| p.name.as_str()),
             Some("proxy")
         );
-        assert_eq!(login.stage, LoginStage::EnterCredential);
+        assert_eq!(dialog.stage, DialogStage::EnterCredential);
         // Esc walks back to the name with it intact.
-        login.handle_key(key(KeyCode::Esc));
-        assert_eq!(login.stage, LoginStage::NameInstance);
-        assert_eq!(login.input, "proxy");
+        settings.handle_key(key(KeyCode::Esc));
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.stage, DialogStage::NameInstance);
+        assert_eq!(dialog.input, "proxy");
+    }
+
+    #[test]
+    fn the_dialog_esc_walks_back_through_the_stages_then_closes() {
+        let (mut settings, _) = descend_to_credential(0);
+        settings.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().stage,
+            DialogStage::NameInstance
+        );
+        settings.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().stage,
+            DialogStage::SelectProvider
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Esc)),
+            SettingsAction::CloseDialog
+        );
+        assert!(settings.dialog.is_none());
+    }
+
+    #[test]
+    fn a_click_can_pick_the_dialogs_provider_row() {
+        let mut settings = settings_screen();
+        settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+        settings.dialog.as_mut().unwrap().select_provider_row(3);
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.selected, 3);
+        assert_eq!(dialog.selected_provider(), LoginProvider::Anthropic);
+        // Out-of-range clicks clamp; other stages ignore them.
+        settings.dialog.as_mut().unwrap().select_provider_row(99);
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().selected,
+            PROVIDERS.len() - 1
+        );
+        settings.handle_key(key(KeyCode::Enter));
+        settings.dialog.as_mut().unwrap().select_provider_row(0);
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().stage,
+            DialogStage::NameInstance,
+            "the name stage has no rows to pick"
+        );
     }
 
     // --- Picker ---
@@ -2181,18 +2487,24 @@ mod tests {
     }
 
     #[test]
-    fn login_paste_lands_on_the_credential_line_without_control_characters() {
-        let mut login = LoginScreen::new();
-        // The list stages have no text line to fill.
-        login.paste("sk-123");
-        assert_eq!(login.input, "");
+    fn a_paste_lands_on_the_dialogs_credential_line_without_control_characters() {
+        let mut settings = settings_screen();
+        settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+        // The list stage has no text line to fill.
+        settings.dialog.as_mut().unwrap().paste("sk-123");
+        assert_eq!(settings.dialog.as_ref().unwrap().input, "");
 
         // The add flow down to the credential line.
-        login.handle_key(key(KeyCode::Enter));
-        login.handle_key(key(KeyCode::Enter));
-        login.handle_key(key(KeyCode::Enter));
-        login.paste("sk-12\n34\r\n");
-        assert_eq!(login.input, "sk-1234", "a key is a single line");
+        settings.handle_key(key(KeyCode::Enter));
+        settings.handle_key(key(KeyCode::Enter));
+        settings.handle_key(key(KeyCode::Enter));
+        settings.handle_key(key(KeyCode::Enter));
+        settings.dialog.as_mut().unwrap().paste("sk-12\n34\r\n");
+        assert_eq!(
+            settings.dialog.as_ref().unwrap().input,
+            "sk-1234",
+            "a key is a single line"
+        );
     }
 
     #[test]

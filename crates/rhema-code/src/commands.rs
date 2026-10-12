@@ -66,6 +66,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: login,
     },
     CommandSpec {
+        name: "/settings",
+        description: "providers, theme, skills, usage, about",
+        argument: Argument::None,
+        handler: settings,
+    },
+    CommandSpec {
         name: "/clear",
         description: "fresh session",
         argument: Argument::None,
@@ -274,11 +280,19 @@ fn thinking(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
 }
 
 fn login(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
-    if app.running {
-        app.push_notice("a turn is running; /login waits for it to finish");
-        return Vec::new();
-    }
-    app.open_login();
+    // The login flow lives on the settings' Providers page now.
+    app.open_settings_at(
+        crate::screens::SettingsSection::Providers,
+        crate::screens::SettingsPurpose::FromChat,
+    );
+    Vec::new()
+}
+
+fn settings(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    app.open_settings_at(
+        crate::screens::SettingsSection::Providers,
+        crate::screens::SettingsPurpose::FromChat,
+    );
     Vec::new()
 }
 

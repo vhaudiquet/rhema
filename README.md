@@ -249,10 +249,11 @@ and file in the system prompt. When a trigger applies,
 the model loads the body itself with the shell (`cat`), so skills
 need no special tool. `/skills` lists what was discovered.
 
-First launch opens the login screen: one list of the profile's
-logged-in instances (the active one marked) plus an `add a new
-instance` row. Enter uses the highlighted instance, `d` forgets it, and
-the add flow asks for a provider: Google Gemini by API key, a llama.cpp
+First launch opens the settings on the providers page (`/login` opens
+the same page mid-session): one list of the profile's logged-in
+instances (the active one marked) plus an `add a new instance` row.
+Enter uses the highlighted instance, `d` forgets it, and the add flow
+asks for a provider: Google Gemini by API key, a llama.cpp
 `llama-server` by URL (optional bearer key), or
 OpenRouter, Anthropic, OpenAI, and DeepSeek by API key (DeepSeek rides
 the generic OpenAI-compatible adapter against their
@@ -322,7 +323,8 @@ calls run auto-approved for now; command allowlists are planned.
 The TUI paints the Jadeite design system: jade-tinted dark ground,
 one green accent, status colors reserved for meaning. `theme: light` in
 config.yaml switches to the light token set for light terminals; dark
-is the design's primary.
+is the design's primary — `/settings` toggles it (and the icon flavor)
+live and writes the same key.
 
 The backend is a stored decision, not a flag: the profile's `provider`
 picks it (a `RHEMA_PROVIDER` environment variable overrides), and the
@@ -350,21 +352,29 @@ preview at a second of runtime or a second line of output; the block
 vanishes the moment the reply starts, and the trace is never stored in
 the session.
 Commands: `/help`, `/clear` or
-`/new` (fresh session), `/resume`, `/skills`, `/system` (the system
-prompt in use), `/exit`. The transcript word-wraps and scrolls (`pgup`/
+`/new` (fresh session), `/resume`, `/settings` and `/login` (the same
+screen: a sidebar of pages — providers, appearance, memory, skills,
+usage, about. The providers page manages the logins: enter uses the
+highlighted instance, `d` forgets it, and enter on the add row opens a
+pop-in dialog for the provider/name/key flow. The appearance page
+toggles the theme and icon flavor live. The menu is clickable: sidebar
+rows switch sections, page rows select and act, and the dialog's
+provider rows pick), `/skills`, `/system` (the system prompt in use),
+`/exit`. The transcript word-wraps and scrolls (`pgup`/
 `pgdn` or mouse wheel; terminal text selection works for copy-paste).
 The footer's badges are plain-Unicode icons: `⁂` names the thinking
 level, the context gauge (`◔◑◕●`) fills with the window so the fill
 is readable at a glance, `❐` prefixes the workspace folder (the
 home — and its `Documents` — trimmed away, at most three folders:
-the folder and two parents), and `◎` prefixes the subscription
+the folder and two parents), and `¤` prefixes the subscription
 allowance when the active backend reports one (prepaid balance on
 OpenRouter and DeepSeek — the amount alone, the icon says the unit —
 the premium-request quota of the plan cycle
 on Copilot; the badge refreshes with each turn and stays hidden when
 the fetch fails or the provider reports nothing). Terminals carrying
 a Nerd Font can switch to the lightbulb, database, folder, and
-credit-card glyphs with `icons: nerd` in config.yaml.
+credit-card glyphs with `icons: nerd` in config.yaml (or live from
+`/settings`).
 Flags: `--profile`, `-m/--model`, `--workspace`, `--resume`/`--save`
 (session checkpointing), `--max-steps`, `--thinking low|medium|high`
 (reasoning effort; mapped
