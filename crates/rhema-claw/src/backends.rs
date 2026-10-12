@@ -642,6 +642,7 @@ fn seed_llama_model(backend: &mut Backend, config: &crate::config::ClawConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_config::secrets::SecretStore as _;
     use rhema_core::{Message, Role, StopReason, Usage};
 
     /// A minimal scripted stand-in: registry tests never complete a turn.
@@ -818,6 +819,35 @@ mod tests {
         let backends = discover(&config, &profile, &env, &|| Vec::new(), None);
         assert_eq!(backends.len(), 1);
         assert_eq!(backends[0].kind, "llama-cpp");
+    }
+
+    #[test]
+    fn a_keychain_ref_serves_the_profile_fallback_without_a_literal() {
+        let config = test_config();
+        // The stored instance logs in through the chain: no literal, a
+        // live ref. Discovery resolves it through the store tier.
+        let mut profile = rhema_config::Profile::default();
+        profile.upsert_instance(
+            "google",
+            rhema_config::ProviderInstance {
+                provider: "google".into(),
+                api_key: None,
+                secret_ref: Some("ref-1".into()),
+                base_url: None,
+            },
+        );
+        let store = rhema_config::secrets::VolatileSecretStore::new();
+        store.set("ref-1", "chain-key").unwrap();
+        let env = |_name: &str| None;
+        let backends = discover(&config, &profile, &env, &|| Vec::new(), Some(&store));
+        assert!(
+            backends.iter().any(|b| b.kind == "google"),
+            "the keychain key builds the backend"
+        );
+        // Without the store the ref is unreadable and the kind is not
+        // constructible — the honest logged-out shape, not a guess.
+        let backends = discover(&config, &profile, &env, &|| Vec::new(), None);
+        assert!(!backends.iter().any(|b| b.kind == "google"));
     }
 
     #[test]

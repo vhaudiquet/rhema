@@ -162,7 +162,13 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
             .collect::<Vec<_>>()
     };
     let env = |name: &str| std::env::var(name).ok();
-    let backends = rhema_claw::backends::discover(config, &profile, &env, &claw_rows, None);
+    // The daemon only reads the stored rhema config, keychain tier
+    // included; it never writes it, so no migration runs here — the
+    // file's logins belong to the frontends. In a container the
+    // keychain is unreachable and the literal tier serves.
+    let secrets = rhema_config::secrets::KeyringSecretStore::new();
+    let backends =
+        rhema_claw::backends::discover(config, &profile, &env, &claw_rows, Some(&secrets));
     // The config's provider/model pair seeds the active backend when it
     // names one. When it does not, the seed is the first credential
     // discovery actually found — never a hardcoded default kind, and
