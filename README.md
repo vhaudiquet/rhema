@@ -2,10 +2,18 @@
 
 <div align="center">
 <b>ῥῆμα, "the spoken word": words that do things.</b>
+</div>
 
 <br>
 
+<div align="center">
+<a href="https://rhema.rs">
 <img src=".github/img/a1-breath-dark.png" width="100">
+
+<br>
+
+rhema.rs
+</a>
 </div>
 
 <br>
