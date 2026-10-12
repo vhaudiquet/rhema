@@ -2566,6 +2566,7 @@ dependencies = [
  "rhema-config",
  "rhema-core",
  "rhema-forge-integration",
+ "rhema-identity",
  "rhema-memory",
  "rhema-provider",
  "rhema-provider-anthropic",
@@ -2665,6 +2666,16 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "rhema-identity"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

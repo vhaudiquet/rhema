@@ -1,0 +1,22 @@
+[package]
+name = "rhema-identity"
+description = "The agent accounts layer: named accounts on services, holding one secret each, behind a use-never-read contract"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# Event payloads cross nothing here: the store is plain data. Secrets are
+# never serialized by this crate — `Account` is redacted by construction.
+serde = { workspace = true }
+# Typed public errors
+thiserror = { workspace = true }
+# The durable backend (`SqliteIdentityStore`), always bundled: no system
+# sqlite is required, so the build stays self-contained.
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"
