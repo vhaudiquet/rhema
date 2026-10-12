@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use rhema_core::{
-    Agent, AgentError, ChatParams, Content, EventSink, Message, ModelOutput, Role, Session,
-    ToolContext, ToolResult, run_turn,
+    Agent, AgentError, ChatParams, Content, EventSink, Message, ModelOutput, ModelProvider,
+    ModelRequest, ProviderError, Role, Session, ToolContext, ToolResult, async_trait, run_turn,
 };
 
 use crate::approval::Approval;
@@ -52,6 +52,36 @@ impl From<minijinja::Error> for CodingAgentError {
     }
 }
 
+/// Expands embedded pastes in user text before a request leaves
+/// (`rhema_core::paste`): the session carries the compact chip form a
+/// UI renders, the model sees only the plain text. Wrapped around
+/// every provider the agent is built with, so fresh and resumed
+/// histories expand alike.
+struct ExpandPastes {
+    inner: Arc<dyn ModelProvider>,
+}
+
+#[async_trait]
+impl ModelProvider for ExpandPastes {
+    async fn complete(
+        &self,
+        mut req: ModelRequest,
+        sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        for message in &mut req.messages {
+            if message.role != Role::User {
+                continue;
+            }
+            for content in &mut message.content {
+                if let Content::Text(text) = content {
+                    *text = rhema_core::paste::expand(text);
+                }
+            }
+        }
+        self.inner.complete(req, sink).await
+    }
+}
+
 /// A coding agent: drives [`run_turn`] over the built-in tools, one turn at
 /// a time, keeping the history in a caller-visible [`Session`].
 pub struct CodingAgent {
@@ -72,6 +102,11 @@ impl CodingAgent {
         provider: Arc<dyn rhema_core::ModelProvider>,
         config: CodingAgentConfig,
     ) -> Result<Self, CodingAgentError> {
+        // The paste expansion rides the provider seam, not the engine:
+        // the session keeps the compact form, and this one wrapper is
+        // every request path's way out.
+        let provider: Arc<dyn rhema_core::ModelProvider> =
+            Arc::new(ExpandPastes { inner: provider });
         let tools = Arc::new(CodingTools::new(config.workspace.clone()));
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
@@ -265,5 +300,78 @@ mod repair_tests {
         // And it never over-repairs.
         repair_dangling_calls(&mut session);
         assert_eq!(session.history.len(), 4);
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+    use crate::approval::AllowAll;
+    use rhema_core::{Event, StopReason, Usage};
+    use std::sync::Mutex;
+
+    /// Records the user text each request carried, then ends the turn.
+    struct Recording(Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl ModelProvider for Recording {
+        async fn complete(
+            &self,
+            req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            let mut user = String::new();
+            for message in &req.messages {
+                if message.role != Role::User {
+                    continue;
+                }
+                for content in &message.content {
+                    if let Content::Text(text) = content {
+                        user.push_str(text);
+                    }
+                }
+            }
+            self.0.lock().unwrap().push(user);
+            Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    struct NoopSink;
+
+    impl EventSink for NoopSink {
+        fn emit(&mut self, _event: Event<'_>) {}
+    }
+
+    #[tokio::test]
+    async fn the_provider_sees_pastes_expanded_and_the_session_keeps_the_chips() {
+        let payload = "l1\nl2\nl3\nl4";
+        let embedded = rhema_core::paste::embed(
+            &format!("look at {} this", rhema_core::paste::MARK),
+            &[payload.to_owned()],
+        );
+        let recording = Arc::new(Recording(Mutex::new(Vec::new())));
+        let mut agent = CodingAgent::new(
+            recording.clone(),
+            CodingAgentConfig::new("m", std::env::temp_dir()),
+        )
+        .unwrap();
+        agent
+            .turn(&embedded, &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+
+        // The session records the compact chip form.
+        assert_eq!(
+            agent.session().history[0],
+            Message::text(Role::User, embedded.clone())
+        );
+        // The provider saw the plain expansion, never the encoding.
+        let seen = recording.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], format!("look at {payload} this"));
     }
 }
