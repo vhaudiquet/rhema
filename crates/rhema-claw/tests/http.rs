@@ -1495,7 +1495,8 @@ fn discovered_registry(dir: &tempfile::TempDir) -> Arc<rhema_claw::BackendRegist
             })
             .collect::<Vec<_>>()
     };
-    let mut backends = rhema_claw::backends::discover(&cfg, &profile, &|_| None, &stored_rows);
+    let mut backends =
+        rhema_claw::backends::discover(&cfg, &profile, &|_| None, &stored_rows, None);
     backends.push(rhema_claw::Backend::headless(
         "mock",
         Arc::new(MockProvider::new([reply("on it")])),

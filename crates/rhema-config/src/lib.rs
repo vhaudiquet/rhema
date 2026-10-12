@@ -13,6 +13,14 @@
 //! llama.cpp servers, a work and a personal Copilot sub — with one of
 //! them active (`provider` + `instance`).
 //!
+//! A key lives in one of two places: the OS keychain, which the file
+//! references by an opaque `secret_ref` ([`secrets`]), or the file
+//! itself as the literal `api_key` — the fallback on machines with no
+//! reachable keychain. [`Profile::place_key`] and
+//! [`Config::migrate_secrets`] prefer the keychain and only fall back
+//! to the literal when the store refuses; resolution reads the
+//! keychain first on every tier.
+//!
 //! Environment variables (`RHEMA_PROVIDER`, `GEMINI_API_KEY`,
 //! `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
 //! `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GITHUB_COPILOT_TOKEN`) always
@@ -23,8 +31,10 @@
 #![deny(missing_docs)]
 
 pub mod privacy;
+pub mod secrets;
 
 use crate::privacy::{private_dir, private_write};
+use crate::secrets::SecretStore;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -58,8 +68,15 @@ pub struct ProviderInstance {
     /// `openrouter`, `anthropic`, `openai`, `deepseek`, or `copilot`.
     pub provider: String,
     /// The API key (the bearer key for a llama.cpp server), when the
-    /// instance needs one. Environment variables still win at use time.
+    /// instance needs one and the keychain does not hold it.
+    /// Environment variables still win at use time.
     pub api_key: Option<String>,
+    /// The keychain entry holding the key, when it is not in this
+    /// file: an opaque id under the `rhema` service, resolved through
+    /// the [`secrets`] seam. Written by [`Profile::place_key`] and
+    /// [`Config::migrate_secrets`]; a literal `api_key` and a live
+    /// `secret_ref` never hold the same key at rest.
+    pub secret_ref: Option<String>,
     /// The server base URL: the llama.cpp address, or an OpenAI-compatible
     /// endpoint's base. Unset means the provider's own default.
     pub base_url: Option<String>,
@@ -107,11 +124,20 @@ impl Profile {
         )
     }
 
-    /// The Google API key to use: `GEMINI_API_KEY`, then `GOOGLE_API_KEY`,
-    /// then the stored key of the profile's Google instance. Whitespace-only
-    /// values count as unset.
-    pub fn google_api_key(&self) -> Option<String> {
-        self.provider_key("google")
+    /// The API key `provider` serves: the matching instance's key,
+    /// environment tier included; env-only when the profile holds no
+    /// instance of it. The provider name is the adapter spelling —
+    /// `google`, `llama-cpp`, `openrouter`, `anthropic`, `openai`,
+    /// `deepseek`, `copilot`.
+    pub fn api_key(&self, provider: &str, secrets: Option<&dyn SecretStore>) -> Option<String> {
+        match self.instance_for_provider(provider) {
+            Some((_, instance)) => self.instance_api_key(instance, secrets),
+            None => resolve_key(
+                |name| std::env::var(name).ok(),
+                provider_env_names(provider),
+                None,
+            ),
+        }
     }
 
     /// The llama.cpp server URL to use: `LLAMA_CPP_URL`, then the llama
@@ -123,42 +149,6 @@ impl Profile {
             self.llama_url(),
         )
         .unwrap_or_else(|| "http://localhost:8080".to_owned())
-    }
-
-    /// The llama.cpp bearer key to use: `LLAMA_CPP_API_KEY`, then the
-    /// llama instance's key; `None` when the server is open.
-    pub fn llama_cpp_api_key(&self) -> Option<String> {
-        self.provider_key("llama-cpp")
-    }
-
-    /// The OpenRouter key to use: `OPENROUTER_API_KEY`, then the
-    /// OpenRouter instance's key.
-    pub fn openrouter_api_key(&self) -> Option<String> {
-        self.provider_key("openrouter")
-    }
-
-    /// The Anthropic key to use: `ANTHROPIC_API_KEY`, then the Anthropic
-    /// instance's key.
-    pub fn anthropic_api_key(&self) -> Option<String> {
-        self.provider_key("anthropic")
-    }
-
-    /// The OpenAI key to use: `OPENAI_API_KEY`, then the OpenAI
-    /// instance's key.
-    pub fn openai_api_key(&self) -> Option<String> {
-        self.provider_key("openai")
-    }
-
-    /// The DeepSeek key to use: `DEEPSEEK_API_KEY`, then the DeepSeek
-    /// instance's key.
-    pub fn deepseek_api_key(&self) -> Option<String> {
-        self.provider_key("deepseek")
-    }
-
-    /// The GitHub token the Copilot adapter runs on:
-    /// `GITHUB_COPILOT_TOKEN`, then the Copilot instance's token.
-    pub fn copilot_api_key(&self) -> Option<String> {
-        self.provider_key("copilot")
     }
 
     /// The OpenAI-compatible base URL of the profile's OpenAI instance:
@@ -180,15 +170,15 @@ impl Profile {
     /// Whether this profile can build a backend: it names a provider and
     /// carries the credential that provider needs (a llama.cpp server
     /// works keyless; the rest need a key, env included).
-    pub fn has_credentials(&self) -> bool {
+    pub fn has_credentials(&self, secrets: Option<&dyn SecretStore>) -> bool {
         match self.provider.as_deref() {
             Some("llama-cpp") => true,
-            Some("openrouter") => self.openrouter_api_key().is_some(),
-            Some("anthropic") => self.anthropic_api_key().is_some(),
-            Some("openai") => self.openai_api_key().is_some(),
-            Some("deepseek") => self.deepseek_api_key().is_some(),
-            Some("copilot") => self.copilot_api_key().is_some(),
-            _ => self.google_api_key().is_some(),
+            Some("openrouter") => self.api_key("openrouter", secrets).is_some(),
+            Some("anthropic") => self.api_key("anthropic", secrets).is_some(),
+            Some("openai") => self.api_key("openai", secrets).is_some(),
+            Some("deepseek") => self.api_key("deepseek", secrets).is_some(),
+            Some("copilot") => self.api_key("copilot", secrets).is_some(),
+            _ => self.api_key("google", secrets).is_some(),
         }
     }
 
@@ -252,11 +242,35 @@ impl Profile {
     }
 
     /// The stored key for `provider` without the environment tier: the
-    /// matching instance's key. Callers that run their own environment
-    /// precedence (the claw's discovery) read this instead of the
-    /// env-aware accessors.
-    pub fn stored_provider_key(&self, provider: &str) -> Option<String> {
+    /// keychain entry first, then the literal. Callers that run their
+    /// own environment precedence (the claw's discovery) read this
+    /// instead of [`Profile::api_key`].
+    pub fn stored_provider_key(
+        &self,
+        provider: &str,
+        secrets: Option<&dyn SecretStore>,
+    ) -> Option<String> {
         let (_, instance) = self.instance_for_provider(provider)?;
+        self.stored_instance_key(instance, secrets)
+    }
+
+    /// The stored key of one instance without the environment tier:
+    /// the keychain entry `secret_ref` names, then the literal. A
+    /// store that cannot be reached reads as "not in the store" — the
+    /// next tier serves, never a lost credential.
+    pub fn stored_instance_key(
+        &self,
+        instance: &ProviderInstance,
+        secrets: Option<&dyn SecretStore>,
+    ) -> Option<String> {
+        if let (Some(store), Some(id)) = (secrets, instance.secret_ref.as_deref()) {
+            if let Ok(Some(key)) = store.get(id) {
+                let trimmed = key.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_owned());
+                }
+            }
+        }
         instance
             .api_key
             .clone()
@@ -265,14 +279,54 @@ impl Profile {
     }
 
     /// The key an instance serves: the provider's environment variables
-    /// first, then the stored key. Whitespace-only values count as
-    /// unset.
-    pub fn instance_api_key(&self, instance: &ProviderInstance) -> Option<String> {
+    /// first, then the stored key — keychain, then literal.
+    /// Whitespace-only values count as unset at every tier.
+    pub fn instance_api_key(
+        &self,
+        instance: &ProviderInstance,
+        secrets: Option<&dyn SecretStore>,
+    ) -> Option<String> {
         resolve_key(
             |name| std::env::var(name).ok(),
             provider_env_names(&instance.provider),
-            instance.api_key.clone(),
+            self.stored_instance_key(instance, secrets),
         )
+    }
+
+    /// Places a just-entered key on the named instance: the keychain,
+    /// when the store accepts it — the instance then carries only its
+    /// `secret_ref` — else the literal, the shape machines without a
+    /// store have always held. `None` when no instance bears `name`.
+    pub fn place_key(
+        &mut self,
+        name: &str,
+        key: &str,
+        secrets: Option<&dyn SecretStore>,
+    ) -> Option<KeyLocation> {
+        let instance = self.instances.get_mut(name)?;
+        let trimmed = key.trim();
+        if trimmed.is_empty() || secrets.is_none() {
+            instance.api_key = Some(trimmed.to_owned());
+            return Some(KeyLocation::File);
+        }
+        let store = secrets.expect("checked above");
+        let id = instance
+            .secret_ref
+            .clone()
+            .unwrap_or_else(crate::secrets::fresh_id);
+        match store.set(&id, trimmed) {
+            Ok(()) => {
+                instance.secret_ref = Some(id);
+                instance.api_key = None;
+                Some(KeyLocation::Keychain)
+            }
+            // The keychain refused: the file keeps the key, the
+            // behavior it has always had. Nothing is lost.
+            Err(_) => {
+                instance.api_key = Some(trimmed.to_owned());
+                Some(KeyLocation::File)
+            }
+        }
     }
 
     /// The base URL an instance serves: `LLAMA_CPP_URL` over the stored
@@ -307,19 +361,17 @@ impl Profile {
     fn llama_url(&self) -> Option<String> {
         self.instance_url_for("llama-cpp")
     }
+}
 
-    /// The key `provider` serves: the matching instance's key, environment
-    /// included; env-only when the profile holds no instance of it.
-    fn provider_key(&self, provider: &str) -> Option<String> {
-        match self.instance_for_provider(provider) {
-            Some((_, instance)) => self.instance_api_key(instance),
-            None => resolve_key(
-                |name| std::env::var(name).ok(),
-                provider_env_names(provider),
-                None,
-            ),
-        }
-    }
+/// Where [`Profile::place_key`] landed a credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyLocation {
+    /// The OS keychain: the instance carries only the entry's
+    /// `secret_ref`.
+    Keychain,
+    /// The config file itself: no keychain answered, so the literal
+    /// stayed — the shape the file has always held.
+    File,
 }
 
 /// The environment variables whose values override a stored key for
@@ -482,6 +534,37 @@ impl Config {
         Self::save_to(&dir.join("config.yaml"), self)
     }
 
+    /// Moves every stored literal key into the keychain, instance by
+    /// instance, best effort: one the store refuses stays literal.
+    /// Returns the number moved. Idempotent — an instance already
+    /// carrying only its `secret_ref` is skipped, so calling this on
+    /// every load costs one refused read per key at most.
+    pub fn migrate_secrets(&mut self, secrets: &dyn SecretStore) -> usize {
+        let mut moved = 0;
+        for profile in self.profiles.values_mut() {
+            for instance in profile.instances.values_mut() {
+                let Some(key) = instance
+                    .api_key
+                    .clone()
+                    .map(|key| key.trim().to_owned())
+                    .filter(|key| !key.is_empty())
+                else {
+                    continue;
+                };
+                let id = instance
+                    .secret_ref
+                    .clone()
+                    .unwrap_or_else(crate::secrets::fresh_id);
+                if secrets.set(&id, &key).is_ok() {
+                    instance.secret_ref = Some(id);
+                    instance.api_key = None;
+                    moved += 1;
+                }
+            }
+        }
+        moved
+    }
+
     /// [`Config::load`] against an explicit file (missing file is the
     /// default config).
     pub fn load_from(path: &impl AsRef<Path>) -> Result<Config, ConfigError> {
@@ -581,19 +664,28 @@ mod tests {
                 ProviderInstance {
                     provider: provider.to_owned(),
                     api_key: Some("k".to_owned()),
+                    secret_ref: None,
                     base_url: None,
                 },
             );
             profile
         };
         // A stored key makes the profile usable...
-        assert!(keyed("anthropic").has_credentials());
-        assert!(keyed("openai").has_credentials());
-        assert!(keyed("deepseek").has_credentials());
-        assert!(keyed("copilot").has_credentials());
+        assert!(keyed("anthropic").has_credentials(None));
+        assert!(keyed("openai").has_credentials(None));
+        assert!(keyed("deepseek").has_credentials(None));
+        assert!(keyed("copilot").has_credentials(None));
         // ...and each provider needs exactly its own key.
-        assert!(keyed("anthropic").stored_provider_key("openai").is_none());
-        assert!(keyed("openai").stored_provider_key("anthropic").is_none());
+        assert!(
+            keyed("anthropic")
+                .stored_provider_key("openai", None)
+                .is_none()
+        );
+        assert!(
+            keyed("openai")
+                .stored_provider_key("anthropic", None)
+                .is_none()
+        );
         // No stored key and no env var: not usable. (Machines running the
         // suite with these env vars exported would see the env key win,
         // per the convention above.)
@@ -601,10 +693,10 @@ mod tests {
             provider: Some(provider.to_owned()),
             ..Profile::default()
         };
-        assert!(!bare("anthropic").has_credentials());
-        assert!(!bare("openai").has_credentials());
-        assert!(!bare("deepseek").has_credentials());
-        assert!(!bare("copilot").has_credentials());
+        assert!(!bare("anthropic").has_credentials(None));
+        assert!(!bare("openai").has_credentials(None));
+        assert!(!bare("deepseek").has_credentials(None));
+        assert!(!bare("copilot").has_credentials(None));
     }
 
     #[test]
@@ -653,6 +745,7 @@ mod tests {
                             ProviderInstance {
                                 provider: "llama-cpp".into(),
                                 api_key: None,
+                                secret_ref: None,
                                 base_url: Some("http://localhost:8080".into()),
                             },
                         ),
@@ -661,6 +754,7 @@ mod tests {
                             ProviderInstance {
                                 provider: "anthropic".into(),
                                 api_key: Some("sk-ant-123".into()),
+                                secret_ref: None,
                                 base_url: None,
                             },
                         ),
@@ -669,6 +763,7 @@ mod tests {
                             ProviderInstance {
                                 provider: "copilot".into(),
                                 api_key: Some("gho-123".into()),
+                                secret_ref: None,
                                 base_url: None,
                             },
                         ),
@@ -677,6 +772,7 @@ mod tests {
                             ProviderInstance {
                                 provider: "deepseek".into(),
                                 api_key: Some("sk-dsk-123".into()),
+                                secret_ref: None,
                                 base_url: None,
                             },
                         ),
@@ -728,6 +824,7 @@ mod tests {
                     ProviderInstance {
                         provider: "llama-cpp".into(),
                         api_key: None,
+                        secret_ref: None,
                         base_url: Some("http://gpu:8080".into()),
                     },
                 ),
@@ -736,6 +833,7 @@ mod tests {
                     ProviderInstance {
                         provider: "llama-cpp".into(),
                         api_key: None,
+                        secret_ref: None,
                         base_url: Some("http://home:8080".into()),
                     },
                 ),
@@ -787,6 +885,7 @@ mod tests {
             ProviderInstance {
                 provider: "openai".into(),
                 api_key: Some("sk-personal".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );
@@ -795,31 +894,38 @@ mod tests {
             ProviderInstance {
                 provider: "openai".into(),
                 api_key: Some("sk-proxy".into()),
+                secret_ref: None,
                 base_url: Some("http://localhost:1234/v1".into()),
             },
         );
-        assert_eq!(profile.openai_api_key().as_deref(), Some("sk-personal"));
+        assert_eq!(
+            profile.api_key("openai", None).as_deref(),
+            Some("sk-personal")
+        );
         assert_eq!(
             profile.openai_base_url().as_deref(),
             Some("https://api.openai.com/v1")
         );
         // Activating the proxy instance moves both the key and the base.
         profile.instance = Some("proxy".into());
-        assert_eq!(profile.openai_api_key().as_deref(), Some("sk-proxy"));
+        assert_eq!(profile.api_key("openai", None).as_deref(), Some("sk-proxy"));
         assert_eq!(
             profile.openai_base_url().as_deref(),
             Some("http://localhost:1234/v1")
         );
-        assert!(profile.has_credentials());
+        assert!(profile.has_credentials(None));
         // Pointing at a missing name falls back to the first openai
         // instance rather than failing open.
         profile.instance = Some("nope".into());
-        assert_eq!(profile.openai_api_key().as_deref(), Some("sk-personal"));
+        assert_eq!(
+            profile.api_key("openai", None).as_deref(),
+            Some("sk-personal")
+        );
 
         // The env-free read serves callers with their own precedence.
         profile.instance = Some("proxy".into());
         assert_eq!(
-            profile.stored_provider_key("openai").as_deref(),
+            profile.stored_provider_key("openai", None).as_deref(),
             Some("sk-proxy")
         );
     }
@@ -887,6 +993,7 @@ mod tests {
                 ProviderInstance {
                     provider: provider.to_owned(),
                     api_key: Some(key.to_owned()),
+                    secret_ref: None,
                     base_url: None,
                 },
             );
@@ -915,9 +1022,9 @@ mod tests {
         };
         let work = config.effective(Some("work"));
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
-        assert_eq!(work.stored_provider_key("google").as_deref(), None);
+        assert_eq!(work.stored_provider_key("google", None).as_deref(), None);
         assert_eq!(
-            work.stored_provider_key("openrouter").as_deref(),
+            work.stored_provider_key("openrouter", None).as_deref(),
             Some("work-key")
         );
         assert_eq!(work.model, None);
@@ -926,7 +1033,7 @@ mod tests {
         // personal's fields never leak into work, and vice versa.
         let personal = config.effective(Some("personal"));
         assert_eq!(
-            personal.stored_provider_key("google").as_deref(),
+            personal.stored_provider_key("google", None).as_deref(),
             Some("personal-key")
         );
         assert_eq!(personal.model.as_deref(), Some("personal-model"));
@@ -944,6 +1051,7 @@ mod tests {
                 ProviderInstance {
                     provider: "google".into(),
                     api_key: Some("work-key".into()),
+                    secret_ref: None,
                     base_url: None,
                 },
             );
@@ -952,7 +1060,7 @@ mod tests {
         config.set_for_profile(None, |p| p.model = Some("m".into()));
         assert_eq!(
             config.profiles["work"]
-                .stored_provider_key("google")
+                .stored_provider_key("google", None)
                 .as_deref(),
             Some("work-key")
         );
@@ -989,5 +1097,194 @@ mod tests {
             loaded.last_profile_in(Path::new("/home/u/proj")).as_deref(),
             Some("personal")
         );
+    }
+
+    /// A store that answers nothing: the shape a machine without a
+    /// keychain presents.
+    struct UnreachableStore;
+
+    impl crate::secrets::SecretStore for UnreachableStore {
+        fn get(&self, _: &str) -> Result<Option<String>, crate::secrets::SecretError> {
+            Err(crate::secrets::SecretError::NoStore)
+        }
+        fn set(&self, _: &str, _: &str) -> Result<(), crate::secrets::SecretError> {
+            Err(crate::secrets::SecretError::NoStore)
+        }
+        fn delete(&self, _: &str) -> Result<bool, crate::secrets::SecretError> {
+            Err(crate::secrets::SecretError::NoStore)
+        }
+    }
+
+    /// The keychain tier serves before the literal, an unreachable
+    /// store falls through to it, and the environment tier is covered
+    /// by the pure resolver tests above.
+    #[test]
+    fn the_keychain_tier_serves_before_the_literal() {
+        use crate::secrets::VolatileSecretStore;
+        let mut profile = Profile::default();
+        profile.upsert_instance(
+            "anthropic",
+            ProviderInstance {
+                provider: "anthropic".into(),
+                api_key: Some("file-key".into()),
+                secret_ref: Some("ref-1".into()),
+                base_url: None,
+            },
+        );
+        let key_of = |profile: &Profile, secrets: Option<&dyn SecretStore>| {
+            profile.stored_instance_key(
+                profile.instance_for_provider("anthropic").unwrap().1,
+                secrets,
+            )
+        };
+        let store = VolatileSecretStore::new();
+        // No entry yet: the literal serves.
+        assert_eq!(key_of(&profile, Some(&store)).as_deref(), Some("file-key"));
+        // The entry lands: the keychain outranks the literal.
+        store.set("ref-1", "chain-key").unwrap();
+        assert_eq!(key_of(&profile, Some(&store)).as_deref(), Some("chain-key"));
+        // An unreachable store reads as "not in the store": the literal
+        // serves, nothing is lost.
+        assert_eq!(
+            key_of(&profile, Some(&UnreachableStore)).as_deref(),
+            Some("file-key")
+        );
+        // No store at all — the pre-keychain callers — same answer.
+        assert_eq!(key_of(&profile, None).as_deref(), Some("file-key"));
+    }
+
+    #[test]
+    fn place_key_prefers_the_chain_and_falls_back_to_the_file() {
+        use crate::secrets::VolatileSecretStore;
+        let mut profile = Profile {
+            provider: Some("anthropic".into()),
+            ..Profile::default()
+        };
+        profile.upsert_instance(
+            "anthropic",
+            ProviderInstance {
+                provider: "anthropic".into(),
+                api_key: None,
+                secret_ref: None,
+                base_url: None,
+            },
+        );
+        // With a working store the key lives in the chain and the
+        // instance carries only the ref.
+        let store = VolatileSecretStore::new();
+        assert_eq!(
+            profile.place_key("anthropic", " sk-new ", Some(&store)),
+            Some(KeyLocation::Keychain)
+        );
+        let instance = profile.instance_for_provider("anthropic").unwrap().1;
+        assert_eq!(instance.api_key, None);
+        let id = instance.secret_ref.clone().unwrap();
+        assert_eq!(store.get(&id).unwrap().as_deref(), Some("sk-new"));
+        assert_eq!(
+            profile
+                .stored_provider_key("anthropic", Some(&store))
+                .as_deref(),
+            Some("sk-new")
+        );
+
+        // Without a store the file keeps the key, trimmed.
+        assert_eq!(
+            profile.place_key("anthropic", " sk-file ", None),
+            Some(KeyLocation::File)
+        );
+        let instance = profile.instance_for_provider("anthropic").unwrap().1;
+        assert_eq!(instance.api_key.as_deref(), Some("sk-file"));
+
+        // An unreachable store lands the key in the file too.
+        assert_eq!(
+            profile.place_key("anthropic", "sk-again", Some(&UnreachableStore)),
+            Some(KeyLocation::File)
+        );
+        assert_eq!(
+            profile
+                .instance_for_provider("anthropic")
+                .unwrap()
+                .1
+                .api_key
+                .as_deref(),
+            Some("sk-again")
+        );
+        // An unknown instance name places nothing.
+        assert_eq!(profile.place_key("nope", "k", Some(&store)), None);
+    }
+
+    #[test]
+    fn migration_moves_literals_into_the_store_and_round_trips() {
+        use crate::secrets::VolatileSecretStore;
+        let keyed = |provider: &str, key: &str| {
+            let mut profile = Profile {
+                provider: Some(provider.to_owned()),
+                ..Profile::default()
+            };
+            profile.upsert_instance(
+                provider,
+                ProviderInstance {
+                    provider: provider.to_owned(),
+                    api_key: Some(key.to_owned()),
+                    secret_ref: None,
+                    base_url: None,
+                },
+            );
+            profile
+        };
+        let mut config = Config {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), keyed("google", "personal-key")),
+                ("work".to_owned(), keyed("openrouter", "work-key")),
+            ]),
+            icons: None,
+            theme: None,
+            last_profile_by_workspace: BTreeMap::new(),
+        };
+        let store = VolatileSecretStore::new();
+        assert_eq!(config.migrate_secrets(&store), 2);
+        for (name, expected) in [("google", "personal-key"), ("openrouter", "work-key")] {
+            let instance = config
+                .profiles
+                .values()
+                .flat_map(|p| p.instances.values())
+                .find(|instance| instance.provider == name)
+                .unwrap();
+            assert_eq!(instance.api_key, None, "{name}'s literal is gone");
+            let id = instance.secret_ref.as_deref().unwrap();
+            assert_eq!(store.get(id).unwrap().as_deref(), Some(expected));
+        }
+        // Idempotent: nothing left to move.
+        assert_eq!(config.migrate_secrets(&store), 0);
+        // The refs survive the file round trip.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        Config::save_to(&path, &config).unwrap();
+        let mut loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, config);
+        assert_eq!(loaded.migrate_secrets(&store), 0);
+    }
+
+    #[test]
+    fn a_store_that_refuses_everything_keeps_the_literals() {
+        let mut config = Config::default();
+        config.set_for_profile(Some("personal"), |p| {
+            p.upsert_instance(
+                "google",
+                ProviderInstance {
+                    provider: "google".into(),
+                    api_key: Some("stays-put".into()),
+                    secret_ref: None,
+                    base_url: None,
+                },
+            );
+        });
+        assert_eq!(config.migrate_secrets(&UnreachableStore), 0);
+        let instance = config.profiles["personal"]
+            .instance_for_provider("google")
+            .unwrap()
+            .1;
+        assert_eq!(instance.api_key.as_deref(), Some("stays-put"));
+        assert_eq!(instance.secret_ref, None);
     }
 }

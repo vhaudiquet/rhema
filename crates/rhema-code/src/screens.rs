@@ -111,7 +111,11 @@ pub struct ProfileScreen {
 impl ProfileScreen {
     /// A picker over the config's profiles. `active` marks the row the
     /// session is currently running on.
-    pub fn new(profiles: &BTreeMap<String, rhema_config::Profile>, active: Option<&str>) -> Self {
+    pub fn new(
+        profiles: &BTreeMap<String, rhema_config::Profile>,
+        active: Option<&str>,
+        secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+    ) -> Self {
         let mut entries: Vec<ProfileRow> = profiles
             .iter()
             .map(|(name, profile)| ProfileRow {
@@ -119,7 +123,7 @@ impl ProfileScreen {
                 provider: profile.provider.clone(),
                 model: profile.model.clone(),
                 color: profile.color.clone(),
-                usable: profile.has_credentials(),
+                usable: profile.has_credentials(secrets),
                 active: Some(name.as_str()) == active,
             })
             .collect();
@@ -1757,6 +1761,7 @@ mod tests {
             rhema_config::ProviderInstance {
                 provider: provider.to_owned(),
                 api_key: Some(key.to_owned()),
+                secret_ref: None,
                 base_url: None,
             },
         );
@@ -1837,6 +1842,7 @@ mod tests {
             rhema_config::ProviderInstance {
                 provider: "openrouter".into(),
                 api_key: Some("o-key".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );
@@ -2064,6 +2070,7 @@ mod tests {
                 rhema_config::ProviderInstance {
                     provider: "openai".into(),
                     api_key: Some("k".into()),
+                    secret_ref: None,
                     base_url: None,
                 },
             );

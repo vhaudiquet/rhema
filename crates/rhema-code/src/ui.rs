@@ -1984,6 +1984,7 @@ mod tests {
             rhema_config::ProviderInstance {
                 provider: "google".into(),
                 api_key: Some("k".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );
@@ -2271,6 +2272,7 @@ mod scroll_tests {
             rhema_config::ProviderInstance {
                 provider: "google".into(),
                 api_key: Some("k".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );
@@ -2321,6 +2323,7 @@ mod scroll_tests {
             rhema_config::ProviderInstance {
                 provider: "llama-cpp".into(),
                 api_key: None,
+                secret_ref: None,
                 base_url: Some("http://home:8080".into()),
             },
         );
@@ -2329,6 +2332,7 @@ mod scroll_tests {
             rhema_config::ProviderInstance {
                 provider: "copilot".into(),
                 api_key: Some("g".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );

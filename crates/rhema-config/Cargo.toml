@@ -13,6 +13,10 @@ rhema-core = { path = "../rhema-core" }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+# The keychain seam's OS backends (see src/secrets.rs): the `v1` simple
+# API over macOS Keychain, Windows Credential Manager, and the Secret
+# Service on Linux
+keyring = { version = "4", default-features = false, features = ["v1"] }
 
 [dev-dependencies]
 tempfile = "3"

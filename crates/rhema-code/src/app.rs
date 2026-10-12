@@ -153,12 +153,15 @@ impl Backend {
     /// over the stored `provider`, the same env-wins convention the keys
     /// follow. The active instance serves; a profile without instances
     /// falls back to the environment alone.
-    pub fn from_profile(profile: &rhema_config::Profile) -> Option<Backend> {
+    pub fn from_profile(
+        profile: &rhema_config::Profile,
+        secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+    ) -> Option<Backend> {
         let active = profile.provider_name()?;
         if let Some((_, instance)) = profile.instance_for_provider(&active) {
-            return Self::from_instance(profile, instance);
+            return Self::from_instance(profile, instance, secrets);
         }
-        Self::named(&active, profile)
+        Self::named(&active, profile, secrets)
     }
 
     /// Builds one backend per logged-in instance of the profile — the
@@ -167,7 +170,10 @@ impl Backend {
     /// Copilot sub the profile holds. A profile without instances falls
     /// back to the environment alone (llama.cpp only when active: a
     /// URL is a server address, not a login).
-    pub fn candidates_from_profile(profile: &rhema_config::Profile) -> Vec<Candidate> {
+    pub fn candidates_from_profile(
+        profile: &rhema_config::Profile,
+        secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+    ) -> Vec<Candidate> {
         let active = profile.provider_name();
         let active_entry = active
             .as_deref()
@@ -176,13 +182,13 @@ impl Backend {
         let mut candidates = Vec::new();
         if let Some(kind) = active.as_deref() {
             if let Some((name, instance)) = profile.instance_for_provider(kind) {
-                if let Some(backend) = Self::from_instance(profile, instance) {
+                if let Some(backend) = Self::from_instance(profile, instance, secrets) {
                     candidates.push(Candidate {
                         instance: Some(name.to_owned()),
                         backend,
                     });
                 }
-            } else if let Some(backend) = Self::named(kind, profile) {
+            } else if let Some(backend) = Self::named(kind, profile, secrets) {
                 candidates.push(Candidate {
                     instance: None,
                     backend,
@@ -193,7 +199,7 @@ impl Backend {
             if active_entry.as_deref() == Some(name) {
                 continue;
             }
-            if let Some(backend) = Self::from_instance(profile, instance) {
+            if let Some(backend) = Self::from_instance(profile, instance, secrets) {
                 candidates.push(Candidate {
                     instance: Some(name.to_owned()),
                     backend,
@@ -211,7 +217,7 @@ impl Backend {
             if Some(name) == active.as_deref() || profile.instance_for_provider(name).is_some() {
                 continue;
             }
-            if let Some(backend) = Self::named(name, profile) {
+            if let Some(backend) = Self::named(name, profile, secrets) {
                 candidates.push(Candidate {
                     instance: None,
                     backend,
@@ -228,34 +234,37 @@ impl Backend {
     fn from_instance(
         profile: &rhema_config::Profile,
         instance: &rhema_config::ProviderInstance,
+        secrets: Option<&dyn rhema_config::secrets::SecretStore>,
     ) -> Option<Backend> {
         match instance.provider.as_str() {
             "llama-cpp" => Some(Backend::LlamaCpp {
                 url: profile
                     .instance_url(instance)
                     .unwrap_or_else(|| profile.llama_cpp_url()),
-                api_key: profile.instance_api_key(instance),
+                api_key: profile.instance_api_key(instance, secrets),
             }),
             "openrouter" => profile
-                .instance_api_key(instance)
+                .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::OpenRouter { api_key }),
             "anthropic" => profile
-                .instance_api_key(instance)
+                .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::Anthropic { api_key }),
-            "openai" => profile
-                .instance_api_key(instance)
-                .map(|api_key| Backend::OpenAi {
-                    api_key,
-                    base_url: profile.instance_url(instance),
-                }),
+            "openai" => {
+                profile
+                    .instance_api_key(instance, secrets)
+                    .map(|api_key| Backend::OpenAi {
+                        api_key,
+                        base_url: profile.instance_url(instance),
+                    })
+            }
             "deepseek" => profile
-                .instance_api_key(instance)
+                .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::DeepSeek { api_key }),
             "copilot" => profile
-                .instance_api_key(instance)
+                .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
             _ => profile
-                .instance_api_key(instance)
+                .instance_api_key(instance, secrets)
                 .filter(|_| instance.provider == "google")
                 .map(|api_key| Backend::Google { api_key }),
         }
@@ -265,30 +274,36 @@ impl Backend {
     /// alone, `None` when the environment carries no usable credential
     /// for it. Profiles with a stored instance resolve through
     /// [`Backend::from_profile`] instead.
-    fn named(provider: &str, profile: &rhema_config::Profile) -> Option<Backend> {
+    fn named(
+        provider: &str,
+        profile: &rhema_config::Profile,
+        secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+    ) -> Option<Backend> {
         match provider {
             "google" => profile
-                .google_api_key()
+                .api_key("google", secrets)
                 .map(|api_key| Backend::Google { api_key }),
             "llama-cpp" => Some(Backend::LlamaCpp {
                 url: profile.llama_cpp_url(),
-                api_key: profile.llama_cpp_api_key(),
+                api_key: profile.api_key("llama-cpp", secrets),
             }),
             "openrouter" => profile
-                .openrouter_api_key()
+                .api_key("openrouter", secrets)
                 .map(|api_key| Backend::OpenRouter { api_key }),
             "anthropic" => profile
-                .anthropic_api_key()
+                .api_key("anthropic", secrets)
                 .map(|api_key| Backend::Anthropic { api_key }),
-            "openai" => profile.openai_api_key().map(|api_key| Backend::OpenAi {
-                api_key,
-                base_url: None,
-            }),
+            "openai" => profile
+                .api_key("openai", secrets)
+                .map(|api_key| Backend::OpenAi {
+                    api_key,
+                    base_url: None,
+                }),
             "deepseek" => profile
-                .deepseek_api_key()
+                .api_key("deepseek", secrets)
                 .map(|api_key| Backend::DeepSeek { api_key }),
             "copilot" => profile
-                .copilot_api_key()
+                .api_key("copilot", secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
             _ => None,
         }
@@ -704,6 +719,7 @@ impl App {
         self.screen = Screen::Profile(crate::screens::ProfileScreen::new(
             &self.config.profiles,
             self.session_profile.as_deref(),
+            None,
         ));
         Vec::new()
     }
@@ -880,7 +896,7 @@ impl App {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
-        let Some(backend) = Backend::from_profile(&effective) else {
+        let Some(backend) = Backend::from_profile(&effective, None) else {
             // Never recorded: startup re-validates usability, so the
             // memory naming a keyless profile would only fall through.
             // The agent drops with the provider: a turn here would run
@@ -1430,7 +1446,7 @@ impl App {
         }
         let effective = self.config.effective(Some(&tab));
         self.options.thinking = effective.thinking_effort().unwrap_or_default();
-        let Some(backend) = Backend::from_profile(&effective) else {
+        let Some(backend) = Backend::from_profile(&effective, None) else {
             self.error = Some(format!(
                 "no usable credentials for {} — /login first",
                 instance.provider
@@ -1495,7 +1511,7 @@ impl App {
         let mut effects = Vec::new();
         if self.session_profile.as_deref() == Some(tab.as_str()) {
             let effective = self.config.effective(Some(&tab));
-            match Backend::from_profile(&effective) {
+            match Backend::from_profile(&effective, None) {
                 Some(backend) => {
                     self.backend = Some(backend.clone());
                     self.provider = Some(backend.provider());
@@ -1689,6 +1705,7 @@ impl App {
                                 rhema_config::ProviderInstance {
                                     provider: provider.to_owned(),
                                     api_key,
+                                    secret_ref: None,
                                     base_url,
                                 },
                             );
@@ -1914,7 +1931,7 @@ impl App {
             self.error = Some(format!("cannot save config: {err}"));
             return Vec::new();
         }
-        let backend = match Backend::from_profile(&self.effective()) {
+        let backend = match Backend::from_profile(&self.effective(), None) {
             Some(backend) => backend,
             None => {
                 self.error = Some(format!(
@@ -2257,7 +2274,7 @@ pub(crate) fn startup_profile(config: &rhema_config::Config, workspace: &Path) -
         config
             .profiles
             .get(name)
-            .map(|profile| Backend::from_profile(profile).is_some())
+            .map(|profile| Backend::from_profile(profile, None).is_some())
             .unwrap_or(false)
     };
     if let Some(last) = config.last_profile_in(workspace).filter(|name| ready(name)) {
@@ -2376,6 +2393,7 @@ mod tests {
             rhema_config::ProviderInstance {
                 provider: provider.to_owned(),
                 api_key: Some(key.to_owned()),
+                secret_ref: None,
                 base_url: None,
             },
         );
@@ -2406,6 +2424,7 @@ mod tests {
                 rhema_config::ProviderInstance {
                     provider: "google".into(),
                     api_key: Some(key.to_owned()),
+                    secret_ref: None,
                     base_url: None,
                 },
             );
@@ -2613,7 +2632,7 @@ mod tests {
             effective.instances["google"].api_key.as_deref(),
             Some("secret")
         );
-        assert_eq!(effective.google_api_key().as_deref(), Some("secret"));
+        assert_eq!(effective.api_key("google", None).as_deref(), Some("secret"));
         assert!(matches!(
             h.app.backend,
             Some(Backend::Google { ref api_key }) if api_key == "secret"
@@ -2803,7 +2822,10 @@ mod tests {
             effective.instances["anthropic"].api_key.as_deref(),
             Some("sk-ant-01")
         );
-        assert_eq!(effective.anthropic_api_key().as_deref(), Some("sk-ant-01"));
+        assert_eq!(
+            effective.api_key("anthropic", None).as_deref(),
+            Some("sk-ant-01")
+        );
         assert!(matches!(
             h.app.backend,
             Some(Backend::Anthropic { ref api_key }) if api_key == "sk-ant-01"
@@ -2867,14 +2889,14 @@ mod tests {
             }
             profile
         };
-        let backend = Backend::from_profile(&keyed("anthropic", Some("k-a")))
+        let backend = Backend::from_profile(&keyed("anthropic", Some("k-a")), None)
             .expect("a keyed anthropic profile serves turns");
         assert_eq!(backend.config_name(), "anthropic");
         assert!(
             matches!(backend, Backend::Anthropic { ref api_key } if api_key == "k-a"),
             "the anthropic profile builds the anthropic backend: {backend:?}"
         );
-        let backend = Backend::from_profile(&keyed("openai", Some("k-o")))
+        let backend = Backend::from_profile(&keyed("openai", Some("k-o")), None)
             .expect("a keyed openai profile serves turns");
         assert_eq!(backend.config_name(), "openai");
         assert!(
@@ -2888,22 +2910,25 @@ mod tests {
         };
         store_key(&mut cross, "openai", "k-o");
         assert_eq!(
-            Backend::from_profile(&cross),
+            Backend::from_profile(&cross, None),
             None,
             "an anthropic profile is not served by an openai key"
         );
         assert_eq!(
-            Backend::from_profile(&rhema_config::Profile {
-                provider: Some("openai".into()),
-                ..rhema_config::Profile::default()
-            }),
+            Backend::from_profile(
+                &rhema_config::Profile {
+                    provider: Some("openai".into()),
+                    ..rhema_config::Profile::default()
+                },
+                None,
+            ),
             None
         );
         // No provider named, and a spelling no provider answers to, both
         // leave the backend unresolved: the login flow runs, nothing
         // silently serves google.
         assert_eq!(
-            Backend::from_profile(&rhema_config::Profile::default()),
+            Backend::from_profile(&rhema_config::Profile::default(), None),
             None,
             "a provider-less profile opens the login flow"
         );
@@ -2913,7 +2938,7 @@ mod tests {
         };
         store_key(&mut nonsense, "google", "k");
         assert_eq!(
-            Backend::from_profile(&nonsense),
+            Backend::from_profile(&nonsense, None),
             None,
             "an unknown spelling never falls back to google"
         );
@@ -2923,7 +2948,7 @@ mod tests {
     fn candidates_span_every_provider_the_profile_holds_keys_for() {
         let mut profile = keyed_profile("openrouter", "o");
         store_key(&mut profile, "google", "g");
-        let names: Vec<&str> = Backend::candidates_from_profile(&profile)
+        let names: Vec<&str> = Backend::candidates_from_profile(&profile, None)
             .iter()
             .map(|candidate| candidate.backend.config_name())
             .collect();
@@ -2932,7 +2957,7 @@ mod tests {
         // llama.cpp joins only as the active provider: a server address
         // is a login, not a catalog to browse.
         profile.provider = Some("llama-cpp".into());
-        let names: Vec<&str> = Backend::candidates_from_profile(&profile)
+        let names: Vec<&str> = Backend::candidates_from_profile(&profile, None)
             .iter()
             .map(|candidate| candidate.backend.config_name())
             .collect();
@@ -2950,6 +2975,7 @@ mod tests {
                     rhema_config::ProviderInstance {
                         provider: "llama-cpp".into(),
                         api_key: None,
+                        secret_ref: None,
                         base_url: Some("http://gpu:8080".into()),
                     },
                 ),
@@ -2958,6 +2984,7 @@ mod tests {
                     rhema_config::ProviderInstance {
                         provider: "llama-cpp".into(),
                         api_key: None,
+                        secret_ref: None,
                         base_url: Some("http://home:8080".into()),
                     },
                 ),
@@ -2966,13 +2993,14 @@ mod tests {
                     rhema_config::ProviderInstance {
                         provider: "copilot".into(),
                         api_key: Some("gho-1".into()),
+                        secret_ref: None,
                         base_url: None,
                     },
                 ),
             ]),
             ..rhema_config::Profile::default()
         };
-        let candidates = Backend::candidates_from_profile(&profile);
+        let candidates = Backend::candidates_from_profile(&profile, None);
         let rows: Vec<(Option<&str>, &str)> = candidates
             .iter()
             .map(|candidate| {
@@ -3307,6 +3335,7 @@ mod tests {
                 rhema_config::ProviderInstance {
                     provider: "llama-cpp".into(),
                     api_key: None,
+                    secret_ref: None,
                     base_url: Some("http://home:8080".into()),
                 },
             );
@@ -3315,6 +3344,7 @@ mod tests {
                 rhema_config::ProviderInstance {
                     provider: "llama-cpp".into(),
                     api_key: None,
+                    secret_ref: None,
                     base_url: Some("http://gpu:8080".into()),
                 },
             );
@@ -3354,6 +3384,7 @@ mod tests {
                 rhema_config::ProviderInstance {
                     provider: "openai".into(),
                     api_key: Some("sk".into()),
+                    secret_ref: None,
                     base_url: None,
                 },
             );
@@ -3362,6 +3393,7 @@ mod tests {
                 rhema_config::ProviderInstance {
                     provider: "llama-cpp".into(),
                     api_key: None,
+                    secret_ref: None,
                     base_url: Some("http://home:8080".into()),
                 },
             );
@@ -3393,6 +3425,7 @@ mod tests {
                 rhema_config::ProviderInstance {
                     provider: "llama-cpp".into(),
                     api_key: None,
+                    secret_ref: None,
                     base_url: Some("http://home:8080".into()),
                 },
             );
@@ -3568,7 +3601,7 @@ mod tests {
                 .load()
                 .unwrap()
                 .effective(None)
-                .copilot_api_key()
+                .api_key("copilot", None)
                 .as_deref(),
             Some("gho_token")
         );
@@ -4077,7 +4110,10 @@ mod tests {
             work.instances["openrouter"].api_key.as_deref(),
             Some("work-key")
         );
-        assert_eq!(work.openrouter_api_key().as_deref(), Some("work-key"));
+        assert_eq!(
+            work.api_key("openrouter", None).as_deref(),
+            Some("work-key")
+        );
     }
 
     #[test]
@@ -4261,7 +4297,7 @@ mod tests {
             ..Default::default()
         };
         let profile = startup_profile(&config, Path::new("/nowhere"));
-        let backend = Backend::from_profile(&config.effective(Some(&profile)));
+        let backend = Backend::from_profile(&config.effective(Some(&profile)), None);
         let app = App::new(AppSetup {
             store: Arc::new(MemoryStore::new(config.clone())),
             config,

@@ -215,7 +215,7 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
     // naming the fix.
     let backend = match provider_choice {
         ProviderChoice::Google => effective
-            .google_api_key()
+            .api_key("google", None)
             .map(|api_key| Backend::Google { api_key })
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -224,22 +224,22 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
             })?,
         ProviderChoice::LlamaCpp => Backend::LlamaCpp {
             url: effective.llama_cpp_url(),
-            api_key: effective.llama_cpp_api_key(),
+            api_key: effective.api_key("llama-cpp", None),
         },
         ProviderChoice::OpenRouter => Backend::OpenRouter {
             api_key: effective
-                .openrouter_api_key()
+                .api_key("openrouter", None)
                 .ok_or_else(|| anyhow::anyhow!("missing API key: set OPENROUTER_API_KEY"))?,
         },
         ProviderChoice::Anthropic => Backend::Anthropic {
-            api_key: effective.anthropic_api_key().ok_or_else(|| {
+            api_key: effective.api_key("anthropic", None).ok_or_else(|| {
                 anyhow::anyhow!(
                     "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)"
                 )
             })?,
         },
         ProviderChoice::OpenAi => Backend::OpenAi {
-            api_key: effective.openai_api_key().ok_or_else(|| {
+            api_key: effective.api_key("openai", None).ok_or_else(|| {
                 anyhow::anyhow!(
                     "missing API key: set OPENAI_API_KEY (or log in once interactively)"
                 )
@@ -247,14 +247,14 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
             base_url: effective.openai_base_url(),
         },
         ProviderChoice::DeepSeek => Backend::DeepSeek {
-            api_key: effective.deepseek_api_key().ok_or_else(|| {
+            api_key: effective.api_key("deepseek", None).ok_or_else(|| {
                 anyhow::anyhow!(
                     "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)"
                 )
             })?,
         },
         ProviderChoice::Copilot => Backend::Copilot {
-            api_key: effective.copilot_api_key().ok_or_else(|| {
+            api_key: effective.api_key("copilot", None).ok_or_else(|| {
                 anyhow::anyhow!(
                     "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)"
                 )
@@ -351,27 +351,31 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     let backend = ProviderChoice::from_stored(effective.provider_name().as_deref()).and_then(
         |provider_choice| match provider_choice {
             ProviderChoice::Google => effective
-                .google_api_key()
+                .api_key("google", None)
                 .map(|api_key| Backend::Google { api_key }),
             ProviderChoice::LlamaCpp => Some(Backend::LlamaCpp {
                 url: effective.llama_cpp_url(),
-                api_key: effective.llama_cpp_api_key(),
+                api_key: effective.api_key("llama-cpp", None),
             }),
             ProviderChoice::OpenRouter => effective
-                .openrouter_api_key()
+                .api_key("openrouter", None)
                 .map(|api_key| Backend::OpenRouter { api_key }),
             ProviderChoice::Anthropic => effective
-                .anthropic_api_key()
+                .api_key("anthropic", None)
                 .map(|api_key| Backend::Anthropic { api_key }),
-            ProviderChoice::OpenAi => effective.openai_api_key().map(|api_key| Backend::OpenAi {
-                api_key,
-                base_url: effective.openai_base_url(),
-            }),
+            ProviderChoice::OpenAi => {
+                effective
+                    .api_key("openai", None)
+                    .map(|api_key| Backend::OpenAi {
+                        api_key,
+                        base_url: effective.openai_base_url(),
+                    })
+            }
             ProviderChoice::DeepSeek => effective
-                .deepseek_api_key()
+                .api_key("deepseek", None)
                 .map(|api_key| Backend::DeepSeek { api_key }),
             ProviderChoice::Copilot => effective
-                .copilot_api_key()
+                .api_key("copilot", None)
                 .map(|api_key| Backend::Copilot { api_key }),
         },
     );
@@ -584,7 +588,7 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
                         backend: backend.clone(),
                     }]
                 }
-                _ => Backend::candidates_from_profile(&app.effective()),
+                _ => Backend::candidates_from_profile(&app.effective(), None),
             };
             if backends.is_empty() {
                 return;

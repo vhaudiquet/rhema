@@ -120,6 +120,8 @@ pub(crate) struct App {
     options: AcpOptions,
     /// The profile resolved once at startup: credentials, model, thinking.
     effective: rhema_config::Profile,
+    /// The keychain the profile's `secret_ref`s resolve through.
+    secrets: rhema_config::secrets::KeyringSecretStore,
     /// The rendered base prompt from the user's SYSTEM.md, when present.
     base_system: Option<String>,
     /// Where sessions persist; `None` when no cache dir exists (turns
@@ -164,6 +166,7 @@ impl App {
         Self {
             options,
             effective,
+            secrets: rhema_config::secrets::KeyringSecretStore::new(),
             base_system,
             base,
             sessions: Mutex::new(HashMap::new()),
@@ -196,6 +199,7 @@ impl App {
             self.options.provider.as_deref(),
             self.options.model.as_deref(),
             self.options.llama_url.as_deref(),
+            Some(&self.secrets),
         ) {
             Ok(resolved) => resolved,
             Err(err) => {
@@ -240,7 +244,12 @@ impl App {
             }
         }
         #[cfg(not(feature = "mock"))]
-        backend::catalog(&self.effective, self.options.llama_url.as_deref()).await
+        backend::catalog(
+            &self.effective,
+            self.options.llama_url.as_deref(),
+            Some(&self.secrets),
+        )
+        .await
     }
 
     fn thinking(&self) -> ThinkingEffort {
@@ -372,16 +381,19 @@ impl App {
             let (kind, model) = backend::split_switch(value, slot.kind)
                 .map_err(|message| Error::invalid_params().data(message))?;
             let provider = match kind {
-                Some(kind) => {
-                    backend::provider_for(kind, &self.effective, self.options.llama_url.as_deref())
-                        .map_err(|message| Error::invalid_params().data(message))?
-                        .ok_or_else(|| {
-                            Error::invalid_params().data(format!(
-                                "no usable credentials for {kind}; log in once with the \
+                Some(kind) => backend::provider_for(
+                    kind,
+                    &self.effective,
+                    self.options.llama_url.as_deref(),
+                    Some(&self.secrets),
+                )
+                .map_err(|message| Error::invalid_params().data(message))?
+                .ok_or_else(|| {
+                    Error::invalid_params().data(format!(
+                        "no usable credentials for {kind}; log in once with the \
                          rhema TUI or set its API key"
-                            ))
-                        })?
-                }
+                    ))
+                })?,
                 None => slot.provider.clone(),
             };
             let kind = kind.unwrap_or(slot.kind);

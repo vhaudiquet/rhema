@@ -162,7 +162,7 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
             .collect::<Vec<_>>()
     };
     let env = |name: &str| std::env::var(name).ok();
-    let backends = rhema_claw::backends::discover(config, &profile, &env, &claw_rows);
+    let backends = rhema_claw::backends::discover(config, &profile, &env, &claw_rows, None);
     // The config's provider/model pair seeds the active backend when it
     // names one. When it does not, the seed is the first credential
     // discovery actually found — never a hardcoded default kind, and

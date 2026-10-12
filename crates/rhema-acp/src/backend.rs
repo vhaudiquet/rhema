@@ -12,6 +12,7 @@
 use std::sync::Arc;
 
 use rhema_config::Profile;
+use rhema_config::secrets::SecretStore;
 use rhema_core::{ModelProvider, ProviderError};
 use rhema_provider::ModelCard;
 use rhema_provider_anthropic::AnthropicProvider;
@@ -91,10 +92,14 @@ pub struct CatalogRow {
 /// without resolvable credentials is silently absent (it was never
 /// logged in); a fetch that fails warns on stderr and the rest still
 /// land.
-pub async fn catalog(profile: &Profile, llama_url: Option<&str>) -> Vec<CatalogRow> {
+pub async fn catalog(
+    profile: &Profile,
+    llama_url: Option<&str>,
+    secrets: Option<&dyn SecretStore>,
+) -> Vec<CatalogRow> {
     let mut tasks = Vec::new();
     for kind in PROVIDERS {
-        if let Some(task) = catalog_fetch(kind, profile, llama_url) {
+        if let Some(task) = catalog_fetch(kind, profile, llama_url, secrets) {
             tasks.push((*kind, task));
         }
     }
@@ -127,6 +132,7 @@ fn catalog_fetch(
     kind: &'static str,
     profile: &Profile,
     llama_url: Option<&str>,
+    secrets: Option<&dyn SecretStore>,
 ) -> Option<tokio::task::JoinHandle<Result<Vec<ModelCard>, ProviderError>>> {
     let profile = profile.clone();
     let llama_url = llama_url.map(str::to_owned);
@@ -134,7 +140,7 @@ fn catalog_fetch(
         "llama-cpp" => {
             let mut llama =
                 LlamaCppProvider::new(llama_url.unwrap_or_else(|| profile.llama_cpp_url()));
-            if let Some(api_key) = profile.llama_cpp_api_key() {
+            if let Some(api_key) = profile.api_key("llama-cpp", secrets) {
                 llama = llama.with_api_key(api_key);
             }
             tokio::spawn(async move {
@@ -154,19 +160,19 @@ fn catalog_fetch(
             })
         }
         "openrouter" => {
-            let key = profile.openrouter_api_key()?;
+            let key = profile.api_key("openrouter", secrets)?;
             tokio::spawn(async move { OpenRouterProvider::new(key).list_models().await })
         }
         "anthropic" => {
-            let key = profile.anthropic_api_key()?;
+            let key = profile.api_key("anthropic", secrets)?;
             tokio::spawn(async move { AnthropicProvider::new(key).list_models().await })
         }
         "openai" => {
-            let key = profile.openai_api_key()?;
+            let key = profile.api_key("openai", secrets)?;
             tokio::spawn(async move { OpenAiCompatibleProvider::new(key).list_models().await })
         }
         "deepseek" => {
-            let key = profile.deepseek_api_key()?;
+            let key = profile.api_key("deepseek", secrets)?;
             tokio::spawn(async move {
                 OpenAiCompatibleProvider::new(key)
                     .with_base_url("https://api.deepseek.com/v1")
@@ -175,11 +181,11 @@ fn catalog_fetch(
             })
         }
         "copilot" => {
-            let key = profile.copilot_api_key()?;
+            let key = profile.api_key("copilot", secrets)?;
             tokio::spawn(async move { CopilotProvider::new(key).list_models().await })
         }
         _ => {
-            let key = profile.google_api_key()?;
+            let key = profile.api_key("google", secrets)?;
             tokio::spawn(async move { GoogleProvider::new(key).list_models().await })
         }
     };
@@ -199,6 +205,7 @@ pub fn resolve(
     provider: Option<&str>,
     model: Option<&str>,
     llama_url: Option<&str>,
+    secrets: Option<&dyn SecretStore>,
 ) -> Result<Option<Resolved>, String> {
     let stored = profile.provider_name();
     let chosen = provider
@@ -210,7 +217,7 @@ pub fn resolve(
         .map(str::to_owned)
         .or_else(|| profile.model.clone())
         .unwrap_or_else(|| default_model_for(kind).to_owned());
-    let provider = provider_for(kind, profile, llama_url)?;
+    let provider = provider_for(kind, profile, llama_url, secrets)?;
     Ok(provider.map(|provider| Resolved {
         kind,
         provider,
@@ -232,6 +239,7 @@ pub fn provider_for(
     kind: &str,
     profile: &Profile,
     llama_url: Option<&str>,
+    secrets: Option<&dyn SecretStore>,
 ) -> Result<Option<Arc<dyn ModelProvider>>, String> {
     match kind {
         "llama-cpp" => {
@@ -239,30 +247,30 @@ pub fn provider_for(
                 .map(str::to_owned)
                 .unwrap_or_else(|| profile.llama_cpp_url());
             let mut llama = LlamaCppProvider::new(url);
-            if let Some(api_key) = profile.llama_cpp_api_key() {
+            if let Some(api_key) = profile.api_key("llama-cpp", secrets) {
                 llama = llama.with_api_key(api_key);
             }
             Ok(Some(Arc::new(llama)))
         }
         "openrouter" => Ok(profile
-            .openrouter_api_key()
+            .api_key("openrouter", secrets)
             .map(|key| Arc::new(OpenRouterProvider::new(key)) as Arc<dyn ModelProvider>)),
         "anthropic" => Ok(profile
-            .anthropic_api_key()
+            .api_key("anthropic", secrets)
             .map(|key| Arc::new(AnthropicProvider::new(key)) as Arc<dyn ModelProvider>)),
         "openai" => Ok(profile
-            .openai_api_key()
+            .api_key("openai", secrets)
             .map(|key| Arc::new(OpenAiCompatibleProvider::new(key)) as Arc<dyn ModelProvider>)),
-        "deepseek" => Ok(profile.deepseek_api_key().map(|key| {
+        "deepseek" => Ok(profile.api_key("deepseek", secrets).map(|key| {
             Arc::new(
                 OpenAiCompatibleProvider::new(key).with_base_url("https://api.deepseek.com/v1"),
             ) as Arc<dyn ModelProvider>
         })),
         "copilot" => Ok(profile
-            .copilot_api_key()
+            .api_key("copilot", secrets)
             .map(|key| Arc::new(CopilotProvider::new(key)) as Arc<dyn ModelProvider>)),
         "google" => Ok(profile
-            .google_api_key()
+            .api_key("google", secrets)
             .map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn ModelProvider>)),
         other => Err(format!("unknown provider kind \"{other}\"")),
     }
@@ -309,7 +317,7 @@ mod tests {
 
     #[test]
     fn the_keyless_backend_always_resolves() {
-        let resolved = resolve(&profile(Some("llama-cpp"), None), None, None, None)
+        let resolved = resolve(&profile(Some("llama-cpp"), None), None, None, None, None)
             .expect("llama-cpp is keyless and always resolves")
             .expect("llama-cpp is keyless and always resolves");
         assert_eq!(resolved.model, "local");
@@ -322,6 +330,7 @@ mod tests {
             Some("llama-cpp"),
             Some("flag-model"),
             Some("http://localhost:9999"),
+            None,
         )
         .expect("llama-cpp is keyless and always resolves")
         .expect("llama-cpp is keyless and always resolves");
@@ -332,6 +341,7 @@ mod tests {
     fn the_model_falls_back_config_then_kind_default() {
         let stored = resolve(
             &profile(Some("llama-cpp"), Some("stored-model")),
+            None,
             None,
             None,
             None,
@@ -350,7 +360,7 @@ mod tests {
             return;
         }
         assert!(matches!(
-            resolve(&profile(None, None), Some("openrouter"), None, None),
+            resolve(&profile(None, None), Some("openrouter"), None, None, None),
             Ok(None)
         ));
     }
@@ -363,7 +373,7 @@ mod tests {
         if std::env::var_os("RHEMA_PROVIDER").is_some() {
             return;
         }
-        let err = match resolve(&profile(None, None), None, None, None) {
+        let err = match resolve(&profile(None, None), None, None, None, None) {
             Ok(_) => panic!("nothing is configured, yet a backend resolved"),
             Err(err) => err,
         };
@@ -378,13 +388,13 @@ mod tests {
         if std::env::var_os("RHEMA_PROVIDER").is_some() {
             return;
         }
-        let err = match resolve(&profile(Some("nonsense"), None), None, None, None) {
+        let err = match resolve(&profile(Some("nonsense"), None), None, None, None, None) {
             Ok(_) => panic!("an unknown spelling resolved a backend"),
             Err(err) => err,
         };
         assert!(err.contains("nonsense"), "the error names the value: {err}");
         // An explicit unknown kind errors the same way.
-        let err = match resolve(&profile(None, None), Some("bogus"), None, None) {
+        let err = match resolve(&profile(None, None), Some("bogus"), None, None, None) {
             Ok(_) => panic!("an unknown flagged kind resolved a backend"),
             Err(err) => err,
         };
@@ -402,10 +412,11 @@ mod tests {
             ProviderInstance {
                 provider: "copilot".into(),
                 api_key: Some("gho_token".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );
-        let resolved = resolve(&profile, None, None, None)
+        let resolved = resolve(&profile, None, None, None, None)
             .expect("a stored token resolves")
             .expect("a stored token resolves");
         assert_eq!(resolved.kind, "copilot");
@@ -420,10 +431,11 @@ mod tests {
             ProviderInstance {
                 provider: "google".into(),
                 api_key: Some("g".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );
-        let err = match provider_for("nonsense", &keyed, None) {
+        let err = match provider_for("nonsense", &keyed, None, None) {
             Ok(_) => panic!("an unknown kind built a provider"),
             Err(err) => err,
         };

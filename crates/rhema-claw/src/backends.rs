@@ -535,6 +535,7 @@ pub fn discover(
     stored: &rhema_config::Profile,
     env: &dyn Fn(&str) -> Option<String>,
     stored_rows: &dyn Fn() -> Vec<(String, ProviderParams)>,
+    secrets: Option<&dyn rhema_config::secrets::SecretStore>,
 ) -> Vec<Backend> {
     let rows = stored_rows();
     let mut backends = Vec::new();
@@ -600,7 +601,7 @@ pub fn discover(
             // takes a key from the profile.
             let api_key = match kind {
                 "llama-cpp" => None,
-                _ => stored.stored_provider_key(kind),
+                _ => stored.stored_provider_key(kind, secrets),
             };
             ProviderParams {
                 kind: kind.to_owned(),
@@ -803,7 +804,7 @@ mod tests {
         let profile = profile_with_google();
         let env = |_name: &str| None;
         let stored_rows = || vec![("deepseek".to_owned(), params("deepseek", Some("cd"), None))];
-        let backends = discover(&config, &profile, &env, &stored_rows);
+        let backends = discover(&config, &profile, &env, &stored_rows, None);
         let mut kinds: Vec<&str> = backends.iter().map(|b| b.kind.as_str()).collect();
         kinds.sort_unstable();
         assert_eq!(kinds, vec!["deepseek", "google", "llama-cpp"]);
@@ -814,7 +815,7 @@ mod tests {
         let config = test_config();
         let profile = rhema_config::Profile::default();
         let env = |_name: &str| None;
-        let backends = discover(&config, &profile, &env, &|| Vec::new());
+        let backends = discover(&config, &profile, &env, &|| Vec::new(), None);
         assert_eq!(backends.len(), 1);
         assert_eq!(backends[0].kind, "llama-cpp");
     }
@@ -830,7 +831,7 @@ mod tests {
                 params("llama-cpp", None, Some("http://h:1")),
             )]
         };
-        let backends = discover(&config, &profile, &env, &stored_rows);
+        let backends = discover(&config, &profile, &env, &stored_rows, None);
         let mut ids: Vec<&str> = backends.iter().map(|b| b.id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, vec!["google", "local-llama"]);
@@ -847,7 +848,7 @@ mod tests {
         let profile = rhema_config::Profile::default();
         let env = |name: &str| (name == "GOOGLE_API_KEY").then(|| "from-env".to_owned());
         let stored_rows = || vec![("google".to_owned(), params("google", Some("stored"), None))];
-        let backends = discover(&config, &profile, &env, &stored_rows);
+        let backends = discover(&config, &profile, &env, &stored_rows, None);
         let google: Vec<&Backend> = backends.iter().filter(|b| b.kind == "google").collect();
         assert_eq!(google.len(), 1, "env wins the id, no twin survives");
         assert_eq!(google[0].id, "google");
@@ -859,7 +860,7 @@ mod tests {
         let profile = rhema_config::Profile::default();
         let env = |_name: &str| None;
         let stored_rows = || vec![("anthropic".to_owned(), params("anthropic", Some("k"), None))];
-        let backends = discover(&config, &profile, &env, &stored_rows);
+        let backends = discover(&config, &profile, &env, &stored_rows, None);
         let anthropic = backends
             .iter()
             .find(|b| b.id == "anthropic")
@@ -910,6 +911,7 @@ mod tests {
             rhema_config::ProviderInstance {
                 provider: "google".into(),
                 api_key: Some("pg".into()),
+                secret_ref: None,
                 base_url: None,
             },
         );
