@@ -63,6 +63,9 @@ GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{for
 GET  /v1/bootstrap                     {"soul": bool, "user": bool}
 POST /v1/ingest                         {"source","key","payload"} -> 202
 GET  /v1/notifications?device=&since=   POST /v1/notifications/{id}/ack
+GET  /v1/consents                      the asks a turn is waiting on
+POST /v1/consents/{id}                 {"secret"} or {"grant": bool}
+DELETE /v1/consents/{id}               deny a pending ask
 GET  /v1/providers                      the backend instances + the active pair
 PUT  /v1/providers/active               {"provider","model"?} — switch, persisted
 PUT  /v1/providers/{id}/credentials     add or replace an instance, persisted
@@ -123,6 +126,16 @@ keys from the Android app, for example). The resident agent owns
 `interactive:`, `task:`, and `phone:` keys; forge threads own the rest.
 Its `notify` tool queues a notification for a device; the device polls
 and acks.
+
+When a turn needs something only a human can give, it asks and waits
+inside the tool call: `ask_secret` raises a consent request — a card in
+the chat stream (`consent_request` over SSE, plus `GET /v1/consents`
+for a UI catching up after a reload) — and the human answers through
+`POST /v1/consents/{id}` (`{"secret": ...}`) or denies with `DELETE`.
+The secret travels once, from the answer into the agent accounts; the
+tool wakes with the account id, never the secret, and a denial or a
+15-minute silence comes back in-band so the turn can say so and move
+on.
 
 Stock OpenAI-speaking UIs point at the shim instead:
 

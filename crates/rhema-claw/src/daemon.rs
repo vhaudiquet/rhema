@@ -71,6 +71,9 @@ pub enum ClawError {
     /// The turn-history table could not be opened or read.
     #[error(transparent)]
     TurnHistory(#[from] crate::turn_store::TurnStoreError),
+    /// The consent table could not be opened or read.
+    #[error(transparent)]
+    Consents(#[from] crate::consents::ConsentStoreError),
     /// The backend registry could not be built: no provider constructed,
     /// or the configured seed named an unknown kind.
     #[error("backend registry failed: {0}")]
@@ -218,6 +221,10 @@ impl Daemon {
         // reads the table back — a restart continues the transcript,
         // whole, with no boot-time seed pass.
         let hub = Arc::new(EventHub::with_record_store(turns.clone()));
+        // The consent table and its wake bridge: the `ask_secret` tool
+        // asks through them, the consent routes answer through them.
+        let consents = Arc::new(crate::consents::ConsentStore::open(&db)?);
+        let bridge = Arc::new(crate::consents::WaitBridge::new());
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
         let settings = Arc::new(crate::settings::SettingsStore::open(&db)?);
@@ -253,6 +260,8 @@ impl Daemon {
             tasks.clone(),
             accounts.clone(),
             config.max_turn_steps,
+            consents.clone(),
+            bridge.clone(),
         );
         let interactive_driver = Arc::new(
             Driver::new(
@@ -283,6 +292,8 @@ impl Daemon {
             settings.clone(),
             identity,
             accounts,
+            consents,
+            bridge,
             config.token.clone(),
         );
 

@@ -72,6 +72,11 @@ pub struct ClawState {
     /// The accounts layer the identity routes serve. Like every consumer
     /// of the store, the routes only ever see redacted records.
     accounts: Arc<dyn rhema_identity::IdentityStore>,
+    /// The consent table the consent routes read and answer into — the
+    /// same rows the interactive handler's `ask_secret` tool waits on.
+    consents: Arc<crate::consents::ConsentStore>,
+    /// The wake bridge between those answers and the waiting tools.
+    bridge: Arc<crate::consents::WaitBridge>,
     token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
@@ -82,9 +87,9 @@ pub struct ClawState {
 impl ClawState {
     /// The state over the interactive dispatcher and its driver, the
     /// shared dispatch store, the watch table, the notification table,
-    /// the bootstrap store, the event hub, the account store, and the
-    /// configured bearer `token`.
-    #[allow(clippy::too_many_arguments)] // eleven parts, each load-bearing
+    /// the bootstrap store, the event hub, the account store, the
+    /// consent table, and the configured bearer `token`.
+    #[allow(clippy::too_many_arguments)] // thirteen parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
@@ -97,6 +102,8 @@ impl ClawState {
         settings: Arc<crate::settings::SettingsStore>,
         identity: Arc<crate::identity::IdentityStore>,
         accounts: Arc<dyn rhema_identity::IdentityStore>,
+        consents: Arc<crate::consents::ConsentStore>,
+        bridge: Arc<crate::consents::WaitBridge>,
         token: Option<String>,
     ) -> Self {
         Self {
@@ -111,6 +118,8 @@ impl ClawState {
             settings,
             identity,
             accounts,
+            consents,
+            bridge,
             token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
@@ -193,6 +202,11 @@ pub fn router(state: ClawState) -> Router {
         .route("/watches/{forge}/{*repo}", delete(watches_remove))
         .route("/accounts", get(accounts_list).post(accounts_add))
         .route("/accounts/{id}", delete(accounts_remove))
+        .route("/consents", get(consents_list))
+        .route(
+            "/consents/{id}",
+            post(consents_resolve).delete(consents_deny),
+        )
         .route("/ingest", post(ingest))
         .route("/notifications", get(notifications_list))
         .route("/notifications/{id}/ack", post(notifications_ack))
@@ -582,6 +596,195 @@ async fn accounts_remove(State(state): State<ClawState>, Path(id): Path<String>)
             .into_response(),
         Err(reason) => internal_error(reason).into_response(),
     }
+}
+
+/// The outstanding consent requests — what a running turn has asked and
+/// nobody has answered yet, oldest first. A UI polls this after a
+/// reload so a card is never lost to one; the live ask also rides the
+/// session's event stream as a `consent_request` event.
+async fn consents_list(
+    State(state): State<ClawState>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let consents = state
+        .consents
+        .pending()
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(json!({ "consents": consents })))
+}
+
+/// The answer body: `{"secret": "..."}` for a `secret` request,
+/// `{"grant": true|false}` for a `phone` one. The two shapes never mix —
+/// the request's kind picks which field means anything.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ConsentBody {
+    /// The credential, for a `secret` request. Stored into the identity
+    /// store; never echoed, never persisted in the consent row.
+    pub secret: Option<String>,
+    /// The verdict, for a `phone` request.
+    pub grant: Option<bool>,
+}
+
+async fn consents_resolve(
+    State(state): State<ClawState>,
+    Path(id): Path<String>,
+    Json(body): Json<ConsentBody>,
+) -> Response {
+    let consent = match state.consents.get(&id) {
+        Ok(Some(consent)) => consent,
+        Ok(None) => return not_found_consent(),
+        Err(err) => return internal_error(err.to_string()).into_response(),
+    };
+    if consent.resolved_at.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "consent request already resolved"})),
+        )
+            .into_response();
+    }
+    match consent.kind {
+        crate::consents::ConsentKind::Secret => {
+            let secret = body
+                .secret
+                .as_deref()
+                .map(str::trim)
+                .filter(|secret| !secret.is_empty())
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({"error": "body must carry a non-empty secret"})),
+                    )
+                });
+            let secret = match secret {
+                Ok(secret) => secret,
+                Err(response) => return response.into_response(),
+            };
+            resolve_secret_consent(&state, &consent, secret).await
+        }
+        crate::consents::ConsentKind::Phone => {
+            let Some(granted) = body.grant else {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({"error": "body must carry a grant boolean"})),
+                )
+                    .into_response();
+            };
+            settle_consent(&state, &consent, granted, None).await
+        }
+    }
+}
+
+/// `DELETE /v1/consents/{id}`: deny (or cancel) a pending ask — the
+/// tool wakes to an in-band refusal instead of a timeout.
+async fn consents_deny(State(state): State<ClawState>, Path(id): Path<String>) -> Response {
+    let consent = match state.consents.get(&id) {
+        Ok(Some(consent)) => consent,
+        Ok(None) => return not_found_consent(),
+        Err(err) => return internal_error(err.to_string()).into_response(),
+    };
+    if consent.resolved_at.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "consent request already resolved"})),
+        )
+            .into_response();
+    }
+    settle_consent(&state, &consent, false, None).await
+}
+
+/// The 404 shape for a consent id.
+fn not_found_consent() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": "no such consent request"})),
+    )
+        .into_response()
+}
+
+/// The secret request's second half: store the credential into the
+/// identity store under the draft the ask carried, then resolve the row.
+/// A store the identity layer refuses (bad kind, caps) leaves the
+/// request pending — the human can retry with a corrected answer.
+async fn resolve_secret_consent(
+    state: &ClawState,
+    consent: &crate::consents::Consent,
+    secret: String,
+) -> Response {
+    let Some(draft) = consent.draft.as_ref() else {
+        return internal_error("the consent row carries no account draft").into_response();
+    };
+    let Some(label) = draft["label"].as_str() else {
+        return internal_error("the consent draft carries no label").into_response();
+    };
+    let Some(service) = draft["service"].as_str() else {
+        return internal_error("the consent draft carries no service").into_response();
+    };
+    let kind = match crate::accounts_tools::parse_kind(draft["secret_kind"].as_str()) {
+        Ok(kind) => kind,
+        Err(reason) => return internal_error(reason).into_response(),
+    };
+    let mut account = rhema_identity::AccountDraft::new(
+        label.to_owned(),
+        service.to_owned(),
+        rhema_identity::Secret::new(kind, secret),
+    );
+    if let Some(url) = draft["url"].as_str() {
+        account = account.with_url(url.to_owned());
+    }
+    if let Some(username) = draft["username"].as_str() {
+        account = account.with_username(username.to_owned());
+    }
+    let stored = match state.accounts().put(account) {
+        Ok(account) => account,
+        Err(err) => return bad_request(err.to_string()).into_response(),
+    };
+    settle_consent(state, consent, true, Some(stored.id.clone())).await
+}
+
+/// Marks the row resolved, wakes the waiting tool, and tells the
+/// session's stream. `account_id` rides only a granted secret request.
+async fn settle_consent(
+    state: &ClawState,
+    consent: &crate::consents::Consent,
+    granted: bool,
+    account_id: Option<String>,
+) -> Response {
+    let resolved = if consent.kind == crate::consents::ConsentKind::Secret && granted {
+        state
+            .consents
+            .resolve_secret(&consent.id, account_id.as_deref().unwrap_or(""))
+    } else {
+        state.consents.resolve_decision(&consent.id, granted)
+    };
+    match resolved {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json!({"error": "consent request already resolved"})),
+            )
+                .into_response();
+        }
+        Err(err) => return internal_error(err.to_string()).into_response(),
+    }
+    state.bridge.wake(&consent.id);
+    state.hub.emit(
+        &ResourceKey::from(consent.session_key.clone()),
+        TurnEvent::ConsentResolved {
+            id: consent.id.clone(),
+            granted,
+        },
+    );
+    (
+        StatusCode::OK,
+        Json(json!({
+            "resolved": true,
+            "granted": granted,
+            "account_id": account_id,
+        })),
+    )
+        .into_response()
 }
 
 /// `{"source": "...", "key": "...", "payload": {...}}` — one external

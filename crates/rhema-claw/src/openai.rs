@@ -289,7 +289,15 @@ fn stream_response(
                     let _ = sender.send(done).await;
                     break;
                 }
-                Ok(TurnEvent::ToolStart { .. } | TurnEvent::ToolResult { .. }) => continue,
+                // The claw's own clients get the tool rows, the
+                // consent cards, and the attachments; an OpenAI caller
+                // gets text, reasoning, and the end marker.
+                Ok(
+                    TurnEvent::ToolStart { .. }
+                    | TurnEvent::ToolResult { .. }
+                    | TurnEvent::ConsentRequest { .. }
+                    | TurnEvent::ConsentResolved { .. },
+                ) => continue,
                 // The turn's input rides the stream for the claw's own
                 // clients; an OpenAI caller named it in the request.
                 Ok(TurnEvent::UserMessage { .. }) => continue,

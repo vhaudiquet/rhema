@@ -174,6 +174,12 @@ pub struct InteractiveHandler {
     /// The notification table: the `notify` tool writes it, and
     /// non-interactive replies auto-notify through it.
     notifications: Arc<NotificationStore>,
+    /// The consent table the `ask_secret` tool asks through and the
+    /// consent routes answer into.
+    consents: Arc<crate::consents::ConsentStore>,
+    /// The wake bridge between those routes and the tools waiting on
+    /// their rows.
+    bridge: Arc<crate::consents::WaitBridge>,
     /// How many tool rounds one turn may run before it is cut off — the
     /// config's runaway guard for an agent meant to work unattended; a
     /// follow-up message keeps going.
@@ -188,7 +194,7 @@ impl InteractiveHandler {
     /// v1-permissive — the shell is the point of a resident coding
     /// agent — installed once, since resolution is synchronous within a
     /// turn.
-    #[allow(clippy::too_many_arguments)] // ten parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // twelve parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -200,6 +206,8 @@ impl InteractiveHandler {
         tasks: Arc<crate::task_store::TaskStore>,
         accounts: Arc<dyn rhema_identity::IdentityStore>,
         max_turn_steps: u32,
+        consents: Arc<crate::consents::ConsentStore>,
+        bridge: Arc<crate::consents::WaitBridge>,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(CodingTools::new(&workspace));
@@ -227,6 +235,8 @@ impl InteractiveHandler {
             bootstrap_resolver,
             hub,
             notifications,
+            consents,
+            bridge,
             max_turn_steps,
         }
     }
@@ -239,14 +249,14 @@ impl InteractiveHandler {
     /// gone the moment both files exist, and the tool roster is the
     /// dispatch chain's own specs — what the prompt lists is what the
     /// request advertises.
-    fn agent(&self) -> Result<Agent, String> {
+    fn agent(&self, key: &ResourceKey) -> Result<Agent, String> {
         let (provider, model) = self.backends.current();
         // Chat input may carry embedded pastes — the compact chip form
         // the UIs mint and the session keeps — so the provider wraps in
         // the same expansion the coding driver wraps its own with: the
         // model sees plain text, the transcript keeps the chips.
         let provider: Arc<dyn ModelProvider> = Arc::new(ExpandPastes::new(provider));
-        let resolver = self.resolver();
+        let resolver = self.resolver(key);
         let system = render_system(
             DEFAULT_SYSTEM_MD,
             &self.workspace,
@@ -264,8 +274,10 @@ impl InteractiveHandler {
     }
 
     /// The resolver chain one dispatch runs under: the coding toolset
-    /// over the interactive workspace, then the resident toolsets.
-    fn resolver(&self) -> Arc<ResolverChain> {
+    /// over the interactive workspace, then the resident toolsets. The
+    /// consent tools build per dispatch — their asks must name the
+    /// session that asked, and the handler serves every session.
+    fn resolver(&self, key: &ResourceKey) -> Arc<ResolverChain> {
         Arc::new(ResolverChain::new(vec![
             self.tools.clone(),
             Arc::new(MemoryResolver::new(
@@ -277,6 +289,13 @@ impl InteractiveHandler {
             self.task_resolver.clone(),
             self.watch_resolver.clone(),
             self.accounts_resolver.clone(),
+            crate::consents::registry(
+                self.consents.clone(),
+                self.bridge.clone(),
+                self.hub.clone(),
+                key.clone(),
+            )
+            .resolver_for(&Allowlist::permissive()),
         ]))
     }
 
@@ -329,7 +348,8 @@ impl InteractiveHandler {
         };
 
         let mut session = restore_session(&ctx.session.core.driver_state, &key)?;
-        let mut agent = self.agent()?;
+        let resolver = self.resolver(&ctx.key);
+        let mut agent = self.agent(&ctx.key)?;
         // Commit-before-execute: the intent is in the store before the
         // first tool runs — and if the lease cannot be committed under
         // (expired, lost), the turn fails before any side effect. A
@@ -341,7 +361,7 @@ impl InteractiveHandler {
             run_id: key.clone(),
             cancelled: Arc::new(AtomicBool::new(false)),
         };
-        revive_dangling_calls(&mut session, self.resolver().as_ref(), &tools).await;
+        revive_dangling_calls(&mut session, resolver.as_ref(), &tools).await;
         let mut sink = HubSink {
             key: ctx.key.clone(),
             hub: self.hub.clone(),
@@ -582,6 +602,18 @@ mod tests {
         Arc::new(rhema_identity::VolatileIdentityStore::new())
     }
 
+    /// A throwaway consent table, the shape the dispatch tests hand the
+    /// handler.
+    fn consents() -> Arc<crate::consents::ConsentStore> {
+        Arc::new(crate::consents::ConsentStore::in_memory().expect("store opens"))
+    }
+
+    /// A fresh wake bridge, the shape the dispatch tests hand the
+    /// handler.
+    fn bridge() -> Arc<crate::consents::WaitBridge> {
+        Arc::new(crate::consents::WaitBridge::new())
+    }
+
     fn test_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<BackendRegistry> {
         Arc::new(
             BackendRegistry::new(vec![Backend::headless("mock", provider)], None)
@@ -658,6 +690,8 @@ mod tests {
             tasks(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
         );
         let dispatcher = Arc::new(Dispatcher::new(
             DispatcherConfig {
@@ -731,8 +765,10 @@ mod tests {
             tasks(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
         );
-        let specs = handler.resolver().specs();
+        let specs = handler.resolver(&Key::from("interactive:web")).specs();
         assert!(
             specs.iter().any(|spec| spec.name == "bash"),
             "the coding toolset is in the chain: {specs:?}"
@@ -979,6 +1015,8 @@ mod tests {
             tasks(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1061,6 +1099,8 @@ mod tests {
             tasks(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1152,6 +1192,8 @@ mod tests {
             tasks(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1219,6 +1261,8 @@ mod tests {
             tasks(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1288,6 +1332,8 @@ mod tests {
             tasks(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(

@@ -95,6 +95,30 @@ pub enum TurnEvent {
         /// `handled` or `failed`.
         outcome: String,
     },
+    /// The agent asked the human something only they can answer: a
+    /// credential to store, permission to act. A chat surface renders
+    /// the ask as a card and answers through the consent routes.
+    ConsentRequest {
+        /// The request's id — the answer addresses it.
+        id: String,
+        /// What kind of answer: `secret` or `phone`.
+        kind: String,
+        /// The one-line ask.
+        summary: String,
+        /// The ask's context, the model's own reason.
+        detail: String,
+        /// When the request was made, epoch millis — a card that has
+        /// outlived the answer window greys out against it.
+        created_at: u64,
+    },
+    /// A consent request settled. The tool's answer rides the turn like
+    /// any tool result; this is how the card learns it can stop waiting.
+    ConsentResolved {
+        /// The request's id.
+        id: String,
+        /// Whether it was granted.
+        granted: bool,
+    },
 }
 
 impl TurnEvent {
@@ -108,6 +132,8 @@ impl TurnEvent {
             Self::ToolStart { .. } => "tool_start",
             Self::ToolResult { .. } => "tool_result",
             Self::TurnDone { .. } => "turn_done",
+            Self::ConsentRequest { .. } => "consent_request",
+            Self::ConsentResolved { .. } => "consent_resolved",
         }
     }
 }

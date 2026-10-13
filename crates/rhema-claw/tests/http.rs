@@ -30,6 +30,23 @@ fn reply(text: &str) -> ModelOutput {
     }
 }
 
+/// The scripted assistant turn that asks for a tool by name.
+fn tool_call(id: &str, name: &str, args: Value) -> ModelOutput {
+    ModelOutput {
+        message: Message {
+            role: Role::Assistant,
+            content: vec![Content::ToolCall(rhema_core::ToolCall {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                args,
+                provider_data: Value::Null,
+            })],
+        },
+        stop_reason: StopReason::ToolUse,
+        usage: Usage::default(),
+    }
+}
+
 /// The test's claw config: everything under one tempdir, no seed
 /// watches, no listen address of its own (the test binds ephemeral).
 fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
@@ -1624,4 +1641,145 @@ async fn named_provider_instances_share_the_surface() {
         "local-b",
         "the named instance is still active after the rebuild"
     );
+}
+
+/// The consent round-trip, over the wire: a turn asks through
+/// `ask_secret`, the message POST that triggered it holds until the
+/// answer lands, the pending list shows the ask, and the secret ends up
+/// in the accounts — never in the transcript.
+#[tokio::test]
+async fn a_secret_ask_is_answered_over_the_consent_routes() {
+    let provider = Arc::new(MockProvider::new([
+        tool_call(
+            "c1",
+            "ask_secret",
+            json!({
+                "service": "github",
+                "username": "octocat",
+                "reason": "to file the issue",
+            }),
+        ),
+        reply("stored, thanks."),
+    ]));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+
+    // The turn blocks inside the tool: the POST returns only when the
+    // human answers, so it runs on its own task.
+    let poster = tokio::spawn({
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/v1/sessions/interactive:web/messages"))
+                .json(&json!({"text": "file the issue"}))
+                .send()
+                .await
+                .expect("the message posts")
+        }
+    });
+
+    // The ask appears on the pending list, then on the stream.
+    let consents: Value = loop {
+        let consents: Value = client
+            .get(format!("{base}/v1/consents"))
+            .send()
+            .await
+            .expect("consents reads")
+            .json()
+            .await
+            .expect("consents parses");
+        if consents["consents"]
+            .as_array()
+            .is_some_and(|list| !list.is_empty())
+        {
+            break consents;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    let id = consents["consents"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    assert_eq!(consents["consents"][0]["kind"], "secret");
+    read_until(&mut stream, &mut seen, r#""type":"consent_request""#).await;
+
+    // A wrong-shaped answer is refused and the ask stays open.
+    let refused = client
+        .post(format!("{base}/v1/consents/{id}"))
+        .json(&json!({}))
+        .send()
+        .await
+        .expect("the answer posts");
+    assert_eq!(refused.status(), 422);
+
+    // The answer: the secret goes in, the POST unblocks, the account
+    // exists redacted.
+    let answered = client
+        .post(format!("{base}/v1/consents/{id}"))
+        .json(&json!({"secret": "gh_pat_123"}))
+        .send()
+        .await
+        .expect("the answer posts");
+    assert_eq!(answered.status(), 200);
+    let settled: Value = answered.json().await.expect("the answer parses");
+    assert_eq!(settled["granted"], true);
+    let account_id = settled["account_id"]
+        .as_str()
+        .expect("an account id")
+        .to_owned();
+
+    let posted = poster.await.expect("the post joins");
+    assert_eq!(posted.status(), 202);
+
+    let accounts: Value = client
+        .get(format!("{base}/v1/accounts"))
+        .send()
+        .await
+        .expect("accounts reads")
+        .json()
+        .await
+        .expect("accounts parses");
+    assert_eq!(accounts["accounts"].as_array().expect("a list").len(), 1);
+    assert_eq!(accounts["accounts"][0]["service"], "github");
+    assert_eq!(accounts["accounts"][0]["id"], account_id);
+    assert!(
+        !seen.contains("gh_pat_123"),
+        "the secret never reaches the transcript: {seen}"
+    );
+    read_until(&mut stream, &mut seen, r#""type":"consent_resolved""#).await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+
+    // A second answer is a conflict, and the ask has left the list.
+    let again = client
+        .post(format!("{base}/v1/consents/{id}"))
+        .json(&json!({"secret": "x"}))
+        .send()
+        .await
+        .expect("the answer posts");
+    assert_eq!(again.status(), 409);
+    let consents: Value = client
+        .get(format!("{base}/v1/consents"))
+        .send()
+        .await
+        .expect("consents reads")
+        .json()
+        .await
+        .expect("consents parses");
+    assert!(consents["consents"].as_array().expect("a list").is_empty());
 }

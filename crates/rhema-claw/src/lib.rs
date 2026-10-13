@@ -34,6 +34,9 @@
 //! - [`hub`] — the event hub: per-key record and broadcast of turn events
 //! - [`identity`] — the agent's presentation identity: name, mark,
 //!   images, served over `/v1/agent`
+//! - [`consents`] — the consent table and wake bridge: a running turn
+//!   asks the human (a secret to store, permission to act) and waits;
+//!   the chat surface answers through the consent routes
 //! - [`watch_tools`] — the agent's watch-management tool set
 //! - [`notify_tools`] — the `notify` tool: the queue a device polls
 //! - [`task_tools`] — `schedule_task`, `list_tasks`, `cancel_task`
@@ -56,6 +59,7 @@ pub mod accounts_tools;
 pub mod backends;
 pub mod bootstrap;
 pub mod config;
+pub mod consents;
 pub mod daemon;
 pub mod environment;
 pub mod forge;
