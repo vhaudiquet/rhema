@@ -52,6 +52,29 @@ function submit(): void {
   emit('send', text)
   draft.value = ''
   pinned.value = true
+  void nextTick(resizePrompt)
+}
+
+// --- the composer -----------------------------------------------------
+const prompt = ref<HTMLTextAreaElement | null>(null)
+
+/** The composer grows to this many rows, then scrolls instead. */
+const MAX_PROMPT_ROWS = 10
+
+/** Height follows the content; the CSS max-height clamps the growth. */
+function resizePrompt(): void {
+  const el = prompt.value
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${el.scrollHeight}px`
+}
+
+/** Enter submits, shift+enter is a newline, ctrl/cmd+enter submits. */
+function onPromptKeydown(event: KeyboardEvent): void {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault()
+    submit()
+  }
 }
 
 const displayName = computed(() => props.activeKey.replace(/^interactive:/, ''))
@@ -186,12 +209,14 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
         </button>
       </div>
       <div class="input-row">
-        <input
+        <textarea
+          ref="prompt"
           v-model="draft"
-          type="text"
+          rows="1"
           :placeholder="canSend ? `Message ${agentName}…` : 'only interactive:* sessions accept messages'"
           :disabled="!canSend"
-          @keydown.enter="submit"
+          @keydown="onPromptKeydown"
+          @input="resizePrompt"
         />
         <button class="primary send" :disabled="!canSend || busy || draft.trim() === ''" title="send" @click="submit">
           ↑
@@ -445,10 +470,14 @@ li.error .glyph {
   gap: 8px;
 }
 
-.input-row input {
+.input-row textarea {
   flex: 1;
   min-width: 0;
   padding: 9px 12px;
+  resize: none;
+  overflow-y: auto;
+  /* MAX_PROMPT_ROWS rows, then the box scrolls instead of growing. */
+  max-height: calc(10 * 1.55em + 18px);
 }
 
 .send {

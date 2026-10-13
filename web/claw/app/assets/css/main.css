@@ -114,7 +114,8 @@ button.ghost:hover:not(:disabled) {
 }
 
 input,
-select {
+select,
+textarea {
   font: inherit;
   color: var(--text);
   background: var(--sunken);
@@ -124,18 +125,21 @@ select {
 }
 
 input:hover,
-select:hover {
+select:hover,
+textarea:hover {
   border-color: var(--border-strong);
 }
 
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 button:focus-visible {
   outline: 1px solid var(--accent);
   outline-offset: 0;
 }
 
-input::placeholder {
+input::placeholder,
+textarea::placeholder {
   color: var(--text3);
 }
 
