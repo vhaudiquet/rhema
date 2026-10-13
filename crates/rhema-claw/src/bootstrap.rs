@@ -232,12 +232,14 @@ fn substitute(template: &str, values: &[(&str, &str)]) -> String {
 
 /// Renders the system prompt for one dispatch: `{workspace}` and the
 /// three file sections from the live store, `{tools}` from the
-/// dispatch's own resolver specs, the `{onboarding}` section only
-/// while [`Bootstrap::needs_onboarding`]. Fallible on purpose — a
-/// store that cannot be read surfaces loudly instead of rendering a
-/// prompt without it.
+/// dispatch's own resolver specs, `{session}` — the dispatching key,
+/// the address the model schedules its own wakes to — and the
+/// `{onboarding}` section only while [`Bootstrap::needs_onboarding`].
+/// Fallible on purpose — a store that cannot be read surfaces loudly
+/// instead of rendering a prompt without it.
 pub fn render_system(
     template: &str,
+    session: &str,
     workspace: &Path,
     bootstrap: &Bootstrap,
     tools: &[ToolSpec],
@@ -258,6 +260,7 @@ pub fn render_system(
     let rendered = substitute(
         template,
         &[
+            ("session", session),
             ("workspace", workspace.as_str()),
             ("soul", soul_section.as_str()),
             ("user", user_section.as_str()),
@@ -445,8 +448,14 @@ mod tests {
         }))
         .resolver_for(&rhema_autonomous_agent::Allowlist::permissive())
         .specs();
-        let prompt = render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &tools)
-            .expect("renders");
+        let prompt = render_system(
+            DEFAULT_SYSTEM_MD,
+            "interactive:web",
+            Path::new("/ws"),
+            &bootstrap,
+            &tools,
+        )
+        .expect("renders");
         assert!(prompt.contains("## SOUL"), "{prompt}");
         assert!(prompt.contains("## USER"), "{prompt}");
         assert!(prompt.contains("## ENVIRONMENT"), "{prompt}");
@@ -467,8 +476,14 @@ mod tests {
             .save(BootstrapKind::User, "The user is Ana; she ships compilers.")
             .expect("saves");
         write_environment(&bootstrap, "Linux, 32 cores, no GPU.");
-        let prompt =
-            render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &[]).expect("renders");
+        let prompt = render_system(
+            DEFAULT_SYSTEM_MD,
+            "interactive:web",
+            Path::new("/ws"),
+            &bootstrap,
+            &[],
+        )
+        .expect("renders");
         assert!(
             prompt.contains("I am claw: terse, warm, relentless."),
             "{prompt}"
@@ -488,8 +503,14 @@ mod tests {
         let (_dir, bootstrap) = store();
         let content = "the user is Ana.\n\n- braces stay: {{ keep }} and {soul}\n";
         bootstrap.save(BootstrapKind::User, content).expect("saves");
-        let prompt =
-            render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &[]).expect("renders");
+        let prompt = render_system(
+            DEFAULT_SYSTEM_MD,
+            "interactive:web",
+            Path::new("/ws"),
+            &bootstrap,
+            &[],
+        )
+        .expect("renders");
         assert!(prompt.contains(content), "{prompt}");
         assert!(
             prompt.contains("{soul}"),
@@ -513,8 +534,14 @@ mod tests {
                 "required": ["kind"]
             }),
         )];
-        let prompt = render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &tools)
-            .expect("renders");
+        let prompt = render_system(
+            DEFAULT_SYSTEM_MD,
+            "interactive:web",
+            Path::new("/ws"),
+            &bootstrap,
+            &tools,
+        )
+        .expect("renders");
         assert!(prompt.contains("- my_tool | its purpose | "), "{prompt}");
         assert!(
             prompt.contains(r#""required":["kind"]"#),

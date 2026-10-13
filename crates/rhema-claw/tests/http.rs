@@ -87,11 +87,17 @@ type SseBody = Pin<Box<dyn tokio_stream::Stream<Item = reqwest::Result<bytes::By
 async fn read_until(stream: &mut SseBody, seen: &mut String, needle: &str) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while !seen.contains(needle) {
-        let chunk = tokio::time::timeout_at(deadline, stream.next())
-            .await
-            .expect("timed out waiting for the stream to carry the needle")
-            .expect("the stream ended early")
-            .expect("the body errored");
+        let chunk = match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(Ok(chunk))) => chunk,
+            Ok(_) => panic!(
+                "the stream ended early waiting for {needle:?}; seen: {}",
+                &seen[seen.len().saturating_sub(600)..]
+            ),
+            Err(_) => panic!(
+                "timed out waiting for {needle:?}; seen tail: {}",
+                &seen[seen.len().saturating_sub(600)..]
+            ),
+        };
         seen.push_str(&String::from_utf8_lossy(&chunk));
     }
 }
@@ -2146,4 +2152,93 @@ async fn a_session_is_creatable_over_http() {
             .expect("the create posts");
         assert_eq!(refused.status(), 400, "refusing {bad:?}");
     }
+}
+
+/// The wake-itself loop, over the wire: the model schedules a turn into
+/// the chat session it is talking in, the daemon's detect pass fires it
+/// when due, and the reply lands in that same session — one session,
+/// one context, on both sides of the sleep.
+#[tokio::test]
+async fn a_scheduled_task_wakes_the_chat_session_it_names() {
+    let provider = Arc::new(MockProvider::new([
+        tool_call(
+            "c1",
+            "schedule_task",
+            json!({
+                "prompt": "summarize tonight's work",
+                "at": 1_791_734_400_000_i64,
+                "session": "interactive:web",
+            }),
+        ),
+        reply("scheduled for tomorrow morning."),
+        // The wake's turn.
+        reply("tonight you shipped the claw."),
+    ]));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "wake me here tomorrow morning with a summary"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+    read_until(&mut stream, &mut seen, r#""type":"tool_result""#).await;
+    read_until(&mut stream, &mut seen, "scheduled for tomorrow morning.").await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+
+    // The scheduled instant is tomorrow, far past the test's patience:
+    // pull it due by hand (the row is the store's, the mechanism is the
+    // scheduler's) and run one daemon pass — detect, admit, run.
+    {
+        use rhema_claw::task_store::TaskStore;
+        let store = TaskStore::open(dir.path().join("dispatch.db")).expect("the task table opens");
+        let task = &store.list().expect("the row reads")[0];
+        store.rearm(task.id, 1).expect("pulled due");
+    }
+    let report = daemon.tick().await.expect("the tick runs");
+    assert_eq!(report.detected, 1, "the wake was detected");
+
+    // The wake fired in the chat session: its prompt is the next user
+    // message and the turn's reply streamed after it.
+    read_until(&mut stream, &mut seen, "summarize tonight's work").await;
+    read_until(&mut stream, &mut seen, "tonight you shipped the claw.").await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    assert_eq!(
+        seen.matches(r#""type":"user_message""#).count(),
+        2,
+        "the chat's ask, then the wake: {seen}"
+    );
+    // The session notified nothing: interactive replies stay in the chat.
+    let notifications: Value = client
+        .get(format!("{base}/v1/notifications"))
+        .send()
+        .await
+        .expect("notifications read")
+        .json()
+        .await
+        .expect("notifications parse");
+    assert!(
+        notifications["notifications"]
+            .as_array()
+            .expect("a list")
+            .is_empty(),
+        "{notifications}"
+    );
 }

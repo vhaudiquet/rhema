@@ -40,11 +40,19 @@ pub fn task_key(id: i64) -> String {
     format!("task:{id}")
 }
 
-/// The event one due firing becomes. The dedup id carries the firing's
+/// The event one due firing becomes. The key is the task's delivery
+/// target — its own `task:<id>` slot, or the session the scheduler was
+/// asked to wake (a chat conversation with its context, a phone key
+/// whose reply auto-notifies). The dedup id carries the firing's
 /// `next_due`, so a recurring task's next firing never dedups against
 /// the last one still pending in the key's inbox.
 pub fn task_event(task: &crate::task_store::TaskRecord, now: u64) -> Event {
-    let key = task_key(task.id);
+    let default_key = task_key(task.id);
+    let key = task
+        .deliver_to
+        .as_deref()
+        .filter(|key| !key.is_empty())
+        .unwrap_or(default_key.as_str());
     Event {
         id: format!("task-{}@{}", task.id, task.next_due_millis),
         source: TASKS_SOURCE.to_owned(),
@@ -169,7 +177,7 @@ mod tests {
         let dispatcher = dispatcher();
         let source = TaskScheduler::new(&dispatcher, clock.clone(), store.clone());
         store
-            .schedule_at("remind the user: bread", 1_500, 1_000)
+            .schedule_at("remind the user: bread", 1_500, 1_000, None)
             .expect("scheduled");
 
         // Not yet due: skipped, nothing fed, no record.
@@ -194,7 +202,7 @@ mod tests {
         let dispatcher = dispatcher();
         let source = TaskScheduler::new(&dispatcher, clock.clone(), store.clone());
         store
-            .schedule_every("stand up", 1_000, 1_000)
+            .schedule_every("stand up", 1_000, 1_000, None)
             .expect("scheduled");
 
         // Due at 2000: one firing, re-armed to due + interval.
@@ -220,6 +228,34 @@ mod tests {
             2,
             "one firing per pass: two passes, two events"
         );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_target_routes_the_firing_to_that_session() {
+        let clock = Arc::new(FixedClock::new(1_000));
+        let store = Arc::new(TaskStore::in_memory().expect("store opens"));
+        let dispatcher = dispatcher();
+        let source = TaskScheduler::new(&dispatcher, clock.clone(), store.clone());
+        store
+            .schedule_at(
+                "summarize this evening's work",
+                1_500,
+                1_000,
+                Some("interactive:web"),
+            )
+            .expect("scheduled");
+
+        clock.advance(500);
+        assert_eq!(source.detect().await.expect("detect runs"), 1);
+        // The firing woke the named session, not the task's own slot.
+        let depth = |key: &str| {
+            dispatcher
+                .status(&rhema_rsd::ResourceKey::from(key))
+                .expect("status reads")
+                .inbox_depth
+        };
+        assert_eq!(depth("interactive:web"), 1);
+        assert_eq!(depth(&task_key(1)), 0, "the default slot stays cold");
     }
 
     #[tokio::test]

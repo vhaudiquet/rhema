@@ -23,7 +23,8 @@ use serde::Serialize;
 
 /// The task table. The CHECK pins the two kinds' column pairing to what
 /// the code writes: `at` rows carry `at_millis`, `every` rows carry
-/// `interval_millis`.
+/// `interval_millis`. `deliver_to` names the session a firing wakes —
+/// `NULL` meaning the task's own `task:<id>` slot.
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tasks (
     id              INTEGER PRIMARY KEY,
@@ -32,9 +33,26 @@ CREATE TABLE IF NOT EXISTS tasks (
     at_millis       INTEGER NULL,
     interval_millis INTEGER NULL,
     next_due_millis INTEGER NOT NULL,
-    created_at      INTEGER NOT NULL
+    created_at      INTEGER NOT NULL,
+    deliver_to      TEXT NULL
 );
 ";
+
+/// Adds `deliver_to` to a table created before it existed. The column
+/// is the only schema the first release lacked, and `ALTER TABLE ADD
+/// COLUMN` with a `NULL` default is the one shape SQLite can add
+/// in place.
+fn migrate_add_deliver_to(conn: &rusqlite::Connection) -> Result<(), TaskStoreError> {
+    let present: bool = conn
+        .prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .filter_map(Result::ok)
+        .any(|name| name == "deliver_to");
+    if !present {
+        conn.execute("ALTER TABLE tasks ADD COLUMN deliver_to TEXT NULL", [])?;
+    }
+    Ok(())
+}
 
 /// Why a task-table operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -97,6 +115,9 @@ pub struct TaskRecord {
     pub next_due_millis: i64,
     /// Creation time, milliseconds since the Unix epoch.
     pub created_at: i64,
+    /// The session a firing wakes; `None` meaning the task's own
+    /// `task:<id>` slot.
+    pub deliver_to: Option<String>,
 }
 
 /// The persistent task table over its own connection to the daemon's
@@ -135,25 +156,28 @@ impl TaskStore {
                 .map_err(TaskStoreError::from)?;
         }
         conn.execute_batch(SCHEMA).map_err(TaskStoreError::from)?;
+        migrate_add_deliver_to(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })
     }
 
-    /// Schedules a one-shot firing at `at_millis`. A time already past
-    /// is accepted: the next detect pass fires it immediately — a task
-    /// scheduled for "15:00" at 15:01 still runs.
+    /// Schedules a one-shot firing at `at_millis`, waking `deliver_to`
+    /// (the task's own `task:<id>` slot when `None`). A time already
+    /// past is accepted: the next detect pass fires it immediately — a
+    /// task scheduled for "15:00" at 15:01 still runs.
     pub fn schedule_at(
         &self,
         prompt: &str,
         at_millis: i64,
         now: i64,
+        deliver_to: Option<&str>,
     ) -> Result<TaskRecord, TaskStoreError> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         conn.execute(
-            "INSERT INTO tasks (prompt, kind, at_millis, interval_millis, next_due_millis, created_at)
-             VALUES (?1, 'at', ?2, NULL, ?2, ?3)",
-            params![prompt, at_millis, now],
+            "INSERT INTO tasks (prompt, kind, at_millis, interval_millis, next_due_millis, created_at, deliver_to)
+             VALUES (?1, 'at', ?2, NULL, ?2, ?3, ?4)",
+            params![prompt, at_millis, now, deliver_to],
         )?;
         Ok(TaskRecord {
             id: conn.last_insert_rowid(),
@@ -163,23 +187,25 @@ impl TaskStore {
             interval_millis: None,
             next_due_millis: at_millis,
             created_at: now,
+            deliver_to: deliver_to.map(str::to_owned),
         })
     }
 
     /// Schedules a recurring firing every `interval_millis`, the first
-    /// one `interval_millis` from `now`.
+    /// one `interval_millis` from `now`, waking `deliver_to`.
     pub fn schedule_every(
         &self,
         prompt: &str,
         interval_millis: i64,
         now: i64,
+        deliver_to: Option<&str>,
     ) -> Result<TaskRecord, TaskStoreError> {
         let next_due = now + interval_millis;
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         conn.execute(
-            "INSERT INTO tasks (prompt, kind, at_millis, interval_millis, next_due_millis, created_at)
-             VALUES (?1, 'every', NULL, ?2, ?3, ?4)",
-            params![prompt, interval_millis, next_due, now],
+            "INSERT INTO tasks (prompt, kind, at_millis, interval_millis, next_due_millis, created_at, deliver_to)
+             VALUES (?1, 'every', NULL, ?2, ?3, ?4, ?5)",
+            params![prompt, interval_millis, next_due, now, deliver_to],
         )?;
         Ok(TaskRecord {
             id: conn.last_insert_rowid(),
@@ -189,6 +215,7 @@ impl TaskStore {
             interval_millis: Some(interval_millis),
             next_due_millis: next_due,
             created_at: now,
+            deliver_to: deliver_to.map(str::to_owned),
         })
     }
 
@@ -197,7 +224,7 @@ impl TaskStore {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let mut stmt = conn
             .prepare(
-                "SELECT id, prompt, kind, at_millis, interval_millis, next_due_millis, created_at
+                "SELECT id, prompt, kind, at_millis, interval_millis, next_due_millis, created_at, deliver_to
                  FROM tasks ORDER BY id ASC",
             )
             .map_err(TaskStoreError::from)?;
@@ -217,7 +244,7 @@ impl TaskStore {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let mut stmt = conn
             .prepare(
-                "SELECT id, prompt, kind, at_millis, interval_millis, next_due_millis, created_at
+                "SELECT id, prompt, kind, at_millis, interval_millis, next_due_millis, created_at, deliver_to
                  FROM tasks WHERE next_due_millis <= ?1
                  ORDER BY next_due_millis ASC, id ASC",
             )
@@ -266,6 +293,7 @@ fn row_task(row: &rusqlite::Row<'_>) -> Result<TaskRecord, rusqlite::Error> {
         interval_millis: row.get(4)?,
         next_due_millis: row.get(5)?,
         created_at: row.get(6)?,
+        deliver_to: row.get(7)?,
     })
 }
 
@@ -277,12 +305,13 @@ mod tests {
     fn tasks_round_trip_through_the_table() {
         let store = TaskStore::in_memory().expect("store opens");
         let at = store
-            .schedule_at("take the bread out", 1_500, 1_000)
+            .schedule_at("take the bread out", 1_500, 1_000, None)
             .expect("at lands");
         let every = store
-            .schedule_every("stand up", 1_800_000, 1_000)
+            .schedule_every("stand up", 1_800_000, 1_000, None)
             .expect("every lands");
         assert_ne!(at.id, every.id);
+        assert_eq!(at.deliver_to, None, "the default slot is the task's own");
 
         let listed = store.list().expect("list reads");
         assert_eq!(listed, vec![at.clone(), every.clone()]);
@@ -297,9 +326,11 @@ mod tests {
     #[test]
     fn due_selects_only_elapsed_tasks_in_firing_order() {
         let store = TaskStore::in_memory().expect("store opens");
-        let late = store.schedule_at("late", 500, 0).expect("at lands");
-        let edge = store.schedule_at("edge", 1_000, 0).expect("at lands");
-        store.schedule_at("future", 5_000, 0).expect("at lands");
+        let late = store.schedule_at("late", 500, 0, None).expect("at lands");
+        let edge = store.schedule_at("edge", 1_000, 0, None).expect("at lands");
+        store
+            .schedule_at("future", 5_000, 0, None)
+            .expect("at lands");
 
         assert!(
             store.due(499).expect("due reads").is_empty(),
@@ -320,7 +351,7 @@ mod tests {
     #[test]
     fn remove_and_rearm_advance_rows() {
         let store = TaskStore::in_memory().expect("store opens");
-        let task = store.schedule_every("tick", 1_000, 0).expect("lands");
+        let task = store.schedule_every("tick", 1_000, 0, None).expect("lands");
         store.rearm(task.id, 9_999).expect("rearm lands");
         let listed = store.list().expect("list reads");
         assert_eq!(listed[0].next_due_millis, 9_999);
@@ -330,12 +361,61 @@ mod tests {
     }
 
     #[test]
+    fn a_deliver_to_session_round_trips_and_defaults_absent() {
+        let store = TaskStore::in_memory().expect("store opens");
+        store
+            .schedule_at(
+                "summarize tonight's work",
+                1_500,
+                1_000,
+                Some("interactive:web"),
+            )
+            .expect("at lands");
+        let listed = store.list().expect("list reads");
+        assert_eq!(listed[0].deliver_to.as_deref(), Some("interactive:web"));
+    }
+
+    /// A table from before `deliver_to` opens into the new shape; its
+    /// rows read as defaulting to the task's own slot.
+    #[test]
+    fn a_pre_deliver_to_table_migrates_at_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("dispatch.db");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("opens");
+            conn.execute_batch(
+                "CREATE TABLE tasks (
+                     id              INTEGER PRIMARY KEY,
+                     prompt          TEXT NOT NULL,
+                     kind            TEXT NOT NULL CHECK(kind IN ('at','every')),
+                     at_millis       INTEGER NULL,
+                     interval_millis INTEGER NULL,
+                     next_due_millis INTEGER NOT NULL,
+                     created_at      INTEGER NOT NULL
+                 );
+                 INSERT INTO tasks (prompt, kind, at_millis, next_due_millis, created_at)
+                     VALUES ('old row', 'at', 42, 42, 0);",
+            )
+            .expect("legacy table");
+        }
+        let store = TaskStore::open(&path).expect("opens and migrates");
+        let listed = store.list().expect("list reads");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].deliver_to, None);
+        // The migrated row still schedules with a delivery target.
+        store
+            .schedule_at("new row", 50, 40, Some("task:9"))
+            .expect("schedules");
+        assert_eq!(store.list().expect("reads").len(), 2);
+    }
+
+    #[test]
     fn two_connections_share_one_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("dispatch.db");
         let writer = TaskStore::open(&path).expect("first connection");
         let reader = TaskStore::open(&path).expect("second connection");
-        writer.schedule_at("hello", 42, 0).expect("schedule");
+        writer.schedule_at("hello", 42, 0, None).expect("schedule");
         let listed = reader.list().expect("the other connection sees it");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].prompt, "hello");

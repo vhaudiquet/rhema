@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::interactive::is_resident_key;
 use crate::task_store::TaskStore;
 
 /// The task tool set over `store`: `schedule_task`, `list_tasks`,
@@ -42,6 +43,8 @@ struct ScheduleArgs {
     at: Option<Value>,
     #[serde(default)]
     every_secs: Option<u64>,
+    #[serde(default)]
+    session: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,11 +125,26 @@ impl Tool for ScheduleTask {
         if prompt.is_empty() {
             return Err("prompt must not be empty".to_owned());
         }
+        // A blank session reads as unset, and only a resident key can be
+        // woken: the delivery target must be a session the resident
+        // dispatcher answers.
+        let deliver_to = args
+            .session
+            .as_deref()
+            .map(str::trim)
+            .filter(|session| !session.is_empty());
+        if let Some(session) = deliver_to {
+            if !is_resident_key(session) {
+                return Err(format!(
+                    "session must be a resident key (interactive:, task:, or phone:), got {session:?}"
+                ));
+            }
+        }
         let record = match (args.at, args.every_secs) {
             (Some(at), None) => {
                 let at_millis = parse_at_millis(at)?;
                 self.store
-                    .schedule_at(prompt, at_millis, now_millis())
+                    .schedule_at(prompt, at_millis, now_millis(), deliver_to)
                     .map_err(|err| err.to_string())?
             }
             (None, Some(every_secs)) => {
@@ -138,7 +156,7 @@ impl Tool for ScheduleTask {
                     .filter(|millis| *millis <= i64::MAX as u64)
                     .ok_or_else(|| "`every_secs` is out of range".to_owned())?;
                 self.store
-                    .schedule_every(prompt, interval as i64, now_millis())
+                    .schedule_every(prompt, interval as i64, now_millis(), deliver_to)
                     .map_err(|err| err.to_string())?
             }
             (Some(_), Some(_)) => {
@@ -153,6 +171,7 @@ impl Tool for ScheduleTask {
             "id": record.id,
             "kind": record.kind.name(),
             "next_due_millis": record.next_due_millis,
+            "session": record.deliver_to,
         })
         .to_string())
     }
@@ -252,7 +271,7 @@ mod tests {
         assert!(!result.is_error, "{}", result.content);
         assert_eq!(
             serde_json::from_str::<Value>(&result.content).unwrap(),
-            json!({"scheduled": true, "id": 1, "kind": "at", "next_due_millis": 2_000_000_000_000_i64}),
+            json!({"scheduled": true, "id": 1, "kind": "at", "next_due_millis": 2_000_000_000_000_i64, "session": null}),
             "{}",
             result.content
         );
@@ -325,11 +344,76 @@ mod tests {
         );
     }
 
+    /// The wake-itself shape: a session-named task lands with its
+    /// delivery target, and a non-resident target is refused in band.
+    #[tokio::test]
+    async fn a_session_target_lands_and_a_foreign_one_is_refused() {
+        let store = store();
+        let result = call(
+            &store,
+            "schedule_task",
+            json!({
+                "prompt": "summarize this evening's work",
+                "at": "2026-10-15T08:00:00Z",
+                "session": "interactive:web",
+            }),
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        let answer: Value = serde_json::from_str(&result.content).unwrap();
+        assert_eq!(answer["session"], "interactive:web");
+        assert_eq!(
+            store.list().expect("reads")[0].deliver_to.as_deref(),
+            Some("interactive:web")
+        );
+
+        // A blank session reads as unset — the default task slot.
+        for blank in ["", "  "] {
+            let accepted = call(
+                &store,
+                "schedule_task",
+                json!({"prompt": "x", "at": 1, "session": blank}),
+            )
+            .await;
+            assert!(!accepted.is_error, "{blank:?} reads as unset");
+            assert_eq!(
+                store
+                    .list()
+                    .expect("reads")
+                    .last()
+                    .expect("lands")
+                    .deliver_to,
+                None,
+                "{blank:?} schedules into the task's own slot"
+            );
+        }
+        // A non-resident target, or a bare name, cannot be woken.
+        for foreign in ["github:acme/w#7", "web"] {
+            let refused = call(
+                &store,
+                "schedule_task",
+                json!({"prompt": "x", "at": 1, "session": foreign}),
+            )
+            .await;
+            assert!(refused.is_error, "{foreign:?} must be refused");
+        }
+        assert_eq!(
+            store
+                .list()
+                .expect("reads")
+                .iter()
+                .filter(|task| task.deliver_to.is_some())
+                .count(),
+            1,
+            "the named session is the only targeted row"
+        );
+    }
+
     #[tokio::test]
     async fn list_and_cancel_round_trip_through_the_table() {
         let store = store();
-        store.schedule_at("one", 42, 0).expect("seed");
-        store.schedule_every("two", 1_000, 0).expect("seed");
+        store.schedule_at("one", 42, 0, None).expect("seed");
+        store.schedule_every("two", 1_000, 0, None).expect("seed");
 
         let listed = call(&store, "list_tasks", json!({})).await;
         assert!(!listed.is_error, "{}", listed.content);

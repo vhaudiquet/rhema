@@ -269,6 +269,7 @@ impl InteractiveHandler {
         let resolver = self.resolver(key);
         let system = render_system(
             DEFAULT_SYSTEM_MD,
+            key.as_str(),
             &self.workspace,
             &self.bootstrap,
             &resolver.specs(),
@@ -362,12 +363,25 @@ impl InteractiveHandler {
         );
         // A non-chat resident key has no subscriber to read the reply:
         // say so in the input, so the model writes for the notification
-        // the final message becomes.
+        // the final message becomes. A chat key woken by its own
+        // schedule (the `prompt` payload field, never a typed message)
+        // is told why it fired: the reply lands in the conversation, and
+        // the user away from it needs notify.
+        let scheduled = items
+            .iter()
+            .any(|item| item.event.payload.get("prompt").is_some());
         let input = if is_resident_key(&key) && !key.starts_with(KEY_PREFIX) {
             format!(
                 "[Turn on {key}: this session has no live chat surface — \
                  your final message is delivered to the user as a \
                  notification.]\n\n{input}"
+            )
+        } else if scheduled {
+            format!(
+                "[Scheduled wake: this turn fired from your own \
+                 schedule_task, not from a chat message. The reply lands \
+                 in this conversation; reach the user away from it with \
+                 notify if they must see this now.]\n\n{input}"
             )
         } else {
             input
@@ -824,11 +838,16 @@ mod tests {
         );
         let prompt = render_system(
             DEFAULT_SYSTEM_MD,
+            "interactive:web",
             Path::new("/state/claw/workspaces/interactive"),
             &handler.bootstrap,
             &specs,
         )
         .expect("renders");
+        assert!(
+            prompt.contains("session's key is interactive:web"),
+            "the model learns the address it schedules itself at: {prompt}"
+        );
         assert!(
             prompt.contains("/state/claw/workspaces/interactive"),
             "{prompt}"
@@ -1473,6 +1492,120 @@ mod tests {
             notifications.pending("phone", 0).expect("poll reads").len(),
             1,
             "still just the task's notification"
+        );
+    }
+    /// The wake-itself path, end to end: a scheduled task whose target
+    /// is a chat session fires into that conversation — the model sees
+    /// the wake framing, the reply streams to the chat surface, and the
+    /// conversation's earlier context is still in the session.
+    #[tokio::test]
+    async fn a_scheduled_wake_fires_inside_the_chat_session_it_names() {
+        let reply = |text: &str| ModelOutput {
+            message: CoreMessage::text(CoreRole::Assistant, text),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        };
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        let hub = Arc::new(EventHub::default());
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let handler = InteractiveHandler::new(
+            test_registry(Arc::new(MockProvider::new([
+                reply("noted, leaving early."),
+                reply("evening summary: shipped the claw."),
+            ]))),
+            workspace.path().join("interactive"),
+            store,
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub,
+            notifications(),
+            tasks(),
+            accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+            consents(),
+            bridge(),
+            attachments(),
+            phone(),
+        );
+        let backing = Arc::new(VolatileStore::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            backing.clone(),
+        ));
+        register_user(&dispatcher);
+        // The source registration the daemon's assembly performs.
+        let _scheduler = crate::task_source::TaskScheduler::new(
+            &dispatcher,
+            Arc::new(rhema_rsd::SystemClock),
+            tasks(),
+        );
+        let driver = rhema_autonomous_agent::Driver::new(dispatcher.clone(), Arc::new(handler))
+            .with_holder("test");
+        let key = Key::from("interactive:web");
+
+        // The evening's work, in the chat session.
+        dispatcher
+            .ingest(user_event(key.as_str(), "we shipped the claw tonight"))
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("first run"),
+            vec![RsdOutcome::Handled]
+        );
+
+        // The scheduled wake: a `tasks` event delivered to the chat
+        // session — the shape task_event produces for a targeted task.
+        dispatcher
+            .ingest(Event {
+                id: "task-1@1500".into(),
+                source: crate::task_source::TASKS_SOURCE.into(),
+                payload: json!({
+                    "key": "interactive:web",
+                    "prompt": "summarize this evening's work",
+                }),
+                received_at: 1_500,
+            })
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("second run"),
+            vec![RsdOutcome::Handled]
+        );
+        assert_eq!(
+            dispatcher.status(&key).expect("status reads").state,
+            KeyState::Idle,
+            "the wake ran in the named session, not a cold slot"
+        );
+
+        // The session kept its context: the stashed conversation holds
+        // the evening's message, then the framed wake.
+        use rhema_rsd::Store;
+        let record = backing
+            .load(&key)
+            .expect("the record loads")
+            .expect("the key has a record");
+        let stashed: Session =
+            serde_json::from_value(record.session.expect("a session").core.driver_state)
+                .expect("the stash parses");
+        let user_texts: Vec<String> = stashed
+            .history
+            .iter()
+            .filter_map(|message| match &message.content[0] {
+                Content::Text(text) if message.role == Role::User => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(user_texts.len(), 2, "{user_texts:?}");
+        assert!(
+            user_texts[0].contains("we shipped the claw tonight"),
+            "the first turn is the conversation's own: {user_texts:?}"
+        );
+        assert!(
+            user_texts[1].contains("Scheduled wake")
+                && user_texts[1].contains("summarize this evening's work"),
+            "the wake names itself and carries the prompt: {user_texts:?}"
         );
     }
 }

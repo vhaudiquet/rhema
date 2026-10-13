@@ -122,8 +122,13 @@ nothing and a switch never needs a restart.
 
 The claw registers RSD sources three ways: watches (forge), scheduled
 tasks the agent creates in chat (`schedule_task` with `at` or
-`every_secs`; a due task dispatches `task:<id>` through the resident
-agent, whose reply auto-notifies the phone), and a generic door,
+`every_secs`; a due task dispatches through the resident agent — into
+the session the tool named, its own `task:<id>` slot by default — and
+a reply on a chat-less key auto-notifies the phone; a task whose
+`session` names a chat conversation wakes *that* session with its full
+context, so "pick this back up at 10 am" or "before my meeting,
+summarize X" is one tool call, with `notify` reaching the user away
+from the chat), and a generic door,
 `POST /v1/ingest`, that any external emitter addresses
 (`phone:<device>:<topic>`
 keys from the Android app, for example). The resident agent owns
