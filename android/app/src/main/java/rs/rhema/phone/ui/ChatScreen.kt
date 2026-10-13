@@ -27,10 +27,12 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
@@ -53,6 +55,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
@@ -101,7 +104,7 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             items(turnGroups(controller.items).asReversed(), key = { it.key }) { group ->
-                TurnGroupRow(group, container)
+                TurnGroupRow(group, container, controller)
             }
         }
 
@@ -256,7 +259,7 @@ private fun turnGroups(items: List<ChatController.Item>): List<TurnGroup> {
 }
 
 @Composable
-private fun TurnGroupRow(group: TurnGroup, container: AppContainer) {
+private fun TurnGroupRow(group: TurnGroup, container: AppContainer, controller: ChatController) {
     when (group) {
         is TurnGroup.User -> Row(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -309,6 +312,7 @@ private fun TurnGroupRow(group: TurnGroup, container: AppContainer) {
                         is ChatController.ToolCall ->
                             if (isShellTool(item.name)) ShellRow(item) else ToolCard(item)
                         is ChatController.Attachment -> AttachmentCard(item, container)
+                        is ChatController.Consent -> ConsentCard(item, controller)
                         is ChatController.Reply -> ReplyBlock(item)
                         is ChatController.Outcome -> OutcomeTag(item.outcome)
                         is ChatController.UserMessage -> Unit // never grouped here
@@ -320,14 +324,15 @@ private fun TurnGroupRow(group: TurnGroup, container: AppContainer) {
 }
 
 // Render order inside one agent turn: thinking, tools, attachments,
-// reply, outcome.
+// questions, reply, outcome.
 private fun turnPriority(item: ChatController.Item): Int = when (item) {
     is ChatController.Thinking -> 0
     is ChatController.ToolCall -> 1
     is ChatController.Attachment -> 2
-    is ChatController.Reply -> 3
-    is ChatController.Outcome -> 4
-    is ChatController.UserMessage -> 5
+    is ChatController.Consent -> 3
+    is ChatController.Reply -> 4
+    is ChatController.Outcome -> 5
+    is ChatController.UserMessage -> 6
 }
 
 @Composable
@@ -736,4 +741,125 @@ private fun formatBytes(size: Long): String = when {
     size < 1024 -> "$size B"
     size < 1024 * 1024 -> "${size / 1024} KB"
     else -> "${size / (1024 * 1024)} MB"
+}
+
+@Composable
+private fun ConsentCard(item: ChatController.Consent, controller: ChatController) {
+    val scope = rememberCoroutineScope()
+    var secret by remember(item.id) { mutableStateOf("") }
+    var busy by remember(item.id) { mutableStateOf(false) }
+    var failure by remember(item.id) { mutableStateOf<String?>(null) }
+
+    // An open question glows warn; a settled card keeps only its tone.
+    val tint = when (item.granted) {
+        null -> JadeiteWarn
+        true -> JadeiteOk
+        false -> JadeiteText3
+    }
+
+    fun answer(call: suspend () -> ClawResult<Unit>) {
+        busy = true
+        scope.launch {
+            failure = when (val result = call()) {
+                is ClawResult.Ok -> null
+                is ClawResult.HttpError -> "HTTP ${result.code}" + (result.body?.let { " — $it" } ?: "")
+                is ClawResult.Network -> result.message
+            }
+            busy = false
+        }
+    }
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(IntrinsicSize.Min)
+            .background(JadeiteSurface, MaterialTheme.shapes.extraSmall),
+    ) {
+        AccentBar(tint)
+        Column(
+            modifier = Modifier
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .weight(1f),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AppBadge(item.kind, tint = tint)
+                Text(
+                    item.summary,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
+            Text(item.detail, style = MaterialTheme.typography.bodySmall, color = JadeiteText2)
+            when (item.granted) {
+                true -> Text(
+                    "✓ " + stringResource(R.string.consent_granted),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = JadeiteOk,
+                )
+                false -> Text(
+                    "✗ " + stringResource(R.string.consent_denied),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = JadeiteText3,
+                )
+                null -> {
+                    if (item.kind == "secret") {
+                        OutlinedTextField(
+                            value = secret,
+                            onValueChange = { secret = it },
+                            modifier = Modifier.fillMaxWidth(),
+                            placeholder = { Text(stringResource(R.string.consent_secret_hint)) },
+                            visualTransformation = PasswordVisualTransformation(),
+                            singleLine = true,
+                            enabled = !busy,
+                            shape = MaterialTheme.shapes.small,
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = JadeiteAccent,
+                                unfocusedBorderColor = JadeiteBorder,
+                                focusedContainerColor = JadeiteSunken,
+                                unfocusedContainerColor = JadeiteSunken,
+                                cursorColor = JadeiteAccentText,
+                                focusedTextColor = JadeiteText,
+                                unfocusedTextColor = JadeiteText,
+                            ),
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (item.kind == "secret") {
+                            Button(
+                                enabled = !busy && secret.isNotBlank(),
+                                onClick = { answer { controller.answerSecret(item.consentId, secret) } },
+                            ) {
+                                Text(stringResource(R.string.consent_submit))
+                            }
+                        } else {
+                            Button(
+                                enabled = !busy,
+                                onClick = { answer { controller.grantPhone(item.consentId, true) } },
+                            ) {
+                                Text(stringResource(R.string.consent_approve))
+                            }
+                        }
+                        OutlinedButton(
+                            enabled = !busy,
+                            onClick = { answer { controller.denyConsent(item.consentId) } },
+                        ) {
+                            Text(stringResource(R.string.consent_deny))
+                        }
+                    }
+                }
+            }
+            failure?.let { fail ->
+                Text(
+                    stringResource(R.string.consent_answer_failed, fail),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = JadeiteError,
+                )
+            }
+        }
+    }
 }

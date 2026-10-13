@@ -131,4 +131,42 @@ sealed interface ClawEvent {
         val size: Long = 0,
         val caption: String? = null,
     ) : ClawEvent
+
+    // The agent asking the human: kind=secret wants a secret string,
+    // kind=phone is approve/deny of a phone control action.
+    @Serializable
+    @SerialName("consent_request")
+    data class ConsentRequest(
+        val id: String,
+        val kind: String,
+        val summary: String,
+        val detail: String,
+        @SerialName("created_at") val createdAt: Long = 0,
+    ) : ClawEvent
+
+    // A question settled — by this surface or another one; the card
+    // flips on it whichever way the answer went.
+    @Serializable
+    @SerialName("consent_resolved")
+    data class ConsentResolved(val id: String, val granted: Boolean) : ClawEvent
 }
+
+// GET /v1/consents — the pending questions, oldest first.
+@Serializable
+data class ConsentsPage(val consents: List<ConsentInfo> = emptyList())
+
+@Serializable
+data class ConsentInfo(
+    val id: String,
+    val kind: String,
+    val summary: String,
+    val detail: String,
+    @SerialName("created_at") val createdAt: Long,
+)
+
+// POST /v1/consents/{id} — the kind decides the body.
+@Serializable
+data class SecretConsentAnswer(val secret: String)
+
+@Serializable
+data class PhoneConsentAnswer(val grant: Boolean)

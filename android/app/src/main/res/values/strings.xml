@@ -38,6 +38,13 @@
     <string name="chat_attachment_open">Open</string>
     <string name="chat_attachment_open_failed">No app on this phone opens this file type.</string>
     <string name="chat_attachment_failed">Download failed: %1$s</string>
+    <string name="consent_secret_hint">The secret the agent asked for</string>
+    <string name="consent_submit">Send secret</string>
+    <string name="consent_approve">Approve</string>
+    <string name="consent_deny">Deny</string>
+    <string name="consent_granted">granted</string>
+    <string name="consent_denied">denied</string>
+    <string name="consent_answer_failed">Answer failed: %1$s</string>
 <string name="settings_page_title">Settings</string>
     <string name="card_connection">Connection</string>
     <string name="card_providers">Model providers</string>

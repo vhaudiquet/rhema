@@ -38,7 +38,11 @@ notifications.
   preview for small (≤ 2 MB) images, and a download-and-open row (bytes
   from `GET /v1/attachments/{id}` land in the app cache and open through a
   FileProvider `ACTION_VIEW`, the only way another app can read a private
-  cache file). The streaming reply is finalized by `turn_done`. Replies
+  cache file). The agent's `consent_request` questions (a secret, or an
+  approval of a phone control action) render as cards answered in place —
+  `POST`/`DELETE /v1/consents/{id}` — and `consent_resolved` settles them
+  (a reconnect's replay rebuilds the settled states). The streaming reply
+  is finalized by `turn_done`. Replies
   render
   as markdown (`com.mikepenz:multiplatform-markdown-renderer`, GFM flavour:
   raw HTML stays literal, so model output never mounts as markup; the
@@ -82,8 +86,11 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `PUT /v1/providers/active` | switch the backend instance, persisted |
 | `GET /v1/sessions` | session list |
 | `POST /v1/sessions/{key}/messages` | `{"text"}` → 202; reply via stream |
-| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment` |
+| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment`, `consent_request`, `consent_resolved` |
 | `GET /v1/attachments/{id}` | an attachment event's bytes (bearer) |
+| `GET /v1/consents` | pending consent questions, oldest first |
+| `POST /v1/consents/{id}` | answer one: `{"secret"}` or `{"grant"}` |
+| `DELETE /v1/consents/{id}` | deny / cancel a question |
 | `POST /v1/ingest` | `{"source","key","payload"}` |
 | `GET /v1/notifications?device=&since=` | ascending notification list |
 | `POST /v1/notifications/{id}/ack` | best-effort ack |

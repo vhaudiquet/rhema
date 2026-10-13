@@ -156,6 +156,35 @@ class ClawApi(
         }
     }
 
+    // GET /v1/consents: the pending questions, oldest first.
+    suspend fun consents(): ClawResult<List<ConsentInfo>> {
+        val builder = v1("consents") ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.get().build()) { response ->
+            json.decodeFromString<ConsentsPage>(response.body?.string() ?: "{}").consents
+        }
+    }
+
+    // POST /v1/consents/{id}: the kind decides the body — the secret
+    // string for kind=secret, the grant flag for kind=phone. A 409 means
+    // the question was already answered (here or on another surface).
+    suspend fun revealSecret(id: String, secret: String): ClawResult<Unit> {
+        val builder = v1("consents", id) ?: return ClawResult.Network("no base URL configured")
+        val body = json.encodeToString(SecretConsentAnswer(secret)).toRequestBody(jsonBody)
+        return execute(builder.post(body).build()) { }
+    }
+
+    suspend fun grantPhone(id: String, grant: Boolean): ClawResult<Unit> {
+        val builder = v1("consents", id) ?: return ClawResult.Network("no base URL configured")
+        val body = json.encodeToString(PhoneConsentAnswer(grant)).toRequestBody(jsonBody)
+        return execute(builder.post(body).build()) { }
+    }
+
+    // DELETE /v1/consents/{id}: deny, or cancel a question left open.
+    suspend fun denyConsent(id: String): ClawResult<Unit> {
+        val builder = v1("consents", id) ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.delete().build()) { }
+    }
+
     fun eventStream(sessionKey: String): Flow<SseFrame> = callbackFlow {
         val builder = v1("sessions", sessionKey, "events")
         if (builder == null) {

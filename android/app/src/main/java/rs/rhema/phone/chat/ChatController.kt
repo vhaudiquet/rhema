@@ -51,6 +51,18 @@ class ChatController(
         val caption: String?,
     ) : Item
 
+    // The agent's question to the human, answered in place. granted is
+    // null while open; consent_resolved (or a local answer) flips it.
+    // Replay rebuilds the whole ladder, so nothing persists here.
+    data class Consent(
+        override val id: Long,
+        val consentId: String,
+        val kind: String,
+        val summary: String,
+        val detail: String,
+        val granted: Boolean? = null,
+    ) : Item
+
     // The turn's end tag ("Handled", "Failed", …) from turn_done; the
     // reply carries the text, this carries the outcome.
     data class Outcome(override val id: Long, val outcome: String) : Item
@@ -220,6 +232,42 @@ class ChatController(
             }
             is ClawEvent.Attachment ->
                 items = items + Attachment(newId(), event.id, event.name, event.media, event.size, event.caption)
+            is ClawEvent.ConsentRequest ->
+                items = items + Consent(newId(), event.id, event.kind, event.summary, event.detail)
+            is ClawEvent.ConsentResolved -> flipConsent(event.id, event.granted)
+        }
+    }
+
+    // Answers a consent question. The claw's consent_resolved event is the
+    // transcript's authority and flips the card again (idempotent); the
+    // local flip covers the gap before the event lands. The raw result
+    // rides back so the card can show what failed.
+    suspend fun answerSecret(consentId: String, secret: String): ClawResult<Unit> =
+        settle(consentId, granted = true) { api.revealSecret(consentId, secret) }
+
+    suspend fun grantPhone(consentId: String, grant: Boolean): ClawResult<Unit> =
+        settle(consentId, granted = grant) { api.grantPhone(consentId, grant) }
+
+    suspend fun denyConsent(consentId: String): ClawResult<Unit> =
+        settle(consentId, granted = false) { api.denyConsent(consentId) }
+
+    private suspend fun settle(
+        consentId: String,
+        granted: Boolean,
+        call: suspend () -> ClawResult<Unit>,
+    ): ClawResult<Unit> {
+        val result = call()
+        if (result is ClawResult.Ok) flipConsent(consentId, granted)
+        return result
+    }
+
+    private fun flipConsent(consentId: String, granted: Boolean) {
+        val index = items.indexOfLast { it is Consent && it.consentId == consentId }
+        if (index >= 0) {
+            items = items.toMutableList().also { list ->
+                val consent = list[index] as Consent
+                list[index] = consent.copy(granted = granted)
+            }
         }
     }
 
