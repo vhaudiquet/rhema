@@ -13,7 +13,13 @@ import {
   pasteParts,
 } from '~/composables/useTranscript'
 import type { ClawSession, ConsentAnswer, StreamStatus } from '~/composables/useClaw'
-import type { ConsentCard, PastePart, TranscriptItem, TurnBlock } from '~/composables/useTranscript'
+import type {
+  AttachmentCard,
+  ConsentCard,
+  PastePart,
+  TranscriptItem,
+  TurnBlock,
+} from '~/composables/useTranscript'
 
 const props = defineProps<{
   items: TranscriptItem[]
@@ -36,6 +42,7 @@ const emit = defineEmits<{
   openProviders: []
   consentAnswer: [id: string, answer: ConsentAnswer]
   consentDeny: [id: string]
+  downloadAttachment: [id: string, name: string]
 }>()
 
 const draft = ref('')
@@ -195,6 +202,23 @@ function answerSecret(consent: ConsentCard): void {
   secretDrafts.value[consent.id] = ''
 }
 
+// --- attachment cards -------------------------------------------------
+// The bytes are the claw's to serve: images arrive via the shell's
+// fetch once the card exists; code and file download on click.
+
+const MEDIA_GLYPHS: Record<AttachmentCard['media'], string> = {
+  image: '▣',
+  code: '⌗',
+  file: '▤',
+}
+
+/** B / KB / MB, one decimal past 1 KB — a card label, not precision. */
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
 /** Command rows render as shell lines, not glyph rows (the TUI's
  * tool_row); run_command is the bash tool's other name. */
 function isShellTool(name: string): boolean {
@@ -286,13 +310,10 @@ function isShellTool(name: string): boolean {
             </div>
           </div>
         </div>
-        <div v-else class="msg">
+        <div v-else-if="item.kind === 'consent'" class="msg">
           <div class="avatar user" aria-hidden="true">?</div>
           <div class="msg-body">
-            <div
-              class="consent-card"
-              :class="consentTone(item.consent)"
-            >
+            <div class="consent-card" :class="consentTone(item.consent)">
               <div class="consent-head">
                 <span class="badge">{{ item.consent.kind }}</span>
                 <strong class="consent-summary">{{ item.consent.summary }}</strong>
@@ -330,6 +351,40 @@ function isShellTool(name: string): boolean {
                   deny
                 </button>
               </div>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="item.kind === 'attachment'" class="msg">
+          <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="32" />
+          <div class="msg-body">
+            <div class="who">{{ agentName }}</div>
+            <div class="attachment-card">
+              <div class="attachment-head">
+                <span
+                  class="attachment-glyph"
+                  aria-hidden="true"
+                  :title="`${item.attachment.media} attachment`"
+                >{{ MEDIA_GLYPHS[item.attachment.media] }}</span>
+                <span class="attachment-name mono">{{ item.attachment.name }}</span>
+                <span class="attachment-size mono">{{ formatBytes(item.attachment.size) }}</span>
+                <button
+                  v-if="item.attachment.media !== 'image'"
+                  class="ghost"
+                  :title="`download ${item.attachment.name}`"
+                  @click="emit('downloadAttachment', item.attachment.id, item.attachment.name)"
+                >
+                  ↓ download
+                </button>
+              </div>
+              <img
+                v-if="item.attachment.media === 'image' && item.attachment.url"
+                :src="item.attachment.url"
+                :alt="item.attachment.caption ?? item.attachment.name"
+                class="attachment-image"
+              />
+              <p v-if="item.attachment.caption" class="attachment-caption">
+                {{ item.attachment.caption }}
+              </p>
             </div>
           </div>
         </div>
@@ -721,6 +776,61 @@ li.error .glyph {
 .consent-actions input {
   flex: 1;
   min-width: 160px;
+}
+
+/* An attachment card: the agent handing a file over — head row names
+   it, the image (when there is one) rides under it, capped so a
+   screenshot cannot take the stream. */
+.attachment-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 480px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.attachment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.attachment-glyph {
+  flex: none;
+  color: var(--text3);
+}
+
+.attachment-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.attachment-size {
+  flex: none;
+  color: var(--text3);
+  font-size: 11px;
+}
+
+.attachment-image {
+  max-width: 100%;
+  max-height: 240px;
+  align-self: flex-start;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.attachment-caption {
+  margin: 0;
+  color: var(--text3);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
 }
 
 .composer {

@@ -100,6 +100,29 @@ watch(activeKey, (key) => persist(ACTIVE_STORE_KEY, key))
 const transcript = useTranscript()
 const { items: transcriptItems, live: liveTurn } = transcript
 
+// Attachment ids this page already tried to fetch; a failed fetch is
+// not retried until the stream resets and clears the set.
+const attemptedAttachments = new Set<string>()
+
+// Image cards need their bytes before they can render: fetched as the
+// card appears, not on any timer. code/file fetch on download instead.
+watch(
+  transcriptItems,
+  (items) => {
+    for (const item of items) {
+      if (item.kind !== 'attachment') continue
+      const { id, media, url } = item.attachment
+      if (media !== 'image' || url !== null || attemptedAttachments.has(id)) continue
+      attemptedAttachments.add(id)
+      claw
+        .attachmentUrl(id)
+        .then((fetched) => transcript.setAttachmentUrl(id, fetched))
+        .catch((err) => noteApiError(err))
+    }
+  },
+  { deep: true },
+)
+
 // --- the agent's identity --------------------------------------------
 const identity = ref<AgentIdentity | null>(null)
 const identityAvatarUrl = ref<string | null>(null)
@@ -433,6 +456,20 @@ async function denyConsent(id: string): Promise<void> {
   }
 }
 
+async function downloadAttachment(id: string, name: string): Promise<void> {
+  try {
+    // The URL is cached per id, so a second download of the same file
+    // replays the blob, not the request.
+    const url = await claw.attachmentUrl(id)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = name
+    anchor.click()
+  } catch (err) {
+    noteApiError(err)
+  }
+}
+
 function saveToken(): void {
   const next = tokenDraft.value.trim()
   token.value = next || null
@@ -453,6 +490,7 @@ let stream: { close: () => void } | null = null
 function resubscribe(): void {
   stream?.close()
   transcript.reset()
+  attemptedAttachments.clear()
   notices.value = []
   streamStatus.value = 'connecting'
   stream = claw.subscribeEvents(activeKey.value, {
@@ -564,6 +602,7 @@ onUnmounted(() => {
             @open-providers="go({ view: 'settings', section: 'providers' })"
             @consent-answer="answerConsent"
             @consent-deny="denyConsent"
+            @download-attachment="downloadAttachment"
           />
         </template>
 

@@ -6,7 +6,7 @@
 // mirror when the stream reopens and folds what arrives, never the other
 // way around.
 import { ref } from 'vue'
-import type { ConsentKind, TurnEvent } from './useClaw'
+import type { AttachmentMedia, ConsentKind, TurnEvent } from './useClaw'
 
 /** One tool call inside a turn: started, then completed by its result. */
 export interface ToolRow {
@@ -39,11 +39,24 @@ export interface ConsentCard {
   granted: boolean | null
 }
 
+/** One file the agent handed over, as the card renders it. The bytes
+ * arrive as an object URL on request — the route is bearer-guarded. */
+export interface AttachmentCard {
+  id: string
+  name: string
+  media: AttachmentMedia
+  size: number
+  caption: string | null
+  /** The object URL once fetched; null until then. */
+  url: string | null
+}
+
 /** A transcript line: a message the local user sent, or one streamed turn. */
 export type TranscriptItem =
   | { kind: 'sent'; id: number; text: string }
   | { kind: 'turn'; id: number; turn: TurnBlock }
   | { kind: 'consent'; id: number; consent: ConsentCard }
+  | { kind: 'attachment'; id: number; attachment: AttachmentCard }
 
 // --- embedded pastes --------------------------------------------------
 // The wire form a long paste travels in: MARK, payload, MARK — one
@@ -197,6 +210,28 @@ export function useTranscript() {
       case 'consent_resolved':
         resolveConsent(event.id, event.granted)
         break
+      case 'attachment':
+        // One card per attachment id: the same file never stacks a
+        // second card beside the first.
+        if (
+          !items.value.some(
+            (item) => item.kind === 'attachment' && item.attachment.id === event.id,
+          )
+        ) {
+          items.value.push({
+            kind: 'attachment',
+            id: nextId++,
+            attachment: {
+              id: event.id,
+              name: event.name,
+              media: event.media,
+              size: event.size,
+              caption: event.caption,
+              url: null,
+            },
+          })
+        }
+        break
       case 'turn_done': {
         const turn = ensureLive()
         turn.outcome = event.outcome
@@ -232,6 +267,17 @@ export function useTranscript() {
     }
   }
 
+  /** An attachment's object URL landed; stored on its card. The useClaw
+   * cache keeps a reconnect's replay from refetching the bytes. */
+  function setAttachmentUrl(id: string, url: string): void {
+    for (const item of items.value) {
+      if (item.kind === 'attachment' && item.attachment.id === id) {
+        item.attachment.url = url
+        return
+      }
+    }
+  }
+
   /** Session switched, or the stream reopened: the mirror is per-key,
    * and the replay that follows rebuilds it either way. */
   function reset(): void {
@@ -239,5 +285,5 @@ export function useTranscript() {
     live.value = null
   }
 
-  return { items, live, applyEvent, addSent, resolveConsent, reset }
+  return { items, live, applyEvent, addSent, resolveConsent, setAttachmentUrl, reset }
 }

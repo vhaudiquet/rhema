@@ -28,6 +28,19 @@ export interface ConsentRequest {
  * the two shapes. */
 export type ConsentAnswer = { secret: string } | { grant: boolean }
 
+/** What an attachment's bytes are: an image to render inline, a code
+ * or generic file to download. */
+export type AttachmentMedia = 'image' | 'code' | 'file'
+
+/** One attachment event. */
+export interface ClawAttachment {
+  id: string
+  name: string
+  media: AttachmentMedia
+  size: number
+  caption: string | null
+}
+
 /** One turn event, exactly `hub.rs`'s `TurnEvent` (serde type tag, snake case). */
 export type TurnEvent =
   | { type: 'user_message'; text: string }
@@ -46,6 +59,7 @@ export type TurnEvent =
     }
   | ({ type: 'consent_request' } & ConsentRequest)
   | { type: 'consent_resolved'; id: string; granted: boolean }
+  | ({ type: 'attachment' } & ClawAttachment)
   | { type: 'turn_done'; reply: string | null; outcome: string }
 
 /** One entry of `GET /v1/sessions` (http.rs `sessions`). */
@@ -289,6 +303,11 @@ export interface ClawApi {
   resolveConsent(id: string, answer: ConsentAnswer): Promise<void>
   /** `DELETE /v1/consents/{id}` — deny or cancel a consent. */
   denyConsent(id: string): Promise<void>
+  /** `GET /v1/attachments/{id}` — the attachment's bytes as an object
+   * URL for an `<img>` or a download (the route is bearer-guarded, so
+   * a plain src will not do). Cached per id: attachments are immutable,
+   * so a replayed event never refetches. */
+  attachmentUrl(id: string): Promise<string>
   /** `POST /v1/sessions/{key}/messages` — fire-and-forget: the claw answers 202 and the reply arrives on the event stream. */
   sendMessage(key: string, text: string): Promise<void>
   /** `GET /v1/providers` — the constructible backends and the active pair. */
@@ -339,6 +358,26 @@ export interface ClawApi {
 
 /** Build the client bound to one bearer token (null = unguarded claw). */
 export function useClaw(token: Ref<string | null>): ClawApi {
+  /** Object URLs already minted for attachments, by id. Attachments are
+   * immutable, so the URLs live as long as the page does. */
+  const attachmentUrls = new Map<string, string>()
+
+  /** The bytes behind a bearer-guarded route, as a blob. */
+  async function fetchBlob(path: string): Promise<Blob> {
+    let response: Response
+    try {
+      response = await fetch(`${base()}${path}`, {
+        headers: authHeaders(token.value),
+      })
+    } catch (cause) {
+      throw new ClawError(0, `claw unreachable: ${String(cause)}`)
+    }
+    if (!response.ok) {
+      throw new ClawError(response.status, `HTTP ${response.status}`)
+    }
+    return response.blob()
+  }
+
   async function sessions(): Promise<ClawSession[]> {
     return (await get('/v1/sessions', token.value)) as ClawSession[]
   }
@@ -461,18 +500,15 @@ export function useClaw(token: Ref<string | null>): ClawApi {
   }
 
   async function agentImage(kind: AgentImageKind): Promise<string> {
-    let response: Response
-    try {
-      response = await fetch(`${base()}/v1/agent/${kind}`, {
-        headers: authHeaders(token.value),
-      })
-    } catch (cause) {
-      throw new ClawError(0, `claw unreachable: ${String(cause)}`)
-    }
-    if (!response.ok) {
-      throw new ClawError(response.status, `HTTP ${response.status}`)
-    }
-    return URL.createObjectURL(await response.blob())
+    return URL.createObjectURL(await fetchBlob(`/v1/agent/${kind}`))
+  }
+
+  async function attachmentUrl(id: string): Promise<string> {
+    const cached = attachmentUrls.get(id)
+    if (cached) return cached
+    const url = URL.createObjectURL(await fetchBlob(`/v1/attachments/${encodeURIComponent(id)}`))
+    attachmentUrls.set(id, url)
+    return url
   }
 
   function subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void } {
@@ -561,6 +597,7 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     setAgentImage,
     clearAgentImage,
     agentImage,
+    attachmentUrl,
     subscribeEvents,
   }
 }
@@ -651,6 +688,19 @@ function parseTurnEvent(data: string): TurnEvent | null {
           id: String(raw.id ?? ''),
           granted: Boolean(raw.granted),
         }
+      case 'attachment': {
+        // An attachment of an unknown media kind is an unknown shape:
+        // dropped, not guessed.
+        if (raw.media !== 'image' && raw.media !== 'code' && raw.media !== 'file') return null
+        return {
+          type: 'attachment',
+          id: String(raw.id ?? ''),
+          name: String(raw.name ?? ''),
+          media: raw.media,
+          size: typeof raw.size === 'number' ? raw.size : 0,
+          caption: typeof raw.caption === 'string' ? raw.caption : null,
+        }
+      }
       case 'turn_done':
         return {
           type: 'turn_done',
