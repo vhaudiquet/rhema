@@ -36,7 +36,7 @@ use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use rhema_autonomous_agent::Driver;
 use rhema_rsd::{
-    DispatchError, Dispatcher, IngestResult, KeyState, ResourceKey, SqliteStore, Store,
+    DispatchError, Dispatcher, IngestResult, KeyRecord, KeyState, ResourceKey, SqliteStore, Store,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -205,7 +205,7 @@ impl ClawState {
 /// the config set a token.
 pub fn router(state: ClawState) -> Router {
     let v1 = Router::new()
-        .route("/sessions", get(sessions))
+        .route("/sessions", get(sessions).post(sessions_create))
         .route("/sessions/{key}/messages", post(messages))
         .route("/sessions/{key}/events", get(events))
         .route("/bootstrap", get(bootstrap_status))
@@ -312,6 +312,67 @@ async fn sessions(
         .sessions()
         .map(Json)
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
+}
+
+/// `{"name": "my-notes"}` — a chat session to create.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionCreateBody {
+    /// The name under the `interactive:` prefix.
+    pub name: String,
+}
+
+/// The session name a create route accepts: the shape a key's suffix
+/// must take to stay legible in lists, URLs, and logs.
+fn valid_session_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// `POST /v1/sessions`: create an empty `interactive:<name>` session —
+/// a record, not a conversation; nothing dispatches until a message
+/// arrives. Sessions otherwise come into being implicitly, on their
+/// first message, which is why a UI could not offer one before this.
+async fn sessions_create(
+    State(state): State<ClawState>,
+    Json(body): Json<SessionCreateBody>,
+) -> Response {
+    let name = body.name.trim();
+    if !valid_session_name(name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "name must be 1-64 chars of letters, digits, '.', '_', or '-'"})),
+        )
+            .into_response();
+    }
+    let key = ResourceKey::from(format!("{}{name}", crate::interactive::KEY_PREFIX));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    // The CAS precondition does the duplicate check: `None` means the
+    // key must not exist yet, so a race between two creates resolves to
+    // one 201 and one 409, never two sessions under one key.
+    match state.store.save(KeyRecord::fresh(key.clone(), now), None) {
+        Ok(()) => (
+            StatusCode::CREATED,
+            Json(json!({ "key": key.as_str(), "created": true })),
+        )
+            .into_response(),
+        Err(rhema_rsd::StoreError::RevisionMismatch { .. }) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": format!("session {:?} already exists", key.as_str())})),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 /// The setup badge: which of SOUL.md and USER.md exist, read live — a

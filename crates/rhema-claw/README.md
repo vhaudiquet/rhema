@@ -57,6 +57,7 @@ The native surface:
 
 ```
 GET  /healthz                          GET  /v1/sessions
+POST /v1/sessions                    {"name"} — create an empty interactive session
 POST /v1/sessions/{key}/messages       {"text": "..."}   -> 202
 GET  /v1/sessions/{key}/events         SSE turn events (see below)
 GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{forge}/{repo}

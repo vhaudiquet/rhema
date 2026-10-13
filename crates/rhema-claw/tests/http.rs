@@ -2078,3 +2078,72 @@ async fn an_ingested_phone_report_feeds_the_status_the_tool_reads() {
         "reading never asks: {seen}"
     );
 }
+
+/// Creating a session over HTTP: an empty `interactive:` key exists
+/// before its first message, a second create of the same name is a
+/// conflict, and a name that would not read as a key is refused.
+#[tokio::test]
+async fn a_session_is_creatable_over_http() {
+    let provider = Arc::new(MockProvider::new([reply("on it")]));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let created = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({"name": "my-notes"}))
+        .send()
+        .await
+        .expect("the create posts");
+    assert_eq!(created.status(), 201);
+    assert_eq!(
+        created.json::<Value>().await.expect("body parses"),
+        json!({"key": "interactive:my-notes", "created": true})
+    );
+
+    // The session exists idle, before any message — and a message to it
+    // turns it, like any other resident key.
+    let sessions: Value = client
+        .get(format!("{base}/v1/sessions"))
+        .send()
+        .await
+        .expect("sessions reads")
+        .json()
+        .await
+        .expect("sessions parses");
+    let keys: Vec<&str> = sessions
+        .as_array()
+        .expect("a list")
+        .iter()
+        .filter_map(|session| session["key"].as_str())
+        .collect();
+    assert_eq!(
+        keys,
+        vec!["interactive:my-notes"],
+        "the created key is listed"
+    );
+
+    let again = client
+        .post(format!("{base}/v1/sessions"))
+        .json(&json!({"name": "my-notes"}))
+        .send()
+        .await
+        .expect("the create posts");
+    assert_eq!(again.status(), 409);
+
+    for bad in ["", "has space", "sl/ash", "a".repeat(65).as_str()] {
+        let refused = client
+            .post(format!("{base}/v1/sessions"))
+            .json(&json!({"name": bad}))
+            .send()
+            .await
+            .expect("the create posts");
+        assert_eq!(refused.status(), 400, "refusing {bad:?}");
+    }
+}
