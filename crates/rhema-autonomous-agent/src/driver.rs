@@ -25,6 +25,10 @@ use rhema_core::CommitHook;
 use rhema_rsd::{DispatchError, Dispatcher, InboxItem, Lease, Outcome, ResourceKey, Session};
 use tokio::task::JoinSet;
 
+/// The key-ownership predicate [`Driver::owning`] takes: which keys
+/// this driver's handler answers.
+pub type OwnsKey = dyn Fn(&ResourceKey) -> bool + Send + Sync;
+
 use crate::async_trait;
 
 /// The embedder's answer to one dispatch: do the work, report the
@@ -93,6 +97,13 @@ pub struct Driver {
     dispatcher: Arc<Dispatcher>,
     handler: Arc<dyn Handler>,
     holder: String,
+    /// Which keys this driver answers: `None` — everything — when it is
+    /// the only driver over the store; a predicate when two drivers
+    /// share one. The split is load-bearing there: admission reads the
+    /// shared table, not a per-driver queue, so an unfiltered driver
+    /// would run — and fail, and consume — events addressed to the
+    /// other driver's handler.
+    owns: Option<Arc<OwnsKey>>,
 }
 
 impl Driver {
@@ -102,12 +113,22 @@ impl Driver {
             dispatcher,
             handler,
             holder: "autonomous-agent".to_owned(),
+            owns: None,
         }
     }
 
     /// Names the lease holder (ops visibility on `rhema_rsd::KeyStatus`).
     pub fn with_holder(mut self, holder: impl Into<String>) -> Self {
         self.holder = holder.into();
+        self
+    }
+
+    /// Restricts [`Self::run_once`] to the keys `owns` answers — the
+    /// ownership split when two drivers share one store. Admission is a
+    /// read, so a key left for the other driver costs this pass nothing:
+    /// the next pass of the driver that owns it offers it again.
+    pub fn owning(mut self, owns: Arc<OwnsKey>) -> Self {
+        self.owns = Some(owns);
         self
     }
 
@@ -126,10 +147,16 @@ impl Driver {
         let keys = self.dispatcher.admit()?;
         let mut set = JoinSet::new();
         for key in keys {
+            if let Some(owns) = &self.owns {
+                if !owns(&key) {
+                    continue;
+                }
+            }
             let driver = Driver {
                 dispatcher: self.dispatcher.clone(),
                 handler: self.handler.clone(),
                 holder: self.holder.clone(),
+                owns: self.owns.clone(),
             };
             set.spawn(async move { driver.drive(key).await });
         }

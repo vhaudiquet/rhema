@@ -631,3 +631,67 @@ async fn concurrent_runs_serve_every_key_once_under_the_cap() {
         assert_eq!(status.last_outcome, Some(Outcome::Handled));
     }
 }
+
+/// Two drivers over one store, each owning half the key space: an event
+/// for the other's key is not driven here, is not consumed, and is
+/// driven — once — by the driver that owns it. This is the claw's
+/// forge/resident split, where an unfiltered pass would run, fail, and
+/// consume the other side's event.
+#[tokio::test]
+async fn a_driver_leaves_the_keys_it_does_not_own_for_the_driver_that_does() {
+    let (dispatcher, clock) = setup();
+    register(&dispatcher);
+
+    struct WhoAmI {
+        mine: &'static str,
+    }
+    #[async_trait]
+    impl Handler for WhoAmI {
+        async fn handle(&self, ctx: &mut SessionContext) -> Outcome {
+            let _ = ctx.poll_inbox().await;
+            Outcome::Failed(self.mine.to_owned())
+        }
+    }
+
+    let mine = the_key(); // github:acme/widgets#142
+    let theirs = ResourceKey::from("interactive:web");
+    dispatcher.ingest(event(mine.as_str(), "e-mine")).unwrap();
+    dispatcher
+        .ingest(event(theirs.as_str(), "e-theirs"))
+        .unwrap();
+    // Past the debounce window, both keys are due.
+    clock.advance(common::DEBOUNCE);
+
+    let only_mine = Arc::new(WhoAmI { mine: "mine" });
+    let only_theirs = Arc::new(WhoAmI { mine: "theirs" });
+    let driver_a = Arc::new(Driver::new(dispatcher.clone(), only_mine).owning(Arc::new(
+        |key: &ResourceKey| key.as_str().starts_with("github:"),
+    )));
+    let driver_b = Arc::new(
+        Driver::new(dispatcher.clone(), only_theirs).owning(Arc::new(|key: &ResourceKey| {
+            key.as_str().starts_with("interactive:")
+        })),
+    );
+
+    // A pass of the github driver answers only its own key; the
+    // interactive key's event is untouched.
+    let outcomes = driver_a.run_once().await.unwrap();
+    assert_eq!(
+        outcomes,
+        vec![Outcome::Failed("mine".to_owned())],
+        "one run, the owned key only"
+    );
+    let status = dispatcher.status(&theirs).unwrap();
+    assert_eq!(status.inbox_depth, 1, "the other driver's event is intact");
+    assert_eq!(status.state, KeyState::Idle);
+
+    // The owning driver picks it up on its own pass.
+    let outcomes = driver_b.run_once().await.unwrap();
+    assert_eq!(outcomes, vec![Outcome::Failed("theirs".to_owned())]);
+    let status = dispatcher.status(&theirs).unwrap();
+    assert_eq!(status.inbox_depth, 0, "driven exactly once");
+    assert_eq!(
+        status.last_outcome,
+        Some(Outcome::Failed("theirs".to_owned()))
+    );
+}
