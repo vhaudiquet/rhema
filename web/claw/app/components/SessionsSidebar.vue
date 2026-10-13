@@ -1,9 +1,10 @@
 <script setup lang="ts">
-// The session inventory: every dispatch key the claw holds, interactive
-// first. Clicking selects the session the chat mirrors. Displayed names
-// drop the `interactive:` prefix — the full key stays in the tooltip.
-// Creating is intent only: the name flows up, the shell answers, and
-// the form closes when the new key lands in the inventory.
+// The session inventory: the dispatch keys a human converses with,
+// interactive first. Clicking selects the session the chat mirrors.
+// Displayed names drop the `interactive:` prefix — the full key stays
+// in the tooltip. Creating is intent only: the name flows up, the
+// shell answers, and the form closes when the new key lands in the
+// inventory.
 import { SESSION_NAME_PATTERN } from '~/composables/useClaw'
 import type { ClawSession } from '~/composables/useClaw'
 
@@ -24,10 +25,14 @@ interface Group {
 
 const groups = computed<Group[]>(() => {
   const byKey = (a: ClawSession, b: ClawSession) => a.key.localeCompare(b.key)
-  const interactive = props.sessions
+  // `phone:<device>:<topic>` keys carry the phone client's status
+  // reporting (battery, network, dnd), not conversation; the inventory
+  // hides them rather than the API narrowing.
+  const conversable = props.sessions.filter((session) => !session.key.startsWith('phone:'))
+  const interactive = conversable
     .filter((session) => session.key.startsWith('interactive:'))
     .sort(byKey)
-  const others = props.sessions
+  const others = conversable
     .filter((session) => !session.key.startsWith('interactive:'))
     .sort(byKey)
   const row = (session: ClawSession) => ({
@@ -41,6 +46,10 @@ const groups = computed<Group[]>(() => {
   if (others.length > 0) groups.push({ label: 'other keys', rows: others.map(row) })
   return groups
 })
+
+const shownCount = computed(() =>
+  groups.value.reduce((total, group) => total + group.rows.length, 0),
+)
 
 function stateTone(state: string): 'ok' | 'warn' | 'idle' {
   if (state === 'leased') return 'ok'
@@ -105,7 +114,7 @@ watch(
     </header>
     <header class="head">
       <span class="label">Sessions</span>
-      <span class="count">{{ sessions.length }}</span>
+      <span class="count">{{ shownCount }}</span>
       <button class="ghost" title="new session" :disabled="creating" @click="creating ? closeCreate() : openCreate()">
         +
       </button>
@@ -133,7 +142,7 @@ watch(
       </p>
     </form>
 
-    <p v-if="sessions.length === 0" class="empty">
+    <p v-if="shownCount === 0" class="empty">
       {{ loading ? 'loading…' : 'no sessions yet; send the first message' }}
     </p>
 
