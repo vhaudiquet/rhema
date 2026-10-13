@@ -71,6 +71,33 @@ Two consequences worth knowing before changing this code:
   (`composables/useClaw.ts`). Drops retry with backoff; the hub's
   `lagged` comments surface as notices.
 
+## What the transcript does with the stream
+
+- **Long pastes travel as chips.** A paste over three lines (the TUI's
+  `PASTE_INLINE_LINES`) never lands in the composer; it stages as a
+  droppable chip (`▣1 42L`) and embeds into the sent text as
+  U+FFFC-payload-U+FFFC — the same record `rhema-core`'s
+  `paste::embed` keeps — so the transcript renders each embed back as
+  a chip in place of the payload. An unpaired mark is literal text.
+- **The agent can ask.** A `consent_request` event renders as an
+  inline card: kind `secret` gets a password input plus submit, kind
+  `phone` gets Approve/Deny, and both carry a deny link
+  (`DELETE /v1/consents/{id}`). The card flips when the answer lands
+  and again on the stream's `consent_resolved` echo; a reconnect's
+  replay rebuilds the cards, so nothing persists client-side.
+- **Attachments render inline.** An `attachment` event becomes a card
+  — media glyph, file name, B/KB/MB size, caption. Images fetch the
+  bearer-guarded bytes (`GET /v1/attachments/{id}`, blob → object URL,
+  like the identity images) and render capped at 240px; code and file
+  cards download on click. Object URLs cache per id, so a replay never
+  refetches.
+- **Sessions are created in place.** The sidebar's `+` form posts
+  `POST /v1/sessions` with a client-validated name
+  (`[A-Za-z0-9._-]{1,64}`), switches the chat to the new key, and
+  lets 400/409 land in the error banner. The phone client's status
+  keys (`phone:…`) stay out of the inventory; the full list stays on
+  the wire.
+
 ## Layout
 
 The shell is an icon rail plus two views, switched by a tiny hash
@@ -109,10 +136,14 @@ app/
     AppMarkdown.vue              agent replies as markdown (markdown-it,
                                  raw HTML escaped, styles in main.css .md)
     ClawBanner.vue               the one error/notice banner surface
-    ChatPanel.vue                transcript: sent lines, streamed turns,
-                                 composer with the backend chip; agent
+    ChatPanel.vue                transcript: sent lines (paste chips),
+                                 streamed turns as bash shell lines and
+                                 glyph rows, consent + attachment
+                                 cards; the growing composer; agent
                                  replies render through AppMarkdown
-    SessionsSidebar.vue          every dispatch key, interactive first
+    SessionsSidebar.vue          conversable dispatch keys (phone status
+                                 keys hidden), interactive first; the
+                                 + form creates a session
     PageHeader.vue               title + subtitle + page actions
     SettingCard.vue              one titled card of rows
     SettingRow.vue               name + description + control
@@ -123,7 +154,8 @@ app/
       AboutPage.vue              identity, stack, the routes spoken
   composables/
     useClaw.ts                   the typed API client + fetch-based SSE
-    useTranscript.ts             folds TurnEvents into renderable turn blocks
+    useTranscript.ts             folds TurnEvents into renderable turn
+                                 blocks; owns the paste-embed text form
 server/
   middleware/claw-proxy.ts dev-only same-origin proxy to a running claw
 ```
