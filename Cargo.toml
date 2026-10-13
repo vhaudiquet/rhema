@@ -29,8 +29,9 @@ tokio = { version = "1", features = ["macros", "rt"] }
 axum = { version = "0.8", features = ["json"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 # The system-prompt template (Jinja syntax); whitespace rules fit
-# markdown templates
-minijinja = { version = "3", default-features = false, features = ["serde", "debug"] }
+# markdown templates. Builtins for the standard filters — `tojson`
+# renders a tool's JSON schema into the prompt.
+minijinja = { version = "3", default-features = false, features = ["serde", "debug", "builtins", "json"] }
 # The Agent Client Protocol: schema types and the agent-side connection
 # (see crates/rhema-acp)
 agent-client-protocol = "3.3"
