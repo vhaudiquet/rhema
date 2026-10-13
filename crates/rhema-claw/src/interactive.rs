@@ -183,6 +183,9 @@ pub struct InteractiveHandler {
     /// The attachment store the `attach_file` tool copies into and the
     /// fetch route serves from.
     attachments: Arc<crate::attachments::AttachmentStore>,
+    /// The phone state and command queue the `phone` tool reads and
+    /// queues through.
+    phone: Arc<crate::phone::PhoneStore>,
     /// How many tool rounds one turn may run before it is cut off — the
     /// config's runaway guard for an agent meant to work unattended; a
     /// follow-up message keeps going.
@@ -197,7 +200,7 @@ impl InteractiveHandler {
     /// v1-permissive — the shell is the point of a resident coding
     /// agent — installed once, since resolution is synchronous within a
     /// turn.
-    #[allow(clippy::too_many_arguments)] // thirteen parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // fourteen parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -212,6 +215,7 @@ impl InteractiveHandler {
         consents: Arc<crate::consents::ConsentStore>,
         bridge: Arc<crate::consents::WaitBridge>,
         attachments: Arc<crate::attachments::AttachmentStore>,
+        phone: Arc<crate::phone::PhoneStore>,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(CodingTools::new(&workspace));
@@ -242,6 +246,7 @@ impl InteractiveHandler {
             consents,
             bridge,
             attachments,
+            phone,
             max_turn_steps,
         }
     }
@@ -305,6 +310,14 @@ impl InteractiveHandler {
             crate::attachments::registry(
                 self.attachments.clone(),
                 self.workspace.clone(),
+                self.hub.clone(),
+                key.clone(),
+            )
+            .resolver_for(&Allowlist::permissive()),
+            crate::phone::registry(
+                self.phone.clone(),
+                self.consents.clone(),
+                self.bridge.clone(),
                 self.hub.clone(),
                 key.clone(),
             )
@@ -627,6 +640,12 @@ mod tests {
         Arc::new(crate::consents::WaitBridge::new())
     }
 
+    /// A throwaway phone table, the shape the dispatch tests hand the
+    /// handler.
+    fn phone() -> Arc<crate::phone::PhoneStore> {
+        Arc::new(crate::phone::PhoneStore::in_memory().expect("store opens"))
+    }
+
     /// A throwaway attachment store under one shared temp root: the
     /// dispatch tests never read it back, and the store must outlive
     /// the handlers it is handed to.
@@ -719,6 +738,7 @@ mod tests {
             consents(),
             bridge(),
             attachments(),
+            phone(),
         );
         let dispatcher = Arc::new(Dispatcher::new(
             DispatcherConfig {
@@ -795,6 +815,7 @@ mod tests {
             consents(),
             bridge(),
             attachments(),
+            phone(),
         );
         let specs = handler.resolver(&Key::from("interactive:web")).specs();
         assert!(
@@ -1046,6 +1067,7 @@ mod tests {
             consents(),
             bridge(),
             attachments(),
+            phone(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1131,6 +1153,7 @@ mod tests {
             consents(),
             bridge(),
             attachments(),
+            phone(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1225,6 +1248,7 @@ mod tests {
             consents(),
             bridge(),
             attachments(),
+            phone(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1295,6 +1319,7 @@ mod tests {
             consents(),
             bridge(),
             attachments(),
+            phone(),
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1367,6 +1392,7 @@ mod tests {
             consents(),
             bridge(),
             attachments(),
+            phone(),
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(

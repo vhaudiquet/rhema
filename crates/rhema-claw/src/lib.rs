@@ -39,6 +39,8 @@
 //!   the chat surface answers through the consent routes
 //! - [`attachments`] — the attachment store and the `attach_file` tool:
 //!   workspace files handed to the human as fetchable cards
+//! - [`phone`] — the phone state and command queue: reported status to
+//!   read, consent-gated control actions the device executes
 //! - [`watch_tools`] — the agent's watch-management tool set
 //! - [`notify_tools`] — the `notify` tool: the queue a device polls
 //! - [`task_tools`] — `schedule_task`, `list_tasks`, `cancel_task`
@@ -76,6 +78,7 @@ pub mod mock;
 pub mod notifications;
 pub mod notify_tools;
 pub mod openai;
+pub mod phone;
 pub mod settings;
 pub mod task_source;
 pub mod task_store;

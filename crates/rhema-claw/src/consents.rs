@@ -302,8 +302,9 @@ impl WaitBridge {
     }
 
     /// The notify handle for `id`, creating it on first use. A waiter
-    /// holds this handle across its wait; a resolver wakes the same one.
-    fn waiter(&self, id: &str) -> Arc<Notify> {
+    /// holds this handle across its wait; the resolver and the phone
+    /// command wait both wait through it.
+    pub(crate) fn waiter(&self, id: &str) -> Arc<Notify> {
         self.waiters
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

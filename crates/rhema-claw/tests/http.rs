@@ -1875,3 +1875,206 @@ async fn an_attached_file_is_fetchable_over_its_route() {
         .expect("the fetch goes out");
     assert_eq!(missing.status(), 404);
 }
+
+/// The phone control loop, over the wire: a turn acts through the
+/// `phone` tool, the consent card is answered with a grant, the command
+/// lands on the device's poll list, and the device's report is what the
+/// tool finally answers with.
+#[tokio::test]
+async fn a_phone_control_runs_consent_queue_and_report() {
+    let provider = Arc::new(MockProvider::new([
+        tool_call(
+            "c1",
+            "phone",
+            json!({"action": "dnd_on", "device": "pixel", "reason": "the movie"}),
+        ),
+        reply("done."),
+    ]));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+
+    let poster = tokio::spawn({
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            client
+                .post(format!("{base}/v1/sessions/interactive:web/messages"))
+                .json(&json!({"text": "quiet the phone"}))
+                .send()
+                .await
+                .expect("the message posts")
+        }
+    });
+
+    // The consent card; the human grants it.
+    let consents: Value = loop {
+        let consents: Value = client
+            .get(format!("{base}/v1/consents"))
+            .send()
+            .await
+            .expect("consents reads")
+            .json()
+            .await
+            .expect("consents parses");
+        if consents["consents"]
+            .as_array()
+            .is_some_and(|list| !list.is_empty())
+        {
+            break consents;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(consents["consents"][0]["kind"], "phone");
+    assert_eq!(
+        consents["consents"][0]["summary"], "phone dnd_on on pixel",
+        "{}",
+        consents
+    );
+    let id = consents["consents"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    read_until(&mut stream, &mut seen, r#""type":"consent_request""#).await;
+    let granted = client
+        .post(format!("{base}/v1/consents/{id}"))
+        .json(&json!({"grant": true}))
+        .send()
+        .await
+        .expect("the grant posts");
+    assert_eq!(granted.status(), 200);
+
+    // The command joins the device's poll list; the device executes and
+    // reports.
+    let commands: Value = loop {
+        let commands: Value = client
+            .get(format!("{base}/v1/phone/commands?device=pixel"))
+            .send()
+            .await
+            .expect("commands reads")
+            .json()
+            .await
+            .expect("commands parses");
+        if commands["commands"]
+            .as_array()
+            .is_some_and(|list| !list.is_empty())
+        {
+            break commands;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    };
+    assert_eq!(commands["commands"][0]["action"], "dnd_on");
+    let command_id = commands["commands"][0]["id"]
+        .as_str()
+        .expect("an id")
+        .to_owned();
+    let reported = client
+        .post(format!("{base}/v1/phone/commands/{command_id}/result"))
+        .json(&json!({"ok": true, "detail": "dnd is on"}))
+        .send()
+        .await
+        .expect("the report posts");
+    assert_eq!(reported.status(), 200);
+
+    let posted = poster.await.expect("the post joins");
+    assert_eq!(posted.status(), 202);
+    read_until(&mut stream, &mut seen, r#""type":"consent_resolved""#).await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+
+    // A redelivered report is a conflict, and the poll list is empty.
+    let again = client
+        .post(format!("{base}/v1/phone/commands/{command_id}/result"))
+        .json(&json!({"ok": true}))
+        .send()
+        .await
+        .expect("the report posts");
+    assert_eq!(again.status(), 409);
+    let commands: Value = client
+        .get(format!("{base}/v1/phone/commands?device=pixel"))
+        .send()
+        .await
+        .expect("commands reads")
+        .json()
+        .await
+        .expect("commands parses");
+    assert!(commands["commands"].as_array().expect("a list").is_empty());
+}
+
+/// The phone's own status reports feed the state the `phone` tool
+/// reads: an ingest to a `phone:<device>:<topic>` key is conversation
+/// and observation at once.
+#[tokio::test]
+async fn an_ingested_phone_report_feeds_the_status_the_tool_reads() {
+    let provider = Arc::new(MockProvider::new([
+        tool_call(
+            "c1",
+            "phone",
+            json!({"action": "status", "device": "pixel"}),
+        ),
+        reply("battery is fine."),
+    ]));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    // The report the PhoneStatusWorker's shape makes: a status event on
+    // its own key.
+    let ingested = client
+        .post(format!("{base}/v1/ingest"))
+        .json(&json!({
+            "source": "phone",
+            "key": "phone:pixel:battery",
+            "payload": {"topic": "battery", "value": "64", "charging": false},
+        }))
+        .send()
+        .await
+        .expect("the report posts");
+    assert_eq!(ingested.status(), 202);
+
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "how is the phone?"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+    read_until(&mut stream, &mut seen, r#""type":"tool_result""#).await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    // The summary is bounded, so the full payload never rides the
+    // stream — but the observed-true verdict and the device do.
+    assert!(
+        seen.contains(r#""summary":"{\"observed\":true,\"snapshot\":{\"device\":\"pixel\""#),
+        "the tool read the ingested observation: {seen}"
+    );
+    assert!(
+        !seen.contains(r#""type":"consent_request""#),
+        "reading never asks: {seen}"
+    );
+}

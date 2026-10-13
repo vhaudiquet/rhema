@@ -77,6 +77,9 @@ pub enum ClawError {
     /// The attachments directory could not be opened.
     #[error(transparent)]
     Attachments(#[from] crate::attachments::AttachmentError),
+    /// The phone tables could not be opened or read.
+    #[error(transparent)]
+    Phone(#[from] crate::phone::PhoneStoreError),
     /// The backend registry could not be built: no provider constructed,
     /// or the configured seed named an unknown kind.
     #[error("backend registry failed: {0}")]
@@ -238,6 +241,9 @@ impl Daemon {
                 })?
                 .join("attachments"),
         )?);
+        // The phone tables: status the ingest door feeds, commands the
+        // `phone` tool queues behind a consent.
+        let phone = Arc::new(crate::phone::PhoneStore::open(&db)?);
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
         let settings = Arc::new(crate::settings::SettingsStore::open(&db)?);
@@ -276,6 +282,7 @@ impl Daemon {
             consents.clone(),
             bridge.clone(),
             attachments.clone(),
+            phone.clone(),
         );
         let interactive_driver = Arc::new(
             Driver::new(
@@ -309,6 +316,7 @@ impl Daemon {
             consents,
             bridge,
             attachments,
+            phone,
             config.token.clone(),
         );
 

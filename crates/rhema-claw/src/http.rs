@@ -80,6 +80,9 @@ pub struct ClawState {
     /// The attachment store the `attach_file` tool copies into and the
     /// fetch route serves from.
     attachments: Arc<crate::attachments::AttachmentStore>,
+    /// The phone tables: the command queue the device polls and the
+    /// reported state the ingest door feeds.
+    phone: Arc<crate::phone::PhoneStore>,
     token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
@@ -93,7 +96,7 @@ impl ClawState {
     /// the bootstrap store, the event hub, the account store, the
     /// consent table, the attachment store, and the configured bearer
     /// `token`.
-    #[allow(clippy::too_many_arguments)] // fourteen parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // fifteen parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
@@ -109,6 +112,7 @@ impl ClawState {
         consents: Arc<crate::consents::ConsentStore>,
         bridge: Arc<crate::consents::WaitBridge>,
         attachments: Arc<crate::attachments::AttachmentStore>,
+        phone: Arc<crate::phone::PhoneStore>,
         token: Option<String>,
     ) -> Self {
         Self {
@@ -126,6 +130,7 @@ impl ClawState {
             consents,
             bridge,
             attachments,
+            phone,
             token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
@@ -214,6 +219,8 @@ pub fn router(state: ClawState) -> Router {
             post(consents_resolve).delete(consents_deny),
         )
         .route("/attachments/{id}", get(attachment_get))
+        .route("/phone/commands", get(phone_commands_list))
+        .route("/phone/commands/{id}/result", post(phone_command_result))
         .route("/ingest", post(ingest))
         .route("/notifications", get(notifications_list))
         .route("/notifications/{id}/ack", post(notifications_ack))
@@ -738,6 +745,90 @@ async fn attachment_get(State(state): State<ClawState>, Path(id): Path<String>) 
     }
 }
 
+/// The command poll's query: which device queue to read.
+#[derive(Deserialize)]
+pub struct PhoneCommandQuery {
+    /// The device queue to read.
+    pub device: String,
+}
+
+/// `GET /v1/phone/commands?device=`: the device's queued commands,
+/// oldest first, none of them confirmed yet — the poll list the phone
+/// executes from and reports on.
+async fn phone_commands_list(
+    State(state): State<ClawState>,
+    Query(query): Query<PhoneCommandQuery>,
+) -> Result<Json<Value>, (StatusCode, String)> {
+    let device = query.device.trim();
+    if device.is_empty() {
+        return Err((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "device must not be empty".to_owned(),
+        ));
+    }
+    let commands = state
+        .phone
+        .pending_commands(device)
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(json!({ "commands": commands })))
+}
+
+/// `{"ok": true, "detail": "..."}` — one command's execution report.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PhoneCommandResult {
+    /// Whether execution succeeded.
+    pub ok: bool,
+    /// What happened, when the device has something to say.
+    pub detail: Option<String>,
+}
+
+/// `POST /v1/phone/commands/{id}/result`: the device's report. Consumed
+/// once — a redelivered report is a 409, and the waiting tool saw the
+/// first verdict.
+async fn phone_command_result(
+    State(state): State<ClawState>,
+    Path(id): Path<String>,
+    Json(body): Json<PhoneCommandResult>,
+) -> Response {
+    let command = match state.phone.get_command(&id) {
+        Ok(Some(command)) => command,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no such command"})),
+            )
+                .into_response();
+        }
+        Err(err) => return internal_error(err.to_string()).into_response(),
+    };
+    if command.result_ok.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "command already confirmed"})),
+        )
+            .into_response();
+    }
+    let detail = body
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|detail| !detail.is_empty())
+        .map(str::to_owned);
+    match state.phone.record_result(&id, body.ok, detail.as_deref()) {
+        Ok(true) => {
+            state.bridge.wake(&id);
+            (StatusCode::OK, Json(json!({ "acked": true }))).into_response()
+        }
+        Ok(false) => (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "command already confirmed"})),
+        )
+            .into_response(),
+        Err(err) => internal_error(err.to_string()).into_response(),
+    }
+}
+
 /// The secret request's second half: store the credential into the
 /// identity store under the draft the ask carried, then resolve the row.
 /// A store the identity layer refuses (bad kind, caps) leaves the
@@ -942,6 +1033,18 @@ async fn ingest(State(state): State<ClawState>, Json(body): Json<IngestBody>) ->
             Json(json!({"error": "payload must be a JSON object"})),
         )
             .into_response();
+    }
+    // A phone report is conversation and state at once: the event
+    // dispatches like any resident key's, and the same payload lands in
+    // the phone tables so a status question reads the latest
+    // observation instead of a transcript. A store failure is logged,
+    // never fatal — the conversation is the report's first job.
+    if source == crate::phone::SOURCE {
+        if let Some((device, topic)) = crate::phone::phone_key_parts(key) {
+            if let Err(err) = state.phone.observe(device, topic, &body.payload) {
+                eprintln!("[claw] warning: phone state for {key} not stored: {err}");
+            }
+        }
     }
     match state.ingest_external(source, key, body.payload) {
         Ok(result) => (

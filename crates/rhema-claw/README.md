@@ -67,6 +67,8 @@ GET  /v1/consents                      the asks a turn is waiting on
 POST /v1/consents/{id}                 {"secret"} or {"grant": bool}
 DELETE /v1/consents/{id}               deny a pending ask
 GET  /v1/attachments/{id}              an attached file's bytes
+GET  /v1/phone/commands?device=        the device's queued, unconfirmed commands
+POST /v1/phone/commands/{id}/result    {"ok", "detail"?} — the device's report
 GET  /v1/providers                      the backend instances + the active pair
 PUT  /v1/providers/active               {"provider","model"?} — switch, persisted
 PUT  /v1/providers/{id}/credentials     add or replace an instance, persisted
@@ -143,6 +145,19 @@ the bytes are fetchable at `GET /v1/attachments/{id}` with the content
 type the file's name implies, so a screenshot, a diff, or a report
 reaches the chat as something to view or download rather than a
 truncated snippet.
+
+The phone is reachable too. Its status reports (`/v1/ingest`, source
+`phone`, keys `phone:<device>:<topic>`) are conversation *and* state:
+the payload lands in the phone tables, so the `phone` tool's
+`status`/`devices` actions read the latest battery, charging, network,
+and DND observations without asking anyone. Acting on the phone —
+`dnd_on`, `dnd_off`, `alert` — is consent-gated end to end: the tool
+raises a consent card, the human approves or denies, and only then does
+the command join `GET /v1/phone/commands?device=`, the poll list the
+device executes from and reports on via `POST
+/v1/phone/commands/{id}/result`. The device confirms on its own clock
+(the 15-minute WorkManager floor), so an answer may honestly be
+"queued, not yet confirmed".
 
 Stock OpenAI-speaking UIs point at the shim instead:
 
