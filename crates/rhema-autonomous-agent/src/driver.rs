@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use rhema_core::CommitHook;
 use rhema_rsd::{DispatchError, Dispatcher, InboxItem, Lease, Outcome, ResourceKey, Session};
 use tokio::task::JoinSet;
 
@@ -63,6 +64,27 @@ impl SessionContext {
     pub fn checkpoint(&self) -> Result<(), DispatchError> {
         self.dispatcher
             .checkpoint(&self.lease, self.session.clone())
+    }
+
+    /// The commit-before-execute hook bound to this run: persists the
+    /// engine's session as this key's engine state under the current
+    /// lease. A driver installs it on its engine
+    /// ([`rhema_core::Agent::set_commit_hook`]) so a crash inside a tool
+    /// call leaves the committed intent in the store instead of no record
+    /// at all. A checkpoint that fails here — an expired lease above all —
+    /// fails the step before any side effect: the engine never runs a
+    /// tool against a lease it cannot commit under.
+    pub fn commit_hook(&self) -> CommitHook {
+        let dispatcher = self.dispatcher.clone();
+        let lease = self.lease.clone();
+        let base = self.session.clone();
+        Box::new(move |core| {
+            let mut session = base.clone();
+            session.core = core.clone();
+            dispatcher
+                .checkpoint(&lease, session)
+                .map_err(|err| err.to_string())
+        })
     }
 }
 
@@ -144,5 +166,43 @@ impl Driver {
             .checkpoint(&ctx.lease, ctx.session.clone())?;
         self.dispatcher.release(&ctx.lease, outcome.clone())?;
         Ok(Some(outcome))
+    }
+}
+
+#[cfg(test)]
+mod commit_hook_tests {
+    use super::*;
+    use rhema_core::{Message, Role};
+    use rhema_rsd::{DispatcherConfig, FixedClock, VolatileStore};
+
+    #[test]
+    fn the_commit_hook_persists_the_engine_state_under_the_run_lease() {
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig::default(),
+            Arc::new(FixedClock::new(1_000)),
+            Arc::new(VolatileStore::new()),
+        ));
+        let key = ResourceKey::new("github:acme/widgets#1");
+        let (lease, _) = dispatcher.acquire(key.clone(), "test").unwrap();
+        let ctx = SessionContext {
+            key: key.clone(),
+            session: Session::fresh(key.clone(), 1_000),
+            dispatcher: dispatcher.clone(),
+            lease,
+        };
+
+        let mut core = rhema_core::Session::default();
+        core.history
+            .push(Message::text(Role::User, "committed mid-run"));
+        ctx.commit_hook()(&core).unwrap();
+
+        // A later holder of the same key resumes with the committed
+        // intent: the hook wrote through the store, not into thin air.
+        dispatcher.release(&ctx.lease, Outcome::Handled).unwrap();
+        let (_, resumed) = dispatcher.acquire(key, "next").unwrap();
+        assert_eq!(
+            resumed.core.history,
+            vec![Message::text(Role::User, "committed mid-run")]
+        );
     }
 }
