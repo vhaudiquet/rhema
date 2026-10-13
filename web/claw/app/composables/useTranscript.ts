@@ -30,6 +30,78 @@ export type TranscriptItem =
   | { kind: 'sent'; id: number; text: string }
   | { kind: 'turn'; id: number; turn: TurnBlock }
 
+// --- embedded pastes --------------------------------------------------
+// The wire form a long paste travels in: MARK, payload, MARK — one
+// logical unit inside otherwise plain text (rhema-core's paste module
+// is the definition; these are its client-side shape).
+
+/** The object-replacement character: opens and closes one embedded
+ * paste. Two marks always bracket a payload; a lone mark is literal. */
+export const PASTE_MARK = '￼'
+
+/** A paste at or under this many lines joins the input inline; longer
+ * ones become chips (the TUI's PASTE_INLINE_LINES). */
+export const PASTE_INLINE_LINES = 3
+
+/** Text that travels beside or inside marks: carriage returns to
+ * newlines, stray marks dropped — the scan must stay unambiguous
+ * (paste::normalize). */
+export function normalizePaste(text: string): string {
+  return text.replaceAll('\r\n', '\n').replaceAll('\r', '\n').replaceAll(PASTE_MARK, '')
+}
+
+/** Rust `str::lines`: \n-split, and a trailing newline ends the last
+ * line instead of opening an empty one. */
+export function lineCount(text: string): number {
+  if (text === '') return 0
+  const lines = text.split('\n')
+  if (lines[lines.length - 1] === '') lines.pop()
+  return lines.length
+}
+
+/** A chip's label: `▣1 5L` — the anchor's one-based id and the
+ * payload's line count (the TUI's chip_label). */
+export function chipLabel(paste: string, index: number): string {
+  return `▣${index + 1} ${lineCount(paste)}L`
+}
+
+/** Appends each paste as one MARK-payload-MARK embed, in order — the
+ * session's record of the prompt (paste::embed; a web draft holds no
+ * anchors, so every payload lands at the end). */
+export function embedPastes(draft: string, pastes: string[]): string {
+  return (
+    draft +
+    pastes.map((paste) => `${PASTE_MARK}${normalizePaste(paste)}${PASTE_MARK}`).join('')
+  )
+}
+
+/** One scanned piece of embedded-form text. */
+export type PastePart = { kind: 'text'; text: string } | { kind: 'paste'; text: string }
+
+/** Splits embedded-form text into its parts, left to right. A mark
+ * with no partner is literal text; malformed input never throws
+ * (paste::parts). */
+export function pasteParts(text: string): PastePart[] {
+  const parts: PastePart[] = []
+  let rest = text
+  for (;;) {
+    const start = rest.indexOf(PASTE_MARK)
+    if (start === -1) break
+    const after = rest.slice(start + PASTE_MARK.length)
+    const end = after.indexOf(PASTE_MARK)
+    if (end === -1) {
+      parts.push({ kind: 'text', text: rest.slice(0, start + PASTE_MARK.length) })
+      rest = after
+      continue
+    }
+    if (start > 0) parts.push({ kind: 'text', text: rest.slice(0, start) })
+    parts.push({ kind: 'paste', text: after.slice(0, end) })
+    rest = after.slice(end + PASTE_MARK.length)
+  }
+  if (rest !== '') parts.push({ kind: 'text', text: rest })
+  return parts
+}
+
 export function useTranscript() {
   const items = ref<TranscriptItem[]>([])
   // A deep ref on purpose: deltas mutate fields in place (reply

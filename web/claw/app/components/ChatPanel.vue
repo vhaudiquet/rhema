@@ -4,8 +4,16 @@
 // event stream delivered, nothing more. The header names the session
 // and hides the dispatch internals behind an info modal; the composer
 // chips mirror live claw state; the backend chip jumps to settings.
+import {
+  PASTE_INLINE_LINES,
+  chipLabel,
+  embedPastes,
+  lineCount,
+  normalizePaste,
+  pasteParts,
+} from '~/composables/useTranscript'
 import type { ClawSession, StreamStatus } from '~/composables/useClaw'
-import type { TranscriptItem, TurnBlock } from '~/composables/useTranscript'
+import type { PastePart, TranscriptItem, TurnBlock } from '~/composables/useTranscript'
 
 const props = defineProps<{
   items: TranscriptItem[]
@@ -49,8 +57,9 @@ watch(
 function submit(): void {
   const text = draft.value.trim()
   if (!text || !props.canSend || props.busy) return
-  emit('send', text)
+  emit('send', embedPastes(text, pastes.value))
   draft.value = ''
+  pastes.value = []
   pinned.value = true
   void nextTick(resizePrompt)
 }
@@ -75,6 +84,69 @@ function onPromptKeydown(event: KeyboardEvent): void {
     event.preventDefault()
     submit()
   }
+}
+
+// --- pasted attachments ----------------------------------------------
+// A paste over PASTE_INLINE_LINES lines rides as a chip: the payload
+// never lands in the box, it embeds into the sent text on submit —
+// the same record the TUI keeps.
+
+const pastes = ref<string[]>([])
+
+function onPaste(event: ClipboardEvent): void {
+  const transfer = event.clipboardData
+  if (!transfer) return
+  const text = transfer.getData('text/plain')
+  if (text !== '') {
+    if (absorbPaste(text)) event.preventDefault()
+    return
+  }
+  // A file paste reads as its text when it claims a textual type; the
+  // rest the composer ignores.
+  const file = transfer.files[0]
+  if (!file || !file.type.startsWith('text/')) return
+  event.preventDefault()
+  void file.text().then((text) => {
+    if (!absorbPaste(text)) insertInline(text)
+  })
+}
+
+/** A long paste becomes one chip; whether it did is the answer. */
+function absorbPaste(text: string): boolean {
+  const normalized = normalizePaste(text)
+  if (lineCount(normalized) <= PASTE_INLINE_LINES) return false
+  pastes.value.push(normalized)
+  return true
+}
+
+/** A short file paste joins the draft where the caret sits. */
+function insertInline(text: string): void {
+  const el = prompt.value
+  if (el && !el.disabled) {
+    el.setRangeText(text, el.selectionStart ?? el.value.length, el.selectionEnd ?? el.value.length, 'end')
+    draft.value = el.value
+  } else {
+    draft.value += text
+  }
+  resizePrompt()
+}
+
+/** One render piece of a user message: literal text or a paste chip. */
+type MessageSegment = PastePart | { kind: 'chip'; label: string }
+
+/** The message's render pieces: literal text and resolved chips, the
+ * chips' one-based ids counted across the message. */
+function messageSegments(text: string): MessageSegment[] {
+  const segments: MessageSegment[] = []
+  let chip = 0
+  for (const part of pasteParts(text)) {
+    if (part.kind === 'text') {
+      if (part.text !== '') segments.push(part)
+    } else {
+      segments.push({ kind: 'chip', label: chipLabel(part.text, chip++) })
+    }
+  }
+  return segments
 }
 
 const displayName = computed(() => props.activeKey.replace(/^interactive:/, ''))
@@ -134,7 +206,12 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           <div class="avatar user" aria-hidden="true">·</div>
           <div class="msg-body">
             <div class="who">you</div>
-            <div class="reply plain">{{ item.text }}</div>
+            <div class="reply plain">
+              <template v-for="(segment, index) in messageSegments(item.text)" :key="index">
+                <span v-if="segment.kind === 'chip'" class="badge paste-chip">{{ segment.label }}</span>
+                <template v-else>{{ segment.text }}</template>
+              </template>
+            </div>
           </div>
         </div>
         <div v-else class="msg">
@@ -208,6 +285,14 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           {{ activeBackend ? `${activeBackend.provider} · ${activeBackend.model}` : 'no backend' }}
         </button>
       </div>
+      <div v-if="pastes.length > 0" class="paste-chips">
+        <span v-for="(paste, index) in pastes" :key="index" class="badge paste-chip">
+          {{ chipLabel(paste, index) }}
+          <button class="chip-x" :title="`drop paste ${index + 1}`" @click="pastes.splice(index, 1)">
+            ×
+          </button>
+        </span>
+      </div>
       <div class="input-row">
         <textarea
           ref="prompt"
@@ -216,6 +301,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           :placeholder="canSend ? `Message ${agentName}…` : 'only interactive:* sessions accept messages'"
           :disabled="!canSend"
           @keydown="onPromptKeydown"
+          @paste="onPaste"
           @input="resizePrompt"
         />
         <button class="primary send" :disabled="!canSend || busy || draft.trim() === ''" title="send" @click="submit">
@@ -463,6 +549,34 @@ li.error .glyph {
 .chip-btn:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--accent-text);
+}
+
+.paste-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+/* One embedded paste, standing in for its payload — composer staging
+   and transcript rendering share the shape. */
+.paste-chip {
+  gap: 2px;
+  padding-right: 4px;
+  background: var(--elevated);
+}
+
+.chip-x {
+  border: none;
+  background: none;
+  padding: 0 2px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--text3);
+}
+
+.chip-x:hover:not(:disabled) {
+  color: var(--error);
 }
 
 .input-row {
