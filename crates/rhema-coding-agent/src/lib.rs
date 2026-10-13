@@ -41,7 +41,8 @@ pub mod skills;
 pub mod tools;
 
 pub use agent::{
-    CodingAgent, CodingAgentError, repair_dangling_calls, revive_dangling_calls, stamped_system,
+    CodingAgent, CodingAgentError, ExpandPastes, repair_dangling_calls, revive_dangling_calls,
+    stamped_system,
 };
 pub use approval::{AllowAll, Approval, DenyAll};
 pub use config::CodingAgentConfig;

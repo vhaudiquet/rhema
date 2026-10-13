@@ -81,9 +81,18 @@ pub fn stamped_system(base: Option<&str>, workspace: &Path) -> Result<String, Co
 /// (`rhema_core::paste`): the session carries the compact chip form a
 /// UI renders, the model sees only the plain text. Wrapped around
 /// every provider the agent is built with, so fresh and resumed
-/// histories expand alike.
-struct ExpandPastes {
+/// histories expand alike. Public so a driver that assembles its own
+/// `Agent` — the resident handler — wraps the same seam instead of
+/// growing a second expansion.
+pub struct ExpandPastes {
     inner: Arc<dyn ModelProvider>,
+}
+
+impl ExpandPastes {
+    /// The wrapper over `inner`.
+    pub fn new(inner: Arc<dyn ModelProvider>) -> Self {
+        Self { inner }
+    }
 }
 
 #[async_trait]
@@ -130,8 +139,7 @@ impl CodingAgent {
         // The paste expansion rides the provider seam, not the engine:
         // the session keeps the compact form, and this one wrapper is
         // every request path's way out.
-        let provider: Arc<dyn rhema_core::ModelProvider> =
-            Arc::new(ExpandPastes { inner: provider });
+        let provider: Arc<dyn rhema_core::ModelProvider> = Arc::new(ExpandPastes::new(provider));
         let tools = Arc::new(CodingTools::new(config.workspace.clone()));
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
