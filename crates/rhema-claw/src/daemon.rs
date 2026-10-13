@@ -26,7 +26,8 @@ use std::time::Duration;
 
 use rhema_autonomous_agent::{Driver, Source, SourceError};
 use rhema_rsd::{
-    DispatchError, Dispatcher, DispatcherConfig, Outcome, SqliteStore, StoreError, SystemClock,
+    DispatchError, Dispatcher, DispatcherConfig, Outcome, ResourceKey, SqliteStore, StoreError,
+    SystemClock,
 };
 
 use crate::config::{ClawConfig, ConfigError, ForgeKind};
@@ -218,8 +219,16 @@ impl Daemon {
         // dispatch time, so a watch added mid-run is answerable without a
         // restart.
         let forge_handler = ClawHandler::new(backends.clone(), workspace_root, watches.clone());
+        // Two drivers over one store admit from the same table, so each
+        // owns its half of the key space: a forge pass must never pick
+        // up a resident event (it would fail it, and consume it), and a
+        // resident pass must never pick up a thread's.
         let forge_driver = Arc::new(
-            Driver::new(forge_dispatcher, Arc::new(forge_handler)).with_holder("rhema-claw"),
+            Driver::new(forge_dispatcher, Arc::new(forge_handler))
+                .with_holder("rhema-claw")
+                .owning(Arc::new(|key: &ResourceKey| {
+                    !crate::interactive::is_resident_key(key.as_str())
+                })),
         );
 
         // The hub replays what past turns streamed: every event appends
@@ -289,7 +298,10 @@ impl Daemon {
                 interactive_dispatcher.clone(),
                 Arc::new(interactive_handler),
             )
-            .with_holder("rhema-claw-interactive"),
+            .with_holder("rhema-claw-interactive")
+            .owning(Arc::new(|key: &ResourceKey| {
+                crate::interactive::is_resident_key(key.as_str())
+            })),
         );
         crate::interactive::register_user(&interactive_dispatcher);
         // The scheduler is the resident dispatcher's second own source:
