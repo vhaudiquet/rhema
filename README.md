@@ -59,9 +59,9 @@ See [Rhema Claw README.md](./crates/rhema-claw/README.md) for more.
 | `rhema-memory` | Cross-session memory: one record per fact behind a `MemoryStore` contract, surfaced as `memory_*` tools the model calls itself |
 | `rhema-identity` | Accounts: one record per external identity, each holding one write-only secret behind a use-never-read contract |
 | `rhema-autonomous-agent` | The resident-agent core tier: model-free `Source` detection, the lease-driven `Driver` loop, allowlist-cut tool resolvers, and `SessionContext::commit_hook`, which binds a run's lease to the engine's commit hook |
-| `rhema-coding-agent` | The coding-agent driver: one approval-gated `bash` tool, the `Approval` seam, session save/resume, and revive-on-resume for calls a crash left unanswered |
+| `rhema-coding-agent` | The coding-agent driver: one approval-gated `bash` tool, the `Approval` seam, session save/resume, and revive-on-resume for calls a crash left unanswered; its system prompt assembled from the editable SYSTEM.md template, tools and skills rendered in |
 | `rhema-acp` | The coding agent as an Agent Client Protocol subprocess, so ACP editors (T3 Code, Zed, JetBrains, Neovim, Emacs, VS Code) drive it without a per-editor plugin |
-| `rhema-code` | The `rhema` binary: the full-screen terminal UI, `rhema run` for the pipeable one-shot, `rhema acp` for editors |
+| `rhema-code` | The `rhema` binary: the full-screen terminal UI, `rhema run` for the pipeable one-shot, `rhema acp` for editors, `rhema system edit/show/restore` for the prompt the agent works from |
 | `rhema-claw` | The resident agent daemon (work in progress): one SQLite store of sessions, forge threads answered with coding-agent turns, chat over HTTP |
 
 ## rhema-core

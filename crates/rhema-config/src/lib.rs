@@ -509,7 +509,9 @@ impl Config {
     }
 
     /// The system prompt file (`<dir>/SYSTEM.md`), the editable base
-    /// prompt seeded with the built-in default on first run.
+    /// prompt. `rhema system edit` seeds it with the built-in default,
+    /// `rhema system restore` restores it; nothing is ever written at
+    /// runtime — the file is an opt-in override.
     pub fn system_prompt_path() -> Result<PathBuf, ConfigError> {
         Ok(Self::dir()?.join("SYSTEM.md"))
     }
