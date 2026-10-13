@@ -4,21 +4,24 @@
 //! HTTP subscribers stream one key's turns through it: a chat UI holds
 //! one `GET /v1/sessions/{key}/events` connection open and watches every
 //! turn of that session go by — whoever triggered the turn. The hub is
-//! a [`tokio::sync::broadcast`] channel per key behind a mutex'd map,
-//! and each entry carries the key's recorded events beside the channel.
-//! `emit` appends to the record and broadcasts in one lock; a
-//! subscriber that asks for history gets a record snapshot and a live
-//! receiver cut under that same lock — every event lands in exactly one
-//! of the two, so a replay has no gap and no overlap with the live
-//! stream, ever.
+//! a [`tokio::sync::broadcast`] channel per key behind a mutex'd map.
+//! `emit` records the event and broadcasts in one lock; a subscriber
+//! that asks for history gets the record and a live receiver cut under
+//! that same lock — every event lands in exactly one of the two, so a
+//! replay has no gap and no overlap with the live stream, ever.
 //!
-//! Two bounds keep the record honest rather than infinite: it holds at
-//! most [`RECORD_CAPACITY`] events per key (the oldest fall off), and
-//! when a record store is attached, each turn's end marker flushes the
-//! key's record there — so the history a restart replays is the history
-//! the completed turns streamed. Live delivery itself stays
-//! best-effort: a subscriber that falls more than
-//! [`EventHub::capacity`] events behind drops the oldest ones
+//! Where the record lives depends on the assembly. With a turn store
+//! attached (the daemon), every event is appended there as it streams
+//! and a replay reads the store back: the transcript is unbounded and
+//! survives restarts, so a session that runs for weeks replays whole —
+//! the appends serialize under the hub's lock, which is what keeps the
+//! table's order the stream's order. Without one (tests, store-less
+//! assemblies) the record is a bounded in-memory window
+//! ([`RECORD_CAPACITY`] events per key, the oldest falling off), good
+//! enough for a process that lives as long as its transcript needs to.
+//!
+//! Live delivery itself stays best-effort: a subscriber that falls more
+//! than [`EventHub::capacity`] events behind drops the oldest ones
 //! (`broadcast`'s contract) and the receiver surfaces the skip as a
 //! `Lagged` error so clients can say so.
 
@@ -36,10 +39,9 @@ use crate::turn_store::TurnStore;
 /// past four digits.
 pub const TURN_CHANNEL_CAPACITY: usize = 1024;
 
-/// How many events one key's record holds. Wide enough that a reload
-/// rebuilds whole recent turns — thinking traces and tool rows are
-/// deltas, and they add up — narrow enough that a flush stays one
-/// modest UPSERT.
+/// How many events one key's in-memory record holds when no turn store
+/// is attached. Wide enough that a reload rebuilds whole recent turns —
+/// thinking traces and tool rows are deltas, and they add up.
 pub const RECORD_CAPACITY: usize = 8192;
 
 /// One event of a turn, as the wire sees it. Serialized with an internal
@@ -110,9 +112,9 @@ impl TurnEvent {
     }
 }
 
-/// One key's entry: the record a reload replays, and the channel the
-/// live watchers hang on. Both live behind one mutex, which is what
-/// makes a history snapshot + subscription atomic.
+/// One key's entry: the live channel, plus the in-memory record a
+/// replay reads when no turn store is attached. Both live behind one
+/// mutex, which is what makes a history snapshot + subscription atomic.
 struct KeyEntry {
     history: VecDeque<TurnEvent>,
     sender: broadcast::Sender<TurnEvent>,
@@ -122,7 +124,7 @@ struct KeyEntry {
 pub struct EventHub {
     entries: Mutex<HashMap<ResourceKey, KeyEntry>>,
     capacity: usize,
-    /// Where finished turns' records flush; `None` keeps the record
+    /// Where events append as they stream; `None` keeps the record
     /// memory-only (tests, and any assembly without a database).
     record_store: Option<Arc<TurnStore>>,
 }
@@ -143,8 +145,9 @@ impl EventHub {
         }
     }
 
-    /// A hub that flushes each key's record to `store` on every turn's
-    /// end marker — the flush is what a restart's replay reads.
+    /// A hub that appends every event to `store` as it streams — the
+    /// replay a restart serves reads back exactly what streamed, with no
+    /// window and no end-marker boundary.
     pub fn with_record_store(store: Arc<TurnStore>) -> Self {
         Self {
             record_store: Some(store),
@@ -177,52 +180,47 @@ impl EventHub {
     ) -> (Vec<TurnEvent>, broadcast::Receiver<TurnEvent>) {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = Self::entry(&mut entries, key, self.capacity);
-        (
-            entry.history.iter().cloned().collect(),
-            entry.sender.subscribe(),
-        )
-    }
-
-    /// Loads a key's record from the boot seed. Run before the surface
-    /// serves: a subscriber arriving later replays exactly this.
-    pub fn seed_history(&self, key: ResourceKey, events: Vec<TurnEvent>) {
-        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-        let entry = Self::entry(&mut entries, &key, self.capacity);
-        entry.history = events.into_iter().collect();
-        entry.history.truncate(RECORD_CAPACITY);
+        let history = match self.record_store.as_ref() {
+            Some(store) => store.events(key.as_str()).unwrap_or_else(|err| {
+                eprintln!("[claw] warning: replay for {key} failed: {err}");
+                Vec::new()
+            }),
+            None => entry.history.iter().cloned().collect(),
+        };
+        (history, entry.sender.subscribe())
     }
 
     /// Publishes one event to `key`: the record takes it, and every
     /// live subscriber gets a copy. A key with nobody listening is not
     /// an error — turns run whether or not anyone watches, and the
-    /// record keeps the turn replayable. The end marker also flushes
-    /// the record to the store when one is attached: a crash between
-    /// turns loses at most the turn that was still running.
+    /// record keeps the turn replayable. With a store attached the
+    /// append happens under the same lock as the broadcast, so the
+    /// table's order is the stream's order no matter how events race in
+    /// across keys.
     pub fn emit(&self, key: &ResourceKey, event: TurnEvent) {
-        let snapshot = {
-            let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            let entry = Self::entry(&mut entries, key, self.capacity);
-            entry.history.push_back(event.clone());
-            if entry.history.len() > RECORD_CAPACITY {
-                entry.history.pop_front();
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = Self::entry(&mut entries, key, self.capacity);
+        match self.record_store.as_ref() {
+            Some(store) => {
+                if let Err(err) = store.append(key.as_str(), std::slice::from_ref(&event)) {
+                    eprintln!("[claw] warning: turn-history append for {key} failed: {err}");
+                }
             }
-            let _ = entry.sender.send(event);
-            // The flush reads the record, not the just-pushed event: the
-            // whole point is that the store ends up holding exactly what
-            // the next boot seeds the hub with.
-            matches!(entry.history.back(), Some(TurnEvent::TurnDone { .. }))
-                .then(|| entry.history.iter().cloned().collect::<Vec<_>>())
-        };
-        if let (Some(store), Some(history)) = (self.record_store.as_ref(), snapshot) {
-            if let Err(err) = store.save(key.as_str(), &history) {
-                eprintln!("[claw] warning: turn-history flush for {key} failed: {err}");
+            None => {
+                entry.history.push_back(event.clone());
+                if entry.history.len() > RECORD_CAPACITY {
+                    entry.history.pop_front();
+                }
             }
         }
+        let _ = entry.sender.send(event);
     }
 
     /// The map entry for `key`, creating it (and its channel) on first
     /// use. Entries live for the process lifetime once created — the
-    /// record is the point — and stay bounded by `RECORD_CAPACITY`.
+    /// live channel is the point; with a store attached the record
+    /// outlives the process, without one it stays bounded by
+    /// `RECORD_CAPACITY`.
     fn entry<'a>(
         entries: &'a mut HashMap<ResourceKey, KeyEntry>,
         key: &ResourceKey,
@@ -415,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn the_record_is_capped_at_the_newest_events() {
+    fn the_memory_record_is_capped_at_the_newest_events() {
         let hub = EventHub::default();
         let key = key("long");
         for n in 0..RECORD_CAPACITY + 10 {
@@ -430,50 +428,49 @@ mod tests {
         );
     }
 
+    /// The restart story: a store-backed hub's record outlives the
+    /// process, whole — a fresh hub over the same store replays
+    /// everything, and past the in-memory cap, too.
     #[test]
-    fn a_seeded_record_replays_and_keeps_taking_new_events() {
+    fn a_stored_record_replays_whole_across_hubs_and_past_any_cap() {
+        let store = Arc::new(TurnStore::in_memory().expect("store opens"));
+        let hub = EventHub::with_record_store(store.clone());
+        let key = key("long");
+        for n in 0..RECORD_CAPACITY + 10 {
+            hub.emit(&key, text(&n.to_string()));
+        }
+        hub.emit(&key, done("hi back"));
+
+        let restarted = EventHub::with_record_store(store);
+        let (history, mut receiver) = restarted.subscribe_with_history(&key);
+        assert_eq!(
+            history.len(),
+            RECORD_CAPACITY + 11,
+            "nothing fell off: the table, not a window, is the record"
+        );
+        assert_eq!(history.first(), Some(&text("0")));
+        assert_eq!(history.last(), Some(&done("hi back")));
+        restarted.emit(&key, text("in this life"));
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            text("in this life"),
+            "the live cut is exact: replayed events never re-deliver"
+        );
+    }
+
+    #[test]
+    fn a_memory_record_replays_and_keeps_taking_new_events() {
         let hub = EventHub::default();
         let key = key("booted");
-        hub.seed_history(
-            key.clone(),
-            vec![TurnEvent::UserMessage {
-                text: "from the last life".into(),
-            }],
+        hub.emit(
+            &key,
+            TurnEvent::UserMessage {
+                text: "earlier".into(),
+            },
         );
         let (history, mut receiver) = hub.subscribe_with_history(&key);
         assert_eq!(history.len(), 1);
         hub.emit(&key, text("in this life"));
         assert_eq!(receiver.try_recv().unwrap(), text("in this life"));
-    }
-
-    #[test]
-    fn the_end_marker_flushes_the_record_to_the_store() {
-        let store = Arc::new(TurnStore::in_memory().expect("store opens"));
-        let hub = EventHub::with_record_store(store.clone());
-        let key = key("web");
-
-        // Deltas alone do not flush: a crash mid-turn leaves the store
-        // at the last turn boundary.
-        hub.emit(
-            &key,
-            TurnEvent::UserMessage {
-                text: "hello".into(),
-            },
-        );
-        hub.emit(&key, text("hi"));
-        assert_eq!(store.load(key.as_str()).expect("reads"), None);
-
-        hub.emit(&key, done("hi back"));
-        assert_eq!(
-            store.load(key.as_str()).expect("reads"),
-            Some(vec![
-                TurnEvent::UserMessage {
-                    text: "hello".into()
-                },
-                text("hi"),
-                done("hi back"),
-            ]),
-            "the flushed record is exactly what a restart seeds"
-        );
     }
 }

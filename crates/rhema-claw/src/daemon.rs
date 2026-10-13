@@ -26,8 +26,7 @@ use std::time::Duration;
 
 use rhema_autonomous_agent::{Driver, Source, SourceError};
 use rhema_rsd::{
-    DispatchError, Dispatcher, DispatcherConfig, Outcome, ResourceKey, SqliteStore, StoreError,
-    SystemClock,
+    DispatchError, Dispatcher, DispatcherConfig, Outcome, SqliteStore, StoreError, SystemClock,
 };
 
 use crate::config::{ClawConfig, ConfigError, ForgeKind};
@@ -214,13 +213,11 @@ impl Daemon {
             Driver::new(forge_dispatcher, Arc::new(forge_handler)).with_holder("rhema-claw"),
         );
 
-        // The hub replays what past turns streamed: the table's records
-        // seed it before the surface serves, and the hub flushes each
-        // turn's end marker back — a restart continues the transcript.
+        // The hub replays what past turns streamed: every event appends
+        // to the turn-history table as it streams, so a restart's replay
+        // reads the table back — a restart continues the transcript,
+        // whole, with no boot-time seed pass.
         let hub = Arc::new(EventHub::with_record_store(turns.clone()));
-        for (key, events) in turns.all()? {
-            hub.seed_history(ResourceKey::from(key), events);
-        }
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
         let settings = Arc::new(crate::settings::SettingsStore::open(&db)?);

@@ -84,9 +84,10 @@ lets a UI badge setup state.
 SSE frames are JSON, `data: {..}`: `user_message`, `thinking_delta`,
 `text_delta`, `tool_start`, `tool_result`, `turn_done`. A subscription
 opens with the session's recorded turns replayed first and the live feed
-after, cut atomically daemon-side — the record holds the newest 8192
-events per key, flushed at every turn's end marker, so both a reload and
-a daemon restart rebuild the transcript. A chat UI subscribes once,
+after, cut atomically daemon-side — every streamed event is persisted as
+it streams, so both a reload and a daemon restart rebuild the whole
+transcript, not a recent window; a session that runs for weeks scrolls
+back to its first message. A chat UI subscribes once,
 POSTs messages, and resets its mirror whenever the stream (re)opens,
 letting the replay rebuild it; the daemon owns the conversation, so the
 client mirrors the stream rather than managing history. The OpenAI shim

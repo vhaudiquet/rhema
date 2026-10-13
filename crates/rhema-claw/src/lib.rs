@@ -30,7 +30,7 @@
 //! - [`task_store`] — the task table: scheduled prompts, inert until the
 //!   scheduler detects them due
 //! - [`turn_store`] — the turn-history table: what each key's stream
-//!   streamed, flushed per turn, replayed after a restart
+//!   streamed, appended per event, replayed whole after a restart
 //! - [`hub`] — the event hub: per-key record and broadcast of turn events
 //! - [`identity`] — the agent's presentation identity: name, mark,
 //!   images, served over `/v1/agent`
