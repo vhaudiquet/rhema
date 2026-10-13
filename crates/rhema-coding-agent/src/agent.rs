@@ -118,16 +118,16 @@ impl CodingAgent {
             Some(system) => system,
             None => {
                 // An explicit base from the user's SYSTEM.md replaces
-                // the built-in default; a base with no skills section
-                // shows no skills. The global skills directory may not
-                // exist (no HOME) — as normal as an empty one.
+                // the built-in default; a base with no skills or tools
+                // section shows none. The global skills directory may
+                // not exist (no HOME) — as normal as an empty one.
                 let global = rhema_config::Config::skills_dir().ok();
                 let skills = crate::skills::discover(global.as_deref(), tools.workspace());
                 let base = config
                     .base_system
                     .as_deref()
                     .unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD);
-                crate::prompt::render_system(base, tools.workspace(), &skills)?
+                crate::prompt::render_system(base, tools.workspace(), &skills, &tools.specs())?
             }
         };
         let agent = Agent::builder()

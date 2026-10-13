@@ -43,6 +43,30 @@ pub struct CodingTools {
 }
 
 impl CodingTools {
+    /// The specs the built-in tool set advertises. Fixed at compile time
+    /// and independent of the instance: the system-prompt renderer names
+    /// the same tools the resolver offers, so the prompt and the API's
+    /// tools array cannot drift.
+    pub(crate) fn builtin_specs() -> Vec<ToolSpec> {
+        vec![ToolSpec::new(
+            "bash",
+            "Run a shell command (`bash -c`) with the workspace root as \
+             working directory. Reading, listing, and editing files are \
+             shell work. Output is capped and the exit status reported; a \
+             non-zero exit comes back as an error. Requires user approval.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "The shell command to run."
+                    }
+                },
+                "required": ["command"]
+            }),
+        )]
+    }
+
     /// Tools rooted at `workspace`; the path is canonicalized, falling back
     /// to the input if canonicalization fails (canonicalization requires
     /// every component to exist).
@@ -182,23 +206,7 @@ impl CodingTools {
 #[async_trait]
 impl ToolResolver for CodingTools {
     fn specs(&self) -> Vec<ToolSpec> {
-        vec![ToolSpec::new(
-            "bash",
-            "Run a shell command (`bash -c`) with the workspace root as \
-             working directory. Reading, listing, and editing files are \
-             shell work. Output is capped and the exit status reported; a \
-             non-zero exit comes back as an error. Requires user approval.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to run."
-                    }
-                },
-                "required": ["command"]
-            }),
-        )]
+        Self::builtin_specs()
     }
 
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {

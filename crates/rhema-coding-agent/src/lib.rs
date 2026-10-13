@@ -3,13 +3,14 @@
 //!
 //! Wires a [`ModelProvider`](rhema_core::ModelProvider) into a
 //! [`CodingAgent`] whose turns drive `rhema_core::run_turn` against a
-//! built-in tool set: one approval-gated shell (`bash`), with skills
-//! presented in the system prompt for the model to load via the shell.
-//! Tool errors surface in-band to the model (SPEC.md §4); approval
-//! arrives per turn through the [`Approval`] hook; the session is plain
-//! data the driver can persist and resume, with a commit hook so an intent
-//! is durable before its first side effect, revive-on-resume for calls a
-//! crash left unanswered, and cancel-path repair for those a user stopped.
+//! built-in tool set: one approval-gated shell (`bash`), its spec and
+//! discovered skills presented in the system prompt, the model loading
+//! skill bodies via the shell. Tool errors surface in-band to the model
+//! (SPEC.md §4); approval arrives per turn through the [`Approval`]
+//! hook; the session is plain data the driver can persist and resume,
+//! with a commit hook so an intent is durable before its first side
+//! effect, revive-on-resume for calls a crash left unanswered, and
+//! cancel-path repair for those a user stopped.
 //!
 //! Layout:
 //! - [`approval`] — the `Approval` hook and `AllowAll`

@@ -165,6 +165,37 @@ async fn a_base_system_with_a_for_loop_renders_each_skill_through_it() {
 }
 
 #[tokio::test]
+async fn a_base_system_with_a_for_loop_renders_each_tool_through_it() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = recorder();
+    let config = CodingAgentConfig {
+        base_system: Some(
+            "{% for tool in tools %}call {{ tool.name }}: {{ tool.description }} with {{ tool.parameters | tojson }}\n{% endfor %}TAIL {{ workspace }}"
+                .into(),
+        ),
+        ..CodingAgentConfig::new("mock-model", root.path())
+    };
+    let mut agent = CodingAgent::new(provider.clone(), config).unwrap();
+    let mut sink = NullSink;
+
+    agent
+        .turn("hi", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    let systems = provider.systems();
+    let system = systems[0].as_deref().expect("one system prompt recorded");
+    // The built-in bash spec reaches the template: the same name the
+    // model calls and the schema the API's tools array carries.
+    assert!(system.contains("call bash: "), "{system}");
+    assert!(system.contains(r#""required": ["command"]"#), "{system}");
+    assert!(
+        system.contains("TAIL /"),
+        "the workspace placeholder still fills: {system}"
+    );
+}
+
+#[tokio::test]
 async fn a_base_system_that_fails_to_render_fails_the_construction() {
     let root = tempfile::tempdir().unwrap();
     let provider = recorder();
