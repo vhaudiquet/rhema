@@ -135,6 +135,27 @@ class ClawApi(
         return execute(builder.post(EMPTY_BODY).build()) { }
     }
 
+    // GET /v1/attachments/{id}: raw bytes, not JSON. The generic execute()
+    // rejects any 2xx body that does not open like JSON, so this endpoint
+    // gets its own plain read with the same error vocabulary.
+    suspend fun attachment(id: String): ClawResult<ByteArray> {
+        val builder = v1("attachments", id)
+            ?: return ClawResult.Network("no base URL configured")
+        return withContext(Dispatchers.IO) {
+            try {
+                client.newCall(builder.get().build()).execute().use { response ->
+                    if (response.isSuccessful) {
+                        ClawResult.Ok(response.body?.bytes() ?: ByteArray(0))
+                    } else {
+                        ClawResult.HttpError(response.code, response.body?.string()?.take(500))
+                    }
+                }
+            } catch (e: IOException) {
+                ClawResult.Network(e.message ?: "network error")
+            }
+        }
+    }
+
     fun eventStream(sessionKey: String): Flow<SseFrame> = callbackFlow {
         val builder = v1("sessions", sessionKey, "events")
         if (builder == null) {

@@ -107,6 +107,10 @@ sealed interface ClawEvent {
         val name: String = "",
         @SerialName("is_error") val isError: Boolean = false,
         val summary: String? = null,
+        // Command tools answer with a process exit code and the shell
+        // line; both ride only on the bash-like tools.
+        val code: Long? = null,
+        val command: String? = null,
     ) : ClawEvent
 
     // The reply is null when the turn ended without producing text —
@@ -115,4 +119,16 @@ sealed interface ClawEvent {
     @Serializable
     @SerialName("turn_done")
     data class TurnDone(val reply: String? = null, val outcome: String? = null) : ClawEvent
+
+    // A file the agent produced. The bytes are not on the stream; they
+    // live at GET /v1/attachments/{id} behind the same bearer token.
+    @Serializable
+    @SerialName("attachment")
+    data class Attachment(
+        val id: String,
+        val name: String,
+        val media: String = "file",
+        val size: Long = 0,
+        val caption: String? = null,
+    ) : ClawEvent
 }

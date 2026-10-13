@@ -33,6 +33,11 @@
     <string name="chat_send_failed">Send failed: %1$s</string>
     <string name="chat_tool_running">tool running: %1$s</string>
     <string name="chat_tool_done">tool: %1$s</string>
+    <string name="chat_attachment_download">Download and open</string>
+    <string name="chat_attachment_downloading">downloading…</string>
+    <string name="chat_attachment_open">Open</string>
+    <string name="chat_attachment_open_failed">No app on this phone opens this file type.</string>
+    <string name="chat_attachment_failed">Download failed: %1$s</string>
 <string name="settings_page_title">Settings</string>
     <string name="card_connection">Connection</string>
     <string name="card_providers">Model providers</string>

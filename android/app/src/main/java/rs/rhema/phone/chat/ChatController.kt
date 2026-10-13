@@ -33,9 +33,23 @@ class ChatController(
         val summary: String?,
         val isError: Boolean,
         val running: Boolean,
+        // Command tools: the shell line and the exit code, both null
+        // until the tool_result lands (and null forever on the others).
+        val command: String? = null,
+        val exitCode: Long? = null,
     ) : Item
-
     data class Reply(override val id: Long, val text: String, val streaming: Boolean) : Item
+
+    // A file the agent produced; the bytes stay at the claw until this
+    // screen fetches them by attachmentId.
+    data class Attachment(
+        override val id: Long,
+        val attachmentId: String,
+        val name: String,
+        val media: String,
+        val size: Long,
+        val caption: String?,
+    ) : Item
 
     // The turn's end tag ("Handled", "Failed", …) from turn_done; the
     // reply carries the text, this carries the outcome.
@@ -167,10 +181,24 @@ class ChatController(
                 items = if (index >= 0) {
                     items.toMutableList().also { list ->
                         val tool = list[index] as ToolCall
-                        list[index] = tool.copy(summary = event.summary, isError = event.isError, running = false)
+                        list[index] = tool.copy(
+                            summary = event.summary,
+                            isError = event.isError,
+                            running = false,
+                            command = event.command,
+                            exitCode = event.code,
+                        )
                     }
                 } else {
-                    items + ToolCall(newId(), event.name, event.summary, event.isError, running = false)
+                    items + ToolCall(
+                        newId(),
+                        event.name,
+                        event.summary,
+                        event.isError,
+                        running = false,
+                        command = event.command,
+                        exitCode = event.code,
+                    )
                 }
             }
             is ClawEvent.TurnDone -> {
@@ -190,6 +218,8 @@ class ChatController(
                 }
                 event.outcome?.let { outcome -> items = items + Outcome(newId(), outcome) }
             }
+            is ClawEvent.Attachment ->
+                items = items + Attachment(newId(), event.id, event.name, event.media, event.size, event.caption)
         }
     }
 

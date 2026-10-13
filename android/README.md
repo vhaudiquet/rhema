@@ -31,7 +31,15 @@ notifications.
   composer POSTs `{"text"}`; the claw's documented dance is preserved:
   **subscribe first, then POST**, the reply arrives on the stream. Thinking
   deltas render dim and collapsible, tool rows show name/summary with error
-  coloring, the streaming reply is finalized by `turn_done`. Replies render
+  coloring (bash-like tools render as shell lines instead: dim `$` prefix,
+  the command line, and an exit-code badge), pasted payloads embedded in a
+  message as paired `U+FFFC` marks render as compact `▣N 5L` chips, and
+  `attachment` events render as cards: file name, size, caption, an inline
+  preview for small (≤ 2 MB) images, and a download-and-open row (bytes
+  from `GET /v1/attachments/{id}` land in the app cache and open through a
+  FileProvider `ACTION_VIEW`, the only way another app can read a private
+  cache file). The streaming reply is finalized by `turn_done`. Replies
+  render
   as markdown (`com.mikepenz:multiplatform-markdown-renderer`, GFM flavour:
   raw HTML stays literal, so model output never mounts as markup; the
   streaming cursor rides the source text). The transcript is a reversed
@@ -74,7 +82,8 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `PUT /v1/providers/active` | switch the backend instance, persisted |
 | `GET /v1/sessions` | session list |
 | `POST /v1/sessions/{key}/messages` | `{"text"}` → 202; reply via stream |
-| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done` |
+| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment` |
+| `GET /v1/attachments/{id}` | an attachment event's bytes (bearer) |
 | `POST /v1/ingest` | `{"source","key","payload"}` |
 | `GET /v1/notifications?device=&since=` | ascending notification list |
 | `POST /v1/notifications/{id}/ack` | best-effort ack |
