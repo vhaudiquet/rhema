@@ -31,7 +31,11 @@
 //! from there on the next dispatch (`Null` means fresh). The session is
 //! the record of the conversation — the context the model returns to —
 //! and the hub's record is the transcript: the stream is replayable,
-//! the live deltas are the only best-effort part left.
+//! the live deltas are the only best-effort part left. Commit-before-
+//! execute rides it too: the run installs the context's commit hook, so
+//! the intent is in the store before the first tool runs, and a
+//! crash-left dangling call revives before the turn — safe tools re-run,
+//! the rest report interrupted.
 //!
 //! Deterministic setup first (spec §1, §8): the allowlist — permissive,
 //! v1's starting point — and the resolver chain (the coding toolset over
@@ -48,7 +52,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rhema_autonomous_agent::{Allowlist, Handler, ResolverChain, SessionContext, async_trait};
-use rhema_coding_agent::{AllowAll, CodingTools};
+use rhema_coding_agent::{AllowAll, CodingTools, revive_dangling_calls};
 use rhema_core::{
     Agent, ChatParams, Content, Event as ModelEvent, EventSink, Message, Role, Session,
     ToolContext, run_turn,
@@ -238,22 +242,28 @@ impl InteractiveHandler {
             .map_err(|err| format!("cannot render the bootstrap system prompt: {err}"))?;
         Agent::builder()
             .provider(provider)
-            .resolver(Arc::new(ResolverChain::new(vec![
-                self.tools.clone(),
-                Arc::new(MemoryResolver::new(
-                    self.memory.clone(),
-                    Scope::Workspace(self.workspace.clone()),
-                )),
-                self.bootstrap_resolver.clone(),
-                self.notify_resolver.clone(),
-                self.task_resolver.clone(),
-                self.watch_resolver.clone(),
-                self.accounts_resolver.clone(),
-            ])))
+            .resolver(self.resolver())
             .system(system)
             .params(ChatParams::new(model))
             .build()
             .map_err(|err| format!("cannot build the interactive agent: {err}"))
+    }
+
+    /// The resolver chain one dispatch runs under: the coding toolset
+    /// over the interactive workspace, then the resident toolsets.
+    fn resolver(&self) -> Arc<ResolverChain> {
+        Arc::new(ResolverChain::new(vec![
+            self.tools.clone(),
+            Arc::new(MemoryResolver::new(
+                self.memory.clone(),
+                Scope::Workspace(self.workspace.clone()),
+            )),
+            self.bootstrap_resolver.clone(),
+            self.notify_resolver.clone(),
+            self.task_resolver.clone(),
+            self.watch_resolver.clone(),
+            self.accounts_resolver.clone(),
+        ]))
     }
 
     /// One dispatch: drain, restore, turn, stash, reply.
@@ -306,11 +316,18 @@ impl InteractiveHandler {
 
         let mut session = restore_session(&ctx.session.core.driver_state, &key)?;
         let mut agent = self.agent()?;
+        // Commit-before-execute: the intent is in the store before the
+        // first tool runs — and if the lease cannot be committed under
+        // (expired, lost), the turn fails before any side effect. A
+        // crash-left dangling call revives first: safe tools re-run, the
+        // rest report interrupted.
+        agent.set_commit_hook(Some(ctx.commit_hook()));
         let tools = ToolContext {
             cwd: self.workspace.clone(),
             run_id: key.clone(),
             cancelled: Arc::new(AtomicBool::new(false)),
         };
+        revive_dangling_calls(&mut session, self.resolver().as_ref(), &tools).await;
         let mut sink = HubSink {
             key: ctx.key.clone(),
             hub: self.hub.clone(),

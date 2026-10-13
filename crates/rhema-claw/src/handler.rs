@@ -12,7 +12,10 @@
 //! agent's session JSON is stashed into `ctx.session.core.driver_state`
 //! before the run returns and restored with [`CodingAgent::from_session`]
 //! on the next dispatch of the same key, so a resumed thread keeps its
-//! conversation. Delivery is at-least-once: a re-delivered drained event
+//! conversation. Commit-before-execute rides it too: the run installs the
+//! context's commit hook, so the intent is in the store before the first
+//! tool runs, and a crash-left dangling call revives at turn entry.
+//! Delivery is at-least-once: a re-delivered drained event
 //! re-dispatches, and this handler treats a dispatch as work to do — the
 //! dedup boundary is the dispatcher's, not re-derived here.
 
@@ -131,6 +134,10 @@ impl ClawHandler {
 
         let workspace = self.workspace_for(&key, &repo, number)?;
         let mut agent = self.resume(ctx, &workspace, &key)?;
+        // Commit-before-execute: the intent is in the store before the
+        // first tool runs; a lease that cannot be committed under fails
+        // the step before any side effect.
+        agent.set_commit_hook(Some(ctx.commit_hook()));
 
         let prompt = build_prompt(&key, &snapshot, &news, workspace.as_path(), role);
         let mut sink = TurnSink;
