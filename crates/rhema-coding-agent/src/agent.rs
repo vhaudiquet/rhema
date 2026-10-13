@@ -56,6 +56,27 @@ impl From<minijinja::Error> for CodingAgentError {
     }
 }
 
+/// The system prompt an agent stamps into every request, assembled
+/// outside an agent: `base` — the user's SYSTEM.md — when given, the
+/// built-in default otherwise, rendered over `workspace` as given, the
+/// discovered skills, and the built-in tool specs. The one assembly
+/// point: [`CodingAgent::new`] builds every agent's prompt here, and a
+/// driver that previews the prompt calls the same function, so what is
+/// previewed is what turns send.
+pub fn stamped_system(base: Option<&str>, workspace: &Path) -> Result<String, CodingAgentError> {
+    // The global skills directory may not exist (no HOME) — as normal
+    // as an empty one.
+    let global = rhema_config::Config::skills_dir().ok();
+    let skills = crate::skills::discover(global.as_deref(), workspace);
+    crate::prompt::render_system(
+        base.unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD),
+        workspace,
+        &skills,
+        &CodingTools::builtin_specs(),
+    )
+    .map_err(CodingAgentError::from)
+}
+
 /// Expands embedded pastes in user text before a request leaves
 /// (`rhema_core::paste`): the session carries the compact chip form a
 /// UI renders, the model sees only the plain text. Wrapped around
@@ -116,19 +137,7 @@ impl CodingAgent {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
             Some(system) => system,
-            None => {
-                // An explicit base from the user's SYSTEM.md replaces
-                // the built-in default; a base with no skills or tools
-                // section shows none. The global skills directory may
-                // not exist (no HOME) — as normal as an empty one.
-                let global = rhema_config::Config::skills_dir().ok();
-                let skills = crate::skills::discover(global.as_deref(), tools.workspace());
-                let base = config
-                    .base_system
-                    .as_deref()
-                    .unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD);
-                crate::prompt::render_system(base, tools.workspace(), &skills, &tools.specs())?
-            }
+            None => stamped_system(config.base_system.as_deref(), tools.workspace())?,
         };
         let agent = Agent::builder()
             .provider(provider)

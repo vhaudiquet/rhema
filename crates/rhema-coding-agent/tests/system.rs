@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rhema_coding_agent::{
-    AllowAll, CodingAgent, CodingAgentConfig, CodingAgentError, default_system,
+    AllowAll, CodingAgent, CodingAgentConfig, CodingAgentError, default_system, stamped_system,
 };
 use rhema_core::{
     Event, EventSink, Message, ModelOutput, ModelProvider, ProviderError, Role, StopReason, Usage,
@@ -242,4 +242,31 @@ fn the_agent_exposes_its_rendered_system_prompt() {
     };
     let agent = CodingAgent::new(provider, config).unwrap();
     assert_eq!(agent.system(), "custom prompt");
+}
+
+#[tokio::test]
+async fn the_stamped_prompt_is_what_the_agent_sends() {
+    // The anti-drift contract: a preview through stamped_system is
+    // byte-identical to what CodingAgent::new renders for the same
+    // base and workspace.
+    let root = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(root.path()).unwrap();
+    let provider = recorder();
+    let mut agent = CodingAgent::new(
+        provider.clone(),
+        CodingAgentConfig::new("mock-model", root.path()),
+    )
+    .unwrap();
+    let mut sink = NullSink;
+
+    agent
+        .turn("hi", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    let systems = provider.systems();
+    assert_eq!(
+        systems[0].as_deref(),
+        Some(stamped_system(None, &workspace).unwrap().as_str())
+    );
 }
