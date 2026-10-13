@@ -52,10 +52,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rhema_autonomous_agent::{Allowlist, Handler, ResolverChain, SessionContext, async_trait};
-use rhema_coding_agent::{AllowAll, CodingTools, revive_dangling_calls};
+use rhema_coding_agent::{AllowAll, CodingTools, ExpandPastes, revive_dangling_calls};
 use rhema_core::{
-    Agent, ChatParams, Content, Event as ModelEvent, EventSink, Message, Role, Session,
-    ToolContext, ToolResolver, run_turn,
+    Agent, ChatParams, Content, Event as ModelEvent, EventSink, Message, ModelProvider, Role,
+    Session, ToolContext, ToolResolver, run_turn,
 };
 use rhema_memory::{MemoryResolver, MemoryStore, Scope};
 use rhema_rsd::{Dispatcher, Event, KeyFn, Outcome, ResourceKey};
@@ -241,6 +241,11 @@ impl InteractiveHandler {
     /// request advertises.
     fn agent(&self) -> Result<Agent, String> {
         let (provider, model) = self.backends.current();
+        // Chat input may carry embedded pastes — the compact chip form
+        // the UIs mint and the session keeps — so the provider wraps in
+        // the same expansion the coding driver wraps its own with: the
+        // model sees plain text, the transcript keeps the chips.
+        let provider: Arc<dyn ModelProvider> = Arc::new(ExpandPastes::new(provider));
         let resolver = self.resolver();
         let system = render_system(
             DEFAULT_SYSTEM_MD,
@@ -590,6 +595,106 @@ mod tests {
             stop_reason: StopReason::EndTurn,
             usage: Usage::default(),
         }
+    }
+
+    /// A provider that keeps every request it is handed, so a test can
+    /// assert on what the model would have seen.
+    struct RecordingProvider {
+        requests: std::sync::Mutex<Vec<rhema_core::ModelRequest>>,
+    }
+
+    impl RecordingProvider {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                requests: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        fn last_user_text(&self) -> String {
+            let requests = self.requests.lock().unwrap();
+            let last = requests.last().expect("a request was made");
+            last.messages
+                .iter()
+                .rev()
+                .find(|message| message.role == CoreRole::User)
+                .and_then(|message| match &message.content[0] {
+                    Content::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("a user text")
+        }
+    }
+
+    #[async_trait]
+    impl rhema_core::ModelProvider for RecordingProvider {
+        async fn complete(
+            &self,
+            request: rhema_core::ModelRequest,
+            _sink: &mut dyn rhema_core::EventSink,
+        ) -> Result<ModelOutput, rhema_core::ProviderError> {
+            self.requests.lock().unwrap().push(request);
+            Ok(reply("noted."))
+        }
+    }
+
+    /// The paste contract across the provider seam: a chat input that
+    /// carries an embedded paste (the compact form the UIs mint) is
+    /// expanded before the request leaves, while the transcript the hub
+    /// streams keeps the compact form.
+    #[tokio::test]
+    async fn an_embedded_paste_expands_for_the_model_and_not_for_the_transcript() {
+        let recorder = RecordingProvider::new();
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        let hub = Arc::new(EventHub::default());
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let handler = InteractiveHandler::new(
+            test_registry(recorder.clone()),
+            workspace.path().join("interactive"),
+            store,
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub.clone(),
+            notifications(),
+            tasks(),
+            accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+        );
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            Arc::new(VolatileStore::new()),
+        ));
+        register_user(&dispatcher);
+        let driver = rhema_autonomous_agent::Driver::new(dispatcher.clone(), Arc::new(handler))
+            .with_holder("test");
+        let key = Key::from("interactive:web");
+        dispatcher
+            .ingest(user_event(
+                key.as_str(),
+                "review this:\u{FFFC}fn main() {}\nfn other() {}\u{FFFC}",
+            ))
+            .expect("ingests");
+        driver.run_once().await.expect("the run happens");
+
+        assert_eq!(
+            recorder.last_user_text(),
+            "review this:fn main() {}\nfn other() {}",
+            "the model saw the payload, not the marks"
+        );
+        let (history, _) = hub.subscribe_with_history(&key);
+        let saw_input = history.into_iter().find_map(|event| match event {
+            TurnEvent::UserMessage { text } => Some(text),
+            _ => None,
+        });
+        assert!(
+            saw_input
+                .expect("the transcript saw the question")
+                .contains('\u{FFFC}'),
+            "the transcript keeps the compact chip form"
+        );
     }
 
     /// A scripted tool-call turn: the model asking for `name` with `args`.
