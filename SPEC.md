@@ -289,6 +289,29 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   its promised keychain backend, that backend consumes the `keyring`
   crate directly, as its SQLite backend consumes `rusqlite` — a
   shared mechanism, not a shared crate.
+- ~~**How a running turn gets something only a human can give**~~,
+  **decided:** the claw's consent round-trip — a claw mechanism, not
+  an engine seam, keeping SPEC §1's "no approvals in crate 1" intact.
+  A tool (`ask_secret`; the phone tool's control actions) inserts a
+  consent row, puts a `consent_request` card on the session's stream,
+  and blocks inside the tool call on a wake bridge; the chat surfaces
+  answer through `POST /v1/consents/{id}` or deny with `DELETE`. A
+  secret rides once, from the answer through the identity store — the
+  row keeps only the draft without it, and the tool wakes with the
+  account id, so use-never-read survives the round-trip. Denial and
+  the fifteen-minute silence answer in-band, so a refused turn says so
+  and moves on; expiry is by age at read, so a daemon restarted under
+  a waiting tool stops offering a stale card.
+- ~~**How the claw reaches the phone**~~, **decided:** the same shape
+  turned outward. The device's reports (`/v1/ingest`,
+  `phone:<device>:<topic>`) are conversation and state at once: they
+  dispatch like any resident key and land in the phone tables, so the
+  `phone` tool's `status`/`devices` actions read observations without
+  asking. Acting is consent-gated end to end: an approved action
+  joins a command queue the device polls and reports on
+  (`/v1/phone/commands`), and the tool answers in-band — including
+  "queued, not yet confirmed", the honest latency of a 15-minute
+  WorkManager floor.
 
 ---
 
