@@ -20,7 +20,8 @@ notifications.
   the realistic threat (other apps). Backups that could exfiltrate the file
   are disabled in the manifest (`allowBackup=false`,
   `dataExtractionRules`, `fullBackupContent`).
-- **Chat**: session list (`GET /v1/sessions`, interactive sessions first)
+- **Chat**: session list (`GET /v1/sessions`, interactive sessions first,
+  the phone's own `phone:*` status keys hidden)
   and one chat screen per session. While a chat screen is open the app holds
   one SSE connection (`GET /v1/sessions/{key}/events`, OkHttp streaming GET
   with the auth header, hand-parsed frames: blank-line delimited `data:`

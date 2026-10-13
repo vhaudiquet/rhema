@@ -74,6 +74,7 @@ fun SessionsScreen(
         )
 
         val currentError = error
+        val visible = sessions?.let(::displayable)
         when {
             currentError != null -> Column(
                 modifier = Modifier.padding(horizontal = 16.dp),
@@ -102,14 +103,14 @@ fun SessionsScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentAlignment = Alignment.Center,
             ) { CircularProgressIndicator() }
-            sessions?.isEmpty() == true -> Text(
+            visible != null && visible.isEmpty() -> Text(
                 stringResource(R.string.sessions_empty),
                 modifier = Modifier.padding(horizontal = 16.dp),
                 style = MaterialTheme.typography.bodyMedium,
                 color = JadeiteText3,
             )
-            sessions != null -> SessionsList(
-                sessions = sessions ?: emptyList(),
+            visible != null -> SessionsList(
+                sessions = visible,
                 onOpenSession = onOpenSession,
             )
         }
@@ -121,12 +122,19 @@ private data class SessionGroup(val labelKey: String, val rows: List<SessionInfo
 private const val GROUP_INTERACTIVE = "interactive"
 private const val GROUP_OTHER = "other"
 
+// `phone:<device>:<topic>` keys are this device's own status reports,
+// not conversations — listed they read as broken empty sessions, so
+// they never reach a group.
+private fun displayable(sessions: List<SessionInfo>): List<SessionInfo> =
+    sessions.filterNot { it.key.startsWith("phone:") }
+
 // Interactive keys are the chat surface and lead; other dispatch keys
 // read after. Key order is stable within a group.
 private fun groupSessions(sessions: List<SessionInfo>): List<SessionGroup> {
     val byKey = compareBy<SessionInfo> { it.key }
-    val interactive = sessions.filter { it.key.startsWith("interactive:") }.sortedWith(byKey)
-    val others = sessions.filterNot { it.key.startsWith("interactive:") }.sortedWith(byKey)
+    val visible = displayable(sessions)
+    val interactive = visible.filter { it.key.startsWith("interactive:") }.sortedWith(byKey)
+    val others = visible.filterNot { it.key.startsWith("interactive:") }.sortedWith(byKey)
     val groups = mutableListOf<SessionGroup>()
     if (interactive.isNotEmpty()) {
         groups += SessionGroup(GROUP_INTERACTIVE, interactive)
