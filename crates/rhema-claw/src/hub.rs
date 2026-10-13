@@ -78,6 +78,11 @@ pub enum TurnEvent {
         is_error: bool,
         /// A bounded snippet of the result content.
         summary: String,
+        /// The process exit code of command-like tools; `None` otherwise.
+        code: Option<i32>,
+        /// The command line a shell tool ran, parsed from the call's
+        /// streamed arguments; `None` for every other tool.
+        command: Option<String>,
     },
     /// The turn is over — the clean end marker subscribers wait on,
     /// emitted by the handler itself, so it arrives whoever triggered
@@ -263,10 +268,12 @@ mod tests {
             serde_json::to_string(&TurnEvent::ToolResult {
                 name: "bash".into(),
                 is_error: true,
-                summary: "exit 1".into()
+                summary: "exit 1".into(),
+                code: Some(1),
+                command: Some("false".into()),
             })
             .unwrap(),
-            r#"{"type":"tool_result","name":"bash","is_error":true,"summary":"exit 1"}"#
+            r#"{"type":"tool_result","name":"bash","is_error":true,"summary":"exit 1","code":1,"command":"false"}"#
         );
         assert_eq!(
             serde_json::to_string(&TurnEvent::TurnDone {

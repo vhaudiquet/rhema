@@ -340,6 +340,8 @@ impl InteractiveHandler {
             key: ctx.key.clone(),
             hub: self.hub.clone(),
             tool_names: HashMap::new(),
+            tool_args: HashMap::new(),
+            streaming: None,
         };
         let output = run_turn(
             &mut agent,
@@ -460,6 +462,24 @@ struct HubSink {
     key: ResourceKey,
     hub: Arc<EventHub>,
     tool_names: HashMap<String, String>,
+    /// The arguments streamed per call id. A shell result's command line
+    /// is only known once the call's args have fully streamed, and a
+    /// result event carries none of them — so the sink keeps what the
+    /// deltas delivered and parses it when the result lands.
+    tool_args: HashMap<String, String>,
+    /// The call whose args the deltas are currently streaming. The delta
+    /// event carries no id of its own; it belongs to the call that last
+    /// started.
+    streaming: Option<String>,
+}
+
+/// The shell command a `bash` call ran, parsed out of the streamed
+/// arguments JSON. A call whose args never streamed, or that parses to
+/// something without a string `command`, renders without one — the TUI's
+/// transcript makes the same bargain with the same deltas.
+fn shell_command(args: Option<&str>) -> Option<String> {
+    let parsed = serde_json::from_str::<Value>(args?).ok()?;
+    parsed.get("command")?.as_str().map(str::to_owned)
 }
 
 impl EventSink for HubSink {
@@ -473,28 +493,47 @@ impl EventSink for HubSink {
             },
             ModelEvent::ToolCallStart { id, name } => {
                 self.tool_names.insert(id.to_owned(), name.to_owned());
+                self.tool_args.insert(id.to_owned(), String::new());
+                self.streaming = Some(id.to_owned());
                 TurnEvent::ToolStart {
                     name: name.to_owned(),
                 }
+            }
+            ModelEvent::ToolCallArgsDelta(fragment) => {
+                if let Some(id) = &self.streaming {
+                    self.tool_args
+                        .entry(id.clone())
+                        .or_default()
+                        .push_str(fragment);
+                }
+                return;
             }
             ModelEvent::ToolResult {
                 id,
                 content,
                 is_error,
+                code,
                 ..
-            } => TurnEvent::ToolResult {
-                name: self
+            } => {
+                let name = self
                     .tool_names
                     .get(id)
                     .cloned()
-                    .unwrap_or_else(|| id.to_owned()),
-                is_error,
-                summary: snippet(content),
-            },
+                    .unwrap_or_else(|| id.to_owned());
+                let command = matches!(name.as_str(), "bash" | "run_command")
+                    .then(|| shell_command(self.tool_args.get(id).map(String::as_str)))
+                    .flatten();
+                TurnEvent::ToolResult {
+                    name,
+                    is_error,
+                    summary: snippet(content),
+                    code,
+                    command,
+                }
+            }
             // Step bookkeeping is the engine's business, not the wire's;
             // a running tool's live output lands with its result.
             ModelEvent::StepStart { .. }
-            | ModelEvent::ToolCallArgsDelta(_)
             | ModelEvent::ToolOutputDelta { .. }
             | ModelEvent::StepEnd { .. } => return,
         };
@@ -720,6 +759,86 @@ mod tests {
         let cut = snippet(&long);
         assert_eq!(cut.chars().count(), 73, "72 plus the ellipsis: {cut}");
         assert!(cut.ends_with('…'));
+    }
+
+    /// A bash result carries its command line and exit code on the wire:
+    /// the sink parses the command out of the call's streamed arguments.
+    #[test]
+    fn a_bash_result_streams_its_command_and_exit_code() {
+        let hub = Arc::new(EventHub::default());
+        let key = Key::from("interactive:web");
+        let mut receiver = hub.subscribe(&key);
+        let mut sink = HubSink {
+            key: key.clone(),
+            hub: hub.clone(),
+            tool_names: HashMap::new(),
+            tool_args: HashMap::new(),
+            streaming: None,
+        };
+        sink.emit(ModelEvent::ToolCallStart {
+            id: "c1",
+            name: "bash",
+        });
+        sink.emit(ModelEvent::ToolCallArgsDelta(r#"{"command": "ls""#));
+        sink.emit(ModelEvent::ToolCallArgsDelta(r#", "quiet": true}"#));
+        sink.emit(ModelEvent::ToolResult {
+            id: "c1",
+            content: "exit 0\n--- stdout ---",
+            is_error: false,
+            code: Some(0),
+        });
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::ToolStart {
+                name: "bash".into()
+            }
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::ToolResult {
+                name: "bash".into(),
+                is_error: false,
+                summary: "exit 0".into(),
+                code: Some(0),
+                command: Some("ls".into()),
+            }
+        );
+    }
+
+    /// A tool whose args never streamed, or that is not a shell, reports
+    /// no command — the summary still rides.
+    #[test]
+    fn a_result_without_streamed_args_or_a_shell_name_carries_no_command() {
+        let hub = Arc::new(EventHub::default());
+        let key = Key::from("interactive:web");
+        let mut sink = HubSink {
+            key: key.clone(),
+            hub: hub.clone(),
+            tool_names: HashMap::new(),
+            tool_args: HashMap::new(),
+            streaming: None,
+        };
+        sink.emit(ModelEvent::ToolCallStart {
+            id: "c1",
+            name: "memory_save",
+        });
+        sink.emit(ModelEvent::ToolResult {
+            id: "c1",
+            content: "saved",
+            is_error: false,
+            code: None,
+        });
+        let (history, _) = hub.subscribe_with_history(&key);
+        assert_eq!(
+            history.last(),
+            Some(&TurnEvent::ToolResult {
+                name: "memory_save".into(),
+                is_error: false,
+                summary: "saved".into(),
+                code: None,
+                command: None,
+            })
+        );
     }
 
     #[test]
