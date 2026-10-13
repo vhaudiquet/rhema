@@ -189,6 +189,15 @@ export function isInteractive(key: string): boolean {
   return key.startsWith(INTERACTIVE_PREFIX)
 }
 
+/** The session name `POST /v1/sessions` accepts; the key becomes
+ * `interactive:<name>`. Anything else is a 400. */
+export const SESSION_NAME_PATTERN = /^[A-Za-z0-9._-]{1,64}$/
+
+/** The `POST /v1/sessions` answer: the new session's dispatch key. */
+export interface NewSession {
+  key: string
+}
+
 function base(): string {
   const config = useRuntimeConfig()
   return config.public.clawBase.replace(/\/$/, '')
@@ -251,6 +260,9 @@ export interface StreamHandlers {
 export interface ClawApi {
   /** `GET /v1/sessions` — every dispatch key with its status. */
   sessions(): Promise<ClawSession[]>
+  /** `POST /v1/sessions` — create an interactive session from a name;
+   * 400 for a name off `SESSION_NAME_PATTERN`, 409 when it exists. */
+  createSession(name: string): Promise<NewSession>
   /** `POST /v1/sessions/{key}/messages` — fire-and-forget: the claw answers 202 and the reply arrives on the event stream. */
   sendMessage(key: string, text: string): Promise<void>
   /** `GET /v1/providers` — the constructible backends and the active pair. */
@@ -303,6 +315,14 @@ export interface ClawApi {
 export function useClaw(token: Ref<string | null>): ClawApi {
   async function sessions(): Promise<ClawSession[]> {
     return (await get('/v1/sessions', token.value)) as ClawSession[]
+  }
+
+  async function createSession(name: string): Promise<NewSession> {
+    return (await send('/v1/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
+      body: JSON.stringify({ name }),
+    })) as NewSession
   }
 
   async function sendMessage(key: string, text: string): Promise<void> {
@@ -477,6 +497,7 @@ export function useClaw(token: Ref<string | null>): ClawApi {
 
   return {
     sessions,
+    createSession,
     sendMessage,
     providers,
     setActive,

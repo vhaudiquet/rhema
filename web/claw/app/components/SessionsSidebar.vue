@@ -2,6 +2,9 @@
 // The session inventory: every dispatch key the claw holds, interactive
 // first. Clicking selects the session the chat mirrors. Displayed names
 // drop the `interactive:` prefix — the full key stays in the tooltip.
+// Creating is intent only: the name flows up, the shell answers, and
+// the form closes when the new key lands in the inventory.
+import { SESSION_NAME_PATTERN } from '~/composables/useClaw'
 import type { ClawSession } from '~/composables/useClaw'
 
 const props = defineProps<{
@@ -12,7 +15,7 @@ const props = defineProps<{
   avatarUrl?: string | null
 }>()
 
-defineEmits<{ select: [key: string]; refresh: [] }>()
+const emit = defineEmits<{ select: [key: string]; refresh: []; create: [name: string] }>()
 
 interface Group {
   label: string
@@ -44,6 +47,47 @@ function stateTone(state: string): 'ok' | 'warn' | 'idle' {
   if (state === 'reacquire') return 'warn'
   return 'idle'
 }
+
+// --- new sessions -----------------------------------------------------
+const creating = ref(false)
+const nameDraft = ref('')
+const nameInput = ref<HTMLInputElement | null>(null)
+/** The name this form is waiting on; the create is in flight. */
+const pendingCreate = ref<string | null>(null)
+
+const nameValid = computed(() => SESSION_NAME_PATTERN.test(nameDraft.value))
+
+function openCreate(): void {
+  creating.value = true
+  nameDraft.value = ''
+  void nextTick(() => nameInput.value?.focus())
+}
+
+function closeCreate(): void {
+  creating.value = false
+  nameDraft.value = ''
+  pendingCreate.value = null
+}
+
+function submitCreate(): void {
+  if (!nameValid.value) return
+  pendingCreate.value = nameDraft.value
+  emit('create', nameDraft.value)
+}
+
+// The form closes when the claw answers with the session in the
+// inventory; a failed create answers nothing, and the form stays.
+watch(
+  () => props.sessions,
+  (sessions) => {
+    if (
+      pendingCreate.value !== null &&
+      sessions.some((session) => session.key === `interactive:${pendingCreate.value}`)
+    ) {
+      closeCreate()
+    }
+  },
+)
 </script>
 
 <template>
@@ -62,10 +106,32 @@ function stateTone(state: string): 'ok' | 'warn' | 'idle' {
     <header class="head">
       <span class="label">Sessions</span>
       <span class="count">{{ sessions.length }}</span>
+      <button class="ghost" title="new session" :disabled="creating" @click="creating ? closeCreate() : openCreate()">
+        +
+      </button>
       <button class="ghost" title="refresh sessions" :disabled="loading" @click="$emit('refresh')">
         ↻
       </button>
     </header>
+
+    <form v-if="creating" class="new-session" @submit.prevent="submitCreate">
+      <input
+        ref="nameInput"
+        v-model="nameDraft"
+        type="text"
+        class="mono"
+        placeholder="session name"
+        autocomplete="off"
+        maxlength="64"
+      />
+      <div class="new-actions">
+        <button type="button" class="ghost" @click="closeCreate">cancel</button>
+        <button type="submit" class="primary" :disabled="!nameValid">create</button>
+      </div>
+      <p v-if="nameDraft !== '' && !nameValid" class="new-note">
+        letters, digits, dots, dashes, underscores — up to 64.
+      </p>
+    </form>
 
     <p v-if="sessions.length === 0" class="empty">
       {{ loading ? 'loading…' : 'no sessions yet; send the first message' }}
@@ -148,6 +214,35 @@ function stateTone(state: string): 'ok' | 'warn' | 'idle' {
 
 .head .ghost {
   padding: 0 6px;
+}
+
+.new-session {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 8px 10px;
+}
+
+.new-session input {
+  width: 100%;
+  font-size: 12.5px;
+}
+
+.new-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.new-actions button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+.new-note {
+  margin: 0;
+  color: var(--text3);
+  font-size: 11.5px;
 }
 
 .empty {

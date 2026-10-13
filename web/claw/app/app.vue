@@ -249,6 +249,18 @@ async function refreshSessions(): Promise<void> {
   }
 }
 
+async function createSession(name: string): Promise<void> {
+  try {
+    // The SSE resubscribe watcher follows the switch; the inventory
+    // refresh lands the new key in the sidebar and closes its form.
+    activeKey.value = (await claw.createSession(name)).key
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  }
+  void refreshSessions()
+}
+
 async function refreshProviders(): Promise<void> {
   try {
     providersState.value = await claw.providers()
@@ -511,6 +523,7 @@ onUnmounted(() => {
             :avatar-url="identityAvatarUrl"
             @select="activeKey = $event"
             @refresh="refreshSessions"
+            @create="createSession"
           />
           <ChatPanel
             :items="transcriptItems"
