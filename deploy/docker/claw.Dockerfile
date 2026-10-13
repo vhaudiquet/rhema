@@ -17,6 +17,7 @@ COPY crates/rhema-code/Cargo.toml crates/rhema-code/Cargo.toml
 COPY crates/rhema-coding-agent/Cargo.toml crates/rhema-coding-agent/Cargo.toml
 COPY crates/rhema-config/Cargo.toml crates/rhema-config/Cargo.toml
 COPY crates/rhema-core/Cargo.toml crates/rhema-core/Cargo.toml
+COPY crates/rhema-identity/Cargo.toml crates/rhema-identity/Cargo.toml
 COPY crates/rhema-memory/Cargo.toml crates/rhema-memory/Cargo.toml
 COPY crates/rhema-provider/Cargo.toml crates/rhema-provider/Cargo.toml
 COPY crates/rhema-provider-anthropic/Cargo.toml crates/rhema-provider-anthropic/Cargo.toml
