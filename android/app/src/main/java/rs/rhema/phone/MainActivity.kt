@@ -30,6 +30,7 @@ import rs.rhema.phone.ui.JadeiteGround
 import rs.rhema.phone.ui.RhemaTheme
 import rs.rhema.phone.ui.SessionsScreen
 import rs.rhema.phone.ui.SettingsScreen
+import rs.rhema.phone.work.enqueuePhoneCommandsNow
 
 class MainActivity : ComponentActivity() {
 
@@ -59,6 +60,13 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // The control queue (phone commands) is freshest when the human is
+    // holding the phone; KEEP coalesces rapid resume bursts.
+    override fun onResume() {
+        super.onResume()
+        enqueuePhoneCommandsNow(applicationContext)
     }
 }
 

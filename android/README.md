@@ -2,8 +2,8 @@
 
 The phone client of the claw (the resident agent daemon): Kotlin + Jetpack
 Compose, single module, deliberately small. It chats with the agent, reports
-phone status as events, and shows the agent's notifications as system
-notifications.
+phone status as events, shows the agent's notifications as system
+notifications, and executes the agent's phone commands (DND, alerts).
 
 ## What it does
 
@@ -63,6 +63,20 @@ notifications.
   refused by the OS (implicit broadcasts, API 26+), so the receiver is
   registered dynamically in the Application and stays dumb: it only
   enqueues work. Location is not touched in v1.
+- **Phone commands**: a third periodic worker polls
+  `GET /v1/phone/commands?device=<id>` — the agent's consented control
+  queue — every 15 minutes like the other workers (that interval is the
+  control latency; opening the app kicks a one-shot KEEP-coalesced run, so
+  the queue is fresh while the phone is in hand). Commands execute in
+  order, each answered with `POST /v1/phone/commands/{id}/result`, which
+  doubles as the ack: a failed post leaves the command queued and the next
+  run repeats it. `dnd_on`/`dnd_off` set the interruption filter; they
+  need the special **Do Not Disturb access** grant (Settings → Special app
+  access — a settings toggle, not a permission), and without it the worker
+  reports that back and toggles nothing. `alert` posts a heads-up,
+  sound-on notification on the high-importance `rhema-alert` channel with
+  the args' `title`/`body` (falling back to "claw" / the action name).
+  Unknown actions are reported, never guessed.
 - **Notifications**: a second periodic worker polls
   `GET /v1/notifications?device=<id>&since=<cursor>` (cursor in DataStore),
   posts each as a system notification on channel `rhema` (tap opens the app;
@@ -72,7 +86,9 @@ notifications.
 - **Permissions**: `INTERNET`, `POST_NOTIFICATIONS` (runtime request on
   API 33+, re-asked per cold start; the OS throttles denials),
   `RECEIVE_BOOT_COMPLETED` (boot receiver re-runs the idempotent KEEP
-  schedule; WorkManager also re-enqueues its own work). Nothing else in v1.
+  schedule; WorkManager also re-enqueues its own work). Nothing else in
+  v1; DND control needs the special-app Do Not Disturb access grant, a
+  settings toggle rather than a permission.
 
 ## API contract (the claw's `/v1`)
 
@@ -92,6 +108,8 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `GET /v1/consents` | pending consent questions, oldest first |
 | `POST /v1/consents/{id}` | answer one: `{"secret"}` or `{"grant"}` |
 | `DELETE /v1/consents/{id}` | deny / cancel a question |
+| `GET /v1/phone/commands?device=` | the control queue for this device |
+| `POST /v1/phone/commands/{id}/result` | execution result; doubles as the ack |
 | `POST /v1/ingest` | `{"source","key","payload"}` |
 | `GET /v1/notifications?device=&since=` | ascending notification list |
 | `POST /v1/notifications/{id}/ack` | best-effort ack |
@@ -161,7 +179,8 @@ app/src/main/java/rs/rhema/phone/
   chat/ChatController  transcript state + SSE loop for the open screen
   ui/                  Theme, shared design components, SettingsScreen,
                        SessionsScreen, ChatScreen
-  work/                PhoneStatusWorker, NotificationsWorker, receivers, scheduling
+  work/                PhoneStatusWorker, NotificationsWorker,
+                       PhoneCommandWorker, receivers, scheduling
   notif/Notifier.kt    channel + system notifications
 ```
 

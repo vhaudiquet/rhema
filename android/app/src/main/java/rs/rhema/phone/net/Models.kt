@@ -170,3 +170,21 @@ data class SecretConsentAnswer(val secret: String)
 
 @Serializable
 data class PhoneConsentAnswer(val grant: Boolean)
+
+// GET /v1/phone/commands — the control queue for this device, oldest
+// first. The result POST doubles as the ack: until it lands the claw
+// keeps the command queued and the worker repeats it.
+@Serializable
+data class CommandPage(val commands: List<PhoneCommand> = emptyList())
+
+@Serializable
+data class PhoneCommand(
+    val id: String,
+    val action: String,
+    val args: JsonObject = JsonObject(emptyMap()),
+    @SerialName("created_at") val createdAt: Long = 0,
+)
+
+// POST /v1/phone/commands/{id}/result
+@Serializable
+data class CommandResult(val ok: Boolean, val detail: String? = null)

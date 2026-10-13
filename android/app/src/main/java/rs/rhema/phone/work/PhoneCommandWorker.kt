@@ -1,0 +1,89 @@
+package rs.rhema.phone.work
+
+import android.app.NotificationManager
+import android.content.Context
+import androidx.work.CoroutineWorker
+import androidx.work.WorkerParameters
+import rs.rhema.phone.RhemaApp
+import rs.rhema.phone.di.AppContainer
+import rs.rhema.phone.net.ClawResult
+import rs.rhema.phone.net.PhoneCommand
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+
+// Periodic control-plane poll: the claw queues commands for this device
+// once their phone consent is granted; each is executed in order, then
+// answered. The result POST is the ack, so a failed post leaves the
+// command queued and the next run repeats it — at-least-once delivery.
+class PhoneCommandWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
+
+    override suspend fun doWork(): Result {
+        val container = (applicationContext as RhemaApp).container
+        val deviceId = container.settings.deviceId()
+
+        val commands = when (val result = container.api.phoneCommands(deviceId)) {
+            is ClawResult.Ok -> result.value
+            is ClawResult.HttpError -> return if (result.code >= 500) Result.retry() else Result.failure()
+            is ClawResult.Network -> return Result.retry()
+        }
+
+        for (command in commands) {
+            val (ok, detail) = execute(container, command)
+            // Stop at the first failed ack: the queue is ordered, later
+            // commands must not jump ahead of an un-acked one.
+            if (container.api.postPhoneCommandResult(command.id, ok, detail) !is ClawResult.Ok) {
+                return Result.retry()
+            }
+        }
+        return Result.success()
+    }
+
+    // One command, locally. The answer pair rides to the claw verbatim;
+    // the detail strings are wire content, not UI resources.
+    private fun execute(container: AppContainer, command: PhoneCommand): Pair<Boolean, String?> {
+        val notifications = applicationContext.getSystemService(NotificationManager::class.java)
+        return when (command.action) {
+            "dnd_on", "dnd_off" -> {
+                // Policy access is a settings grant, not a permission: it
+                // can only be given by the user in system settings, so a
+                // missing grant is reported back, never prompted here.
+                if (notifications?.isNotificationPolicyAccessGranted != true) {
+                    false to DND_ACCESS_DETAIL
+                } else {
+                    notifications.setInterruptionFilter(
+                        if (command.action == "dnd_on") {
+                            NotificationManager.INTERRUPTION_FILTER_PRIORITY
+                        } else {
+                            NotificationManager.INTERRUPTION_FILTER_ALL
+                        },
+                    )
+                    true to null
+                }
+            }
+            "alert" -> {
+                val posted = container.notifier.postAlert(
+                    command.id.hashCode(),
+                    command.args.text("title") ?: "claw",
+                    command.args.text("body") ?: command.action,
+                )
+                if (posted) {
+                    true to null
+                } else {
+                    true to "notification permission not granted"
+                }
+            }
+            else -> false to "unknown action"
+        }
+    }
+
+    private companion object {
+        const val DND_ACCESS_DETAIL =
+            "grant Do Not Disturb access to Rhema (Settings → Special app access)"
+    }
+}
+
+// Only primitive strings count; anything else falls back to the
+// caller's default.
+private fun JsonObject.text(name: String): String? =
+    (this[name] as? JsonPrimitive)?.contentOrNull

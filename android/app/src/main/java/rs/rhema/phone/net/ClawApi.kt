@@ -185,6 +185,31 @@ class ClawApi(
         return execute(builder.delete().build()) { }
     }
 
+    // GET /v1/phone/commands?device=: the control queue for this device.
+    // Built by hand like notifications(): v1() bakes the URL into the
+    // builder, leaving no room for query parameters.
+    suspend fun phoneCommands(deviceId: String): ClawResult<List<PhoneCommand>> {
+        val base = baseOrNull() ?: return ClawResult.Network("no base URL configured")
+        val url = base.toHttpUrlOrNull()?.newBuilder()
+            ?.addPathSegments("v1/phone/commands")
+            ?.addQueryParameter("device", deviceId)
+            ?.build()
+            ?: return ClawResult.Network("bad base URL")
+        val request = Request.Builder().url(url).header("Authorization", bearer()).build()
+        return execute(request) { response ->
+            json.decodeFromString<CommandPage>(response.body?.string() ?: "{}").commands
+        }
+    }
+
+    // POST /v1/phone/commands/{id}/result: the ack. Until it lands the
+    // claw keeps the command queued and the next run repeats it.
+    suspend fun postPhoneCommandResult(id: String, ok: Boolean, detail: String?): ClawResult<Unit> {
+        val builder = v1("phone", "commands", id, "result")
+            ?: return ClawResult.Network("no base URL configured")
+        val body = json.encodeToString(CommandResult(ok, detail)).toRequestBody(jsonBody)
+        return execute(builder.post(body).build()) { }
+    }
+
     fun eventStream(sessionKey: String): Flow<SseFrame> = callbackFlow {
         val builder = v1("sessions", sessionKey, "events")
         if (builder == null) {

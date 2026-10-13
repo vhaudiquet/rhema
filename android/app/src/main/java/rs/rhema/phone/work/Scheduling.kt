@@ -12,7 +12,9 @@ import java.time.Duration
 
 private const val PHONE_STATUS = "phone_status"
 private const val NOTIFICATIONS = "notifications"
+private const val PHONE_COMMANDS = "phone_commands"
 private const val PHONE_STATUS_KICK = "phone_status_kick"
+private const val PHONE_COMMANDS_KICK = "phone_commands_kick"
 
 private fun networked() = Constraints.Builder()
     .setRequiredNetworkType(NetworkType.CONNECTED)
@@ -36,6 +38,13 @@ fun schedulePeriodicWork(context: Context) {
             .setConstraints(networked())
             .build(),
     )
+    wm.enqueueUniquePeriodicWork(
+        PHONE_COMMANDS,
+        ExistingPeriodicWorkPolicy.KEEP,
+        PeriodicWorkRequestBuilder<PhoneCommandWorker>(Duration.ofMinutes(15))
+            .setConstraints(networked())
+            .build(),
+    )
 }
 
 // Receiver-side kick for charging flips; KEEP coalesces bursts into one run.
@@ -44,6 +53,19 @@ fun enqueuePhoneStatusNow(context: Context) {
         PHONE_STATUS_KICK,
         ExistingWorkPolicy.KEEP,
         OneTimeWorkRequestBuilder<PhoneStatusWorker>()
+            .setConstraints(networked())
+            .build(),
+    )
+}
+
+// Foreground kick for the control queue: the app opening is when the human
+// is around to see an alert or answer a question. KEEP coalesces resume
+// bursts into one run.
+fun enqueuePhoneCommandsNow(context: Context) {
+    WorkManager.getInstance(context).enqueueUniqueWork(
+        PHONE_COMMANDS_KICK,
+        ExistingWorkPolicy.KEEP,
+        OneTimeWorkRequestBuilder<PhoneCommandWorker>()
             .setConstraints(networked())
             .build(),
     )
