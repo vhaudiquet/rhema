@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rhema_coding_agent::{Approval, CodingAgent, repair_dangling_calls};
-use rhema_core::{Event, EventSink};
+use rhema_core::{Event, EventSink, Session};
 use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
 #[cfg(feature = "mock")]
 use tokio::sync::mpsc::UnboundedReceiver;
@@ -50,11 +50,12 @@ async fn cancelled(mut rx: watch::Receiver<bool>) {
 }
 
 /// Spawns one turn on a tokio task: runs `agent.turn` with the given
-/// approval hook, checkpoints the session on success (when `save` is set),
-/// and hands the agent back via [`UiEvent::TurnFinished`] — or, when the
-/// cancel flag flips, drops the turn future at its current await and hands
-/// the agent back via [`UiEvent::TurnCancelled`]. The UI thread must treat
-/// the agent as gone until either event arrives.
+/// approval hook, commits the session before each tool round and
+/// checkpoints it on success (when `save` is set), and hands the agent
+/// back via [`UiEvent::TurnFinished`] — or, when the cancel flag flips,
+/// drops the turn future at its current await and hands the agent back
+/// via [`UiEvent::TurnCancelled`]. The UI thread must treat the agent as
+/// gone until either event arrives.
 pub fn spawn_turn(
     mut agent: CodingAgent,
     input: String,
@@ -63,6 +64,15 @@ pub fn spawn_turn(
     cancel: watch::Receiver<bool>,
     events: UnboundedSender<UiEvent>,
 ) -> JoinHandle<()> {
+    // Commit-before-execute: when the session persists to a file, the
+    // engine hands it over after the assistant message lands and before
+    // the first tool runs — a crash mid-call leaves a committed intent
+    // (the next turn's revive closes it) instead of no record at all.
+    if let Some(path) = save.clone() {
+        agent.set_commit_hook(Some(Box::new(move |session: &Session| {
+            crate::sessions::write_session(&path, session).map_err(|err| err.to_string())
+        })));
+    }
     tokio::spawn(async move {
         let mut sink = ChannelSink { tx: events.clone() };
         // The select's scope ends before the match: the pinned future —
@@ -77,8 +87,11 @@ pub fn spawn_turn(
         };
         match result {
             Some(result) => {
-                // Checkpoint only after a completed turn, so the file never
-                // contains a half-finished (tool-call without result) history.
+                // Checkpoint after a completed turn: the file's freshest
+                // complete state. A crash can leave a committed intent (a
+                // call without its result) in the file — the next turn's
+                // revive closes exactly that, so it is a resume input now,
+                // not a half-finished write.
                 if result.is_ok() {
                     if let Some(path) = &save {
                         let _ = agent.save_session_to(path);
@@ -216,8 +229,10 @@ mod mock_tests {
     use crate::transcript::{Line, Transcript};
     use rhema_coding_agent::{AllowAll, CodingAgent, CodingAgentConfig};
     use rhema_core::{
-        Message, ModelOutput, ModelProvider, ModelRequest, ProviderError, Role, StopReason, Usage,
+        Content, Message, ModelOutput, ModelProvider, ModelRequest, ProviderError, Role,
+        StopReason, ToolCall, Usage,
     };
+    use serde_json::json;
     use tokio::sync::mpsc::unbounded_channel;
 
     fn scripted_output(text: &str) -> ModelOutput {
@@ -229,6 +244,17 @@ mod mock_tests {
                 output_tokens: 2,
                 cached_input_tokens: 1,
             },
+        }
+    }
+
+    fn tool_use_output(call: ToolCall) -> ModelOutput {
+        ModelOutput {
+            message: Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolCall(call)],
+            },
+            stop_reason: StopReason::ToolUse,
+            usage: Usage::default(),
         }
     }
 
@@ -325,6 +351,71 @@ mod mock_tests {
                 }
                 UiEvent::TurnFinished { .. } => {
                     panic!("a cancelled turn must not come back as finished");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The model calls the real `bash` tool with a long sleep: the cancel
+    /// lands *inside* the tool call, after the commit hook fired.
+    fn sleeping_tool_output() -> ModelOutput {
+        tool_use_output(ToolCall {
+            id: "call_1".into(),
+            name: "bash".into(),
+            args: json!({ "command": "sleep 30" }),
+            provider_data: serde_json::Value::Null,
+        })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancel_inside_a_tool_leaves_the_committed_intent_in_the_file() {
+        let (tx, mut rx) = unbounded_channel();
+        let (cancel, cancelled) = watch_cancel();
+        let dir = tempfile::tempdir().unwrap();
+        let save = dir.path().join("session.json");
+        let agent = CodingAgent::new(
+            Arc::new(rhema_core::MockProvider::new(vec![sleeping_tool_output()])),
+            CodingAgentConfig::new("test-model", std::env::temp_dir()),
+        )
+        .unwrap();
+        spawn_turn(
+            agent,
+            "hi".into(),
+            Arc::new(AllowAll),
+            Some(save.clone()),
+            cancelled,
+            tx,
+        );
+
+        // The hook writes the intent before the tool hangs; wait for the
+        // file so the cancel cannot race ahead of the commit.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !save.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the commit hook never wrote the intent");
+
+        cancel.send(true).unwrap();
+        loop {
+            match rx.recv().await.expect("turn task still alive") {
+                UiEvent::TurnCancelled { .. } => {
+                    // The file holds the committed intent: the user input
+                    // and the assistant call, no result — exactly what a
+                    // resumed session's revive closes.
+                    let raw = std::fs::read_to_string(&save).unwrap();
+                    let doc: serde_json::Value = serde_json::from_str(&raw).unwrap();
+                    let history = doc["history"].as_array().unwrap();
+                    assert_eq!(history.len(), 2);
+                    let last = serde_json::to_string(&history[1]).unwrap();
+                    assert!(last.contains("call_1"), "intent committed: {last}");
+                    assert!(!last.contains("\"is_error\""), "no result yet: {last}");
+                    return;
+                }
+                UiEvent::TurnFinished { .. } => {
+                    panic!("a hanging tool must not finish");
                 }
                 _ => {}
             }
