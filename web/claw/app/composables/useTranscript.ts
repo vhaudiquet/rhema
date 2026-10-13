@@ -6,7 +6,7 @@
 // mirror when the stream reopens and folds what arrives, never the other
 // way around.
 import { ref } from 'vue'
-import type { TurnEvent } from './useClaw'
+import type { ConsentKind, TurnEvent } from './useClaw'
 
 /** One tool call inside a turn: started, then completed by its result. */
 export interface ToolRow {
@@ -29,10 +29,21 @@ export interface TurnBlock {
   outcome: string | null
 }
 
+/** One thing the agent asked its human, as the card renders it. */
+export interface ConsentCard {
+  id: string
+  kind: ConsentKind
+  summary: string
+  detail: string
+  /** null while the human has not answered. */
+  granted: boolean | null
+}
+
 /** A transcript line: a message the local user sent, or one streamed turn. */
 export type TranscriptItem =
   | { kind: 'sent'; id: number; text: string }
   | { kind: 'turn'; id: number; turn: TurnBlock }
+  | { kind: 'consent'; id: number; consent: ConsentCard }
 
 // --- embedded pastes --------------------------------------------------
 // The wire form a long paste travels in: MARK, payload, MARK — one
@@ -162,6 +173,30 @@ export function useTranscript() {
         }
         break
       }
+      case 'consent_request':
+        // One card per consent id: the same request never stacks a
+        // second card beside the first.
+        if (
+          !items.value.some(
+            (item) => item.kind === 'consent' && item.consent.id === event.id,
+          )
+        ) {
+          items.value.push({
+            kind: 'consent',
+            id: nextId++,
+            consent: {
+              id: event.id,
+              kind: event.kind,
+              summary: event.summary,
+              detail: event.detail,
+              granted: null,
+            },
+          })
+        }
+        break
+      case 'consent_resolved':
+        resolveConsent(event.id, event.granted)
+        break
       case 'turn_done': {
         const turn = ensureLive()
         turn.outcome = event.outcome
@@ -185,6 +220,18 @@ export function useTranscript() {
     items.value.push({ kind: 'sent', id: nextId++, text })
   }
 
+  /** A consent card resolved: flipped in place, or ignored when no
+   * card carries the id. The stream's consent_resolved echo lands on
+   * the same value either way. */
+  function resolveConsent(id: string, granted: boolean): void {
+    for (const item of items.value) {
+      if (item.kind === 'consent' && item.consent.id === id) {
+        item.consent.granted = granted
+        return
+      }
+    }
+  }
+
   /** Session switched, or the stream reopened: the mirror is per-key,
    * and the replay that follows rebuilds it either way. */
   function reset(): void {
@@ -192,5 +239,5 @@ export function useTranscript() {
     live.value = null
   }
 
-  return { items, live, applyEvent, addSent, reset }
+  return { items, live, applyEvent, addSent, resolveConsent, reset }
 }

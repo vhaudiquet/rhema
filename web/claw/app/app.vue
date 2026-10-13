@@ -11,6 +11,7 @@ import type {
   AgentImageKind,
   ClawAccount,
   ClawSession,
+  ConsentAnswer,
   IdentityTexts,
   ModelCard,
   NewAccount,
@@ -409,6 +410,29 @@ async function send(text: string): Promise<void> {
   void refreshSessions()
 }
 
+// A consent answers optimistically: the card flips as soon as the POST
+// lands, and the stream's consent_resolved echo confirms the same
+// value.
+async function answerConsent(id: string, answer: ConsentAnswer): Promise<void> {
+  try {
+    await claw.resolveConsent(id, answer)
+    transcript.resolveConsent(id, 'secret' in answer ? true : answer.grant)
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  }
+}
+
+async function denyConsent(id: string): Promise<void> {
+  try {
+    await claw.denyConsent(id)
+    transcript.resolveConsent(id, false)
+    apiError.value = null
+  } catch (err) {
+    noteApiError(err)
+  }
+}
+
 function saveToken(): void {
   const next = tokenDraft.value.trim()
   token.value = next || null
@@ -538,6 +562,8 @@ onUnmounted(() => {
             :avatar-url="identityAvatarUrl"
             @send="send"
             @open-providers="go({ view: 'settings', section: 'providers' })"
+            @consent-answer="answerConsent"
+            @consent-deny="denyConsent"
           />
         </template>
 

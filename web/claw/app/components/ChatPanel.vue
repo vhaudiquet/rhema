@@ -12,8 +12,8 @@ import {
   normalizePaste,
   pasteParts,
 } from '~/composables/useTranscript'
-import type { ClawSession, StreamStatus } from '~/composables/useClaw'
-import type { PastePart, TranscriptItem, TurnBlock } from '~/composables/useTranscript'
+import type { ClawSession, ConsentAnswer, StreamStatus } from '~/composables/useClaw'
+import type { ConsentCard, PastePart, TranscriptItem, TurnBlock } from '~/composables/useTranscript'
 
 const props = defineProps<{
   items: TranscriptItem[]
@@ -31,7 +31,12 @@ const props = defineProps<{
 
 const agentName = computed(() => props.identity?.name?.trim() || 'rhema')
 
-const emit = defineEmits<{ send: [text: string]; openProviders: [] }>()
+const emit = defineEmits<{
+  send: [text: string]
+  openProviders: []
+  consentAnswer: [id: string, answer: ConsentAnswer]
+  consentDeny: [id: string]
+}>()
 
 const draft = ref('')
 const scroller = ref<HTMLElement | null>(null)
@@ -172,6 +177,24 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
   return 'warn'
 }
 
+// --- consent cards ----------------------------------------------------
+// The card's tone reads its resolution; answering is intent only — the
+// shell POSTs, and the card flips on the local echo or the stream's.
+
+const secretDrafts = ref<Record<string, string>>({})
+
+function consentTone(consent: ConsentCard): 'pending' | 'ok' | 'denied' {
+  if (consent.granted === null) return 'pending'
+  return consent.granted ? 'ok' : 'denied'
+}
+
+function answerSecret(consent: ConsentCard): void {
+  const secret = (secretDrafts.value[consent.id] ?? '').trim()
+  if (secret === '') return
+  emit('consentAnswer', consent.id, { secret })
+  secretDrafts.value[consent.id] = ''
+}
+
 /** Command rows render as shell lines, not glyph rows (the TUI's
  * tool_row); run_command is the bash tool's other name. */
 function isShellTool(name: string): boolean {
@@ -220,7 +243,7 @@ function isShellTool(name: string): boolean {
             </div>
           </div>
         </div>
-        <div v-else class="msg">
+        <div v-else-if="item.kind === 'turn'" class="msg">
           <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="32" />
           <div class="msg-body">
             <div class="who">{{ agentName }}</div>
@@ -260,6 +283,53 @@ function isShellTool(name: string): boolean {
               :class="{ failed: item.turn.outcome === 'failed' }"
             >
               {{ item.turn.outcome }}
+            </div>
+          </div>
+        </div>
+        <div v-else class="msg">
+          <div class="avatar user" aria-hidden="true">?</div>
+          <div class="msg-body">
+            <div
+              class="consent-card"
+              :class="consentTone(item.consent)"
+            >
+              <div class="consent-head">
+                <span class="badge">{{ item.consent.kind }}</span>
+                <strong class="consent-summary">{{ item.consent.summary }}</strong>
+                <span v-if="item.consent.granted !== null" class="consent-state mono">
+                  {{ item.consent.granted ? 'granted' : 'denied' }}
+                </span>
+              </div>
+              <p v-if="item.consent.detail" class="consent-detail">{{ item.consent.detail }}</p>
+              <div v-if="item.consent.granted === null" class="consent-actions">
+                <template v-if="item.consent.kind === 'secret'">
+                  <input
+                    v-model="secretDrafts[item.consent.id]"
+                    type="password"
+                    placeholder="the secret, never shown again"
+                    autocomplete="off"
+                    @keydown.enter="answerSecret(item.consent)"
+                  />
+                  <button
+                    class="primary"
+                    :disabled="(secretDrafts[item.consent.id] ?? '').trim() === ''"
+                    @click="answerSecret(item.consent)"
+                  >
+                    submit
+                  </button>
+                </template>
+                <template v-else>
+                  <button class="primary" @click="emit('consentAnswer', item.consent.id, { grant: true })">
+                    Approve
+                  </button>
+                  <button @click="emit('consentAnswer', item.consent.id, { grant: false })">
+                    Deny
+                  </button>
+                </template>
+                <button class="ghost" title="cancel without answering" @click="emit('consentDeny', item.consent.id)">
+                  deny
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -583,6 +653,74 @@ li.error .glyph {
 
 .outcome.failed {
   color: var(--error);
+}
+
+/* A consent card: the agent asking its human something — distinct
+   from a tool row, toned by its resolution. */
+.consent-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 6px;
+}
+
+.consent-card.ok {
+  border-left-color: var(--ok);
+}
+
+.consent-card.denied {
+  border-left-color: var(--error);
+}
+
+.consent-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.consent-summary {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.denied .consent-summary {
+  color: var(--text3);
+}
+
+.consent-state {
+  flex: none;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ok);
+}
+
+.denied .consent-state {
+  color: var(--error);
+}
+
+.consent-detail {
+  margin: 0;
+  color: var(--text2);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.consent-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.consent-actions input {
+  flex: 1;
+  min-width: 160px;
 }
 
 .composer {

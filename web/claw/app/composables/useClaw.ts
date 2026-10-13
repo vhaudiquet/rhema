@@ -11,6 +11,23 @@
 // keeping the token out of URLs and access logs.
 import type { Ref } from 'vue'
 
+/** What a consent asks of the human: a secret string, or an approve/
+ * deny on a phone control action. */
+export type ConsentKind = 'secret' | 'phone'
+
+/** One consent_request event, and one entry of `GET /v1/consents`. */
+export interface ConsentRequest {
+  id: string
+  kind: ConsentKind
+  summary: string
+  detail: string
+  created_at: number
+}
+
+/** The body `POST /v1/consents/{id}` takes: per kind, exactly one of
+ * the two shapes. */
+export type ConsentAnswer = { secret: string } | { grant: boolean }
+
 /** One turn event, exactly `hub.rs`'s `TurnEvent` (serde type tag, snake case). */
 export type TurnEvent =
   | { type: 'user_message'; text: string }
@@ -27,6 +44,8 @@ export type TurnEvent =
       /** The shell command line; only the bash tool carries one. */
       command: string | null
     }
+  | ({ type: 'consent_request' } & ConsentRequest)
+  | { type: 'consent_resolved'; id: string; granted: boolean }
   | { type: 'turn_done'; reply: string | null; outcome: string }
 
 /** One entry of `GET /v1/sessions` (http.rs `sessions`). */
@@ -263,6 +282,13 @@ export interface ClawApi {
   /** `POST /v1/sessions` — create an interactive session from a name;
    * 400 for a name off `SESSION_NAME_PATTERN`, 409 when it exists. */
   createSession(name: string): Promise<NewSession>
+  /** `GET /v1/consents` — the pending consents, oldest first. */
+  listConsents(): Promise<ConsentRequest[]>
+  /** `POST /v1/consents/{id}` — answer one consent; 409 when already
+   * resolved, 422 for an empty secret. */
+  resolveConsent(id: string, answer: ConsentAnswer): Promise<void>
+  /** `DELETE /v1/consents/{id}` — deny or cancel a consent. */
+  denyConsent(id: string): Promise<void>
   /** `POST /v1/sessions/{key}/messages` — fire-and-forget: the claw answers 202 and the reply arrives on the event stream. */
   sendMessage(key: string, text: string): Promise<void>
   /** `GET /v1/providers` — the constructible backends and the active pair. */
@@ -323,6 +349,26 @@ export function useClaw(token: Ref<string | null>): ClawApi {
       headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
       body: JSON.stringify({ name }),
     })) as NewSession
+  }
+
+  async function listConsents(): Promise<ConsentRequest[]> {
+    const body = (await get('/v1/consents', token.value)) as { consents: ConsentRequest[] }
+    return body.consents
+  }
+
+  async function resolveConsent(id: string, answer: ConsentAnswer): Promise<void> {
+    await send(`/v1/consents/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
+      body: JSON.stringify(answer),
+    })
+  }
+
+  async function denyConsent(id: string): Promise<void> {
+    await send(`/v1/consents/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: authHeaders(token.value),
+    })
   }
 
   async function sendMessage(key: string, text: string): Promise<void> {
@@ -498,6 +544,9 @@ export function useClaw(token: Ref<string | null>): ClawApi {
   return {
     sessions,
     createSession,
+    listConsents,
+    resolveConsent,
+    denyConsent,
     sendMessage,
     providers,
     setActive,
@@ -582,6 +631,25 @@ function parseTurnEvent(data: string): TurnEvent | null {
           summary: String(raw.summary ?? ''),
           code: typeof raw.code === 'number' ? raw.code : null,
           command: typeof raw.command === 'string' ? raw.command : null,
+        }
+      case 'consent_request': {
+        // A consent of an unknown kind is an unknown shape: dropped,
+        // not guessed.
+        if (raw.kind !== 'secret' && raw.kind !== 'phone') return null
+        return {
+          type: 'consent_request',
+          id: String(raw.id ?? ''),
+          kind: raw.kind,
+          summary: String(raw.summary ?? ''),
+          detail: String(raw.detail ?? ''),
+          created_at: typeof raw.created_at === 'number' ? raw.created_at : 0,
+        }
+      }
+      case 'consent_resolved':
+        return {
+          type: 'consent_resolved',
+          id: String(raw.id ?? ''),
+          granted: Boolean(raw.granted),
         }
       case 'turn_done':
         return {
