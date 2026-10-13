@@ -33,10 +33,17 @@ model: claude-sonnet-4-5
 listen: 127.0.0.1:7799
 token: change-me                 # optional; when set, /v1/* requires it
 poll_interval_secs: 120
+max_turn_steps: 2048             # tool rounds one chat turn may run
 watches:                         # a seed: imported while the table is empty
   - forge: github
     repo: acme/widgets
 ```
+
+`max_turn_steps` caps one turn's tool rounds (the coding driver's own
+budget shape, and the same default, 2048): the claw is meant to work
+unattended for a long time, so a cap this deep is a runaway guard, not
+a work timer — a turn that hits it ends with a failed outcome and the
+conversation intact; a follow-up message keeps going.
 
 The surface refuses to start on a non-loopback `listen` with no
 `token`: anything beyond loopback can reach the port, and the bearer

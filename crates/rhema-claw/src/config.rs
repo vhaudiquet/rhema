@@ -19,6 +19,12 @@ use serde::{Deserialize, Serialize};
 /// [`ClawConfig::poll_interval_secs`] is unset.
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
 
+/// How many tool rounds one chat turn may run, when
+/// [`ClawConfig::max_turn_steps`] is unset — the coding driver's own
+/// budget shape and its default: deep enough that a cap is a runaway
+/// guard for an agent meant to work unattended, not a work timer.
+pub const DEFAULT_MAX_TURN_STEPS: u32 = 2048;
+
 /// Where the HTTP surface listens when [`ClawConfig::listen`] is unset:
 /// loopback only — the surface is for the machine's resident user.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7799";
@@ -237,6 +243,10 @@ pub struct ClawConfig {
     pub bootstrap_root: Option<PathBuf>,
     /// Seconds between detect passes of the resident loop.
     pub poll_interval_secs: u64,
+    /// How many tool rounds one chat turn may run before it is cut off
+    /// with a failed outcome, the conversation intact. A follow-up
+    /// message keeps going. [`DEFAULT_MAX_TURN_STEPS`] when unset.
+    pub max_turn_steps: u32,
     /// The handler's model backend: `google`, `llama-cpp`, `openrouter`,
     /// `anthropic`, or `openai`; google when unset. Keys resolve through
     /// the stored rhema config's default profile, env vars winning.
@@ -263,6 +273,7 @@ impl Default for ClawConfig {
             memory_root: None,
             bootstrap_root: None,
             poll_interval_secs: DEFAULT_POLL_INTERVAL_SECS,
+            max_turn_steps: DEFAULT_MAX_TURN_STEPS,
             provider: None,
             model: None,
             listen: None,
@@ -432,6 +443,7 @@ workspace_root: /var/lib/rhema/claw-work
 memory_root: /var/lib/rhema/claw-memory
 bootstrap_root: /var/lib/rhema/claw-bootstrap
 poll_interval_secs: 30
+max_turn_steps: 512
 provider: anthropic
 model: claude-sonnet-4-5
 listen: 192.168.1.10:7800
@@ -448,6 +460,7 @@ watches:
 ";
         let config: ClawConfig = serde_yaml::from_str(raw).expect("parses");
         assert_eq!(config.poll_interval_secs, 30);
+        assert_eq!(config.max_turn_steps, 512);
         assert_eq!(config.provider.as_deref(), Some("anthropic"));
         assert_eq!(config.model.as_deref(), Some("claude-sonnet-4-5"));
         assert_eq!(config.listen.as_deref(), Some("192.168.1.10:7800"));
@@ -498,6 +511,7 @@ watches:
             serde_yaml::from_str("watches:\n  - forge: github\n    repo: acme/widgets\n")
                 .expect("parses");
         assert_eq!(config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
+        assert_eq!(config.max_turn_steps, DEFAULT_MAX_TURN_STEPS);
         assert_eq!(config.provider, None);
         assert_eq!(config.model, None);
         assert_eq!(config.db, None);

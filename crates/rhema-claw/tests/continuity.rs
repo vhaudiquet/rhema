@@ -62,6 +62,7 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
         memory_root: None,
         bootstrap_root: None,
         poll_interval_secs: 60,
+        max_turn_steps: rhema_claw::config::DEFAULT_MAX_TURN_STEPS,
         provider: Some("google".to_owned()),
         model: Some("test-model".to_owned()),
         listen: None,

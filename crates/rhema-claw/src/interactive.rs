@@ -81,11 +81,6 @@ pub const KEY_PREFIX: &str = "interactive:";
 /// The source name the interactive messages ingest under.
 pub const SOURCE: &str = "user";
 
-/// How many tool rounds one chat turn may run before it is cut off —
-/// the same shape the coding driver's limit takes; a follow-up message
-/// keeps going.
-const MAX_TURN_ITERATIONS: u32 = 16;
-
 /// The title an auto-notified reply carries: the resident's name — the
 /// reply itself is the body, the key it came from is the session.
 const AUTO_NOTIFY_TITLE: &str = "claw";
@@ -179,6 +174,10 @@ pub struct InteractiveHandler {
     /// The notification table: the `notify` tool writes it, and
     /// non-interactive replies auto-notify through it.
     notifications: Arc<NotificationStore>,
+    /// How many tool rounds one turn may run before it is cut off — the
+    /// config's runaway guard for an agent meant to work unattended; a
+    /// follow-up message keeps going.
+    max_turn_steps: u32,
 }
 
 impl InteractiveHandler {
@@ -200,6 +199,7 @@ impl InteractiveHandler {
         notifications: Arc<NotificationStore>,
         tasks: Arc<crate::task_store::TaskStore>,
         accounts: Arc<dyn rhema_identity::IdentityStore>,
+        max_turn_steps: u32,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(CodingTools::new(&workspace));
@@ -227,6 +227,7 @@ impl InteractiveHandler {
             bootstrap_resolver,
             hub,
             notifications,
+            max_turn_steps,
         }
     }
 
@@ -349,7 +350,7 @@ impl InteractiveHandler {
             Message::text(Role::User, input),
             &mut sink,
             &tools,
-            MAX_TURN_ITERATIONS,
+            self.max_turn_steps,
         )
         .await
         .map_err(|err| format!("turn for {key} failed: {err}"))?;
@@ -624,6 +625,7 @@ mod tests {
             notifications(),
             tasks(),
             accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
         );
         let specs = handler.resolver().specs();
         assert!(
@@ -871,6 +873,7 @@ mod tests {
             notifications(),
             tasks(),
             accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -952,6 +955,7 @@ mod tests {
             notifications(),
             tasks(),
             accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1042,6 +1046,7 @@ mod tests {
             notifications(),
             tasks(),
             accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1108,6 +1113,7 @@ mod tests {
             notifications(),
             tasks(),
             accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1176,6 +1182,7 @@ mod tests {
             notifications.clone(),
             tasks(),
             accounts(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(

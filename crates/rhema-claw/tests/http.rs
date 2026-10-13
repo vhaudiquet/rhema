@@ -39,6 +39,7 @@ fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
         memory_root: None,
         bootstrap_root: Some(dir.path().join("bootstrap")),
         poll_interval_secs: 60,
+        max_turn_steps: rhema_claw::config::DEFAULT_MAX_TURN_STEPS,
         provider: Some("google".to_owned()),
         model: Some("test-model".to_owned()),
         listen: None,

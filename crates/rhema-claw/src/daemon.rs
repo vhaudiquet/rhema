@@ -252,6 +252,7 @@ impl Daemon {
             notifications.clone(),
             tasks.clone(),
             accounts.clone(),
+            config.max_turn_steps,
         );
         let interactive_driver = Arc::new(
             Driver::new(
