@@ -22,7 +22,8 @@
 //! - [`config`] — the YAML config: the watch seed, paths, HTTP surface,
 //!   provider and model
 //! - [`bootstrap`] — the SOUL/USER/ENVIRONMENT store, the system prompt
-//!   rendered from it per dispatch, and the `bootstrap_save` tool
+//!   rendered from it per dispatch with the dispatch's tool roster, and
+//!   the `bootstrap_save` tool
 //! - [`watch_store`] — the persistent watch table (SQLite, shared file)
 //! - [`notifications`] — the notification table: the outbound queue the
 //!   devices poll and ack

@@ -13,11 +13,13 @@
 //!
 //! The template ([`DEFAULT_SYSTEM_MD`]) is data next to the code, the
 //! coding agent's house pattern: placeholders `{workspace}`, `{soul}`,
-//! `{user}`, `{environment}`, and `{onboarding}` are filled per
-//! dispatch from the live files. A present file replaces its
-//! placeholder verbatim — never appended to, never escaped; a missing
-//! one renders its stub. The `{onboarding}` section renders only while
-//! either file is unwritten, so the offer self-terminates.
+//! `{user}`, `{environment}`, `{tools}`, and `{onboarding}` are filled
+//! per dispatch — the file sections from the live files, `{tools}` from
+//! the dispatch's own resolver chain, so the roster the prompt shows is
+//! the roster the model gets. A present file replaces its placeholder
+//! verbatim — never appended to, never escaped; a missing one renders
+//! its stub. The `{onboarding}` section renders only while either file
+//! is unwritten, so the offer self-terminates.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -192,6 +194,15 @@ fn section(header: &str, content: Option<&str>, stub: &str) -> String {
     format!("{header}\n\n{}", content.unwrap_or(stub))
 }
 
+/// One rendered tool line: name, description, and the call's JSON
+/// schema — the same three the API's tools array carries, so the
+/// roster the prompt shows cannot drift from what the resolver
+/// advertises.
+fn tool_line(spec: &ToolSpec) -> String {
+    let schema = serde_json::to_string(&spec.parameters).expect("a JSON value always serializes");
+    format!("- {} | {} | {}", spec.name, spec.description, schema)
+}
+
 /// Fills every placeholder in one pass: text a value carries is never
 /// rescanned, so a file's own braces survive verbatim.
 fn substitute(template: &str, values: &[(&str, &str)]) -> String {
@@ -220,14 +231,16 @@ fn substitute(template: &str, values: &[(&str, &str)]) -> String {
 }
 
 /// Renders the system prompt for one dispatch: `{workspace}` and the
-/// three file sections from the live store, the `{onboarding}` section
-/// only while [`Bootstrap::needs_onboarding`]. Fallible on purpose — a
+/// three file sections from the live store, `{tools}` from the
+/// dispatch's own resolver specs, the `{onboarding}` section only
+/// while [`Bootstrap::needs_onboarding`]. Fallible on purpose — a
 /// store that cannot be read surfaces loudly instead of rendering a
 /// prompt without it.
 pub fn render_system(
     template: &str,
     workspace: &Path,
     bootstrap: &Bootstrap,
+    tools: &[ToolSpec],
 ) -> Result<String, BootstrapError> {
     let soul = bootstrap.load(BootstrapKind::Soul)?;
     let user = bootstrap.load(BootstrapKind::User)?;
@@ -241,6 +254,7 @@ pub fn render_system(
     let soul_section = section("## SOUL", soul.as_deref(), PENDING);
     let user_section = section("## USER", user.as_deref(), PENDING);
     let environment_section = section("## ENVIRONMENT", environment.as_deref(), GENERATED_AT_BOOT);
+    let tool_list = tools.iter().map(tool_line).collect::<Vec<_>>().join("\n");
     let rendered = substitute(
         template,
         &[
@@ -248,6 +262,7 @@ pub fn render_system(
             ("soul", soul_section.as_str()),
             ("user", user_section.as_str()),
             ("environment", environment_section.as_str()),
+            ("tools", tool_list.as_str()),
             ("onboarding", onboarding),
         ],
     );
@@ -425,8 +440,13 @@ mod tests {
     #[test]
     fn a_fresh_house_renders_stubs_and_the_onboarding_section() {
         let (_dir, bootstrap) = store();
-        let prompt =
-            render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap).expect("renders");
+        let tools = registry(Arc::new(Bootstrap {
+            root: bootstrap.root().to_path_buf(),
+        }))
+        .resolver_for(&rhema_autonomous_agent::Allowlist::permissive())
+        .specs();
+        let prompt = render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &tools)
+            .expect("renders");
         assert!(prompt.contains("## SOUL"), "{prompt}");
         assert!(prompt.contains("## USER"), "{prompt}");
         assert!(prompt.contains("## ENVIRONMENT"), "{prompt}");
@@ -448,7 +468,7 @@ mod tests {
             .expect("saves");
         write_environment(&bootstrap, "Linux, 32 cores, no GPU.");
         let prompt =
-            render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap).expect("renders");
+            render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &[]).expect("renders");
         assert!(
             prompt.contains("I am claw: terse, warm, relentless."),
             "{prompt}"
@@ -469,7 +489,7 @@ mod tests {
         let content = "the user is Ana.\n\n- braces stay: {{ keep }} and {soul}\n";
         bootstrap.save(BootstrapKind::User, content).expect("saves");
         let prompt =
-            render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap).expect("renders");
+            render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &[]).expect("renders");
         assert!(prompt.contains(content), "{prompt}");
         assert!(
             prompt.contains("{soul}"),
@@ -478,6 +498,27 @@ mod tests {
         assert!(
             !prompt.contains("## USER\n\n\n"),
             "the file rides under its header, not appended: {prompt}"
+        );
+    }
+
+    #[test]
+    fn the_tool_specs_render_with_their_schemas() {
+        let (_dir, bootstrap) = store();
+        let tools = vec![ToolSpec::new(
+            "my_tool",
+            "its purpose",
+            json!({
+                "type": "object",
+                "properties": { "kind": { "type": "string" } },
+                "required": ["kind"]
+            }),
+        )];
+        let prompt = render_system(DEFAULT_SYSTEM_MD, Path::new("/ws"), &bootstrap, &tools)
+            .expect("renders");
+        assert!(prompt.contains("- my_tool | its purpose | "), "{prompt}");
+        assert!(
+            prompt.contains(r#""required":["kind"]"#),
+            "the JSON schema rendered: {prompt}"
         );
     }
 

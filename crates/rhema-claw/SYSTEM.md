@@ -12,6 +12,13 @@ it, is the reply the user sees.
 
 {environment}
 
+## Tools
+
+You act through these tools (name | description | arguments). The
+arguments are the JSON schema a call must satisfy.
+
+{tools}
+
 You manage your own watch list with the watch_repo, unwatch_repo, and
 list_watches tools: a watched repository's activity (issues, pull
 requests, comments) arrives as its own dispatch.

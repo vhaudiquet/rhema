@@ -55,7 +55,7 @@ use rhema_autonomous_agent::{Allowlist, Handler, ResolverChain, SessionContext, 
 use rhema_coding_agent::{AllowAll, CodingTools, revive_dangling_calls};
 use rhema_core::{
     Agent, ChatParams, Content, Event as ModelEvent, EventSink, Message, Role, Session,
-    ToolContext, run_turn,
+    ToolContext, ToolResolver, run_turn,
 };
 use rhema_memory::{MemoryResolver, MemoryStore, Scope};
 use rhema_rsd::{Dispatcher, Event, KeyFn, Outcome, ResourceKey};
@@ -234,15 +234,23 @@ impl InteractiveHandler {
     /// session (the engine's own step counter is per-agent; the
     /// conversation lives in the session, not the agent). The system
     /// prompt is re-rendered per dispatch, so a SOUL.md or USER.md the
-    /// last turn wrote is live this turn, and the onboarding section is
-    /// gone the moment both files exist.
+    /// last turn wrote is live this turn, the onboarding section is
+    /// gone the moment both files exist, and the tool roster is the
+    /// dispatch chain's own specs — what the prompt lists is what the
+    /// request advertises.
     fn agent(&self) -> Result<Agent, String> {
         let (provider, model) = self.backends.current();
-        let system = render_system(DEFAULT_SYSTEM_MD, &self.workspace, &self.bootstrap)
-            .map_err(|err| format!("cannot render the bootstrap system prompt: {err}"))?;
+        let resolver = self.resolver();
+        let system = render_system(
+            DEFAULT_SYSTEM_MD,
+            &self.workspace,
+            &self.bootstrap,
+            &resolver.specs(),
+        )
+        .map_err(|err| format!("cannot render the bootstrap system prompt: {err}"))?;
         Agent::builder()
             .provider(provider)
-            .resolver(self.resolver())
+            .resolver(resolver)
             .system(system)
             .params(ChatParams::new(model))
             .build()
@@ -505,7 +513,7 @@ mod tests {
     use crate::backends::{Backend, BackendRegistry};
     use rhema_core::{
         Content, Message as CoreMessage, MockProvider, ModelOutput, Role as CoreRole, StopReason,
-        ToolCall, Usage,
+        ToolCall, ToolResolver, Usage,
     };
     use rhema_rsd::{
         DispatcherConfig, KeyState, Outcome as RsdOutcome, ResourceKey as Key, VolatileStore,
@@ -562,33 +570,54 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_names_the_workspace_and_the_tools() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let bootstrap = Bootstrap::new(dir.path().join("bootstrap")).expect("store opens");
+    fn the_prompt_renders_the_dispatch_chain_and_the_workspace() {
+        // The real chain, the shape a dispatch runs under: the prompt
+        // must name every tool the chain advertises, with its schema —
+        // what the prompt lists is what the request carries.
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let handler = InteractiveHandler::new(
+            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
+            workspace.path().join("interactive"),
+            Arc::new(ClawStore::in_memory().expect("store opens")),
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            Arc::new(EventHub::default()),
+            notifications(),
+            tasks(),
+            accounts(),
+        );
+        let specs = handler.resolver().specs();
+        assert!(
+            specs.iter().any(|spec| spec.name == "bash"),
+            "the coding toolset is in the chain: {specs:?}"
+        );
         let prompt = render_system(
             DEFAULT_SYSTEM_MD,
             Path::new("/state/claw/workspaces/interactive"),
-            &bootstrap,
+            &handler.bootstrap,
+            &specs,
         )
         .expect("renders");
         assert!(
             prompt.contains("/state/claw/workspaces/interactive"),
             "{prompt}"
         );
-        for tool in [
-            "watch_repo",
-            "unwatch_repo",
-            "list_watches",
-            "memory_save",
-            "memory_search",
-            "bootstrap_save",
-            "notify",
-            "schedule_task",
-            "list_tasks",
-            "cancel_task",
-        ] {
-            assert!(prompt.contains(tool), "missing {tool}: {prompt}");
+        for spec in &specs {
+            assert!(
+                prompt.contains(&spec.name),
+                "missing {}: {prompt}",
+                spec.name
+            );
+            assert!(
+                prompt.contains(&spec.description),
+                "missing {}'s description: {prompt}",
+                spec.name
+            );
         }
+        assert!(
+            prompt.contains(r#""required":["command"]"#),
+            "bash's schema renders: {prompt}"
+        );
         assert!(prompt.contains("final message"), "{prompt}");
         // A fresh store is pending onboarding: the offered setup renders.
         assert!(prompt.contains("## Setup"), "{prompt}");

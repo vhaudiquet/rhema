@@ -71,7 +71,10 @@ three identity files under the state dir's `bootstrap/` (config:
 written with you; **USER.md**, the always-visible summary of who you
 are; **ENVIRONMENT.md**, host, shell, and tool inventory, generated
 deterministically at every boot (detection is code, not conversation;
-hand edits are overwritten). On first run the claw *offers* a short
+hand edits are overwritten). The base renders the dispatch's own tool
+roster too — every tool's name, description, and call schema, straight
+from the resolver chain, so what the prompt lists is what the request
+advertises. On first run the claw *offers* a short
 setup in chat: who you are, what the machine is for, who it should be.
 It writes the first two files itself through the `bootstrap_save`
 tool as you answer; decline and it simply keeps offering, never
