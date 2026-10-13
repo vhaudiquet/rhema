@@ -7,11 +7,14 @@
 //! presented in the system prompt for the model to load via the shell.
 //! Tool errors surface in-band to the model (SPEC.md §4); approval
 //! arrives per turn through the [`Approval`] hook; the session is plain
-//! data the driver can persist and resume.
+//! data the driver can persist and resume, with a commit hook so an intent
+//! is durable before its first side effect, revive-on-resume for calls a
+//! crash left unanswered, and cancel-path repair for those a user stopped.
 //!
 //! Layout:
 //! - [`approval`] — the `Approval` hook and `AllowAll`
-//! - [`agent`] — `CodingAgent`, `CodingAgentError`, `repair_dangling_calls`
+//! - [`agent`] — `CodingAgent`, `CodingAgentError`, `repair_dangling_calls`,
+//!   `revive_dangling_calls`
 //! - [`config`] — `CodingAgentConfig`
 //! - [`prompt`] — the SYSTEM.md template and its renderer
 //! - [`skills`] — discovery of markdown skills, prompt presentation
@@ -36,7 +39,7 @@ pub mod prompt;
 pub mod skills;
 pub mod tools;
 
-pub use agent::{CodingAgent, CodingAgentError, repair_dangling_calls};
+pub use agent::{CodingAgent, CodingAgentError, repair_dangling_calls, revive_dangling_calls};
 pub use approval::{AllowAll, Approval, DenyAll};
 pub use config::CodingAgentConfig;
 pub use prompt::{DEFAULT_SYSTEM_MD, default_system, render_system};
