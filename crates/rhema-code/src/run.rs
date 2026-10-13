@@ -29,7 +29,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Backend;
 use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
-use crate::args::{Args, ProviderChoice, RunArgs};
+use crate::args::{Args, ProviderChoice, RunArgs, SystemCommand};
 use crate::sessions;
 use crate::store::{ConfigStore, DiskStore};
 use crate::turn::{spawn_model_fetch, spawn_turn, spawn_usage_fetch};
@@ -155,6 +155,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     match args.command {
         Some(crate::args::Command::Acp(acp)) => return run_acp(acp),
         Some(crate::args::Command::Run(run)) => return run_headless(run).await,
+        Some(crate::args::Command::System { action }) => {
+            return system_command(action, &args.workspace);
+        }
         None => {}
     }
     // Headless is explicit now: a piped stdout alone is not an
@@ -180,6 +183,90 @@ fn run_acp(args: crate::args::AcpArgs) -> anyhow::Result<()> {
         thinking: args.thinking.map(From::from),
         ..AcpOptions::default()
     })
+}
+
+/// The `rhema system` utilities: they shape what turns would send and
+/// run no model — no provider, profile, or credential is touched.
+fn system_command(action: SystemCommand, workspace: &std::path::Path) -> anyhow::Result<()> {
+    match action {
+        SystemCommand::Edit => system_edit_at(&Config::system_prompt_path()?, None),
+        SystemCommand::Restore => system_restore_at(&Config::system_prompt_path()?),
+        SystemCommand::Show => {
+            let prompt = system_show_at(Config::system_prompt_path().ok().as_deref(), workspace)?;
+            print!("{prompt}");
+            Ok(())
+        }
+    }
+}
+
+/// `rhema system edit`: seeds the config's SYSTEM.md with the built-in
+/// default when missing, then opens the editor on it. `editor` — the
+/// tests' seam — overrides `$EDITOR`/`$VISUAL`.
+fn system_edit_at(path: &std::path::Path, editor: Option<&str>) -> anyhow::Result<()> {
+    if !path.exists() {
+        seed_system_file(path)?;
+        eprintln!("· seeded {} with the built-in default", path.display());
+    }
+    run_editor(path, editor)
+}
+
+/// `rhema system restore`: the config's SYSTEM.md becomes the built-in
+/// default again.
+fn system_restore_at(path: &std::path::Path) -> anyhow::Result<()> {
+    seed_system_file(path)?;
+    eprintln!("· restored {} to the built-in default", path.display());
+    Ok(())
+}
+
+/// The prompt the next turn in `workspace` would send: the config's
+/// SYSTEM.md when present, the built-in default otherwise, through the
+/// same assembly the agent stamps — rendered over the workspace, its
+/// skills, and the tools.
+fn system_show_at(
+    path: Option<&std::path::Path>,
+    workspace: &std::path::Path,
+) -> anyhow::Result<String> {
+    let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    Ok(rhema_coding_agent::stamped_system(
+        resolve_base_system(path).as_deref(),
+        &workspace,
+    )?)
+}
+
+/// Writes the built-in default to `path`, creating the directory. The
+/// default goes out verbatim: the file is a template, injections
+/// render per turn, never here.
+fn seed_system_file(path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, rhema_coding_agent::DEFAULT_SYSTEM_MD)?;
+    Ok(())
+}
+
+/// Runs the editor on `path`, blocking until it closes. The editor
+/// value may carry flags (`code -w`), so it goes through `sh -c` with
+/// the file as the only positional argument; a non-zero exit fails.
+fn run_editor(path: &std::path::Path, editor: Option<&str>) -> anyhow::Result<()> {
+    let editor = match editor {
+        Some(editor) => editor.to_owned(),
+        None => match (std::env::var("EDITOR"), std::env::var("VISUAL")) {
+            (Ok(value), _) if !value.trim().is_empty() => value,
+            (_, Ok(value)) if !value.trim().is_empty() => value,
+            _ => anyhow::bail!("no editor: set $EDITOR"),
+        },
+    };
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("exec {editor} \"$@\""))
+        .arg(&editor)
+        .arg(path)
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to run editor {editor:?}: {err}"))?;
+    if !status.success() {
+        anyhow::bail!("editor {editor:?} exited with {status}");
+    }
+    Ok(())
 }
 
 /// The headless one-shot: resolve the backend, run one turn, print the
@@ -671,5 +758,95 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
             app.login_cancel = Some(cancel);
             crate::turn::spawn_login_flow(flow, cancelled, tx.clone());
         }
+    }
+}
+
+#[cfg(test)]
+mod system_tests {
+    use super::*;
+
+    #[test]
+    fn edit_seeds_the_default_when_the_file_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SYSTEM.md");
+
+        system_edit_at(&path, Some("true")).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            rhema_coding_agent::DEFAULT_SYSTEM_MD
+        );
+    }
+
+    #[test]
+    fn edit_keeps_an_existing_file() {
+        // Seeding is for the missing file only; an existing SYSTEM.md,
+        // even an empty one, is the user's.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SYSTEM.md");
+        std::fs::write(&path, "mine").unwrap();
+
+        system_edit_at(&path, Some("true")).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "mine");
+    }
+
+    #[test]
+    fn edit_fails_when_the_editor_exits_non_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SYSTEM.md");
+        assert!(system_edit_at(&path, Some("false")).is_err());
+    }
+
+    #[test]
+    fn restore_overwrites_with_the_default_and_creates_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("SYSTEM.md");
+
+        system_restore_at(&path).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            rhema_coding_agent::DEFAULT_SYSTEM_MD
+        );
+    }
+
+    #[test]
+    fn show_renders_the_base_over_the_workspace_skills_and_tools() {
+        let config = tempfile::tempdir().unwrap();
+        let base = config.path().join("SYSTEM.md");
+        std::fs::write(
+            &base,
+            "ws {{ workspace }}{% for skill in skills %} skill {{ skill.name }}{% endfor %}{% for tool in tools %} tool {{ tool.name }}{% endfor %}",
+        )
+        .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let folder = workspace.path().join(".rhema").join("skills").join("local");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            "---\ndescription: local trigger\n---\nbody",
+        )
+        .unwrap();
+
+        let prompt = system_show_at(Some(&base), workspace.path()).unwrap();
+
+        let canonical = std::fs::canonicalize(workspace.path()).unwrap();
+        assert!(
+            prompt.starts_with(&format!("ws {}", canonical.display())),
+            "{prompt}"
+        );
+        assert!(prompt.contains("skill local"), "{prompt}");
+        assert!(prompt.contains("tool bash"), "{prompt}");
+    }
+
+    #[test]
+    fn show_falls_back_to_the_built_in_default_without_a_file() {
+        let workspace = tempfile::tempdir().unwrap();
+
+        let prompt = system_show_at(None, workspace.path()).unwrap();
+
+        assert!(prompt.contains("bash"), "{prompt}");
+        assert!(!prompt.contains("{{"), "the default is rendered: {prompt}");
     }
 }

@@ -134,6 +134,31 @@ pub enum Command {
     /// Serve the Agent Client Protocol over stdio: the coding agent as
     /// an editor-launched subprocess (Zed, Neovim, JetBrains, Emacs).
     Acp(AcpArgs),
+    /// Edit, restore, or print the system prompt. No model, profile,
+    /// or credential involved — these shape what turns would send.
+    System {
+        /// What to do with the system prompt.
+        #[command(subcommand)]
+        action: SystemCommand,
+    },
+}
+
+/// What `rhema system` does with the prompt. The edited file is the
+/// config's `SYSTEM.md`, a Jinja template rendered per turn over the
+/// workspace, the discovered skills, and the tool specs.
+#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+pub enum SystemCommand {
+    /// Open `$EDITOR` (then `$VISUAL`) on the config's SYSTEM.md,
+    /// seeding it with the built-in default first when the file does
+    /// not exist yet.
+    Edit,
+    /// Overwrite the config's SYSTEM.md with the built-in default.
+    Restore,
+    /// Print the prompt the next turn in `--workspace` would send: the
+    /// config's SYSTEM.md when present, the built-in default
+    /// otherwise, with the workspace, the discovered skills, and the
+    /// tools rendered in.
+    Show,
 }
 
 /// Flags of `rhema run`, the headless one-shot built for pipes.
@@ -441,5 +466,33 @@ mod tests {
         // the `run` subcommand's job now, not a flag.
         assert!(try_parse(&["--print", "hi"]).is_err());
         assert!(try_parse(&["-m", "m"]).is_ok());
+    }
+
+    #[test]
+    fn the_system_subcommand_takes_an_action() {
+        let args = parse(&["system", "show"]);
+        assert_eq!(
+            args.command,
+            Some(Command::System {
+                action: SystemCommand::Show
+            })
+        );
+        let args = parse(&["system", "edit"]);
+        assert_eq!(
+            args.command,
+            Some(Command::System {
+                action: SystemCommand::Edit
+            })
+        );
+        let args = parse(&["system", "restore"]);
+        assert_eq!(
+            args.command,
+            Some(Command::System {
+                action: SystemCommand::Restore
+            })
+        );
+        // An action is required: bare `rhema system` is a usage error,
+        // not a default.
+        assert!(try_parse(&["system"]).is_err());
     }
 }
