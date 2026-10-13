@@ -1,7 +1,8 @@
 <script setup lang="ts">
 // The transcript: sent lines and streamed turns, the turn in flight at
 // the bottom. The claw owns the conversation — this renders what the
-// event stream delivered, nothing more. The header and the composer
+// event stream delivered, nothing more. The header names the session
+// and hides the dispatch internals behind an info modal; the composer
 // chips mirror live claw state; the backend chip jumps to settings.
 import type { ClawSession, StreamStatus } from '~/composables/useClaw'
 import type { TranscriptItem, TurnBlock } from '~/composables/useTranscript'
@@ -55,6 +56,17 @@ function submit(): void {
 
 const displayName = computed(() => props.activeKey.replace(/^interactive:/, ''))
 
+// The dispatch internals live behind the info modal, not in the header.
+const infoOpen = ref(false)
+
+const infoRows = computed(() => [
+  { label: 'state', value: props.session?.state ?? 'unknown' },
+  { label: 'revision', value: props.session ? String(props.session.revision) : '—' },
+  { label: 'inbox depth', value: props.session ? String(props.session.inbox_depth) : '—' },
+  { label: 'last outcome', value: props.session?.last_outcome ?? '—' },
+  { label: 'key', value: props.activeKey },
+])
+
 const streamLabel = computed(() =>
   props.streamStatus === 'open' ? 'live' : props.streamStatus,
 )
@@ -72,16 +84,22 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
       <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="34" />
       <div class="text">
         <h2>{{ displayName }}</h2>
-        <p class="mono">
-          {{ session ? `${session.state} · rev ${session.revision}` : activeKey }}
-          <template v-if="session?.last_outcome"> · {{ session.last_outcome }}</template>
-        </p>
       </div>
       <span class="stream-status" :title="`event stream: ${streamStatus}`">
         <StatusDot :tone="streamTone(streamStatus)" />
         {{ streamLabel }}
       </span>
+      <button class="ghost info" title="session info" @click="infoOpen = true">ⓘ</button>
     </header>
+
+    <AppModal :open="infoOpen" title="Session info" @close="infoOpen = false">
+      <dl class="info-rows">
+        <div v-for="row in infoRows" :key="row.label" class="info-row">
+          <dt class="label">{{ row.label }}</dt>
+          <dd class="mono">{{ row.value }}</dd>
+        </div>
+      </dl>
+    </AppModal>
 
     <div ref="scroller" class="stream-area" @scroll.passive="onScroll">
       <p v-if="items.length === 0 && !live" class="empty">
@@ -227,15 +245,40 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
   margin: 0;
   font-size: 15px;
   font-weight: 700;
-}
-
-.text p {
-  margin: 1px 0 0;
-  color: var(--text3);
-  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.head .info {
+  flex: none;
+  padding: 0 6px;
+  font-size: 14px;
+}
+
+.info-rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.info-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 7px 0;
+}
+
+.info-row + .info-row {
+  border-top: 1px solid var(--border);
+}
+
+.info-row dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
 }
 
 .stream-status {
