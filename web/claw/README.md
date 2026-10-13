@@ -77,8 +77,8 @@ The shell is an icon rail plus two views, switched by a tiny hash
 router (`#/chat`, `#/settings/agent/general`, `#/settings/agent/
 accounts`, `#/settings/providers`, `#/settings/about`), no
 vue-router. The chat view is the session inventory plus the live
-transcript; the settings view is a searchable nav plus pages over one
-shared detail panel. The agent's identity (name, mark, avatar) loads
+transcript; the settings view is a searchable nav plus pages. The
+agent's identity (name, mark, avatar) loads
 once and renders everywhere — rail, sidebar, chat, window title —
 through `AgentAvatar`, which owns the precedence: avatar image, then
 mark or initials. Settings pages stage edits into a local draft and
@@ -113,7 +113,6 @@ app/
                                  composer with the backend chip; agent
                                  replies render through AppMarkdown
     SessionsSidebar.vue          every dispatch key, interactive first
-    DetailPanel.vue              the right-hand detail column
     PageHeader.vue               title + subtitle + page actions
     SettingCard.vue              one titled card of rows
     SettingRow.vue               name + description + control

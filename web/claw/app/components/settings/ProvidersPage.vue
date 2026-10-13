@@ -16,7 +16,7 @@ const props = defineProps<{
   models: ModelCard[]
   modelsLoading: boolean
   modelsError: string | null
-  /** The instance whose listing is loaded/shown in the detail panel. */
+  /** The instance whose live listing the Model row shows. */
   selectedProvider: string | null
   saving: boolean
   /** A login or a removal is in flight. */

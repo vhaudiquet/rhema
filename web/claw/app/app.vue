@@ -366,9 +366,8 @@ async function removeProvider(id: string): Promise<void> {
   mutatingProviders.value = true
   try {
     providersState.value = await claw.removeProvider(id)
-    // The removal may have moved the active pair, and the removed
-    // instance cannot keep the detail panel: both re-ground on what
-    // remains.
+    // The removal may have moved the active pair: both re-ground on
+    // what remains.
     if (selectedProvider.value === id) {
       selectedProvider.value = providersState.value.active.provider
       await loadProviderModels(selectedProvider.value)
@@ -570,53 +569,6 @@ onUnmounted(() => {
             @remove="removeProvider"
           />
           <SettingsAboutPage v-show="route.section === 'about'" :claw-up="clawUp" />
-          <DetailPanel v-if="route.section === 'providers'" title="Backend">
-            <template v-if="selectedProvider">
-              <div class="detail-name">
-                <strong class="mono">{{ selectedProvider }}</strong>
-                <AppBadge
-                  :variant="providerModelsError ? 'warn' : providerModelsLoading ? undefined : 'ok'"
-                >
-                  {{ providerModelsLoading
-                    ? 'listing…'
-                    : providerModelsError
-                      ? 'no live listing'
-                      : `${providerModels.length} models` }}
-                </AppBadge>
-              </div>
-              <p v-if="providerModelsError" class="detail-note">
-                {{ providerModelsError }}; the backend still switches and
-                its default model applies.
-              </p>
-              <div v-if="providerModels.length > 0" class="detail-models">
-                <span class="label">Live listing</span>
-                <div v-for="m in providerModels" :key="m.id" class="detail-model mono">
-                  {{ m.id }}
-                </div>
-              </div>
-              <button class="ghost" :disabled="providerModelsLoading" @click="loadProviderModels(selectedProvider)">
-                ↻ reload listing
-              </button>
-            </template>
-            <p v-else class="detail-note">loading…</p>
-          </DetailPanel>
-          <DetailPanel v-else-if="route.section === 'agent/general'" title="Where identity lives">
-            <p class="detail-note">
-              The name, mark, and images are stored claw-side and served
-              over <code>/v1/agent</code> — every client renders the same
-              identity. Behaviour is a different file: the agent's
-              persona lives in its <code>SOUL.md</code>, written with the
-              agent over onboarding, not here.
-            </p>
-          </DetailPanel>
-          <DetailPanel v-else-if="route.section === 'about'" title="Where things live">
-            <p class="detail-note">
-              The claw's code, including this client, sits in the rhema
-              workspace: <code>crates/rhema-claw</code> for the daemon,
-              <code>web/claw</code> for this UI. Design decisions live in
-              <code>SPEC.md</code>.
-            </p>
-          </DetailPanel>
         </template>
       </main>
     </div>
@@ -651,39 +603,6 @@ onUnmounted(() => {
 
 .view > * {
   min-height: 0;
-}
-
-.detail-name {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-
-.detail-name strong {
-  font-size: 14px;
-}
-
-.detail-note {
-  margin: 0;
-  color: var(--text3);
-  font-size: 12.5px;
-}
-
-.detail-models {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.detail-model {
-  color: var(--text2);
-  font-size: 12px;
-  padding: 3px 0;
-  border-bottom: 1px solid var(--border);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 @media (max-width: 980px) {
