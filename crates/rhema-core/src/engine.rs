@@ -2,10 +2,11 @@
 //!
 //! `step()` semantics are exact (SPEC.md §4): emit `StepStart`, assemble the
 //! request from the session, stream through the provider, append the
-//! assistant message, then — on `ToolUse` — resolve each call in order and
-//! append its `Tool`-role result, then emit `StepEnd`. Tool errors never
-//! abort; they are in-band `is_error` results. [`run_turn`] is the provided
-//! coding-agent driver, not part of the primitive.
+//! assistant message, then — on `ToolUse` — hand the session to the commit
+//! hook (commit-before-execute), resolve each call in order, append its
+//! `Tool`-role result, then emit `StepEnd`. Tool errors never abort; they
+//! are in-band `is_error` results. [`run_turn`] is the provided coding-agent
+//! driver, not part of the primitive.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -27,6 +28,12 @@ pub enum AgentError {
     /// The model call failed.
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    /// The commit hook rejected the intent (see [`CommitHook`]): the
+    /// assistant message is in the history, but no tool ran. The step
+    /// fails so the driver surfaces the persistence problem before a side
+    /// effect starts.
+    #[error("commit before tool execution failed: {0}")]
+    Commit(String),
     /// The turn was still requesting tools after `max_iterations` steps.
     #[error(
         "stopped after {0} steps without finishing; send a follow-up \
@@ -52,6 +59,18 @@ impl EventSink for ForwardingSink<'_> {
     }
 }
 
+/// The commit-before-execute seam: called by [`Agent::step`] on a `ToolUse`
+/// stop, after the assistant message is appended to the history and before
+/// the first call resolves. Persisting the session here is what makes a
+/// crash inside a tool call resumable without losing the fact that the call
+/// was decided: the durable history ends with the committed intent, and the
+/// resume path ([`crate::ToolResolver::replay_safety`]) decides between
+/// re-running a safe call and reporting an unsafe one interrupted. An `Err`
+/// fails the step before any tool runs — the engine never starts a side
+/// effect whose intent it could not commit. Post-round checkpointing (after
+/// the results) remains the driver's job.
+pub type CommitHook = Box<dyn Fn(&Session) -> Result<(), String> + Send + Sync>;
+
 /// The step engine: a provider, an optional tool resolver, and the fixed
 /// prompt/params it stamps into every request.
 pub struct Agent {
@@ -59,6 +78,7 @@ pub struct Agent {
     resolver: Option<Arc<dyn ToolResolver>>,
     system: Option<String>,
     params: ChatParams,
+    commit: Option<CommitHook>,
     steps: u32,
 }
 
@@ -107,6 +127,11 @@ impl Agent {
         session.history.push(out.message.clone());
 
         if out.stop_reason == StopReason::ToolUse {
+            if let Some(commit) = &self.commit {
+                // Commit-before-execute: the intent is durable before the
+                // first side effect, or nothing runs.
+                commit(session).map_err(AgentError::Commit)?;
+            }
             for i in call_indices {
                 let Some(Content::ToolCall(call)) = out.message.content.get(i) else {
                     continue;
@@ -159,6 +184,12 @@ impl Agent {
     pub fn system(&self) -> &str {
         self.system.as_deref().unwrap_or_default()
     }
+
+    /// Replaces the commit hook after building; `None` disables it. See
+    /// [`CommitHook`].
+    pub fn set_commit_hook(&mut self, hook: Option<CommitHook>) {
+        self.commit = hook;
+    }
 }
 
 /// Builder for [`Agent`]; the provider is required, everything else
@@ -169,6 +200,7 @@ pub struct AgentBuilder {
     resolver: Option<Arc<dyn ToolResolver>>,
     system: Option<String>,
     params: Option<ChatParams>,
+    commit: Option<CommitHook>,
 }
 
 impl AgentBuilder {
@@ -197,6 +229,15 @@ impl AgentBuilder {
         self
     }
 
+    /// Sets the commit-before-execute hook (see [`CommitHook`]). Without
+    /// one, a `ToolUse` step relies on the driver's post-round checkpoints
+    /// alone, and a crash inside a tool call loses the record that the call
+    /// was decided.
+    pub fn commit_hook(mut self, hook: CommitHook) -> Self {
+        self.commit = Some(hook);
+        self
+    }
+
     /// Builds the agent; fails if no provider was set.
     pub fn build(self) -> Result<Agent, AgentError> {
         Ok(Agent {
@@ -204,6 +245,7 @@ impl AgentBuilder {
             resolver: self.resolver,
             system: self.system,
             params: self.params.unwrap_or_default(),
+            commit: self.commit,
             steps: 0,
         })
     }

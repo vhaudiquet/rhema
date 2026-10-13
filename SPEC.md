@@ -130,6 +130,9 @@ pub trait ModelProvider: Send + Sync {
 pub trait ToolResolver: Send + Sync {
     /// The tools offered to the model this step.
     fn specs(&self) -> Vec<ToolSpec>;
+    /// Replay safety of one tool (default `Unsafe`): whether a committed
+    /// call that lost its result to a crash may be re-executed on resume.
+    fn replay_safety(&self, name: &str) -> ReplaySafety;
     /// Turn a model's call into a result. Errors become in-band results.
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult;
 }
@@ -147,7 +150,8 @@ pub enum Event<'a> {
 pub trait EventSink { fn emit(&mut self, event: Event<'_>); }
 
 // engine.rs
-pub struct Agent { /* provider, resolver: Option<Arc<dyn ToolResolver>>, system, params */ }
+pub struct Agent { /* provider, resolver: Option<Arc<dyn ToolResolver>>, system, params,
+                      commit: Option<CommitHook> — commit-before-execute, see §4 */ }
 impl Agent {
     pub fn builder() -> AgentBuilder;
     /// ONE exchange. Never loops. Appends to `session.history` in place.
@@ -166,6 +170,7 @@ req  = ModelRequest { system, messages: session.history.clone(), tools: resolver
 out  = provider.complete(req, sink)?                       # streams deltas
 session.history.push(out.message)                          # assistant message (may hold ToolCall(s))
 if out.stop_reason == ToolUse:
+    commit_hook(session)?        # commit-before-execute: durable intent, or no side effect
     for call in out.message's ToolCall(s), in order:
         emit ToolCallStart
         result = resolver.resolve_streaming(call, ctx, progress)  # errors → ToolResult{is_error:true}
@@ -177,6 +182,7 @@ return Step { output: out }
 
 - **No loop, no `max_iterations`, no `Final`.** Those belong to a driver.
 - **One exchange, but tool calls are resolved within it.** A step that requested tools returns with the results already appended, so the next step sees them. This is the loop's half of tool-use, and it is the minimum that makes it an agent rather than a chat call.
+- **Commit-before-execute.** On a `ToolUse` stop the optional commit hook (`CommitHook`) runs after the assistant message is appended and before the first call resolves; an `Err` fails the step (`AgentError::Commit`) before any side effect. The hook is how a driver makes a crash inside a tool call resumable: the durable history ends with the committed intent, and resume re-runs calls whose tool declared `ReplaySafety::Safe` while reporting the rest interrupted. Without a hook, intent durability rides the driver's post-round checkpoints alone, and a crash mid-call loses the record that the call was decided. The post-round checkpoint (after the results) remains the driver's either way.
 - Tool errors never abort; they surface as in-band `is_error` the model can react to. Unknown tool name is an error result, not a panic.
 - No resolver configured → `specs()` is empty; a `ToolUse` stop with no resolver appends an error result.
 - Tool progress (`ToolOutputDelta`) is ephemeral like reasoning: streamed around the resolver's optional progress callback, never appended to history — the full text arrives in the result.

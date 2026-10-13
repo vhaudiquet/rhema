@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use rhema_core::{
-    Agent, ChatParams, Content, Event, EventSink, Message, MockProvider, ModelOutput, Role,
-    Session, StopReason, ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec, Usage,
+    Agent, AgentError, ChatParams, Content, Event, EventSink, Message, MockProvider, ModelOutput,
+    Role, Session, StopReason, ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec, Usage,
 };
 use serde_json::{Value, json};
+use std::sync::Mutex;
 
 struct EchoResolver;
 
@@ -367,4 +368,105 @@ async fn an_unknown_tool_name_is_an_in_band_error() {
             code: None,
         }
     );
+}
+
+/// A shared log of the stages a step passed through, so a hook closure and
+/// a resolver record into one order.
+#[derive(Clone, Default)]
+struct StageLog(Arc<Mutex<Vec<String>>>);
+
+impl StageLog {
+    fn push(&self, stage: String) {
+        self.0.lock().unwrap().push(stage);
+    }
+
+    fn entries(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+/// A resolver that logs each resolve and answers.
+struct LoggingResolver {
+    log: StageLog,
+}
+
+#[rhema_core::async_trait]
+impl ToolResolver for LoggingResolver {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec::new(
+            "echo",
+            "echoes its arguments back",
+            json!({}),
+        )]
+    }
+
+    async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
+        self.log.push("resolve".into());
+        ToolResult::success(call.id, "done")
+    }
+}
+
+#[tokio::test]
+async fn the_commit_hook_fires_after_the_intent_and_before_the_first_tool() {
+    let log = StageLog::default();
+    let hook_log = log.clone();
+    let mut agent = Agent::builder()
+        .provider(Arc::new(MockProvider::new(vec![
+            tool_use_output(call("call_1", "echo", json!({}))),
+            end_turn_output("all done"),
+        ])))
+        .resolver(Arc::new(LoggingResolver { log: log.clone() }))
+        .commit_hook(Box::new(move |session: &Session| {
+            // The hook must already see the committed intent: the
+            // assistant message is in the history when it fires.
+            hook_log.push(format!("commit:{}", session.history.len()));
+            Ok(())
+        }))
+        .build()
+        .unwrap();
+    let mut session = Session::default();
+    let mut sink = RecordSink::default();
+    let ctx = ToolContext::default();
+
+    agent.step(&mut session, &mut sink, &ctx).await.unwrap();
+    assert_eq!(
+        log.entries(),
+        vec![
+            // The hook saw exactly the assistant message: history len 1,
+            // before any tool result existed.
+            "commit:1".to_owned(),
+            "resolve".to_owned(),
+        ]
+    );
+
+    // A text-only step has no intent to commit: the hook stays silent.
+    agent.step(&mut session, &mut sink, &ctx).await.unwrap();
+    assert_eq!(log.entries().len(), 2);
+}
+
+#[tokio::test]
+async fn a_failing_commit_fails_the_step_before_any_tool_runs() {
+    let log = StageLog::default();
+    let mut agent = Agent::builder()
+        .provider(Arc::new(MockProvider::new(vec![tool_use_output(call(
+            "call_1",
+            "echo",
+            json!({}),
+        ))])))
+        .resolver(Arc::new(LoggingResolver { log: log.clone() }))
+        .commit_hook(Box::new(|_session: &Session| Err("disk full".into())))
+        .build()
+        .unwrap();
+    let mut session = Session::default();
+    let mut sink = RecordSink::default();
+    let ctx = ToolContext::default();
+
+    let err = agent.step(&mut session, &mut sink, &ctx).await.unwrap_err();
+
+    assert_eq!(err, AgentError::Commit("disk full".into()));
+    // The intent stays in the history; no result followed it, and the
+    // resolver never ran.
+    assert_eq!(session.history.len(), 1);
+    assert_eq!(session.history[0].role, Role::Assistant);
+    assert!(log.entries().is_empty());
 }

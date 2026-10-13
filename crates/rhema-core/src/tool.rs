@@ -4,7 +4,9 @@
 //! ([`ToolResolver::specs`]) and turns a model's call into an in-band
 //! [`ToolResult`]. Errors never abort a step — they become `is_error` results
 //! the model can react to; an unknown tool name is the resolver's error
-//! result, not a panic.
+//! result, not a panic. Each tool also declares its [`ReplaySafety`]:
+//! whether a committed call that lost its result to a crash may be
+//! re-executed on resume or must be reported interrupted.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -100,11 +102,37 @@ impl Default for ToolContext {
     }
 }
 
+/// Whether re-running a tool after an interruption can repeat an external
+/// side effect. Declared per tool via [`ToolResolver::replay_safety`] and
+/// consulted when a session resumes with a committed call whose result
+/// never landed: a `Safe` call may be re-executed to finish the round, an
+/// `Unsafe` one is reported interrupted so the model can verify state
+/// before retrying.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ReplaySafety {
+    /// Re-running may repeat an external effect — a post, a merge, a
+    /// delete. The default: an unclassified tool is treated as
+    /// side-effecting.
+    #[default]
+    Unsafe,
+    /// Re-running is safe — read-only queries, pure computation. A resume
+    /// may re-execute the call without asking the model again.
+    Safe,
+}
+
 /// Turns a model's tool calls into results.
 #[async_trait]
 pub trait ToolResolver: Send + Sync {
     /// The tools offered to the model this step.
     fn specs(&self) -> Vec<crate::request::ToolSpec>;
+
+    /// The replay safety of one offered tool (see [`ReplaySafety`]),
+    /// consulted when a crash left a committed call without its result.
+    /// Defaults to [`ReplaySafety::Unsafe`]: a resolver that does not
+    /// classify its tools is treated as entirely side-effecting.
+    fn replay_safety(&self, _name: &str) -> ReplaySafety {
+        ReplaySafety::Unsafe
+    }
 
     /// Turn a model's call into a result. Errors become in-band results:
     /// implementations must not panic and must not abort on unknown names
