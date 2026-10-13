@@ -17,7 +17,16 @@ export type TurnEvent =
   | { type: 'thinking_delta'; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; name: string }
-  | { type: 'tool_result'; name: string; is_error: boolean; summary: string }
+  | {
+      type: 'tool_result'
+      name: string
+      is_error: boolean
+      summary: string
+      /** Process exit code; only command-like tools carry one. */
+      code: number | null
+      /** The shell command line; only the bash tool carries one. */
+      command: string | null
+    }
   | { type: 'turn_done'; reply: string | null; outcome: string }
 
 /** One entry of `GET /v1/sessions` (http.rs `sessions`). */
@@ -550,6 +559,8 @@ function parseTurnEvent(data: string): TurnEvent | null {
           name: String(raw.name ?? ''),
           is_error: Boolean(raw.is_error),
           summary: String(raw.summary ?? ''),
+          code: typeof raw.code === 'number' ? raw.code : null,
+          command: typeof raw.command === 'string' ? raw.command : null,
         }
       case 'turn_done':
         return {

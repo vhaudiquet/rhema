@@ -171,6 +171,12 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
   if (status === 'reconnecting') return 'error'
   return 'warn'
 }
+
+/** Command rows render as shell lines, not glyph rows (the TUI's
+ * tool_row); run_command is the bash tool's other name. */
+function isShellTool(name: string): boolean {
+  return name === 'bash' || name === 'run_command'
+}
 </script>
 
 <template>
@@ -228,11 +234,23 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
                 :key="index"
                 :class="{ error: tool.isError === true }"
               >
-                <span class="glyph" aria-hidden="true">{{
-                  tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
-                }}</span>
-                <span class="name mono">{{ tool.name }}</span>
-                <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
+                <template v-if="isShellTool(tool.name)">
+                  <span class="shell-mark" aria-hidden="true">$ </span>
+                  <span class="shell-command mono">{{ tool.command ?? '…' }}</span>
+                  <span
+                    v-if="typeof tool.code === 'number'"
+                    class="shell-code mono"
+                    :class="tool.code === 0 ? 'ok' : 'failed'"
+                  >[{{ tool.code }}]</span>
+                  <span v-else-if="tool.isError === true" class="shell-code failed">✗</span>
+                </template>
+                <template v-else>
+                  <span class="glyph" aria-hidden="true">{{
+                    tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
+                  }}</span>
+                  <span class="name mono">{{ tool.name }}</span>
+                  <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
+                </template>
               </li>
             </ul>
             <AppMarkdown v-if="item.turn.reply" :text="item.turn.reply" class="reply" />
@@ -261,11 +279,23 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
               :key="index"
               :class="{ error: tool.isError === true }"
             >
-              <span class="glyph" aria-hidden="true">{{
-                tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
-              }}</span>
-              <span class="name mono">{{ tool.name }}</span>
-              <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
+              <template v-if="isShellTool(tool.name)">
+                <span class="shell-mark" aria-hidden="true">$ </span>
+                <span class="shell-command mono">{{ tool.command ?? '…' }}</span>
+                <span
+                  v-if="typeof tool.code === 'number'"
+                  class="shell-code mono"
+                  :class="tool.code === 0 ? 'ok' : 'failed'"
+                >[{{ tool.code }}]</span>
+                <span v-else-if="tool.isError === true" class="shell-code failed">✗</span>
+              </template>
+              <template v-else>
+                <span class="glyph" aria-hidden="true">{{
+                  tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
+                }}</span>
+                <span class="name mono">{{ tool.name }}</span>
+                <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
+              </template>
             </li>
           </ul>
           <AppMarkdown v-if="live.reply" :text="live.reply" streaming class="reply" />
@@ -500,6 +530,36 @@ li.error .glyph {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* A bash row reads as the shell line it ran: dim $ prefix, the
+   command, and the exit code pushed to the row's right end. */
+.shell-mark {
+  flex: none;
+  color: var(--text3);
+  white-space: pre;
+}
+
+.shell-command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.shell-code {
+  flex: none;
+  font-size: 11px;
+}
+
+.shell-code.ok {
+  color: var(--ok);
+}
+
+.shell-code.failed {
+  color: var(--error);
 }
 
 .reply {

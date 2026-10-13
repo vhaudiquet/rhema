@@ -14,6 +14,10 @@ export interface ToolRow {
   /** null until the result lands. */
   isError: boolean | null
   summary: string
+  /** The process exit code a command-like result carries. */
+  code: number | null
+  /** The command line a bash result carries. */
+  command: string | null
 }
 
 /** One turn as the UI renders it: thinking trace, tool rows, streamed reply. */
@@ -133,7 +137,7 @@ export function useTranscript() {
         ensureLive().reply += event.text
         break
       case 'tool_start':
-        ensureLive().tools.push({ name: event.name, isError: null, summary: '' })
+        ensureLive().tools.push({ name: event.name, isError: null, summary: '', code: null, command: null })
         break
       case 'tool_result': {
         const turn = ensureLive()
@@ -145,8 +149,16 @@ export function useTranscript() {
         if (pending) {
           pending.isError = event.is_error
           pending.summary = event.summary
+          pending.code = event.code
+          pending.command = event.command
         } else {
-          turn.tools.push({ name: event.name, isError: event.is_error, summary: event.summary })
+          turn.tools.push({
+            name: event.name,
+            isError: event.is_error,
+            summary: event.summary,
+            code: event.code,
+            command: event.command,
+          })
         }
         break
       }
