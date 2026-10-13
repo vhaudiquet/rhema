@@ -12,8 +12,12 @@ defineProps<{
 const routes = [
   { method: 'GET', path: '/healthz', note: 'liveness, open without a token' },
   { method: 'GET', path: '/v1/sessions', note: 'the dispatch-key inventory' },
+  { method: 'POST', path: '/v1/sessions', note: 'create an interactive session from a name' },
   { method: 'POST', path: '/v1/sessions/{key}/messages', note: 'message ingest, 202 + stream' },
   { method: 'GET', path: '/v1/sessions/{key}/events', note: 'the turn-event stream (SSE)' },
+  { method: 'POST', path: '/v1/consents/{id}', note: 'answer a consent (a secret or a grant)' },
+  { method: 'DELETE', path: '/v1/consents/{id}', note: 'deny or cancel a consent' },
+  { method: 'GET', path: '/v1/attachments/{id}', note: "an attachment's bytes" },
   { method: 'GET', path: '/v1/providers', note: 'constructible backends + active pair' },
   { method: 'PUT', path: '/v1/providers/active', note: 'switch the backend, persisted' },
   { method: 'PUT', path: '/v1/providers/{kind}/credentials', note: 'add a backend or replace its login' },
