@@ -296,7 +296,8 @@ fn stream_response(
                     TurnEvent::ToolStart { .. }
                     | TurnEvent::ToolResult { .. }
                     | TurnEvent::ConsentRequest { .. }
-                    | TurnEvent::ConsentResolved { .. },
+                    | TurnEvent::ConsentResolved { .. }
+                    | TurnEvent::Attachment { .. },
                 ) => continue,
                 // The turn's input rides the stream for the claw's own
                 // clients; an OpenAI caller named it in the request.

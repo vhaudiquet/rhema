@@ -74,6 +74,9 @@ pub enum ClawError {
     /// The consent table could not be opened or read.
     #[error(transparent)]
     Consents(#[from] crate::consents::ConsentStoreError),
+    /// The attachments directory could not be opened.
+    #[error(transparent)]
+    Attachments(#[from] crate::attachments::AttachmentError),
     /// The backend registry could not be built: no provider constructed,
     /// or the configured seed named an unknown kind.
     #[error("backend registry failed: {0}")]
@@ -225,6 +228,16 @@ impl Daemon {
         // asks through them, the consent routes answer through them.
         let consents = Arc::new(crate::consents::ConsentStore::open(&db)?);
         let bridge = Arc::new(crate::consents::WaitBridge::new());
+        // The attachments live beside the database, the same state
+        // volume the transcript is durable on: a served id must not
+        // outlive its bytes.
+        let attachments = Arc::new(crate::attachments::AttachmentStore::open(
+            db.parent()
+                .ok_or_else(|| {
+                    ClawError::Backend("the database has no parent directory".to_owned())
+                })?
+                .join("attachments"),
+        )?);
         let memory = Arc::new(FileMemoryStore::new(config.memory_path()?)?);
         let bootstrap = Arc::new(crate::bootstrap::Bootstrap::new(config.bootstrap_dir()?)?);
         let settings = Arc::new(crate::settings::SettingsStore::open(&db)?);
@@ -262,6 +275,7 @@ impl Daemon {
             config.max_turn_steps,
             consents.clone(),
             bridge.clone(),
+            attachments.clone(),
         );
         let interactive_driver = Arc::new(
             Driver::new(
@@ -294,6 +308,7 @@ impl Daemon {
             accounts,
             consents,
             bridge,
+            attachments,
             config.token.clone(),
         );
 

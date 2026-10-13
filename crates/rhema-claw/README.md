@@ -66,6 +66,7 @@ GET  /v1/notifications?device=&since=   POST /v1/notifications/{id}/ack
 GET  /v1/consents                      the asks a turn is waiting on
 POST /v1/consents/{id}                 {"secret"} or {"grant": bool}
 DELETE /v1/consents/{id}               deny a pending ask
+GET  /v1/attachments/{id}              an attached file's bytes
 GET  /v1/providers                      the backend instances + the active pair
 PUT  /v1/providers/active               {"provider","model"?} — switch, persisted
 PUT  /v1/providers/{id}/credentials     add or replace an instance, persisted
@@ -135,7 +136,13 @@ for a UI catching up after a reload) — and the human answers through
 The secret travels once, from the answer into the agent accounts; the
 tool wakes with the account id, never the secret, and a denial or a
 15-minute silence comes back in-band so the turn can say so and move
-on.
+on. A turn can also hand files over: `attach_file` copies a workspace
+file (25 MiB cap, workspace-relative paths only) into the attachment
+store beside the database and puts an `attachment` card on the stream;
+the bytes are fetchable at `GET /v1/attachments/{id}` with the content
+type the file's name implies, so a screenshot, a diff, or a report
+reaches the chat as something to view or download rather than a
+truncated snippet.
 
 Stock OpenAI-speaking UIs point at the shim instead:
 

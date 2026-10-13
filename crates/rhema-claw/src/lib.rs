@@ -37,6 +37,8 @@
 //! - [`consents`] — the consent table and wake bridge: a running turn
 //!   asks the human (a secret to store, permission to act) and waits;
 //!   the chat surface answers through the consent routes
+//! - [`attachments`] — the attachment store and the `attach_file` tool:
+//!   workspace files handed to the human as fetchable cards
 //! - [`watch_tools`] — the agent's watch-management tool set
 //! - [`notify_tools`] — the `notify` tool: the queue a device polls
 //! - [`task_tools`] — `schedule_task`, `list_tasks`, `cancel_task`
@@ -56,6 +58,7 @@
 #![deny(missing_docs)]
 
 pub mod accounts_tools;
+pub mod attachments;
 pub mod backends;
 pub mod bootstrap;
 pub mod config;

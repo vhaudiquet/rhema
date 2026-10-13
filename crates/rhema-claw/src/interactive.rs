@@ -180,6 +180,9 @@ pub struct InteractiveHandler {
     /// The wake bridge between those routes and the tools waiting on
     /// their rows.
     bridge: Arc<crate::consents::WaitBridge>,
+    /// The attachment store the `attach_file` tool copies into and the
+    /// fetch route serves from.
+    attachments: Arc<crate::attachments::AttachmentStore>,
     /// How many tool rounds one turn may run before it is cut off — the
     /// config's runaway guard for an agent meant to work unattended; a
     /// follow-up message keeps going.
@@ -194,7 +197,7 @@ impl InteractiveHandler {
     /// v1-permissive — the shell is the point of a resident coding
     /// agent — installed once, since resolution is synchronous within a
     /// turn.
-    #[allow(clippy::too_many_arguments)] // twelve parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // thirteen parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -208,6 +211,7 @@ impl InteractiveHandler {
         max_turn_steps: u32,
         consents: Arc<crate::consents::ConsentStore>,
         bridge: Arc<crate::consents::WaitBridge>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(CodingTools::new(&workspace));
@@ -237,6 +241,7 @@ impl InteractiveHandler {
             notifications,
             consents,
             bridge,
+            attachments,
             max_turn_steps,
         }
     }
@@ -275,8 +280,9 @@ impl InteractiveHandler {
 
     /// The resolver chain one dispatch runs under: the coding toolset
     /// over the interactive workspace, then the resident toolsets. The
-    /// consent tools build per dispatch — their asks must name the
-    /// session that asked, and the handler serves every session.
+    /// consent and attachment tools build per dispatch — their asks and
+    /// cards must land on the session that asked, and the handler
+    /// serves every session.
     fn resolver(&self, key: &ResourceKey) -> Arc<ResolverChain> {
         Arc::new(ResolverChain::new(vec![
             self.tools.clone(),
@@ -292,6 +298,13 @@ impl InteractiveHandler {
             crate::consents::registry(
                 self.consents.clone(),
                 self.bridge.clone(),
+                self.hub.clone(),
+                key.clone(),
+            )
+            .resolver_for(&Allowlist::permissive()),
+            crate::attachments::registry(
+                self.attachments.clone(),
+                self.workspace.clone(),
                 self.hub.clone(),
                 key.clone(),
             )
@@ -614,6 +627,19 @@ mod tests {
         Arc::new(crate::consents::WaitBridge::new())
     }
 
+    /// A throwaway attachment store under one shared temp root: the
+    /// dispatch tests never read it back, and the store must outlive
+    /// the handlers it is handed to.
+    fn attachments() -> Arc<crate::attachments::AttachmentStore> {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let dir = std::env::temp_dir().join("rhema-claw-test-attachments");
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        });
+        Arc::new(crate::attachments::AttachmentStore::open(root).expect("store opens"))
+    }
+
     fn test_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<BackendRegistry> {
         Arc::new(
             BackendRegistry::new(vec![Backend::headless("mock", provider)], None)
@@ -692,6 +718,7 @@ mod tests {
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
+            attachments(),
         );
         let dispatcher = Arc::new(Dispatcher::new(
             DispatcherConfig {
@@ -767,6 +794,7 @@ mod tests {
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
+            attachments(),
         );
         let specs = handler.resolver(&Key::from("interactive:web")).specs();
         assert!(
@@ -1017,6 +1045,7 @@ mod tests {
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
+            attachments(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1101,6 +1130,7 @@ mod tests {
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
+            attachments(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1194,6 +1224,7 @@ mod tests {
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
+            attachments(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1263,6 +1294,7 @@ mod tests {
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
+            attachments(),
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1334,6 +1366,7 @@ mod tests {
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
+            attachments(),
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(

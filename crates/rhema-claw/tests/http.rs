@@ -1783,3 +1783,95 @@ async fn a_secret_ask_is_answered_over_the_consent_routes() {
         .expect("consents parses");
     assert!(consents["consents"].as_array().expect("a list").is_empty());
 }
+
+/// The attachment round-trip, over the wire: a turn calls
+/// `attach_file`, the stream carries the card, and the bytes are
+/// fetchable at the card's address with the content type its name
+/// implies.
+#[tokio::test]
+async fn an_attached_file_is_fetchable_over_its_route() {
+    let workspace = |dir: &tempfile::TempDir| {
+        let workspace = dir.path().join("workspaces").join("interactive");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        workspace
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        workspace(&dir).join("notes.md"),
+        "# notes\nthe thing broke\n",
+    )
+    .expect("the file writes");
+    let provider = Arc::new(MockProvider::new([
+        tool_call(
+            "c1",
+            "attach_file",
+            json!({"path": "notes.md", "caption": "look"}),
+        ),
+        reply("attached."),
+    ]));
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "hand me the notes"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+
+    read_until(&mut stream, &mut seen, r#""type":"attachment""#).await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    let marker = seen
+        .split(r#""type":"attachment""#)
+        .nth(1)
+        .and_then(|rest| rest.split(r#""id":""#).nth(1))
+        .and_then(|rest| rest.split('"').next())
+        .expect("the card names its id")
+        .to_owned();
+
+    let fetched = client
+        .get(format!("{base}/v1/attachments/{marker}"))
+        .send()
+        .await
+        .expect("the fetch goes out");
+    assert_eq!(
+        fetched.status(),
+        200,
+        "marker {marker:?}; tail {:?}",
+        &seen[seen.len().saturating_sub(300)..]
+    );
+    assert_eq!(
+        fetched
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("text/plain; charset=utf-8"),
+        "the content type follows the name"
+    );
+    assert_eq!(
+        fetched.bytes().await.expect("the bytes arrive"),
+        "# notes\nthe thing broke\n"
+    );
+
+    let missing = client
+        .get(format!("{base}/v1/attachments/att-nowhere"))
+        .send()
+        .await
+        .expect("the fetch goes out");
+    assert_eq!(missing.status(), 404);
+}

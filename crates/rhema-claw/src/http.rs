@@ -77,6 +77,9 @@ pub struct ClawState {
     consents: Arc<crate::consents::ConsentStore>,
     /// The wake bridge between those answers and the waiting tools.
     bridge: Arc<crate::consents::WaitBridge>,
+    /// The attachment store the `attach_file` tool copies into and the
+    /// fetch route serves from.
+    attachments: Arc<crate::attachments::AttachmentStore>,
     token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
@@ -88,8 +91,9 @@ impl ClawState {
     /// The state over the interactive dispatcher and its driver, the
     /// shared dispatch store, the watch table, the notification table,
     /// the bootstrap store, the event hub, the account store, the
-    /// consent table, and the configured bearer `token`.
-    #[allow(clippy::too_many_arguments)] // thirteen parts, each load-bearing
+    /// consent table, the attachment store, and the configured bearer
+    /// `token`.
+    #[allow(clippy::too_many_arguments)] // fourteen parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
@@ -104,6 +108,7 @@ impl ClawState {
         accounts: Arc<dyn rhema_identity::IdentityStore>,
         consents: Arc<crate::consents::ConsentStore>,
         bridge: Arc<crate::consents::WaitBridge>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
         token: Option<String>,
     ) -> Self {
         Self {
@@ -120,6 +125,7 @@ impl ClawState {
             accounts,
             consents,
             bridge,
+            attachments,
             token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
@@ -207,6 +213,7 @@ pub fn router(state: ClawState) -> Router {
             "/consents/{id}",
             post(consents_resolve).delete(consents_deny),
         )
+        .route("/attachments/{id}", get(attachment_get))
         .route("/ingest", post(ingest))
         .route("/notifications", get(notifications_list))
         .route("/notifications/{id}/ack", post(notifications_ack))
@@ -700,6 +707,35 @@ fn not_found_consent() -> Response {
         Json(json!({"error": "no such consent request"})),
     )
         .into_response()
+}
+
+/// `GET /v1/attachments/{id}`: a stored attachment's bytes, content
+/// type from its name. A transcript card's fetch path — the route
+/// serves a copy the turn made, so a workspace cleanup cannot break a
+/// link the transcript already carried.
+async fn attachment_get(State(state): State<ClawState>, Path(id): Path<String>) -> Response {
+    match state.attachments.get(&id) {
+        Ok(Some((stored, bytes))) => (
+            [
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    crate::attachments::content_type(&stored.name).to_owned(),
+                ),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    format!("inline; filename=\"{}\"", stored.name.replace('"', "")),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "no such attachment"})),
+        )
+            .into_response(),
+        Err(err) => internal_error(err.to_string()).into_response(),
+    }
 }
 
 /// The secret request's second half: store the credential into the

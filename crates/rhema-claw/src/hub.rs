@@ -119,6 +119,20 @@ pub enum TurnEvent {
         /// Whether it was granted.
         granted: bool,
     },
+    /// The agent attached a file from its workspace: the metadata a
+    /// card needs, the bytes behind `GET /v1/attachments/{id}`.
+    Attachment {
+        /// The attachment's id.
+        id: String,
+        /// The file's name, as the tool call named it.
+        name: String,
+        /// What the name implies: `image`, `code`, or `file`.
+        media: String,
+        /// The byte size.
+        size: u64,
+        /// One line about the file, when the tool call carried one.
+        caption: Option<String>,
+    },
 }
 
 impl TurnEvent {
@@ -134,6 +148,7 @@ impl TurnEvent {
             Self::TurnDone { .. } => "turn_done",
             Self::ConsentRequest { .. } => "consent_request",
             Self::ConsentResolved { .. } => "consent_resolved",
+            Self::Attachment { .. } => "attachment",
         }
     }
 }
