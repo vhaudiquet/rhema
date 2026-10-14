@@ -3,7 +3,10 @@
 //!
 //! Speaks the Messages REST API directly: one `POST {base}/v1/messages`
 //! with `stream: true` per exchange, the API key in the `x-api-key` header
-//! and the pinned `anthropic-version` header, the SSE event stream decoded
+//! (or `Authorization: Bearer` via `with_bearer_auth`, for the
+//! Anthropic-compatible endpoints such as Z.ai's GLM Coding Plan route,
+//! [`ZAI_BASE_URL`](provider::ZAI_BASE_URL)) and the pinned
+//! `anthropic-version` header, the SSE event stream decoded
 //! into rhema-core [`Event`](rhema_core::Event)s and assembled into a
 //! [`ModelOutput`](rhema_core::ModelOutput). `GET {base}/v1/models` lists
 //! the account's models as
@@ -51,5 +54,5 @@
 pub mod provider;
 pub mod wire;
 
-pub use provider::{ANTHROPIC_VERSION, AnthropicProvider, DEFAULT_BASE_URL};
+pub use provider::{ANTHROPIC_VERSION, AnthropicProvider, DEFAULT_BASE_URL, ZAI_BASE_URL};
 pub use wire::{ChunkAssembler, DEFAULT_MAX_TOKENS, MessagesRequest, StreamEvent};

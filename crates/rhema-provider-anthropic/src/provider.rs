@@ -3,7 +3,10 @@
 //!
 //! Auth is by API key in the `x-api-key` header — never a query parameter,
 //! so the key never lands in URLs or access logs — with the pinned
-//! `anthropic-version` header ([`ANTHROPIC_VERSION`]). Only the streaming
+//! `anthropic-version` header ([`ANTHROPIC_VERSION`]). Anthropic-compatible
+//! endpoints that authenticate by bearer token instead (Z.ai's GLM Coding
+//! Plan route, [`ZAI_BASE_URL`]) switch the header scheme with
+//! `with_bearer_auth`; the dialect is unchanged. Only the streaming
 //! dialect is spoken; every call streams and assembles. Transport failures
 //! map onto [`ProviderError`]: timeouts to [`ProviderError::Timeout`],
 //! other network failures to [`ProviderError::Other`], non-2xx responses
@@ -35,6 +38,16 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 /// The API version pin every request carries.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The Z.ai GLM Coding Plan's Anthropic-compatible base — the
+/// `with_base_url` target for that backend, which also switches the
+/// header scheme with `with_bearer_auth` (Z.ai documents token auth, not
+/// `x-api-key`).
+pub const ZAI_BASE_URL: &str = "https://api.z.ai/api/anthropic";
+
+/// The `User-Agent` every request carries: honest client identification,
+/// so the server side sees rhema as rhema — never another tool's mark.
+pub const USER_AGENT: &str = concat!("rhema/", env!("CARGO_PKG_VERSION"));
+
 /// The largest page size the models endpoint honors.
 const MODELS_PAGE_LIMIT: u32 = 1000;
 
@@ -42,6 +55,8 @@ const MODELS_PAGE_LIMIT: u32 = 1000;
 pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
+    /// Bearer instead of `x-api-key`, per `with_bearer_auth`.
+    bearer_auth: bool,
     http: reqwest::Client,
 }
 
@@ -56,19 +71,31 @@ impl AnthropicProvider {
             // Per-read stall guard for streams: bounds the silence between
             // chunks, never the total generation time.
             .read_timeout(Duration::from_secs(90))
+            .user_agent(USER_AGENT)
             .build()
             .expect("a client builder with only timeouts cannot fail");
         Self {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_owned(),
+            bearer_auth: false,
             http,
         }
     }
 
-    /// Overrides the base URL (trailing slashes trimmed) — for tests against
-    /// a mock server.
+    /// Overrides the base URL (trailing slashes trimmed) — for the
+    /// Anthropic-compatible endpoints and for tests against a mock
+    /// server.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into().trim_end_matches('/').to_owned();
+        self
+    }
+
+    /// Authenticates with `Authorization: Bearer <key>` instead of the
+    /// default `x-api-key` — the scheme the Anthropic-compatible
+    /// endpoints document (Z.ai's GLM Coding Plan route,
+    /// [`ZAI_BASE_URL`]). Everything else about the dialect is unchanged.
+    pub fn with_bearer_auth(mut self) -> Self {
+        self.bearer_auth = true;
         self
     }
 
@@ -109,12 +136,15 @@ impl AnthropicProvider {
         }
     }
 
-    /// Common headers of every request: the key in `x-api-key` and the
-    /// pinned API version.
+    /// Common headers of every request: the key by the configured scheme
+    /// and the pinned API version.
     fn authenticated(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        request
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", ANTHROPIC_VERSION)
+        let request = if self.bearer_auth {
+            request.header("Authorization", format!("Bearer {}", self.api_key))
+        } else {
+            request.header("x-api-key", &self.api_key)
+        };
+        request.header("anthropic-version", ANTHROPIC_VERSION)
     }
 }
 

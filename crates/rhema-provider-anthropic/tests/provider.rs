@@ -123,6 +123,44 @@ async fn streams_sse_into_events_and_an_assembled_output() {
 }
 
 #[tokio::test]
+async fn a_bearer_provider_authenticates_by_the_authorization_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .and(header("authorization", "Bearer test-key"))
+        .and(header("anthropic-version", "2023-06-01"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(event("message_stop", r#"{"type":"message_stop"}"#)),
+        )
+        .mount(&server)
+        .await;
+
+    let mut sink = Collector(vec![]);
+    provider(&server)
+        .with_bearer_auth()
+        .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
+        .await
+        .expect("the bearer-authenticated call succeeds");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 1);
+    // The bearer scheme replaces x-api-key, it does not join it.
+    assert!(received[0].headers.get("x-api-key").is_none());
+    // Every request identifies its client honestly.
+    let agent = received[0]
+        .headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(agent.starts_with("rhema/"), "got user-agent: {agent}");
+}
+
+#[tokio::test]
 async fn a_tool_use_reply_streams_call_events_and_multi_chunk_args() {
     let server = MockServer::start().await;
     let body = [
@@ -533,6 +571,13 @@ async fn list_models_follows_pagination_and_carries_the_auth_headers() {
             .and_then(|value| value.to_str().ok()),
         Some("2023-06-01")
     );
+    // And the honest client mark rides along.
+    let agent = received[0]
+        .headers
+        .get("user-agent")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(agent.starts_with("rhema/"), "got user-agent: {agent}");
 }
 
 #[tokio::test]
