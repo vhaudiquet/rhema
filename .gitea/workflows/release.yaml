@@ -93,42 +93,63 @@ jobs:
             "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
 
   release-binaries:
-    # The stable binary channel: the tag's tarball under its version,
+    # The stable binary channel: the tag's tarballs under its version,
     # and the root manifest repointed at it — the shape the installer
     # resolves. Built from the committed tree, so the vendored
     # crossterm ships in the binary and the installer keeps its
     # keyboard handling (the crates.io build is the one that waits).
+    # amd64 builds natively; arm64 and riscv64 cross-compile through
+    # cross — its target images carry the toolchains and OpenSSL that
+    # the C dependencies need (reqwest's native-tls, the bundled
+    # SQLite). Each leg uploads its tarball only; the manifest job that
+    # follows hashes the bytes as served, so the stable pointer never
+    # moves to a partial set. darwin-arm64 joins the same way once an
+    # osxcross image with a self-provided SDK exists (Apple's license
+    # wants the SDK taken from your own Xcode).
     if: ${{ !contains(gitea.ref_name, '-') }}
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: linux-amd64
+            rust_target: ""
+          - target: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu
+          - target: linux-riscv64
+            rust_target: riscv64gc-unknown-linux-gnu
     steps:
       - uses: https://gitea.com/actions/checkout@v4
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
+      # The cross legs build inside the target image: the host needs
+      # nothing of openssl or pkg-config there.
       - name: Install build and upload dependencies
+        if: matrix.rust_target == ''
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev awscli
 
-      - name: Build
-        run: cargo build --release -p rhema-code
+      - name: Install upload dependencies
+        if: matrix.rust_target != ''
+        run: sudo apt-get update && sudo apt-get install -y awscli
 
-      - name: Package the tarball and the root manifest
+      - name: Install cross
+        if: matrix.rust_target != ''
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          mkdir -p "dist/$version"
-          cp target/release/rhema "dist/$version/rhema"
-          tar -czf "dist/$version/rhema-linux-amd64.tar.gz" -C "dist/$version" rhema
-          (cd "dist/$version" && sha256sum rhema-linux-amd64.tar.gz > checksums.txt)
-          sha="$(sha256sum "dist/$version/rhema-linux-amd64.tar.gz" | awk '{print $1}')"
-          # One binary per line, on the same line as its name: the
-          # installer parses the manifest with line-wise sed, so
-          # reformatting this through json.dumps breaks every install.
-          {
-            printf '{\n  "stable": "%s",\n  "binaries": {\n' "$version"
-            printf '    "rhema-linux-amd64": {"url": "https://get.rhema.rs/%s/rhema-linux-amd64.tar.gz", "sha256": "%s"}\n' "$version" "$sha"
-            printf '  }\n}\n'
-          } > dist/manifest.json
+          curl -fsSL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz \
+            | sudo tar -xz -C /usr/local/bin
+          cross --version
 
-      - name: Upload to the distribution bucket
+      - name: Build
+        run: |
+          if [ -n "${{ matrix.rust_target }}" ]; then
+            cross build --release -p rhema-code --target ${{ matrix.rust_target }}
+            cp "target/${{ matrix.rust_target }}/release/rhema" dist-rhema
+          else
+            cargo build --release -p rhema-code
+            cp target/release/rhema dist-rhema
+          fi
+
+      - name: Upload the tarball
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
@@ -137,10 +158,53 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           endpoint="${{ secrets.RHEMA_DIST_ENDPOINT }}"
-          aws s3api put-bucket-website --bucket get --endpoint-url "$endpoint" \
-            --website-configuration '{"IndexDocument":{"Suffix":"index.html"}}'
-          aws s3 cp "dist/$version/rhema-linux-amd64.tar.gz" "s3://get/$version/" --endpoint-url "$endpoint"
-          aws s3 cp "dist/$version/checksums.txt" "s3://get/$version/" --endpoint-url "$endpoint"
+          mkdir -p "dist/$version"
+          mv dist-rhema "dist/$version/rhema"
+          tar -czf "dist/$version/rhema-${{ matrix.target }}.tar.gz" -C "dist/$version" rhema
+          aws s3 cp "dist/$version/rhema-${{ matrix.target }}.tar.gz" \
+            "s3://get/$version/" --endpoint-url "$endpoint"
+
+  release-manifest:
+    # Hashes the tarballs as served (not as built), writes the version
+    # dir's checksums.txt and the root manifest with the stable pointer
+    # repointed — only reached when every leg above succeeded.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    needs: release-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install upload dependencies
+        run: sudo apt-get update && sudo apt-get install -y awscli
+
+      - name: Publish the channel manifest
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          endpoint="${{ secrets.RHEMA_DIST_ENDPOINT }}"
+          mkdir -p dist
+          for t in linux-amd64 linux-arm64 linux-riscv64; do
+            curl -fsSL "https://get.rhema.rs/$version/rhema-$t.tar.gz" -o "dist/rhema-$t.tar.gz"
+          done
+          (cd dist && sha256sum rhema-*.tar.gz > checksums.txt)
+          # One binary per line, on the same line as its name: the
+          # installer parses the manifest with line-wise sed, so
+          # reformatting this through json.dumps breaks every install.
+          {
+            printf '{\n  "stable": "%s",\n  "binaries": {\n' "$version"
+            first=yes
+            for t in linux-amd64 linux-arm64 linux-riscv64; do
+              sha="$(sha256sum "dist/rhema-$t.tar.gz" | awk '{print $1}')"
+              [ "$first" = yes ] || printf ',\n'
+              first=no
+              printf '    "rhema-%s": {"url": "https://get.rhema.rs/%s/rhema-%s.tar.gz", "sha256": "%s"}\n' \
+                "$t" "$version" "$t" "$sha"
+            done
+            printf '  }\n}\n'
+          } > dist/manifest.json
+          aws s3 cp dist/checksums.txt "s3://get/$version/" --endpoint-url "$endpoint"
           aws s3 cp dist/manifest.json "s3://get/manifest.json" --endpoint-url "$endpoint"
 
   release-snap:
