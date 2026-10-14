@@ -5,7 +5,8 @@
 //! `add` pins a name to a workspace directory, `drop` removes it,
 //! `run` enqueues a job (a `CodingAgent` turn over the instance's
 //! workspace, resumed from the instance's last coding session unless
-//! `fresh`), and `status` reports instances and jobs. The run is
+//! `fresh`), `list` names the instances, and `status` reports jobs.
+//! The run is
 //! **async by design**: a coding job is minutes of tool rounds, so the
 //! call returns the job id in one model round, the jobs dispatcher
 //! runs the turn off the chat turn ([`crate::jobs`]), and the final
@@ -94,6 +95,31 @@ impl CodingAgent {
         .to_string())
     }
 
+    /// The instances: the audit surface for which checkouts a coding
+    /// agent may drive, each with its live job at a glance.
+    fn list(&self) -> Result<String, String> {
+        let instances = self.store.instances().map_err(in_band)?;
+        let listed = instances
+            .iter()
+            .map(|instance| {
+                let live = self
+                    .store
+                    .live_job(&instance.name)
+                    .ok()
+                    .flatten()
+                    .map(|job| json!({"id": job.id, "status": job.status.as_str()}));
+                json!({
+                    "name": instance.name,
+                    "path": instance.path,
+                    "has_session": instance.session.is_some(),
+                    "live_job": live,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(json!({ "instances": listed }).to_string())
+    }
+
+    /// The jobs: every recent one, one instance's, or one job's result.
     fn status(&self, instance: Option<&str>, job: Option<i64>) -> Result<String, String> {
         if let Some(id) = job {
             let record = self
@@ -116,24 +142,11 @@ impl CodingAgent {
                 .to_string())
             }
             None => {
-                let instances = self.store.instances().map_err(in_band)?;
-                let listed =
-                    instances
-                        .iter()
-                        .map(|instance| {
-                            let live =
-                                self.store.live_job(&instance.name).ok().flatten().map(
-                                    |job| json!({"id": job.id, "status": job.status.as_str()}),
-                                );
-                            json!({
-                                "name": instance.name,
-                                "path": instance.path,
-                                "has_session": instance.session.is_some(),
-                                "live_job": live,
-                            })
-                        })
-                        .collect::<Vec<_>>();
-                Ok(json!({ "instances": listed }).to_string())
+                let jobs = self.store.recent(20).map_err(in_band)?;
+                Ok(json!({
+                    "jobs": jobs.iter().map(job_json).collect::<Vec<_>>(),
+                })
+                .to_string())
             }
         }
     }
@@ -162,17 +175,19 @@ impl Tool for CodingAgent {
             "Drive a coding agent — a full rhema-coding-agent session with \
              its own shell — in a named workspace, off this chat. `add` \
              pins a name to an existing directory; `drop` removes it; \
-             `run` enqueues a job whose turn runs in the background \
-             (minutes, not seconds): the answer is the job id, the final \
-             text reaches `status` and the user's notifications, and the \
-             instance's coding session carries over to the next run \
-             unless `fresh`. `status` lists instances, an instance's \
-             jobs, or one job's result. One live job per instance.",
+             `list` names the instances (the workspaces a coding agent \
+             may drive); `run` enqueues a job whose turn runs in the \
+             background (minutes, not seconds): the answer is the job \
+             id, the final text reaches `status` and the user's \
+             notifications, and the instance's coding session carries \
+             over to the next run unless `fresh`. `status` reads jobs — \
+             every recent one, one instance's, or one job's result. One \
+             live job per instance.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": { "type": "string",
-                        "enum": ["add", "drop", "run", "status"],
+                        "enum": ["add", "drop", "run", "list", "status"],
                         "description": "Which operation." },
                     "name": { "type": "string",
                         "description": "add/drop: the instance's name." },
@@ -208,9 +223,10 @@ impl Tool for CodingAgent {
                 required(&args.prompt, "run needs `prompt`")?,
                 args.fresh.unwrap_or(false),
             ),
+            "list" => self.list(),
             "status" => self.status(args.instance.as_deref(), args.job),
             other => Err(format!(
-                "unknown action {other:?}; one of add, drop, run, status"
+                "unknown action {other:?}; one of add, drop, run, list, status"
             )),
         }
     }
@@ -282,9 +298,12 @@ mod tests {
         .unwrap();
         assert!(run.contains("\"status\":\"queued\""), "{run}");
 
-        let listed = call(&resolver, json!({"action": "status"})).await.unwrap();
+        let listed = call(&resolver, json!({"action": "list"})).await.unwrap();
         assert!(listed.contains("rhema"), "{listed}");
         assert!(listed.contains("live_job"), "{listed}");
+
+        let recent = call(&resolver, json!({"action": "status"})).await.unwrap();
+        assert!(recent.contains("fix the lint"), "{recent}");
 
         let status = call(&resolver, json!({"action": "status", "instance": "rhema"}))
             .await

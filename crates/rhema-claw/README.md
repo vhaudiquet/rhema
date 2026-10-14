@@ -36,7 +36,10 @@ budget — in a named workspace, with one tool and an `action` argument:
   with forge-style leases, the same commit-before-execute discipline.
   The instance's coding session carries to the next run unless
   `fresh`; the final text lands in the job row and the user's
-  notifications, and `status` reads instances, jobs, or one result.
+  notifications.
+- `list` names the instances, each with its live job at a glance;
+  `status` reads jobs — every recent one, one instance's, or one
+  job's result.
 - One live job per instance: two coding agents in one workspace is
   two agents editing the same files. Across instances, jobs run in
   parallel.

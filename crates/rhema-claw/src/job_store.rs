@@ -348,6 +348,19 @@ impl CodingJobStore {
             .map_err(JobStoreError::from)
     }
 
+    /// The most recent jobs across every instance, newest first — the
+    /// no-argument `status` answer.
+    pub fn recent(&self, limit: u32) -> Result<Vec<JobRecord>, JobStoreError> {
+        let conn = self.lock();
+        let mut statement = conn.prepare(
+            "SELECT id, instance, prompt, status, result, created_at_millis, updated_at_millis
+             FROM coding_jobs ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(params![limit], row_job)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(JobStoreError::from)
+    }
+
     /// The queued rows, oldest first — the jobs source's detect pass.
     pub fn queued(&self) -> Result<Vec<JobRecord>, JobStoreError> {
         let conn = self.lock();
