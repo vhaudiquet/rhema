@@ -104,6 +104,7 @@ const KIND_LABELS: Record<string, string> = {
   'llama-cpp': 'llama.cpp server',
   openai: 'OpenAI',
   openrouter: 'OpenRouter',
+  zai: 'Z.ai (GLM Coding Plan)',
 }
 
 function kindLabel(kind: string): string {
