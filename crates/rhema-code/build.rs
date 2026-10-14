@@ -40,6 +40,20 @@ fn git(args: &[&str]) -> Option<String> {
 }
 
 fn main() {
+    // The label describes git state, so git activity must invalidate
+    // the cached build script — without these, a label outlives the
+    // tree it named (a commit touching nothing in the crate would
+    // leave the previous sha standing). HEAD covers checkouts; the
+    // index covers commits, adds, and status's stat refreshes. The
+    // sources and manifest keep the default freshness. In packaged
+    // builds the .git paths do not exist and the queries below answer
+    // None anyway.
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=../../.git/HEAD");
+    println!("cargo:rerun-if-changed=../../.git/index");
+
     let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by cargo");
     let label = match git(&["rev-parse", "--short=8", "HEAD"]) {
         Some(sha) => {
@@ -50,10 +64,14 @@ fn main() {
             if tag.as_deref() == Some(format!("v{pkg}").as_str()) && !dirty {
                 // The release: a clean checkout at this version's tag.
                 pkg
+            } else if dirty {
+                // Before the channel check: a dirty tree is never an
+                // edge build — the CI legs are always clean — and a
+                // stray channel variable in a developer's shell must
+                // not rename local changes.
+                format!("{pkg}+{sha}.dirty")
             } else if std::env::var("RHEMA_BUILD_CHANNEL").as_deref() == Ok("edge") {
                 format!("{pkg}-edge.{sha}")
-            } else if dirty {
-                format!("{pkg}+{sha}.dirty")
             } else {
                 format!("{pkg}+{sha}")
             }
