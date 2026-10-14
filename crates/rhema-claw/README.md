@@ -209,7 +209,12 @@ phone app, no CORS anywhere.
 
 The image is the daemon plus `bash` and `git` (the agent's shell is
 load-bearing); the chart runs exactly one replica, the claw is
-single-node by design: one SQLite store, one dispatcher. The
+single-node by design: one SQLite store, one dispatcher. Single-node
+is what makes restarts instant: at boot the daemon releases every
+lease the previous process left — outright, not at the dead lease's
+TTL — so a turn an update cut mid-flight answers its next message
+instead of stalling behind a ghost (the committed tool call revives
+at the top of that next dispatch). The
 store and workspaces live on a PVC, `claw.yaml` in a ConfigMap (db and
 workspace paths are pinned to the mounted volume), credentials in a
 Secret, and the bearer token is the `token` value, required since the

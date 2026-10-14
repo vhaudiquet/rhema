@@ -126,6 +126,8 @@ fn interactive_dispatch() -> DispatcherConfig {
 pub struct Daemon {
     sources: Vec<ForgeSource>,
     scheduler: TaskScheduler,
+    forge_dispatcher: Arc<Dispatcher>,
+    interactive_dispatcher: Arc<Dispatcher>,
     forge_driver: Arc<Driver>,
     interactive_driver: Arc<Driver>,
     poll_interval: Duration,
@@ -224,7 +226,7 @@ impl Daemon {
         // up a resident event (it would fail it, and consume it), and a
         // resident pass must never pick up a thread's.
         let forge_driver = Arc::new(
-            Driver::new(forge_dispatcher, Arc::new(forge_handler))
+            Driver::new(forge_dispatcher.clone(), Arc::new(forge_handler))
                 .with_holder("rhema-claw")
                 .owning(Arc::new(|key: &ResourceKey| {
                     !crate::interactive::is_resident_key(key.as_str())
@@ -315,7 +317,7 @@ impl Daemon {
         );
 
         let http = ClawState::new(
-            interactive_dispatcher,
+            interactive_dispatcher.clone(),
             interactive_driver.clone(),
             store,
             watches,
@@ -336,6 +338,8 @@ impl Daemon {
         Ok(Self {
             sources,
             scheduler,
+            forge_dispatcher,
+            interactive_dispatcher,
             forge_driver,
             interactive_driver,
             // A zero poll interval would spin detect passes against the
@@ -363,12 +367,18 @@ impl Daemon {
         &self.registry
     }
 
-    /// Startup recovery (RSD spec §7): sweeps leases a dead process left
-    /// behind, on both dispatchers. Idempotent; called before the first
-    /// pass.
+    /// Startup recovery: releases the leases the previous process left
+    /// behind — all of them, now, not at the dead lease's TTL (an hour
+    /// on the resident dispatcher), because the claw is single-node:
+    /// the only lease holder over this file is the process that just
+    /// died, and a key it held mid-turn must answer its next message
+    /// instead of stalling behind a ghost. A turn the restart cut
+    /// resumes then: the committed-but-unanswered call revives at the
+    /// top of the next dispatch (safe tools re-run, the rest report
+    /// interrupted). Idempotent; called before the first pass.
     pub async fn bootstrap(&self) -> Result<(), DispatchError> {
-        self.forge_driver.bootstrap().await?;
-        self.interactive_driver.bootstrap().await
+        self.forge_dispatcher.recover_all()?;
+        self.interactive_dispatcher.recover_all()
     }
 
     /// One pass: every source detects (due tasks first — a reminder is

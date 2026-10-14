@@ -2242,3 +2242,78 @@ async fn a_scheduled_task_wakes_the_chat_session_it_names() {
         "{notifications}"
     );
 }
+
+/// The durability story, over the wire: a daemon restart cut a turn
+/// mid-flight, leaving the dead process's lease on the key. At boot the
+/// daemon releases it outright — single-node means the only lease
+/// holder was the process that died — so the key answers its next
+/// message instead of stalling behind a ghost for the dead lease's
+/// remaining TTL.
+#[tokio::test]
+async fn a_restart_releases_a_dead_lease_and_the_key_answers() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("dispatch.db");
+    {
+        // The old process, mid-turn: it holds a fresh lease on the chat
+        // session — hours left, the turn never released it.
+        use rhema_rsd::DispatcherConfig;
+        let store = Arc::new(SqliteStore::open(&db).expect("the store opens"));
+        let dispatcher = rhema_rsd::Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                lease_ttl_millis: 3_600_000,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            store,
+        );
+        let (lease, _) = dispatcher
+            .acquire(ResourceKey::from("interactive:web"), "the-old-process")
+            .expect("the old process takes its lease");
+        assert_eq!(lease.holder, "the-old-process");
+        // ...and dies here. The lease outlives it in the store.
+    }
+
+    // The new process boots, recovers, and serves.
+    let provider = Arc::new(MockProvider::new([reply("back, and whole.")]));
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    daemon.bootstrap().await.expect("recovery runs");
+
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    // The key reads idle, not leased: the ghost lease is gone.
+    let sessions: Value = client
+        .get(format!("{base}/v1/sessions"))
+        .send()
+        .await
+        .expect("sessions reads")
+        .json()
+        .await
+        .expect("sessions parses");
+    assert_eq!(sessions[0]["key"], "interactive:web");
+    assert_eq!(sessions[0]["state"], "idle", "{sessions}");
+
+    // The next message dispatches instead of queueing behind the ghost.
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "are you back?"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+    read_until(&mut stream, &mut seen, "back, and whole.").await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+}
