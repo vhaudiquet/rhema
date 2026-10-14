@@ -423,10 +423,14 @@ pub struct Config {
     pub last_profile_by_workspace: BTreeMap<String, String>,
 }
 
+/// The profile the flags and stores fall back to: fresh setups seed it,
+/// and every `unwrap_or` fallback resolves to it. One name, one owner.
+pub const DEFAULT_PROFILE: &str = "personal";
+
 /// The profiles on fresh setups and files that omit the key.
 fn default_profiles() -> BTreeMap<String, Profile> {
     BTreeMap::from([
-        ("personal".to_owned(), Profile::default()),
+        (DEFAULT_PROFILE.to_owned(), Profile::default()),
         ("work".to_owned(), Profile::default()),
     ])
 }
@@ -454,7 +458,7 @@ impl Config {
     /// says "no provider; use /login").
     pub fn effective(&self, flag: Option<&str>) -> Profile {
         self.profiles
-            .get(flag.unwrap_or("personal"))
+            .get(flag.unwrap_or(DEFAULT_PROFILE))
             .cloned()
             .unwrap_or_default()
     }
@@ -464,7 +468,7 @@ impl Config {
     pub fn set_for_profile(&mut self, flag: Option<&str>, apply: impl FnOnce(&mut Profile)) {
         let name = flag
             .map(str::to_owned)
-            .unwrap_or_else(|| "personal".to_owned());
+            .unwrap_or_else(|| DEFAULT_PROFILE.to_owned());
         apply(self.profiles.entry(name).or_default());
     }
 

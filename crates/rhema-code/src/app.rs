@@ -767,7 +767,7 @@ impl App {
                     .options
                     .profile
                     .clone()
-                    .unwrap_or_else(|| "personal".to_owned()),
+                    .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned()),
             ),
             options: setup.options,
             home: std::env::var("HOME").ok().map(PathBuf::from),
@@ -879,7 +879,9 @@ impl App {
         let mut settings = SettingsScreen::new(purpose);
         settings.theme_dark = options.theme == crate::args::ThemeKind::Dark;
         settings.icons_nerd = options.icons == crate::icons::Flavor::Nerd;
-        settings.profile = session_profile.unwrap_or("personal").to_owned();
+        settings.profile = session_profile
+            .unwrap_or(rhema_config::DEFAULT_PROFILE)
+            .to_owned();
         settings.stored = effective;
         settings.skills = skills;
         settings.skills_global_dir = global_skills.map(|dir| dir.to_string_lossy().into_owned());
@@ -2430,7 +2432,7 @@ pub(crate) fn startup_profile(
     workspace: &Path,
     secrets: Option<&dyn rhema_config::secrets::SecretStore>,
 ) -> String {
-    let default = "personal";
+    let default = rhema_config::DEFAULT_PROFILE;
     let ready = |name: &str| {
         config
             .profiles
