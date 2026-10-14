@@ -45,9 +45,11 @@
 //! - Usage merges per field: `message_start`'s nested `usage` carries the
 //!   input-token count, `message_delta`'s the final output-token count.
 //!   The totals normalize to the inclusive convention the other adapters
-//!   use: `input_tokens` counts the uncached input plus the cache-write
-//!   subset (writes bill near the full input price), and
-//!   `cache_read_input_tokens` maps to cached tokens (0 when absent).
+//!   use: `input_tokens` counts the whole prompt — the uncached input
+//!   plus both cache subsets (writes bill near the full input price,
+//!   reads are the cached subset) — and `cache_read_input_tokens` maps
+//!   to cached tokens (0 when absent). A prompt served whole from cache
+//!   reports its whole size, never just the new tokens.
 //! - Stop reasons: `end_turn` -> EndTurn, `tool_use` -> ToolUse,
 //!   `max_tokens` -> MaxTokens, `stop_sequence` -> StopSequence, anything
 //!   else -> Other. Anthropic's reason is authoritative — `tool_use` rides
@@ -945,14 +947,24 @@ impl ChunkAssembler {
 /// the value a previous frame set.
 fn merge_usage(usage: &mut Usage, wire: &WireUsage) {
     // The input total is inclusive: the API's own input_tokens count
-    // excludes both cache subsets, so the write subset folds in (writes
-    // bill near the full input price) and reads stay the cached subset.
-    // That keeps every downstream consumer — the context footprint and
-    // the cost math — on the inclusive convention the other adapters use.
-    let mut input = wire.input_tokens;
-    if let Some(writes) = wire.cache_creation_input_tokens {
-        input = Some(input.unwrap_or(0) + writes);
-    }
+    // excludes both cache subsets, so both fold in — the writes (which
+    // bill near the full input price) and the reads (which the cached
+    // subset carries, disjoint from the rest). That keeps every
+    // downstream consumer — the context footprint and the cost math —
+    // on the inclusive convention the other adapters use: input is the
+    // whole prompt, cached the part of it served from cache. A prompt
+    // fully served from cache reports its whole size, never just the
+    // new tokens.
+    let input = match (
+        wire.input_tokens,
+        wire.cache_creation_input_tokens,
+        wire.cache_read_input_tokens,
+    ) {
+        (None, None, None) => None,
+        (input, writes, reads) => {
+            Some(input.unwrap_or(0) + writes.unwrap_or(0) + reads.unwrap_or(0))
+        }
+    };
     if let Some(input) = input {
         usage.input_tokens = input;
     }
@@ -1403,18 +1415,52 @@ mod tests {
             }
         );
         assert_eq!(out.stop_reason, StopReason::EndTurn);
-        // input from message_start, output from message_delta, cache from
-        // message_start: the frames carry disjoint accounting.
+        // input from message_start (plus its cache reads: the whole
+        // prompt), output from message_delta, cache from message_start:
+        // the frames carry disjoint accounting.
         assert_eq!(
             out.usage,
             Usage {
-                input_tokens: 10,
+                input_tokens: 13,
                 output_tokens: 2,
                 cached_input_tokens: 3,
             }
         );
         // Pings and block/message stops emit nothing.
         assert_eq!(sink.0, vec!["TextDelta(\"Hel\")", "TextDelta(\"lo\")"]);
+    }
+
+    #[test]
+    fn a_cached_prompt_reports_its_whole_size() {
+        // The prefix served from cache rides cache_read_input_tokens,
+        // outside the API's own input_tokens. The normalized total must
+        // still describe the whole prompt — a gauge reading the raw
+        // input_tokens alone collapses to the new tokens once the
+        // prefix is cached.
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            r#"{"type":"message_start","message":{"id":"msg_3","type":"message","role":"assistant","usage":{"input_tokens":149,"output_tokens":1,"cache_creation_input_tokens":2000,"cache_read_input_tokens":20000}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            assembler
+                .push(event(payload), &mut sink)
+                .expect("event feeds");
+        }
+        let out = assembler.finish();
+
+        assert_eq!(
+            out.usage,
+            Usage {
+                input_tokens: 22_149,
+                output_tokens: 2,
+                cached_input_tokens: 20_000,
+            }
+        );
     }
 
     #[test]
