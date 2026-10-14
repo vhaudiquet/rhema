@@ -102,9 +102,11 @@ pub enum Backend {
 }
 
 impl Backend {
-    /// The provider implementation for this backend.
+    /// The provider implementation for this backend: the raw adapter
+    /// under the shared retry, so a transient failure costs a pause
+    /// instead of the turn (see `rhema_provider::Retrying`).
     pub fn provider(&self) -> Arc<dyn ModelProvider> {
-        match self {
+        let raw: Arc<dyn ModelProvider> = match self {
             Backend::Google { api_key } => {
                 Arc::new(rhema_provider_google::GoogleProvider::new(api_key.clone()))
             }
@@ -144,7 +146,8 @@ impl Backend {
             Backend::Copilot { api_key } => Arc::new(rhema_provider_copilot::CopilotProvider::new(
                 api_key.clone(),
             )),
-        }
+        };
+        Arc::new(rhema_provider::Retrying::new(raw))
     }
 
     /// The Coding Plan provider: the stored base URL when an instance
