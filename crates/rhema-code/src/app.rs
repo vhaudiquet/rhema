@@ -644,6 +644,9 @@ pub struct App {
     /// The clickable rects of the settings screen, re-registered by
     /// every frame's render and matched against click positions.
     pub settings_hits: Vec<(ratatui::layout::Rect, SettingsHit)>,
+    /// The transcript render's row cache: wrapped rows per block,
+    /// invalided by width, theme, and the transcript's watermark.
+    pub(crate) transcript_cache: crate::ui::WrapCache,
 }
 
 /// The lifecycle state of the turn the UI thread handed to a task. The
@@ -867,6 +870,7 @@ impl App {
             should_quit: false,
             chat: ChatState::new(),
             settings_hits: Vec::new(),
+            transcript_cache: crate::ui::WrapCache::new(),
         })
     }
 

@@ -46,15 +46,44 @@ pub enum Line {
 }
 
 /// The transcript: lines in stream order.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Clone)]
 pub struct Transcript {
     lines: Vec<Line>,
+    /// The smallest index of any line whose content changed after the
+    /// line was created — a streamed tail extending it, an argument
+    /// fragment landing on it, a result marking it. Appends do not
+    /// count. `usize::MAX` for a transcript grown only by appends, where
+    /// every existing line is untouchable; `0` after a wholesale
+    /// rebuild, where no line is trusted. The transcript render caches
+    /// wrapped rows per block, and this is what decides a block still
+    /// holds.
+    dirty_from: usize,
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Self {
+            lines: Vec::new(),
+            dirty_from: usize::MAX,
+        }
+    }
 }
 
 impl Transcript {
     /// An empty transcript.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The smallest index of any line mutated in place since creation
+    /// (`usize::MAX` when none was): the render cache's validity bound.
+    pub fn dirty_from(&self) -> usize {
+        self.dirty_from
+    }
+
+    /// Records that the line at `index` changed in place.
+    fn mutated(&mut self, index: usize) {
+        self.dirty_from = self.dirty_from.min(index);
     }
 
     /// Rebuilds the transcript from a session history — the resume /
@@ -114,6 +143,9 @@ impl Transcript {
                 Role::System => {}
             }
         }
+        // A rebuilt transcript shares no history with the cache's
+        // blocks, whatever their shapes say.
+        transcript.dirty_from = 0;
         transcript
     }
 
@@ -172,16 +204,19 @@ impl Transcript {
                     Some(Line::ToolCall { id: line_id, .. }) if *line_id == *id
                 );
                 let target = if last_is_target {
-                    self.lines.last_mut()
+                    Some(self.lines.len() - 1)
                 } else {
-                    self.lines.iter_mut().rev().find(|line| {
+                    self.lines.iter().rposition(|line| {
                         matches!(line, Line::ToolCall {
                             id: line_id, ok: None, ..
                         } if *line_id == *id)
                     })
                 };
-                if let Some(Line::ToolCall { args, .. }) = target {
-                    args.push_str(delta);
+                if let Some(index) = target {
+                    if let Some(Line::ToolCall { args, .. }) = self.lines.get_mut(index) {
+                        args.push_str(delta);
+                        self.mutated(index);
+                    }
                 }
             }
             OwnedEvent::ToolResult {
@@ -198,7 +233,7 @@ impl Transcript {
                     )
                 });
                 let target = if has_call {
-                    self.lines.iter_mut().rev().find(|line| {
+                    self.lines.iter().rposition(|line| {
                         matches!(
                             line,
                             Line::ToolCall { id: line_id, ok: None, .. }
@@ -207,18 +242,20 @@ impl Transcript {
                     })
                 } else {
                     self.lines
-                        .iter_mut()
-                        .rev()
-                        .find(|line| matches!(line, Line::ToolCall { ok: None, .. }))
+                        .iter()
+                        .rposition(|line| matches!(line, Line::ToolCall { ok: None, .. }))
                 };
-                if let Some(Line::ToolCall {
-                    ok,
-                    code: line_code,
-                    ..
-                }) = target
-                {
-                    *ok = Some(!*is_error);
-                    *line_code = *code;
+                if let Some(index) = target {
+                    if let Some(Line::ToolCall {
+                        ok,
+                        code: line_code,
+                        ..
+                    }) = self.lines.get_mut(index)
+                    {
+                        *ok = Some(!*is_error);
+                        *line_code = *code;
+                        self.mutated(index);
+                    }
                 }
             }
             OwnedEvent::StepEnd { .. } => {}
@@ -238,6 +275,7 @@ impl Transcript {
             }
             if let Some(Line::Assistant(text)) = self.lines.last_mut() {
                 text.push_str(segment);
+                self.mutated(self.lines.len() - 1);
             } else {
                 self.lines.push(Line::Assistant(segment.to_owned()));
             }

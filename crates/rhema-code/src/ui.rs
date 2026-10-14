@@ -15,6 +15,121 @@ use crate::transcript::{self, pretty_args};
 use rhema_provider::ModelCard;
 use std::path::Path;
 
+/// One renderable unit of the transcript, the granularity the wrap
+/// cache works at: one markdown response, one prompt, a tight run of
+/// tool calls, a notice, or a system markdown block. Partitioning is
+/// prefix-stable — appending lines extends the last block or adds one,
+/// never rejoins an earlier one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    /// Consecutive assistant lines: one markdown response, streaming or
+    /// done.
+    Response,
+    /// A user prompt.
+    User,
+    /// A maximal run of tool-call lines; they sit tight together.
+    ToolRun,
+    /// A UI notice.
+    Notice,
+    /// A system-generated markdown block.
+    Markdown,
+}
+
+/// A block: a half-open line range and its kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TranscriptBlock {
+    start: usize,
+    end: usize,
+    kind: Kind,
+}
+
+/// Partitions the transcript lines into blocks. A whitespace-only
+/// assistant line with no response behind it is noise — models emit
+/// empty text parts between tool calls — and belongs to no block.
+fn partition(lines: &[transcript::Line]) -> Vec<TranscriptBlock> {
+    let mut blocks = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        let kind = match &lines[index] {
+            transcript::Line::Assistant(text) => {
+                if text.trim().is_empty() {
+                    index += 1;
+                    continue;
+                }
+                Kind::Response
+            }
+            transcript::Line::User(_) => Kind::User,
+            transcript::Line::ToolCall { .. } => Kind::ToolRun,
+            transcript::Line::Notice(_) => Kind::Notice,
+            transcript::Line::Markdown(_) => Kind::Markdown,
+        };
+        let start = index;
+        index += 1;
+        // A response runs while the lines stay assistant text. A tool
+        // run also absorbs the model's empty text parts between calls:
+        // they render as nothing and never end a run.
+        match kind {
+            Kind::Response => {
+                while index < lines.len() && matches!(lines[index], transcript::Line::Assistant(_))
+                {
+                    index += 1;
+                }
+            }
+            Kind::ToolRun => {
+                while index < lines.len()
+                    && match &lines[index] {
+                        transcript::Line::ToolCall { .. } => true,
+                        transcript::Line::Assistant(text) => text.trim().is_empty(),
+                        _ => false,
+                    }
+                {
+                    index += 1;
+                }
+            }
+            _ => {}
+        }
+        blocks.push(TranscriptBlock {
+            start,
+            end: index,
+            kind,
+        });
+    }
+    blocks
+}
+
+/// The transcript render's cache: the wrapped rows of whole blocks. A
+/// cached block still holds while its line range and first line are
+/// unchanged and no line inside mutated since it was drawn; the prefix
+/// of blocks that holds reuses its rows instead of re-parsing markdown
+/// and re-wrapping every frame.
+#[derive(Debug, Default)]
+pub(crate) struct WrapCache {
+    /// The width the rows were wrapped at.
+    width: usize,
+    /// The theme they were styled with.
+    theme: Option<&'static Theme>,
+    /// One entry per cached block, in order.
+    blocks: Vec<CachedBlock>,
+}
+
+impl WrapCache {
+    /// An empty cache: the first frame renders and fills it.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// One cached block: its line range, its first line (the wholesale-
+/// rebuild check — a new transcript can repeat a shape but not a
+/// conversation), and its wrapped rows.
+#[derive(Debug)]
+struct CachedBlock {
+    start: usize,
+    end: usize,
+    first: transcript::Line,
+    rows: Vec<Line<'static>>,
+}
+
 /// Renders one frame.
 pub fn render(app: &mut App, frame: &mut Frame) {
     let theme = app.theme;
@@ -817,7 +932,7 @@ fn settings_page(
         }
     }
 }
-fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
+fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &'static Theme) {
     let inner = Rect {
         x: area.x + 1,
         width: area.width.saturating_sub(2),
@@ -827,10 +942,41 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
     // Wrapping is done here rather than by Paragraph so the row count is
     // exact: the scroll offset is expressed in rendered rows.
     let width = inner.width.saturating_sub(2) as usize;
-    // The banner is the conversation's first content, not chrome: it
-    // scrolls away with the history and shares the transcript background.
-    // One mark, one word — the model and keys live in the footer and /help.
-    let mut lines: Vec<Line> = vec![
+    let lines = app.transcript.lines();
+    let blocks = partition(lines);
+
+    // The cached prefix: blocks whose range, first line, and mutation
+    // watermark all still agree. A width or theme change, or a rebuilt
+    // transcript (every block dirty), answers for none.
+    let reusable = {
+        let cache = &app.transcript_cache;
+        if cache.width == width && cache.theme == Some(theme) {
+            blocks
+                .iter()
+                .zip(cache.blocks.iter())
+                .take_while(|(block, cached)| {
+                    block.start == cached.start
+                        && block.end == cached.end
+                        && block.end <= app.transcript.dirty_from()
+                        && lines[block.start] == cached.first
+                })
+                .count()
+        } else {
+            0
+        }
+    };
+    {
+        let cache = &mut app.transcript_cache;
+        cache.width = width;
+        cache.theme = Some(theme);
+        cache.blocks.truncate(reusable);
+    }
+
+    // The canvas of rows: the banner, then the blocks with their
+    // separators. Blocks read apart: a prompt, a response, and a tool
+    // run each end below a blank row — tool lines sit tight against
+    // each other, notices and markdown take no trailing air.
+    let banner = [
         Line::from(vec![
             Span::raw("ῥ ").fg(theme.accent_text).bold(),
             Span::raw("rhema").bold(),
@@ -839,118 +985,162 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
         ]),
         Line::from(""),
     ];
-    // Consecutive assistant lines form one markdown response and render
-    // through the parser; everything else renders as-is. The bullet marks
-    // the first row of each response. Blocks read apart: a prompt and a
-    // response each get a blank row after them, a tool run ends with a
-    // blank row before whatever follows — but tool lines sit tight
-    // against each other, and the model's empty text parts between calls
-    // neither end a run nor open a reply.
-    let mut group: Vec<String> = Vec::new();
-    let mut marked = false;
-    let mut in_tool_run = false;
-    for line in app.transcript.lines() {
-        match line {
-            transcript::Line::Assistant(text) => {
-                // A whitespace-only line with no response behind it is
-                // noise — models emit empty text parts between tool
-                // calls. Paragraph breaks inside a response keep theirs.
-                if group.is_empty() && text.trim().is_empty() {
-                    continue;
-                }
-                if in_tool_run {
-                    lines.push(Line::from(""));
-                    in_tool_run = false;
-                }
-                group.push(text.clone());
-            }
-            other => {
-                let had_response = !group.is_empty();
-                flush_response_group(&mut lines, &mut group, &mut marked, app.theme, width);
-                marked = false;
-                let is_tool = matches!(other, transcript::Line::ToolCall { .. });
-                if had_response {
-                    // A response ends: whatever follows — its tool run
-                    // or the next block — starts below a blank row.
-                    lines.push(Line::from(""));
-                }
-                if in_tool_run && !is_tool {
-                    lines.push(Line::from(""));
-                }
-                in_tool_run = is_tool;
-                if let transcript::Line::Markdown(source) = other {
-                    for line in crate::markdown::render_markdown(source, theme, width) {
-                        lines.push(line);
-                    }
-                } else if let transcript::Line::User(text) = other {
-                    // A multi-line prompt renders as the lines it is:
-                    // a raw \n inside one row's spans would vanish. The
-                    // prompt glyph marks only the first row; the rest
-                    // speak for themselves. An embedded paste renders
-                    // as its chip — id and size, the body hidden.
-                    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
-                    let mut pastes = 0usize;
-                    for part in rhema_core::paste::parts(text) {
-                        match part {
-                            rhema_core::paste::Part::Text(segment) => {
-                                for (index, line_text) in segment.split('\n').enumerate() {
-                                    if index > 0 {
-                                        rows.push(Vec::new());
-                                    }
-                                    if !line_text.is_empty() {
-                                        rows.last_mut()
-                                            .unwrap()
-                                            .push(Span::raw(line_text.to_owned()));
-                                    }
-                                }
-                            }
-                            rhema_core::paste::Part::Paste(payload) => {
-                                rows.last_mut()
-                                    .unwrap()
-                                    .extend(chip_spans(payload, pastes, theme));
-                                pastes += 1;
-                            }
-                        }
-                    }
-                    for (index, mut spans) in rows.into_iter().enumerate() {
-                        if index == 0 {
-                            spans.insert(0, Span::raw("❯ ").fg(theme.text3));
-                        }
-                        lines.push(Line::from(spans));
-                    }
-                } else if let transcript::Line::ToolCall { args, ok, code, .. } = other {
-                    if name_is_bash(other) {
-                        lines.push(tool_row(args, *ok, *code, width, theme));
-                    } else {
-                        lines.push(render_line(other, theme));
-                    }
-                } else {
-                    lines.push(render_line(other, theme));
-                }
-                if matches!(other, transcript::Line::User(_)) {
-                    lines.push(Line::from(""));
-                }
-            }
-        }
-    }
-    flush_response_group(&mut lines, &mut group, &mut marked, app.theme, width);
-    let wrapped: Vec<Line> = lines
+    let mut rows: Vec<Line> = banner
         .iter()
         .flat_map(|line| wrap_line(line, width))
         .collect();
+    for (index, block) in blocks.iter().enumerate() {
+        if index > 0
+            && matches!(
+                blocks[index - 1].kind,
+                Kind::Response | Kind::User | Kind::ToolRun
+            )
+        {
+            rows.push(Line::from(""));
+        }
+        if index < reusable {
+            rows.extend(app.transcript_cache.blocks[index].rows.iter().cloned());
+        } else {
+            let rendered = render_block(lines, block, theme, width);
+            let cached = CachedBlock {
+                start: block.start,
+                end: block.end,
+                first: lines[block.start].clone(),
+                rows: rendered.clone(),
+            };
+            let cache = &mut app.transcript_cache;
+            if index < cache.blocks.len() {
+                cache.blocks[index] = cached;
+            } else {
+                cache.blocks.push(cached);
+            }
+            rows.extend(rendered);
+        }
+    }
+    if matches!(blocks.last().map(|block| block.kind), Some(Kind::User)) {
+        rows.push(Line::from(""));
+    }
+
     let visible = inner.height as usize;
-    let max_top = wrapped.len().saturating_sub(visible);
+    let max_top = rows.len().saturating_sub(visible);
     // PgUp has no content bound at press time, so the offset can sit
     // above the top; clamping here keeps PgDn answering immediately
     // instead of burning the surplus first.
     app.chat.scroll = app.chat.scroll.min(max_top);
     let top = max_top - app.chat.scroll;
     frame.render_widget(
-        Paragraph::new(wrapped)
+        Paragraph::new(rows)
             .scroll((top as u16, 0))
             .style(Style::default().bg(theme.sunken).fg(theme.text)),
         inner,
     );
+}
+
+/// Renders one block's wrapped content rows at `width` — the separators
+/// between blocks live at assembly, so a block's rows are cacheable
+/// regardless of what comes after it.
+fn render_block(
+    lines: &[transcript::Line],
+    block: &TranscriptBlock,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let range = &lines[block.start..block.end];
+    let raw: Vec<Line<'static>> = match block.kind {
+        Kind::Response => {
+            // One markdown response, the bullet on its first row.
+            let source = range
+                .iter()
+                .filter_map(|line| match line {
+                    transcript::Line::Assistant(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            crate::markdown::render_markdown(&source, theme, width)
+                .into_iter()
+                .enumerate()
+                .map(|(index, mut line)| {
+                    if index == 0 {
+                        line.spans.insert(
+                            0,
+                            Span::styled("● ", Style::default().fg(theme.accent_text)),
+                        );
+                    }
+                    line
+                })
+                .collect()
+        }
+        Kind::User => range
+            .iter()
+            .filter_map(|line| match line {
+                transcript::Line::User(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .flat_map(|text| render_user(text, theme))
+            .collect(),
+        // The run's absorbed empty text parts render as nothing.
+        Kind::ToolRun => range
+            .iter()
+            .filter_map(|line| match line {
+                transcript::Line::ToolCall { args, ok, code, .. } if name_is_bash(line) => {
+                    Some(tool_row(args, *ok, *code, width, theme))
+                }
+                transcript::Line::ToolCall { .. } => Some(render_line(line, theme)),
+                _ => None,
+            })
+            .collect(),
+        Kind::Notice => range.iter().map(|line| render_line(line, theme)).collect(),
+        Kind::Markdown => range
+            .iter()
+            .filter_map(|line| match line {
+                transcript::Line::Markdown(source) => Some(source.as_str()),
+                _ => None,
+            })
+            .flat_map(|source| crate::markdown::render_markdown(source, theme, width))
+            .collect(),
+    };
+    raw.iter().flat_map(|line| wrap_line(line, width)).collect()
+}
+
+/// A multi-line prompt renders as the lines it is: a raw \n inside one
+/// row's spans would vanish. The prompt glyph marks only the first row;
+/// the rest speak for themselves. An embedded paste renders as its
+/// chip — id and size, the body hidden.
+fn render_user(text: &str, theme: &Theme) -> Vec<Line<'static>> {
+    let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
+    let mut pastes = 0usize;
+    for part in rhema_core::paste::parts(text) {
+        match part {
+            rhema_core::paste::Part::Text(segment) => {
+                for (index, line_text) in segment.split('\n').enumerate() {
+                    if index > 0 {
+                        rows.push(Vec::new());
+                    }
+                    if !line_text.is_empty() {
+                        rows.last_mut()
+                            .unwrap()
+                            .push(Span::raw(line_text.to_owned()));
+                    }
+                }
+            }
+            rhema_core::paste::Part::Paste(payload) => {
+                rows.last_mut()
+                    .unwrap()
+                    .extend(chip_spans(payload, pastes, theme));
+                pastes += 1;
+            }
+        }
+    }
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, mut spans)| {
+            if index == 0 {
+                spans.insert(0, Span::raw("❯ ").fg(theme.text3));
+            }
+            Line::from(spans)
+        })
+        .collect()
 }
 
 /// One picker row: `provider/` dim, id bright, then display name, price,
@@ -1113,33 +1303,6 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
         }
     }
     rows.into_iter().map(Line::from).collect()
-}
-
-/// Renders one accumulated assistant response as markdown into `lines`,
-/// marking its first row. An empty group is a no-op.
-fn flush_response_group(
-    lines: &mut Vec<Line<'static>>,
-    group: &mut Vec<String>,
-    marked: &mut bool,
-    theme: &Theme,
-    width: usize,
-) {
-    if group.is_empty() {
-        return;
-    }
-    let source = group.join("\n");
-    group.clear();
-    let rendered = crate::markdown::render_markdown(&source, theme, width);
-    for (index, mut line) in rendered.into_iter().enumerate() {
-        if index == 0 && !*marked {
-            *marked = true;
-            line.spans.insert(
-                0,
-                Span::styled("● ", Style::default().fg(theme.accent_text)),
-            );
-        }
-        lines.push(line);
-    }
 }
 
 fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
@@ -3386,6 +3549,76 @@ mod scroll_tests {
         // Tool lines sit tight: the model's empty text parts between
         // calls render as nothing.
         assert_eq!(second, first + 1, "no blank row between the calls");
+    }
+
+    /// Draws and returns the whole screen as one string.
+    fn draw_screen(app: &mut App) -> String {
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(app, frame)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_late_result_mark_rerenders_its_cached_block() {
+        let mut app = chat_app();
+        app.transcript.push_user("investigate");
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolCallStart {
+                id: "c1".into(),
+                name: "bash".into(),
+            });
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolCallArgsDelta {
+                id: "c1".into(),
+                delta: "{\"command\":\"git status\"}".into(),
+            });
+        // A response behind the call: the result lands on a block that
+        // is not the render's tail.
+        app.transcript
+            .apply(&crate::events::OwnedEvent::TextDelta("meanwhile".into()));
+        let before = draw_screen(&mut app);
+        assert!(before.contains("❯ investigate"), "{before}");
+        assert!(before.contains("$ git status"), "{before}");
+        assert!(!before.contains("[1]"), "unresolved: {before}");
+        assert_eq!(app.transcript_cache.blocks.len(), 3);
+
+        // The result mutates a line under the cache: the watermark must
+        // retire the block, not serve the stale rows.
+        app.transcript
+            .apply(&crate::events::OwnedEvent::ToolResult {
+                id: "c1".into(),
+                content: "exit code 1".into(),
+                is_error: true,
+                code: Some(1),
+            });
+        let after = draw_screen(&mut app);
+        assert!(after.contains("❯ investigate"), "{after}");
+        assert!(after.contains("[1]"), "the mark lands: {after}");
+    }
+
+    #[test]
+    fn a_markdown_block_renders_through_the_cache() {
+        let mut app = chat_app();
+        app.transcript
+            .push_markdown("name | trigger\n--- | ---\nfmt | format code".to_string());
+        let first = draw_screen(&mut app);
+        assert!(
+            first.contains("name") && first.contains("trigger"),
+            "{first}"
+        );
+        assert!(first.contains("fmt"), "{first}");
+        // A second frame draws from the cache and must not lose the block.
+        let second = draw_screen(&mut app);
+        assert_eq!(first, second, "the cached frame draws identically");
     }
 
     #[test]
