@@ -1,0 +1,131 @@
+# The release channel: a v* tag ships the exact-version images (plus
+# the sha pin the chart's appVersion resolves to), the exact-version
+# chart, and the library closure to crates.io. Edge publishing on every
+# main push lives in publish.yml. Release candidates (a v* tag with a
+# prerelease suffix, v0.2.0-rc1) publish nothing, like pkh's release
+# jobs.
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: git.vhaudiquet.fr
+  OWNER: vhaudiquet
+
+jobs:
+  build-and-push-release-images:
+    # The same two deployable images as the edge channel, tagged for the
+    # release: the exact version, the rolling stable pin, and the sha
+    # the chart's appVersion resolves to.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: deploy/docker/claw.Dockerfile
+            image: rhema-claw
+          - dockerfile: deploy/docker/ui.Dockerfile
+            image: rhema-claw-ui
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: https://git.vhaudiquet.fr
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.PACKAGES_TOKEN }}
+
+      - name: Compute the release version (the tag strips the v)
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ steps.ver.outputs.version }}
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:stable
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ gitea.sha }}
+
+  release-chart:
+    # The exact tag version ships as-is so deployments can pin
+    # `--version 0.1.0`; appVersion pins the exact commit the image was
+    # built from (the chart's default image tag is appVersion, so the
+    # sha image above must exist before this runs).
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    needs: build-and-push-release-images
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Update Chart version and appVersion
+        run: |
+          sed -i "s/^version:.*/version: \"${GITHUB_REF_NAME#v}\"/" deploy/helm/rhema-claw/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ gitea.sha }}\"/" deploy/helm/rhema-claw/Chart.yaml
+
+      - name: Lint Helm chart
+        run: helm lint deploy/helm/rhema-claw
+
+      - name: Package Helm chart
+        run: helm package deploy/helm/rhema-claw
+
+      - name: Push Helm chart to Gitea registry
+        run: |
+          TOKEN=$(echo -n "${{ secrets.PACKAGES_TOKEN }}" | tr -d '\n')
+          curl --fail --user "${{ gitea.actor }}:${TOKEN}" \
+            -X POST \
+            --upload-file rhema-claw-*.tgz \
+            "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
+
+  publish-crates-io:
+    # The rhema-code library closure to crates.io, in dependency order —
+    # cargo walks the closure so every crate uploads after its deps.
+    # rhema-code itself stays excluded until its two crossterm patches
+    # land upstream: a published crate cannot carry [patch.crates-io]
+    # (cargo ignores patches from dependencies), and stock 0.29 does
+    # not compile the TUI's keyboard handling. Until then the vendored
+    # patch keeps every in-tree build (dev, CI, image) whole and the
+    # binary ships through the get.rhema.rs installer.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # reqwest's default TLS links openssl; rusqlite's bundled SQLite
+      # needs a C compiler.
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Check the tag matches the workspace version
+        # cargo publish ships whatever the manifest declares, regardless
+        # of the tag: a mismatch must fail loudly instead of publishing
+        # the wrong version under the release tag.
+        run: |
+          crate_version="$(awk -F'"' '/^version =/{print $2; exit}' Cargo.toml)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$crate_version" != "$tag_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $crate_version" >&2
+            exit 1
+          fi
+
+      - name: Publish
+        run: cargo publish --workspace --exclude rhema-code
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
