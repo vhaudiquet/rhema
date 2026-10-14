@@ -14,8 +14,16 @@ source-code: https://github.com/vhaudiquet/rhema
 website: https://rhema.rs
 grade: stable
 confinement: classic
+# One platform per arch, each building only on its own arch: whatever
+# runs `snapcraft pack` produces its platform's snap, and an upload
+# from that machine adds the arch to the channel. Wire an arm64 or
+# riscv64 runner into the snap jobs (or pack on the board itself) and
+# the channels gain the arch — no cross-compiling anywhere. core24
+# ships all three, and rustup serves the pinned toolchain on each.
 platforms:
   amd64:
+  arm64:
+  riscv64:
 
 apps:
   rhema:
