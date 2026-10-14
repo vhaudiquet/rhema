@@ -74,6 +74,9 @@ pub mod http;
 pub mod hub;
 mod identity;
 pub mod interactive;
+pub mod job_store;
+pub mod job_tools;
+pub mod jobs;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod notifications;

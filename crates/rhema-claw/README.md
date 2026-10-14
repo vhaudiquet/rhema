@@ -20,6 +20,27 @@ rhema-claw                     # serve on 127.0.0.1:7799 (config: listen)
 rhema-claw --once              # one detect + one dispatch pass, then exit
 ```
 
+### Coding jobs: the `coding_agent` tool
+
+The claw is not the only agent it runs. The `coding_agent` tool drives
+a full rhema-coding-agent session — its own shell, skills, and step
+budget — in a named workspace, with one tool and an `action` argument:
+
+- `add` pins a name to an existing directory (`rhema` → `~/rhema`).
+  The instance list is the audit surface for which checkouts the model
+  can drive a coding agent in; `drop` removes one, refused while a job
+  is live.
+- `run` enqueues a job. Async by design: a coding run is minutes of
+  tool rounds, so the call answers with the job id in one model round
+  and the turn runs off the chat — its own dispatcher, `job:` keys
+  with forge-style leases, the same commit-before-execute discipline.
+  The instance's coding session carries to the next run unless
+  `fresh`; the final text lands in the job row and the user's
+  notifications, and `status` reads instances, jobs, or one result.
+- One live job per instance: two coding agents in one workspace is
+  two agents editing the same files. Across instances, jobs run in
+  parallel.
+
 For the debug loop, daemon plus UI against throwaway state and zero
 credentials: `scripts/dev.sh --mock` (canned streamed replies; the UI
 is at `localhost:3000`, the claw at `127.0.0.1:7799`). Drop `--mock`

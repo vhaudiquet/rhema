@@ -69,6 +69,9 @@ pub enum ClawError {
     /// The task table could not be opened or read.
     #[error(transparent)]
     Tasks(#[from] crate::task_store::TaskStoreError),
+    /// The coding-job tables could not be opened or read.
+    #[error(transparent)]
+    Jobs(#[from] crate::job_store::JobStoreError),
     /// The turn-history table could not be opened or read.
     #[error(transparent)]
     TurnHistory(#[from] crate::turn_store::TurnStoreError),
@@ -122,14 +125,18 @@ fn interactive_dispatch() -> DispatcherConfig {
 }
 
 /// The resident daemon: one source per forge kind, the task scheduler,
-/// the two drivers, and the HTTP surface.
+/// the coding-job source, the three drivers, and the HTTP surface.
 pub struct Daemon {
     sources: Vec<ForgeSource>,
     scheduler: TaskScheduler,
+    job_source: crate::jobs::JobsSource,
+    jobs: Arc<crate::job_store::CodingJobStore>,
     forge_dispatcher: Arc<Dispatcher>,
     interactive_dispatcher: Arc<Dispatcher>,
+    jobs_dispatcher: Arc<Dispatcher>,
     forge_driver: Arc<Driver>,
     interactive_driver: Arc<Driver>,
+    jobs_driver: Arc<Driver>,
     poll_interval: Duration,
     listen: String,
     http: ClawState,
@@ -173,6 +180,9 @@ impl Daemon {
         let notifications = Arc::new(NotificationStore::open(&db)?);
         let tasks = Arc::new(TaskStore::open(&db)?);
         let turns = Arc::new(crate::turn_store::TurnStore::open(&db)?);
+        // The coding-job tables: instances the `coding_agent` tool
+        // drives, jobs the jobs dispatcher answers.
+        let jobs = Arc::new(crate::job_store::CodingJobStore::open(&db)?);
 
         // The YAML watch list is the one-time seed; the table rules
         // after that.
@@ -187,6 +197,14 @@ impl Daemon {
             store.clone(),
         ));
         let interactive_dispatcher = Arc::new(Dispatcher::new(
+            interactive_dispatch(),
+            Arc::new(SystemClock),
+            store.clone(),
+        ));
+        // The jobs dispatcher answers `job:<instance>#<id>`: a coding
+        // run's turn can take minutes, so it leases on the resident
+        // timing and runs in its own driver, never blocking a chat.
+        let jobs_dispatcher = Arc::new(Dispatcher::new(
             interactive_dispatch(),
             Arc::new(SystemClock),
             store.clone(),
@@ -221,15 +239,16 @@ impl Daemon {
         // dispatch time, so a watch added mid-run is answerable without a
         // restart.
         let forge_handler = ClawHandler::new(backends.clone(), workspace_root, watches.clone());
-        // Two drivers over one store admit from the same table, so each
-        // owns its half of the key space: a forge pass must never pick
-        // up a resident event (it would fail it, and consume it), and a
-        // resident pass must never pick up a thread's.
+        // Three drivers over one store admit from the same table, so
+        // each owns its slice of the key space: a forge pass must never
+        // pick up a resident or job event (it would fail it, and
+        // consume it), and the others likewise.
         let forge_driver = Arc::new(
             Driver::new(forge_dispatcher.clone(), Arc::new(forge_handler))
                 .with_holder("rhema-claw")
                 .owning(Arc::new(|key: &ResourceKey| {
                     !crate::interactive::is_resident_key(key.as_str())
+                        && !crate::jobs::is_job_key(key.as_str())
                 })),
         );
 
@@ -288,6 +307,7 @@ impl Daemon {
             hub.clone(),
             notifications.clone(),
             tasks.clone(),
+            jobs.clone(),
             accounts.clone(),
             config.max_turn_steps,
             consents.clone(),
@@ -306,6 +326,23 @@ impl Daemon {
                 crate::interactive::is_resident_key(key.as_str())
             })),
         );
+        // The coding jobs: one handler, one driver, one source. The
+        // final text of a job's turn notifies the user's device, so the
+        // handler needs the notification table too.
+        let jobs_handler = crate::jobs::CodingJobHandler::new(
+            backends.clone(),
+            jobs.clone(),
+            notifications.clone(),
+            config.max_turn_steps,
+        );
+        let jobs_driver = Arc::new(
+            Driver::new(jobs_dispatcher.clone(), Arc::new(jobs_handler))
+                .with_holder("rhema-claw-jobs")
+                .owning(Arc::new(|key: &ResourceKey| {
+                    crate::jobs::is_job_key(key.as_str())
+                })),
+        );
+        let job_source = crate::jobs::JobsSource::new(&jobs_dispatcher, jobs.clone());
         crate::interactive::register_user(&interactive_dispatcher);
         // The scheduler is the resident dispatcher's second own source:
         // its detect pass (the daemon's tick drives it) is what turns a
@@ -338,10 +375,14 @@ impl Daemon {
         Ok(Self {
             sources,
             scheduler,
+            job_source,
+            jobs,
             forge_dispatcher,
             interactive_dispatcher,
+            jobs_dispatcher,
             forge_driver,
             interactive_driver,
+            jobs_driver,
             // A zero poll interval would spin detect passes against the
             // forge API; one second is the floor.
             poll_interval: Duration::from_secs(config.poll_interval_secs.max(1)),
@@ -376,9 +417,18 @@ impl Daemon {
     /// resumes then: the committed-but-unanswered call revives at the
     /// top of the next dispatch (safe tools re-run, the rest report
     /// interrupted). Idempotent; called before the first pass.
-    pub async fn bootstrap(&self) -> Result<(), DispatchError> {
+    pub async fn bootstrap(&self) -> Result<(), ClawError> {
+        // The job rows first: a turn the restart cut is failed
+        // interrupted before anything re-runs, and a still-queued row
+        // is re-armed with a fresh dedup id.
+        let touched = self.jobs.recover()?;
+        if touched > 0 {
+            eprintln!("[claw] jobs: {touched} row(s) recovered at boot");
+        }
         self.forge_dispatcher.recover_all()?;
-        self.interactive_dispatcher.recover_all()
+        self.jobs_dispatcher.recover_all()?;
+        self.interactive_dispatcher.recover_all()?;
+        Ok(())
     }
 
     /// One pass: every source detects (due tasks first — a reminder is
@@ -388,8 +438,14 @@ impl Daemon {
     /// the key for a pass like this one.
     pub async fn tick(&self) -> Result<TickReport, ClawError> {
         let mut detected = self.scheduler.detect().await?;
+        detected += self.job_source.detect().await?;
         for source in &self.sources {
             detected += source.detect().await?;
+        }
+        // A queued coding job starts before the forge pass: it is the
+        // thing someone just asked for.
+        if let Err(err) = self.jobs_driver.run_once().await {
+            eprintln!("[claw] warning: jobs pass failed: {err}");
         }
         let outcomes = self.forge_driver.run_once().await?;
         if !outcomes.is_empty() {

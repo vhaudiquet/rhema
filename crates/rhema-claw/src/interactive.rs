@@ -192,6 +192,9 @@ pub struct InteractiveHandler {
     /// The phone state and command queue the `phone` tool reads and
     /// queues through.
     phone: Arc<crate::phone::PhoneStore>,
+    /// The coding-agent tool: instances and async jobs the resident
+    /// drives a full rhema-coding-agent session through.
+    job_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// How many tool rounds one turn may run before it is cut off — the
     /// config's runaway guard for an agent meant to work unattended; a
     /// follow-up message keeps going.
@@ -202,11 +205,12 @@ impl InteractiveHandler {
     /// A handler whose chat turns run in `workspace` (the interactive
     /// scratch space under the daemon's workspace root), whose watch
     /// tools mutate `watches`, whose notifications land in
-    /// `notifications`, and whose task tools manage `tasks`. Approval is
+    /// `notifications`, whose task tools manage `tasks`, and whose
+    /// `coding_agent` tool enqueues jobs into `jobs`. Approval is
     /// v1-permissive — the shell is the point of a resident coding
     /// agent — installed once, since resolution is synchronous within a
     /// turn.
-    #[allow(clippy::too_many_arguments)] // fifteen parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // sixteen parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -216,6 +220,7 @@ impl InteractiveHandler {
         hub: Arc<EventHub>,
         notifications: Arc<NotificationStore>,
         tasks: Arc<crate::task_store::TaskStore>,
+        jobs: Arc<crate::job_store::CodingJobStore>,
         accounts: Arc<dyn rhema_identity::IdentityStore>,
         max_turn_steps: u32,
         consents: Arc<crate::consents::ConsentStore>,
@@ -238,6 +243,7 @@ impl InteractiveHandler {
             .resolver_for(&Allowlist::permissive());
         let task_resolver =
             crate::task_tools::registry(tasks).resolver_for(&Allowlist::permissive());
+        let job_resolver = crate::job_tools::registry(jobs).resolver_for(&Allowlist::permissive());
         let bootstrap_resolver =
             crate::bootstrap::registry(bootstrap.clone()).resolver_for(&Allowlist::permissive());
         let identity_resolver = crate::identity::registry(identity.clone(), workspace.clone())
@@ -246,6 +252,7 @@ impl InteractiveHandler {
             backends,
             workspace,
             tools,
+            job_resolver,
             watch_resolver,
             accounts_resolver,
             identity_exec,
@@ -313,6 +320,7 @@ impl InteractiveHandler {
             self.bootstrap_resolver.clone(),
             self.notify_resolver.clone(),
             self.task_resolver.clone(),
+            self.job_resolver.clone(),
             self.watch_resolver.clone(),
             self.accounts_resolver.clone(),
             self.identity_exec.clone(),
@@ -646,6 +654,11 @@ mod tests {
         Arc::new(TaskStore::in_memory().expect("store opens"))
     }
 
+    /// A throwaway coding-job store: the `coding_agent` tool's tables.
+    fn jobs() -> Arc<crate::job_store::CodingJobStore> {
+        Arc::new(crate::job_store::CodingJobStore::in_memory().expect("store opens"))
+    }
+
     /// A throwaway account store: the identity tools need something to
     /// stand in, and the dispatch tests never touch it.
     fn accounts() -> Arc<dyn rhema_identity::IdentityStore> {
@@ -772,6 +785,7 @@ mod tests {
             hub.clone(),
             notifications(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
@@ -850,6 +864,7 @@ mod tests {
             Arc::new(EventHub::default()),
             notifications(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
@@ -1112,6 +1127,7 @@ mod tests {
             hub.clone(),
             notifications(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
@@ -1199,6 +1215,7 @@ mod tests {
             hub,
             notifications(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
@@ -1295,6 +1312,7 @@ mod tests {
             hub,
             notifications(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
@@ -1367,6 +1385,7 @@ mod tests {
             hub,
             notifications(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
@@ -1441,6 +1460,7 @@ mod tests {
             hub,
             notifications.clone(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
@@ -1556,6 +1576,7 @@ mod tests {
             hub,
             notifications(),
             tasks(),
+            jobs(),
             accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),

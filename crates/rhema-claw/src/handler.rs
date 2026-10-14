@@ -453,7 +453,7 @@ fn kind_text(kind: EventKind) -> &'static str {
 /// The text a turn ends on: the assistant message's text parts, joined
 /// and trimmed. `None` when the model stopped on tool calls and never
 /// wrote a reply.
-fn final_text(message: &Message) -> Option<String> {
+pub(crate) fn final_text(message: &Message) -> Option<String> {
     let joined = message
         .content
         .iter()
