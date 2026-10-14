@@ -148,10 +148,7 @@ pub fn parse(input: &str) -> Parsed {
         return Parsed::Prompt(input.to_owned());
     }
     let (name, argument) = split(input);
-    match COMMANDS
-        .iter()
-        .find(|spec| spec.name == format!("/{name}").as_str())
-    {
+    match COMMANDS.iter().find(|spec| &spec.name[1..] == name) {
         Some(spec) => match (spec.argument, argument) {
             (Argument::None, Some(_)) => Parsed::Unknown(input.to_owned()),
             (Argument::Optional, argument) => Parsed::Command {
