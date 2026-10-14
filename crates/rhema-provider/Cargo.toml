@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 # The ModelProvider seam the retry decorator implements and the
 # ProviderError it classifies
-rhema-core = { path = "../rhema-core" }
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
 # The card and the price record round-trip through stored catalogs
 serde = { workspace = true }
 # dyn InteractiveLogin: the frontends hold boxed flows

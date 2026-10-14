@@ -15,9 +15,9 @@ mock = ["rhema-core/mock"]
 [dependencies]
 # The shared toolkit the driver runs on: the approval-gated shell,
 # skills, paste expansion, revive-on-resume, the prompt renderer
-rhema-agent-tools = { path = "../rhema-agent-tools" }
-rhema-config = { path = "../rhema-config" }
-rhema-core = { path = "../rhema-core" }
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0" }
+rhema-config = { path = "../rhema-config", version = "0.1.0" }
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
 # The SYSTEM.md template engine: the renderer lives in the toolkit,
 # the template error type stays with the driver
 minijinja = { workspace = true }

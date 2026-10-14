@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# The resident tier is still indev: `cargo publish --workspace` skips
+# it until the claw ships.
+publish = false
 
 [dependencies]
 # The dispatch seam: sources ingest, the driver runs admitted keys

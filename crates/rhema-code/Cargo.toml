@@ -1,6 +1,7 @@
 [package]
 name = "rhema-code"
 description = "The rhema-code frontend: terminal UI and pipeable one-shot runner (binary: rhema)"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -22,20 +23,20 @@ path = "src/main.rs"
 mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
 
 [dependencies]
-rhema-core = { path = "../rhema-core" }
-rhema-config = { path = "../rhema-config" }
-rhema-agent-tools = { path = "../rhema-agent-tools" }
-rhema-coding-agent = { path = "../rhema-coding-agent" }
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+rhema-config = { path = "../rhema-config", version = "0.1.0" }
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0" }
+rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0" }
 # The `rhema acp` subcommand: the Agent Client Protocol server
-rhema-acp = { path = "../rhema-acp" }
+rhema-acp = { path = "../rhema-acp", version = "0.1.0" }
 # The shared model card every adapter's catalog normalizes into
-rhema-provider = { path = "../rhema-provider" }
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
-rhema-provider-copilot = { path = "../rhema-provider-copilot" }
-rhema-provider-google = { path = "../rhema-provider-google" }
-rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }
-rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
+rhema-provider = { path = "../rhema-provider", version = "0.1.0" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.1.0" }
+rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.1.0" }
+rhema-provider-google = { path = "../rhema-provider-google", version = "0.1.0" }
+rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp", version = "0.1.0" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.1.0" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.1.0" }
 # Full-screen rendering; the crossterm version must stay the one ratatui
 # builds on so the event types unify.
 ratatui = "0.30"
