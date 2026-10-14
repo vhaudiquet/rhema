@@ -33,9 +33,9 @@
 
 /// The transcript banner's version label, baked by `build.rs` from the
 /// tree the binary was built from: `v0.1.0` for a clean checkout at the
-/// matching tag (or a build outside any git tree), `v0.1.0-<sha>` on
-/// the edge channel, `v<sha>` for a clean devel build, `v<sha>-dirty`
-/// with local changes.
+/// matching tag (or a build outside any git tree), `v0.1.0-edge.<sha>`
+/// on the edge channel, `v0.1.0+<sha>` for a clean devel build,
+/// `v0.1.0+<sha>.dirty` with local changes.
 pub const VERSION_LABEL: &str = env!("RHEMA_VERSION_LABEL");
 
 pub mod app;

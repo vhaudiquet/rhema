@@ -1,11 +1,15 @@
 //! Bakes the version label the transcript banner shows, from the tree
-//! the binary was built from:
+//! the binary was built from. Every label anchors on the workspace
+//! version — a bare `v` against hex reads as one opaque token — and
+//! the states separate by semver's own marks:
 //!
 //! - `v0.1.0` — a clean checkout exactly at the matching `v*` tag, or
 //!   a build outside any git tree (a crates.io checkout)
-//! - `v0.1.0-<sha>` — an edge build (`RHEMA_BUILD_CHANNEL=edge`)
-//! - `v<sha>` — a clean build off any other commit
-//! - `v<sha>-dirty` — a build from a tree with local changes
+//! - `v0.1.0-edge.<sha>` — an edge build (`RHEMA_BUILD_CHANNEL=edge`);
+//!   a named pre-release of the channel
+//! - `v0.1.0+<sha>` — a clean build off any other commit; `+` is
+//!   semver's build metadata, which is what a devel build is
+//! - `v0.1.0+<sha>.dirty` — a build from a tree with local changes
 //!
 //! The label rides `env!("RHEMA_VERSION_LABEL")` (see
 //! [`crate::VERSION_LABEL`]).
@@ -47,11 +51,11 @@ fn main() {
                 // The release: a clean checkout at this version's tag.
                 pkg
             } else if std::env::var("RHEMA_BUILD_CHANNEL").as_deref() == Ok("edge") {
-                format!("{pkg}-{sha}")
+                format!("{pkg}-edge.{sha}")
             } else if dirty {
-                format!("{sha}-dirty")
+                format!("{pkg}+{sha}.dirty")
             } else {
-                sha
+                format!("{pkg}+{sha}")
             }
         }
         None => pkg,
