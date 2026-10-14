@@ -76,12 +76,11 @@ manages the device fleet the claw keeps.
   location payload includes accuracy and fix age, the app payload the
   package, its label and how long it has been current.
 
-  On the claw these split into two kinds. `battery`, `network`, and `dnd`
-  dispatch (the agent hears the flip). `location`, `app`, `device`,
-  `wifi`, and `alarm` are state-only: they land in the claw's phone
+  Every report is an observation on the claw: it lands in the phone
   tables (the ingest answers `{"ingested": "observed"}`) and a `phone`
-  tool status question reads them, but no turn is run. A commute or a
-  session of app-hopping must not be a model call per move.
+  tool status question reads it. No report dispatches a turn, so a
+  commute or a session of app-hopping is never a model call per move,
+  and a battery flip never becomes a push notification.
 
   Charging flips additionally kick a one-shot worker from a process-lifetime
   broadcast receiver (`ACTION_POWER_CONNECTED|DISCONNECTED`,
@@ -162,8 +161,9 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 ### Ingest payloads emitted
 
 `source` is always `"phone"`, `key` is `phone:<deviceId>:<topic>`.
-The first three dispatch; the rest are state-only on the claw (the
-ingest answers `{"ingested": "observed"}` and no turn is run):
+Every report is an observation on the claw: it feeds the status the
+`phone` tool reads, and no turn is run (the ingest answers
+`{"ingested": "observed"}`):
 
 ```json
 {"topic": "battery", "value": "83", "charging": true}
