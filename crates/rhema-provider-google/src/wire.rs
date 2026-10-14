@@ -505,7 +505,10 @@ impl NormalizedPart {
                     id: &call.id,
                     name: &call.name,
                 });
-                sink.emit(Event::ToolCallArgsDelta(&args));
+                sink.emit(Event::ToolCallArgsDelta {
+                    id: &call.id,
+                    delta: &args,
+                });
             }
         }
     }
@@ -1132,7 +1135,7 @@ mod tests {
             sink.0,
             vec![
                 "ToolCallStart { id: \"call_0\", name: \"echo\" }".to_owned(),
-                "ToolCallArgsDelta(\"{\\\"x\\\":1}\")".to_owned(),
+                "ToolCallArgsDelta { id: \"call_0\", delta: \"{\\\"x\\\":1}\" }".to_owned(),
             ]
         );
     }
@@ -1274,7 +1277,7 @@ mod tests {
             vec![
                 "ThinkingDelta(\"I should check\")".to_owned(),
                 "ToolCallStart { id: \"call_0\", name: \"a\" }".to_owned(),
-                "ToolCallArgsDelta(\"{}\")".to_owned(),
+                "ToolCallArgsDelta { id: \"call_0\", delta: \"{}\" }".to_owned(),
             ]
         );
     }

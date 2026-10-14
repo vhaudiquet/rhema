@@ -30,8 +30,16 @@ pub enum Event<'a> {
         /// The tool's name.
         name: &'a str,
     },
-    /// A piece of a tool call's JSON arguments, in stream order.
-    ToolCallArgsDelta(&'a str),
+    /// A piece of a tool call's JSON arguments, in stream order. The id
+    /// names the call the piece belongs to: the wire formats let a server
+    /// interleave the fragments of parallel calls, so sinks must not
+    /// assume the call that started last is the one still streaming.
+    ToolCallArgsDelta {
+        /// The streaming call's correlation id.
+        id: &'a str,
+        /// A piece of the call's JSON arguments.
+        delta: &'a str,
+    },
     /// A chunk of a running tool's human-facing output — a command's
     /// completed lines — in stream order. Ephemeral like
     /// [`Event::ThinkingDelta`]: never appended to the session history;

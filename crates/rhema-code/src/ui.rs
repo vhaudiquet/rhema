@@ -3129,9 +3129,10 @@ mod scroll_tests {
                 name: "bash".into(),
             });
         app.transcript
-            .apply(&crate::events::OwnedEvent::ToolCallArgsDelta(
-                "{\"command\":\"git status\"}".into(),
-            ));
+            .apply(&crate::events::OwnedEvent::ToolCallArgsDelta {
+                id: "c1".into(),
+                delta: "{\"command\":\"git status\"}".into(),
+            });
         app.transcript
             .apply(&crate::events::OwnedEvent::ToolResult {
                 id: "c1".into(),
@@ -3309,9 +3310,10 @@ mod scroll_tests {
                 name: "bash".into(),
             });
         app.transcript
-            .apply(&crate::events::OwnedEvent::ToolCallArgsDelta(format!(
-                "{{\"command\":\"{long}\"}}"
-            )));
+            .apply(&crate::events::OwnedEvent::ToolCallArgsDelta {
+                id: "c1".into(),
+                delta: format!("{{\"command\":\"{long}\"}}"),
+            });
         app.transcript
             .apply(&crate::events::OwnedEvent::ToolResult {
                 id: "c1".into(),
@@ -3347,9 +3349,10 @@ mod scroll_tests {
                     name: "bash".into(),
                 });
             app.transcript
-                .apply(&crate::events::OwnedEvent::ToolCallArgsDelta(format!(
-                    "{{\"command\":\"{command}\"}}"
-                )));
+                .apply(&crate::events::OwnedEvent::ToolCallArgsDelta {
+                    id: id.into(),
+                    delta: format!("{{\"command\":\"{command}\"}}"),
+                });
             app.transcript
                 .apply(&crate::events::OwnedEvent::ToolResult {
                     id: id.into(),

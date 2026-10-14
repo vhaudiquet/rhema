@@ -62,7 +62,10 @@ impl ModelProvider for MockProvider {
                         id: &call.id,
                         name: &call.name,
                     });
-                    sink.emit(Event::ToolCallArgsDelta(call.args.to_string().as_str()));
+                    sink.emit(Event::ToolCallArgsDelta {
+                        id: &call.id,
+                        delta: call.args.to_string().as_str(),
+                    });
                 }
                 crate::message::Content::ToolResult(_) => {}
             }

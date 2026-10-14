@@ -139,8 +139,8 @@ async fn tool_call_fragments_stream_into_events_and_a_tool_use_output() {
         sink.0,
         vec![
             "ToolCallStart { id: \"call_abc\", name: \"echo\" }".to_owned(),
-            "ToolCallArgsDelta(\"{\\\"x\\\":\")".to_owned(),
-            "ToolCallArgsDelta(\"1}\")".to_owned(),
+            "ToolCallArgsDelta { id: \"call_abc\", delta: \"{\\\"x\\\":\" }".to_owned(),
+            "ToolCallArgsDelta { id: \"call_abc\", delta: \"1}\" }".to_owned(),
         ]
     );
 }

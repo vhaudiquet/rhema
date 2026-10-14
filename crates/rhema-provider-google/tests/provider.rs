@@ -90,7 +90,7 @@ async fn streams_sse_into_events_and_an_assembled_output() {
         vec![
             "TextDelta(\"He\")".to_owned(),
             "ToolCallStart { id: \"call_0\", name: \"echo\" }".to_owned(),
-            "ToolCallArgsDelta(\"{\\\"x\\\":1}\")".to_owned(),
+            "ToolCallArgsDelta { id: \"call_0\", delta: \"{\\\"x\\\":1}\" }".to_owned(),
         ]
     );
 

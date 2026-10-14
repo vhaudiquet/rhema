@@ -62,9 +62,15 @@ impl EventSink for AcpSink {
                         .kind(ToolKind::Execute),
                 ));
             }
-            Event::ToolCallArgsDelta(delta) => {
-                if let Some((_, _, args)) = &mut self.pending {
-                    args.push_str(delta);
+            Event::ToolCallArgsDelta { id, delta } => {
+                // The args accumulate for the announced call; a fragment
+                // naming a different call has no slot in the single
+                // pending update, the same discipline the result path's
+                // id check applies.
+                if let Some((pending_id, _, args)) = &mut self.pending {
+                    if *pending_id == id {
+                        args.push_str(delta);
+                    }
                 }
             }
             // A running tool's live output has no ACP update of its own;

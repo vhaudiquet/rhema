@@ -43,7 +43,10 @@ enum Recorded {
         id: String,
         name: String,
     },
-    ToolCallArgsDelta(String),
+    ToolCallArgsDelta {
+        id: String,
+        delta: String,
+    },
     ToolOutputDelta {
         id: String,
         chunk: String,
@@ -70,7 +73,10 @@ impl From<Event<'_>> for Recorded {
                 id: id.to_owned(),
                 name: name.to_owned(),
             },
-            Event::ToolCallArgsDelta(args) => Self::ToolCallArgsDelta(args.to_owned()),
+            Event::ToolCallArgsDelta { id, delta } => Self::ToolCallArgsDelta {
+                id: id.to_owned(),
+                delta: delta.to_owned(),
+            },
             Event::ToolOutputDelta { id, chunk } => Self::ToolOutputDelta {
                 id: id.to_owned(),
                 chunk: chunk.to_owned(),
@@ -184,7 +190,10 @@ async fn step_dispatches_the_tool_once_and_appends_the_result() {
                 id: "call_1".into(),
                 name: "echo".into(),
             },
-            Recorded::ToolCallArgsDelta(r#"{"text":"hi"}"#.into()),
+            Recorded::ToolCallArgsDelta {
+                id: "call_1".into(),
+                delta: r#"{"text":"hi"}"#.into(),
+            },
             Recorded::ToolResult {
                 id: "call_1".into(),
                 content: r#"{"text":"hi"}"#.into(),

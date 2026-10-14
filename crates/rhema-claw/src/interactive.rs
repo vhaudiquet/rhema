@@ -423,7 +423,6 @@ impl InteractiveHandler {
             hub: self.hub.clone(),
             tool_names: HashMap::new(),
             tool_args: HashMap::new(),
-            streaming: None,
         };
         let output = run_turn(
             &mut agent,
@@ -549,10 +548,6 @@ struct HubSink {
     /// result event carries none of them — so the sink keeps what the
     /// deltas delivered and parses it when the result lands.
     tool_args: HashMap<String, String>,
-    /// The call whose args the deltas are currently streaming. The delta
-    /// event carries no id of its own; it belongs to the call that last
-    /// started.
-    streaming: Option<String>,
 }
 
 /// The shell command a `bash` call ran, parsed out of the streamed
@@ -576,18 +571,17 @@ impl EventSink for HubSink {
             ModelEvent::ToolCallStart { id, name } => {
                 self.tool_names.insert(id.to_owned(), name.to_owned());
                 self.tool_args.insert(id.to_owned(), String::new());
-                self.streaming = Some(id.to_owned());
                 TurnEvent::ToolStart {
                     name: name.to_owned(),
                 }
             }
-            ModelEvent::ToolCallArgsDelta(fragment) => {
-                if let Some(id) = &self.streaming {
-                    self.tool_args
-                        .entry(id.clone())
-                        .or_default()
-                        .push_str(fragment);
-                }
+            ModelEvent::ToolCallArgsDelta { id, delta } => {
+                // The id, not the call that started last, decides: the
+                // wire may interleave parallel calls' fragments.
+                self.tool_args
+                    .entry(id.to_owned())
+                    .or_default()
+                    .push_str(delta);
                 return;
             }
             ModelEvent::ToolResult {
@@ -1017,14 +1011,19 @@ mod tests {
             hub: hub.clone(),
             tool_names: HashMap::new(),
             tool_args: HashMap::new(),
-            streaming: None,
         };
         sink.emit(ModelEvent::ToolCallStart {
             id: "c1",
             name: "bash",
         });
-        sink.emit(ModelEvent::ToolCallArgsDelta(r#"{"command": "ls""#));
-        sink.emit(ModelEvent::ToolCallArgsDelta(r#", "quiet": true}"#));
+        sink.emit(ModelEvent::ToolCallArgsDelta {
+            id: "c1",
+            delta: r#"{"command": "ls""#,
+        });
+        sink.emit(ModelEvent::ToolCallArgsDelta {
+            id: "c1",
+            delta: r#", "quiet": true}"#,
+        });
         sink.emit(ModelEvent::ToolResult {
             id: "c1",
             content: "exit 0\n--- stdout ---",
@@ -1060,7 +1059,6 @@ mod tests {
             hub: hub.clone(),
             tool_names: HashMap::new(),
             tool_args: HashMap::new(),
-            streaming: None,
         };
         sink.emit(ModelEvent::ToolCallStart {
             id: "c1",

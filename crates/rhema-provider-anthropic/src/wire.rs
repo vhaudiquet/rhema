@@ -814,7 +814,19 @@ impl ChunkAssembler {
                         else {
                             return Ok(());
                         };
-                        sink.emit(Event::ToolCallArgsDelta(piece));
+                        // The id comes from the block's start event; a
+                        // stray delta with none behind it synthesizes the
+                        // id that start would have used.
+                        let id = match self.blocks.get(&index) {
+                            Some(PartialBlock::ToolCall { id, .. }) => {
+                                id.clone().unwrap_or_else(|| format!("call_{index}"))
+                            }
+                            _ => format!("call_{index}"),
+                        };
+                        sink.emit(Event::ToolCallArgsDelta {
+                            id: &id,
+                            delta: piece,
+                        });
                         match self.blocks.entry(index).or_insert(PartialBlock::ToolCall {
                             id: None,
                             name: String::new(),
@@ -1438,8 +1450,8 @@ mod tests {
             sink.0,
             vec![
                 "ToolCallStart { id: \"toolu_01A\", name: \"echo\" }".to_owned(),
-                "ToolCallArgsDelta(\"{\\\"x\\\":\")".to_owned(),
-                "ToolCallArgsDelta(\"1}\")".to_owned(),
+                "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"{\\\"x\\\":\" }".to_owned(),
+                "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"1}\" }".to_owned(),
             ]
         );
     }

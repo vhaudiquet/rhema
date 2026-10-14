@@ -234,8 +234,8 @@ async fn a_tool_use_reply_streams_call_events_and_multi_chunk_args() {
         vec![
             "TextDelta(\"running\")".to_owned(),
             "ToolCallStart { id: \"toolu_01A\", name: \"echo\" }".to_owned(),
-            "ToolCallArgsDelta(\"{\\\"x\\\":\")".to_owned(),
-            "ToolCallArgsDelta(\"1}\")".to_owned(),
+            "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"{\\\"x\\\":\" }".to_owned(),
+            "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"1}\" }".to_owned(),
         ]
     );
 }

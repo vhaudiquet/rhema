@@ -71,10 +71,12 @@ pub enum OwnedEvent {
         name: String,
     },
     /// See [`Event::ToolCallArgsDelta`].
-    ToolCallArgsDelta(
+    ToolCallArgsDelta {
+        /// The streaming call's correlation id.
+        id: String,
         /// A piece of the call's JSON arguments.
-        String,
-    ),
+        delta: String,
+    },
     /// See [`Event::ToolOutputDelta`].
     ToolOutputDelta {
         /// The running call's correlation id.
@@ -115,7 +117,10 @@ impl From<&Event<'_>> for OwnedEvent {
                 id: (*id).to_owned(),
                 name: (*name).to_owned(),
             },
-            Event::ToolCallArgsDelta(delta) => Self::ToolCallArgsDelta((*delta).to_owned()),
+            Event::ToolCallArgsDelta { id, delta } => Self::ToolCallArgsDelta {
+                id: (*id).to_owned(),
+                delta: (*delta).to_owned(),
+            },
             Event::ToolOutputDelta { id, chunk } => Self::ToolOutputDelta {
                 id: (*id).to_owned(),
                 chunk: (*chunk).to_owned(),

@@ -679,7 +679,16 @@ impl ChunkAssembler {
             .and_then(|function| function.arguments)
             .filter(|piece| !piece.is_empty())
         {
-            sink.emit(Event::ToolCallArgsDelta(&piece));
+            // A stray fragment with no start behind it synthesizes the
+            // id the start path would have used.
+            let id = partial
+                .id
+                .clone()
+                .unwrap_or_else(|| format!("call_{index}"));
+            sink.emit(Event::ToolCallArgsDelta {
+                id: &id,
+                delta: &piece,
+            });
             partial.arguments.push_str(&piece);
         }
     }
@@ -1132,8 +1141,8 @@ mod tests {
             sink.0,
             vec![
                 "ToolCallStart { id: \"call_abc\", name: \"echo\" }".to_owned(),
-                "ToolCallArgsDelta(\"{\\\"x\\\":\")".to_owned(),
-                "ToolCallArgsDelta(\"1}\")".to_owned(),
+                "ToolCallArgsDelta { id: \"call_abc\", delta: \"{\\\"x\\\":\" }".to_owned(),
+                "ToolCallArgsDelta { id: \"call_abc\", delta: \"1}\" }".to_owned(),
             ]
         );
     }

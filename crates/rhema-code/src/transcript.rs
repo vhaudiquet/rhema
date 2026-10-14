@@ -163,8 +163,24 @@ impl Transcript {
                     code: None,
                 });
             }
-            OwnedEvent::ToolCallArgsDelta(delta) => {
-                if let Some(Line::ToolCall { args, .. }) = self.lines.last_mut() {
+            OwnedEvent::ToolCallArgsDelta { id, delta } => {
+                // The id picks the line: providers may interleave the
+                // fragments of parallel calls, so the last line is only
+                // the fast path, never the answer.
+                let last_is_target = matches!(
+                    self.lines.last(),
+                    Some(Line::ToolCall { id: line_id, .. }) if *line_id == *id
+                );
+                let target = if last_is_target {
+                    self.lines.last_mut()
+                } else {
+                    self.lines.iter_mut().rev().find(|line| {
+                        matches!(line, Line::ToolCall {
+                            id: line_id, ok: None, ..
+                        } if *line_id == *id)
+                    })
+                };
+                if let Some(Line::ToolCall { args, .. }) = target {
                     args.push_str(delta);
                 }
             }
@@ -325,8 +341,14 @@ mod tests {
             id: "c1".into(),
             name: "bash".into(),
         });
-        transcript.apply(&OwnedEvent::ToolCallArgsDelta("{\"comm".into()));
-        transcript.apply(&OwnedEvent::ToolCallArgsDelta("and".into()));
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c1".into(),
+            delta: "{\"comm".into(),
+        });
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c1".into(),
+            delta: "and".into(),
+        });
         transcript.apply(&OwnedEvent::ToolResult {
             id: "c1".into(),
             content: "wrote notes.txt (3 bytes)\nsecond line".into(),
@@ -342,6 +364,48 @@ mod tests {
                 ok: Some(true),
                 code: Some(0),
             }]
+        );
+    }
+
+    #[test]
+    fn interleaved_args_land_on_their_own_call() {
+        // The wire formats let a server interleave the fragments of
+        // parallel calls; the id, not the line order, decides.
+        let mut transcript = Transcript::new();
+        transcript.apply(&OwnedEvent::ToolCallStart {
+            id: "c1".into(),
+            name: "bash".into(),
+        });
+        transcript.apply(&OwnedEvent::ToolCallStart {
+            id: "c2".into(),
+            name: "bash".into(),
+        });
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c2".into(),
+            delta: "{\"command\":\"second\"".into(),
+        });
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c1".into(),
+            delta: "{\"command\":\"first\"}".into(),
+        });
+        assert_eq!(
+            transcript.lines(),
+            &[
+                Line::ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    args: "{\"command\":\"first\"}".into(),
+                    ok: None,
+                    code: None,
+                },
+                Line::ToolCall {
+                    id: "c2".into(),
+                    name: "bash".into(),
+                    args: "{\"command\":\"second\"".into(),
+                    ok: None,
+                    code: None,
+                },
+            ]
         );
     }
 
@@ -408,9 +472,10 @@ mod tests {
             id: "c1".into(),
             name: "bash".into(),
         });
-        streamed.apply(&OwnedEvent::ToolCallArgsDelta(
-            "{\"command\":\"cat notes.txt\"}".into(),
-        ));
+        streamed.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c1".into(),
+            delta: "{\"command\":\"cat notes.txt\"}".into(),
+        });
         streamed.apply(&OwnedEvent::ToolResult {
             id: "c1".into(),
             content: "file body".into(),
