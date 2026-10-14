@@ -329,6 +329,31 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   (`/v1/phone/commands`), and the tool answers in-band — including
   "queued, not yet confirmed", the honest latency of a 15-minute
   WorkManager floor.
+- **How the claw keeps the fleet honest when installs come and go**,
+  **decided:** a device registry alongside the status tables, not a
+  `DISTINCT` over them. A device id lives for one install — a
+  reinstall, a cleared app data, a new phone each arrive under a fresh
+  id, and an upgrade that regenerates one used to leave the old
+  identity listed forever. `phone_devices` carries every identity that
+  ever reported with its self-reported label (the client's
+  manufacturer and model), first and last report; `observe` upserts it,
+  so a reporting phone re-registers itself and a forgotten one that
+  still reports comes back on its next report. `forget_device` retires
+  the identity with its observations and its queued commands, and the
+  same registry backs both management surfaces — `GET`/`DELETE
+  /v1/phones` for the client's settings screen, the `phone` tool's
+  `devices`/`forget` actions (forget consent-gated like the controls)
+  for the agent.
+- **Why most new phone topics never dispatch**, **decided:** a
+  state-only topic set (`location`, `app`, `device`, `wifi`, `alarm`)
+  that feeds the phone tables and stops there. Phone reports dispatch
+  like any resident key, so a location fix on a commute or a foreground
+  app between taps would otherwise be a model call per move; the
+  observation is the whole job, and a status question reads the
+  snapshot. Battery, network, and DND keep their conversational role —
+  their transitions are rare and worth hearing about. The client's own
+  transition discipline (post only on change, a 300 m move for
+  location) bounds the writes; the state-only rule bounds the tokens.
 
 ---
 

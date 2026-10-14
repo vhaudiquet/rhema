@@ -254,7 +254,9 @@ private fun fleetRowDescription(phone: PhoneInfo, mine: Boolean): String {
     phone.topics["network"]?.field("value")?.contentOrNull?.let { parts += it }
     phone.topics["app"]?.field("label")?.contentOrNull?.let { parts += it }
         ?: phone.topics["app"]?.field("value")?.contentOrNull
-            ?.let { pkg -> pkg.substringBefore('.').takeIf { it.isNotEmpty() } ?: pkg }
+            // No label on the payload: the package's last segment is the
+            // closest readable name ("maps" out of com.google.android.maps).
+            ?.let { pkg -> pkg.substringAfterLast('.').ifEmpty { pkg } }
             ?.let { parts += it }
 
     val seen = when {
