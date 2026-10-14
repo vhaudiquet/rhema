@@ -320,11 +320,21 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   its destination — git, curl, a service CLI — without entering the
   transcript; the use-never-read rule bars echoes, not work.
 - ~~**How the claw reaches the phone**~~, **decided:** the same shape
-  turned outward. The device's reports (`/v1/ingest`,
-  `phone:<device>:<topic>`) are conversation and state at once: they
-  dispatch like any resident key and land in the phone tables, so the
-  `phone` tool's `status`/`devices` actions read observations without
-  asking. Acting is consent-gated end to end: an approved action
+  turned outward, with one correction the fleet work earned. A topic
+  report (`/v1/ingest`, `phone:<device>:<topic>`) is an observation:
+  it lands in the phone tables and dispatches nothing, and the
+  `phone` tool's `status`/`devices` actions read it without asking.
+  The original shape dispatched every report like any resident key —
+  conversation and state at once — on the premise that the agent
+  should react to flips; in practice the transition rules bound
+  volume, not value (a decile drop from 80 is not news), and each
+  dispatched turn's reply auto-notifies the phone, so the premise
+  cost a model call and a push notification per flip for reactions
+  the agent could have made on demand with a status read. Deliberate
+  reactions keep a home: a scheduled task reads status and notifies
+  on the user's terms, and a bare `phone:<device>` key (a message on
+  the device's resident key) still dispatches like any resident key.
+  Acting is consent-gated end to end: an approved action
   joins a command queue the device polls and reports on
   (`/v1/phone/commands`), and the tool answers in-band — including
   "queued, not yet confirmed", the honest latency of a 15-minute
@@ -344,16 +354,16 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   /v1/phones` for the client's settings screen, the `phone` tool's
   `devices`/`forget` actions (forget consent-gated like the controls)
   for the agent.
-- **Why most new phone topics never dispatch**, **decided:** a
-  state-only topic set (`location`, `app`, `device`, `wifi`, `alarm`)
-  that feeds the phone tables and stops there. Phone reports dispatch
-  like any resident key, so a location fix on a commute or a foreground
-  app between taps would otherwise be a model call per move; the
-  observation is the whole job, and a status question reads the
-  snapshot. Battery, network, and DND keep their conversational role —
-  their transitions are rare and worth hearing about. The client's own
-  transition discipline (post only on change, a 300 m move for
-  location) bounds the writes; the state-only rule bounds the tokens.
+- **Why no phone report dispatches**, **decided:** the topic key's
+  shape is the whole rule. `phone:<device>:<topic>` is telemetry — it
+  feeds the tables and the ingest door answers
+  `{"ingested": "observed"}` — because a report's transitions bound
+  the write volume but say nothing about whether a turn is worth it,
+  and a turn per flip is a model call plus an auto-notified push per
+  flip. The status question reads the snapshot; the deliberate
+  reaction is a task. The client's own discipline (post only on
+  change, a 300 m move for location) bounds the writes; dropping the
+  dispatch bounds the tokens and the notification noise to zero.
 
 ---
 
