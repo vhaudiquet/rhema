@@ -32,12 +32,32 @@ android {
             keyAlias = "androiddebugkey"
             keyPassword = "android"
         }
+
+        // The release key anchors the future edge channel: whatever is
+        // signed with it can silently update an install that trusts the
+        // channel, so it must not travel with the source. It exists only
+        // as a CI secret (see .gitea/workflows/android.yml); blank
+        // environment — local builds, fork PRs — leaves release unsigned.
+        create("release") {
+            storeFile = System.getenv("ANDROID_RELEASE_KEYSTORE")
+                ?.takeIf { it.isNotBlank() }?.let { rootProject.file(it) }
+            storePassword = System.getenv("ANDROID_RELEASE_KEYSTORE_PASSWORD")
+                ?.takeIf { it.isNotBlank() }
+            keyAlias = "rhema-release"
+            keyPassword = storePassword
+        }
     }
 
     buildTypes {
         release {
-            // v1 ships debug builds only; keep release plain until there is a keystore.
             isMinifyEnabled = false
+            // Signed only where the release credentials exist; the
+            // unsigned artifact is a build check, never a deliverable.
+            if (!System.getenv("ANDROID_RELEASE_KEYSTORE")
+                .isNullOrBlank()
+            ) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
 

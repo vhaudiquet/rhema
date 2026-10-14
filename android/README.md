@@ -155,6 +155,7 @@ or `local.properties` `sdk.dir`).
 ```sh
 ANDROID_HOME=~/Android/Sdk ./gradlew :app:assembleDebug   # debug APK
 ANDROID_HOME=~/Android/Sdk ./gradlew :app:lintDebug       # lint
+ANDROID_HOME=~/Android/Sdk ./gradlew :app:assembleRelease # release APK
 ```
 
 APK lands at `app/build/outputs/apk/debug/app-debug.apk`. Install and run:
@@ -170,6 +171,16 @@ updates a locally-built install and vice versa. The key is deliberately
 not a secret — debug keys guard nothing — a stable signature across
 machines is the whole point. The build never touches
 `~/.android/debug.keystore`, so other projects keep their own key.
+
+Release builds are the opposite custody model: the key anchors the
+future edge channel — whatever it signs can silently update an install
+that trusts the channel — so it never travels with the source. CI holds
+it as two repository secrets (`ANDROID_RELEASE_KEYSTORE`, the base64
+keystore, and `ANDROID_RELEASE_KEYSTORE_PASSWORD`; alias
+`rhema-release`), and the android workflow pins both certificates by
+SHA-256 fingerprint before uploading an artifact. Locally, blank
+environment leaves `assembleRelease` unsigned: a build check, never a
+deliverable.
 
 Pinned toolchain: Gradle 9.3.1 (wrapper), AGP 8.13.2, Kotlin 2.2.21
 (`org.jetbrains.kotlin.plugin.compose` + `plugin.serialization`), Compose
@@ -216,3 +227,8 @@ certificate.
   token, rendered by the web UI or printed in the terminal) instead of
   typing both by hand. Deliberately deferred; the Settings screen is
   the manual path today.
+- Distribution: the CI release artifact (`rhema-android-release`) is
+  the future edge channel's payload — publishing it somewhere public
+  (a Gitea generic package, an always-latest link) is deferred; the
+  secret release key is already the channel's trust anchor, so the
+  artifact is worth building and pinning now.
