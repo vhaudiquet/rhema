@@ -89,7 +89,9 @@ impl ProviderChoice {
 #[derive(Debug, Parser)]
 #[command(
     name = "rhema",
-    version,
+    // The baked label, not the bare crate version: `--version` answers
+    // the same question the banner does — which tree is this binary.
+    version = crate::VERSION_LABEL,
     about = "Full-screen terminal UI for the rhema coding agent"
 )]
 pub struct Args {
