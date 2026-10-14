@@ -32,6 +32,7 @@ pub const PROVIDERS: &[&str] = &[
     "anthropic",
     "openai",
     "deepseek",
+    "zai",
     "copilot",
     "google",
 ];
@@ -66,6 +67,8 @@ pub fn default_model_for(provider: &str) -> &'static str {
         "anthropic" => "claude-sonnet-4-5",
         "openai" => "gpt-5",
         "deepseek" => "deepseek-chat",
+        // The Coding Plan's flagship, as Z.ai's own client spells it.
+        "zai" => "GLM-5.3",
         // The proxy's long-running default workhorse.
         "copilot" => "gpt-4.1",
         // Google and OpenRouter share the Gemini fallback; OpenRouter
@@ -180,6 +183,19 @@ fn catalog_fetch(
                     .await
             })
         }
+        "zai" => {
+            let key = profile.api_key("zai", secrets)?;
+            let base_url = stored_zai_route(&profile);
+            tokio::spawn(async move {
+                let mut provider = AnthropicProvider::new(key).with_bearer_auth();
+                if let Some(base_url) = base_url {
+                    provider = provider.with_base_url(base_url);
+                } else {
+                    provider = provider.with_base_url(rhema_provider_anthropic::ZAI_BASE_URL);
+                }
+                provider.list_models().await
+            })
+        }
         "copilot" => {
             let key = profile.api_key("copilot", secrets)?;
             tokio::spawn(async move { CopilotProvider::new(key).list_models().await })
@@ -190,6 +206,14 @@ fn catalog_fetch(
         }
     };
     Some(task)
+}
+
+/// The stored route override of the profile's zai instance, trimmed and
+/// blank-filtered — the shape [`Profile::instance_url`] serves.
+fn stored_zai_route(profile: &Profile) -> Option<String> {
+    profile
+        .instance_for_provider("zai")
+        .and_then(|(_, instance)| profile.instance_url(instance))
 }
 
 /// Resolves the backend the profile's settings call for. `provider`
@@ -265,6 +289,18 @@ pub fn provider_for(
             Arc::new(
                 OpenAiCompatibleProvider::new(key).with_base_url("https://api.deepseek.com/v1"),
             ) as Arc<dyn ModelProvider>
+        })),
+        "zai" => Ok(profile.api_key("zai", secrets).map(|key| {
+            // A stored instance may override the route (a proxy); none
+            // means the Coding Plan endpoint itself. Bearer auth is the
+            // scheme that route documents.
+            let mut provider = AnthropicProvider::new(key).with_bearer_auth();
+            if let Some(base_url) = stored_zai_route(profile) {
+                provider = provider.with_base_url(base_url);
+            } else {
+                provider = provider.with_base_url(rhema_provider_anthropic::ZAI_BASE_URL);
+            }
+            Arc::new(provider) as Arc<dyn ModelProvider>
         })),
         "copilot" => Ok(profile
             .api_key("copilot", secrets)
@@ -421,6 +457,49 @@ mod tests {
             .expect("a stored token resolves");
         assert_eq!(resolved.kind, "copilot");
         assert_eq!(resolved.model, "gpt-4.1");
+    }
+
+    #[test]
+    fn the_zai_kind_resolves_from_a_stored_key_and_its_route() {
+        let mut profile = Profile {
+            provider: Some("zai".into()),
+            ..Profile::default()
+        };
+        profile.upsert_instance(
+            "zai",
+            ProviderInstance {
+                provider: "zai".into(),
+                api_key: Some("zkey".into()),
+                secret_ref: None,
+                base_url: Some("https://proxy.example/api/anthropic".into()),
+            },
+        );
+        let resolved = resolve(&profile, None, None, None, None)
+            .expect("a stored key resolves")
+            .expect("a stored key resolves");
+        assert_eq!(resolved.kind, "zai");
+        // The kind's own fallback model, not the anthropic one.
+        assert_eq!(resolved.model, "GLM-5.3");
+        // No key, no provider — `auth_required` to the client.
+        let mut keyless = Profile {
+            provider: Some("zai".into()),
+            ..Profile::default()
+        };
+        keyless.upsert_instance(
+            "zai",
+            ProviderInstance {
+                provider: "zai".into(),
+                api_key: None,
+                secret_ref: None,
+                base_url: None,
+            },
+        );
+        assert!(
+            provider_for("zai", &keyless, None, None)
+                .expect("a known kind resolves")
+                .is_none(),
+            "a keyless zai kind is auth_required, not an error"
+        );
     }
 
     #[test]

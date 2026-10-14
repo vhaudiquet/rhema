@@ -59,7 +59,8 @@ pub struct AcpOptions {
     /// Which config profile to use; `None` is the default profile.
     pub profile: Option<String>,
     /// Model backend override (a provider name like `google`,
-    /// `anthropic`, `openai`, `deepseek`, `openrouter`, `llama-cpp`).
+    /// `anthropic`, `openai`, `deepseek`, `zai`, `openrouter`,
+    /// `llama-cpp`).
     pub provider: Option<String>,
     /// Model name override.
     pub model: Option<String>,
