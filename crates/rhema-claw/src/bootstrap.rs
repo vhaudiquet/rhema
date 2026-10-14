@@ -12,18 +12,20 @@
 //! is handed over through [`Bootstrap::root`] for exactly that writer.
 //!
 //! The template ([`DEFAULT_SYSTEM_MD`]) is data next to the code, the
-//! coding agent's house pattern: placeholders `{workspace}`, `{soul}`,
-//! `{user}`, `{environment}`, `{tools}`, and `{onboarding}` are filled
-//! per dispatch — the file sections from the live files, `{tools}` from
-//! the dispatch's own resolver chain, so the roster the prompt shows is
-//! the roster the model gets. A present file replaces its placeholder
-//! verbatim — never appended to, never escaped; a missing one renders
-//! its stub. The `{onboarding}` section renders only while either file
-//! is unwritten, so the offer self-terminates.
+//! coding agent's house pattern, and it renders through the agent
+//! toolkit's Jinja renderer — one template language for both agents:
+//! `{{ workspace }}`, the three file sections from the live files, a
+//! `{% for %}` over `tools` from the dispatch's own resolver chain, so
+//! the roster the prompt shows is the roster the model gets. A present
+//! file replaces its placeholder verbatim — never appended to, never
+//! re-parsed; a missing one renders its stub. The `{% if onboarding %}`
+//! section renders only while either file is unwritten, so the offer
+//! self-terminates.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rhema_agent_tools::render_template;
 use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
 use rhema_core::ToolSpec;
 use serde_json::{Value, json};
@@ -92,6 +94,11 @@ pub enum BootstrapError {
         /// The rejected content's size, in bytes.
         size: usize,
     },
+    /// The system-prompt template failed to render — bad syntax, unknown
+    /// filter — with the template position when known. The dispatch
+    /// refuses to run on a prompt it cannot fully render.
+    #[error("system prompt template: {0}")]
+    Template(String),
 }
 
 /// Which of the onboarding files exist — the badge the HTTP surface
@@ -189,49 +196,15 @@ fn section(header: &str, content: Option<&str>, stub: &str) -> String {
     format!("{header}\n\n{}", content.unwrap_or(stub))
 }
 
-/// One rendered tool line: name, description, and the call's JSON
-/// schema — the same three the API's tools array carries, so the
-/// roster the prompt shows cannot drift from what the resolver
-/// advertises.
-fn tool_line(spec: &ToolSpec) -> String {
-    let schema = serde_json::to_string(&spec.parameters).expect("a JSON value always serializes");
-    format!("- {} | {} | {}", spec.name, spec.description, schema)
-}
-
-/// Fills every placeholder in one pass: text a value carries is never
-/// rescanned, so a file's own braces survive verbatim.
-fn substitute(template: &str, values: &[(&str, &str)]) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    'scan: while !rest.is_empty() {
-        let Some(start) = rest.find('{') else {
-            out.push_str(rest);
-            break;
-        };
-        out.push_str(&rest[..start]);
-        let tail = &rest[start..];
-        for (name, value) in values {
-            let token = format!("{{{name}}}");
-            if tail.starts_with(&token) {
-                out.push_str(value);
-                rest = &tail[token.len()..];
-                continue 'scan;
-            }
-        }
-        // Not a known placeholder: the brace is the document's own.
-        out.push('{');
-        rest = &tail[1..];
-    }
-    out
-}
-
-/// Renders the system prompt for one dispatch: `{workspace}` and the
-/// three file sections from the live store, `{tools}` from the
-/// dispatch's own resolver specs, `{session}` — the dispatching key,
-/// the address the model schedules its own wakes to — and the
-/// `{onboarding}` section only while [`Bootstrap::needs_onboarding`].
+/// Renders the system prompt for one dispatch through the agent
+/// toolkit's Jinja renderer: `{{ workspace }}` and the three file
+/// sections from the live store, `tools` from the dispatch's own
+/// resolver specs, `{{ session }}` — the dispatching key, the address
+/// the model schedules its own wakes to — and `onboarding`, the offer
+/// the template's `{% if %}` shows only while a file is unwritten.
 /// Fallible on purpose — a store that cannot be read surfaces loudly
-/// instead of rendering a prompt without it.
+/// instead of rendering a prompt without it, and a template that
+/// cannot render fails the dispatch before any model call.
 pub fn render_system(
     template: &str,
     session: &str,
@@ -247,24 +220,22 @@ pub fn render_system(
     } else {
         ""
     };
-    let workspace = workspace.display().to_string();
-    let soul_section = section("## SOUL", soul.as_deref(), PENDING);
-    let user_section = section("## USER", user.as_deref(), PENDING);
-    let environment_section = section("## ENVIRONMENT", environment.as_deref(), GENERATED_AT_BOOT);
-    let tool_list = tools.iter().map(tool_line).collect::<Vec<_>>().join("\n");
-    let rendered = substitute(
-        template,
-        &[
-            ("session", session),
-            ("workspace", workspace.as_str()),
-            ("soul", soul_section.as_str()),
-            ("user", user_section.as_str()),
-            ("environment", environment_section.as_str()),
-            ("tools", tool_list.as_str()),
-            ("onboarding", onboarding),
-        ],
-    );
-    Ok(rendered.trim_end().to_owned() + "\n")
+    let context = json!({
+        "session": session,
+        "workspace": workspace.display().to_string(),
+        "soul": section("## SOUL", soul.as_deref(), PENDING),
+        "user": section("## USER", user.as_deref(), PENDING),
+        "environment": section("## ENVIRONMENT", environment.as_deref(), GENERATED_AT_BOOT),
+        "onboarding": onboarding,
+        "tools": tools,
+    });
+    render_template(template, &context).map_err(|err| {
+        let line = err
+            .line()
+            .map(|line| format!(", line {line}"))
+            .unwrap_or_default();
+        BootstrapError::Template(format!("{err}{line}"))
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -539,7 +510,7 @@ mod tests {
         .expect("renders");
         assert!(prompt.contains("- my_tool | its purpose | "), "{prompt}");
         assert!(
-            prompt.contains(r#""required":["kind"]"#),
+            prompt.contains(r#""required": ["kind"]"#),
             "the JSON schema rendered: {prompt}"
         );
     }
