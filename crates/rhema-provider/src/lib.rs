@@ -19,6 +19,7 @@
 //! - [`allowance`] — the subscription allowance a backend reports
 //! - [`stream`] — the SSE byte-stream decoder
 //! - [`login`] — the interactive login flow seam
+//! - [`retry`] — the transient-failure retry every turn provider rides
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -27,10 +28,12 @@ pub mod allowance;
 pub mod card;
 pub mod login;
 pub mod pricing;
+pub mod retry;
 pub mod stream;
 
 pub use allowance::Allowance;
 pub use card::ModelCard;
 pub use login::{InteractiveLogin, LoginInstruction, LoginSink, LoginUpdate};
 pub use pricing::Pricing;
+pub use retry::Retrying;
 pub use stream::SseDecoder;

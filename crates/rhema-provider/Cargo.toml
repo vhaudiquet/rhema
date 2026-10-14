@@ -9,11 +9,17 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+# The ModelProvider seam the retry decorator implements and the
+# ProviderError it classifies
+rhema-core = { path = "../rhema-core" }
 # The card and the price record round-trip through stored catalogs
 serde = { workspace = true }
 # dyn InteractiveLogin: the frontends hold boxed flows
 async-trait = { workspace = true }
+# The retry decorator's backoff sleeps
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
-# The login-flow tests run on the test runtime
-tokio = { workspace = true, features = ["macros", "rt"] }
+# The login-flow tests run on the test runtime; start_paused (test-util)
+# drives the retry ladder's sleeps virtually.
+tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
