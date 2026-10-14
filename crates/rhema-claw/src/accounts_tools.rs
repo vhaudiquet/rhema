@@ -1,22 +1,29 @@
-//! The identity tools: `identity_save`, `identity_list`, and
-//! `identity_forget`, the model's surface over the [`IdentityStore`].
+//! The identity tools: `identity_save`, `identity_list`,
+//! `identity_forget`, and `identity_exec`, the model's surface over the
+//! [`IdentityStore`].
 //!
 //! These are the one place the use-never-read contract could break, so
 //! the answers are built to keep it: a save answers with the redacted
 //! [`Account`] and the watch verdict — never the secret, which nothing
 //! here re-renders; a list answers with the store's own redacted
-//! records; a forget answers with what went. The store's `secret()` is
-//! *not* reachable from any tool: it exists for the forge clients, and
-//! this module never calls it.
+//! records; a forget answers with what went. The store's `secret()`
+//! has exactly one tool-side consumer, [`IDENTITY_EXEC`]: the credential
+//! is injected into one child process's environment — the sanctioned
+//! *destination* — and only that command's output returns, so the value
+//! reaches its work without ever entering the conversation.
 //!
 //! These tools join the interactive chain only. A forge dispatch — whose
 //! prompt is text a stranger wrote — never resolves them, so an injected
-//! comment cannot ask its way to the accounts.
+//! comment cannot ask its way to the accounts or act with their
+//! credentials.
 
+use std::path::PathBuf;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 use rhema_identity::{Account, AccountDraft, IdentityStore, Secret, SecretKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -157,8 +164,9 @@ impl Tool for IdentitySave {
             "identity_save",
             "Store an account the daemon holds on a service: a label, the service's name (e.g. \
              'github'), optionally its URL and the username, and the secret (an API token, or a \
-             password — passwords are stored but never usable by you). With watch=true and a \
-             forge the daemon watches, its notifications for this account are followed.",
+             password). Act with a stored account through identity_exec — the credential \
+             itself is never shown to you. With watch=true and a forge the daemon watches, \
+             the account's notifications are followed.",
             json!({
                 "type": "object",
                 "properties": {
@@ -291,6 +299,289 @@ pub fn registry(accounts: Arc<dyn IdentityStore>, watches: Arc<ClawStore>) -> To
     }));
     registry.register(Arc::new(IdentityForget { accounts, watches }));
     registry
+}
+
+/// The tool's name on the wire.
+pub const IDENTITY_EXEC: &str = "identity_exec";
+
+/// How long one command may run before it is killed.
+const EXEC_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// The longest a caller may stretch a command's budget.
+const EXEC_TIMEOUT_MAX: Duration = Duration::from_secs(600);
+
+/// The output tail a result carries, mirroring the bash tool's caps:
+/// past either the byte or the line limit the head is elided and the
+/// tail kept — a failure's summary lives at the end.
+fn render_truncated(bytes: &[u8]) -> String {
+    const LIMIT: usize = 50 * 1024;
+    const LINES: usize = 2000;
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines: Vec<&str> = text.lines().collect();
+    if bytes.len() <= LIMIT && lines.len() <= LINES {
+        return text.into_owned();
+    }
+    if lines.len() > LINES {
+        lines = lines[lines.len() - LINES..].to_vec();
+    }
+    let mut kept = String::new();
+    for line in lines {
+        if kept.len() + line.len() + 1 > LIMIT {
+            break;
+        }
+        kept.push_str(line);
+        kept.push('\n');
+    }
+    let elided = bytes.len() - kept.len();
+    format!("[output truncated — {elided} bytes elided]\n{kept}")
+}
+
+/// The service's own env names a token answers as, beyond the generic
+/// `ACCOUNT_*` set: the names its CLI and API clients read.
+fn service_env_names(service: &str) -> &'static [&'static str] {
+    match service.trim().to_ascii_lowercase().as_str() {
+        "github" => &["GITHUB_TOKEN", "GH_TOKEN"],
+        "gitea" => &["GITEA_TOKEN"],
+        "gitlab" => &["GITLAB_TOKEN"],
+        _ => &[],
+    }
+}
+
+/// The git credential helper the command runs with: a shell snippet
+/// that answers git's https prompts from the injected environment. The
+/// secret lives only in the child process's env — never in the value
+/// itself, never in the output.
+const GIT_CREDENTIAL_HELPER: &str = "!f() { \
+    printf 'username=%s\\n' \"$ACCOUNT_USERNAME\"; \
+    printf 'password=%s\\n' \"$ACCOUNT_SECRET\"; }; f";
+
+/// `identity_exec`: act with a stored account. The one tool-side
+/// consumer of the store's `secret()` — the credential is injected into
+/// one child process's environment and a git credential helper, the
+/// command runs, and only its output returns. The value reaches its
+/// destination; it never reaches the conversation.
+pub struct IdentityExec {
+    accounts: Arc<dyn IdentityStore>,
+    workspace: PathBuf,
+}
+
+impl IdentityExec {
+    /// The executor over `accounts`, running commands in `workspace`.
+    pub fn new(accounts: Arc<dyn IdentityStore>, workspace: impl Into<PathBuf>) -> Self {
+        Self {
+            accounts,
+            workspace: workspace.into(),
+        }
+    }
+
+    async fn exec(
+        &self,
+        call: ToolCall,
+        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> ToolResult {
+        let id = match call.args.get("id").and_then(Value::as_str) {
+            Some(id) => id.trim().to_owned(),
+            None => return ToolResult::failure(call.id, "missing required argument: id"),
+        };
+        let command = match call.args.get("command").and_then(Value::as_str) {
+            Some(command) => command,
+            None => return ToolResult::failure(call.id, "missing required argument: command"),
+        };
+        let timeout = match call.args.get("timeout_secs") {
+            None | Some(Value::Null) => EXEC_TIMEOUT,
+            Some(value) => {
+                let Some(secs) = value.as_u64() else {
+                    return ToolResult::failure(call.id, "timeout_secs must be a number");
+                };
+                Duration::from_secs(secs.clamp(1, EXEC_TIMEOUT_MAX.as_secs()))
+            }
+        };
+        let Some(account) = self
+            .accounts
+            .get(&id)
+            .map_err(|err| err.to_string())
+            .ok()
+            .flatten()
+        else {
+            return ToolResult::failure(
+                call.id,
+                format!("no account {id:?} — identity_list names them"),
+            );
+        };
+        let Some(secret) = self
+            .accounts
+            .secret(&id)
+            .map_err(|err| err.to_string())
+            .ok()
+            .flatten()
+        else {
+            return ToolResult::failure(call.id, format!("account {id:?} has no secret"));
+        };
+
+        let mut cmd = tokio::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg(command)
+            .current_dir(&self.workspace)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .env("ACCOUNT_ID", &account.id)
+            .env("ACCOUNT_SERVICE", &account.service)
+            .env(
+                "ACCOUNT_USERNAME",
+                account.username.as_deref().unwrap_or(""),
+            )
+            .env("ACCOUNT_SECRET", &secret.value)
+            // git asks https credentials from the helper, which reads
+            // the injected env; a failed auth must fail, not hang.
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "credential.helper")
+            .env("GIT_CONFIG_VALUE_0", GIT_CREDENTIAL_HELPER)
+            .env("GIT_TERMINAL_PROMPT", "0");
+        if secret.kind == SecretKind::Token {
+            for name in service_env_names(&account.service) {
+                cmd.env(name, &secret.value);
+            }
+        }
+
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) => {
+                return ToolResult::failure(call.id, format!("failed to spawn bash: {err}"));
+            }
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        if let Some(stdout) = child.stdout.take() {
+            pump(stdout, false, tx.clone());
+        }
+        if let Some(stderr) = child.stderr.take() {
+            pump(stderr, true, tx.clone());
+        }
+        drop(tx);
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep_until(deadline) => {
+                    let _ = child.start_kill();
+                    let _ = child.wait().await;
+                    return ToolResult::failure(
+                        call.id,
+                        format!(
+                            "command timed out after {}s and was killed",
+                            timeout.as_secs()
+                        ),
+                    );
+                }
+                line = rx.recv() => match line {
+                    Some((is_stderr, line)) => {
+                        let sink = if is_stderr { &mut stderr } else { &mut stdout };
+                        sink.extend_from_slice(line.as_bytes());
+                        sink.push(b'\n');
+                        progress(&format!("{line}\n"));
+                    }
+                    None => break,
+                }
+            }
+        }
+        let status = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => status,
+            _ => {
+                return ToolResult::failure(
+                    call.id,
+                    format!(
+                        "command timed out after {}s and was killed",
+                        timeout.as_secs()
+                    ),
+                );
+            }
+        };
+        let content = format!(
+            "exit code {}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+            status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_owned()),
+            render_truncated(&stdout),
+            render_truncated(&stderr),
+        );
+        let result = if status.success() {
+            ToolResult::success(call.id, content)
+        } else {
+            ToolResult::failure(call.id, content)
+        };
+        match status.code() {
+            Some(code) => result.with_code(code),
+            None => result,
+        }
+    }
+}
+
+/// Reads `stream` line by line into `tx`, tagged with its stream, until
+/// EOF — the live side of the command's output.
+fn pump<R>(stream: R, is_stderr: bool, tx: tokio::sync::mpsc::UnboundedSender<(bool, String)>)
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if tx.send((is_stderr, line)).is_err() {
+                break;
+            }
+        }
+    });
+}
+
+#[async_trait]
+impl ToolResolver for IdentityExec {
+    fn specs(&self) -> Vec<ToolSpec> {
+        vec![ToolSpec::new(
+            IDENTITY_EXEC,
+            "Act with a stored account's credential without ever seeing \
+             it: run one shell command in this session's workspace with \
+             the secret injected as environment variables — ACCOUNT_SECRET, \
+             the service's own (GITHUB_TOKEN/GH_TOKEN, GITEA_TOKEN, \
+             GITLAB_TOKEN) — and a git credential helper preconfigured, \
+             so plain `git clone`/`git push` over https and API calls \
+             (curl, gh) just work. Only the command's output comes back; \
+             the secret itself never enters the conversation. Pick `id` \
+             from identity_list.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string",
+                        "description": "The account's id, as identity_list \
+                            reports it." },
+                    "command": { "type": "string",
+                        "description": "The shell command to run." },
+                    "timeout_secs": { "type": "integer",
+                        "description": "Kill the command after this many \
+                            seconds; 180 by default, 600 at most." }
+                },
+                "required": ["id", "command"]
+            }),
+        )]
+    }
+
+    async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
+        self.exec(call, &mut |_| {}).await
+    }
+
+    async fn resolve_streaming(
+        &self,
+        call: ToolCall,
+        ctx: &ToolContext,
+        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+    ) -> ToolResult {
+        if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+            return ToolResult::failure(call.id, "cancelled");
+        }
+        self.exec(call, progress).await
+    }
 }
 
 #[cfg(test)]
@@ -429,5 +720,143 @@ mod tests {
         )
         .expect_err("rejected");
         assert!(err.contains("unknown secret_kind"), "{err}");
+    }
+
+    /// The use half of the accounts: the command runs with the
+    /// service's env injected, the git helper configured, and none of
+    /// the secret in the result.
+    #[tokio::test]
+    async fn identity_exec_runs_with_the_credential_in_its_environment() {
+        let accounts = Arc::new(rhema_identity::VolatileIdentityStore::new());
+        let stored = accounts
+            .put(
+                AccountDraft::new(
+                    "github releases",
+                    "github",
+                    Secret::new(SecretKind::Token, "tok-1234567890"),
+                )
+                .with_username("kosmos-ai-bot"),
+            )
+            .expect("the account stores");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let exec = IdentityExec::new(accounts, workspace.path());
+        let id = stored.id.clone();
+
+        async fn run(exec: &IdentityExec, id: &str, command: &str) -> rhema_core::ToolResult {
+            exec.resolve(
+                ToolCall {
+                    id: "c1".into(),
+                    name: IDENTITY_EXEC.into(),
+                    args: json!({ "id": id, "command": command }),
+                    provider_data: Value::Null,
+                },
+                &rhema_core::ToolContext::default(),
+            )
+            .await
+        }
+
+        // The service's token and the generic set are all the same
+        // value, and the username rode along.
+        let result = run(
+            &exec,
+            &id,
+            "[ -n \"$GITHUB_TOKEN\" ] && [ \"$GH_TOKEN\" = \"$ACCOUNT_SECRET\" ] \
+             && [ \"$ACCOUNT_USERNAME\" = \"kosmos-ai-bot\" ] \
+             && [ \"$GIT_CONFIG_COUNT\" = \"1\" ] && echo ok",
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.contains("ok"), "{}", result.content);
+        assert!(
+            !result.content.contains("tok-1234567890"),
+            "the secret never rides the answer: {}",
+            result.content
+        );
+
+        // The helper answers git's prompt shape from the env.
+        let result = run(
+            &exec,
+            &id,
+            "printf 'username=%s password=%s' \"$ACCOUNT_USERNAME\" \"$ACCOUNT_SECRET\" \
+             | grep -c kosmos-ai-bot",
+        )
+        .await;
+        assert!(!result.is_error, "{}", result.content);
+    }
+
+    #[tokio::test]
+    async fn identity_exec_reports_exit_codes_and_unknown_accounts() {
+        let accounts = Arc::new(rhema_identity::VolatileIdentityStore::new());
+        let stored = accounts
+            .put(AccountDraft::new(
+                "gitea",
+                "gitea",
+                Secret::new(SecretKind::Token, "gt-1"),
+            ))
+            .expect("the account stores");
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let exec = IdentityExec::new(accounts.clone(), workspace.path());
+        let id = stored.id.clone();
+
+        let call = |id: &str, args: Value| ToolCall {
+            id: "c1".into(),
+            name: IDENTITY_EXEC.into(),
+            args: {
+                let mut args = args;
+                args["id"] = json!(id);
+                args
+            },
+            provider_data: Value::Null,
+        };
+        let failure = exec
+            .resolve(
+                call(&id, json!({ "command": "exit 3" })),
+                &rhema_core::ToolContext::default(),
+            )
+            .await;
+        assert!(failure.is_error);
+        assert_eq!(failure.code, Some(3));
+        assert!(failure.content.contains("exit code 3"));
+
+        // A gitea token answers as GITEA_TOKEN; a github account it is not.
+        let check = exec
+            .resolve(
+                call(
+                    &id,
+                    json!({
+                        "command": "[ -n \"$GITEA_TOKEN\" ] && [ -z \"$GITHUB_TOKEN\" ]"
+                    }),
+                ),
+                &rhema_core::ToolContext::default(),
+            )
+            .await;
+        assert!(!check.is_error, "{}", check.content);
+
+        let missing = exec
+            .resolve(
+                call("99", json!({ "command": "echo hi" })),
+                &rhema_core::ToolContext::default(),
+            )
+            .await;
+        assert!(missing.is_error);
+        assert!(
+            missing.content.contains("no account"),
+            "{}",
+            missing.content
+        );
+
+        // The command runs in the session's workspace.
+        let pwd = exec
+            .resolve(
+                call(&id, json!({ "command": "pwd" })),
+                &rhema_core::ToolContext::default(),
+            )
+            .await;
+        assert!(
+            pwd.content
+                .contains(workspace.path().to_str().expect("utf8")),
+            "{}",
+            pwd.content
+        );
     }
 }

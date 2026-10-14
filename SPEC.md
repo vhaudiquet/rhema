@@ -301,7 +301,12 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   account id, so use-never-read survives the round-trip. Denial and
   the fifteen-minute silence answer in-band, so a refused turn says so
   and moves on; expiry is by age at read, so a daemon restarted under
-  a waiting tool stops offering a stale card.
+  a waiting tool stops offering a stale card. Using a stored
+  credential is the mirror half: `identity_exec` (interactive chain
+  only, like every accounts tool) runs one command with the secret in
+  its environment plus a git credential helper, so the value reaches
+  its destination — git, curl, a service CLI — without entering the
+  transcript; the use-never-read rule bars echoes, not work.
 - ~~**How the claw reaches the phone**~~, **decided:** the same shape
   turned outward. The device's reports (`/v1/ingest`,
   `phone:<device>:<topic>`) are conversation and state at once: they

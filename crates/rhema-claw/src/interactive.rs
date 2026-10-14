@@ -161,6 +161,9 @@ pub struct InteractiveHandler {
     /// handler never resolves them, so a forge comment cannot reach the
     /// accounts.
     accounts_resolver: Arc<dyn rhema_core::ToolResolver>,
+    /// The one tool that acts with a stored credential: the secret is
+    /// injected into a command's environment and never returns.
+    identity_exec: Arc<dyn rhema_core::ToolResolver>,
     notify_resolver: Arc<dyn rhema_core::ToolResolver>,
     task_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// The durable cross-session store the memory tools act on; the
@@ -226,8 +229,11 @@ impl InteractiveHandler {
         tools.install_approval(Arc::new(AllowAll));
         let watch_resolver =
             crate::watch_tools::registry(watches.clone()).resolver_for(&Allowlist::permissive());
-        let accounts_resolver = crate::accounts_tools::registry(accounts, watches)
+        let accounts_resolver = crate::accounts_tools::registry(accounts.clone(), watches)
             .resolver_for(&Allowlist::permissive());
+        let identity_exec: Arc<dyn rhema_core::ToolResolver> = Arc::new(
+            crate::accounts_tools::IdentityExec::new(accounts, workspace.clone()),
+        );
         let notify_resolver = crate::notify_tools::registry(notifications.clone())
             .resolver_for(&Allowlist::permissive());
         let task_resolver =
@@ -242,6 +248,7 @@ impl InteractiveHandler {
             tools,
             watch_resolver,
             accounts_resolver,
+            identity_exec,
             notify_resolver,
             task_resolver,
             memory,
@@ -308,6 +315,7 @@ impl InteractiveHandler {
             self.task_resolver.clone(),
             self.watch_resolver.clone(),
             self.accounts_resolver.clone(),
+            self.identity_exec.clone(),
             self.identity_resolver.clone(),
             crate::consents::registry(
                 self.consents.clone(),

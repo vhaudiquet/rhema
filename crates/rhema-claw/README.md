@@ -149,7 +149,11 @@ for a UI catching up after a reload) — and the human answers through
 The secret travels once, from the answer into the agent accounts; the
 tool wakes with the account id, never the secret, and a denial or a
 15-minute silence comes back in-band so the turn can say so and move
-on. A turn can also hand files over: `attach_file` copies a workspace
+on. Acting with a stored account is `identity_exec`: it runs one shell
+command in the session workspace with the secret injected —
+`ACCOUNT_SECRET` plus the service's own `GITHUB_TOKEN`/`GITEA_TOKEN`/
+`GITLAB_TOKEN`, and a git credential helper — so `git clone` and API
+calls work while the credential itself never reaches the transcript. A turn can also hand files over: `attach_file` copies a workspace
 file (25 MiB cap, workspace-relative paths only) into the attachment
 store beside the database and puts an `attachment` card on the stream;
 the bytes are fetchable at `GET /v1/attachments/{id}` with the content

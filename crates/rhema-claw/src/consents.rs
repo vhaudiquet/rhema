@@ -412,7 +412,8 @@ impl Tool for AskSecret {
              an API key) that identity_list does not show yet — never ask \
              for something already stored. The answer carries no secret, \
              only whether it was stored and the account's id. The human \
-             may decline, or answer never; both come back in-band.",
+             may decline, or answer never; both come back in-band. Act \
+             with the stored account afterwards through identity_exec.",
             json!({
                 "type": "object",
                 "properties": {
