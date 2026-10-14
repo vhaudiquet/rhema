@@ -93,11 +93,6 @@ impl ProviderChoice {
     about = "Full-screen terminal UI for the rhema coding agent"
 )]
 pub struct Args {
-    /// Model name. Defaults to the stored choice, then the backend's
-    /// default.
-    #[arg(short = 'm', long)]
-    pub model: Option<String>,
-
     /// Which config profile to use (e.g. work, personal). Without it the
     /// session starts on the default profile, or the first one holding
     /// usable credentials.
@@ -269,7 +264,6 @@ mod tests {
     #[test]
     fn defaults_match_the_spec() {
         let args = parse(&[]);
-        assert_eq!(args.model, None);
         assert_eq!(args.profile, None);
         assert_eq!(args.workspace, PathBuf::from("."));
         assert_eq!(args.resume, None);
@@ -283,8 +277,6 @@ mod tests {
         let args = parse(&[
             "--profile",
             "work",
-            "-m",
-            "m1",
             "--workspace",
             "/tmp/ws",
             "--resume",
@@ -297,7 +289,6 @@ mod tests {
             "low",
         ]);
         assert_eq!(args.profile.as_deref(), Some("work"));
-        assert_eq!(args.model.as_deref(), Some("m1"));
         assert_eq!(args.workspace, PathBuf::from("/tmp/ws"));
         assert_eq!(args.resume, Some(PathBuf::from("s.json")));
         assert_eq!(args.save, Some(PathBuf::from("s.json")));
@@ -473,10 +464,10 @@ mod tests {
         // before the subcommand name, where it would be ambiguous with
         // the TUI's.
         assert!(try_parse(&["acp", "--workspace", "/tmp"]).is_err());
-        // And the default frontend still parses as before — headless is
-        // the `run` subcommand's job now, not a flag.
+        // And the model flag belongs to the subcommands only: the TUI's
+        // model is the picker's or the stored choice's to make.
         assert!(try_parse(&["--print", "hi"]).is_err());
-        assert!(try_parse(&["-m", "m"]).is_ok());
+        assert!(try_parse(&["-m", "m"]).is_err());
     }
 
     #[test]
