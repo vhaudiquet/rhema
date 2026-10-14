@@ -1,6 +1,7 @@
 package rs.rhema.phone.di
 
 import android.content.Context
+import rs.rhema.phone.data.AgentIdentityRepository
 import rs.rhema.phone.data.SettingsRepository
 import rs.rhema.phone.data.StatusRepository
 import rs.rhema.phone.data.rhemaStore
@@ -30,6 +31,8 @@ class AppContainer(context: Context) {
         .build()
 
     val api = ClawApi(settings, http, json)
+
+    val identity = AgentIdentityRepository(appContext.rhemaStore, api, json)
 
     val notifier = Notifier(appContext)
 

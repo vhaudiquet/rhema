@@ -39,6 +39,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +62,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import rs.rhema.phone.R
 import rs.rhema.phone.chat.ChatController
+import rs.rhema.phone.data.AgentIdentityCache
 import rs.rhema.phone.di.AppContainer
 import rs.rhema.phone.net.ClawResult
 import kotlinx.coroutines.Dispatchers
@@ -87,8 +89,13 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
 
     var draft by rememberSaveable { mutableStateOf("") }
 
+    // The claw's presentation identity: the avatar picture (when one is
+    // set), the initials glyph otherwise, and the agent's name on every
+    // turn — the same face the web UI shows.
+    val face = rememberAgentFace(container)
+
     Column(modifier = Modifier.fillMaxSize()) {
-        ChatHeader(sessionKey, controller.connection, onBack)
+        ChatHeader(sessionKey, controller.connection, face, onBack)
         HorizontalDivider(color = JadeiteBorder)
 
         // Reversed layout: index 0 is the newest turn, pinned to the
@@ -104,7 +111,7 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
             items(turnGroups(controller.items).asReversed(), key = { it.key }) { group ->
-                TurnGroupRow(group, container, controller)
+                TurnGroupRow(group, container, controller, face)
             }
         }
 
@@ -155,7 +162,12 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
 }
 
 @Composable
-private fun ChatHeader(sessionKey: String, conn: ChatController.Conn, onBack: () -> Unit) {
+private fun ChatHeader(
+    sessionKey: String,
+    conn: ChatController.Conn,
+    face: AgentFace,
+    onBack: () -> Unit,
+) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -168,7 +180,7 @@ private fun ChatHeader(sessionKey: String, conn: ChatController.Conn, onBack: ()
                 tint = JadeiteText2,
             )
         }
-        AppAvatar("R", accent = true, size = 34.dp)
+        AppAvatar(face.glyph, accent = face.image == null, size = 34.dp, image = face.image)
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 sessionKey.removePrefix("interactive:"),
@@ -259,7 +271,12 @@ private fun turnGroups(items: List<ChatController.Item>): List<TurnGroup> {
 }
 
 @Composable
-private fun TurnGroupRow(group: TurnGroup, container: AppContainer, controller: ChatController) {
+private fun TurnGroupRow(
+    group: TurnGroup,
+    container: AppContainer,
+    controller: ChatController,
+    face: AgentFace,
+) {
     when (group) {
         is TurnGroup.User -> Row(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -291,10 +308,10 @@ private fun TurnGroupRow(group: TurnGroup, container: AppContainer, controller: 
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            AppAvatar("R", accent = true)
+            AppAvatar(face.glyph, accent = face.image == null, image = face.image)
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    stringResource(R.string.chat_agent),
+                    face.name ?: stringResource(R.string.chat_agent),
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
                     color = if (group.items.any { it is ChatController.Reply && it.streaming }) {
@@ -867,4 +884,31 @@ private fun ConsentCard(item: ChatController.Consent, controller: ChatController
             }
         }
     }
+}
+
+// The agent's face as this screen renders it: the display name (null
+// keeps the string resource's fallback), the initials glyph, and the
+// decoded avatar image. The glyph precedence is the web's: the claw's
+// `initials`, else the name's first letter, else "R".
+private data class AgentFace(val name: String?, val glyph: String, val image: ImageBitmap?)
+
+@Composable
+private fun rememberAgentFace(container: AppContainer): AgentFace {
+    val cache by container.identity.cached.collectAsState(AgentIdentityCache())
+    var image by remember { mutableStateOf<ImageBitmap?>(null) }
+    // Decoding off the main thread: an uploaded avatar can weigh the
+    // claw's full 2 MB image cap.
+    LaunchedEffect(cache.avatar) {
+        image = cache.avatar?.let { bytes ->
+            withContext(Dispatchers.Default) {
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }
+        }
+    }
+    val identity = cache.identity
+    val name = identity?.name?.trim()?.takeIf { it.isNotEmpty() }
+    val glyph = identity?.initials?.trim()?.takeIf { it.isNotEmpty() }
+        ?: name?.take(1)
+        ?: "R"
+    return AgentFace(name, glyph, image)
 }

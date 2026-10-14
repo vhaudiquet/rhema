@@ -152,13 +152,26 @@ class ClawApi(
         return execute(builder.post(EMPTY_BODY).build()) { }
     }
 
-    // GET /v1/attachments/{id}: raw bytes, not JSON. The generic execute()
-    // rejects any 2xx body that does not open like JSON, so this endpoint
-    // gets its own plain read with the same error vocabulary.
+    // GET /v1/attachments/{id} and GET /v1/agent/avatar: raw bytes, not
+    // JSON. The generic execute() rejects any 2xx body that does not open
+    // like JSON, so these endpoints share one plain read with the same
+    // error vocabulary.
     suspend fun attachment(id: String): ClawResult<ByteArray> {
         val builder = v1("attachments", id)
             ?: return ClawResult.Network("no base URL configured")
-        return withContext(Dispatchers.IO) {
+        return rawGet(builder)
+    }
+
+    // The avatar behind GET /v1/agent; the identity document's `avatar`
+    // flag says whether the fetch can succeed.
+    suspend fun agentAvatar(): ClawResult<ByteArray> {
+        val builder = v1("agent", "avatar")
+            ?: return ClawResult.Network("no base URL configured")
+        return rawGet(builder)
+    }
+
+    private suspend fun rawGet(builder: Request.Builder): ClawResult<ByteArray> =
+        withContext(Dispatchers.IO) {
             try {
                 client.newCall(builder.get().build()).execute().use { response ->
                     if (response.isSuccessful) {
@@ -170,6 +183,14 @@ class ClawApi(
             } catch (e: IOException) {
                 ClawResult.Network(e.message ?: "network error")
             }
+        }
+
+    // GET /v1/agent: the agent's presentation identity — the name, mark,
+    // initials, and whether the avatar image is set.
+    suspend fun agent(): ClawResult<AgentIdentity> {
+        val builder = v1("agent") ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.get().build()) { response ->
+            json.decodeFromString<AgentIdentity>(response.body?.string() ?: "{}")
         }
     }
 

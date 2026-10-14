@@ -46,7 +46,11 @@ manages the device fleet the claw keeps.
   approval of a phone control action) render as cards answered in place —
   `POST`/`DELETE /v1/consents/{id}` — and `consent_resolved` settles them
   (a reconnect's replay rebuilds the settled states). The streaming reply
-  is finalized by `turn_done`. Replies
+  is finalized by `turn_done`. The chat renders the claw's presentation identity
+  (`GET /v1/agent`, cached in DataStore, refreshed per app open and on the session
+  list's refresh): the avatar image when one is set (`GET /v1/agent/avatar`), else
+  the initials, the name's first letter, or R; the agent's name labels every turn,
+  falling back to "rhema". Replies
   render
   as markdown (`com.mikepenz:multiplatform-markdown-renderer`, GFM flavour:
   raw HTML stays literal, so model output never mounts as markup; the

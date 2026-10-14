@@ -1,6 +1,7 @@
 package rs.rhema.phone.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -33,9 +34,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 
@@ -89,28 +92,54 @@ fun AppBadge(text: String, modifier: Modifier = Modifier, tint: Color = JadeiteT
     }
 }
 
-/** The avatar square: the agent's accent mark, or a neutral one. */
+/**
+ * The avatar square: the agent's picture when the claw has one, the
+ * accent mark (or a neutral one) otherwise — the same precedence as the
+ * web's `AgentAvatar`.
+ */
 @Composable
-fun AppAvatar(mark: String, accent: Boolean, modifier: Modifier = Modifier, size: Dp = 32.dp) {
+fun AppAvatar(
+    mark: String,
+    accent: Boolean,
+    modifier: Modifier = Modifier,
+    size: Dp = 32.dp,
+    image: ImageBitmap? = null,
+) {
     val shape = RoundedCornerShape(size / 4)
     Box(
         modifier = modifier
             .size(size)
             .clip(shape)
-            .background(if (accent) JadeiteAccent else JadeiteElevated)
-            .border(
-                if (accent) 0.dp else 1.dp,
-                if (accent) Color.Transparent else JadeiteBorderStrong,
-                shape,
+            .then(
+                if (image == null) {
+                    Modifier
+                        .background(if (accent) JadeiteAccent else JadeiteElevated)
+                        .border(
+                            if (accent) 0.dp else 1.dp,
+                            if (accent) Color.Transparent else JadeiteBorderStrong,
+                            shape,
+                        )
+                } else {
+                    Modifier
+                },
             ),
         contentAlignment = Alignment.Center,
     ) {
-        Text(
-            mark,
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-            color = if (accent) JadeiteOnAccent else JadeiteText2,
-        )
+        if (image != null) {
+            Image(
+                bitmap = image,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.matchParentSize(),
+            )
+        } else {
+            Text(
+                mark,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                color = if (accent) JadeiteOnAccent else JadeiteText2,
+            )
+        }
     }
 }
 

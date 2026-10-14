@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -94,6 +95,12 @@ private fun AppRoot(container: AppContainer) {
     BackHandler(enabled = chatSession != null || showSettings) {
         chatSession = null
         showSettings = false
+    }
+
+    // The agent's identity (name, avatar) is refreshed once per app open
+    // and cached in DataStore; the sessions screen's refresh re-fetches it.
+    LaunchedEffect(configured) {
+        if (configured == true) container.identity.refresh()
     }
 
     when {

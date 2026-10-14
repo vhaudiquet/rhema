@@ -207,3 +207,18 @@ data class PhoneCommand(
 // POST /v1/phone/commands/{id}/result
 @Serializable
 data class CommandResult(val ok: Boolean, val detail: String? = null)
+
+// GET /v1/agent — the agent's presentation identity, shared with the web
+// UI. Unset text fields are absent on the wire (the claw skips nulls), so
+// every field defaults; the images report presence only, their bytes live
+// at GET /v1/agent/{kind}.
+@Serializable
+data class AgentIdentity(
+    val name: String? = null,
+    val mark: String? = null,
+    val initials: String? = null,
+    val tagline: String? = null,
+    val signoff: String? = null,
+    val avatar: Boolean = false,
+    val logo: Boolean = false,
+)

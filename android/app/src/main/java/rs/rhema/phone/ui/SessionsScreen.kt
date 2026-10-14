@@ -53,6 +53,9 @@ fun SessionsScreen(
         scope.launch {
             loading = true
             error = null
+            // The agent may have renamed or re-faced itself on another
+            // surface; this button is the manual path for the cached identity.
+            container.identity.refresh()
             when (val result = container.api.sessions()) {
                 is ClawResult.Ok -> sessions = result.value
                 is ClawResult.HttpError -> error = UiMessage.Http(result.code, result.body)
