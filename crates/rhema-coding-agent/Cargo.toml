@@ -1,6 +1,6 @@
 [package]
 name = "rhema-coding-agent"
-description = "The coding-agent driver on top of rhema-core: built-in tools, turn loop, session persistence"
+description = "The coding-agent driver on top of rhema-core: turn loop, session persistence, the SYSTEM.md template"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,19 +13,16 @@ authors.workspace = true
 mock = ["rhema-core/mock"]
 
 [dependencies]
+# The shared toolkit the driver runs on: the approval-gated shell,
+# skills, paste expansion, revive-on-resume, the prompt renderer
+rhema-agent-tools = { path = "../rhema-agent-tools" }
 rhema-config = { path = "../rhema-config" }
 rhema-core = { path = "../rhema-core" }
-# The SYSTEM.md template engine
+# The SYSTEM.md template engine: the renderer lives in the toolkit,
+# the template error type stays with the driver
 minijinja = { workspace = true }
-serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 thiserror = { workspace = true }
-async-trait = { workspace = true }
-# Subprocess execution for the command tool; its streams read line by
-# line (io-util) and hand their lines to the resolver's progress
-# callback across reader tasks (sync).
-tokio = { workspace = true, features = ["process", "time", "io-util", "sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

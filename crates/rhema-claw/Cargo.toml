@@ -22,6 +22,9 @@ path = "src/main.rs"
 mock = ["rhema-core/mock"]
 
 [dependencies]
+# The shared toolkit: the resident agent assembles its agent from the
+# shell, the approval seam, paste expansion, and revive-on-resume
+rhema-agent-tools = { path = "../rhema-agent-tools" }
 rhema-autonomous-agent = { path = "../rhema-autonomous-agent" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
 rhema-config = { path = "../rhema-config" }

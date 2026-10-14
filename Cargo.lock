@@ -2946,6 +2946,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-agent-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "minijinja",
+ "rhema-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "rhema-autonomous-agent"
 version = "0.1.0"
 dependencies = [
@@ -2966,6 +2980,7 @@ dependencies = [
  "bytes",
  "clap",
  "reqwest",
+ "rhema-agent-tools",
  "rhema-autonomous-agent",
  "rhema-coding-agent",
  "rhema-config",
@@ -3005,6 +3020,7 @@ dependencies = [
  "pulldown-cmark",
  "ratatui",
  "rhema-acp",
+ "rhema-agent-tools",
  "rhema-coding-agent",
  "rhema-config",
  "rhema-core",
@@ -3025,13 +3041,11 @@ dependencies = [
 name = "rhema-coding-agent"
 version = "0.1.0"
 dependencies = [
- "async-trait",
  "minijinja",
+ "rhema-agent-tools",
  "rhema-config",
  "rhema-core",
- "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",

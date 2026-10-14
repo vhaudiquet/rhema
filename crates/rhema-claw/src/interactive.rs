@@ -38,7 +38,7 @@
 //! the rest report interrupted.
 //!
 //! Deterministic setup first (spec §1, §8): the allowlist — permissive,
-//! v1's starting point — and the resolver chain (the coding toolset over
+//! v1's starting point — and the resolver chain (the shell toolset over
 //! the interactive workspace, the memory tools, `bootstrap_save`, the
 //! notify tool, the task tools, and the watch tools) are assembled
 //! before the first model call; the model never decides its own
@@ -51,8 +51,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use rhema_agent_tools::{AllowAll, ExpandPastes, ShellTools, revive_dangling_calls};
 use rhema_autonomous_agent::{Allowlist, Handler, ResolverChain, SessionContext, async_trait};
-use rhema_coding_agent::{AllowAll, CodingTools, ExpandPastes, revive_dangling_calls};
 use rhema_core::{
     Agent, ChatParams, Content, Event as ModelEvent, EventSink, Message, ModelProvider, Role,
     Session, ToolContext, ToolResolver, run_turn,
@@ -155,7 +155,7 @@ pub struct InteractiveHandler {
     /// so a runtime switch is live on the next turn.
     backends: Arc<BackendRegistry>,
     workspace: PathBuf,
-    tools: Arc<CodingTools>,
+    tools: Arc<ShellTools>,
     watch_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// The identity tools: interactive-only by construction — the forge
     /// handler never resolves them, so a forge comment cannot reach the
@@ -225,7 +225,7 @@ impl InteractiveHandler {
         identity: Arc<crate::identity::IdentityStore>,
     ) -> Self {
         let workspace = workspace.into();
-        let tools = Arc::new(CodingTools::new(&workspace));
+        let tools = Arc::new(ShellTools::new(&workspace));
         tools.install_approval(Arc::new(AllowAll));
         let watch_resolver =
             crate::watch_tools::registry(watches.clone()).resolver_for(&Allowlist::permissive());
@@ -298,7 +298,7 @@ impl InteractiveHandler {
             .map_err(|err| format!("cannot build the interactive agent: {err}"))
     }
 
-    /// The resolver chain one dispatch runs under: the coding toolset
+    /// The resolver chain one dispatch runs under: the shell toolset
     /// over the interactive workspace, then the resident toolsets. The
     /// consent and attachment tools build per dispatch — their asks and
     /// cards must land on the session that asked, and the handler
@@ -861,7 +861,7 @@ mod tests {
         let specs = handler.resolver(&Key::from("interactive:web")).specs();
         assert!(
             specs.iter().any(|spec| spec.name == "bash"),
-            "the coding toolset is in the chain: {specs:?}"
+            "the shell toolset is in the chain: {specs:?}"
         );
         let prompt = render_system(
             DEFAULT_SYSTEM_MD,

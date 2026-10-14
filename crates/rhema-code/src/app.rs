@@ -947,7 +947,7 @@ impl App {
         let workspace =
             std::fs::canonicalize(&options.workspace).unwrap_or_else(|_| options.workspace.clone());
         let global_skills = rhema_config::Config::skills_dir().ok();
-        let skills = rhema_coding_agent::skills::discover(global_skills.as_deref(), &workspace)
+        let skills = rhema_agent_tools::skills::discover(global_skills.as_deref(), &workspace)
             .into_iter()
             .map(|skill| SkillRow {
                 name: skill.name,
@@ -1163,7 +1163,7 @@ impl App {
     /// Lists the discovered skills in the transcript: what the model's
     /// system prompt carries, for the human who wrote them.
     pub fn show_skills(&mut self, global: Option<&Path>, workspace: &Path) {
-        let skills = rhema_coding_agent::skills::discover(global, workspace);
+        let skills = rhema_agent_tools::skills::discover(global, workspace);
         if skills.is_empty() {
             self.transcript.push_notice(
                 "no skills. a skill is <dir>/SKILL.md with a `description` \

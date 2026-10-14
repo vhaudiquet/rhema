@@ -8,7 +8,7 @@
 
 use rhema_core::ToolCall;
 
-/// Decides whether a gated tool call (`write_file`, `run_command`) may run.
+/// Decides whether a gated tool call (`bash`) may run.
 /// Called once per gated call, before execution.
 pub trait Approval: Send + Sync {
     /// Return `true` to let the tool run.

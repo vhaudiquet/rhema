@@ -1,6 +1,6 @@
 //! The built-in tool: one approval-gated shell, scoped to a workspace.
 //!
-//! [`CodingTools`] is one [`ToolResolver`], not a registry: the same spec
+//! [`ShellTools`] is one [`ToolResolver`], not a registry: the same spec
 //! goes to the model every step. `bash` runs its command with `bash -c`
 //! and the workspace root as working directory — reading, listing, and
 //! editing are shell work, not separate tools. The output streams are
@@ -34,7 +34,7 @@ const BASH_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The built-in tool set: `bash`. Shared behind an `Arc` between the
 /// engine's `Agent` and the driver.
-pub struct CodingTools {
+pub struct ShellTools {
     /// Working directory every command starts in.
     workspace: PathBuf,
     /// The approval hook installed for the current turn; `None` rejects
@@ -42,12 +42,12 @@ pub struct CodingTools {
     pending: Mutex<Option<Arc<dyn Approval>>>,
 }
 
-impl CodingTools {
+impl ShellTools {
     /// The specs the built-in tool set advertises. Fixed at compile time
     /// and independent of the instance: the system-prompt renderer names
     /// the same tools the resolver offers, so the prompt and the API's
     /// tools array cannot drift.
-    pub(crate) fn builtin_specs() -> Vec<ToolSpec> {
+    pub fn builtin_specs() -> Vec<ToolSpec> {
         vec![ToolSpec::new(
             "bash",
             "Run a shell command (`bash -c`) with the workspace root as \
@@ -204,7 +204,7 @@ impl CodingTools {
 }
 
 #[async_trait]
-impl ToolResolver for CodingTools {
+impl ToolResolver for ShellTools {
     fn specs(&self) -> Vec<ToolSpec> {
         Self::builtin_specs()
     }
@@ -352,7 +352,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_streams_its_lines_before_its_result() {
-        let tools = CodingTools::new(std::env::temp_dir());
+        let tools = ShellTools::new(std::env::temp_dir());
         tools.install_approval(Arc::new(crate::approval::AllowAll));
         let call = ToolCall {
             id: "call_1".into(),
@@ -387,7 +387,7 @@ mod tests {
 
     #[tokio::test]
     async fn stderr_streams_too_and_the_exit_code_rides_the_result() {
-        let tools = CodingTools::new(std::env::temp_dir());
+        let tools = ShellTools::new(std::env::temp_dir());
         tools.install_approval(Arc::new(crate::approval::AllowAll));
         let call = ToolCall {
             id: "call_1".into(),

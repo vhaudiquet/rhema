@@ -24,6 +24,7 @@ mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
 [dependencies]
 rhema-core = { path = "../rhema-core" }
 rhema-config = { path = "../rhema-config" }
+rhema-agent-tools = { path = "../rhema-agent-tools" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
 # The `rhema acp` subcommand: the Agent Client Protocol server
 rhema-acp = { path = "../rhema-acp" }

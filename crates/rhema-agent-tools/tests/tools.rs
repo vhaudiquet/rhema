@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use rhema_coding_agent::{AllowAll, Approval, CodingTools};
+use rhema_agent_tools::{AllowAll, Approval, ShellTools};
 use rhema_core::{ToolCall, ToolContext, ToolResolver};
 use serde_json::json;
 
@@ -28,7 +28,7 @@ fn call(id: &str, name: &str, args: serde_json::Value) -> ToolCall {
 }
 
 async fn resolve(
-    tools: &CodingTools,
+    tools: &ShellTools,
     ctx: &ToolContext,
     name: &str,
     args: serde_json::Value,
@@ -47,7 +47,7 @@ impl Approval for DenyAll {
 #[tokio::test]
 async fn bash_runs_in_the_workspace_and_returns_output_with_the_code() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     tools.install_approval(Arc::new(AllowAll));
     let ctx = ctx(root.path());
 
@@ -73,7 +73,7 @@ async fn bash_runs_in_the_workspace_and_returns_output_with_the_code() {
 #[tokio::test]
 async fn a_failing_command_is_an_in_band_error_with_the_code() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     tools.install_approval(Arc::new(AllowAll));
     let ctx = ctx(root.path());
 
@@ -86,7 +86,7 @@ async fn a_failing_command_is_an_in_band_error_with_the_code() {
 #[tokio::test]
 async fn a_rejected_call_never_executes() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     tools.install_approval(Arc::new(DenyAll));
     let ctx = ctx(root.path());
 
@@ -100,7 +100,7 @@ async fn a_rejected_call_never_executes() {
 #[tokio::test]
 async fn the_tool_rejects_without_an_installed_hook() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     let ctx = ctx(root.path());
 
     let result = resolve(&tools, &ctx, "bash", json!({ "command": "true" })).await;
@@ -111,7 +111,7 @@ async fn the_tool_rejects_without_an_installed_hook() {
 #[tokio::test]
 async fn an_unknown_tool_name_is_an_in_band_error() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     let ctx = ctx(root.path());
 
     let result = resolve(&tools, &ctx, "nope", json!({})).await;
@@ -122,7 +122,7 @@ async fn an_unknown_tool_name_is_an_in_band_error() {
 #[tokio::test]
 async fn a_cancelled_context_rejects_every_call() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     let cancelled = Arc::new(AtomicBool::new(true));
     let ctx = ToolContext {
         cwd: root.path().to_path_buf(),
@@ -139,7 +139,7 @@ async fn a_cancelled_context_rejects_every_call() {
 #[tokio::test]
 async fn large_output_is_truncated_with_a_notice() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     tools.install_approval(Arc::new(AllowAll));
     let ctx = ctx(root.path());
 
@@ -171,7 +171,7 @@ async fn large_output_is_truncated_with_a_notice() {
 #[tokio::test]
 async fn a_missing_argument_is_an_in_band_error() {
     let root = tempfile::tempdir().unwrap();
-    let tools = CodingTools::new(root.path());
+    let tools = ShellTools::new(root.path());
     tools.install_approval(Arc::new(AllowAll));
     let ctx = ctx(root.path());
 
