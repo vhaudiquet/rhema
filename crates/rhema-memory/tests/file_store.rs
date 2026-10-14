@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use rhema_memory::{
-    FileMemoryStore, MemoryDraft, MemoryError, MemoryQuery, MemoryRecord, MemoryStore, Scope,
-    store_contract,
+    Decay, FileMemoryStore, MemoryDraft, MemoryError, MemoryQuery, MemoryRecord, MemoryStore,
+    Scope, Source, Status, VerifyHint, store_contract,
 };
 
 fn store(dir: &tempfile::TempDir) -> FileMemoryStore {
@@ -25,7 +25,7 @@ fn the_contract_holds() {
 #[test]
 fn ranking_orders_terms_recency_and_tags() {
     let dir = tempfile::tempdir().unwrap();
-    store_contract::rank_orders_terms_recency_and_tags(&store(&dir));
+    store_contract::run_rank_orders(&store(&dir));
 }
 
 #[test]
@@ -151,6 +151,75 @@ fn an_update_of_a_corrupt_record_reports_it() {
     assert!(matches!(err, MemoryError::Corrupt { .. }), "{err:?}");
     // `forget` does not parse, so it is the way out.
     assert!(store.forget(&record.id).unwrap());
+}
+
+#[test]
+fn a_v1_file_without_temporal_fields_reads_with_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // Exactly what the pre-validity store wrote: no decay, no status, no
+    // validity window, no provenance.
+    fs::write(
+        root.join("20261001T000000-00000001.md"),
+        "---\n id: 20261001T000000-00000001\n scope: Global\n tags: [migration]\n created_at: 1759276800000\n updated_at: 1759276800000\n---\nthe old way of deploying\n",
+    )
+    .unwrap();
+
+    let store = store(&dir);
+    let record = store
+        .get("20261001T000000-00000001")
+        .unwrap()
+        .expect("reads unchanged");
+    // The body is whatever followed the frontmatter, verbatim.
+    assert_eq!(record.body, "the old way of deploying\n");
+    assert_eq!(
+        record.valid_from, record.created_at,
+        "validity from creation"
+    );
+    assert_eq!(record.valid_until, None);
+    assert_eq!(record.decay, Decay::Volatile, "derived from the tags");
+    assert_eq!(record.source, Source::default(), "provenance unknown");
+    assert_eq!(record.status, Status::Active);
+    assert_eq!(record.verified_at, None);
+    assert_eq!(record.subject, None);
+    assert!(store.search(MemoryQuery::new("deploying")).unwrap().len() == 1);
+}
+
+#[test]
+fn temporal_fields_round_trip_through_the_frontmatter() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    let day = 86_400_000u64;
+    let now = store
+        .put(MemoryDraft::new(Scope::Global, "clock probe"))
+        .unwrap()
+        .created_at;
+    let saved = store
+        .put(
+            MemoryDraft::new(Scope::Global, "the lease runs out")
+                .with_tags(["home"])
+                .with_subject("home/accommodation")
+                .with_decay(Decay::Long)
+                .with_source(Source::Told {
+                    by: "the landlord".to_owned(),
+                })
+                .with_valid_from(now - day)
+                .with_valid_until(now + 90 * day)
+                .with_verify_hint(VerifyHint::Manual),
+        )
+        .unwrap();
+    // A write marks the frontmatter with the temporal facts.
+    let raw = fs::read_to_string(dir.path().join(format!("{}.md", saved.id))).unwrap();
+    assert!(raw.contains("subject: home/accommodation"), "{raw}");
+    assert!(raw.contains("decay: long"), "{raw}");
+    assert!(raw.contains("kind: told"), "{raw}");
+
+    let loaded = store.get(&saved.id).unwrap().unwrap();
+    assert_eq!(loaded, saved);
+    assert_eq!(loaded.decay, Decay::Long, "declared decay, not derived");
+    assert_eq!(loaded.subject.as_deref(), Some("home/accommodation"));
+    assert_eq!(loaded.verify_hint, Some(VerifyHint::Manual));
+    assert_eq!(loaded.valid_from, now - day);
 }
 
 #[test]

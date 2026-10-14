@@ -56,7 +56,7 @@ See [Rhema Claw README.md](./crates/rhema-claw/README.md) for more.
 | `rhema-provider-copilot` | GitHub Copilot adapter: the OpenAI-shaped proxy, driven by a device-flow OAuth token |
 | `rhema-config` | The XDG config file: named profiles of provider instances, stored keys, the active pair, the last-used model |
 | `rhema-rsd` | Resource-scoped dispatch: at most one live handler per resource key, a live inbox delivered mid-run, revision-guarded checkpoints, leases with TTL and crash recovery |
-| `rhema-memory` | Cross-session memory: one record per fact behind a `MemoryStore` contract, surfaced as `memory_*` tools the model calls itself |
+| `rhema-memory` | Cross-session memory: one record per fact behind a `MemoryStore` contract, surfaced as `memory_*` tools the model calls itself; records carry a validity window, decay, provenance, a subject key, and a verify hint, and are superseded or retracted — never silently stale, never silently deleted |
 | `rhema-identity` | Accounts: one record per external identity, each holding one write-only secret behind a use-never-read contract |
 | `rhema-autonomous-agent` | The resident-agent core tier: model-free `Source` detection, the lease-driven `Driver` loop, allowlist-cut tool resolvers, and `SessionContext::commit_hook`, which binds a run's lease to the engine's commit hook |
 | `rhema-coding-agent` | The coding-agent driver: one approval-gated `bash` tool, the `Approval` seam, session save/resume, and revive-on-resume for calls a crash left unanswered; its system prompt assembled from the editable SYSTEM.md template, tools and skills rendered in |

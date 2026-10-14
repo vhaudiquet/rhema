@@ -39,6 +39,33 @@ impl MemoryStore for Scrambled {
     fn forget(&self, id: &str) -> Result<bool, rhema_memory::MemoryError> {
         self.0.forget(id)
     }
+
+    fn supersede(
+        &self,
+        id: &str,
+        by: &str,
+    ) -> Result<rhema_memory::MemoryRecord, rhema_memory::MemoryError> {
+        self.0.supersede(id, by)
+    }
+
+    fn retract(
+        &self,
+        id: &str,
+        why: &str,
+    ) -> Result<rhema_memory::MemoryRecord, rhema_memory::MemoryError> {
+        self.0.retract(id, why)
+    }
+
+    fn verify(&self, id: &str) -> Result<rhema_memory::MemoryRecord, rhema_memory::MemoryError> {
+        self.0.verify(id)
+    }
+
+    fn due_for_review(
+        &self,
+        now: u64,
+    ) -> Result<Vec<rhema_memory::ReviewItem>, rhema_memory::MemoryError> {
+        self.0.due_for_review(now)
+    }
 }
 
 #[test]

@@ -15,7 +15,7 @@
 
 use std::path::PathBuf;
 
-use crate::record::{BODY_LIMIT, MemoryDraft, Scope, check_id};
+use crate::record::{BODY_LIMIT, Decay, MemoryDraft, Scope, Source, Status, VerifyHint, check_id};
 use crate::search::MemoryQuery;
 use crate::store::{MemoryError, MemoryStore};
 
@@ -265,6 +265,431 @@ pub fn rank_orders_terms_recency_and_tags(store: &dyn MemoryStore) {
     );
 }
 
+/// A create carries the declared validity, provenance, and hint, and
+/// derives the rest: `valid_from` from creation, decay from the tag
+/// namespace, unknown source, active status.
+pub fn put_carries_validity_provenance_and_defaults(store: &dyn MemoryStore) {
+    let day = 86_400_000;
+    let record = store
+        .put(
+            MemoryDraft::new(Scope::Global, "temporal fact")
+                .with_tags(["Infrastructure"])
+                .with_subject("home/accommodation")
+                .with_valid_until(90 * day)
+                .with_decay(Decay::Permanent)
+                .with_source(Source::Told {
+                    by: "the user".to_owned(),
+                })
+                .with_verify_hint(VerifyHint::Manual),
+        )
+        .unwrap();
+    assert_eq!(record.valid_from, record.created_at);
+    assert_eq!(record.valid_until, Some(90 * day));
+    assert_eq!(record.decay, Decay::Permanent, "declared decay wins");
+    assert_eq!(
+        record.source,
+        Source::Told {
+            by: "the user".to_owned()
+        }
+    );
+    assert_eq!(record.subject.as_deref(), Some("home/accommodation"));
+    assert_eq!(record.status, Status::Active);
+    assert_eq!(record.verified_at, None);
+    assert_eq!(record.verify_hint, Some(VerifyHint::Manual));
+
+    let derived = store
+        .put(MemoryDraft::new(Scope::Global, "derived fact").with_tags(["migration"]))
+        .unwrap();
+    assert_eq!(derived.decay, Decay::Volatile, "derived from the tags");
+    assert_eq!(derived.source, Source::default(), "provenance unknown");
+    assert_eq!(derived.status, Status::Active);
+    assert_eq!(derived.subject, None);
+
+    let bad = MemoryDraft::new(Scope::Global, "bad subject").with_subject("Has Spaces");
+    assert!(
+        matches!(store.put(bad), Err(MemoryError::InvalidSubject { .. })),
+        "malformed subject rejected"
+    );
+}
+
+/// The default search rules: only active records inside their validity
+/// window answer; `as_of` replays any instant; `include_superseded`
+/// widens the status rule but not the window; `fresh_only` drops records
+/// past their decay while staleness itself never hides anything.
+pub fn search_applies_the_validity_rules(store: &dyn MemoryStore) {
+    let day = 86_400_000;
+    let now = now_of(store);
+    for (body, draft) in [
+        (
+            "validity stable record",
+            MemoryDraft::new(Scope::Global, "validity stable record"),
+        ),
+        (
+            "validity expired record",
+            MemoryDraft::new(Scope::Global, "validity expired record").with_valid_until(now - day),
+        ),
+        (
+            "validity unborn record",
+            MemoryDraft::new(Scope::Global, "validity unborn record")
+                .with_valid_from(now + 2 * day),
+        ),
+        (
+            "validity volatile record",
+            MemoryDraft::new(Scope::Global, "validity volatile record").with_tags(["migration"]),
+        ),
+    ] {
+        store.put(draft).unwrap_or_else(|e| panic!("{body}: {e}"));
+    }
+
+    let bodies = |query: MemoryQuery| -> Vec<String> {
+        store
+            .search(query)
+            .unwrap()
+            .into_iter()
+            .map(|record| record.body)
+            .collect()
+    };
+
+    let default = bodies(MemoryQuery::new("validity"));
+    assert!(
+        default.contains(&"validity stable record".to_owned()),
+        "{default:?}"
+    );
+    assert!(
+        default.contains(&"validity volatile record".to_owned()),
+        "{default:?}"
+    );
+    assert!(
+        !default.contains(&"validity expired record".to_owned()),
+        "the horizon has passed: hidden, not killed"
+    );
+    assert!(
+        !default.contains(&"validity unborn record".to_owned()),
+        "not valid yet"
+    );
+
+    let replay = bodies(MemoryQuery::new("validity").as_of(now + day));
+    assert!(
+        !replay.contains(&"validity unborn record".to_owned()),
+        "still unborn at day 1: {replay:?}"
+    );
+
+    let later = bodies(MemoryQuery::new("validity").as_of(now + 31 * day));
+    assert!(
+        later.contains(&"validity unborn record".to_owned()),
+        "born by day 31: {later:?}"
+    );
+    assert!(
+        later.contains(&"validity volatile record".to_owned()),
+        "staleness annotates, it never hides: {later:?}"
+    );
+
+    let fresh = bodies(
+        MemoryQuery::new("validity")
+            .fresh_only()
+            .as_of(now + 31 * day),
+    );
+    assert!(
+        !fresh.contains(&"validity volatile record".to_owned()),
+        "fresh_only drops the stale: {fresh:?}"
+    );
+    assert!(
+        fresh.contains(&"validity stable record".to_owned()),
+        "{fresh:?}"
+    );
+
+    let widened = bodies(MemoryQuery::new("validity").include_superseded());
+    assert_eq!(
+        widened.len(),
+        default.len(),
+        "widening the status rule changes nothing here: the window rule holds"
+    );
+}
+
+/// A record created and retired inside the test runs is replayable:
+/// `as_of` before the retirement still shows it as it was believed then.
+pub fn as_of_replay_sees_through_supersession(store: &dyn MemoryStore) {
+    // Replay distinguishes instants at the store's millisecond
+    // granularity, so the three writes need distinct stamps.
+    let gap = std::time::Duration::from_millis(2);
+    let old = store
+        .put(MemoryDraft::new(Scope::Global, "replay old fact"))
+        .unwrap();
+    std::thread::sleep(gap);
+    let new = store
+        .put(MemoryDraft::new(Scope::Global, "replay new fact"))
+        .unwrap();
+    std::thread::sleep(gap);
+    let marked = store.supersede(&old.id, &new.id).unwrap();
+    let retired_at = match marked.status {
+        Status::Superseded { at, .. } => at,
+        ref other => panic!("expected superseded, got {other:?}"),
+    };
+
+    let bodies = |at: u64| -> Vec<String> {
+        store
+            .search(MemoryQuery::new("replay").as_of(at))
+            .unwrap()
+            .into_iter()
+            .map(|record| record.body)
+            .collect()
+    };
+    let before = bodies(old.created_at - 1);
+    assert!(before.is_empty(), "nothing existed yet: {before:?}");
+    let between = bodies(retired_at - 1);
+    assert!(
+        between.contains(&"replay old fact".to_owned()),
+        "the old fact was still believed: {between:?}"
+    );
+    let after = bodies(retired_at + 1);
+    assert_eq!(
+        after,
+        vec!["replay new fact".to_owned()],
+        "only the replacement answers once superseded"
+    );
+}
+
+/// Superseding keeps the record, marks what replaced it, and hides it
+/// from plain search while it stays reachable; a dead record never
+/// outranks a live one on a widened query.
+pub fn supersede_keeps_the_record_and_hides_it(store: &dyn MemoryStore) {
+    let old = store
+        .put(MemoryDraft::new(Scope::Global, "supersede old").with_tags(["contract-supersede"]))
+        .unwrap();
+    let new = store
+        .put(MemoryDraft::new(Scope::Global, "supersede new").with_tags(["contract-supersede"]))
+        .unwrap();
+    let marked = store.supersede(&old.id, &new.id).unwrap();
+    assert!(matches!(
+        marked.status,
+        Status::Superseded { ref by, .. } if by == &new.id
+    ));
+    assert_eq!(marked.body, "supersede old");
+    assert_eq!(
+        store.get(&old.id).unwrap().unwrap().body,
+        "supersede old",
+        "the body survives: what was believed stays readable"
+    );
+
+    let live: Vec<String> = store
+        .search(MemoryQuery::new("supersede"))
+        .unwrap()
+        .into_iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(
+        live,
+        vec![new.id.clone()],
+        "the dead record stops answering"
+    );
+
+    let widened = store
+        .search(MemoryQuery::new("supersede").include_superseded())
+        .unwrap();
+    let ids: Vec<String> = widened.into_iter().map(|record| record.id).collect();
+    assert!(ids.contains(&new.id) && ids.contains(&old.id), "{ids:?}");
+    assert!(
+        matches!(
+            store.supersede("19700101T000000-00000009", &new.id),
+            Err(MemoryError::UnknownId { .. })
+        ),
+        "superseding an absent record reports it"
+    );
+}
+
+/// On a widened search a live record outranks a dead one with the same
+/// keyword hits. Order-sensitive, so — like
+/// [`rank_orders_terms_recency_and_tags`] — it is *not* part of
+/// [`run_all`]: a store with a different ranking method cannot replay it.
+pub fn superseded_records_never_outrank_active(store: &dyn MemoryStore) {
+    let old = store
+        .put(MemoryDraft::new(Scope::Global, "outrank old"))
+        .unwrap();
+    let new = store
+        .put(MemoryDraft::new(Scope::Global, "outrank new"))
+        .unwrap();
+    store.supersede(&old.id, &new.id).unwrap();
+    let found: Vec<String> = store
+        .search(MemoryQuery::new("outrank").include_superseded())
+        .unwrap()
+        .into_iter()
+        .map(|record| record.id)
+        .collect();
+    assert_eq!(
+        found.first(),
+        Some(&new.id),
+        "a keyword hit on a dead fact must not bury the live one"
+    );
+}
+
+/// Retracting keeps the record and the reason: a human's no outlives
+/// the model's yes.
+pub fn retract_records_the_reason(store: &dyn MemoryStore) {
+    let record = store
+        .put(MemoryDraft::new(Scope::Global, "retract me"))
+        .unwrap();
+    let retracted = store.retract(&record.id, "the user says so").unwrap();
+    assert!(matches!(
+        retracted.status,
+        Status::Retracted { ref why, at } if why == "the user says so" && at > 0
+    ));
+    assert!(retracted.status.is_dead());
+    assert!(
+        store
+            .search(MemoryQuery::new("retract me"))
+            .unwrap()
+            .is_empty(),
+        "the retracted record stops answering"
+    );
+    let kept = store
+        .search(MemoryQuery::new("retract me").include_superseded())
+        .unwrap();
+    assert_eq!(kept.len(), 1, "kept, not deleted");
+    assert!(matches!(
+        store.retract("19700101T000000-00000009", "why"),
+        Err(MemoryError::UnknownId { .. })
+    ));
+}
+
+/// Verification moves only `verified_at` — the belief is re-confirmed,
+/// not rewritten.
+pub fn verify_sets_verified_at_only(store: &dyn MemoryStore) {
+    let record = store
+        .put(MemoryDraft::new(Scope::Global, "verify me"))
+        .unwrap();
+    let verified = store.verify(&record.id).unwrap();
+    assert!(verified.verified_at.unwrap_or(0) >= verified.created_at);
+    assert_eq!(verified.body, record.body);
+    assert_eq!(verified.created_at, record.created_at);
+    assert_eq!(verified.updated_at, record.updated_at);
+    assert!(matches!(
+        store.verify("19700101T000000-00000009"),
+        Err(MemoryError::UnknownId { .. })
+    ));
+}
+
+/// A body edit voids the verification (nobody checked the new wording);
+/// a retag does not. An edit never resurrects a dead record.
+pub fn updates_void_verification_only_when_the_body_changes(store: &dyn MemoryStore) {
+    let record = store
+        .put(MemoryDraft::new(Scope::Global, "voiding update"))
+        .unwrap();
+    store.verify(&record.id).unwrap();
+
+    let retagged = store
+        .put(
+            MemoryDraft::new(Scope::Global, "voiding update")
+                .with_tags(["retagged"])
+                .with_id(record.id.clone()),
+        )
+        .unwrap();
+    assert!(
+        retagged.verified_at.is_some(),
+        "same body: the verification holds"
+    );
+
+    let rewritten = store
+        .put(MemoryDraft::new(Scope::Global, "voiding update, reworded").with_id(record.id.clone()))
+        .unwrap();
+    assert!(
+        rewritten.verified_at.is_none(),
+        "new wording, nobody has checked it"
+    );
+    assert!(
+        rewritten.valid_from >= rewritten.created_at,
+        "the new wording holds from when it was written"
+    );
+
+    store.retract(&record.id, "wrong").unwrap();
+    let edited = store
+        .put(MemoryDraft::new(Scope::Global, "voiding update, edited").with_id(record.id.clone()))
+        .unwrap();
+    assert!(
+        edited.status.is_dead(),
+        "an edit does not resurrect a retracted record"
+    );
+}
+
+/// The sweep reports stale and horizon-past records, most overdue first,
+/// and never reports a dead one.
+pub fn due_for_review_reports_stale_and_expired(store: &dyn MemoryStore) {
+    let day = 86_400_000;
+    let fresh = store
+        .put(MemoryDraft::new(Scope::Global, "sweep fresh record"))
+        .unwrap();
+    let volatile = store
+        .put(
+            MemoryDraft::new(Scope::Global, "sweep volatile record")
+                .with_tags(["infrastructure"])
+                .with_verify_hint(VerifyHint::Manual),
+        )
+        .unwrap();
+    // Probed after the writes, so "now" is at or after every creation.
+    let now = now_of(store);
+    store
+        .put(
+            MemoryDraft::new(Scope::Global, "sweep horizon record")
+                .with_decay(Decay::Permanent)
+                .with_valid_until(now + day),
+        )
+        .unwrap();
+
+    // The suite shares one store, so earlier functions' records may be
+    // due too; the assertions below stay on this function's markers.
+    let items = store.due_for_review(now).unwrap();
+    assert!(
+        items
+            .iter()
+            .all(|item| item.record.id != fresh.id && item.record.id != volatile.id),
+        "a fresh record and a 30-day record are not due right after writing"
+    );
+
+    let items = store.due_for_review(now + 31 * day).unwrap();
+    let position = |body: &str| {
+        items
+            .iter()
+            .position(|item| item.record.body == body)
+            .unwrap()
+    };
+    assert!(
+        position("sweep horizon record") < position("sweep volatile record"),
+        "most overdue first: the horizon lapsed a day after writing, the \
+         30-day decay only at day 30"
+    );
+    assert!(
+        !items.iter().any(|item| item.record.id == fresh.id),
+        "the fresh record waits"
+    );
+    let volatile_item = items
+        .iter()
+        .find(|item| item.record.body == "sweep volatile record")
+        .unwrap();
+    assert_eq!(volatile_item.verify_hint, Some(VerifyHint::Manual));
+
+    // Supersession takes a record out of the sweep.
+    store.supersede(&volatile.id, &fresh.id).unwrap();
+    let items = store.due_for_review(now + 31 * day).unwrap();
+    assert!(
+        !items.iter().any(|item| item.record.id == volatile.id),
+        "the superseded record leaves the sweep"
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.record.body == "sweep horizon record"),
+        "the horizon stays due"
+    );
+}
+
+/// Runs the order-sensitive rank assertions against `store` — the
+/// complement to [`run_all`] for rankers that honor the documented
+/// ordering (tag hits over body hits, recency ties by id, live over
+/// dead).
+pub fn run_rank_orders(store: &dyn MemoryStore) {
+    rank_orders_terms_recency_and_tags(store);
+    superseded_records_never_outrank_active(store);
+}
+
 /// Runs the whole order-agnostic suite against `store`, which must be
 /// fresh. The rank-order assertions live in
 /// [`rank_orders_terms_recency_and_tags`]; see the module docs for why.
@@ -282,4 +707,20 @@ pub fn run_all(store: &dyn MemoryStore) {
     search_filters_by_tags(store);
     search_respects_limit(store);
     search_empty_query_returns_recent(store);
+    put_carries_validity_provenance_and_defaults(store);
+    search_applies_the_validity_rules(store);
+    as_of_replay_sees_through_supersession(store);
+    supersede_keeps_the_record_and_hides_it(store);
+    retract_records_the_reason(store);
+    verify_sets_verified_at_only(store);
+    updates_void_verification_only_when_the_body_changes(store);
+    due_for_review_reports_stale_and_expired(store);
+}
+/// The store's wall clock, as far as the contract's relative-time tests
+/// need it: the same vocabulary the stores stamp records with.
+fn now_of(store: &dyn MemoryStore) -> u64 {
+    let probe = store
+        .put(MemoryDraft::new(Scope::Global, "contract clock probe"))
+        .unwrap();
+    probe.created_at
 }

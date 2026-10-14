@@ -6,8 +6,11 @@ use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::record::{IdCounter, MemoryDraft, MemoryRecord, check_id, normalize_tags};
-use crate::search::{MemoryQuery, rank};
+use crate::record::{
+    IdCounter, MemoryDraft, MemoryRecord, Status, check_id, compose, normalize_tags,
+};
+use crate::review::ReviewItem;
+use crate::search::{MemoryQuery, select};
 use crate::store::{MemoryError, MemoryStore};
 
 /// An in-process [`MemoryStore`]. Shareable; every operation is
@@ -38,16 +41,13 @@ impl MemoryStore for VolatileStore {
         let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
         let now = SystemTime::now();
         let now_ms = now_millis(now);
-        match draft.id {
+        let draft_id = draft.id.clone();
+        let (id, existing) = match draft_id {
             Some(id) => {
                 let existing = records
-                    .get_mut(&id)
+                    .remove(&id)
                     .ok_or_else(|| MemoryError::UnknownId { id: id.clone() })?;
-                existing.scope = draft.scope;
-                existing.tags = tags;
-                existing.body = draft.body;
-                existing.updated_at = now_ms;
-                Ok(existing.clone())
+                (id, Some(existing))
             }
             None => {
                 let id = loop {
@@ -56,18 +56,13 @@ impl MemoryStore for VolatileStore {
                         break candidate;
                     }
                 };
-                let record = MemoryRecord {
-                    id,
-                    scope: draft.scope,
-                    tags,
-                    body: draft.body,
-                    created_at: now_ms,
-                    updated_at: now_ms,
-                };
-                records.insert(record.id.clone(), record.clone());
-                Ok(record)
+                (id, None)
             }
-        }
+        };
+        let created_at = existing.as_ref().map_or(now_ms, |e| e.created_at);
+        let record = compose(&draft, tags, existing, id, created_at, now_ms);
+        records.insert(record.id.clone(), record.clone());
+        Ok(record)
     }
 
     fn get(&self, id: &str) -> Result<Option<MemoryRecord>, MemoryError> {
@@ -78,13 +73,67 @@ impl MemoryStore for VolatileStore {
 
     fn search(&self, query: MemoryQuery) -> Result<Vec<MemoryRecord>, MemoryError> {
         let records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
-        Ok(rank(records.values().cloned().collect(), &query))
+        Ok(select(
+            records.values().cloned().collect(),
+            &query,
+            now_millis(SystemTime::now()),
+        ))
     }
 
     fn forget(&self, id: &str) -> Result<bool, MemoryError> {
         check_id(id)?;
         let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(records.remove(id).is_some())
+    }
+
+    fn supersede(&self, id: &str, by: &str) -> Result<MemoryRecord, MemoryError> {
+        check_id(id)?;
+        check_id(by)?;
+        let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        let now_ms = now_millis(SystemTime::now());
+        let record = records
+            .get_mut(id)
+            .ok_or_else(|| MemoryError::UnknownId { id: id.to_owned() })?;
+        record.status = Status::Superseded {
+            by: by.to_owned(),
+            at: now_ms,
+        };
+        record.updated_at = now_ms;
+        Ok(record.clone())
+    }
+
+    fn retract(&self, id: &str, why: &str) -> Result<MemoryRecord, MemoryError> {
+        check_id(id)?;
+        let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        let now_ms = now_millis(SystemTime::now());
+        let record = records
+            .get_mut(id)
+            .ok_or_else(|| MemoryError::UnknownId { id: id.to_owned() })?;
+        record.status = Status::Retracted {
+            why: why.to_owned(),
+            at: now_ms,
+        };
+        record.updated_at = now_ms;
+        Ok(record.clone())
+    }
+
+    fn verify(&self, id: &str) -> Result<MemoryRecord, MemoryError> {
+        check_id(id)?;
+        let mut records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        let now_ms = now_millis(SystemTime::now());
+        let record = records
+            .get_mut(id)
+            .ok_or_else(|| MemoryError::UnknownId { id: id.to_owned() })?;
+        record.verified_at = Some(now_ms);
+        Ok(record.clone())
+    }
+
+    fn due_for_review(&self, now: u64) -> Result<Vec<ReviewItem>, MemoryError> {
+        let records = self.records.lock().unwrap_or_else(PoisonError::into_inner);
+        Ok(crate::review::due_for_review(
+            records.values().cloned().collect(),
+            now,
+        ))
     }
 }
 
@@ -101,7 +150,7 @@ mod tests {
 
     #[test]
     fn ranking_orders_terms_recency_and_tags() {
-        store_contract::rank_orders_terms_recency_and_tags(&VolatileStore::new());
+        store_contract::run_rank_orders(&VolatileStore::new());
     }
 
     #[test]
