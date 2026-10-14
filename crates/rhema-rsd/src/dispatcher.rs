@@ -393,6 +393,20 @@ impl Dispatcher {
         self.sweep_all()
     }
 
+    /// Startup recovery in its strict form: every lease in the store is
+    /// swept now, expired or not — idle on an empty inbox, re-acquire
+    /// with a fresh debounce window when events are waiting. The caller
+    /// asserts this process is the only live dispatcher over the store
+    /// (the single-node deployment): the leases present were held by
+    /// the process that just died, and honoring their TTL would stall
+    /// every key a cut turn held until the dead lease lapsed.
+    pub fn recover_all(&self) -> Result<(), DispatchError> {
+        for key in self.store.keys()? {
+            self.mutate_swept(&key, Sweep::All, |record| Ok((record, ())))?;
+        }
+        Ok(())
+    }
+
     /// The stored state of one key. A key never seen reports idle at
     /// revision 0.
     pub fn status(&self, key: &ResourceKey) -> Result<KeyStatus, DispatchError> {
@@ -451,6 +465,18 @@ impl Dispatcher {
         sweep: bool,
         f: impl FnOnce(KeyRecord) -> Result<(KeyRecord, T), DispatchError>,
     ) -> Result<T, DispatchError> {
+        self.mutate_swept(key, if sweep { Sweep::Expired } else { Sweep::No }, f)
+    }
+
+    /// Applies `f` like [`Self::mutate`], naming the sweep's view of a
+    /// lease: the running system only sweeps leases past their TTL; the
+    /// restart path can declare every lease dead.
+    fn mutate_swept<T>(
+        &self,
+        key: &ResourceKey,
+        sweep: Sweep,
+        f: impl FnOnce(KeyRecord) -> Result<(KeyRecord, T), DispatchError>,
+    ) -> Result<T, DispatchError> {
         let _gate = self.gate.lock().unwrap_or_else(PoisonError::into_inner);
         let loaded = self.store.load(key)?;
         let now = self.clock.now_millis();
@@ -458,8 +484,10 @@ impl Dispatcher {
         let next = match &loaded {
             Some(record) => {
                 let mut record = record.clone();
-                if sweep {
-                    record = sweep_record(record, now, &self.config);
+                match sweep {
+                    Sweep::No => {}
+                    Sweep::Expired => record = sweep_record(record, now, &self.config, false),
+                    Sweep::All => record = sweep_record(record, now, &self.config, true),
                 }
                 record
             }
@@ -477,6 +505,17 @@ impl Dispatcher {
         }
         Ok(output)
     }
+}
+
+/// What a pre-apply sweep may treat as dead: nothing (the caller is
+/// mid-mutation), expired leases only (the running system's view), or
+/// every lease (the restart's assertion that this process is the only
+/// live dispatcher over the store).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Sweep {
+    No,
+    Expired,
+    All,
 }
 
 /// Ends a lease: idle on an empty inbox, re-acquire with a fresh debounce
@@ -505,11 +544,17 @@ fn end_lease(
 /// - a lease past its TTL ends (idle, or re-acquire on a non-empty inbox);
 /// - an admission entry past its TTL leaves the queue and re-enters the
 ///   normal debounce path, as if its event had just arrived.
-fn sweep_record(mut record: KeyRecord, now: u64, config: &DispatcherConfig) -> KeyRecord {
-    let lapsed = record
-        .lease
-        .as_ref()
-        .is_some_and(|lease| lease.expires_at <= now);
+fn sweep_record(
+    mut record: KeyRecord,
+    now: u64,
+    config: &DispatcherConfig,
+    all_leases_dead: bool,
+) -> KeyRecord {
+    let lapsed = all_leases_dead
+        || record
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.expires_at <= now);
     if lapsed && record.state == KeyState::Leased {
         end_lease(&mut record, now, config, None);
     }
