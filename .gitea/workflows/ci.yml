@@ -322,6 +322,9 @@ jobs:
   publish-edge-binaries:
     if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
     needs: [checks, test]
+    # The banner's edge label: v<version>-<sha> (rhema-code's build.rs).
+    env:
+      RHEMA_BUILD_CHANNEL: edge
     runs-on: ubuntu-latest
     strategy:
       matrix:

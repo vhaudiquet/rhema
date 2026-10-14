@@ -2,3 +2,4 @@
 Cargo.lock.bak
 *.snap
 .snapcraft/
+.zcode/

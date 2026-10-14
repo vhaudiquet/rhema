@@ -982,6 +982,9 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &'stat
             Span::raw("rhema").bold(),
             // The TUI's name, lighter than the brand mark.
             Span::raw(" code").fg(theme.accent_text),
+            // What tree this binary came from, floor-lit: identity,
+            // not content.
+            Span::raw(format!("  {}", crate::VERSION_LABEL)).fg(theme.text3),
         ]),
         Line::from(""),
     ];
