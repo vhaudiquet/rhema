@@ -6,6 +6,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  OWNER: vhaudiquet
 
 jobs:
   # Fast checks + release build of the Rust workspace.
@@ -192,3 +193,79 @@ jobs:
       - name: Build
         working-directory: web/claw
         run: npm run build
+
+  # The edge channel: a main push that passed everything above ships
+  # the two deployable images as a rolling latest + sha pair. Release
+  # publishing (exact versions, the stable pin, crates.io) lives in
+  # release.yaml. The claw image is rebuilt here for the registry even
+  # though the docker job above just built and smoked it: no artifact
+  # hand-off is worth the plumbing for a build this cheap.
+  publish-edge-images:
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    needs: [checks, test, chart, docker, web]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: deploy/docker/claw.Dockerfile
+            image: rhema-claw
+          - dockerfile: deploy/docker/ui.Dockerfile
+            image: rhema-claw-ui
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: https://git.vhaudiquet.fr
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.PACKAGES_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          # The edge pair: rolling latest, and the sha pin the chart's
+          # appVersion resolves to.
+          tags: |
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:latest
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ gitea.sha }}
+
+  # The edge chart lands only once its images are in the registry: the
+  # chart's default image tag is appVersion, and appVersion here is
+  # this exact commit. The version rides the base version + a timestamp
+  # (ordered; SemVer pre-release rules allow no dots).
+  publish-edge-chart:
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    needs: publish-edge-images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Update Chart version and appVersion
+        run: |
+          BASE_VERSION=$(grep '^version:' deploy/helm/rhema-claw/Chart.yaml | awk '{print $2}')
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          sed -i "s/^version:.*/version: \"${BASE_VERSION}-${TIMESTAMP}\"/" deploy/helm/rhema-claw/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ gitea.sha }}\"/" deploy/helm/rhema-claw/Chart.yaml
+
+      - name: Lint Helm chart
+        run: helm lint deploy/helm/rhema-claw
+
+      - name: Package Helm chart
+        run: helm package deploy/helm/rhema-claw
+
+      - name: Push Helm chart to Gitea registry
+        run: |
+          TOKEN=$(echo -n "${{ secrets.PACKAGES_TOKEN }}" | tr -d '\n')
+          curl --fail --user "${{ gitea.actor }}:${TOKEN}" \
+            -X POST \
+            --upload-file rhema-claw-*.tgz \
+            "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
