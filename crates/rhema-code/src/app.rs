@@ -5146,4 +5146,99 @@ mod tests {
         crate::commands::dispatch(&mut h.app, "/exit");
         assert!(h.app.should_quit);
     }
+
+    #[test]
+    fn the_status_tracker_follows_the_turn_lifecycle() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let mut tracker = crate::status::Tracker::default();
+
+        // At rest before anything runs.
+        assert!(matches!(
+            tracker.status_for(&h.app),
+            crate::status::Status::Idle
+        ));
+
+        // A turn runs: the step drives progress against the 4-step cap.
+        h.app.running = true;
+        tracker.observe(&UiEvent::Engine(OwnedEvent::StepStart { iteration: 2 }));
+        match tracker.status_for(&h.app) {
+            crate::status::Status::Working {
+                msg: None,
+                progress: Some(progress),
+            } => assert_eq!(progress, 50),
+            _ => panic!("a running turn is working at its step fraction"),
+        }
+
+        // The latest tool call names the working state.
+        tracker.observe(&UiEvent::Engine(OwnedEvent::ToolCallStart {
+            id: "c1".into(),
+            name: "bash".into(),
+        }));
+        match tracker.status_for(&h.app) {
+            crate::status::Status::Working {
+                msg: Some(msg),
+                progress: Some(50),
+            } => assert_eq!(msg, "bash"),
+            _ => panic!("the tool call is the working state's msg"),
+        }
+
+        // A pending approval blocks ahead of the running state.
+        h.app.pending_approval = Some(ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            args: serde_json::Value::Null,
+            provider_data: serde_json::Value::Null,
+        });
+        assert!(matches!(
+            tracker.status_for(&h.app),
+            crate::status::Status::Blocked { .. }
+        ));
+
+        // The turn ends in failure: the error stands at the idle prompt,
+        // first line only.
+        let agent = h
+            .app
+            .agent
+            .take()
+            .expect("the keyed harness built an agent");
+        h.app.pending_approval = None;
+        h.app.running = false;
+        tracker.observe(&UiEvent::TurnFinished {
+            agent: Box::new(agent),
+            result: Err("provider exploded\nwith detail".to_owned()),
+        });
+        match tracker.status_for(&h.app) {
+            crate::status::Status::Error { msg: Some(msg) } => {
+                assert_eq!(msg, "provider exploded");
+            }
+            _ => panic!("a failed turn reads as an error at the idle prompt"),
+        }
+
+        // A later turn outranks the remembered failure and ends clean:
+        // back to idle, not to the old error.
+        h.app.running = true;
+        tracker.observe(&UiEvent::Engine(OwnedEvent::StepStart { iteration: 0 }));
+        assert!(matches!(
+            tracker.status_for(&h.app),
+            crate::status::Status::Working { .. }
+        ));
+        let agent = CodingAgent::new(
+            Arc::new(GoogleProvider::new("k")),
+            CodingAgentConfig::new("m-a", std::env::temp_dir()),
+        )
+        .unwrap();
+        h.app.running = false;
+        tracker.observe(&UiEvent::TurnFinished {
+            agent: Box::new(agent),
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+        });
+        assert!(matches!(
+            tracker.status_for(&h.app),
+            crate::status::Status::Idle
+        ));
+    }
 }

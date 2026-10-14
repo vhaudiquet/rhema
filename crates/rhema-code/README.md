@@ -44,6 +44,10 @@ Login keys are stored in your system keychain (macOS Keychain, Windows Credentia
 
 Regular coding agent features are supported, while maintaining a simplicity balance. Right now, no MCPs.
 
+### Program status (OSC 7501)
+
+Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimoto's program status protocol](https://mitchellh.com/writing/program-status-osc7501): `working` (with step progress and the current tool) while a turn runs, `blocked` (permission or auth) when it needs you, `idle` at the prompt, and `done` or `error` when a `rhema run` one-shot finishes — so supporting terminals (Ghostty, and terminal UIs built on libghostty) can mark tab headers, session pickers, and agentic inboxes without scraping the screen. Terminals without support ignore the sequence; piped output stays byte-exact.
+
 ## Documentation
 
 ## About

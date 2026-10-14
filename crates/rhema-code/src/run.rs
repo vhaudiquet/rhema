@@ -31,6 +31,7 @@ use crate::app::Backend;
 use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
 use crate::args::{Args, ProviderChoice, RunArgs, SystemCommand};
 use crate::sessions;
+use crate::status::{self, Status, Tracker, first_line};
 use crate::store::{ConfigStore, DiskStore};
 use crate::turn::{spawn_model_fetch, spawn_turn, spawn_usage_fetch};
 use crate::{events::UiEvent, ui};
@@ -72,8 +73,27 @@ const DEFAULT_ZAI_MODEL: &str = "GLM-5.3";
 const DEFAULT_COPILOT_MODEL: &str = "gpt-4.1";
 
 /// The headless event sink: reply text streams raw to stdout (so pipes
-/// capture exactly the reply), tool traffic goes to stderr.
-struct HeadlessSink;
+/// capture exactly the reply), tool traffic goes to stderr, and the
+/// program-status record follows the turn.
+struct HeadlessSink {
+    /// The intent the status shows: the prompt's first line until a
+    /// tool call names a more specific one.
+    msg: Option<String>,
+    /// The last announced step, for the status' `progress`.
+    step: Option<u32>,
+    /// The turn's step cap, the denominator of `progress`.
+    max_steps: u32,
+}
+
+impl HeadlessSink {
+    /// Re-announces the working state from the current step and tool.
+    fn report(&self) {
+        status::emit(&Status::Working {
+            msg: self.msg.clone(),
+            progress: self.step.map(|step| status::progress(step, self.max_steps)),
+        });
+    }
+}
 
 impl EventSink for HeadlessSink {
     fn emit(&mut self, event: ModelEvent<'_>) {
@@ -83,8 +103,14 @@ impl EventSink for HeadlessSink {
                 print!("{delta}");
                 let _ = std::io::stdout().flush();
             }
+            ModelEvent::StepStart { iteration } => {
+                self.step = Some(iteration);
+                self.report();
+            }
             ModelEvent::ToolCallStart { name, .. } => {
                 eprintln!("⌁ {name}");
+                self.msg = Some(name.to_owned());
+                self.report();
             }
             ModelEvent::ToolResult {
                 content, is_error, ..
@@ -95,16 +121,6 @@ impl EventSink for HeadlessSink {
             _ => {}
         }
     }
-}
-
-/// First line of a tool result, cut for the headless stderr stream.
-fn first_line(content: &str) -> String {
-    let line = content.lines().next().unwrap_or("");
-    let mut cut = line.chars().take(72).collect::<String>();
-    if line.chars().count() > 72 {
-        cut.push('…');
-    }
-    cut
 }
 
 /// Humanizes a token count: 1_048_576 → "1.0M", 131_072 → "131k".
@@ -276,6 +292,11 @@ fn run_editor(path: &std::path::Path, editor: Option<&str>) -> anyhow::Result<()
 
 /// The headless one-shot: resolve the backend, run one turn, print the
 /// reply to stdout and everything else to stderr. Built for pipes.
+///
+/// The program-status record covers the whole run — credential
+/// resolution included — and is what survives it: `done` or `error`,
+/// never cleared (see `crate::status`). A usage failure (no prompt)
+/// exits before any record exists.
 async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
     let prompt = match args.prompt.as_deref() {
         Some("-") => read_prompt_from_stdin()?,
@@ -288,7 +309,23 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
     if prompt.trim().is_empty() {
         anyhow::bail!("empty prompt");
     }
+    status::emit(&Status::Working {
+        msg: Some(first_line(&prompt)),
+        progress: None,
+    });
+    let outcome = run_prompt(args, prompt).await;
+    match outcome {
+        Ok(()) => status::emit(&Status::Done),
+        Err(ref err) => status::emit(&Status::Error {
+            msg: Some(first_line(&err.to_string())),
+        }),
+    }
+    outcome
+}
 
+/// The body of the one-shot: everything from the stored config to the
+/// finished turn.
+async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     let mut config = match Config::load() {
         Ok(config) => config,
         Err(err) => {
@@ -434,7 +471,11 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
     // allowlists will land.
     let approval: Arc<dyn Approval> = Arc::new(rhema_coding_agent::AllowAll);
 
-    let mut sink = HeadlessSink;
+    let mut sink = HeadlessSink {
+        msg: Some(first_line(&prompt)),
+        step: None,
+        max_steps: args.max_steps,
+    };
     let output = agent.turn(prompt, &mut sink, approval).await?;
     eprintln!(
         "· {} · ctx {}",
@@ -651,6 +692,10 @@ fn restore_terminal() {
         LeaveAlternateScreen
     );
     let _ = stdout().flush();
+    // The program-status record goes with the session: an exited
+    // interactive rhema leaves no badge behind (terminals that already
+    // dropped the record on exit ignore this).
+    status::clear();
 }
 
 /// Installs a panic hook that restores the terminal before the original
@@ -674,15 +719,18 @@ async fn event_loop(
     rx: &mut UnboundedReceiver<UiEvent>,
     effects: &mut Vec<Effect>,
 ) -> anyhow::Result<()> {
+    let mut status = Tracker::default();
     for effect in std::mem::take(effects) {
-        dispatch(app, tx, effect);
+        dispatch(app, tx, &mut status, effect);
     }
     loop {
+        status.sync(app);
         terminal.draw(|frame| ui::render(app, frame))?;
 
         while let Ok(event) = rx.try_recv() {
+            status.observe(&event);
             for effect in app.on_event(event) {
-                dispatch(app, tx, effect);
+                dispatch(app, tx, &mut status, effect);
             }
             if app.should_quit {
                 return Ok(());
@@ -696,7 +744,7 @@ async fn event_loop(
             match crossterm::event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     for effect in app.on_key(key) {
-                        dispatch(app, tx, effect);
+                        dispatch(app, tx, &mut status, effect);
                     }
                 }
                 Event::Mouse(mouse) => match mouse.kind {
@@ -706,7 +754,7 @@ async fn event_loop(
                     // lands once, on the row the user let go over.
                     crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                         for effect in app.on_click(mouse.column, mouse.row) {
-                            dispatch(app, tx, effect);
+                            dispatch(app, tx, &mut status, effect);
                         }
                     }
                     _ => {}
@@ -720,7 +768,7 @@ async fn event_loop(
 
 /// Performs one effect: spawn a fetch task or a turn task. The turn takes
 /// the agent off the UI thread until its `TurnFinished` event.
-fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
+fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, status: &mut Tracker, effect: Effect) {
     match effect {
         Effect::FetchModels(why) => {
             // A login validates one provider; the catalogs otherwise span
@@ -753,6 +801,8 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, effect: Effect) {
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             app.turn_cancel = Some(cancel);
+            // The status names the prompt until a tool call takes over.
+            status.note_prompt(&input);
             // Auto-approved for now: the Approval seam — and the modal
             // wired through it — is where command allowlists will land.
             app.begin_turn(None);
