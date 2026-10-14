@@ -248,8 +248,9 @@ pub struct ClawConfig {
     /// message keeps going. [`DEFAULT_MAX_TURN_STEPS`] when unset.
     pub max_turn_steps: u32,
     /// The handler's model backend: `google`, `llama-cpp`, `openrouter`,
-    /// `anthropic`, or `openai`; google when unset. Keys resolve through
-    /// the stored rhema config's default profile, env vars winning.
+    /// `anthropic`, `openai`, or `zai`; google when unset. Keys resolve
+    /// through the stored rhema config's default profile, env vars
+    /// winning.
     pub provider: Option<String>,
     /// The model identifier; a per-provider default when unset.
     pub model: Option<String>,
@@ -375,6 +376,8 @@ impl ClawConfig {
                 "llama-cpp" => "local",
                 "anthropic" => "claude-sonnet-4-5",
                 "openai" => "gpt-5",
+                // The Coding Plan's flagship, as Z.ai's own client spells it.
+                "zai" => "GLM-5.3",
                 _ => "gemini-3.8-flash",
             }
             .to_owned()

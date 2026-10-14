@@ -28,7 +28,7 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockWriteGuard};
 
 use rhema_autonomous_agent::async_trait;
 use rhema_core::{EventSink, ModelOutput, ModelProvider, ModelRequest, ProviderError};
-use rhema_provider_anthropic::AnthropicProvider;
+use rhema_provider_anthropic::{AnthropicProvider, ZAI_BASE_URL};
 use rhema_provider_copilot::CopilotProvider;
 use rhema_provider_google::GoogleProvider;
 use rhema_provider_llama_cpp::LlamaCppProvider;
@@ -47,6 +47,8 @@ pub fn default_model_for(kind: &str) -> &'static str {
         "openai" => "gpt-5",
         "openrouter" => "openrouter/auto",
         "deepseek" => "deepseek-chat",
+        // The Coding Plan's flagship, as Z.ai's own client spells it.
+        "zai" => "GLM-5.3",
         "copilot" => "gpt-4.1",
         _ => "gemini-3.8-flash",
     }
@@ -288,6 +290,8 @@ pub enum AnyProvider {
     OpenAiCompatible(OpenAiCompatibleProvider),
     /// DeepSeek through the OpenAI-compatible adapter at its own base.
     DeepSeek(OpenAiCompatibleProvider),
+    /// Z.ai's GLM Coding Plan through the Anthropic-compatible route.
+    Zai(AnthropicProvider),
     /// GitHub Copilot through the Copilot adapter.
     Copilot(CopilotProvider),
 }
@@ -303,6 +307,7 @@ impl AnyProvider {
             AnyProvider::OpenRouter(provider) => provider.list_models().await,
             AnyProvider::OpenAiCompatible(provider) => provider.list_models().await,
             AnyProvider::DeepSeek(provider) => provider.list_models().await,
+            AnyProvider::Zai(provider) => provider.list_models().await,
             AnyProvider::Copilot(provider) => provider.list_models().await,
             AnyProvider::LlamaCpp(provider) => {
                 let models = provider.list_models().await?;
@@ -345,6 +350,7 @@ impl ModelProvider for AnyProvider {
             AnyProvider::Anthropic(provider) => provider.complete(request, sink).await,
             AnyProvider::OpenAiCompatible(provider) => provider.complete(request, sink).await,
             AnyProvider::DeepSeek(provider) => provider.complete(request, sink).await,
+            AnyProvider::Zai(provider) => provider.complete(request, sink).await,
             AnyProvider::Copilot(provider) => provider.complete(request, sink).await,
         }
     }
@@ -367,6 +373,7 @@ fn env_vars_for(kind: &str) -> &'static [&'static str] {
         "openai" => &["OPENAI_API_KEY"],
         "openrouter" => &["OPENROUTER_API_KEY"],
         "deepseek" => &["DEEPSEEK_API_KEY"],
+        "zai" => &["ZAI_API_KEY", "Z_AI_API_KEY"],
         "copilot" => &["GITHUB_COPILOT_TOKEN"],
         _ => &[],
     }
@@ -422,6 +429,7 @@ pub fn addable_kinds() -> &'static [&'static str] {
         "llama-cpp",
         "openai",
         "openrouter",
+        "zai",
     ]
 }
 
@@ -477,6 +485,12 @@ pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String>
         "deepseek" => AnyProvider::DeepSeek(
             OpenAiCompatibleProvider::new(require_key(kind, params)?)
                 .with_base_url(DEEPSEEK_BASE_URL),
+        ),
+        // Bearer auth: the scheme the Coding Plan route documents.
+        "zai" => AnyProvider::Zai(
+            AnthropicProvider::new(require_key(kind, params)?)
+                .with_base_url(ZAI_BASE_URL)
+                .with_bearer_auth(),
         ),
         "copilot" => AnyProvider::Copilot(CopilotProvider::new(require_key(kind, params)?)),
         "llama-cpp" => {
@@ -569,6 +583,7 @@ pub fn discover(
         "openai",
         "openrouter",
         "deepseek",
+        "zai",
         "copilot",
     ] {
         let stored_of_kind = rows.iter().any(|(_, params)| params.kind == kind);
@@ -792,6 +807,7 @@ mod tests {
         assert!(construct("google", &params("google", Some("  "), None)).is_err());
         assert!(construct("google", &params("google", Some("k"), None)).is_ok());
         assert!(construct("deepseek", &params("deepseek", Some("k"), None)).is_ok());
+        assert!(construct("zai", &params("zai", Some("k"), None)).is_ok());
         assert!(construct("copilot", &params("copilot", Some("t"), None)).is_ok());
         assert!(construct("nope", &params("nope", Some("k"), None)).is_err());
         // llama.cpp serves keyless on its default url.
@@ -809,6 +825,19 @@ mod tests {
         let mut kinds: Vec<&str> = backends.iter().map(|b| b.kind.as_str()).collect();
         kinds.sort_unstable();
         assert_eq!(kinds, vec!["deepseek", "google", "llama-cpp"]);
+    }
+
+    #[test]
+    fn discover_boots_the_zai_kind_from_its_env_key() {
+        let config = test_config();
+        let profile = rhema_config::Profile::default();
+        let env = |name: &str| (name == "ZAI_API_KEY").then(|| "zk".to_owned());
+        let backends = discover(&config, &profile, &env, &|| Vec::new(), None);
+        let kinds: Vec<&str> = backends.iter().map(|b| b.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"zai"),
+            "the env key boots the zai backend: {kinds:?}"
+        );
     }
 
     #[test]
