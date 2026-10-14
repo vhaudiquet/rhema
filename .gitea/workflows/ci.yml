@@ -307,3 +307,55 @@ jobs:
         run: snapcraft upload rhema_*.snap --release=edge
         env:
           SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
+
+  # The edge binary channel: get.rhema.rs's edge manifest names this
+  # build sha, so `installer --edge` runs the newest green main. The
+  # chart (rhema-dist, in the landing repo) serves the bucket and owns
+  # the contract; the upload is the piece it leaves to this repo, with
+  # the endpoint and the chart's generated key pair as repo secrets.
+  # Binary-only gates: the tarball packages rhema-code alone.
+  publish-edge-binaries:
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    needs: [checks, test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build and upload dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev awscli
+
+      - name: Build
+        run: cargo build --release -p rhema-code
+
+      - name: Package the tarball and the edge manifest
+        run: |
+          version="${GITHUB_SHA}"
+          mkdir -p "dist/$version"
+          cp target/release/rhema "dist/$version/rhema"
+          tar -czf "dist/$version/rhema-linux-amd64.tar.gz" -C "dist/$version" rhema
+          (cd "dist/$version" && sha256sum rhema-linux-amd64.tar.gz > checksums.txt)
+          sha="$(sha256sum "dist/$version/rhema-linux-amd64.tar.gz" | awk '{print $1}')"
+          # One binary per line, on the same line as its name: the
+          # installer parses the manifest with line-wise sed, so
+          # reformatting this through json.dumps breaks every install.
+          {
+            printf '{\n  "edge": "%s",\n  "binaries": {\n' "$version"
+            printf '    "rhema-linux-amd64": {"url": "https://get.rhema.rs/%s/rhema-linux-amd64.tar.gz", "sha256": "%s"}\n' "$version" "$sha"
+            printf '  }\n}\n'
+          } > dist/edge-manifest.json
+
+      - name: Upload to the distribution bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          endpoint="${{ secrets.RHEMA_DIST_ENDPOINT }}"
+          aws s3api put-bucket-website --bucket get --endpoint-url "$endpoint" \
+            --website-configuration '{"IndexDocument":{"Suffix":"index.html"}}'
+          aws s3 cp "dist/$GITHUB_SHA/rhema-linux-amd64.tar.gz" "s3://get/$GITHUB_SHA/" --endpoint-url "$endpoint"
+          aws s3 cp "dist/$GITHUB_SHA/checksums.txt" "s3://get/$GITHUB_SHA/" --endpoint-url "$endpoint"
+          aws s3 cp dist/edge-manifest.json "s3://get/edge/manifest.json" --endpoint-url "$endpoint"

@@ -92,6 +92,57 @@ jobs:
             --upload-file rhema-claw-*.tgz \
             "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
 
+  release-binaries:
+    # The stable binary channel: the tag's tarball under its version,
+    # and the root manifest repointed at it — the shape the installer
+    # resolves. Built from the committed tree, so the vendored
+    # crossterm ships in the binary and the installer keeps its
+    # keyboard handling (the crates.io build is the one that waits).
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build and upload dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev awscli
+
+      - name: Build
+        run: cargo build --release -p rhema-code
+
+      - name: Package the tarball and the root manifest
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          mkdir -p "dist/$version"
+          cp target/release/rhema "dist/$version/rhema"
+          tar -czf "dist/$version/rhema-linux-amd64.tar.gz" -C "dist/$version" rhema
+          (cd "dist/$version" && sha256sum rhema-linux-amd64.tar.gz > checksums.txt)
+          sha="$(sha256sum "dist/$version/rhema-linux-amd64.tar.gz" | awk '{print $1}')"
+          # One binary per line, on the same line as its name: the
+          # installer parses the manifest with line-wise sed, so
+          # reformatting this through json.dumps breaks every install.
+          {
+            printf '{\n  "stable": "%s",\n  "binaries": {\n' "$version"
+            printf '    "rhema-linux-amd64": {"url": "https://get.rhema.rs/%s/rhema-linux-amd64.tar.gz", "sha256": "%s"}\n' "$version" "$sha"
+            printf '  }\n}\n'
+          } > dist/manifest.json
+
+      - name: Upload to the distribution bucket
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          endpoint="${{ secrets.RHEMA_DIST_ENDPOINT }}"
+          aws s3api put-bucket-website --bucket get --endpoint-url "$endpoint" \
+            --website-configuration '{"IndexDocument":{"Suffix":"index.html"}}'
+          aws s3 cp "dist/$version/rhema-linux-amd64.tar.gz" "s3://get/$version/" --endpoint-url "$endpoint"
+          aws s3 cp "dist/$version/checksums.txt" "s3://get/$version/" --endpoint-url "$endpoint"
+          aws s3 cp dist/manifest.json "s3://get/manifest.json" --endpoint-url "$endpoint"
+
   release-snap:
     # The rhema snap to the store's stable channel. The store tracks
     # revisions itself, so the tag decides one thing: the version
