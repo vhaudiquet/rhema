@@ -23,9 +23,9 @@
 //!
 //! Environment variables (`RHEMA_PROVIDER`, `GEMINI_API_KEY`,
 //! `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
-//! `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `GITHUB_COPILOT_TOKEN`) always
-//! win over the stored value — a stored entry is the fallback, not the
-//! override.
+//! `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
+//! `GITHUB_COPILOT_TOKEN`) always win over the stored value — a stored
+//! entry is the fallback, not the override.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -65,7 +65,8 @@ pub enum ConfigError {
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProviderInstance {
     /// Which adapter serves this instance: `google`, `llama-cpp`,
-    /// `openrouter`, `anthropic`, `openai`, `deepseek`, or `copilot`.
+    /// `openrouter`, `anthropic`, `openai`, `deepseek`, `zai`, or
+    /// `copilot`.
     pub provider: String,
     /// The API key (the bearer key for a llama.cpp server), when the
     /// instance needs one and the keychain does not hold it.
@@ -77,8 +78,9 @@ pub struct ProviderInstance {
     /// [`Config::migrate_secrets`]; a literal `api_key` and a live
     /// `secret_ref` never hold the same key at rest.
     pub secret_ref: Option<String>,
-    /// The server base URL: the llama.cpp address, or an OpenAI-compatible
-    /// endpoint's base. Unset means the provider's own default.
+    /// The server base URL: the llama.cpp address, an OpenAI-compatible
+    /// endpoint's base, or a Z.ai route override. Unset means the
+    /// provider's own default.
     pub base_url: Option<String>,
 }
 
@@ -92,7 +94,7 @@ pub struct ProviderInstance {
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct Profile {
     /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
-    /// `anthropic`, `openai`, `deepseek`, or `copilot`.
+    /// `anthropic`, `openai`, `deepseek`, `zai`, or `copilot`.
     pub provider: Option<String>,
     /// The name of the active instance in [`Profile::instances`] — the
     /// one whose backend serves turns. Must name an instance of
@@ -128,7 +130,7 @@ impl Profile {
     /// environment tier included; env-only when the profile holds no
     /// instance of it. The provider name is the adapter spelling —
     /// `google`, `llama-cpp`, `openrouter`, `anthropic`, `openai`,
-    /// `deepseek`, `copilot`.
+    /// `deepseek`, `zai`, `copilot`.
     pub fn api_key(&self, provider: &str, secrets: Option<&dyn SecretStore>) -> Option<String> {
         match self.instance_for_provider(provider) {
             Some((_, instance)) => self.instance_api_key(instance, secrets),
@@ -177,6 +179,7 @@ impl Profile {
             Some("anthropic") => self.api_key("anthropic", secrets).is_some(),
             Some("openai") => self.api_key("openai", secrets).is_some(),
             Some("deepseek") => self.api_key("deepseek", secrets).is_some(),
+            Some("zai") => self.api_key("zai", secrets).is_some(),
             Some("copilot") => self.api_key("copilot", secrets).is_some(),
             _ => self.api_key("google", secrets).is_some(),
         }
@@ -330,8 +333,8 @@ impl Profile {
     }
 
     /// The base URL an instance serves: `LLAMA_CPP_URL` over the stored
-    /// URL for llama.cpp; the stored base for OpenAI-compatible
-    /// instances (the caller defaults OpenAI itself, so its own default
+    /// URL for llama.cpp; the stored base for OpenAI-compatible and Z.ai
+    /// instances (the caller defaults each kind, so its own default
     /// stays in one place); `None` for key-only providers.
     pub fn instance_url(&self, instance: &ProviderInstance) -> Option<String> {
         match instance.provider.as_str() {
@@ -343,7 +346,7 @@ impl Profile {
                 )
                 .unwrap_or_else(|| "http://localhost:8080".to_owned()),
             ),
-            "openai" => instance
+            "openai" | "zai" => instance
                 .base_url
                 .clone()
                 .filter(|url| !url.trim().is_empty()),
@@ -384,6 +387,7 @@ fn provider_env_names(provider: &str) -> &'static [&'static str] {
         "anthropic" => &["ANTHROPIC_API_KEY"],
         "openai" => &["OPENAI_API_KEY"],
         "deepseek" => &["DEEPSEEK_API_KEY"],
+        "zai" => &["ZAI_API_KEY", "Z_AI_API_KEY"],
         "copilot" => &["GITHUB_COPILOT_TOKEN"],
         _ => &[],
     }
@@ -930,6 +934,64 @@ mod tests {
             profile.stored_provider_key("openai", None).as_deref(),
             Some("sk-proxy")
         );
+    }
+
+    #[test]
+    fn zai_keys_read_the_two_env_names_with_zai_api_key_first() {
+        let env = |name: &str| match name {
+            "ZAI_API_KEY" => Some("zai-from-env".into()),
+            "Z_AI_API_KEY" => Some("z-ai-from-env".into()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_key(env, provider_env_names("zai"), Some("stored".into())),
+            Some("zai-from-env".into())
+        );
+        // The alias serves when the primary name is unset.
+        let env = |name: &str| match name {
+            "Z_AI_API_KEY" => Some("z-ai-from-env".into()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_key(env, provider_env_names("zai"), None),
+            Some("z-ai-from-env".into())
+        );
+    }
+
+    #[test]
+    fn a_zai_instance_honors_its_stored_base_url() {
+        let mut profile = Profile {
+            provider: Some("zai".into()),
+            instance: Some("plan".into()),
+            ..Profile::default()
+        };
+        profile.upsert_instance(
+            "plan",
+            ProviderInstance {
+                provider: "zai".into(),
+                api_key: Some("zkey".into()),
+                secret_ref: None,
+                base_url: Some("https://proxy.example/api/anthropic".into()),
+            },
+        );
+        assert_eq!(profile.api_key("zai", None).as_deref(), Some("zkey"));
+        assert_eq!(
+            profile.instance_url_for("zai").as_deref(),
+            Some("https://proxy.example/api/anthropic")
+        );
+        assert!(profile.has_credentials(None));
+        // A blank stored base reads as unset: the caller defaults the
+        // route, the same convention the openai kind follows.
+        profile.upsert_instance(
+            "plan",
+            ProviderInstance {
+                provider: "zai".into(),
+                api_key: Some("zkey".into()),
+                secret_ref: None,
+                base_url: Some("   ".into()),
+            },
+        );
+        assert_eq!(profile.instance_url_for("zai"), None);
     }
 
     #[test]
