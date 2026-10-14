@@ -20,11 +20,21 @@ export interface ToolRow {
   command: string | null
 }
 
-/** One turn as the UI renders it: thinking trace, tool rows, streamed reply. */
+/** One stream-ordered thing inside a turn: a tool call, the agent's ask
+ * (a consent card), or a handover (an attachment). The turn renders its
+ * entries in stream order, so a card sits where the event that raised
+ * it happened — an ask appears at its tool call, not at the turn's top. */
+export type TurnEntry =
+  | { kind: 'tool'; row: ToolRow }
+  | { kind: 'consent'; consent: ConsentCard }
+  | { kind: 'attachment'; attachment: AttachmentCard }
+
+/** One turn as the UI renders it: thinking trace, the stream-ordered
+ * entries, the streamed reply. */
 export interface TurnBlock {
   thinking: string
   reply: string
-  tools: ToolRow[]
+  entries: TurnEntry[]
   /** Set by `turn_done`: `handled`, `failed`, or whatever the claw reports. */
   outcome: string | null
 }
@@ -138,8 +148,16 @@ export function useTranscript() {
   let nextId = 1
 
   function ensureLive(): TurnBlock {
-    if (!live.value) live.value = { thinking: '', reply: '', tools: [], outcome: null }
+    if (!live.value) live.value = { thinking: '', reply: '', entries: [], outcome: null }
     return live.value
+  }
+
+  /** A detached copy of one entry: the record of a finished turn must
+   * not alias the live slot's objects. */
+  function cloneEntry(entry: TurnEntry): TurnEntry {
+    if (entry.kind === 'tool') return { kind: 'tool', row: { ...entry.row } }
+    if (entry.kind === 'consent') return { kind: 'consent', consent: { ...entry.consent } }
+    return { kind: 'attachment', attachment: { ...entry.attachment } }
   }
 
   /** Folds one stream event into the mirror. */
@@ -161,75 +179,77 @@ export function useTranscript() {
         ensureLive().reply += event.text
         break
       case 'tool_start':
-        ensureLive().tools.push({ name: event.name, isError: null, summary: '', code: null, command: null })
+        ensureLive().entries.push({
+          kind: 'tool',
+          row: { name: event.name, isError: null, summary: '', code: null, command: null },
+        })
         break
       case 'tool_result': {
-        const turn = ensureLive()
+        const entries = ensureLive().entries
         // Results pair with the most recent still-running call of the
         // same name; a result with no start still shows, never drops.
-        const pending = [...turn.tools].reverse().find(
-          (row) => row.name === event.name && row.isError === null,
-        )
-        if (pending) {
-          pending.isError = event.is_error
-          pending.summary = event.summary
-          pending.code = event.code
-          pending.command = event.command
+        const pending = [...entries]
+          .reverse()
+          .find((entry) => entry.kind === 'tool' && entry.row.name === event.name && entry.row.isError === null)
+        if (pending && pending.kind === 'tool') {
+          pending.row.isError = event.is_error
+          pending.row.summary = event.summary
+          pending.row.code = event.code
+          pending.row.command = event.command
         } else {
-          turn.tools.push({
-            name: event.name,
-            isError: event.is_error,
-            summary: event.summary,
-            code: event.code,
-            command: event.command,
+          entries.push({
+            kind: 'tool',
+            row: {
+              name: event.name,
+              isError: event.is_error,
+              summary: event.summary,
+              code: event.code,
+              command: event.command,
+            },
           })
         }
         break
       }
       case 'consent_request':
-        // One card per consent id: the same request never stacks a
-        // second card beside the first.
-        if (
-          !items.value.some(
-            (item) => item.kind === 'consent' && item.consent.id === event.id,
-          )
-        ) {
-          items.value.push({
-            kind: 'consent',
-            id: nextId++,
-            consent: {
-              id: event.id,
-              kind: event.kind,
-              summary: event.summary,
-              detail: event.detail,
-              granted: null,
-            },
-          })
+        // One card per consent id, wherever the turn stands: mid-turn
+        // the card joins the entries at its tool call; a card with no
+        // turn around it (a defensive shape — asks fire mid-turn)
+        // falls back to a top-level row.
+        if (!findConsent(event.id)) {
+          const card: ConsentCard = {
+            id: event.id,
+            kind: event.kind,
+            summary: event.summary,
+            detail: event.detail,
+            granted: null,
+          }
+          if (live.value) {
+            live.value.entries.push({ kind: 'consent', consent: card })
+          } else {
+            items.value.push({ kind: 'consent', id: nextId++, consent: card })
+          }
         }
         break
       case 'consent_resolved':
         resolveConsent(event.id, event.granted)
         break
       case 'attachment':
-        // One card per attachment id: the same file never stacks a
-        // second card beside the first.
-        if (
-          !items.value.some(
-            (item) => item.kind === 'attachment' && item.attachment.id === event.id,
-          )
-        ) {
-          items.value.push({
-            kind: 'attachment',
-            id: nextId++,
-            attachment: {
-              id: event.id,
-              name: event.name,
-              media: event.media,
-              size: event.size,
-              caption: event.caption,
-              url: null,
-            },
-          })
+        // One card per attachment id; the same dual placement as an
+        // ask — mid-turn it rides the entries.
+        if (!findAttachment(event.id)) {
+          const card: AttachmentCard = {
+            id: event.id,
+            name: event.name,
+            media: event.media,
+            size: event.size,
+            caption: event.caption,
+            url: null,
+          }
+          if (live.value) {
+            live.value.entries.push({ kind: 'attachment', attachment: card })
+          } else {
+            items.value.push({ kind: 'attachment', id: nextId++, attachment: card })
+          }
         }
         break
       case 'turn_done': {
@@ -242,7 +262,7 @@ export function useTranscript() {
         items.value.push({
           kind: 'turn',
           id: nextId++,
-          turn: { ...turn, tools: turn.tools.map((row) => ({ ...row })) },
+          turn: { ...turn, entries: turn.entries.map(cloneEntry) },
         })
         live.value = null
         break
@@ -256,9 +276,17 @@ export function useTranscript() {
   }
 
   /** A consent card resolved: flipped in place, or ignored when no
-   * card carries the id. The stream's consent_resolved echo lands on
-   * the same value either way. */
+   * card carries the id. The in-flight turn's entries hold the cards a
+   * running turn asked for; finished turns keep their own copies. */
   function resolveConsent(id: string, granted: boolean): void {
+    if (live.value) {
+      for (const entry of live.value.entries) {
+        if (entry.kind === 'consent' && entry.consent.id === id) {
+          entry.consent.granted = granted
+          return
+        }
+      }
+    }
     for (const item of items.value) {
       if (item.kind === 'consent' && item.consent.id === id) {
         item.consent.granted = granted
@@ -270,12 +298,35 @@ export function useTranscript() {
   /** An attachment's object URL landed; stored on its card. The useClaw
    * cache keeps a reconnect's replay from refetching the bytes. */
   function setAttachmentUrl(id: string, url: string): void {
+    if (live.value) {
+      for (const entry of live.value.entries) {
+        if (entry.kind === 'attachment' && entry.attachment.id === id) {
+          entry.attachment.url = url
+          return
+        }
+      }
+    }
     for (const item of items.value) {
       if (item.kind === 'attachment' && item.attachment.id === id) {
         item.attachment.url = url
         return
       }
     }
+  }
+
+  /** Whether a card for this consent id is already on the mirror — a
+   * replayed request never stacks a second card beside the first. */
+  function findConsent(id: string): boolean {
+    if (live.value?.entries.some((e) => e.kind === 'consent' && e.consent.id === id)) return true
+    return items.value.some((item) => item.kind === 'consent' && item.consent.id === id)
+  }
+
+  /** Whether a card for this attachment id is already on the mirror. */
+  function findAttachment(id: string): boolean {
+    if (live.value?.entries.some((e) => e.kind === 'attachment' && e.attachment.id === id)) {
+      return true
+    }
+    return items.value.some((item) => item.kind === 'attachment' && item.attachment.id === id)
   }
 
   /** Session switched, or the stream reopened: the mirror is per-key,

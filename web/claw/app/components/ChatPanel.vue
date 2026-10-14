@@ -13,13 +13,7 @@ import {
   pasteParts,
 } from '~/composables/useTranscript'
 import type { ClawSession, ConsentAnswer, StreamStatus } from '~/composables/useClaw'
-import type {
-  AttachmentCard,
-  ConsentCard,
-  PastePart,
-  TranscriptItem,
-  TurnBlock,
-} from '~/composables/useTranscript'
+import type { PastePart, TranscriptItem, TurnBlock } from '~/composables/useTranscript'
 
 const props = defineProps<{
   items: TranscriptItem[]
@@ -57,7 +51,7 @@ function onScroll(): void {
 }
 
 watch(
-  () => [props.items.length, props.live?.reply.length, props.live?.thinking.length, props.live?.tools.length],
+  () => [props.items.length, props.live?.reply.length, props.live?.thinking.length, props.live?.entries.length],
   async () => {
     if (!pinned.value) return
     await nextTick()
@@ -183,47 +177,6 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
   if (status === 'reconnecting') return 'error'
   return 'warn'
 }
-
-// --- consent cards ----------------------------------------------------
-// The card's tone reads its resolution; answering is intent only — the
-// shell POSTs, and the card flips on the local echo or the stream's.
-
-const secretDrafts = ref<Record<string, string>>({})
-
-function consentTone(consent: ConsentCard): 'pending' | 'ok' | 'denied' {
-  if (consent.granted === null) return 'pending'
-  return consent.granted ? 'ok' : 'denied'
-}
-
-function answerSecret(consent: ConsentCard): void {
-  const secret = (secretDrafts.value[consent.id] ?? '').trim()
-  if (secret === '') return
-  emit('consentAnswer', consent.id, { secret })
-  secretDrafts.value[consent.id] = ''
-}
-
-// --- attachment cards -------------------------------------------------
-// The bytes are the claw's to serve: images arrive via the shell's
-// fetch once the card exists; code and file download on click.
-
-const MEDIA_GLYPHS: Record<AttachmentCard['media'], string> = {
-  image: '▣',
-  code: '⌗',
-  file: '▤',
-}
-
-/** B / KB / MB, one decimal past 1 KB — a card label, not precision. */
-function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`
-}
-
-/** Command rows render as shell lines, not glyph rows (the TUI's
- * tool_row); run_command is the bash tool's other name. */
-function isShellTool(name: string): boolean {
-  return name === 'bash' || name === 'run_command'
-}
 </script>
 
 <template>
@@ -275,31 +228,12 @@ function isShellTool(name: string): boolean {
               <summary>thinking</summary>
               <pre>{{ item.turn.thinking }}</pre>
             </details>
-            <ul v-if="item.turn.tools.length > 0" class="tools">
-              <li
-                v-for="(tool, index) in item.turn.tools"
-                :key="index"
-                :class="{ error: tool.isError === true }"
-              >
-                <template v-if="isShellTool(tool.name)">
-                  <span class="shell-mark" aria-hidden="true">$ </span>
-                  <span class="shell-command mono">{{ tool.command ?? '…' }}</span>
-                  <span
-                    v-if="typeof tool.code === 'number'"
-                    class="shell-code mono"
-                    :class="tool.code === 0 ? 'ok' : 'failed'"
-                  >[{{ tool.code }}]</span>
-                  <span v-else-if="tool.isError === true" class="shell-code failed">✗</span>
-                </template>
-                <template v-else>
-                  <span class="glyph" aria-hidden="true">{{
-                    tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
-                  }}</span>
-                  <span class="name mono">{{ tool.name }}</span>
-                  <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
-                </template>
-              </li>
-            </ul>
+            <TurnEntries
+              :entries="item.turn.entries"
+              @consent-answer="(id, answer) => emit('consentAnswer', id, answer)"
+              @consent-deny="(id) => emit('consentDeny', id)"
+              @download-attachment="(id, name) => emit('downloadAttachment', id, name)"
+            />
             <AppMarkdown v-if="item.turn.reply" :text="item.turn.reply" class="reply" />
             <div
               v-if="item.turn.outcome"
@@ -310,82 +244,14 @@ function isShellTool(name: string): boolean {
             </div>
           </div>
         </div>
-        <div v-else-if="item.kind === 'consent'" class="msg">
-          <div class="avatar user" aria-hidden="true">?</div>
+        <div v-else class="msg" :class="item.kind">
           <div class="msg-body">
-            <div class="consent-card" :class="consentTone(item.consent)">
-              <div class="consent-head">
-                <span class="badge">{{ item.consent.kind }}</span>
-                <strong class="consent-summary">{{ item.consent.summary }}</strong>
-                <span v-if="item.consent.granted !== null" class="consent-state mono">
-                  {{ item.consent.granted ? 'granted' : 'denied' }}
-                </span>
-              </div>
-              <p v-if="item.consent.detail" class="consent-detail">{{ item.consent.detail }}</p>
-              <div v-if="item.consent.granted === null" class="consent-actions">
-                <template v-if="item.consent.kind === 'secret'">
-                  <input
-                    v-model="secretDrafts[item.consent.id]"
-                    type="password"
-                    placeholder="the secret, never shown again"
-                    autocomplete="off"
-                    @keydown.enter="answerSecret(item.consent)"
-                  />
-                  <button
-                    class="primary"
-                    :disabled="(secretDrafts[item.consent.id] ?? '').trim() === ''"
-                    @click="answerSecret(item.consent)"
-                  >
-                    submit
-                  </button>
-                </template>
-                <template v-else>
-                  <button class="primary" @click="emit('consentAnswer', item.consent.id, { grant: true })">
-                    Approve
-                  </button>
-                  <button @click="emit('consentAnswer', item.consent.id, { grant: false })">
-                    Deny
-                  </button>
-                </template>
-                <button class="ghost" title="cancel without answering" @click="emit('consentDeny', item.consent.id)">
-                  deny
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-        <div v-else-if="item.kind === 'attachment'" class="msg">
-          <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="32" />
-          <div class="msg-body">
-            <div class="who">{{ agentName }}</div>
-            <div class="attachment-card">
-              <div class="attachment-head">
-                <span
-                  class="attachment-glyph"
-                  aria-hidden="true"
-                  :title="`${item.attachment.media} attachment`"
-                >{{ MEDIA_GLYPHS[item.attachment.media] }}</span>
-                <span class="attachment-name mono">{{ item.attachment.name }}</span>
-                <span class="attachment-size mono">{{ formatBytes(item.attachment.size) }}</span>
-                <button
-                  v-if="item.attachment.media !== 'image'"
-                  class="ghost"
-                  :title="`download ${item.attachment.name}`"
-                  @click="emit('downloadAttachment', item.attachment.id, item.attachment.name)"
-                >
-                  ↓ download
-                </button>
-              </div>
-              <img
-                v-if="item.attachment.media === 'image' && item.attachment.url"
-                :src="item.attachment.url"
-                :alt="item.attachment.caption ?? item.attachment.name"
-                class="attachment-image"
-              />
-              <p v-if="item.attachment.caption" class="attachment-caption">
-                {{ item.attachment.caption }}
-              </p>
-            </div>
+            <TurnEntries
+              :entries="[item.kind === 'consent' ? { kind: 'consent', consent: item.consent } : { kind: 'attachment', attachment: item.attachment }]"
+              @consent-answer="(id, answer) => emit('consentAnswer', id, answer)"
+              @consent-deny="(id) => emit('consentDeny', id)"
+              @download-attachment="(id, name) => emit('downloadAttachment', id, name)"
+            />
           </div>
         </div>
       </template>
@@ -398,31 +264,12 @@ function isShellTool(name: string): boolean {
             <summary>thinking</summary>
             <pre>{{ live.thinking }}</pre>
           </details>
-          <ul v-if="live.tools.length > 0" class="tools">
-            <li
-              v-for="(tool, index) in live.tools"
-              :key="index"
-              :class="{ error: tool.isError === true }"
-            >
-              <template v-if="isShellTool(tool.name)">
-                <span class="shell-mark" aria-hidden="true">$ </span>
-                <span class="shell-command mono">{{ tool.command ?? '…' }}</span>
-                <span
-                  v-if="typeof tool.code === 'number'"
-                  class="shell-code mono"
-                  :class="tool.code === 0 ? 'ok' : 'failed'"
-                >[{{ tool.code }}]</span>
-                <span v-else-if="tool.isError === true" class="shell-code failed">✗</span>
-              </template>
-              <template v-else>
-                <span class="glyph" aria-hidden="true">{{
-                  tool.isError === null ? '…' : tool.isError ? '✗' : '✓'
-                }}</span>
-                <span class="name mono">{{ tool.name }}</span>
-                <span v-if="tool.summary" class="summary mono">{{ tool.summary }}</span>
-              </template>
-            </li>
-          </ul>
+          <TurnEntries
+            :entries="live.entries"
+            @consent-answer="(id, answer) => emit('consentAnswer', id, answer)"
+            @consent-deny="(id) => emit('consentDeny', id)"
+            @download-attachment="(id, name) => emit('downloadAttachment', id, name)"
+          />
           <AppMarkdown v-if="live.reply" :text="live.reply" streaming class="reply" />
         </div>
       </div>
@@ -611,80 +458,6 @@ function isShellTool(name: string): boolean {
   font-style: italic;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.tools {
-  list-style: none;
-  margin: 0 0 10px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.tools li {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  padding: 5px 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--ok);
-  border-radius: 6px;
-}
-
-.tools li.error {
-  border-left-color: var(--error);
-}
-
-.glyph {
-  flex: none;
-  color: var(--ok);
-}
-
-li.error .glyph {
-  color: var(--error);
-}
-
-.name {
-  color: var(--text);
-}
-
-.summary {
-  color: var(--text3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* A bash row reads as the shell line it ran: dim $ prefix, the
-   command, and the exit code pushed to the row's right end. */
-.shell-mark {
-  flex: none;
-  color: var(--text3);
-  white-space: pre;
-}
-
-.shell-command {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-}
-
-.shell-code {
-  flex: none;
-  font-size: 11px;
-}
-
-.shell-code.ok {
-  color: var(--ok);
-}
-
-.shell-code.failed {
-  color: var(--error);
 }
 
 .reply {
