@@ -41,6 +41,10 @@ pub enum ProviderChoice {
     /// DeepSeek, by API key (their OpenAI-compatible endpoint).
     #[value(name = "deepseek")]
     DeepSeek,
+    /// Z.ai GLM Coding Plan, by API key (their Anthropic-compatible
+    /// endpoint).
+    #[value(name = "zai")]
+    Zai,
     /// GitHub Copilot, by GitHub OAuth token (the device flow's output).
     #[value(name = "copilot")]
     Copilot,
@@ -58,6 +62,7 @@ impl ProviderChoice {
             Some("anthropic") => Some(Self::Anthropic),
             Some("openai") => Some(Self::OpenAi),
             Some("deepseek") => Some(Self::DeepSeek),
+            Some("zai") => Some(Self::Zai),
             Some("copilot") => Some(Self::Copilot),
             _ => None,
         }
@@ -73,6 +78,7 @@ impl ProviderChoice {
             Self::Anthropic => "anthropic",
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
+            Self::Zai => "zai",
             Self::Copilot => "copilot",
         }
     }
@@ -341,10 +347,15 @@ mod tests {
             Some(ProviderChoice::DeepSeek)
         );
         assert_eq!(
+            ProviderChoice::from_stored(Some("zai")),
+            Some(ProviderChoice::Zai)
+        );
+        assert_eq!(
             ProviderChoice::from_stored(Some("copilot")),
             Some(ProviderChoice::Copilot)
         );
         assert_eq!(ProviderChoice::Copilot.stored_name(), "copilot");
+        assert_eq!(ProviderChoice::Zai.stored_name(), "zai");
     }
 
     #[test]

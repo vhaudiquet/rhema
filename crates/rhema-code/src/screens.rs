@@ -22,6 +22,9 @@ pub enum LoginProvider {
     OpenAi,
     /// DeepSeek, by API key (their OpenAI-compatible endpoint).
     DeepSeek,
+    /// Z.ai's GLM Coding Plan, by API key (their Anthropic-compatible
+    /// endpoint).
+    Zai,
     /// GitHub Copilot, through the device-code flow.
     Copilot,
 }
@@ -61,6 +64,10 @@ pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "DeepSeek",
         kind: LoginProvider::DeepSeek,
+    },
+    ProviderEntry {
+        name: "Z.ai (GLM Coding Plan)",
+        kind: LoginProvider::Zai,
     },
     ProviderEntry {
         name: "GitHub Copilot",
@@ -510,6 +517,9 @@ impl AddInstanceDialog {
                     (Some(LoginProvider::OpenAi), false) => {
                         "enter the base URL (empty for api.openai.com)"
                     }
+                    (Some(LoginProvider::Zai), false) => {
+                        "enter the base URL (empty for the coding plan route)"
+                    }
                     _ => "enter the API key",
                 };
                 format!("{what} · ctrl-v paste · enter when done · esc back")
@@ -526,6 +536,7 @@ impl AddInstanceDialog {
                 match (self.pending.as_ref().map(|p| p.provider), self.second_input) {
                     (Some(LoginProvider::LlamaCpp), false) => "server URL: ",
                     (Some(LoginProvider::OpenAi), false) => "base URL: ",
+                    (Some(LoginProvider::Zai), false) => "base URL: ",
                     _ => "API key: ",
                 }
             }
@@ -540,8 +551,9 @@ impl AddInstanceDialog {
         let secret = match self.stage {
             DialogStage::NameInstance => false,
             DialogStage::EnterCredential => match self.pending.as_ref().map(|p| p.provider) {
-                Some(LoginProvider::LlamaCpp) => self.second_input,
-                Some(LoginProvider::OpenAi) => self.second_input,
+                Some(LoginProvider::LlamaCpp)
+                | Some(LoginProvider::OpenAi)
+                | Some(LoginProvider::Zai) => self.second_input,
                 _ => true,
             },
             _ => true,
@@ -673,7 +685,7 @@ impl AddInstanceDialog {
                 if !self.second_input
                     && matches!(
                         provider,
-                        Some(LoginProvider::LlamaCpp | LoginProvider::OpenAi)
+                        Some(LoginProvider::LlamaCpp | LoginProvider::OpenAi | LoginProvider::Zai)
                     )
                 {
                     // The URL prompt: captured, then the key is asked.
@@ -726,6 +738,7 @@ impl AddInstanceDialog {
             LoginProvider::Anthropic => "anthropic",
             LoginProvider::OpenAi => "openai",
             LoginProvider::DeepSeek => "deepseek",
+            LoginProvider::Zai => "zai",
             LoginProvider::Copilot => "copilot",
         };
         if !self.instances.contains_key(base) {

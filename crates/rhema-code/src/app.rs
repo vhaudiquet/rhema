@@ -84,6 +84,15 @@ pub enum Backend {
         /// The resolved key (`env` first, stored second).
         api_key: String,
     },
+    /// Z.ai's GLM Coding Plan, by API key (their Anthropic-compatible
+    /// endpoint): an instance may name a base URL (a proxy for the route);
+    /// `None` speaks to the Coding Plan route itself.
+    Zai {
+        /// The resolved key (`env` first, stored second).
+        api_key: String,
+        /// The instance's base URL, when it stored one.
+        base_url: Option<String>,
+    },
     /// GitHub Copilot, driven by the device flow's long-lived GitHub
     /// OAuth token (the adapter exchanges it for short-lived tokens).
     Copilot {
@@ -131,10 +140,28 @@ impl Backend {
                 rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
                     .with_base_url("https://api.deepseek.com/v1"),
             ),
+            Backend::Zai { api_key, base_url } => Arc::new(Self::zai_provider(api_key, base_url)),
             Backend::Copilot { api_key } => Arc::new(rhema_provider_copilot::CopilotProvider::new(
                 api_key.clone(),
             )),
         }
+    }
+
+    /// The Coding Plan provider: the stored base URL when an instance
+    /// overrode it, the Coding Plan route otherwise — always with bearer
+    /// auth, the scheme that route documents.
+    fn zai_provider(
+        api_key: &str,
+        base_url: &Option<String>,
+    ) -> rhema_provider_anthropic::AnthropicProvider {
+        let base = base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .unwrap_or(rhema_provider_anthropic::ZAI_BASE_URL);
+        rhema_provider_anthropic::AnthropicProvider::new(api_key)
+            .with_base_url(base)
+            .with_bearer_auth()
     }
 
     /// The config `provider` string this backend persists.
@@ -146,6 +173,7 @@ impl Backend {
             Backend::Anthropic { .. } => "anthropic",
             Backend::OpenAi { .. } => "openai",
             Backend::DeepSeek { .. } => "deepseek",
+            Backend::Zai { .. } => "zai",
             Backend::Copilot { .. } => "copilot",
         }
     }
@@ -216,6 +244,7 @@ impl Backend {
             "anthropic",
             "openai",
             "deepseek",
+            "zai",
             "copilot",
         ] {
             if Some(name) == active.as_deref() || profile.instance_for_provider(name).is_some() {
@@ -264,6 +293,12 @@ impl Backend {
             "deepseek" => profile
                 .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::DeepSeek { api_key }),
+            "zai" => profile
+                .instance_api_key(instance, secrets)
+                .map(|api_key| Backend::Zai {
+                    api_key,
+                    base_url: profile.instance_url(instance),
+                }),
             "copilot" => profile
                 .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
@@ -306,6 +341,10 @@ impl Backend {
             "deepseek" => profile
                 .api_key("deepseek", secrets)
                 .map(|api_key| Backend::DeepSeek { api_key }),
+            "zai" => profile.api_key("zai", secrets).map(|api_key| Backend::Zai {
+                api_key,
+                base_url: None,
+            }),
             "copilot" => profile
                 .api_key("copilot", secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
@@ -342,11 +381,13 @@ impl Backend {
                     .map_err(|err| err.to_string())
             }
             // No balance endpoint to ask: Google keys, local servers,
-            // Anthropic, and the generic OpenAI-compatible family.
+            // Anthropic, the generic OpenAI-compatible family, and the
+            // Z.ai Coding Plan.
             Backend::Google { .. }
             | Backend::LlamaCpp { .. }
             | Backend::Anthropic { .. }
-            | Backend::OpenAi { .. } => Ok(None),
+            | Backend::OpenAi { .. }
+            | Backend::Zai { .. } => Ok(None),
         }
     }
 
@@ -382,6 +423,10 @@ impl Backend {
                     .await
                     .map_err(|err| err.to_string())
             }
+            Backend::Zai { api_key, base_url } => Self::zai_provider(api_key, base_url)
+                .list_models()
+                .await
+                .map_err(|err| err.to_string()),
             Backend::OpenAi { api_key, base_url } => {
                 let mut provider = rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(
                     api_key.clone(),
@@ -1398,6 +1443,10 @@ impl App {
             crate::screens::LoginProvider::OpenRouter => Backend::OpenRouter { api_key: input },
             crate::screens::LoginProvider::Anthropic => Backend::Anthropic { api_key: input },
             crate::screens::LoginProvider::DeepSeek => Backend::DeepSeek { api_key: input },
+            crate::screens::LoginProvider::Zai => Backend::Zai {
+                api_key: input,
+                base_url,
+            },
             // The flow path never validates a typed key: its credential
             // arrives from the flow task, already wrapped in the backend.
             crate::screens::LoginProvider::Copilot => return Vec::new(),
@@ -1704,7 +1753,8 @@ impl App {
                             Backend::LlamaCpp { url, api_key } => {
                                 (api_key.clone(), Some(url.clone()))
                             }
-                            Backend::OpenAi { api_key, base_url } => {
+                            Backend::OpenAi { api_key, base_url }
+                            | Backend::Zai { api_key, base_url } => {
                                 (Some(api_key.clone()), base_url.clone())
                             }
                             Backend::Google { api_key }
@@ -3010,6 +3060,100 @@ mod tests {
         }
         assert!(h.app.backend.is_none());
         assert!(h.store.load().unwrap().effective(None).instances.is_empty());
+    }
+
+    #[test]
+    fn zai_login_validates_by_key_with_the_default_route() {
+        let mut h = harness(None, None, Session::default());
+        // Z.ai is the seventh provider row.
+        descend_to_credential(&mut h, 6);
+        // The base URL prompt comes first: an empty one means the Coding
+        // Plan route itself.
+        h.app.on_key(key(KeyCode::Enter));
+        for c in "zkey-01".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::Zai {
+                    api_key: "zkey-01".into(),
+                    base_url: None,
+                },
+                instance: Some("zai".into()),
+            })]
+        );
+        // A failed validation stays on the login screen and persists
+        // nothing — same contract as the other keyed providers.
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::Zai {
+                    api_key: "zkey-01".into(),
+                    base_url: None,
+                },
+                instance: Some("zai".into()),
+            },
+            result: failed("zai", "anthropic api error (HTTP 401): denied"),
+        });
+        match &h.app.screen {
+            Screen::Settings(s) => assert!(matches!(
+                s.dialog.as_ref().unwrap().status,
+                crate::screens::DialogStatus::Error(_)
+            )),
+            _ => panic!("a failed login must stay on the login screen"),
+        }
+        assert!(h.app.backend.is_none());
+        assert!(h.store.load().unwrap().effective(None).instances.is_empty());
+    }
+
+    #[test]
+    fn a_zai_profile_builds_its_own_backend_from_a_stored_route() {
+        // A stored instance with a base URL override: the backend points
+        // the adapter at that route instead of the Coding Plan's.
+        let mut profile = keyed_profile("zai", "k-z");
+        profile.instance = Some("zai".into());
+        profile.upsert_instance(
+            "proxy",
+            rhema_config::ProviderInstance {
+                provider: "zai".into(),
+                api_key: Some("k-p".into()),
+                secret_ref: None,
+                base_url: Some("https://proxy.example/api/anthropic".into()),
+            },
+        );
+        let backend =
+            Backend::from_profile(&profile, None).expect("a keyed zai profile serves turns");
+        assert_eq!(backend.config_name(), "zai");
+        assert!(
+            matches!(
+                backend,
+                Backend::Zai { ref api_key, base_url: None }
+                    if api_key == "k-z"
+            ),
+            "the active zai instance serves: {backend:?}"
+        );
+        // Activating the proxy instance moves both the key and the route.
+        profile.instance = Some("proxy".into());
+        assert!(
+            matches!(
+                Backend::from_profile(&profile, None),
+                Some(Backend::Zai { ref api_key, base_url: Some(ref url) })
+                    if api_key == "k-p" && url == "https://proxy.example/api/anthropic"
+            ),
+            "the proxy instance's route serves"
+        );
+        // No key, no backend — the kind is not served by another's key.
+        let mut cross = rhema_config::Profile {
+            provider: Some("zai".into()),
+            ..rhema_config::Profile::default()
+        };
+        store_key(&mut cross, "anthropic", "k-a");
+        assert_eq!(
+            Backend::from_profile(&cross, None),
+            None,
+            "a zai profile is not served by an anthropic key"
+        );
     }
 
     #[test]

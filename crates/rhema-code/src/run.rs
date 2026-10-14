@@ -60,6 +60,11 @@ const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
 /// config names one: the non-thinking chat model — `deepseek-reasoner`
 /// thinks by default and is the slower choice.
 const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
+/// The headless Z.ai Coding Plan model when neither `--model` nor the
+/// stored config names one, chosen with the same reasoning as
+/// [`DEFAULT_ANTHROPIC_MODEL`]: the plan's flagship id, as Z.ai's own
+/// client spells it.
+const DEFAULT_ZAI_MODEL: &str = "GLM-5.3";
 /// The headless Copilot model when neither `--model` nor the stored
 /// config names one, chosen with the same reasoning as
 /// [`DEFAULT_ANTHROPIC_MODEL`]: the GPT-4.1 id, the proxy's long-running
@@ -362,6 +367,16 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
                     )
                 })?,
         },
+        ProviderChoice::Zai => Backend::Zai {
+            api_key: effective.api_key("zai", Some(&secrets)).ok_or_else(|| {
+                anyhow::anyhow!("missing API key: set ZAI_API_KEY (or log in once interactively)")
+            })?,
+            // A stored instance may override the route (a proxy); none
+            // means the Coding Plan endpoint itself.
+            base_url: effective
+                .instance_for_provider("zai")
+                .and_then(|(_, instance)| effective.instance_url(instance)),
+        },
         ProviderChoice::Copilot => Backend::Copilot {
             api_key: effective
                 .api_key("copilot", Some(&secrets))
@@ -381,6 +396,7 @@ async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
                 ProviderChoice::Anthropic => DEFAULT_ANTHROPIC_MODEL.to_owned(),
                 ProviderChoice::OpenAi => DEFAULT_OPENAI_MODEL.to_owned(),
                 ProviderChoice::DeepSeek => DEFAULT_DEEPSEEK_MODEL.to_owned(),
+                ProviderChoice::Zai => DEFAULT_ZAI_MODEL.to_owned(),
                 ProviderChoice::Copilot => DEFAULT_COPILOT_MODEL.to_owned(),
                 ProviderChoice::Google | ProviderChoice::OpenRouter => DEFAULT_MODEL.to_owned(),
             })
@@ -489,6 +505,18 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             ProviderChoice::DeepSeek => effective
                 .api_key("deepseek", Some(&*secrets))
                 .map(|api_key| Backend::DeepSeek { api_key }),
+            ProviderChoice::Zai => {
+                effective
+                    .api_key("zai", Some(&*secrets))
+                    .map(|api_key| Backend::Zai {
+                        api_key,
+                        // A stored instance may override the route (a proxy);
+                        // none means the Coding Plan endpoint itself.
+                        base_url: effective
+                            .instance_for_provider("zai")
+                            .and_then(|(_, instance)| effective.instance_url(instance)),
+                    })
+            }
             ProviderChoice::Copilot => effective
                 .api_key("copilot", Some(&*secrets))
                 .map(|api_key| Backend::Copilot { api_key }),

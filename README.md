@@ -49,7 +49,7 @@ See [Rhema Claw README.md](./crates/rhema-claw/README.md) for more.
 | `rhema-core` | The step engine. `Agent::step` runs one exchange with a model over a caller-owned, serializable `Session`, and never loops. Around it: the `ModelProvider`, `ToolResolver`, and `EventSink` seams, `run_turn`, a scripted `MockProvider` behind the `mock` feature, and commit-before-execute (`CommitHook`, per-tool `ReplaySafety`) so a crash inside a tool call leaves a resumable intent |
 | `rhema-provider` | Shared base for the adapters: the `ModelCard` catalog row, `Pricing`, the SSE decoder, and the `InteractiveLogin` flow seam |
 | `rhema-provider-google` | Gemini adapter: streaming SSE, native tool calling, live model listing |
-| `rhema-provider-anthropic` | Anthropic Messages adapter: streaming SSE, native tool use, live model listing |
+| `rhema-provider-anthropic` | Anthropic Messages adapter: streaming SSE, native tool use, live model listing; also serves Anthropic-compatible routes (Z.ai's GLM Coding Plan) by base override and bearer auth |
 | `rhema-provider-openai-compatible` | Any OpenAI-compatible chat-completions server (OpenAI, vLLM, LM Studio): streaming, live listing |
 | `rhema-provider-openrouter` | OpenRouter adapter: the text-chat catalog with per-model pricing and context lengths |
 | `rhema-provider-llama-cpp` | llama.cpp `llama-server` adapter: streaming chat completions, optional bearer key |
