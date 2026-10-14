@@ -269,3 +269,41 @@ jobs:
             -X POST \
             --upload-file rhema-claw-*.tgz \
             "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
+
+  # The edge snap: the same build the release channel ships, uploaded
+  # to the store's edge channel. Only the rust gates gate it — the snap
+  # packages rhema-code alone, so the deployable checks (chart, docker,
+  # web) say nothing about it. The version carries the short commit so
+  # edge users can tell revisions apart; the store tracks revisions
+  # itself regardless.
+  publish-edge-snap:
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    needs: [checks, test]
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/canonical/snapcraft:8_core24
+    steps:
+      - name: Install build prerequisites
+        run: |
+          apt-get update -q
+          apt-get install -y -q --no-install-recommends git curl nodejs
+
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - name: Stamp the edge version (base + short commit)
+        run: |
+          BASE_VERSION=$(grep '^version:' snap/snapcraft.yaml | awk -F'"' '{print $2}')
+          sed -i "s/^version: .*/version: \"${BASE_VERSION}+g$(git rev-parse --short HEAD)\"/" snap/snapcraft.yaml
+          grep '^version:' snap/snapcraft.yaml
+
+      - name: Build the snap
+        run: |
+          git config --global --add safe.directory '*'
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
+          export PATH="/usr/libexec/snapcraft:$HOME/.cargo/bin:$PATH"
+          snapcraft pack --destructive-mode
+
+      - name: Upload to the edge channel
+        run: snapcraft upload rhema_*.snap --release=edge
+        env:
+          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
