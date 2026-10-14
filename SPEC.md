@@ -246,6 +246,17 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
 - ~~**Where the adapters' shared catalog types live**~~, **decided:** `rhema-provider`, the adapter-family base crate: `ModelCard` (the normalized listing row), `Pricing`, and the `SseDecoder`. What varies per backend stays in the adapter; each owns its text-chat filter over its own ids and bakes its prices into the rows it hands out, so `list_models` only ever returns models a coding agent can drive. No adapter depends on another.
 - ~~**How a provider runs an interactive login**~~, **decided:** the `InteractiveLogin` seam in `rhema-provider` (`login.rs`). An adapter declares the flow (device codes, polling, expiry, all inside the flow) and reports `LoginUpdate`s to a sink; a frontend renders the updates generically and persists the `Completed` credential, one opaque string, the same shape a static API key takes, into the profile field it maps the provider to. Cancellation is dropping the flow's task; the flow keeps no state a retry would trip over. First consumer: the GitHub Copilot device flow.
 - ~~**How a hosted Anthropic-compatible endpoint is served**~~, **decided:** the same `AnthropicProvider` under a base override and bearer auth, not a new adapter: Z.ai's GLM Coding Plan (`ZAI_BASE_URL`) speaks the Messages dialect and only the header scheme differs (`with_bearer_auth`). It is its own provider kind (`zai`, `ZAI_API_KEY`) with an overridable stored route, and its traffic identifies honestly as `rhema` — never another client's mark; quota multipliers are a vendor conversation, not a header.
+- ~~**How transient provider failures retry**~~, **decided:** the `Retrying` decorator in
+  `rhema-provider` (`retry.rs`), wrapped around every turn provider the frontends assemble —
+  the TUI's `Backend::provider()`, claw's backend `construct()`, and ACP's `provider_for()` —
+  never inside `rhema-core`, whose concern list this stays off. A request that failed with a
+  retryable error (`ProviderError::is_retryable`: transport timeout, network failure, HTTP
+  408/429/5xx as the adapters report them) is re-issued with exponential backoff, three
+  attempts at most. Two guards keep a retry honest: a stream that already emitted an event
+  never retries (the caller saw the deltas; a second attempt would repeat them), and an
+  exchange that "succeeds" empty — a provider that closed the stream before its first chunk —
+  retries like any dead response and, if every attempt comes back empty, fails naming that
+  fact instead of completing a turn nobody saw.
 - ~~**How a UI paste travels without flooding the session**~~, **decided:** embedded pastes in message text (`rhema-core::paste`). A frontend records a long paste as `U+FFFC`, payload, `U+FFFC` inside the user text it pushes to the session — the compact form is the session's record, so rebuilds and resumes render the same chip the live stream did. Expansion back to plain text rides the provider seam: the coding-agent driver wraps whatever `ModelProvider` it is built with, so the engine stays ignorant and the encoding never reaches an adapter. The engine's two-consumer discipline holds; a consumer that never mints marks is unaffected.
 - ~~**Where forge support lives**~~, **decided:** an integration, not a
   framework component: `integrations/rhema-forge-integration` (the
