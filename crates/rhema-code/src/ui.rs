@@ -42,7 +42,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                     wrap_line(&Line::from(error.clone()), frame.area().width as usize).len() as u16
                         + 1
                 }
-                None if app.running => 2 + thinking_rows(app, frame.area().width as usize),
+                None if app.turn.running => 2 + thinking_rows(app, frame.area().width as usize),
                 None => 1,
             };
             let input_rows = input_rows(
@@ -63,7 +63,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             render_input(frame, app, input_area, theme);
             render_command_palette(frame, app, input_area, theme);
             render_footer(frame, app, footer_area, theme);
-            if let Some(call) = &app.pending_approval {
+            if let Some(call) = &app.turn.pending_approval {
                 render_approval_modal(frame, call, theme);
             } else if app.confirm_quit {
                 render_confirm_quit(frame, theme);
@@ -1256,21 +1256,23 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .into_iter()
             .map(|line| line.style(Style::default().fg(theme.error).bold()))
             .collect()
-    } else if app.running {
+    } else if app.turn.running {
         // Braille dots cycling through the classic spinner, animated off
         // the running turn's clock — no timer machinery of its own.
         const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let spinner = app
-            .turn_started
+            .turn
+            .started_at
             .map(|started| (started.elapsed().as_millis() / 80) as usize % SPINNER.len())
             .unwrap_or(0);
         let elapsed = app
-            .turn_started
+            .turn
+            .started_at
             .map(|started| format!(" · {}s", started.elapsed().as_secs()))
             .unwrap_or_default();
         // Two phases, two colors: the model streaming is thinking; a
         // command executing is running.
-        let phase = if app.processing {
+        let phase = if app.turn.processing {
             Line::from(vec![
                 Span::styled(
                     SPINNER[spinner].to_string(),
@@ -1298,7 +1300,7 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // tail, or a running command's earned output — at most three dim
     // rows. The reasoning half is gone the moment real output starts,
     // because the buffer clears then.
-    if app.running && app.error.is_none() {
+    if app.turn.running && app.error.is_none() {
         lines.extend(thinking_preview(app, width, theme));
     }
     // Content sits one cell in, on the transcript's left inset, and a
@@ -1330,10 +1332,10 @@ const TOOL_PREVIEW_DELAY: std::time::Duration = std::time::Duration::from_secs(1
 /// Whether the tool preview shows: a second of runtime or a second
 /// completed line — an instant command never flashes its output.
 fn tool_preview_ready(app: &App) -> bool {
-    let Some(started) = app.tool_output_at else {
+    let Some(started) = app.turn.tool_output_at else {
         return false;
     };
-    started.elapsed() >= TOOL_PREVIEW_DELAY || app.tool_output.matches('\n').count() >= 2
+    started.elapsed() >= TOOL_PREVIEW_DELAY || app.turn.tool_output.matches('\n').count() >= 2
 }
 
 /// The live preview's rows at `width`: a running command's output while
@@ -1342,9 +1344,9 @@ fn tool_preview_ready(app: &App) -> bool {
 /// matches what's on screen.
 fn thinking_preview_rows(app: &App, width: usize) -> Vec<Line<'static>> {
     let text = if tool_preview_ready(app) {
-        &app.tool_output
+        &app.turn.tool_output
     } else {
-        &app.thinking
+        &app.turn.thinking
     };
     let width = width.saturating_sub(1).max(1);
     let mut rows: Vec<Line<'static>> = completed_thinking(text)
@@ -1576,7 +1578,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // The input is the one interactive element, so it earns the accent;
     // while a turn runs it calms to a hairline.
-    let border = if app.running {
+    let border = if app.turn.running {
         theme.border_strong
     } else {
         theme.accent
@@ -1623,7 +1625,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .collect()
     };
     frame.render_widget(Paragraph::new(rows), inner);
-    if !app.running {
+    if !app.turn.running {
         let (cursor_row, cursor_col) = cursor_at.unwrap_or((0, 0));
         // The prompt and the continuation indent are both two cells,
         // and only rows carrying one shift the cursor by them. A cursor
@@ -2709,8 +2711,8 @@ mod scroll_tests {
     #[test]
     fn a_running_command_previews_its_lines_once_earned() {
         let mut app = chat_app();
-        app.running = true;
-        app.processing = true;
+        app.turn.running = true;
+        app.turn.processing = true;
         let draw = |app: &mut App| {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -2741,10 +2743,11 @@ mod scroll_tests {
 
         // One line earns it once the command has run long enough.
         let mut app = chat_app();
-        app.running = true;
-        app.processing = true;
+        app.turn.running = true;
+        app.turn.processing = true;
         chunk(&mut app, "c1", "compiling foo\n");
-        app.tool_output_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
+        app.turn.tool_output_at =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(2));
         assert!(draw(&mut app).contains("compiling foo"));
 
         // The result takes the preview back off.
@@ -2760,7 +2763,7 @@ mod scroll_tests {
     #[test]
     fn the_status_line_names_the_phase() {
         let mut app = chat_app();
-        app.running = true;
+        app.turn.running = true;
         let draw = |app: &mut App| {
             let backend = TestBackend::new(80, 12);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -2773,11 +2776,11 @@ mod scroll_tests {
                 .collect::<String>()
         };
 
-        app.processing = false;
+        app.turn.processing = false;
         let screen = draw(&mut app);
         assert!(screen.contains("thinking"), "{screen}");
 
-        app.processing = true;
+        app.turn.processing = true;
         let screen = draw(&mut app);
         assert!(screen.contains("running"), "{screen}");
         assert!(!screen.contains("thinking"), "{screen}");
@@ -2786,10 +2789,10 @@ mod scroll_tests {
     #[test]
     fn the_reasoning_preview_shows_and_vanishes_with_output() {
         let mut app = chat_app();
-        app.running = true;
+        app.turn.running = true;
         // The line ends with its newline: the preview only shows
         // completed lines.
-        app.thinking = "reasoning about the tree state\n".to_owned();
+        app.turn.thinking = "reasoning about the tree state\n".to_owned();
         let draw = |app: &mut App| {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -2807,7 +2810,7 @@ mod scroll_tests {
 
         // Cleared buffer, cleared block: the strip is back to the bare
         // spinner.
-        app.thinking.clear();
+        app.turn.thinking.clear();
         let screen = draw(&mut app);
         assert!(!screen.contains("reasoning about"), "{screen}");
     }
@@ -2817,7 +2820,7 @@ mod scroll_tests {
     #[test]
     fn the_reasoning_preview_reveals_complete_lines_only() {
         let mut app = chat_app();
-        app.running = true;
+        app.turn.running = true;
         let draw = |app: &mut App| {
             let backend = TestBackend::new(80, 24);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -2830,13 +2833,13 @@ mod scroll_tests {
                 .collect::<String>()
         };
 
-        app.thinking = "first thought\nhalf a second".to_owned();
+        app.turn.thinking = "first thought\nhalf a second".to_owned();
         let screen = draw(&mut app);
         assert!(screen.contains("first thought"), "{screen}");
         assert!(!screen.contains("half a second"), "{screen}");
 
         // The newline lands: the held-back line shows whole.
-        app.thinking.push('\n');
+        app.turn.thinking.push('\n');
         let screen = draw(&mut app);
         assert!(screen.contains("half a second"), "{screen}");
     }
@@ -2844,7 +2847,7 @@ mod scroll_tests {
     #[test]
     fn the_spinner_sits_below_a_blank_row_and_on_the_transcript_inset() {
         let mut app = chat_app();
-        app.running = true;
+        app.turn.running = true;
         app.transcript.push_user("look at this");
 
         let backend = TestBackend::new(40, 24);

@@ -639,10 +639,9 @@ pub struct App {
     pub models: Vec<crate::screens::CatalogModel>,
     /// The agent; `None` while a turn runs (the turn task owns it).
     pub agent: Option<CodingAgent>,
-    /// Whether a turn is in flight.
-    pub running: bool,
-    /// When the current turn started, for the elapsed-time indicator.
-    pub turn_started: Option<std::time::Instant>,
+    /// The turn lifecycle: what the keyboard, the renderer, and the
+    /// status tracker need while the agent is out with a task.
+    pub turn: TurnState,
     /// The chat transcript.
     pub transcript: Transcript,
     /// Token accounting of the last finished turn.
@@ -653,20 +652,48 @@ pub struct App {
     /// The last turn's error, shown in the status line until the next
     /// submit.
     pub error: Option<String>,
-    /// The tool call currently awaiting the user's answer.
-    pub pending_approval: Option<ToolCall>,
     /// The quit confirmation overlay is up.
     pub confirm_quit: bool,
-    /// Every future approval request is declined without a modal (the
-    /// turn is being cancelled; nothing more may ask).
-    pub decline_all: bool,
-    /// The cancel flag of the running turn; `None` while idle. The runner
-    /// creates the pair at submit and the task watches the receiver.
-    pub turn_cancel: Option<tokio::sync::watch::Sender<bool>>,
     /// The cancel handle of the running login flow; `None` while idle.
     /// Dropping it ends the flow task — the watch receiver errors out —
     /// exactly what Esc and a completed flow both want.
     pub login_cancel: Option<tokio::sync::watch::Sender<bool>>,
+    /// The file this session was resumed from, if any: the exit save
+    /// updates it in place instead of growing a second entry in /resume.
+    pub resumed_from: Option<PathBuf>,
+    /// Set by the runner to end the event loop.
+    pub should_quit: bool,
+    /// The resolved design tokens every render pass reads.
+    pub theme: &'static crate::palette::Theme,
+    /// The resolved footer glyphs every render pass reads.
+    pub icons: &'static crate::icons::Icons,
+    /// The chat input state.
+    pub chat: ChatState,
+    /// The clickable rects of the settings screen, re-registered by
+    /// every frame's render and matched against click positions.
+    pub settings_hits: Vec<(ratatui::layout::Rect, SettingsHit)>,
+}
+
+/// The lifecycle state of the turn the UI thread handed to a task. The
+/// agent comes back in a `TurnFinished` or `TurnCancelled` event; this is
+/// what the keyboard, the renderer, and the status tracker need until
+/// then. Between turns everything rests at its [`TurnState::idle`] default.
+pub struct TurnState {
+    /// Whether a turn is in flight.
+    pub running: bool,
+    /// When the turn started, for the elapsed-time indicator.
+    pub started_at: Option<std::time::Instant>,
+    /// The cancel flag of the running turn; the task watches the
+    /// receiver. The runner creates the pair at submit.
+    pub cancel: Option<tokio::sync::watch::Sender<bool>>,
+    /// The tool call currently awaiting the user's answer.
+    pub pending_approval: Option<ToolCall>,
+    /// Every future approval request is declined without a modal (the
+    /// turn is being cancelled; nothing more may ask).
+    pub decline_all: bool,
+    /// The approval answer channel; `None` while no turn runs, making
+    /// any late answer a no-op.
+    answers: Option<ApprovalAnswerer>,
     /// A command is executing while the turn runs; `false` while the
     /// model itself is streaming — thinking.
     pub processing: bool,
@@ -683,21 +710,102 @@ pub struct App {
     /// preview stays hidden until the command has earned it — a second
     /// of runtime or a second line.
     pub tool_output_at: Option<std::time::Instant>,
-    /// The file this session was resumed from, if any: the exit save
-    /// updates it in place instead of growing a second entry in /resume.
-    pub resumed_from: Option<PathBuf>,
-    /// Set by the runner to end the event loop.
-    pub should_quit: bool,
-    /// The resolved design tokens every render pass reads.
-    pub theme: &'static crate::palette::Theme,
-    /// The resolved footer glyphs every render pass reads.
-    pub icons: &'static crate::icons::Icons,
-    /// The chat input state.
-    pub chat: ChatState,
-    /// The clickable rects of the settings screen, re-registered by
-    /// every frame's render and matched against click positions.
-    pub settings_hits: Vec<(ratatui::layout::Rect, SettingsHit)>,
-    answers: Option<ApprovalAnswerer>,
+}
+
+impl TurnState {
+    /// The state between turns.
+    fn idle() -> Self {
+        Self {
+            running: false,
+            started_at: None,
+            cancel: None,
+            pending_approval: None,
+            decline_all: false,
+            answers: None,
+            processing: false,
+            thinking: String::new(),
+            tool_output: String::new(),
+            tool_output_at: None,
+        }
+    }
+
+    /// A turn was accepted: the clock starts in the thinking phase, the
+    /// approval answer channel is wired, and the previous turn's residue
+    /// (a stale modal, a preview buffer) is gone.
+    fn running(
+        cancel: tokio::sync::watch::Sender<bool>,
+        answers: Option<ApprovalAnswerer>,
+    ) -> Self {
+        Self {
+            running: true,
+            started_at: Some(std::time::Instant::now()),
+            cancel: Some(cancel),
+            answers,
+            ..Self::idle()
+        }
+    }
+
+    /// The turn is over, finished or cancelled: one reset for both, so
+    /// they cannot drift.
+    fn finished(&mut self) {
+        self.running = false;
+        self.started_at = None;
+        self.cancel = None;
+        self.processing = false;
+        self.thinking.clear();
+        self.decline_all = false;
+        self.pending_approval = None;
+        self.answers = None;
+    }
+
+    /// Answers the pending approval and clears the modal; without a
+    /// listening turn task, a no-op.
+    fn answer(&mut self, approved: bool) {
+        if let Some(answers) = &self.answers {
+            answers.answer(approved);
+        }
+        self.pending_approval = None;
+    }
+
+    /// Appends one reasoning piece to the preview buffer, keeping only
+    /// the tail: the status strip shows at most a few wrapped rows, so
+    /// older reasoning has no screen to live on.
+    fn push_thinking(&mut self, delta: &str) {
+        const TAIL_CAP: usize = 2048;
+        self.thinking.push_str(delta);
+        if self.thinking.len() > TAIL_CAP {
+            let mut cut = self.thinking.len() - TAIL_CAP;
+            while !self.thinking.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.thinking.drain(..cut);
+        }
+    }
+
+    /// Appends one output chunk of the running command to the tool
+    /// preview buffer, tail-capped like the reasoning buffer; the first
+    /// chunk starts the reveal clock.
+    fn push_tool_output(&mut self, chunk: &str) {
+        const TAIL_CAP: usize = 2048;
+        if self.tool_output_at.is_none() {
+            self.tool_output_at = Some(std::time::Instant::now());
+        }
+        self.tool_output.push_str(chunk);
+        if self.tool_output.len() > TAIL_CAP {
+            let mut cut = self.tool_output.len() - TAIL_CAP;
+            while !self.tool_output.is_char_boundary(cut) {
+                cut += 1;
+            }
+            self.tool_output.drain(..cut);
+        }
+    }
+
+    /// The running command's preview goes: its result landed, or the
+    /// next call started.
+    fn clear_tool_output(&mut self) {
+        self.tool_output.clear();
+        self.tool_output_at = None;
+    }
 }
 
 /// One keypress routed to the active screen.
@@ -776,26 +884,17 @@ impl App {
             screen,
             models: Vec::new(),
             agent,
-            running: false,
-            turn_started: None,
+            turn: TurnState::idle(),
             transcript,
             usage: None,
             session_cost: 0.0,
             error: None,
-            pending_approval: None,
             confirm_quit: false,
-            decline_all: false,
-            turn_cancel: None,
             login_cancel: None,
-            processing: false,
-            thinking: String::new(),
-            tool_output: String::new(),
-            tool_output_at: None,
             resumed_from: None,
             should_quit: false,
             chat: ChatState::new(),
             settings_hits: Vec::new(),
-            answers: None,
         })
     }
 
@@ -985,7 +1084,7 @@ impl App {
     /// profile: turns wait for /login rather than leaking the previous
     /// profile's key.
     pub fn switch_profile(&mut self, name: &str) -> Vec<Effect> {
-        if self.running {
+        if self.turn.running {
             self.transcript
                 .push_notice("a turn is running; /profile waits for it to finish");
             return Vec::new();
@@ -1053,7 +1152,7 @@ impl App {
     /// profile like a model pick, and the agent rebuilds carrying the
     /// conversation so the very next turn asks at the new level.
     pub fn set_thinking(&mut self, effort: rhema_core::request::ThinkingEffort) {
-        if self.running {
+        if self.turn.running {
             self.transcript
                 .push_notice("a turn is running; /thinking waits for it to finish");
             return;
@@ -1123,7 +1222,7 @@ impl App {
     /// [`App::open_resume`] against an explicit base, so tests drive real
     /// directories instead of the environment.
     pub fn open_resume_from(&mut self, base: &Path) -> Vec<Effect> {
-        if self.running {
+        if self.turn.running {
             self.transcript
                 .push_notice("a turn is running; /resume waits for it to finish");
             return Vec::new();
@@ -1151,7 +1250,7 @@ impl App {
     /// conversation is replaced — it keeps its own saved file from its
     /// own exit.
     pub fn resume_session(&mut self, path: &Path) {
-        if self.running {
+        if self.turn.running {
             self.transcript
                 .push_notice("a turn is running; /resume waits for it to finish");
             return;
@@ -1375,15 +1474,15 @@ impl App {
         // approval modal included: the pending answer is released, the
         // rest declined, and the task drops the turn at its next await.
         // The y/N modal keys keep answering single calls.
-        if self.running && key.code == KeyCode::Esc {
+        if self.turn.running && key.code == KeyCode::Esc {
             self.cancel_turn();
             return Vec::new();
         }
         // The approval modal takes every key while it is up.
-        if self.pending_approval.is_some() {
+        if self.turn.pending_approval.is_some() {
             match key.code {
-                KeyCode::Char('y' | 'Y') => self.answer_approval(true),
-                KeyCode::Char('n' | 'N') => self.answer_approval(false),
+                KeyCode::Char('y' | 'Y') => self.turn.answer(true),
+                KeyCode::Char('n' | 'N') => self.turn.answer(false),
                 _ => {}
             }
             return Vec::new();
@@ -1402,7 +1501,7 @@ impl App {
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
             // Other Ctrl combos (including Ctrl-P mid-turn) are inert.
-            if key.code == KeyCode::Char('p') && !self.running {
+            if key.code == KeyCode::Char('p') && !self.turn.running {
                 return self.open_picker();
             }
             return Vec::new();
@@ -1415,14 +1514,14 @@ impl App {
             return Vec::new();
         }
         if key.code == KeyCode::Esc {
-            if !self.running {
+            if !self.turn.running {
                 self.confirm_quit = true;
             }
             return Vec::new();
         }
         match action {
             ChatAction::Submit(text) => {
-                if self.running || text.trim().is_empty() {
+                if self.turn.running || text.trim().is_empty() {
                     // The input is kept, so typing during a turn is not
                     // lost.
                     Vec::new()
@@ -1444,10 +1543,10 @@ impl App {
                     self.chat.cursor = 0;
                     self.chat.attachments.clear();
                     self.transcript.push_user(&text);
-                    self.running = true;
-                    self.turn_started = Some(std::time::Instant::now());
+                    self.turn.running = true;
+                    self.turn.started_at = Some(std::time::Instant::now());
                     self.error = None;
-                    self.decline_all = false;
+                    self.turn.decline_all = false;
                     vec![Effect::StartTurn(text)]
                 }
             }
@@ -1515,7 +1614,7 @@ impl App {
     /// one, and the agent rebuilds carrying the conversation over — a
     /// picker when no model is stored yet, the chat otherwise.
     fn activate_instance(&mut self) -> Vec<Effect> {
-        if self.running {
+        if self.turn.running {
             self.transcript
                 .push_notice("a turn is running — the switch waits for it to finish");
             return Vec::new();
@@ -1755,12 +1854,12 @@ impl App {
             UiEvent::ModelsLoaded { why, result } => self.on_models_loaded(why, result),
             UiEvent::LoginUpdate(update) => self.on_login_update(update),
             UiEvent::ApprovalRequested { call } => {
-                if self.decline_all {
+                if self.turn.decline_all {
                     // Esc declined the rest of the turn: answer without a
                     // modal so the blocked turn task keeps going.
-                    self.send_answer(false);
+                    self.turn.answer(false);
                 } else {
-                    self.pending_approval = Some(call);
+                    self.turn.pending_approval = Some(call);
                 }
                 Vec::new()
             }
@@ -2128,13 +2227,15 @@ impl App {
         CodingAgent::from_session(provider, agent_config, session)
     }
 
-    /// The runner accepted a turn: wire the approval answer channel and
-    /// start in the thinking phase.
-    pub fn begin_turn(&mut self, answers: Option<ApprovalAnswerer>) {
-        self.answers = answers;
-        self.processing = false;
-        self.thinking.clear();
-        self.clear_tool_output();
+    /// The runner accepted a turn: a fresh lifecycle state with the
+    /// cancel flag and the approval answer channel wired, starting in
+    /// the thinking phase.
+    pub fn begin_turn(
+        &mut self,
+        cancel: tokio::sync::watch::Sender<bool>,
+        answers: Option<ApprovalAnswerer>,
+    ) {
+        self.turn = TurnState::running(cancel, answers);
         self.remember_profile();
     }
 
@@ -2168,73 +2269,21 @@ impl App {
     fn track_phase(&mut self, owned: &OwnedEvent) {
         match owned {
             OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => {
-                self.processing = false;
-                self.thinking.clear();
+                self.turn.processing = false;
+                self.turn.thinking.clear();
             }
-            OwnedEvent::ThinkingDelta(delta) => self.push_thinking(delta),
+            OwnedEvent::ThinkingDelta(delta) => self.turn.push_thinking(delta),
             // A tool call means a command runs. Its arguments often never
             // stream as deltas, so the label stays phase-only; the last
             // command's preview goes with it.
             OwnedEvent::ToolCallStart { .. } => {
-                self.processing = true;
-                self.thinking.clear();
-                self.clear_tool_output();
+                self.turn.processing = true;
+                self.turn.thinking.clear();
+                self.turn.clear_tool_output();
             }
-            OwnedEvent::ToolOutputDelta { chunk, .. } => self.push_tool_output(chunk),
-            OwnedEvent::ToolResult { .. } => self.clear_tool_output(),
+            OwnedEvent::ToolOutputDelta { chunk, .. } => self.turn.push_tool_output(chunk),
+            OwnedEvent::ToolResult { .. } => self.turn.clear_tool_output(),
             _ => {}
-        }
-    }
-
-    /// Appends one reasoning piece to the preview buffer, keeping only
-    /// the tail: the status strip shows at most a few wrapped rows, so
-    /// older reasoning has no screen to live on.
-    fn push_thinking(&mut self, delta: &str) {
-        const TAIL_CAP: usize = 2048;
-        self.thinking.push_str(delta);
-        if self.thinking.len() > TAIL_CAP {
-            let mut cut = self.thinking.len() - TAIL_CAP;
-            while !self.thinking.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.thinking.drain(..cut);
-        }
-    }
-
-    /// Appends one output chunk of the running command to the tool
-    /// preview buffer, tail-capped like the reasoning buffer; the first
-    /// chunk starts the reveal clock.
-    fn push_tool_output(&mut self, chunk: &str) {
-        const TAIL_CAP: usize = 2048;
-        if self.tool_output_at.is_none() {
-            self.tool_output_at = Some(std::time::Instant::now());
-        }
-        self.tool_output.push_str(chunk);
-        if self.tool_output.len() > TAIL_CAP {
-            let mut cut = self.tool_output.len() - TAIL_CAP;
-            while !self.tool_output.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.tool_output.drain(..cut);
-        }
-    }
-
-    /// The running command's preview goes: its result landed, or the
-    /// next call started.
-    fn clear_tool_output(&mut self) {
-        self.tool_output.clear();
-        self.tool_output_at = None;
-    }
-
-    /// Answers the modal, if the approval hook is listening.
-    fn answer_approval(&mut self, approved: bool) {
-        self.send_answer(approved);
-        self.pending_approval = None;
-    }
-
-    fn send_answer(&self, approved: bool) {
-        if let Some(answers) = &self.answers {
-            answers.answer(approved);
         }
     }
 
@@ -2244,9 +2293,9 @@ impl App {
     /// the turn task drops the future at its current await. The agent
     /// comes back in a `TurnCancelled`.
     fn cancel_turn(&mut self) {
-        self.answer_approval(false);
-        self.decline_all = true;
-        if let Some(cancel) = &self.turn_cancel {
+        self.turn.answer(false);
+        self.turn.decline_all = true;
+        if let Some(cancel) = &self.turn.cancel {
             let _ = cancel.send(true);
         }
     }
@@ -2255,14 +2304,7 @@ impl App {
     /// back, drop the turn's state, and mark the cutoff in the transcript.
     fn cancel_finished(&mut self, agent: Box<CodingAgent>) {
         self.agent = Some(*agent);
-        self.running = false;
-        self.turn_started = None;
-        self.turn_cancel = None;
-        self.processing = false;
-        self.thinking.clear();
-        self.decline_all = false;
-        self.pending_approval = None;
-        self.answers = None;
+        self.turn.finished();
         self.transcript.push_notice("turn cancelled");
     }
 
@@ -2272,14 +2314,7 @@ impl App {
     /// channel is gone).
     fn end_turn(&mut self, agent: Box<CodingAgent>, result: Result<ModelOutput, String>) {
         self.agent = Some(*agent);
-        self.running = false;
-        self.turn_started = None;
-        self.turn_cancel = None;
-        self.processing = false;
-        self.thinking.clear();
-        self.decline_all = false;
-        self.pending_approval = None;
-        self.answers = None;
+        self.turn.finished();
         match result {
             Ok(output) => {
                 if let Some(pricing) = self.current_model_pricing() {
@@ -4146,20 +4181,21 @@ mod tests {
     #[test]
     fn the_status_tracks_thinking_versus_running() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.running = true;
-        h.app.begin_turn(None);
+        h.app.turn.running = true;
+        let (cancel, _cancelled) = tokio::sync::watch::channel(false);
+        h.app.begin_turn(cancel, None);
 
         // The step begins: thinking.
         h.app
             .on_event(UiEvent::Engine(OwnedEvent::StepStart { iteration: 0 }));
-        assert!(!h.app.processing);
+        assert!(!h.app.turn.processing);
 
         // A tool call arrives: running it.
         h.app.on_event(UiEvent::Engine(OwnedEvent::ToolCallStart {
             id: "c1".into(),
             name: "bash".into(),
         }));
-        assert!(h.app.processing);
+        assert!(h.app.turn.processing);
 
         // The result lands: still running, until the next step or the end.
         h.app.on_event(UiEvent::Engine(OwnedEvent::ToolResult {
@@ -4168,7 +4204,7 @@ mod tests {
             is_error: false,
             code: Some(0),
         }));
-        assert!(h.app.processing);
+        assert!(h.app.turn.processing);
 
         // The turn ends: idle, no phase.
         let agent = CodingAgent::new(
@@ -4179,7 +4215,7 @@ mod tests {
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
         });
-        assert!(!h.app.processing);
+        assert!(!h.app.turn.processing);
     }
 
     #[test]
@@ -4207,10 +4243,10 @@ mod tests {
     fn esc_when_running_cancels_the_turn_and_flags_the_channel() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         let (cancel, cancelled) = tokio::sync::watch::channel(false);
-        h.app.turn_cancel = Some(cancel);
-        h.app.running = true;
+        h.app.turn.cancel = Some(cancel);
+        h.app.turn.running = true;
         h.app.on_key(key(KeyCode::Esc));
-        assert!(h.app.decline_all, "upcoming approvals decline");
+        assert!(h.app.turn.decline_all, "upcoming approvals decline");
         assert!(!h.app.should_quit, "esc is not quit mid-turn");
         assert!(*cancelled.borrow(), "the turn task sees the flag");
 
@@ -4223,8 +4259,8 @@ mod tests {
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
         });
-        assert!(!h.app.running);
-        assert!(h.app.turn_cancel.is_none());
+        assert!(!h.app.turn.running);
+        assert!(h.app.turn.cancel.is_none());
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("cancelled")
@@ -4237,27 +4273,28 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (hook, answers) = TuiApproval::pair(tx);
         let handle = std::thread::spawn(move || hook.approve(&test_call()));
-        h.app.begin_turn(Some(answers));
+        let (cancel, _cancelled) = tokio::sync::watch::channel(false);
+        h.app.begin_turn(cancel, Some(answers));
         let (cancel, cancelled) = tokio::sync::watch::channel(false);
-        h.app.turn_cancel = Some(cancel);
-        h.app.running = true;
+        h.app.turn.cancel = Some(cancel);
+        h.app.turn.running = true;
 
         let event = rx.blocking_recv().expect("the parked call requested");
         h.app.on_event(event);
-        assert!(h.app.pending_approval.is_some());
+        assert!(h.app.turn.pending_approval.is_some());
         h.app.on_key(key(KeyCode::Esc));
         assert!(!handle.join().unwrap(), "the parked call was declined");
         assert!(
             *cancelled.borrow(),
             "the turn was cancelled, not just declined"
         );
-        assert!(h.app.pending_approval.is_none());
+        assert!(h.app.turn.pending_approval.is_none());
     }
 
     #[test]
     fn the_cancelled_event_hands_the_agent_back_with_a_notice() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.running = true;
+        h.app.turn.running = true;
         let agent = CodingAgent::new(
             Arc::new(GoogleProvider::new("k".to_owned())),
             CodingAgentConfig::new("m-a", PathBuf::from(".")),
@@ -4266,9 +4303,9 @@ mod tests {
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
         });
-        assert!(!h.app.running);
+        assert!(!h.app.turn.running);
         assert!(h.app.agent.is_some());
-        assert!(h.app.turn_cancel.is_none());
+        assert!(h.app.turn.cancel.is_none());
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("cancelled")
@@ -4281,11 +4318,12 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (hook, answers) = TuiApproval::pair(tx);
         let handle = std::thread::spawn(move || hook.approve(&test_call()));
-        h.app.begin_turn(Some(answers));
+        let (cancel, _cancelled) = tokio::sync::watch::channel(false);
+        h.app.begin_turn(cancel, Some(answers));
 
         let event = rx.blocking_recv().expect("the parked call requested");
         h.app.on_event(event);
-        assert!(h.app.pending_approval.is_some());
+        assert!(h.app.turn.pending_approval.is_some());
         h.app.on_key(key(KeyCode::Char('y')));
         assert!(handle.join().unwrap(), "the y key approves the parked call");
     }
@@ -4307,7 +4345,7 @@ mod tests {
             output_tokens: 3,
             cached_input_tokens: 4,
         };
-        h.app.running = true;
+        h.app.turn.running = true;
         h.app.on_event(UiEvent::TurnFinished {
             agent: make_agent(),
             result: Ok(ModelOutput {
@@ -4316,16 +4354,16 @@ mod tests {
                 usage,
             }),
         });
-        assert!(!h.app.running);
+        assert!(!h.app.turn.running);
         assert!(h.app.error.is_none());
         assert_eq!(h.app.usage, Some(usage));
 
-        h.app.running = true;
+        h.app.turn.running = true;
         h.app.on_event(UiEvent::TurnFinished {
             agent: make_agent(),
             result: Err("stopped after 4 steps without finishing; send a follow-up to keep going, or raise the step limit".into()),
         });
-        assert!(!h.app.running);
+        assert!(!h.app.turn.running);
         assert_eq!(
             h.app.error.as_deref(),
             Some(
@@ -4343,23 +4381,23 @@ mod tests {
         });
         // An empty input never submits.
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
-        assert!(!h.app.running);
+        assert!(!h.app.turn.running);
         // While a turn runs, typing works but Enter is inert.
-        h.app.running = true;
+        h.app.turn.running = true;
         for c in "hi".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
         assert_eq!(h.app.chat.input, "hi");
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
-        assert!(h.app.running);
+        assert!(h.app.turn.running);
         // Idle again: Enter submits, shows the user line, and blocks
         // re-entry.
-        h.app.running = false;
+        h.app.turn.running = false;
         assert_eq!(
             h.app.on_key(key(KeyCode::Enter)),
             vec![Effect::StartTurn("hi".into())]
         );
-        assert!(h.app.running);
+        assert!(h.app.turn.running);
         assert_eq!(
             h.app.transcript.lines().first(),
             Some(&Line::User("hi".into()))
@@ -4398,16 +4436,19 @@ mod tests {
             id: "c1".into(),
             chunk: "one\n".into(),
         }));
-        assert_eq!(h.app.tool_output, "one\n");
-        assert!(h.app.tool_output_at.is_some(), "the first chunk clocks in");
+        assert_eq!(h.app.turn.tool_output, "one\n");
+        assert!(
+            h.app.turn.tool_output_at.is_some(),
+            "the first chunk clocks in"
+        );
 
         // The next command takes the last one's preview with it.
         h.app.on_event(UiEvent::Engine(OwnedEvent::ToolCallStart {
             id: "c2".into(),
             name: "bash".into(),
         }));
-        assert!(h.app.tool_output.is_empty());
-        assert!(h.app.tool_output_at.is_none());
+        assert!(h.app.turn.tool_output.is_empty());
+        assert!(h.app.turn.tool_output_at.is_none());
 
         h.app.on_event(UiEvent::Engine(OwnedEvent::ToolOutputDelta {
             id: "c2".into(),
@@ -4419,8 +4460,8 @@ mod tests {
             is_error: false,
             code: Some(0),
         }));
-        assert!(h.app.tool_output.is_empty());
-        assert!(h.app.tool_output_at.is_none());
+        assert!(h.app.turn.tool_output.is_empty());
+        assert!(h.app.turn.tool_output_at.is_none());
     }
 
     #[test]
@@ -4443,12 +4484,12 @@ mod tests {
             .on_event(UiEvent::Engine(OwnedEvent::ThinkingDelta("hmm".into())));
         h.app
             .on_event(UiEvent::Engine(OwnedEvent::ThinkingDelta(" deeper".into())));
-        assert_eq!(h.app.thinking, "hmm deeper");
+        assert_eq!(h.app.turn.thinking, "hmm deeper");
 
         // Real output clears the buffer: the block vanishes.
         h.app
             .on_event(UiEvent::Engine(OwnedEvent::TextDelta("the answer".into())));
-        assert!(h.app.thinking.is_empty());
+        assert!(h.app.turn.thinking.is_empty());
 
         // So does a tool call mid-turn.
         h.app
@@ -4457,7 +4498,7 @@ mod tests {
             id: "c1".into(),
             name: "bash".into(),
         }));
-        assert!(h.app.thinking.is_empty());
+        assert!(h.app.turn.thinking.is_empty());
     }
 
     #[test]
@@ -4676,7 +4717,8 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         let workspace = h.app.options.workspace.clone();
         h.app.session_profile = Some("work".to_owned());
-        h.app.begin_turn(None);
+        let (cancel, _cancelled) = tokio::sync::watch::channel(false);
+        h.app.begin_turn(cancel, None);
         assert_eq!(
             h.app.config.last_profile_in(&workspace).as_deref(),
             Some("work"),
@@ -4791,7 +4833,7 @@ mod tests {
     fn settings_instance_activation_waits_for_a_running_turn() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/settings");
-        h.app.running = true;
+        h.app.turn.running = true;
         h.app.on_key(key(KeyCode::Enter));
         assert!(
             matches!(h.app.screen, Screen::Settings(_)),
@@ -5070,7 +5112,7 @@ mod tests {
         h.app.chat.cursor = 5;
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
         assert!(h.app.chat.input == "hello", "the prompt is kept");
-        assert!(!h.app.running, "no fake turn starts");
+        assert!(!h.app.turn.running, "no fake turn starts");
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("/login")
@@ -5215,7 +5257,7 @@ mod tests {
     #[test]
     fn slash_model_during_a_turn_declines_with_a_notice() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.running = true;
+        h.app.turn.running = true;
         crate::commands::dispatch(&mut h.app, "/model");
         assert!(matches!(h.app.screen, Screen::Chat));
         assert!(matches!(
@@ -5232,7 +5274,7 @@ mod tests {
             h.app.on_key(key(KeyCode::Char(c)));
         }
         assert_eq!(h.app.on_key(key(KeyCode::Enter)), Vec::new());
-        assert!(!h.app.running, "no turn starts");
+        assert!(!h.app.turn.running, "no turn starts");
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("/clear")
@@ -5280,7 +5322,7 @@ mod tests {
         ));
 
         // A turn runs: the step drives progress against the 4-step cap.
-        h.app.running = true;
+        h.app.turn.running = true;
         tracker.observe(&UiEvent::Engine(OwnedEvent::StepStart { iteration: 2 }));
         match tracker.status_for(&h.app) {
             crate::status::Status::Working {
@@ -5304,7 +5346,7 @@ mod tests {
         }
 
         // A pending approval blocks ahead of the running state.
-        h.app.pending_approval = Some(ToolCall {
+        h.app.turn.pending_approval = Some(ToolCall {
             id: "c1".into(),
             name: "bash".into(),
             args: serde_json::Value::Null,
@@ -5322,8 +5364,8 @@ mod tests {
             .agent
             .take()
             .expect("the keyed harness built an agent");
-        h.app.pending_approval = None;
-        h.app.running = false;
+        h.app.turn.pending_approval = None;
+        h.app.turn.running = false;
         tracker.observe(&UiEvent::TurnFinished {
             agent: Box::new(agent),
             result: Err("provider exploded\nwith detail".to_owned()),
@@ -5337,7 +5379,7 @@ mod tests {
 
         // A later turn outranks the remembered failure and ends clean:
         // back to idle, not to the old error.
-        h.app.running = true;
+        h.app.turn.running = true;
         tracker.observe(&UiEvent::Engine(OwnedEvent::StepStart { iteration: 0 }));
         assert!(matches!(
             tracker.status_for(&h.app),
@@ -5348,7 +5390,7 @@ mod tests {
             CodingAgentConfig::new("m-a", std::env::temp_dir()),
         )
         .unwrap();
-        h.app.running = false;
+        h.app.turn.running = false;
         tracker.observe(&UiEvent::TurnFinished {
             agent: Box::new(agent),
             result: Ok(ModelOutput {

@@ -209,7 +209,7 @@ fn help(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
 }
 
 fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
-    if app.running {
+    if app.turn.running {
         app.push_notice("a turn is running; /model waits for it to finish");
         return Vec::new();
     }
@@ -220,7 +220,7 @@ fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
 }
 
 fn resume(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
-    if app.running {
+    if app.turn.running {
         app.push_notice("a turn is running; /resume waits for it to finish");
         return Vec::new();
     }

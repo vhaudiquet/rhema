@@ -719,12 +719,11 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, status: &mut Tracker, 
                 return;
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
-            app.turn_cancel = Some(cancel);
             // The status names the prompt until a tool call takes over.
             status.note_prompt(&input);
             // Auto-approved for now: the Approval seam — and the modal
             // wired through it — is where command allowlists will land.
-            app.begin_turn(None);
+            app.begin_turn(cancel, None);
             spawn_turn(
                 agent,
                 input,

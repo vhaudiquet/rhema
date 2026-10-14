@@ -263,7 +263,7 @@ impl Tracker {
     /// login flow block on the user, a turn runs, a failed turn reads as
     /// an error at the prompt, everything else is idle.
     pub(crate) fn status_for(&self, app: &App) -> Status {
-        if let Some(call) = &app.pending_approval {
+        if let Some(call) = &app.turn.pending_approval {
             return Status::Blocked {
                 kind: Kind::Permission,
                 msg: Some(call.name.clone()),
@@ -275,7 +275,7 @@ impl Tracker {
                 msg: None,
             };
         }
-        if app.running {
+        if app.turn.running {
             return Status::Working {
                 msg: self.msg.clone(),
                 progress: self.step.map(|step| progress(step, app.options.max_steps)),
