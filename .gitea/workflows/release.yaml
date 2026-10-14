@@ -232,6 +232,9 @@ jobs:
       - name: Stamp the version from the tag
         run: |
           sed -i "s/^version: .*/version: \"${GITHUB_REF_NAME#v}\"/" snap/snapcraft.yaml
+          # The edge build-environment entry must not reach a tag build:
+          # with it, build.rs would label a release an edge pre-release.
+          sed -i -e "/RHEMA_BUILD_CHANNEL/d" -e "/^ *build-environment:$/d" snap/snapcraft.yaml
           grep '^version:' snap/snapcraft.yaml
 
       - name: Build the snap

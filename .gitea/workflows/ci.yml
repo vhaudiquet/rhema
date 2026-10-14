@@ -293,7 +293,7 @@ jobs:
       - name: Stamp the edge version (base + short commit)
         run: |
           BASE_VERSION=$(grep '^version:' snap/snapcraft.yaml | awk -F'"' '{print $2}')
-          sed -i "s/^version: .*/version: \"${BASE_VERSION}+g$(git rev-parse --short HEAD)\"/" snap/snapcraft.yaml
+          sed -i "s/^version: .*/version: \"${BASE_VERSION}+$(git rev-parse --short HEAD)\"/" snap/snapcraft.yaml
           grep '^version:' snap/snapcraft.yaml
 
       - name: Build the snap

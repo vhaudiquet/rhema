@@ -46,6 +46,11 @@ parts:
     # the core24 glibc, and a classic snap would otherwise look it up on
     # the host and refuse to start where the host's is older.
     build-attributes: [enable-patchelf]
+    # The banner's edge label (rhema-code's build.rs): an edge snap
+    # reads v<version>-edge.<sha>. The release workflow deletes this
+    # entry before packing, so a tag build classifies as a release.
+    build-environment:
+      - RHEMA_BUILD_CHANNEL: edge
     build-packages:
       # reqwest's native-tls ends in openssl-sys
       - pkg-config
