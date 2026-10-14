@@ -379,18 +379,89 @@ pub enum KeyLocation {
 
 /// The environment variables whose values override a stored key for
 /// `provider`, in precedence order.
+/// One provider's config-facing facts, one row per adapter: the
+/// spelling the config file and `RHEMA_PROVIDER` use, the environment
+/// variables a credential resolves through, and the fix to name when
+/// none does. Adding a provider means adding a row here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderInfo {
+    /// The config spelling: `google`, `llama-cpp`, `openrouter`,
+    /// `anthropic`, `openai`, `deepseek`, `zai`, `copilot`.
+    pub name: &'static str,
+    /// The environment variables a credential resolves through, in
+    /// priority order.
+    pub env_keys: &'static [&'static str],
+    /// Whether the provider has a login flow: a credential the user
+    /// enters or a device grant answers for. `false` for llama.cpp —
+    /// a server is an address to point at, not a subscription.
+    pub login: bool,
+    /// The fix a frontend without a login screen names when no
+    /// credential resolves for this provider.
+    pub missing_key_help: &'static str,
+}
+
+/// The provider registry, in the order the pickers list them.
+pub const PROVIDERS: &[ProviderInfo] = &[
+    ProviderInfo {
+        name: "google",
+        env_keys: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        login: true,
+        missing_key_help: "missing API key: set GEMINI_API_KEY (or log in once interactively)",
+    },
+    ProviderInfo {
+        name: "llama-cpp",
+        env_keys: &["LLAMA_CPP_API_KEY"],
+        login: false,
+        missing_key_help: "missing API key: set LLAMA_CPP_API_KEY",
+    },
+    ProviderInfo {
+        name: "openrouter",
+        env_keys: &["OPENROUTER_API_KEY"],
+        login: true,
+        missing_key_help: "missing API key: set OPENROUTER_API_KEY",
+    },
+    ProviderInfo {
+        name: "anthropic",
+        env_keys: &["ANTHROPIC_API_KEY"],
+        login: true,
+        missing_key_help: "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)",
+    },
+    ProviderInfo {
+        name: "openai",
+        env_keys: &["OPENAI_API_KEY"],
+        login: true,
+        missing_key_help: "missing API key: set OPENAI_API_KEY (or log in once interactively)",
+    },
+    ProviderInfo {
+        name: "deepseek",
+        env_keys: &["DEEPSEEK_API_KEY"],
+        login: true,
+        missing_key_help: "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)",
+    },
+    ProviderInfo {
+        name: "zai",
+        env_keys: &["ZAI_API_KEY", "Z_AI_API_KEY"],
+        login: true,
+        missing_key_help: "missing API key: set ZAI_API_KEY (or log in once interactively)",
+    },
+    ProviderInfo {
+        name: "copilot",
+        env_keys: &["GITHUB_COPILOT_TOKEN"],
+        login: true,
+        missing_key_help: "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)",
+    },
+];
+
+/// Looks a provider up by config spelling; `None` for anything no row
+/// answers to.
+pub fn provider_info(name: &str) -> Option<&'static ProviderInfo> {
+    PROVIDERS.iter().find(|info| info.name == name)
+}
+
 fn provider_env_names(provider: &str) -> &'static [&'static str] {
-    match provider {
-        "google" => &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
-        "llama-cpp" => &["LLAMA_CPP_API_KEY"],
-        "openrouter" => &["OPENROUTER_API_KEY"],
-        "anthropic" => &["ANTHROPIC_API_KEY"],
-        "openai" => &["OPENAI_API_KEY"],
-        "deepseek" => &["DEEPSEEK_API_KEY"],
-        "zai" => &["ZAI_API_KEY", "Z_AI_API_KEY"],
-        "copilot" => &["GITHUB_COPILOT_TOKEN"],
-        _ => &[],
-    }
+    provider_info(provider)
+        .map(|info| info.env_keys)
+        .unwrap_or(&[])
 }
 
 /// The persisted settings: the registry of named profiles. Unknown keys

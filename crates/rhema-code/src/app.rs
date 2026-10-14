@@ -202,44 +202,18 @@ impl Backend {
     ) -> Result<Backend, String> {
         let active = profile
             .provider_name()
-            .filter(|name| Self::known_provider(name))
+            .filter(|name| rhema_config::provider_info(name).is_some())
             .ok_or_else(|| NO_PROVIDER_HELP.to_owned())?;
-        let missing = || Self::missing_key_help(&active).to_owned();
+        let missing = || {
+            rhema_config::provider_info(&active)
+                .map(|info| info.missing_key_help)
+                .unwrap_or("missing API key")
+                .to_owned()
+        };
         if let Some((_, instance)) = profile.instance_for_provider(&active) {
             return Self::from_instance(profile, instance, secrets).ok_or_else(missing);
         }
         Self::named(&active, profile, secrets).ok_or_else(missing)
-    }
-
-    /// The config spellings a backend exists for; anything else is a
-    /// typo, and a typo must not read as a missing key.
-    fn known_provider(name: &str) -> bool {
-        matches!(
-            name,
-            "google"
-                | "llama-cpp"
-                | "openrouter"
-                | "anthropic"
-                | "openai"
-                | "deepseek"
-                | "zai"
-                | "copilot"
-        )
-    }
-
-    /// The fix for a provider whose credential cannot be resolved.
-    fn missing_key_help(provider: &str) -> &'static str {
-        match provider {
-            "google" => "missing API key: set GEMINI_API_KEY (or log in once interactively)",
-            "openrouter" => "missing API key: set OPENROUTER_API_KEY",
-            "anthropic" => "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)",
-            "openai" => "missing API key: set OPENAI_API_KEY (or log in once interactively)",
-            "deepseek" => "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)",
-            "zai" => "missing API key: set ZAI_API_KEY (or log in once interactively)",
-            "copilot" => "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)",
-            // llama-cpp serves keyless; resolution never fails on it.
-            _ => "missing API key",
-        }
     }
 
     /// Builds one backend per logged-in instance of the profile — the
@@ -284,15 +258,11 @@ impl Backend {
                 });
             }
         }
-        for name in [
-            "google",
-            "openrouter",
-            "anthropic",
-            "openai",
-            "deepseek",
-            "zai",
-            "copilot",
-        ] {
+        // The login rows only: a llama.cpp server is an address to
+        // point at, not a subscription, so the environment alone never
+        // nominates one.
+        for info in rhema_config::PROVIDERS.iter().filter(|info| info.login) {
+            let name = info.name;
             if Some(name) == active.as_deref() || profile.instance_for_provider(name).is_some() {
                 continue;
             }
@@ -348,10 +318,12 @@ impl Backend {
             "copilot" => profile
                 .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
-            _ => profile
+            "google" => profile
                 .instance_api_key(instance, secrets)
-                .filter(|_| instance.provider == "google")
                 .map(|api_key| Backend::Google { api_key }),
+            // A kind no row answers to builds nothing — an unknown
+            // spelling never reads as google.
+            _ => None,
         }
     }
 
