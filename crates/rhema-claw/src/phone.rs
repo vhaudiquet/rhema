@@ -1,19 +1,42 @@
-//! The phone seam: what the claw knows about the user's phone, and the
-//! consent-gated way it acts on it.
+//! The phone seam: what the claw knows about the user's phones, and the
+//! consent-gated way it acts on them.
 //!
 //! The Android client reports its own state — battery, charging,
-//! network, do-not-disturb — as `phone:<device>:<topic>` events through
-//! `/v1/ingest`. Those events are also conversation (the phone
-//! dispatches like any resident key), but the conversation is the
-//! wrong place to answer "what's my battery": a status question needs
-//! the latest observation, not a transcript. [`PhoneStore`] keeps the
-//! latest payload per device and topic, fed at the ingest door.
+//! network, do-not-disturb, location, the foreground app — as
+//! `phone:<device>:<topic>` events through `/v1/ingest`. Those events
+//! are also conversation (the phone dispatches like any resident key),
+//! but the conversation is the wrong place to answer "what's my
+//! battery": a status question needs the latest observation, not a
+//! transcript. [`PhoneStore`] keeps the latest payload per device and
+//! topic, fed at the ingest door, plus a registry of the devices that
+//! have ever reported ([`DeviceRecord`]).
+//!
+//! A device's identity lives for the life of one install: a reinstall,
+//! a cleared app data, or a second phone each arrive under a fresh id.
+//! The registry is what keeps the fleet honest — [`PhoneStore::devices`]
+//! answers who reported, how it names itself (the `device` topic's
+//! manufacturer and model), and when it was last heard — and
+//! [`PhoneStore::forget_device`] retires an identity: its observations,
+//! its queued commands, and its registry row go together. A forgotten
+//! phone that still reports simply re-registers. Both surfaces —
+//! `GET`/`DELETE /v1/phones` for the client's settings screen, the
+//! `phone` tool's `devices`/`forget` actions for the agent — read and
+//! write this one registry.
+//!
+//! Most new topics are observations only: [`STATE_ONLY_TOPICS`] feed
+//! the tables and never dispatch a turn. A location fix on a commute
+//! would otherwise be a model call per move; instead the fix lands in
+//! the snapshot and a status question reads it. Battery, network, and
+//! DND keep their conversational role: their transitions are rare and
+//! worth hearing about.
 //!
 //! Acting on the phone crosses a line reading never does, so it is
 //! consent-gated end to end: a control action raises a consent
 //! request ([`crate::consents`]), the human approves or denies it in
 //! the chat surface, and only then does the action join a command
-//! queue the device polls ([`Command`]). The phone executes on its own
+//! queue the device polls ([`Command`]). Forgetting a device is
+//! consent-gated the same way, minus the queue: nothing is sent to the
+//! device, its records are dropped. The phone executes on its own
 //! clock — a WorkManager floor of fifteen minutes — so the tool's
 //! answer may honestly be "queued, not yet confirmed".
 
@@ -45,8 +68,26 @@ pub const COMMAND_WAIT: Duration = Duration::from_secs(20 * 60);
 /// acting on it is what needs asking.
 pub const CONTROL_ACTIONS: [&str; 3] = ["dnd_on", "dnd_off", "alert"];
 
+/// The topics that feed the phone tables but never dispatch a turn.
+/// They change too often (a foreground app, a moving fix) or matter too
+/// little (a static identity) to be conversation; a status question
+/// reads them from the snapshot instead. Everything else a phone
+/// reports — battery, network, DND — dispatches like any resident key.
+pub const STATE_ONLY_TOPICS: [&str; 5] = ["location", "app", "device", "wifi", "alarm"];
+
+/// Whether a phone report's topic joins the conversation or stays a
+/// snapshot observation — the ingest door's dispatch decision.
+pub fn topic_dispatches(topic: &str) -> bool {
+    !STATE_ONLY_TOPICS.contains(&topic)
+}
+
 /// The source name the phone client's reports ingest under.
 pub const SOURCE: &str = "phone";
+
+/// The topic that names a device: the client sends it once per status
+/// run (it changes with the app version, so an upgrade re-sends it) and
+/// its payload is where [`device_label`] reads the fleet's labels from.
+pub const DEVICE_TOPIC: &str = "device";
 
 /// Splits a `phone:<device>:<topic>` key into its device and topic;
 /// `None` for anything else — the shape the Android client's status
@@ -55,6 +96,30 @@ pub fn phone_key_parts(key: &str) -> Option<(&str, &str)> {
     let rest = key.strip_prefix("phone:")?;
     let (device, topic) = rest.split_once(':')?;
     (!device.is_empty() && !topic.is_empty()).then_some((device, topic))
+}
+
+/// The label a `device` payload names: `<manufacturer> <model>`, with
+/// whichever part is missing simply left out. Anything else (a bare
+/// "unknown", an empty payload) yields no label, and the fleet row
+/// keeps whatever it had.
+fn device_label(payload: &Value) -> Option<String> {
+    let field = |name: &str| {
+        payload[name]
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.eq_ignore_ascii_case("unknown"))
+    };
+    let manufacturer = field("manufacturer");
+    let model = field("model");
+    match (manufacturer, model) {
+        (Some(manufacturer), Some(model)) if model.starts_with(manufacturer) => {
+            Some(model.to_owned())
+        }
+        (Some(manufacturer), Some(model)) => Some(format!("{manufacturer} {model}")),
+        (Some(_), None) => manufacturer.map(str::to_owned),
+        (None, Some(model)) => Some(model.to_owned()),
+        (None, None) => None,
+    }
 }
 
 /// Why a phone-store operation failed.
@@ -95,8 +160,26 @@ pub struct Command {
     pub result_detail: Option<String>,
 }
 
+/// One identity in the fleet: the client's persistent install id, the
+/// name it reported for itself, and the two clocks — first and last
+/// report. A raw UUID says nothing a human can match to a phone in a
+/// drawer, so the label is what the settings screens lead with.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct DeviceRecord {
+    /// The device id the client generated for this install.
+    pub device: String,
+    /// The self-reported name (`<manufacturer> <model>`), when the
+    /// client sent a `device` topic.
+    pub label: Option<String>,
+    /// The first report, epoch millis.
+    pub first_seen: u64,
+    /// The latest report of any topic, epoch millis.
+    pub last_seen: u64,
+}
+
 /// The phone tables over the claw's shared database: the latest
-/// observation per device and topic, and the command queue.
+/// observation per device and topic, the command queue, and the device
+/// registry.
 pub struct PhoneStore {
     conn: Mutex<rusqlite::Connection>,
 }
@@ -136,7 +219,23 @@ impl PhoneStore {
                 result_ok     INTEGER,
                 result_detail TEXT,
                 result_at     INTEGER
+            );
+            CREATE TABLE IF NOT EXISTS phone_devices (
+                device     TEXT PRIMARY KEY,
+                label      TEXT,
+                first_seen INTEGER NOT NULL,
+                last_seen  INTEGER NOT NULL
             );",
+        )
+        .map_err(backend)?;
+        // One-time migration for databases that predate the registry:
+        // every identity still present in the state table becomes a
+        // registry row. A later forget_device deletes the state rows
+        // with the identity, so the seed cannot resurrect it.
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO phone_devices (device, label, first_seen, last_seen)
+             SELECT device, NULL, MIN(updated_at), MAX(updated_at)
+             FROM phone_state GROUP BY device",
         )
         .map_err(backend)?;
         Ok(Self {
@@ -145,18 +244,34 @@ impl PhoneStore {
     }
 
     /// Records the latest payload for one device topic — the ingest
-    /// door's write, one upsert per report.
+    /// door's write, one upsert per report. The report also registers
+    /// the device: first report opens the registry row, every report
+    /// refreshes `last_seen`, and a `device` payload names the label.
     pub fn observe(
         &self,
         device: &str,
         topic: &str,
         payload: &Value,
     ) -> Result<(), PhoneStoreError> {
+        let now = now_millis() as i64;
+        let label = if topic == DEVICE_TOPIC {
+            device_label(payload)
+        } else {
+            None
+        };
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         conn.execute(
             "INSERT INTO phone_state (device, topic, payload, updated_at) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(device, topic) DO UPDATE SET payload = ?3, updated_at = ?4",
-            params![device, topic, payload.to_string(), now_millis() as i64],
+            params![device, topic, payload.to_string(), now],
+        )
+        .map_err(backend)?;
+        conn.execute(
+            "INSERT INTO phone_devices (device, label, first_seen, last_seen) VALUES (?1, ?2, ?3, ?3)
+             ON CONFLICT(device) DO UPDATE SET
+                 last_seen = ?3,
+                 label = COALESCE(?2, label)",
+            params![device, label, now],
         )
         .map_err(backend)?;
         Ok(())
@@ -190,16 +305,46 @@ impl PhoneStore {
         Ok(json!({ "device": device, "topics": topics }))
     }
 
-    /// Every device that has ever reported.
-    pub fn devices(&self) -> Result<Vec<String>, PhoneStoreError> {
+    /// The fleet: every device that has ever reported, oldest first.
+    pub fn devices(&self) -> Result<Vec<DeviceRecord>, PhoneStoreError> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let mut stmt = conn
-            .prepare("SELECT DISTINCT device FROM phone_state ORDER BY device")
+            .prepare("SELECT device, label, first_seen, last_seen FROM phone_devices ORDER BY first_seen, device")
             .map_err(backend)?;
         let rows = stmt
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([], |row| {
+                Ok(DeviceRecord {
+                    device: row.get(0)?,
+                    label: row.get(1)?,
+                    first_seen: row.get::<_, i64>(2)?.max(0) as u64,
+                    last_seen: row.get::<_, i64>(3)?.max(0) as u64,
+                })
+            })
             .map_err(backend)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    /// Retires a device: its observations, its queued commands, and its
+    /// registry row go together. Answers whether the identity was
+    /// known — `false` for an unknown name, which deleted nothing but
+    /// is still a valid answer, never an error. A phone that reports
+    /// after being forgotten re-registers itself.
+    pub fn forget_device(&self, device: &str) -> Result<bool, PhoneStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.execute("DELETE FROM phone_state WHERE device = ?1", params![device])
+            .map_err(backend)?;
+        conn.execute(
+            "DELETE FROM phone_commands WHERE device = ?1",
+            params![device],
+        )
+        .map_err(backend)?;
+        let removed = conn
+            .execute(
+                "DELETE FROM phone_devices WHERE device = ?1",
+                params![device],
+            )
+            .map_err(backend)?;
+        Ok(removed > 0)
     }
 
     /// Queues a command for `device`, durable before it returns. The id
@@ -378,28 +523,37 @@ impl Tool for PhoneTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::new(
             PHONE,
-            "Read or act on the user's phone. status is read-only and \
-             always allowed: the latest reported battery, charging, \
-             network, and do-not-disturb state. The control actions — \
-             dnd_on, dnd_off, alert — first ask the human through a \
-             consent card in the chat; approved, the action queues on \
-             the device, which confirms on its own poll (minutes, not \
-             seconds). Use controls sparingly and always with a reason; \
-             a denial or a silence comes back in-band.",
+            "Read or act on the user's phones. status and devices are \
+             read-only and always allowed: status is one phone's latest \
+             reported state (battery, charging, network, do-not-disturb, \
+             and — when the phone reports them — location, foreground \
+             app, wifi, next alarm, each with its observed_at), devices \
+             is the fleet with each phone's label and last-seen time. A \
+             reinstall or upgrade can leave a stale identity behind; \
+             devices shows it (old last-seen, no reports) and forget \
+             retires it. The control actions — dnd_on, dnd_off, alert, \
+             forget — first ask the human through a consent card in the \
+             chat; an approved dnd_on/dnd_off/alert queues on the phone, \
+             which confirms on its own poll (minutes, not seconds). Use \
+             controls sparingly and always with a reason; a denial or a \
+             silence comes back in-band.",
             json!({
                 "type": "object",
                 "properties": {
                     "action": { "type": "string",
-                        "enum": ["status", "devices", "dnd_on", "dnd_off", "alert"],
-                        "description": "status reads the reported state; \
-                            devices lists the phones that have reported; \
-                            the rest control the phone (with consent)." },
+                        "enum": ["status", "devices", "forget", "dnd_on", "dnd_off", "alert"],
+                        "description": "status reads one phone's reported \
+                            state; devices lists the fleet with labels and \
+                            last-seen; forget retires a device's records \
+                            (with consent); the rest control the phone \
+                            (with consent)." },
                     "device": { "type": "string",
-                        "description": "The target device; the phone when \
-                            omitted." },
+                        "description": "The target device id; the default \
+                            phone when omitted. status and devices accept \
+                            any id; forget names the device to retire." },
                     "reason": { "type": "string",
-                        "description": "Why the control action is needed — \
-                            shown on the consent card." },
+                        "description": "Why the action is needed — shown on \
+                            the consent card." },
                     "title": { "type": "string",
                         "description": "An alert's headline." },
                     "body": { "type": "string",
@@ -441,11 +595,12 @@ impl Tool for PhoneTool {
                 let devices = self.store.devices().map_err(|err| err.to_string())?;
                 Ok(json!({ "devices": devices }).to_string())
             }
+            "forget" => self.forget(&device, args).await,
             action if CONTROL_ACTIONS.contains(&action) => {
                 self.control(action, &device, args).await
             }
             other => Err(format!(
-                "unknown action {other:?}: status, devices, or one of {CONTROL_ACTIONS:?}"
+                "unknown action {other:?}: status, devices, forget, or one of {CONTROL_ACTIONS:?}"
             )),
         }
     }
@@ -455,42 +610,17 @@ impl PhoneTool {
     /// One control action, consent first, confirmation second. Both
     /// waits answer in-band: a refused action is a turn that can say so.
     async fn control(&self, action: &str, device: &str, args: PhoneArgs) -> Result<String, String> {
-        let reason = args
-            .reason
-            .as_deref()
-            .map(str::trim)
-            .filter(|reason| !reason.is_empty())
-            .unwrap_or("no reason given");
-        let summary = format!("phone {action} on {device}");
-        let detail = format!("{reason} (action: {action}, device: {device})");
-        let consent = self
-            .consents
-            .create(
-                ConsentKind::Phone,
-                &summary,
-                &detail,
-                self.key.as_str(),
-                None,
+        match self
+            .ask(
+                &format!("phone {action} on {device}"),
+                action,
+                device,
+                &args,
             )
-            .map_err(|err| err.to_string())?;
-        self.hub.emit(
-            &self.key,
-            TurnEvent::ConsentRequest {
-                id: consent.id.clone(),
-                kind: consent.kind.as_str().to_owned(),
-                summary: consent.summary.clone(),
-                detail: consent.detail.clone(),
-                created_at: consent.created_at,
-            },
-        );
-        match wait_for_resolution(&self.consents, &self.bridge, &consent.id, self.wait).await {
-            crate::consents::WaitOutcome::Granted(_) => {}
-            crate::consents::WaitOutcome::Denied => {
-                return Ok(json!({"granted": false}).to_string());
-            }
-            crate::consents::WaitOutcome::TimedOut => {
-                return Ok(json!({"timed_out": true}).to_string());
-            }
+            .await?
+        {
+            Ask::Granted => {}
+            Ask::Refused(answer) => return Ok(answer),
         }
         let command_args = match action {
             "alert" => json!({
@@ -521,6 +651,89 @@ impl PhoneTool {
             .to_string()),
         }
     }
+
+    /// Retires a device's records after the human approves. Nothing is
+    /// sent to the device and nothing waits for it: a grant drops the
+    /// identity, its observations, and its queued commands at once. The
+    /// answer says whether the name was known, so the turn can tell a
+    /// typo from a retirement.
+    async fn forget(&self, device: &str, args: PhoneArgs) -> Result<String, String> {
+        match self
+            .ask(
+                &format!("phone forget on {device}"),
+                "forget",
+                device,
+                &args,
+            )
+            .await?
+        {
+            Ask::Granted => {}
+            Ask::Refused(answer) => return Ok(answer),
+        }
+        let forgotten = self
+            .store
+            .forget_device(device)
+            .map_err(|err| err.to_string())?;
+        Ok(json!({"granted": true, "forgotten": forgotten}).to_string())
+    }
+
+    /// The consent round-trip both mutating actions share: raise the
+    /// card, wait, and classify the human's answer. `Err` is the store
+    /// failing, not a refusal — a refusal is an [`Ask::Refused`] with
+    /// the in-band answer.
+    async fn ask(
+        &self,
+        summary: &str,
+        action: &str,
+        device: &str,
+        args: &PhoneArgs,
+    ) -> Result<Ask, String> {
+        let reason = args
+            .reason
+            .as_deref()
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .unwrap_or("no reason given");
+        let detail = format!("{reason} (action: {action}, device: {device})");
+        let consent = self
+            .consents
+            .create(
+                ConsentKind::Phone,
+                summary,
+                &detail,
+                self.key.as_str(),
+                None,
+            )
+            .map_err(|err| err.to_string())?;
+        self.hub.emit(
+            &self.key,
+            TurnEvent::ConsentRequest {
+                id: consent.id.clone(),
+                kind: consent.kind.as_str().to_owned(),
+                summary: consent.summary.clone(),
+                detail: consent.detail.clone(),
+                created_at: consent.created_at,
+            },
+        );
+        Ok(
+            match wait_for_resolution(&self.consents, &self.bridge, &consent.id, self.wait).await {
+                crate::consents::WaitOutcome::Granted(_) => Ask::Granted,
+                crate::consents::WaitOutcome::Denied => {
+                    Ask::Refused(json!({"granted": false}).to_string())
+                }
+                crate::consents::WaitOutcome::TimedOut => {
+                    Ask::Refused(json!({"timed_out": true}).to_string())
+                }
+            },
+        )
+    }
+}
+
+/// What [`PhoneTool::ask`] came back with: a grant, or the in-band
+/// answer a refusal or a silence turns into.
+enum Ask {
+    Granted,
+    Refused(String),
 }
 
 /// The phone tool set over `store`: `phone`. Built per dispatch — a
@@ -591,7 +804,170 @@ mod tests {
             store.snapshot("pixel").expect("reads")["topics"]["battery"]["value"],
             "70"
         );
-        assert_eq!(store.devices().expect("reads"), vec!["pixel".to_owned()]);
+        let devices = store.devices().expect("reads");
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].device, "pixel");
+    }
+
+    #[test]
+    fn a_report_registers_the_device_and_its_label_rides_the_device_topic() {
+        let store = store();
+        store
+            .observe(
+                "pixel",
+                "device",
+                &json!({"topic": "device", "manufacturer": "Google", "model": "Pixel 9"}),
+            )
+            .expect("observes");
+        store
+            .observe(
+                "pixel",
+                "battery",
+                &json!({"topic": "battery", "value": "80"}),
+            )
+            .expect("observes");
+        let devices = store.devices().expect("reads");
+        assert_eq!(devices.len(), 1, "two topics, one device");
+        assert_eq!(devices[0].label.as_deref(), Some("Google Pixel 9"));
+        assert!(devices[0].first_seen <= devices[0].last_seen);
+
+        // A second install is a second identity, oldest first.
+        store
+            .observe(
+                "pixel-2",
+                "device",
+                &json!({"topic": "device", "model": "Pixel 8"}),
+            )
+            .expect("observes");
+        let devices = store.devices().expect("reads");
+        assert_eq!(
+            devices
+                .iter()
+                .map(|d| d.device.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pixel", "pixel-2"]
+        );
+        assert_eq!(devices[1].label.as_deref(), Some("Pixel 8"));
+
+        // Other topics never clobber the label.
+        store
+            .observe(
+                "pixel",
+                "network",
+                &json!({"topic": "network", "value": "wifi"}),
+            )
+            .expect("observes");
+        assert_eq!(
+            store.devices().expect("reads")[0].label.as_deref(),
+            Some("Google Pixel 9")
+        );
+    }
+
+    #[test]
+    fn forgetting_a_device_takes_its_state_its_commands_and_its_identity() {
+        let store = store();
+        store
+            .observe(
+                "pixel",
+                "battery",
+                &json!({"topic": "battery", "value": "10"}),
+            )
+            .expect("observes");
+        store
+            .enqueue_command("pixel", "dnd_on", json!({}))
+            .expect("queues");
+        store
+            .observe(
+                "pixel-2",
+                "battery",
+                &json!({"topic": "battery", "value": "90"}),
+            )
+            .expect("observes");
+
+        assert!(
+            !store.forget_device("stranger").expect("forgets"),
+            "an unknown name forgets nothing"
+        );
+        assert!(store.forget_device("pixel").expect("forgets"));
+        assert!(
+            store.snapshot("pixel").expect("reads")["topics"]
+                .as_object()
+                .expect("a map")
+                .is_empty()
+        );
+        assert!(store.pending_commands("pixel").expect("reads").is_empty());
+        assert_eq!(
+            store
+                .devices()
+                .expect("reads")
+                .iter()
+                .map(|d| d.device.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pixel-2"]
+        );
+
+        // A forgotten phone that still reports re-registers.
+        store
+            .observe(
+                "pixel",
+                "battery",
+                &json!({"topic": "battery", "value": "9"}),
+            )
+            .expect("observes");
+        assert_eq!(store.devices().expect("reads").len(), 2);
+    }
+
+    #[test]
+    fn a_store_reopened_over_an_old_database_seeds_the_registry_from_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("phones.db");
+        {
+            let store = PhoneStore::open(&path).expect("opens");
+            store
+                .observe(
+                    "legacy",
+                    "battery",
+                    &json!({"topic": "battery", "value": "5"}),
+                )
+                .expect("observes");
+        }
+        let store = PhoneStore::open(&path).expect("reopens");
+        let devices = store.devices().expect("reads");
+        assert_eq!(devices.len(), 1, "the migration backfills the registry");
+        assert_eq!(devices[0].device, "legacy");
+        assert_eq!(devices[0].label, None);
+    }
+
+    #[test]
+    fn state_only_topics_stay_out_of_the_conversation() {
+        for topic in ["battery", "network", "dnd"] {
+            assert!(topic_dispatches(topic), "{topic} dispatches");
+        }
+        for topic in STATE_ONLY_TOPICS {
+            assert!(!topic_dispatches(topic), "{topic} is snapshot-only");
+        }
+    }
+
+    #[test]
+    fn a_device_label_reads_the_payload_and_ignores_placeholder_parts() {
+        assert_eq!(
+            device_label(&json!({"manufacturer": "Google", "model": "Pixel 9"})).as_deref(),
+            Some("Google Pixel 9")
+        );
+        assert_eq!(
+            device_label(&json!({"manufacturer": "Google", "model": "Google Pixel 9"})).as_deref(),
+            Some("Google Pixel 9"),
+            "a model that repeats the manufacturer is not doubled"
+        );
+        assert_eq!(
+            device_label(&json!({"model": "Pixel 9"})).as_deref(),
+            Some("Pixel 9")
+        );
+        assert_eq!(
+            device_label(&json!({"manufacturer": "unknown", "model": "Pixel 9"})).as_deref(),
+            Some("Pixel 9")
+        );
+        assert_eq!(device_label(&json!({})), None);
     }
 
     #[test]
@@ -733,6 +1109,73 @@ mod tests {
             store.pending_commands("phone").expect("reads").is_empty(),
             "nothing queues behind a denial"
         );
+    }
+
+    /// The full forget path: the consent card first, and only a grant
+    /// drops the identity. The answer carries whether the name was
+    /// known, so a typo reads as data, not as silence.
+    #[tokio::test]
+    async fn forgetting_is_consent_gated_then_drops_the_identity() {
+        let store = store();
+        store
+            .observe(
+                "pixel",
+                "battery",
+                &json!({"topic": "battery", "value": "1"}),
+            )
+            .expect("observes");
+        store
+            .enqueue_command("pixel", "alert", json!({}))
+            .expect("queues");
+        let consents = Arc::new(crate::consents::ConsentStore::in_memory().expect("opens"));
+        let bridge = Arc::new(WaitBridge::new());
+        let tool = PhoneTool {
+            store: store.clone(),
+            consents: consents.clone(),
+            bridge: bridge.clone(),
+            hub: Arc::new(EventHub::default()),
+            key: ResourceKey::from("interactive:web"),
+            wait: std::time::Duration::from_secs(10),
+        };
+        let task = tokio::spawn(async move {
+            tool.invoke(json!({
+                "action": "forget",
+                "device": "pixel",
+                "reason": "the old install, superseded",
+            }))
+            .await
+        });
+
+        // Until the human answers, nothing is dropped.
+        let pending = loop {
+            let pending = consents.pending().expect("reads");
+            if !pending.is_empty() {
+                break pending;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_eq!(pending[0].summary, "phone forget on pixel");
+        assert!(
+            store.devices().expect("reads").len() == 1
+                && !store.pending_commands("pixel").expect("reads").is_empty(),
+            "a waiting consent has dropped nothing yet"
+        );
+        consents
+            .resolve_decision(&pending[0].id, true)
+            .expect("resolves");
+        bridge.wake(&pending[0].id);
+
+        let answer = task.await.expect("the tool returns").expect("in-band ok");
+        let answer: Value = serde_json::from_str(&answer).expect("parses");
+        assert_eq!(answer["forgotten"], true, "{answer}");
+        assert!(store.devices().expect("reads").is_empty());
+        assert!(
+            store.snapshot("pixel").expect("reads")["topics"]
+                .as_object()
+                .expect("a map")
+                .is_empty()
+        );
+        assert!(store.pending_commands("pixel").expect("reads").is_empty());
     }
 
     #[tokio::test]

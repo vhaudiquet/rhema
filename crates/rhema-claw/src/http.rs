@@ -221,6 +221,8 @@ pub fn router(state: ClawState) -> Router {
         .route("/attachments/{id}", get(attachment_get))
         .route("/phone/commands", get(phone_commands_list))
         .route("/phone/commands/{id}/result", post(phone_command_result))
+        .route("/phones", get(phones_list))
+        .route("/phones/{device}", delete(phones_forget))
         .route("/ingest", post(ingest))
         .route("/notifications", get(notifications_list))
         .route("/notifications/{id}/ack", post(notifications_ack))
@@ -252,7 +254,8 @@ pub fn router(state: ClawState) -> Router {
                     "service": "rhema-claw",
                     "chat": "/v1/sessions",
                     "api": ["/v1/sessions", "/v1/providers", "/v1/watches",
-                            "/v1/accounts", "/v1/notifications", "/v1/bootstrap", "/v1/ingest"],
+                            "/v1/accounts", "/v1/notifications", "/v1/phones",
+                            "/v1/bootstrap", "/v1/ingest"],
                 }))
             }),
         )
@@ -813,6 +816,47 @@ pub struct PhoneCommandQuery {
     pub device: String,
 }
 
+/// `GET /v1/phones`: the fleet — every device that ever reported, with
+/// its self-reported label, both clocks, and its latest observations
+/// per topic. The client settings screens read this; `DELETE` below is
+/// their management half.
+async fn phones_list(
+    State(state): State<ClawState>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let devices = state.phone.devices().map_err(internal_error)?;
+    let mut phones = Vec::with_capacity(devices.len());
+    for record in devices {
+        let snapshot = state
+            .phone
+            .snapshot(&record.device)
+            .map_err(internal_error)?;
+        phones.push(json!({
+            "device": record.device,
+            "label": record.label,
+            "first_seen": record.first_seen,
+            "last_seen": record.last_seen,
+            "topics": snapshot["topics"],
+        }));
+    }
+    Ok(Json(json!({ "phones": phones })))
+}
+
+/// `DELETE /v1/phones/{device}`: retire a device — its observations,
+/// its queued commands, and its registry row. Answers `forgotten`
+/// rather than 404 on an unknown name: the caller raced another
+/// manager, and "already gone" is the outcome it wanted.
+async fn phones_forget(
+    State(state): State<ClawState>,
+    Path(device): Path<String>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let device = device.trim();
+    if device.is_empty() {
+        return Err(bad_request("device name must not be empty"));
+    }
+    let forgotten = state.phone.forget_device(device).map_err(internal_error)?;
+    Ok(Json(json!({ "forgotten": forgotten })))
+}
+
 /// `GET /v1/phone/commands?device=`: the device's queued commands,
 /// oldest first, none of them confirmed yet — the poll list the phone
 /// executes from and reports on.
@@ -1100,10 +1144,22 @@ async fn ingest(State(state): State<ClawState>, Json(body): Json<IngestBody>) ->
     // the phone tables so a status question reads the latest
     // observation instead of a transcript. A store failure is logged,
     // never fatal — the conversation is the report's first job.
+    //
+    // The state-only topics are the exception: they feed the tables and
+    // stop there. A location fix on a commute, a foreground app between
+    // taps — each would otherwise be a model call per move; the
+    // observation is the whole job, and the answer reads the snapshot.
     if source == crate::phone::SOURCE {
         if let Some((device, topic)) = crate::phone::phone_key_parts(key) {
             if let Err(err) = state.phone.observe(device, topic, &body.payload) {
                 eprintln!("[claw] warning: phone state for {key} not stored: {err}");
+            }
+            if !crate::phone::topic_dispatches(topic) {
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(json!({ "ingested": "observed" })),
+                )
+                    .into_response();
             }
         }
     }

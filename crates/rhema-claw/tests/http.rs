@@ -2085,6 +2085,138 @@ async fn an_ingested_phone_report_feeds_the_status_the_tool_reads() {
     );
 }
 
+/// The fleet routes: reports register devices, the list carries the
+/// self-reported label and every topic's latest observation, a
+/// state-only topic ("observed") never joins the conversation, and a
+/// forget drops the device — answering `forgotten: false` on an
+/// already-gone name instead of a 404.
+#[tokio::test]
+async fn the_phone_fleet_lists_labels_and_forgets() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    async fn report(client: &reqwest::Client, base: &str, key: &str, payload: Value) -> Value {
+        client
+            .post(format!("{base}/v1/ingest"))
+            .json(&json!({"source": "phone", "key": key, "payload": payload}))
+            .send()
+            .await
+            .expect("the report posts")
+            .json::<Value>()
+            .await
+            .expect("the answer parses")
+    }
+
+    let battery = report(
+        &client,
+        &base,
+        "phone:pixel-1:battery",
+        json!({"topic": "battery", "value": "64", "charging": false}),
+    )
+    .await;
+    assert_eq!(battery, json!({"ingested": "dispatched"}), "{battery}");
+    let location = report(
+        &client,
+        &base,
+        "phone:pixel-1:location",
+        json!({"topic": "location", "lat": 48.85, "lon": 2.35, "accuracy_m": 12.0}),
+    )
+    .await;
+    assert_eq!(location, json!({"ingested": "observed"}), "{location}");
+    report(
+        &client,
+        &base,
+        "phone:pixel-1:device",
+        json!({"topic": "device", "manufacturer": "Google", "model": "Pixel 9"}),
+    )
+    .await;
+    report(
+        &client,
+        &base,
+        "phone:pixel-2:battery",
+        json!({"topic": "battery", "value": "10", "charging": true}),
+    )
+    .await;
+
+    // The location fix fed the snapshot, not the conversation: no
+    // session key exists for it, the battery report's does.
+    let sessions: Vec<Value> = client
+        .get(format!("{base}/v1/sessions"))
+        .send()
+        .await
+        .expect("sessions reads")
+        .json()
+        .await
+        .expect("sessions parses");
+    let keys = sessions
+        .iter()
+        .map(|session| session["key"].as_str().expect("a key"))
+        .collect::<Vec<_>>();
+    assert!(
+        !keys.contains(&"phone:pixel-1:location"),
+        "a state-only topic never dispatches: {keys:?}"
+    );
+    assert!(keys.contains(&"phone:pixel-1:battery"), "{keys:?}");
+
+    let fleet: Value = client
+        .get(format!("{base}/v1/phones"))
+        .send()
+        .await
+        .expect("the fleet reads")
+        .json()
+        .await
+        .expect("the fleet parses");
+    let phones = fleet["phones"].as_array().expect("a list");
+    assert_eq!(phones.len(), 2, "{fleet}");
+    assert_eq!(phones[0]["device"], "pixel-1");
+    assert_eq!(phones[0]["label"], "Google Pixel 9");
+    assert_eq!(phones[0]["topics"]["battery"]["value"], "64");
+    assert_eq!(phones[0]["topics"]["location"]["lat"], 48.85);
+    assert_eq!(phones[1]["device"], "pixel-2");
+    assert!(
+        phones[1]["label"].is_null(),
+        "no device topic, no label: {fleet}"
+    );
+
+    let forgotten: Value = client
+        .delete(format!("{base}/v1/phones/pixel-1"))
+        .send()
+        .await
+        .expect("the forget goes out")
+        .json()
+        .await
+        .expect("the answer parses");
+    assert_eq!(forgotten, json!({"forgotten": true}), "{forgotten}");
+    let fleet: Value = client
+        .get(format!("{base}/v1/phones"))
+        .send()
+        .await
+        .expect("the fleet reads")
+        .json()
+        .await
+        .expect("the fleet parses");
+    assert_eq!(fleet["phones"].as_array().expect("a list").len(), 1);
+    assert_eq!(fleet["phones"][0]["device"], "pixel-2");
+
+    // Forgetting an already-gone name is data, not an error.
+    let again: Value = client
+        .delete(format!("{base}/v1/phones/pixel-1"))
+        .send()
+        .await
+        .expect("the forget goes out")
+        .json()
+        .await
+        .expect("the answer parses");
+    assert_eq!(again, json!({"forgotten": false}), "{again}");
+}
+
 /// Creating a session over HTTP: an empty `interactive:` key exists
 /// before its first message, a second create of the same name is a
 /// conflict, and a name that would not read as a key is refused.
