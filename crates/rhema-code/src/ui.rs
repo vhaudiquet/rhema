@@ -1769,7 +1769,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // running turn) the tail shows.
     let remaining = INPUT_MAX_CONTENT_ROWS.max(1);
     let total = layout.len();
-    let (cursor_row, _cursor_col) = cursor_at.unwrap_or((total.saturating_sub(1), 0));
+    let (cursor_row, cursor_col) = cursor_at.unwrap_or((total.saturating_sub(1), 0));
     let first = if total > remaining {
         cursor_row.min(total - remaining)
     } else {
@@ -1789,7 +1789,6 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     };
     frame.render_widget(Paragraph::new(rows), inner);
     if !app.turn.running {
-        let (cursor_row, cursor_col) = cursor_at.unwrap_or((0, 0));
         // The prompt and the continuation indent are both two cells,
         // and only rows carrying one shift the cursor by them. A cursor
         // past a full row's last cell clamps onto it — there is no
@@ -1797,7 +1796,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         let marker = u16::from(layout[cursor_row].marker);
         frame.set_cursor_position(Position {
             x: (inner.x + marker * 2 + cursor_col as u16).min(inner.right().saturating_sub(1)),
-            y: inner.y + (cursor_row - first) as u16,
+            y: inner.y + cursor_row.saturating_sub(first) as u16,
         });
     }
 }
@@ -1883,7 +1882,12 @@ fn wrap_segments(segments: Vec<Segment>, width: usize) -> Vec<RowSegs> {
         match &segment {
             Segment::Text(span) if span.content.chars().all(char::is_whitespace) => {
                 if row_width == 0 {
-                    continue; // no leading whitespace on a row
+                    // No leading whitespace on a row, but its source
+                    // characters stay counted: the cursor mapping walks
+                    // the input's char indices, and a dropped run here
+                    // would leave everything after it unplaceable.
+                    row.source += segment.source();
+                    continue;
                 }
                 if row_width + seg_width <= width {
                     row_width += seg_width;
@@ -1891,7 +1895,9 @@ fn wrap_segments(segments: Vec<Segment>, width: usize) -> Vec<RowSegs> {
                     row.source += segment.source();
                 } else {
                     // Overflowing whitespace is dropped; the next word
-                    // breaks.
+                    // breaks. Its characters stay counted, for the same
+                    // cursor-mapping reason as the leading run above.
+                    row.source += segment.source();
                     rows.push(std::mem::take(&mut row));
                     row_width = 0;
                 }
@@ -3232,6 +3238,38 @@ mod scroll_tests {
         // on its first cell, after it on the following character.
         assert_eq!(cursor_at_rows(&rows, 6), Some((0, 6)));
         assert_eq!(cursor_at_rows(&rows, 7), Some((0, 13)));
+    }
+
+    /// Dropped whitespace leaves the mapping whole: the wrapper skips
+    /// row-leading and overflowing whitespace runs on the display, but
+    /// their source characters stay counted, so every cursor offset —
+    /// the tail's included — lands on a row and the input renders past
+    /// the eight-row cap.
+    #[test]
+    fn the_input_maps_and_renders_when_whitespace_drops() {
+        let mut app = chat_app();
+        // A leading space starts a row, so the wrapper drops it; the
+        // rest wraps past the eight-row cap.
+        app.chat.input = format!(" {}", "lorem ".repeat(60));
+        app.chat.cursor = app.chat.input.chars().count();
+
+        let layout = input_layout(&app.chat.input, &[], 36, &DARK);
+        assert!(layout.len() > 8, "past the cap: {}", layout.len());
+        for offset in 0..=app.chat.cursor {
+            assert!(
+                cursor_at_rows(&layout, offset).is_some(),
+                "offset {offset} maps nowhere"
+            );
+        }
+        assert_eq!(
+            cursor_at_rows(&layout, app.chat.cursor).map(|(row, _)| row),
+            Some(layout.len() - 1),
+            "the tail cursor sits on the last row"
+        );
+
+        let backend = TestBackend::new(40, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
     }
 
     #[test]
