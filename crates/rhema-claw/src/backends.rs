@@ -512,7 +512,10 @@ pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String>
     Ok(Backend {
         id: kind.to_owned(),
         kind: kind.to_owned(),
-        provider: provider.clone(),
+        // Turns ride the retry, so a transient failure costs a pause
+        // instead of the turn; the listing stays on the raw adapter —
+        // `list_models` is an inherent method the wrapper has no.
+        provider: Arc::new(rhema_provider::Retrying::new(provider.clone())),
         default_model,
         list_models: Some(AnyProvider::boxed_listing(provider)),
     })
