@@ -2121,7 +2121,7 @@ async fn the_phone_fleet_lists_labels_and_forgets() {
         json!({"topic": "battery", "value": "64", "charging": false}),
     )
     .await;
-    assert_eq!(battery, json!({"ingested": "dispatched"}), "{battery}");
+    assert_eq!(battery, json!({"ingested": "observed"}), "{battery}");
     let location = report(
         &client,
         &base,
@@ -2145,8 +2145,8 @@ async fn the_phone_fleet_lists_labels_and_forgets() {
     )
     .await;
 
-    // The location fix fed the snapshot, not the conversation: no
-    // session key exists for it, the battery report's does.
+    // Reports are observations, not conversation: no report leaves a
+    // session key behind, whichever topic it carries.
     let sessions: Vec<Value> = client
         .get(format!("{base}/v1/sessions"))
         .send()
@@ -2160,10 +2160,9 @@ async fn the_phone_fleet_lists_labels_and_forgets() {
         .map(|session| session["key"].as_str().expect("a key"))
         .collect::<Vec<_>>();
     assert!(
-        !keys.contains(&"phone:pixel-1:location"),
-        "a state-only topic never dispatches: {keys:?}"
+        keys.iter().all(|key| !key.starts_with("phone:")),
+        "a report never dispatches: {keys:?}"
     );
-    assert!(keys.contains(&"phone:pixel-1:battery"), "{keys:?}");
 
     let fleet: Value = client
         .get(format!("{base}/v1/phones"))

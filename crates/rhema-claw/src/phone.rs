@@ -23,12 +23,17 @@
 //! `phone` tool's `devices`/`forget` actions for the agent — read and
 //! write this one registry.
 //!
-//! Most new topics are observations only: [`STATE_ONLY_TOPICS`] feed
-//! the tables and never dispatch a turn. A location fix on a commute
-//! would otherwise be a model call per move; instead the fix lands in
-//! the snapshot and a status question reads it. Battery, network, and
-//! DND keep their conversational role: their transitions are rare and
-//! worth hearing about.
+//! Reports are observations, not conversation: a topic-shaped key
+//! (`phone:<device>:<topic>`) lands in the tables and the ingest door
+//! answers "observed" without dispatching a turn. The transition rules
+//! bound the writes, but they cannot bound *value* — a decile drop
+//! from 80 is not news, and each dispatched turn's reply auto-notifies
+//! the phone, so per-flip turns would be a model call and a push
+//! notification per flip. Anything the agent could do with a flip it
+//! can do on demand: the `phone` tool reads the same snapshot at
+//! decision time, and a scheduled task can check it and notify
+//! deliberately. A bare `phone:<device>` key (no topic) is a message on
+//! the device's resident key and dispatches like any resident key.
 //!
 //! Acting on the phone crosses a line reading never does, so it is
 //! consent-gated end to end: a control action raises a consent
@@ -67,19 +72,6 @@ pub const COMMAND_WAIT: Duration = Duration::from_secs(20 * 60);
 /// never appear here: observing the phone is what the tool is for;
 /// acting on it is what needs asking.
 pub const CONTROL_ACTIONS: [&str; 3] = ["dnd_on", "dnd_off", "alert"];
-
-/// The topics that feed the phone tables but never dispatch a turn.
-/// They change too often (a foreground app, a moving fix) or matter too
-/// little (a static identity) to be conversation; a status question
-/// reads them from the snapshot instead. Everything else a phone
-/// reports — battery, network, DND — dispatches like any resident key.
-pub const STATE_ONLY_TOPICS: [&str; 5] = ["location", "app", "device", "wifi", "alarm"];
-
-/// Whether a phone report's topic joins the conversation or stays a
-/// snapshot observation — the ingest door's dispatch decision.
-pub fn topic_dispatches(topic: &str) -> bool {
-    !STATE_ONLY_TOPICS.contains(&topic)
-}
 
 /// The source name the phone client's reports ingest under.
 pub const SOURCE: &str = "phone";
@@ -936,16 +928,6 @@ mod tests {
         assert_eq!(devices.len(), 1, "the migration backfills the registry");
         assert_eq!(devices[0].device, "legacy");
         assert_eq!(devices[0].label, None);
-    }
-
-    #[test]
-    fn state_only_topics_stay_out_of_the_conversation() {
-        for topic in ["battery", "network", "dnd"] {
-            assert!(topic_dispatches(topic), "{topic} dispatches");
-        }
-        for topic in STATE_ONLY_TOPICS {
-            assert!(!topic_dispatches(topic), "{topic} is snapshot-only");
-        }
     }
 
     #[test]

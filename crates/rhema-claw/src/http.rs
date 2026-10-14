@@ -1139,28 +1139,23 @@ async fn ingest(State(state): State<ClawState>, Json(body): Json<IngestBody>) ->
         )
             .into_response();
     }
-    // A phone report is conversation and state at once: the event
-    // dispatches like any resident key's, and the same payload lands in
-    // the phone tables so a status question reads the latest
-    // observation instead of a transcript. A store failure is logged,
-    // never fatal — the conversation is the report's first job.
-    //
-    // The state-only topics are the exception: they feed the tables and
-    // stop there. A location fix on a commute, a foreground app between
-    // taps — each would otherwise be a model call per move; the
-    // observation is the whole job, and the answer reads the snapshot.
+    // A topic-shaped phone key (`phone:<device>:<topic>`) is telemetry:
+    // it lands in the phone tables and stops there. A dispatched turn
+    // per flip would cost a model call and, through auto-notify, a push
+    // notification per flip — and the report has nothing to say a
+    // `phone status` read cannot. A bare `phone:<device>` key is a
+    // message on the device's resident key and dispatches like any
+    // resident key's. A store failure is logged, never fatal.
     if source == crate::phone::SOURCE {
         if let Some((device, topic)) = crate::phone::phone_key_parts(key) {
             if let Err(err) = state.phone.observe(device, topic, &body.payload) {
                 eprintln!("[claw] warning: phone state for {key} not stored: {err}");
             }
-            if !crate::phone::topic_dispatches(topic) {
-                return (
-                    StatusCode::ACCEPTED,
-                    Json(json!({ "ingested": "observed" })),
-                )
-                    .into_response();
-            }
+            return (
+                StatusCode::ACCEPTED,
+                Json(json!({ "ingested": "observed" })),
+            )
+                .into_response();
         }
     }
     match state.ingest_external(source, key, body.payload) {
