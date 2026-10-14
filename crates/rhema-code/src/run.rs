@@ -399,7 +399,7 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     eprintln!(
         "· {} · ctx {}",
         model,
-        crate::screens::format_tokens(Some(u64::from(output.usage.input_tokens)))
+        crate::screens::format_tokens(Some(crate::app::context_tokens(&output.usage)))
     );
     Ok(())
 }

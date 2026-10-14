@@ -2383,12 +2383,14 @@ impl App {
     }
 
     /// The context footprint the footer shows: the last turn's reported
-    /// input tokens when one exists, otherwise an estimate over the
-    /// loaded history — a resumed session has already spent context
-    /// before its first turn here, and an empty one estimates to zero.
+    /// prompt plus its reply — the reply rides into the next request, so
+    /// both count toward the window — otherwise an estimate over the
+    /// loaded history, which already includes every message. A resumed
+    /// session has spent context before its first turn here, and an
+    /// empty one estimates to zero.
     pub fn context_used(&self) -> u64 {
-        match self.usage {
-            Some(usage) => u64::from(usage.input_tokens),
+        match &self.usage {
+            Some(usage) => context_tokens(usage),
             None => estimate_history_tokens(&self.live_session().history),
         }
     }
@@ -2412,6 +2414,15 @@ fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfi
         base_system: options.base_system.clone(),
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
     }
+}
+
+/// The context a reported usage stands for: the whole prompt plus the
+/// reply, the shape of the next request. The adapters normalize
+/// `input_tokens` to the inclusive convention — the cached subset
+/// included — so the prompt total describes the conversation, never
+/// just the tokens a cache miss had to re-read.
+pub(crate) fn context_tokens(usage: &Usage) -> u64 {
+    u64::from(usage.input_tokens) + u64::from(usage.output_tokens)
 }
 
 /// A rough token estimate over a history: about four characters per
@@ -4145,13 +4156,14 @@ mod tests {
             .push(Message::text(Role::User, "12345678"));
         assert_eq!(h.app.context_used(), 2);
 
-        // A reported turn wins over the estimate.
+        // A reported turn wins over the estimate: prompt plus reply,
+        // the shape of the next request.
         h.app.usage = Some(Usage {
             input_tokens: 500,
             output_tokens: 3,
             cached_input_tokens: 0,
         });
-        assert_eq!(h.app.context_used(), 500);
+        assert_eq!(h.app.context_used(), 503);
     }
 
     #[test]
