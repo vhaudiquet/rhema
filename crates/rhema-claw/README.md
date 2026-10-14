@@ -91,7 +91,12 @@ from the resolver chain, so what the prompt lists is what the request
 advertises. On first run the claw *offers* a short
 setup in chat: who you are, what the machine is for, who it should be.
 It writes the first two files itself through the `bootstrap_save`
-tool as you answer; decline and it simply keeps offering, never
+tool as you answer, and — through the `identity_set` tool — sets its
+own presentation the same way: its name, a mark or tagline, an avatar
+from an image you hand it. The same tool is yours to invoke any time
+("call yourself something else"); it is the same store the settings
+pages write, so what it sets is what every client renders. Decline
+and it simply keeps offering, never
 interrogating. Both files stay hand-editable forever; `/v1/bootstrap`
 lets a UI badge setup state.
 

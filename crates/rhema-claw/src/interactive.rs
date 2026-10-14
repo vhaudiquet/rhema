@@ -180,6 +180,9 @@ pub struct InteractiveHandler {
     /// The wake bridge between those routes and the tools waiting on
     /// their rows.
     bridge: Arc<crate::consents::WaitBridge>,
+    /// The presentation-identity tool: the same store the settings
+    /// pages write, offered to the model as `identity_set`.
+    identity_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// The attachment store the `attach_file` tool copies into and the
     /// fetch route serves from.
     attachments: Arc<crate::attachments::AttachmentStore>,
@@ -200,7 +203,7 @@ impl InteractiveHandler {
     /// v1-permissive — the shell is the point of a resident coding
     /// agent — installed once, since resolution is synchronous within a
     /// turn.
-    #[allow(clippy::too_many_arguments)] // fourteen parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // fifteen parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -216,6 +219,7 @@ impl InteractiveHandler {
         bridge: Arc<crate::consents::WaitBridge>,
         attachments: Arc<crate::attachments::AttachmentStore>,
         phone: Arc<crate::phone::PhoneStore>,
+        identity: Arc<crate::identity::IdentityStore>,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(CodingTools::new(&workspace));
@@ -230,6 +234,8 @@ impl InteractiveHandler {
             crate::task_tools::registry(tasks).resolver_for(&Allowlist::permissive());
         let bootstrap_resolver =
             crate::bootstrap::registry(bootstrap.clone()).resolver_for(&Allowlist::permissive());
+        let identity_resolver = crate::identity::registry(identity.clone(), workspace.clone())
+            .resolver_for(&Allowlist::permissive());
         Self {
             backends,
             workspace,
@@ -241,6 +247,7 @@ impl InteractiveHandler {
             memory,
             bootstrap,
             bootstrap_resolver,
+            identity_resolver,
             hub,
             notifications,
             consents,
@@ -301,6 +308,7 @@ impl InteractiveHandler {
             self.task_resolver.clone(),
             self.watch_resolver.clone(),
             self.accounts_resolver.clone(),
+            self.identity_resolver.clone(),
             crate::consents::registry(
                 self.consents.clone(),
                 self.bridge.clone(),
@@ -660,6 +668,21 @@ mod tests {
         Arc::new(crate::phone::PhoneStore::in_memory().expect("store opens"))
     }
 
+    /// A throwaway identity store over a tempdir, the shape the
+    /// dispatch tests hand the handler.
+    fn identity() -> Arc<crate::identity::IdentityStore> {
+        static ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+        let root = ROOT.get_or_init(|| {
+            let dir = std::env::temp_dir().join("rhema-claw-test-identity");
+            let _ = std::fs::remove_dir_all(&dir);
+            dir
+        });
+        Arc::new(crate::identity::IdentityStore::new(
+            Arc::new(crate::settings::SettingsStore::in_memory().expect("store opens")),
+            root,
+        ))
+    }
+
     /// A throwaway attachment store under one shared temp root: the
     /// dispatch tests never read it back, and the store must outlive
     /// the handlers it is handed to.
@@ -753,6 +776,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         );
         let dispatcher = Arc::new(Dispatcher::new(
             DispatcherConfig {
@@ -830,6 +854,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         );
         let specs = handler.resolver(&Key::from("interactive:web")).specs();
         assert!(
@@ -1087,6 +1112,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1173,6 +1199,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1268,6 +1295,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1339,6 +1367,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1412,6 +1441,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1526,6 +1556,7 @@ mod tests {
             bridge(),
             attachments(),
             phone(),
+            identity(),
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(

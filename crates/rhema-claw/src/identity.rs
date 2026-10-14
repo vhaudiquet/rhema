@@ -10,10 +10,13 @@
 //! talks, what it is like — is deliberately not here: that is SOUL.md,
 //! the bootstrap store's domain, edited with the agent over onboarding.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
+use rhema_core::ToolSpec;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::settings::SettingsStore;
 
@@ -236,6 +239,150 @@ impl IdentityStore {
     }
 }
 
+/// The tool's name on the wire.
+pub const IDENTITY_SET: &str = "identity_set";
+
+/// `identity_set`: the model's surface over its own presentation —
+/// the same store the settings pages write, so what it sets here is
+/// what every client renders. Personality stays out of reach: that is
+/// SOUL.md, and the tool has no path to it.
+struct IdentitySet {
+    store: Arc<IdentityStore>,
+    workspace: PathBuf,
+}
+
+#[async_trait]
+impl Tool for IdentitySet {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new(
+            IDENTITY_SET,
+            "Set your own presentation identity: the name, mark, \
+             initials, tagline, and signoff the interfaces render, and \
+             your avatar or logo images. This is how you look, not who \
+             you are — personality lives in SOUL.md. Leave a field out \
+             to keep what is set; an empty string clears it. The avatar \
+             and logo take a workspace-relative path to an image file \
+             (png, jpeg, gif, or webp, under 2 MiB — svg is refused).",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string",
+                        "description": "Display name: message author, \
+                            window title, notifications. Up to 64 chars." },
+                    "mark": { "type": "string",
+                        "description": "Glyph or emoji for the rail and \
+                            favicon. Up to 8 chars." },
+                    "initials": { "type": "string",
+                        "description": "Shown when there is no mark and \
+                            no avatar. Up to 4 chars." },
+                    "tagline": { "type": "string",
+                        "description": "One line under the name. Up to \
+                            120 chars." },
+                    "signoff": { "type": "string",
+                        "description": "Appended to messages sent \
+                            outside the interface. Up to 120 chars." },
+                    "avatar": { "type": "string",
+                        "description": "Workspace-relative path to the \
+                            avatar image." },
+                    "logo": { "type": "string",
+                        "description": "Workspace-relative path to the \
+                            logo image." },
+                    "clear": { "type": "array",
+                        "items": { "type": "string",
+                            "enum": ["avatar", "logo"] },
+                        "description": "Images to remove." }
+                },
+            }),
+        )
+    }
+
+    async fn invoke(&self, args: Value) -> Result<String, String> {
+        if !args.is_object() {
+            return Err("bad arguments: expected an object".to_owned());
+        }
+        // The texts save whole, so an argument the call omits must carry
+        // the stored value forward — the same absent-means-keep rule the
+        // HTTP route applies. An empty string means clear.
+        let current = self.store.get().map_err(|err| err.to_string())?;
+        let field = |arg: Option<&str>, stored: Option<&str>| {
+            arg.map(str::to_owned).or_else(|| stored.map(str::to_owned))
+        };
+        let texts = IdentityTexts {
+            name: field(args["name"].as_str(), current.name.as_deref()),
+            mark: field(args["mark"].as_str(), current.mark.as_deref()),
+            initials: field(args["initials"].as_str(), current.initials.as_deref()),
+            tagline: field(args["tagline"].as_str(), current.tagline.as_deref()),
+            signoff: field(args["signoff"].as_str(), current.signoff.as_deref()),
+        };
+        // Every image is read and validated before anything is written,
+        // so a bad path fails the call without half a new identity.
+        let mut images = Vec::new();
+        for (field, kind) in [("avatar", ImageKind::Avatar), ("logo", ImageKind::Logo)] {
+            if let Some(path) = args[field].as_str() {
+                let file = workspace_image(&self.workspace, path)?;
+                let bytes =
+                    std::fs::read(&file).map_err(|err| format!("cannot read {path:?}: {err}"))?;
+                images.push((kind, bytes, crate::attachments::content_type(path)));
+            }
+        }
+        let mut clears = Vec::new();
+        if let Some(list) = args["clear"].as_array() {
+            for name in list {
+                let name = name.as_str().ok_or("clear must name avatar or logo")?;
+                clears.push(match name {
+                    "avatar" => ImageKind::Avatar,
+                    "logo" => ImageKind::Logo,
+                    other => return Err(format!("unknown image {other:?}")),
+                });
+            }
+        }
+
+        let mut identity = self
+            .store
+            .set_texts(&texts)
+            .map_err(|err| err.to_string())?;
+        for (kind, bytes, content_type) in images {
+            identity = self
+                .store
+                .set_image(kind, &bytes, content_type)
+                .map_err(|err| err.to_string())?;
+        }
+        for kind in clears {
+            identity = self
+                .store
+                .clear_image(kind)
+                .map_err(|err| err.to_string())?;
+        }
+        Ok(json!({ "saved": true, "identity": identity }).to_string())
+    }
+}
+
+/// Resolves a workspace-relative image path — absolute paths and `..`
+/// escapes are refused, the same discipline the attachment tool keeps.
+fn workspace_image(workspace: &Path, path: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(path);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Err(format!(
+            "path must be relative to the workspace, without '..': {path:?}"
+        ));
+    }
+    Ok(workspace.join(relative))
+}
+
+/// The identity tool set over `store`: `identity_set`.
+pub fn registry(store: Arc<IdentityStore>, workspace: impl Into<PathBuf>) -> ToolRegistry {
+    let mut registry = ToolRegistry::new();
+    registry.register(Arc::new(IdentitySet {
+        store,
+        workspace: workspace.into(),
+    }));
+    registry
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,5 +476,91 @@ mod tests {
         );
         let big = vec![0u8; MAX_IMAGE_BYTES + 1];
         assert!(store.set_image(ImageKind::Logo, &big, "image/png").is_err());
+    }
+
+    /// The tool, over a real workspace file: the texts save, the image
+    /// lands with its extension's content type, and the answer carries
+    /// the resulting identity.
+    #[tokio::test]
+    async fn identity_set_saves_texts_and_a_workspace_avatar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("interactive");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        std::fs::write(workspace.join("face.png"), b"png-bytes").expect("the image writes");
+        let settings = Arc::new(SettingsStore::in_memory().expect("the store opens"));
+        let store = Arc::new(IdentityStore::new(settings, dir.path().join("identity")));
+        let tool = IdentitySet {
+            store: store.clone(),
+            workspace: workspace.clone(),
+        };
+        let answer = tool
+            .invoke(json!({
+                "name": "Kosmos",
+                "mark": "✦",
+                "avatar": "face.png",
+            }))
+            .await
+            .expect("in-band ok");
+        let answer: Value = serde_json::from_str(&answer).expect("parses");
+        assert_eq!(answer["saved"], true);
+        assert_eq!(answer["identity"]["name"], "Kosmos");
+        assert_eq!(answer["identity"]["avatar"], true);
+        let (bytes, content_type) = store
+            .image(ImageKind::Avatar)
+            .expect("reads")
+            .expect("the avatar is set");
+        assert_eq!(bytes, b"png-bytes");
+        assert_eq!(content_type, "image/png");
+        // An absent field carried the stored value forward.
+        tool.invoke(json!({ "tagline": "order" }))
+            .await
+            .expect("saves");
+        let identity = store.get().expect("reads");
+        assert_eq!(identity.name.as_deref(), Some("Kosmos"), "kept");
+        assert_eq!(identity.tagline.as_deref(), Some("order"), "added");
+        assert!(identity.avatar, "untouched by a text-only save");
+    }
+
+    #[tokio::test]
+    async fn identity_set_clears_fields_and_images_and_refuses_escapes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path().join("interactive");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let settings = Arc::new(SettingsStore::in_memory().expect("the store opens"));
+        let store = Arc::new(IdentityStore::new(settings, dir.path().join("identity")));
+        store
+            .set_image(ImageKind::Logo, b"bytes", "image/png")
+            .expect("the logo saves");
+        let tool = IdentitySet {
+            store: store.clone(),
+            workspace: workspace.clone(),
+        };
+        let answer = tool
+            .invoke(json!({
+                "name": "",
+                "clear": ["logo"],
+            }))
+            .await
+            .expect("in-band ok");
+        let answer: Value = serde_json::from_str(&answer).expect("parses");
+        assert_eq!(
+            answer["identity"]["name"],
+            Value::Null,
+            "an empty string clears"
+        );
+        assert_eq!(answer["identity"]["logo"], false);
+
+        for bad in [
+            json!({ "avatar": "../outside.png" }),
+            json!({ "avatar": "/etc/hostname" }),
+            json!({ "avatar": "missing.png" }),
+            json!({ "clear": ["soul"] }),
+            json!({ "name": "x".repeat(65) }),
+        ] {
+            assert!(
+                tool.invoke(bad.clone()).await.is_err(),
+                "refused in band: {bad}"
+            );
+        }
     }
 }

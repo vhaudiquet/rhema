@@ -178,15 +178,10 @@ const GENERATED_AT_BOOT: &str = "(generated at boot)";
 /// The offered onboarding, rendered while either file is unwritten. It
 /// self-terminates: the per-dispatch status check stops rendering it
 /// the moment both files exist. The offer is made in chat and may be
-/// declined — never an unprompted interrogation.
-const ONBOARDING_MD: &str = "## Setup\n\nThis is a first conversation: \
-SOUL.md or USER.md is still unwritten. Offer a short setup — who they \
-are, what this machine is for, who the claw should be — and let them \
-decline; never interrogate. Ask at most a few questions, spread across \
-turns. Write SOUL.md (name, tone, purpose) and USER.md (who the user \
-is) with the bootstrap_save tool as facts arrive; incrementally is \
-fine. Never invent facts the user did not give. When both files exist, \
-say setup is done and stop offering.";
+/// declined — never an unprompted interrogation. Compiled in like the
+/// base template (`../ONBOARDING.md`), for the same reason: the prompt
+/// is code-reviewed text, not runtime state.
+const ONBOARDING_MD: &str = include_str!("../ONBOARDING.md");
 
 /// One rendered markdown section: header, blank line, the file's text
 /// — or the stub while it is unwritten.

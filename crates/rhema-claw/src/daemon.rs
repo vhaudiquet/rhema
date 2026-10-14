@@ -292,6 +292,7 @@ impl Daemon {
             bridge.clone(),
             attachments.clone(),
             phone.clone(),
+            identity.clone(),
         );
         let interactive_driver = Arc::new(
             Driver::new(

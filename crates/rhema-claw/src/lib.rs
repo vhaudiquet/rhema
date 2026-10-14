@@ -33,7 +33,8 @@
 //!   streamed, appended per event, replayed whole after a restart
 //! - [`hub`] — the event hub: per-key record and broadcast of turn events
 //! - [`identity`] — the agent's presentation identity: name, mark,
-//!   images, served over `/v1/agent`
+//!   images, served over `/v1/agent` and settable by the agent itself
+//!   through the `identity_set` tool
 //! - [`consents`] — the consent table and wake bridge: a running turn
 //!   asks the human (a secret to store, permission to act) and waits;
 //!   the chat surface answers through the consent routes
