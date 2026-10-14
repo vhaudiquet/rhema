@@ -1564,6 +1564,14 @@ impl App {
         self.config.set_for_profile(Some(&tab), |settings| {
             removed = settings.remove_instance(&name);
         });
+        // The catalog drops the instance's slice with it: nothing
+        // re-fetches a removed login, and the next fetch's merge keeps
+        // unqueried slices, so a stale copy would live forever.
+        if let Some(old) = &removed {
+            self.models.retain(|entry| {
+                entry.provider != old.provider || entry.instance.as_deref() != Some(name.as_str())
+            });
+        }
         if let Some(id) = removed.and_then(|old| old.secret_ref) {
             if let Some(store) = self.secret_store() {
                 let _ = store.delete(&id);
@@ -1866,26 +1874,36 @@ impl App {
                 }
             }
             FetchWhy::Bootstrap | FetchWhy::Refresh => {
-                // One result per queried backend: successes merge into the
-                // catalog; a total failure is the picker's error, and a
-                // partial one is named in its footer — a missing provider
-                // must never look like an empty one.
+                // One result per queried backend: each fetched slice
+                // replaces itself in the catalog, and a slice no fetch
+                // asked about — a login that raced this one — survives. A
+                // total failure is the picker's error, and a partial one
+                // is named in its footer — a missing provider must never
+                // look like an empty one.
                 let (catalogs, failed): (Vec<_>, Vec<_>) =
                     result.into_iter().partition(|entry| entry.result.is_ok());
-                let models: Vec<crate::screens::CatalogModel> = catalogs
-                    .iter()
-                    .flat_map(|entry| {
-                        let models = entry.result.as_deref().unwrap_or_default();
-                        models
-                            .iter()
-                            .map(move |model| crate::screens::CatalogModel {
-                                provider: entry.provider,
-                                instance: entry.instance.clone(),
-                                model: model.clone(),
-                            })
-                    })
-                    .collect();
-                self.models = models;
+                for entry in catalogs.iter().chain(failed.iter()) {
+                    self.models.retain(|existing| {
+                        existing.provider != entry.provider
+                            || existing.instance.as_deref() != entry.instance.as_deref()
+                    });
+                }
+                self.models.extend(catalogs.iter().flat_map(|entry| {
+                    let models = entry.result.as_deref().unwrap_or_default();
+                    models
+                        .iter()
+                        .map(move |model| crate::screens::CatalogModel {
+                            provider: entry.provider,
+                            instance: entry.instance.clone(),
+                            model: model.clone(),
+                        })
+                }));
+                self.models.sort_by(|a, b| {
+                    a.provider
+                        .cmp(b.provider)
+                        .then(a.instance.cmp(&b.instance))
+                        .then(a.model.id.cmp(&b.model.id))
+                });
                 if let Screen::Picker(picker) = &mut self.screen {
                     if catalogs.is_empty() {
                         let message = failed
@@ -2868,6 +2886,56 @@ mod tests {
             }
             _ => panic!("expected the picker"),
         }
+    }
+
+    #[test]
+    fn a_late_bootstrap_keeps_the_login_models() {
+        // The startup fetch races a login: it was spawned first, but a
+        // slow catalog can land it after the login's answer. Its slices
+        // replace themselves; the login's slice is not its business.
+        let mut h = harness(Some("g"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        for c in "/login".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        descend_to_credential(&mut h, 2);
+        for c in "o".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::FetchModels(FetchWhy::Login { .. })]
+        ));
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::OpenRouter {
+                    api_key: "o".into(),
+                },
+                instance: Some("openrouter".into()),
+            },
+            result: loaded(
+                "openrouter",
+                vec![llama_model("openrouter/auto"), llama_model("z-ai/glm-5.3")],
+            ),
+        });
+        assert_eq!(h.app.models.len(), 4);
+
+        // The late startup answer covers google only.
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        let providers: Vec<&str> = h.app.models.iter().map(|m| m.provider).collect();
+        assert_eq!(
+            providers,
+            ["google", "google", "openrouter", "openrouter"],
+            "the login's slice survives the late bootstrap"
+        );
     }
 
     #[test]
