@@ -1550,13 +1550,15 @@ fn thinking_rows(app: &App, width: usize) -> u16 {
 
 /// The dim telemetry strip under the input: last turn's tokens, and the
 /// history-pinned indicator.
-/// The completion popup: while the input names commands, the matches
-/// float above it — full terminal width, the shared background, no panel.
-/// The command reads in accent, the description dim, and the highlighted
-/// row carries the elevated tone. Tab completes, enter runs.
+/// The completion popup: while the input names commands or the cursor
+/// sits on a path, the matches float above it — full terminal width, the
+/// shared background, no panel. The command reads in accent, the
+/// description dim, and the highlighted row carries the elevated tone.
+/// Tab completes, enter runs.
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme: &Theme) {
     let profiles = app.palette_profiles();
-    let rows = crate::screens::palette_rows(&app.chat.input, &app.models, &profiles);
+    let rows =
+        crate::screens::palette_rows(&app.chat.input, app.chat.cursor, &app.models, &profiles);
     if rows.is_empty() {
         return;
     }
@@ -1623,18 +1625,20 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
 }
 
 /// The palette row's name column: the command's name, the model's
-/// provider-prefixed id — the same shape the picker's rows carry — or
-/// the profile's name.
+/// provider-prefixed id — the same shape the picker's rows carry — the
+/// profile's name, or the path entry's name.
 fn palette_row_name(row: &crate::screens::PaletteRow) -> String {
     match row {
         crate::screens::PaletteRow::Command(spec) => spec.name.to_owned(),
         crate::screens::PaletteRow::Model { provider, id, .. } => format!("{provider}/{id}"),
         crate::screens::PaletteRow::Profile { name, .. } => name.clone(),
+        crate::screens::PaletteRow::Path { name, .. } => name.clone(),
     }
 }
 
 /// The palette row's description: the command's own, the model's display
-/// name with its facts, or the profile's provider and model.
+/// name with its facts, the profile's provider and model, or the path
+/// entry's kind.
 fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
     match row {
         crate::screens::PaletteRow::Command(spec) => {
@@ -1646,6 +1650,14 @@ fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
         crate::screens::PaletteRow::Profile { description, .. } => {
             (palette_row_name(row), description.clone())
         }
+        crate::screens::PaletteRow::Path { is_dir, .. } => (
+            palette_row_name(row),
+            if *is_dir {
+                "directory".to_owned()
+            } else {
+                String::new()
+            },
+        ),
     }
 }
 

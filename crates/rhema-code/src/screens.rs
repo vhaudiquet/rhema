@@ -1,8 +1,10 @@
 //! The three screens' input handling and outcome logic — pure state, no
-//! terminal. The renderer reads these structs; [`crate::app`] routes their
-//! actions into transitions and effects.
+//! terminal. The one exception is the chat palette's path rows, which
+//! list the filesystem. The renderer reads these structs;
+//! [`crate::app`] routes their actions into transitions and effects.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_provider::ModelCard;
@@ -1050,23 +1052,42 @@ pub enum PaletteRow {
         /// What the row says about the profile, after the name.
         description: String,
     },
+    /// A filesystem path under the cursor; completing splices the
+    /// entry over the token it came from.
+    Path {
+        /// Start of the token (char offset) the completion replaces.
+        token_start: usize,
+        /// End of the token (char offset), exclusive.
+        token_end: usize,
+        /// The entry's name, with a trailing `/` on directories — the
+        /// row's label.
+        name: String,
+        /// Whether the entry is a directory.
+        is_dir: bool,
+        /// The text to splice over the token: the directory part as
+        /// typed, the entry's name, and a trailing `/` on directories.
+        completion: String,
+    },
 }
 
 /// The palette's rows for an input: command names while the input
-/// matches one, the models matching the `/model` argument, or the
-/// profiles matching the `/profile` argument. The argument filters
-/// follow the picker's rules — the rendered row text, case-insensitive.
+/// matches one, the models matching the `/model` argument, the profiles
+/// matching the `/profile` argument, or — when none of those fire — the
+/// filesystem entries under the cursor's path token. The argument
+/// filters follow the picker's rules — the rendered row text,
+/// case-insensitive.
 pub fn palette_rows(
     input: &str,
+    cursor: usize,
     models: &[CatalogModel],
     profiles: &[PaletteProfile],
 ) -> Vec<PaletteRow> {
     if !input.starts_with('/') {
-        return Vec::new();
+        return path_completion_rows(input, cursor);
     }
     if let Some(needle) = input.strip_prefix("/model ") {
         let needle = needle.to_lowercase();
-        return models
+        let rows: Vec<PaletteRow> = models
             .iter()
             .filter(|entry| {
                 let mut haystack = format!("{}/{}", entry.provider, entry.model.id);
@@ -1083,10 +1104,13 @@ pub fn palette_rows(
                 description: model_description(&entry.model),
             })
             .collect();
+        if !rows.is_empty() {
+            return rows;
+        }
     }
     if let Some(needle) = input.strip_prefix("/profile ") {
         let needle = needle.to_lowercase();
-        return profiles
+        let rows: Vec<PaletteRow> = profiles
             .iter()
             .filter(|profile| {
                 needle.is_empty() || {
@@ -1104,11 +1128,128 @@ pub fn palette_rows(
                 description: profile_description(profile),
             })
             .collect();
+        if !rows.is_empty() {
+            return rows;
+        }
     }
-    filtered_commands(input)
+    let commands: Vec<PaletteRow> = filtered_commands(input)
         .into_iter()
         .map(PaletteRow::Command)
+        .collect();
+    if !commands.is_empty() {
+        return commands;
+    }
+    // A slash input naming no command may still be a path: `/etc/hos`
+    // completes like any other absolute path.
+    path_completion_rows(input, cursor)
+}
+
+/// The most path rows one token lists: big directories still complete,
+/// without the palette carrying every entry.
+const MAX_PATH_ROWS: usize = 256;
+
+/// The path rows for the token under the cursor: the listed directory's
+/// entries whose name starts with the typed stem, case-insensitive,
+/// directories first. Hidden entries (a leading dot) stay hidden until
+/// the stem leads with one. A token completes nothing unless it carries
+/// a separator or opens with `~` or `.`; a directory that cannot be
+/// read simply lists nothing.
+fn path_completion_rows(input: &str, cursor: usize) -> Vec<PaletteRow> {
+    let Some((token_start, token_end)) = path_token(input, cursor) else {
+        return Vec::new();
+    };
+    let token: String = input
+        .chars()
+        .skip(token_start)
+        .take(token_end - token_start)
+        .collect();
+    let Some((dir_part, stem, dir)) = split_path_token(&token) else {
+        return Vec::new();
+    };
+    let needle = stem.to_lowercase();
+    let mut entries: Vec<(String, bool)> = std::fs::read_dir(dir)
+        .map(|listing| {
+            listing
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let name = entry.file_name().into_string().ok()?;
+                    if name.starts_with('.') && !stem.starts_with('.') {
+                        return None;
+                    }
+                    let is_dir = entry.path().is_dir();
+                    (needle.is_empty() || name.to_lowercase().starts_with(&needle))
+                        .then_some((name, is_dir))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Directories first, then names case-insensitively.
+    entries.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
+    entries.truncate(MAX_PATH_ROWS);
+    entries
+        .into_iter()
+        .map(|(name, is_dir)| PaletteRow::Path {
+            token_start,
+            token_end,
+            name: if is_dir {
+                format!("{name}/")
+            } else {
+                name.clone()
+            },
+            is_dir,
+            completion: format!("{dir_part}{name}{}", if is_dir { "/" } else { "" }),
+        })
         .collect()
+}
+
+/// The word under the cursor: the run of characters around it that are
+/// neither whitespace nor an attachment anchor, as `(start, end)` char
+/// offsets. None when the run is empty.
+fn path_token(input: &str, cursor: usize) -> Option<(usize, usize)> {
+    let breaks = |c: char| c.is_whitespace() || c == ChatState::MARK;
+    let chars: Vec<char> = input.chars().collect();
+    let pos = cursor.min(chars.len());
+    let start = (0..pos)
+        .rev()
+        .find(|index| breaks(chars[*index]))
+        .map_or(0, |index| index + 1);
+    let end = chars[pos..]
+        .iter()
+        .position(|c| breaks(*c))
+        .map_or(chars.len(), |offset| pos + offset);
+    (start < end).then_some((start, end))
+}
+
+/// The token split for completion: the directory part as typed (through
+/// the final `/`), the stem the entries must match, and the directory
+/// to list — `~` expands to the home directory, an empty part to the
+/// working directory. None when the token names no path.
+fn split_path_token(token: &str) -> Option<(String, String, PathBuf)> {
+    if token == "~" {
+        let home = std::env::home_dir()?;
+        return Some(("~".to_owned(), String::new(), home));
+    }
+    let path_like = token.starts_with('~') || token.starts_with('.') || token.contains('/');
+    if !path_like {
+        return None;
+    }
+    let (dir_part, stem) = match token.rfind('/') {
+        Some(index) => (&token[..=index], &token[index + 1..]),
+        None => ("", token),
+    };
+    let dir = if let Some(rest) = dir_part.strip_prefix("~/") {
+        std::env::home_dir()?.join(rest)
+    } else if dir_part == "~/" {
+        std::env::home_dir()?
+    } else if dir_part.is_empty() {
+        PathBuf::from(".")
+    } else {
+        PathBuf::from(dir_part)
+    };
+    Some((dir_part.to_owned(), stem.to_owned(), dir))
 }
 
 /// A model's palette description: the display name with the picker's
@@ -1473,7 +1614,7 @@ impl ChatState {
         self.palette_index = 0;
     }
 
-    /// Removes `input[start..end]` (char offsets) and, with it, the
+    /// Removes `input[start..end]` (byte offsets) and, with it, the
     /// payload of every attachment anchor in the range — the 1:1
     /// mark-to-payload pairing survives any deletion.
     fn delete_range(&mut self, start: usize, end: usize) {
@@ -1584,7 +1725,8 @@ impl ChatState {
     /// picker); Esc is the app's (approval decline / quit confirm). The
     /// model catalog and profile registry feed the `/model` and
     /// `/profile` palette rows; empty slices simply leave those rows
-    /// empty.
+    /// empty, and the filesystem feeds path rows for the token under
+    /// the cursor.
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
@@ -1687,13 +1829,13 @@ impl ChatState {
                 self.cursor = start + len;
                 ChatAction::None
             }
-            // The palette owns the vertical arrows while a slash input
-            // filters it — commands, models under `/model`, profiles
-            // under `/profile`.
+            // The palette owns the vertical arrows while it has rows —
+            // commands, models under `/model`, profiles under
+            // `/profile`, or the path entries under the cursor's token.
             KeyCode::Up | KeyCode::Down
-                if !palette_rows(&self.input, models, profiles).is_empty() =>
+                if !palette_rows(&self.input, self.cursor, models, profiles).is_empty() =>
             {
-                let count = palette_rows(&self.input, models, profiles).len();
+                let count = palette_rows(&self.input, self.cursor, models, profiles).len();
                 if key.code == KeyCode::Down {
                     self.palette_index = (self.palette_index + 1).min(count - 1);
                 } else {
@@ -1711,23 +1853,44 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::Tab => {
-                let rows = palette_rows(&self.input, models, profiles);
+                let rows = palette_rows(&self.input, self.cursor, models, profiles);
                 if let Some(row) = rows.get(self.palette_index.min(rows.len().saturating_sub(1))) {
-                    // The input is replaced wholesale: any anchors in it
-                    // go, and their payloads go with them.
-                    self.attachments.clear();
                     match row {
                         PaletteRow::Command(spec) => {
+                            // The input is replaced wholesale: any
+                            // anchors in it go, and their payloads go
+                            // with them.
+                            self.attachments.clear();
                             self.input = spec.name.to_owned();
+                            self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Model { id, .. } => {
+                            self.attachments.clear();
                             self.input = format!("/model {id}");
+                            self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Profile { name, .. } => {
+                            self.attachments.clear();
                             self.input = format!("/profile {name}");
+                            self.cursor = self.input.chars().count();
+                        }
+                        PaletteRow::Path {
+                            token_start,
+                            token_end,
+                            completion,
+                            ..
+                        } => {
+                            // A local splice: anchors outside the token
+                            // keep their payloads, and delete_range
+                            // drops any inside it.
+                            self.cursor = (*token_end).min(self.input.chars().count());
+                            let end = self.byte_offset();
+                            self.cursor = *token_start;
+                            let start = self.byte_offset();
+                            self.delete_range(start, end);
+                            self.insert_str(completion);
                         }
                     }
-                    self.cursor = self.input.chars().count();
                 }
                 ChatAction::None
             }
@@ -2816,7 +2979,7 @@ mod tests {
         }
         // The empty argument lists the whole catalog; the provider filter
         // narrows like the picker's.
-        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, &models, &[])
+        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, chat.cursor, &models, &[])
             .into_iter()
             .filter_map(|row| match row {
                 crate::screens::PaletteRow::Model { id, .. } => Some(id),
@@ -2827,7 +2990,7 @@ mod tests {
         for c in "openrouter".chars() {
             chat.handle_key(key(KeyCode::Char(c)), &models, &[]);
         }
-        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, &models, &[])
+        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, chat.cursor, &models, &[])
             .into_iter()
             .filter_map(|row| match row {
                 crate::screens::PaletteRow::Model { id, .. } => Some(id),
@@ -2837,7 +3000,7 @@ mod tests {
         assert_eq!(ids, ["openrouter/auto"]);
         // The vendor slash keeps narrowing instead of breaking the match.
         chat.handle_key(key(KeyCode::Char('/')), &models, &[]);
-        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, &models, &[])
+        let ids: Vec<String> = crate::screens::palette_rows(&chat.input, chat.cursor, &models, &[])
             .into_iter()
             .filter_map(|row| match row {
                 crate::screens::PaletteRow::Model { id, .. } => Some(id),
@@ -2873,7 +3036,7 @@ mod tests {
         }
         // The name narrows; so does the provider text a row carries.
         let names = |input: &str| {
-            crate::screens::palette_rows(input, &[], &profiles)
+            crate::screens::palette_rows(input, input.chars().count(), &[], &profiles)
                 .into_iter()
                 .filter_map(|row| match row {
                     crate::screens::PaletteRow::Profile { name, .. } => Some(name),
@@ -2889,6 +3052,137 @@ mod tests {
         chat.cursor = chat.input.chars().count();
         chat.handle_key(key(KeyCode::Tab), &[], &profiles);
         assert_eq!(chat.input, "/profile work");
+    }
+
+    // --- Path completion ---
+
+    /// A directory holding `sub/` (empty), `alpha.txt`, `Beta.txt`, and
+    /// the hidden `.hidden`, for the path-completion tests.
+    fn path_fixture() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir stands");
+        std::fs::create_dir(dir.path().join("sub")).expect("mkdir");
+        std::fs::write(dir.path().join("alpha.txt"), "").expect("write");
+        std::fs::write(dir.path().join("Beta.txt"), "").expect("write");
+        std::fs::write(dir.path().join(".hidden"), "").expect("write");
+        dir
+    }
+
+    /// The path rows' labels for `input` with the cursor at its end.
+    fn path_names(input: &str) -> Vec<String> {
+        crate::screens::palette_rows(input, input.chars().count(), &[], &[])
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::screens::PaletteRow::Path { name, .. } => Some(name),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_path_token_is_the_word_under_the_cursor() {
+        let input = "look at src/al and stop";
+        let cursor = "look at src/al".chars().count();
+        assert_eq!(path_token(input, cursor), Some((8, 14)));
+        assert_eq!(
+            path_token(input, 10),
+            Some((8, 14)),
+            "mid-token is the same token"
+        );
+        assert_eq!(path_token(input, 0), Some((0, 4)));
+        // The cursor on the break still picks the word to its left.
+        assert_eq!(path_token(input, 14), Some((8, 14)));
+        // An anchor splits words: a chip is never part of a token.
+        let marked = format!("a{}b src", ChatState::MARK);
+        assert_eq!(path_token(&marked, marked.chars().count()), Some((4, 7)));
+        assert_eq!(
+            path_token(&marked, 2),
+            Some((2, 3)),
+            "an anchor splits words"
+        );
+        assert_eq!(path_token("see ", 4), None);
+    }
+
+    #[test]
+    fn the_palette_lists_the_entries_the_token_names() {
+        let dir = path_fixture();
+        let base = dir.path().display().to_string();
+        assert_eq!(path_names(&format!("see {base}/a")), ["alpha.txt"]);
+        // Case-insensitive, like every other palette filter.
+        assert_eq!(path_names(&format!("see {base}/b")), ["Beta.txt"]);
+        // An empty stem lists the directory: directories first, then
+        // names case-insensitively, and no hidden entries.
+        assert_eq!(
+            path_names(&format!("see {base}/")),
+            ["sub/", "alpha.txt", "Beta.txt"]
+        );
+        // A stem leading with a dot unhides them.
+        assert_eq!(path_names(&format!("see {base}/.")), [".hidden"]);
+    }
+
+    #[test]
+    fn plain_words_complete_nothing() {
+        let _dir = path_fixture();
+        assert!(path_names("hello world").is_empty());
+        // A file name without a separator is prose, not a path.
+        assert!(path_names("see alpha.txt").is_empty());
+        assert!(path_names("").is_empty());
+    }
+
+    #[test]
+    fn tab_splices_the_entry_over_the_token() {
+        let dir = path_fixture();
+        let base = dir.path().display().to_string();
+        let mut chat = ChatState::new();
+        // A file completes in place.
+        chat.input = format!("see {base}/b");
+        chat.cursor = chat.input.chars().count();
+        chat.handle_key(key(KeyCode::Tab), &[], &[]);
+        assert_eq!(chat.input, format!("see {base}/Beta.txt"));
+        assert_eq!(chat.cursor, chat.input.chars().count());
+        // A directory gains its separator; the next Tab lists inside it.
+        chat.input = format!("see {base}/su");
+        chat.cursor = chat.input.chars().count();
+        chat.handle_key(key(KeyCode::Tab), &[], &[]);
+        assert_eq!(chat.input, format!("see {base}/sub/"));
+        assert_eq!(chat.cursor, chat.input.chars().count());
+        chat.handle_key(key(KeyCode::Tab), &[], &[]);
+        assert_eq!(
+            chat.input,
+            format!("see {base}/sub/"),
+            "an empty directory lists nothing"
+        );
+    }
+
+    #[test]
+    fn completing_a_path_leaves_other_attachments_alone() {
+        let dir = path_fixture();
+        let base = dir.path().display().to_string();
+        let mut chat = ChatState::new();
+        chat.paste("p\np\np\np");
+        assert_eq!(chat.attachments.len(), 1);
+        for c in format!(" see {base}/b").chars() {
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[]);
+        }
+        chat.handle_key(key(KeyCode::Tab), &[], &[]);
+        assert_eq!(
+            chat.input,
+            format!("{} see {base}/Beta.txt", ChatState::MARK)
+        );
+        assert_eq!(chat.attachments.len(), 1, "the chip survives");
+    }
+
+    #[test]
+    fn slash_commands_and_arguments_outrank_path_completion() {
+        let dir = path_fixture();
+        let base = dir.path().display().to_string();
+        // "/" lists commands, never root's entries.
+        let rows = crate::screens::palette_rows("/", 1, &[], &[]);
+        assert!(rows.iter().all(|row| matches!(row, PaletteRow::Command(_))));
+        // A `/model` argument with no catalog match falls through to
+        // path completion.
+        let input = format!("/model {base}/al");
+        let rows = crate::screens::palette_rows(&input, input.chars().count(), &[], &[]);
+        assert!(matches!(&rows[0], PaletteRow::Path { .. }));
     }
 
     #[test]
