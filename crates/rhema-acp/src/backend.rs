@@ -255,8 +255,10 @@ pub fn resolve(
 const NO_PROVIDER_CONFIGURED: &str = "no provider configured: set RHEMA_PROVIDER, log in with the rhema TUI, \
      or store one in a profile";
 
-/// The provider implementation a kind rides on. `Ok(None)` when the
-/// kind's credentials do not resolve; `llama-cpp` is keyless and always
+/// The provider a kind's turns ride on: the raw adapter under the
+/// shared retry, so a transient failure costs a pause instead of the
+/// session (see `rhema_provider::Retrying`). `Ok(None)` when the kind's
+/// credentials do not resolve; `llama-cpp` is keyless and always
 /// resolves. A kind outside [`PROVIDERS`] is an error naming the
 /// stored value, never a silent google.
 pub fn provider_for(
@@ -265,7 +267,7 @@ pub fn provider_for(
     llama_url: Option<&str>,
     secrets: Option<&dyn SecretStore>,
 ) -> Result<Option<Arc<dyn ModelProvider>>, String> {
-    match kind {
+    let raw: Option<Arc<dyn ModelProvider>> = match kind {
         "llama-cpp" => {
             let url = llama_url
                 .map(str::to_owned)
@@ -274,23 +276,23 @@ pub fn provider_for(
             if let Some(api_key) = profile.api_key("llama-cpp", secrets) {
                 llama = llama.with_api_key(api_key);
             }
-            Ok(Some(Arc::new(llama)))
+            Some(Arc::new(llama))
         }
-        "openrouter" => Ok(profile
+        "openrouter" => profile
             .api_key("openrouter", secrets)
-            .map(|key| Arc::new(OpenRouterProvider::new(key)) as Arc<dyn ModelProvider>)),
-        "anthropic" => Ok(profile
+            .map(|key| Arc::new(OpenRouterProvider::new(key)) as Arc<dyn ModelProvider>),
+        "anthropic" => profile
             .api_key("anthropic", secrets)
-            .map(|key| Arc::new(AnthropicProvider::new(key)) as Arc<dyn ModelProvider>)),
-        "openai" => Ok(profile
+            .map(|key| Arc::new(AnthropicProvider::new(key)) as Arc<dyn ModelProvider>),
+        "openai" => profile
             .api_key("openai", secrets)
-            .map(|key| Arc::new(OpenAiCompatibleProvider::new(key)) as Arc<dyn ModelProvider>)),
-        "deepseek" => Ok(profile.api_key("deepseek", secrets).map(|key| {
+            .map(|key| Arc::new(OpenAiCompatibleProvider::new(key)) as Arc<dyn ModelProvider>),
+        "deepseek" => profile.api_key("deepseek", secrets).map(|key| {
             Arc::new(
                 OpenAiCompatibleProvider::new(key).with_base_url("https://api.deepseek.com/v1"),
             ) as Arc<dyn ModelProvider>
-        })),
-        "zai" => Ok(profile.api_key("zai", secrets).map(|key| {
+        }),
+        "zai" => profile.api_key("zai", secrets).map(|key| {
             // A stored instance may override the route (a proxy); none
             // means the Coding Plan endpoint itself. Bearer auth is the
             // scheme that route documents.
@@ -301,15 +303,16 @@ pub fn provider_for(
                 provider = provider.with_base_url(rhema_provider_anthropic::ZAI_BASE_URL);
             }
             Arc::new(provider) as Arc<dyn ModelProvider>
-        })),
-        "copilot" => Ok(profile
+        }),
+        "copilot" => profile
             .api_key("copilot", secrets)
-            .map(|key| Arc::new(CopilotProvider::new(key)) as Arc<dyn ModelProvider>)),
-        "google" => Ok(profile
+            .map(|key| Arc::new(CopilotProvider::new(key)) as Arc<dyn ModelProvider>),
+        "google" => profile
             .api_key("google", secrets)
-            .map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn ModelProvider>)),
-        other => Err(format!("unknown provider kind \"{other}\"")),
-    }
+            .map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn ModelProvider>),
+        other => return Err(format!("unknown provider kind \"{other}\"")),
+    };
+    Ok(raw.map(|raw| Arc::new(rhema_provider::Retrying::new(raw)) as Arc<dyn ModelProvider>))
 }
 
 /// Splits a model select value into the provider kind to ride on and
