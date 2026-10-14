@@ -1,7 +1,7 @@
 # rhema-memory — the agent memory layer
 
-> **Status:** v1, 2026-10-08. Decisions resolved in §8; implementation
-> lands in the following commits.
+> **Status:** v1, 2026-10-08 (decisions in §8); amended v1.1,
+> 2026-10-14 — temporal validity, invalidation, and review in §10.
 > **Framework grounding:** `rhema-framework-v1.md` §2 (memory-store is a
 > MODULE-tier contract) and §9 (context and memory strategy).
 > **One-line promise:** durable, cross-session memory the model *pulls*
@@ -294,3 +294,124 @@ Embedding-backed ranking behind the unchanged contract · deterministic
 session-summary capture as a driver policy · `/memory` curation in
 `rhema-code` · cross-workspace search for the resident tier · a shared
 `registry::Tool` adapter if the consumer shims sprout a third copy.
+
+---
+
+## 10. v1.1 — temporal validity, invalidation, review (2026-10-14)
+
+The OpenClaw-era memory store held a fact ("house search: Gragnague") that
+had been superseded months earlier ("house bought: Toulouse"), and the
+agent kept acting on the stale one, because retrieval returned both records
+as equally authoritative. The date was stored and never consumed. This
+amendment gives every record its temporal facts and gives the engine the
+mechanism — never the policy — around them.
+
+### Principles
+
+1. **Age is not truth.** A lapsed decay interval makes a record *unverified*,
+   never false. Only a contradicting fact (supersession) or a human
+   (retraction) retires a record; time never does.
+2. **Invalidate, never delete.** A dead record is marked, not removed. The
+   history of what was believed — and therefore of what the agent did —
+   stays readable. `memory_forget` remains for secrets and junk.
+3. **Contradiction is subject-scoped; age only sets the clock.** What kills
+   a fact is a new fact about the same *subject*. Age decides when to go
+   re-check it.
+4. **Retrieval carries the doubt to the consumer.** Every rendered record
+   shows age, status, and a `STALE` marker; the pipeline never sanitises
+   staleness away.
+5. **Mechanism here, policy outside.** The engine computes what is due for
+   review and what may conflict with what. It never decides that a fact has
+   become false, and it auto-supersedes nothing: a fuzzy match alone can
+   never retire a record, because a false positive there would destroy
+   history silently.
+
+### Record additions
+
+`MemoryRecord` grows: `valid_from` (default: creation), `valid_until`
+(a planned horizon, not a verdict), `decay` (`Permanent` never due /
+`Long` 365d / `Volatile` 30d), `source` (`Told{by}` / `Observed{how}` /
+`Inferred{from}`, default unknown), `subject` (overlap key),
+`status` (`Active` / `Superseded{by, at}` / `Retracted{why, at}`),
+`verified_at`, and `verify_hint` (`Command{run}` / `Url{fetch}` /
+`File{path}` / `Manual`). `VerifyHint` is load-bearing: a sweep re-checks
+most records itself, and only `Manual` reaches a human, batched.
+
+Decay derives from the tag namespace when not declared
+(`family|personal|preferences|rules|identity` → Permanent,
+`projects|accounts|policies` → Long,
+`infrastructure|setup|environment|migration` → Volatile, anything else →
+Long); when tags from several classes mix, the most volatile class wins.
+An update re-derives decay from the new tags unless declared, voids
+`verified_at` when the body changes (nobody checked the new wording), and
+never resurrects a dead record. `memory_save` accepts all of it as tool
+arguments.
+
+### Retrieval
+
+Default rules surface a record at `t` when it existed, had started to hold,
+its horizon had not passed, and it was active. `as_of` turns retrieval into
+a pure function of (query, t) — the debugging/replay primitive; it is honest
+because supersession and retraction carry the instant they happened, so a
+record's status *at t* is computable. (Bodies edited in place are the one
+blind spot: corrections are expected to supersede, not overwrite.)
+`include_superseded` widens the status rule but not the window rule —
+an expired horizon is reachable through the sweep, not through search.
+`fresh_only` drops records past their decay. On a widened search a live
+record always outranks a dead one with the same keyword hits.
+
+### Write path
+
+`memory_save` runs subject-overlap detection before the write: an exact
+subject match, or a tag overlap of at least half the smaller set, is a
+conflict. The write succeeds; the result lists the candidates and asks the
+caller to declare each relation — `supersedes` (marks the older record
+`Superseded{by, at}`, body intact), `refines`, or `unrelated` (both
+acknowledge). Declaring nothing leaves every record active and returns the
+warning again.
+
+### Review, not a daemon
+
+`MemoryStore::due_for_review(now)` returns the active records past their
+decay interval or past their horizon, most overdue first, each with its age
+and `VerifyHint`. `memory_verify` records a re-confirmation;
+`memory_retract` records a human's no with its reason. Nothing is
+scheduled: a scheduled agent turn asks and does the work, so the cadence is
+a policy choice in the harness.
+
+### Migration
+
+Every new field is optional with a derivable default, so existing stores —
+including directories of Markdown with v1 frontmatter — read unchanged, and
+each record enriches itself the next time it is touched.
+
+### Decisions (on the draft's open questions)
+
+- **Subject keys are namespaced free strings**, normalized
+  (`a-z0-9/_-`, ≤ 128 chars, `normalize_subject`) and matched exactly
+  (`home/accommodation`, `account/github/kosmos-ai-bot`). Namespacing keeps
+  overlap detection cheap and predictable; free-form near-misses silently
+  fail to supersede.
+- **A past `valid_until` makes a record due, not dead** — the proposal
+  stands. Only a human or a contradicting fact kills a record; the horizon
+  only ends its visibility and starts a re-check.
+- **`review_by` is derived** (`verified_at.unwrap_or(created_at)` + decay
+  interval), never materialised: one source of truth. A dumb-filter
+  query layer (FTS) can materialise its own column later.
+- **`source` stays, `confidence` waits.** Provenance names who/what to
+  doubt; a confidence number would invite the engine to rank truth. Revisit
+  when a real consumer needs it.
+- **No retention ceiling or erasure path yet.** Supersession keeps
+  third-party facts forever by design; the erasure question (§ open
+  question 3) is real but has no consumer pressure yet. It belongs in a
+  dedicated design, not a drive-by.
+
+### Tests
+
+The contract suite grows: validity defaults, the visibility rules,
+`as_of` replay through a supersession, supersede/retract/verify
+transitions, void-on-rewrite, and the sweep — all order-agnostic, replayed
+by both stores. "Superseded never outranks active" is order-sensitive, so
+it lives in `run_rank_orders` beside the rank assertions, outside
+`run_all`. The falsification test is unchanged: the new tools ride the
+existing `ToolResolver` seam, and nothing here needed `rhema-core`.
