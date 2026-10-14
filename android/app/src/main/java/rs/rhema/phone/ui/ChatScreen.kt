@@ -568,6 +568,11 @@ private sealed interface AttachState {
 private fun AttachmentCard(item: ChatController.Attachment, container: AppContainer) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // Templates resolve in composition, not at callback time: a lookup
+    // through LocalContext.current freezes the locale of the first
+    // composition.
+    val failedTemplate = stringResource(R.string.chat_attachment_failed)
+    val openFailed = stringResource(R.string.chat_attachment_open_failed)
     var state by remember(item.attachmentId) { mutableStateOf<AttachState>(AttachState.Idle) }
 
     // One fetch: bytes → cache file → shareable uri; small images also
@@ -580,7 +585,7 @@ private fun AttachmentCard(item: ChatController.Attachment, container: AppContai
                     val uri = saveAttachment(context, item.attachmentId, item.name, result.value)
                     when {
                         uri == null -> AttachState.Failed(
-                            context.getString(R.string.chat_attachment_failed, "save failed"),
+                            failedTemplate.format("save failed"),
                         )
                         item.media == "image" && result.value.size <= INLINE_IMAGE_MAX_BYTES -> {
                             val preview = BitmapFactory.decodeByteArray(
@@ -595,13 +600,13 @@ private fun AttachmentCard(item: ChatController.Attachment, container: AppContai
                 }
                 state = prepared
                 if (prepared is AttachState.Ready && open && !openAttachment(context, prepared.uri)) {
-                    state = prepared.copy(note = context.getString(R.string.chat_attachment_open_failed))
+                    state = prepared.copy(note = openFailed)
                 }
             }
             is ClawResult.HttpError ->
-                state = AttachState.Failed(context.getString(R.string.chat_attachment_failed, "HTTP ${result.code}"))
+                state = AttachState.Failed(failedTemplate.format("HTTP ${result.code}"))
             is ClawResult.Network ->
-                state = AttachState.Failed(context.getString(R.string.chat_attachment_failed, result.message))
+                state = AttachState.Failed(failedTemplate.format(result.message))
         }
     }
 
@@ -693,7 +698,7 @@ private fun AttachmentCard(item: ChatController.Attachment, container: AppContai
                         when (val s = state) {
                             is AttachState.Ready -> {
                                 if (!openAttachment(context, s.uri)) {
-                                    state = s.copy(note = context.getString(R.string.chat_attachment_open_failed))
+                                    state = s.copy(note = openFailed)
                                 }
                             }
                             else -> scope.launch { download(open = true) }
