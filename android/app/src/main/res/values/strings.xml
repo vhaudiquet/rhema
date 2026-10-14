@@ -62,6 +62,30 @@
     <string name="providers_save">Save</string>
     <string name="providers_error">The claw answered: %1$s</string>
 
+    <string name="card_phones">Phones</string>
+    <string name="phones_hint">Every device the claw has heard from</string>
+    <string name="phones_loading">Loading phones…</string>
+    <string name="phones_empty">No phones have reported yet.</string>
+    <string name="phones_this_device">this phone</string>
+    <string name="phones_forget">Forget</string>
+    <string name="phones_forget_title">Forget %1$s?</string>
+    <string name="phones_forget_text">The claw drops this phone\'s status, queued commands, and identity. A phone that still reports comes back on its next run.</string>
+    <string name="phones_seen_just_now">last seen just now</string>
+    <string name="phones_seen_fmt">last seen %1$s ago</string>
+    <string name="phones_never_reported">never reported</string>
+    <string name="phones_forgot_fmt">Forgot %1$s.</string>
+
+    <string name="card_reporting">Status reporting</string>
+    <string name="reporting_hint">What this phone sends the claw</string>
+    <string name="reporting_location_title">Location</string>
+    <string name="reporting_location_desc">Where this phone is. A fix posts when it moves 300 m or more.</string>
+    <string name="reporting_usage_title">Current app</string>
+    <string name="reporting_usage_desc">The app in the foreground, through Android\'s usage access.</string>
+    <string name="reporting_dnd_title">Do Not Disturb</string>
+    <string name="reporting_dnd_desc">Lets the claw\'s dnd_on and dnd_off commands work.</string>
+    <string name="reporting_on">on</string>
+    <string name="reporting_allow">Allow</string>
+
     <string name="sessions_group_interactive">Interactive</string>
     <string name="sessions_group_other">Other keys</string>
 

@@ -3,14 +3,17 @@
 The phone client of the claw (the resident agent daemon): Kotlin + Jetpack
 Compose, single module, deliberately small. It chats with the agent, reports
 phone status as events, shows the agent's notifications as system
-notifications, and executes the agent's phone commands (DND, alerts).
+notifications, executes the agent's phone commands (DND, alerts), and
+manages the device fleet the claw keeps.
 
 ## What it does
 
 - **Settings**: first launch lands here until a base URL is saved and
   validated with `GET /healthz`. Stores the claw base URL and bearer token
   (plus a generated, persistent device ID) in app-private DataStore. Once
-  connected, the screen also carries the **Model providers** card: the
+  connected, the screen also carries the **Phones** and **Status
+  reporting** cards (both described below) and the **Model providers**
+  card: the
   backend instances (`GET /v1/providers`), each one's live model
   listing, and the active pair staged as a draft behind an explicit save
   (`PUT /v1/providers/active`; it applies from the claw's next turn).
@@ -52,17 +55,53 @@ notifications, and executes the agent's phone commands (DND, alerts).
   blocks stay on screen and a reader scrolled into history is not yanked
   back.
 - **Phone status source**: a WorkManager periodic worker (15 min, the OS
-  floor, `NetworkType.CONNECTED`) snapshots battery level, charging state,
-  network metering (`wifi`/`metered`/`offline`) and DND, and POSTs **only
-  transitions** vs the last successfully-posted snapshot (persisted in
-  DataStore) to `POST /v1/ingest`. Battery transitions fire on charging
-  flips and decile-bucket changes (`level/10`), so slow drain does not ping.
+  floor, `NetworkType.CONNECTED`) reads every sensor into one snapshot and
+  POSTs **only transitions** vs the last successfully-posted snapshot
+  (persisted in DataStore) to `POST /v1/ingest`. Each sensor has its own
+  transition rule, tuned to what would otherwise spam:
+
+  | Topic | Posts when | Needs |
+  |---|---|---|
+  | `battery` | charging flip, or decile bucket change (`level/10`) | nothing |
+  | `network` | `wifi`/`metered`/`offline` changes | nothing |
+  | `dnd` | on/off changes | nothing |
+  | `location` | moved 300 m or more since the last posted fix | location permission |
+  | `app` | the foreground package changes | usage access grant |
+  | `device` | the identity fingerprint changes (basically once, and on app or OS updates) | nothing |
+  | `wifi` | the connected SSID changes | location permission |
+  | `alarm` | the next alarm moves | nothing |
+
+  A sensor that is ungranted or unreadable produces no posts for its
+  topic, never an error. Rich readings carry their own honesty: a
+  location payload includes accuracy and fix age, the app payload the
+  package, its label and how long it has been current.
+
+  On the claw these split into two kinds. `battery`, `network`, and `dnd`
+  dispatch (the agent hears the flip). `location`, `app`, `device`,
+  `wifi`, and `alarm` are state-only: they land in the claw's phone
+  tables (the ingest answers `{"ingested": "observed"}`) and a `phone`
+  tool status question reads them, but no turn is run. A commute or a
+  session of app-hopping must not be a model call per move.
+
   Charging flips additionally kick a one-shot worker from a process-lifetime
   broadcast receiver (`ACTION_POWER_CONNECTED|DISCONNECTED`,
   `ACTION_BATTERY_CHANGED`). Manifest registration for those actions is
   refused by the OS (implicit broadcasts, API 26+), so the receiver is
   registered dynamically in the Application and stays dumb: it only
-  enqueues work. Location is not touched in v1.
+  enqueues work.
+- **Phone fleet**: the Settings screen's **Phones** card is the
+  management surface over the claw's registry (`GET /v1/phones`), not a
+  private view: every device the claw has heard from, its self-reported
+  label (the `device` topic's manufacturer and model), its last-seen
+  time, and a one-line state. This install's row is marked; every other
+  row carries **Forget**, which `DELETE`s the device's records on the
+  claw after a confirm dialog. A device id lives for one install, so a
+  reinstall or a cleared app data leaves the old identity behind as a
+  stale row with an old last-seen time; that row is what Forget is for.
+  A forgotten phone that still reports re-registers on its next run.
+  The **Status reporting** card names what this phone cannot send until
+  a grant is flipped (location permission, usage access, DND access)
+  and walks to the system toggles; the rows re-read on every ON_RESUME.
 - **Phone commands**: a third periodic worker polls
   `GET /v1/phone/commands?device=<id>` — the agent's consented control
   queue — every 15 minutes like the other workers (that interval is the
@@ -86,9 +125,13 @@ notifications, and executes the agent's phone commands (DND, alerts).
 - **Permissions**: `INTERNET`, `POST_NOTIFICATIONS` (runtime request on
   API 33+, re-asked per cold start; the OS throttles denials),
   `RECEIVE_BOOT_COMPLETED` (boot receiver re-runs the idempotent KEEP
-  schedule; WorkManager also re-enqueues its own work). Nothing else in
-  v1; DND control needs the special-app Do Not Disturb access grant, a
-  settings toggle rather than a permission.
+  schedule; WorkManager also re-enqueues its own work),
+  `ACCESS_COARSE_LOCATION`/`ACCESS_FINE_LOCATION` (runtime request per
+  cold start like notifications; a refusal only silences the `location`
+  and `wifi` topics). Two grants are settings toggles, not permissions:
+  usage access (`PACKAGE_USAGE_STATS` is declared only so the toggle can
+  grant it) for the `app` topic, and Do Not Disturb access for the dnd
+  commands. The Status reporting card in Settings shows all three.
 
 ## API contract (the claw's `/v1`)
 
@@ -108,6 +151,8 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `GET /v1/consents` | pending consent questions, oldest first |
 | `POST /v1/consents/{id}` | answer one: `{"secret"}` or `{"grant"}` |
 | `DELETE /v1/consents/{id}` | deny / cancel a question |
+| `GET /v1/phones` | the device fleet, labels and topics included |
+| `DELETE /v1/phones/{device}` | retire a device's records |
 | `GET /v1/phone/commands?device=` | the control queue for this device |
 | `POST /v1/phone/commands/{id}/result` | execution result; doubles as the ack |
 | `POST /v1/ingest` | `{"source","key","payload"}` |
@@ -116,18 +161,28 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 
 ### Ingest payloads emitted
 
-`source` is always `"phone"`, `key` is `phone:<deviceId>:<topic>`:
+`source` is always `"phone"`, `key` is `phone:<deviceId>:<topic>`.
+The first three dispatch; the rest are state-only on the claw (the
+ingest answers `{"ingested": "observed"}` and no turn is run):
 
 ```json
 {"topic": "battery", "value": "83", "charging": true}
 {"topic": "battery", "value": "17", "charging": false}
 {"topic": "network", "value": "wifi"}     // or "metered" | "offline"
 {"topic": "dnd", "value": "on"}           // or "off"
+{"topic": "location", "lat": 48.85, "lon": 2.35, "accuracy_m": 12.0, "provider": "fused", "age_s": 45}
+{"topic": "app", "value": "com.google.android.maps", "label": "Maps", "age_s": 900}
+{"topic": "device", "value": "Google Pixel 9", "manufacturer": "Google", "model": "Pixel 9", "android": "16", "sdk": 36, "app_version": "0.1.0"}
+{"topic": "wifi", "value": "home"}
+{"topic": "alarm", "value": 1760000000000, "in_min": 542}
 ```
 
 `battery.value` is the raw level; the transition rule is charging-flip or
-decile bucket change. Unreadable sensors (e.g. no battery on a desktop boot)
-produce no posts for that topic.
+decile bucket change. `location` posts on a 300 m move from the last posted
+fix. `app` excludes this app itself. `wifi` needs the location grant
+(Android treats an SSID read as location) and is skipped when the system
+answers with a placeholder. Unreadable or ungranted sensors produce no
+posts for that topic.
 
 ## Trade-offs
 
@@ -194,6 +249,7 @@ app/src/main/java/rs/rhema/phone/
   RhemaApp.kt          Application: container, channel, schedule, receiver
   di/AppContainer.kt   manual DI (OkHttp, Json, repos, api, notifier)
   data/                DataStore-backed settings + status repositories
+  sensors/             the status readers (location, foreground app, wifi, alarm, identity)
   net/                 ClawApi (one object per endpoint, sealed result type)
   chat/ChatController  transcript state + SSE loop for the open screen
   ui/                  Theme, shared design components, SettingsScreen,

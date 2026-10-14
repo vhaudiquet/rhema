@@ -12,13 +12,26 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 // What the last successful phone-status run reported. A null field means the
-// sensor was unreadable on this device; null fields never produce ingest posts.
+// sensor was unreadable or ungranted on this device; null fields never produce
+// ingest posts. New fields default to null, so a snapshot persisted by an
+// older build decodes (and re-posts each new topic once, which is what a
+// first report should do).
 @Serializable
 data class PhoneSnapshot(
     val charging: Boolean? = null,
     val batteryLevel: Int? = null,
     val network: String? = null,
     val dnd: String? = null,
+    // The last posted location, kept for the move-distance rule.
+    val locationLat: Double? = null,
+    val locationLon: Double? = null,
+    // The last posted foreground app package.
+    val app: String? = null,
+    // The last posted device-identity fingerprint.
+    val device: String? = null,
+    val wifi: String? = null,
+    // The next alarm's trigger time, epoch millis.
+    val alarm: Long? = null,
 )
 
 class StatusRepository(private val store: DataStore<Preferences>, private val json: Json) {

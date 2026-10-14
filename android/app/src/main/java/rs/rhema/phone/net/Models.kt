@@ -63,6 +63,25 @@ data class ActiveBackend(val active: ActivePair)
 @Serializable
 data class IngestRequest(val source: String, val key: String, val payload: JsonObject)
 
+// GET /v1/phones — the fleet: every device that ever reported, its
+// self-reported label, both clocks, and its latest observation per
+// topic. This device's row is the one whose `device` equals the local
+// device id.
+@Serializable
+data class PhonesPage(val phones: List<PhoneInfo> = emptyList())
+
+@Serializable
+data class PhoneInfo(
+    val device: String,
+    val label: String? = null,
+    @SerialName("first_seen") val firstSeen: Long = 0,
+    @SerialName("last_seen") val lastSeen: Long = 0,
+    // Topic name to its latest payload (battery, location, app, …),
+    // verbatim from the ingest posts. Unknown topics land here too, so
+    // an older build still lists a newer claw's data.
+    val topics: Map<String, JsonObject> = emptyMap(),
+)
+
 // GET /v1/notifications — the claw wraps the list in an object.
 @Serializable
 data class NotificationPage(val notifications: List<RhemaNotification> = emptyList())

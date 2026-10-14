@@ -115,6 +115,23 @@ class ClawApi(
         return execute(builder.post(body).build()) { }
     }
 
+    // GET /v1/phones: the device fleet, for the settings screen's
+    // management card.
+    suspend fun phones(): ClawResult<PhonesPage> {
+        val builder = v1("phones") ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.get().build()) { response ->
+            json.decodeFromString<PhonesPage>(response.body?.string() ?: "{}")
+        }
+    }
+
+    // DELETE /v1/phones/{device}: retire a device's records on the claw.
+    // The claw answers {"forgotten": bool} — false for an unknown name,
+    // which only means another surface got there first.
+    suspend fun forgetPhone(device: String): ClawResult<Unit> {
+        val builder = v1("phones", device) ?: return ClawResult.Network("no base URL configured")
+        return execute(builder.delete().build()) { }
+    }
+
     suspend fun notifications(deviceId: String, since: String): ClawResult<List<RhemaNotification>> {
         val base = baseOrNull() ?: return ClawResult.Network("no base URL configured")
         val url = base.toHttpUrlOrNull()?.newBuilder()

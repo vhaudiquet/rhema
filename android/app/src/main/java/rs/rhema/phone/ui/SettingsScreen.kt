@@ -88,8 +88,12 @@ fun SettingsScreen(container: AppContainer, onConnected: () -> Unit = {}) {
             deviceId = deviceId,
         )
 
-        // The providers card needs a reachable claw; hidden on first launch.
+        // The rest need a reachable claw; hidden on first launch.
         if (configured == true) {
+            Spacer(Modifier.height(20.dp))
+            PhonesCard(container)
+            Spacer(Modifier.height(20.dp))
+            ReportingCard()
             Spacer(Modifier.height(20.dp))
             ProvidersCard(container)
         }

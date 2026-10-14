@@ -37,6 +37,9 @@ class MainActivity : ComponentActivity() {
     private val notificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
+    private val locationPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // Edge-to-edge with the design's dark ground behind the system
         // bars; the theme draws under them, the root pads them out.
@@ -47,6 +50,17 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= 33) {
             notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        // Location is the status source's optional sensor: the request rides
+        // every cold start like the notifications one, and a refusal costs
+        // only the location topic — everything else reports as before. The
+        // Settings screen's Status reporting card names the missing grants
+        // and walks to the system toggles.
+        locationPermissions.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+            ),
+        )
         val container = (application as RhemaApp).container
         setContent {
             RhemaTheme {
