@@ -4,21 +4,14 @@ title: Rhema
 # The version of record: the release workflow rewrites it from the tag
 # before building, so a tag ships exactly its number (the chart's pattern).
 version: "0.1.0"
-summary: The rhema coding agent — terminal UI, one-shot, and ACP
+summary: Rhema Code, a terminal-based coding agent
 description: |
-  A coding agent in your terminal: a full-screen TUI over streamed
-  model replies, `rhema run` for pipeable one-shots, and `rhema acp`
-  so editors drive rhema over the Agent Client Protocol.
-
-  Classic confinement on purpose: the agent's one tool is bash, run
-  in your workspace with your real toolchain, and every profile,
-  login, and saved session lives under your normal ~/.config and
-  ~/.cache paths.
+  Rhema Code is a terminal-based coding agent, built on the Rhema agent framework.
 license: MIT
 contact: vhaudiquet343@hotmail.fr
-issues: https://git.vhaudiquet.fr/vhaudiquet/rhema/issues
-source-code: https://git.vhaudiquet.fr/vhaudiquet/rhema
-website: https://git.vhaudiquet.fr/vhaudiquet/rhema
+issues: https://github.com/vhaudiquet/rhema/issues
+source-code: https://github.com/vhaudiquet/rhema
+website: https://rhema.rs
 grade: stable
 confinement: classic
 platforms:
