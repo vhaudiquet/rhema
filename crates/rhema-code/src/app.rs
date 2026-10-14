@@ -189,11 +189,57 @@ impl Backend {
         profile: &rhema_config::Profile,
         secrets: Option<&dyn rhema_config::secrets::SecretStore>,
     ) -> Option<Backend> {
-        let active = profile.provider_name()?;
+        Self::from_profile_or_help(profile, secrets).ok()
+    }
+
+    /// [`Backend::from_profile`] with the failure explained: the headless
+    /// runner has no login screen to fall back to, so its error names the
+    /// fix instead of leaving it to a screen that does not exist. The TUI
+    /// flattens it back to `None` and opens the login.
+    pub fn from_profile_or_help(
+        profile: &rhema_config::Profile,
+        secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+    ) -> Result<Backend, String> {
+        let active = profile
+            .provider_name()
+            .filter(|name| Self::known_provider(name))
+            .ok_or_else(|| NO_PROVIDER_HELP.to_owned())?;
+        let missing = || Self::missing_key_help(&active).to_owned();
         if let Some((_, instance)) = profile.instance_for_provider(&active) {
-            return Self::from_instance(profile, instance, secrets);
+            return Self::from_instance(profile, instance, secrets).ok_or_else(missing);
         }
-        Self::named(&active, profile, secrets)
+        Self::named(&active, profile, secrets).ok_or_else(missing)
+    }
+
+    /// The config spellings a backend exists for; anything else is a
+    /// typo, and a typo must not read as a missing key.
+    fn known_provider(name: &str) -> bool {
+        matches!(
+            name,
+            "google"
+                | "llama-cpp"
+                | "openrouter"
+                | "anthropic"
+                | "openai"
+                | "deepseek"
+                | "zai"
+                | "copilot"
+        )
+    }
+
+    /// The fix for a provider whose credential cannot be resolved.
+    fn missing_key_help(provider: &str) -> &'static str {
+        match provider {
+            "google" => "missing API key: set GEMINI_API_KEY (or log in once interactively)",
+            "openrouter" => "missing API key: set OPENROUTER_API_KEY",
+            "anthropic" => "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)",
+            "openai" => "missing API key: set OPENAI_API_KEY (or log in once interactively)",
+            "deepseek" => "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)",
+            "zai" => "missing API key: set ZAI_API_KEY (or log in once interactively)",
+            "copilot" => "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)",
+            // llama-cpp serves keyless; resolution never fails on it.
+            _ => "missing API key",
+        }
     }
 
     /// Builds one backend per logged-in instance of the profile — the
@@ -473,6 +519,11 @@ impl Backend {
         }
     }
 }
+
+/// The fix for a config that names no usable provider: the startup gate
+/// and the headless error share it.
+pub(crate) const NO_PROVIDER_HELP: &str = "no provider configured: set RHEMA_PROVIDER, pick one in the UI, or \
+     store one in a profile";
 
 /// One backend a profile can serve, with the instance it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]

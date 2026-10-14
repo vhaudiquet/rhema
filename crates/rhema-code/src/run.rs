@@ -123,18 +123,6 @@ impl EventSink for HeadlessSink {
     }
 }
 
-/// Humanizes a token count: 1_048_576 → "1.0M", 131_072 → "131k".
-fn format_tokens(limit: u32) -> String {
-    let limit = u64::from(limit);
-    if limit >= 1_000_000 {
-        format!("{:.1}M", limit as f64 / 1_000_000.0)
-    } else if limit >= 10_000 {
-        format!("{}k", limit / 1_000)
-    } else {
-        format!("{limit}")
-    }
-}
-
 /// The whole of stdin, as the `run -` prompt form and a piped stdin
 /// read it.
 fn read_prompt_from_stdin() -> anyhow::Result<String> {
@@ -352,78 +340,11 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     // configured is an error naming the fixes: headless has no login
     // screen to fall through to.
     let provider_choice = ProviderChoice::from_stored(effective.provider_name().as_deref())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "no provider configured: set RHEMA_PROVIDER, pick one in the \
-                 UI, or store one in a profile"
-            )
-        })?;
-    // No login screen exists headless: a missing credential is an error
-    // naming the fix.
-    let backend = match provider_choice {
-        ProviderChoice::Google => effective
-            .api_key("google", Some(&secrets))
-            .map(|api_key| Backend::Google { api_key })
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing API key: set GEMINI_API_KEY (or log in once interactically)"
-                )
-            })?,
-        ProviderChoice::LlamaCpp => Backend::LlamaCpp {
-            url: effective.llama_cpp_url(),
-            api_key: effective.api_key("llama-cpp", Some(&secrets)),
-        },
-        ProviderChoice::OpenRouter => Backend::OpenRouter {
-            api_key: effective
-                .api_key("openrouter", Some(&secrets))
-                .ok_or_else(|| anyhow::anyhow!("missing API key: set OPENROUTER_API_KEY"))?,
-        },
-        ProviderChoice::Anthropic => Backend::Anthropic {
-            api_key: effective
-                .api_key("anthropic", Some(&secrets))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)"
-                    )
-                })?,
-        },
-        ProviderChoice::OpenAi => Backend::OpenAi {
-            api_key: effective.api_key("openai", Some(&secrets)).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "missing API key: set OPENAI_API_KEY (or log in once interactively)"
-                )
-            })?,
-            base_url: effective.openai_base_url(),
-        },
-        ProviderChoice::DeepSeek => Backend::DeepSeek {
-            api_key: effective
-                .api_key("deepseek", Some(&secrets))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)"
-                    )
-                })?,
-        },
-        ProviderChoice::Zai => Backend::Zai {
-            api_key: effective.api_key("zai", Some(&secrets)).ok_or_else(|| {
-                anyhow::anyhow!("missing API key: set ZAI_API_KEY (or log in once interactively)")
-            })?,
-            // A stored instance may override the route (a proxy); none
-            // means the Coding Plan endpoint itself.
-            base_url: effective
-                .instance_for_provider("zai")
-                .and_then(|(_, instance)| effective.instance_url(instance)),
-        },
-        ProviderChoice::Copilot => Backend::Copilot {
-            api_key: effective
-                .api_key("copilot", Some(&secrets))
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)"
-                    )
-                })?,
-        },
-    };
+        .ok_or_else(|| anyhow::anyhow!(crate::app::NO_PROVIDER_HELP))?;
+    // The same resolution the TUI's startup runs; a failure names the
+    // fix, because headless has no login screen to fall through to.
+    let backend = Backend::from_profile_or_help(&effective, Some(&secrets))
+        .map_err(|message| anyhow::anyhow!("{message}"))?;
     let model = args.model.clone().unwrap_or_else(|| {
         effective
             .model
@@ -439,12 +360,10 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
             })
     });
 
-    let workspace =
-        std::fs::canonicalize(&args.workspace).unwrap_or_else(|_| args.workspace.clone());
     let thinking = args
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)
-        .or_else(|| config.effective(Some(&profile)).thinking_effort())
+        .or_else(|| effective.thinking_effort())
         .unwrap_or(rhema_core::request::ThinkingEffort::Default);
     let agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
@@ -480,7 +399,7 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     eprintln!(
         "· {} · ctx {}",
         model,
-        format_tokens(output.usage.input_tokens)
+        crate::screens::format_tokens(Some(u64::from(output.usage.input_tokens)))
     );
     Ok(())
 }
