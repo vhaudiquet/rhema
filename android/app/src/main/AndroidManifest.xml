@@ -11,6 +11,10 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- DND control is a special-app grant, and this declaration is what
+         puts the app on the "Do Not Disturb access" screen's list: an
+         undeclared app opens that screen and finds nothing to flip. -->
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
     <!-- App usage is not a runtime permission but a special-app access
          (Settings → Apps → Special app access → Usage access); declaring
          it is what makes the toggle able to grant it to this app. -->
