@@ -1,9 +1,11 @@
 # The release channel: a v* tag ships the exact-version images (plus
 # the sha pin the chart's appVersion resolves to), the exact-version
-# chart, the rhema snap to the store's stable channel, and the library
-# closure to crates.io. Edge publishing on every main push lives in
-# ci.yml. Release candidates (a v* tag with a prerelease suffix,
-# v0.2.0-rc1) publish nothing, like pkh's release jobs.
+# chart, and the library closure to crates.io. Edge publishing on every
+# main push lives in ci.yml. Release candidates (a v* tag with a
+# prerelease suffix, v0.2.0-rc1) publish nothing, like pkh's release
+# jobs. The snap jobs are parked until the store approves classic
+# confinement (a forum request); the recipe in snap/snapcraft.yaml is
+# proven — the first run packed and the store rejected the upload.
 name: release
 on:
   push:
@@ -137,7 +139,7 @@ jobs:
             echo "aws already present"
           else
             sudo apt-get update && sudo apt-get install -y unzip
-            curl -fsSL "https://awscli.amazonaws.com/awscli-v2-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
             unzip -q /tmp/awscliv2.zip -d /tmp
             sudo /tmp/aws/install
             rm -rf /tmp/aws /tmp/awscliv2.zip
@@ -193,7 +195,7 @@ jobs:
             echo "aws already present"
           else
             sudo apt-get update && sudo apt-get install -y unzip
-            curl -fsSL "https://awscli.amazonaws.com/awscli-v2-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
             unzip -q /tmp/awscliv2.zip -d /tmp
             sudo /tmp/aws/install
             rm -rf /tmp/aws /tmp/awscliv2.zip
@@ -231,52 +233,6 @@ jobs:
           } > dist/manifest.json
           aws s3 cp dist/checksums.txt "s3://get/$version/" --endpoint-url "$endpoint"
           aws s3 cp dist/manifest.json "s3://get/manifest.json" --endpoint-url "$endpoint"
-
-  release-snap:
-    # The rhema snap to the store's stable channel. The store tracks
-    # revisions itself, so the tag decides one thing: the version
-    # string, rewritten before building so a tag ships exactly its
-    # number (the chart's pattern). The snap packs the committed tree
-    # (source-type: git), so the vendored crossterm rides along — no
-    # crates.io in the build path.
-    if: ${{ !contains(gitea.ref_name, '-') }}
-    runs-on: ubuntu-latest
-    container:
-      # Official snapcraft image: an Ubuntu userland matching the snap
-      # base, with snapcraft preinstalled (no snapd/systemd/LXD needed
-      # for a destructive-mode pack).
-      image: ghcr.io/canonical/snapcraft:8_core24
-    steps:
-      - name: Install build prerequisites
-        run: |
-          apt-get update -q
-          apt-get install -y -q --no-install-recommends git curl nodejs
-
-      - uses: https://gitea.com/actions/checkout@v4
-
-      - name: Stamp the version from the tag
-        run: |
-          sed -i "s/^version: .*/version: \"${GITHUB_REF_NAME#v}\"/" snap/snapcraft.yaml
-          # The edge build-environment entry must not reach a tag build:
-          # with it, build.rs would label a release an edge pre-release.
-          sed -i -e "/RHEMA_BUILD_CHANNEL/d" -e "/^ *build-environment:$/d" snap/snapcraft.yaml
-          grep '^version:' snap/snapcraft.yaml
-
-      - name: Build the snap
-        run: |
-          # The runner overrides the image entrypoint (pebble), which is
-          # what normally puts craftctl on PATH; restore it, let git run
-          # in the checked-out tree, and provide rustup for the rust
-          # plugin (rust-toolchain.toml then picks the toolchain).
-          git config --global --add safe.directory '*'
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
-          export PATH="/usr/libexec/snapcraft:$HOME/.cargo/bin:$PATH"
-          snapcraft pack --destructive-mode
-
-      - name: Upload to the stable channel
-        run: snapcraft upload rhema_*.snap --release=stable
-        env:
-          SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
 
   publish-crates-io:
     # The rhema-code library closure to crates.io, in dependency order —
