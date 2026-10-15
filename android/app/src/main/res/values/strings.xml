@@ -47,6 +47,17 @@
     <string name="consent_denied">denied</string>
     <string name="consent_answer_failed">Answer failed: %1$s</string>
 <string name="settings_page_title">Settings</string>
+    <string name="settings_back">Back</string>
+    <string name="settings_group_phone">Phone</string>
+    <string name="settings_group_claw">Claw</string>
+    <string name="settings_entry_reporting">Status reporting</string>
+    <string name="settings_entry_reporting_desc">Location, battery, DND, and the other sensors this phone sends</string>
+    <string name="settings_entry_devices">Devices</string>
+    <string name="settings_entry_devices_desc">Every phone the claw has heard from; forget the stale ones</string>
+    <string name="settings_entry_providers">Model providers</string>
+    <string name="settings_entry_providers_desc">Which backend and model answer the claw\'s turns</string>
+    <string name="settings_entry_connection">Connection</string>
+    <string name="settings_entry_connection_desc">The claw\'s URL and bearer token</string>
     <string name="card_connection">Connection</string>
     <string name="card_providers">Model providers</string>
     <string name="providers_hint">What the claw answers with</string>

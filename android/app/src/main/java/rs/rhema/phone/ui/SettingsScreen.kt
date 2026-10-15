@@ -1,5 +1,7 @@
 package rs.rhema.phone.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -10,7 +12,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -25,8 +31,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import rs.rhema.phone.R
@@ -37,19 +45,158 @@ import rs.rhema.phone.net.ModelCard
 import rs.rhema.phone.net.ProvidersState
 import kotlinx.coroutines.launch
 
-// Settings in the design language: the connection card (first launch
-// lands here and stays until GET /healthz succeeds), then — once the
-// claw is reachable — the Model providers card, the same draft → save
-// flow the web UI runs over the public /v1/providers routes.
+// Settings in the design language, as a nav of submenus mirroring the
+// web UI's settings sidebar: labeled groups ("Phone", "Claw") of one
+// page each — status reporting, devices, model providers, connection.
+// First launch is the exception: it lands straight on the connection
+// page and stays there until GET /healthz succeeds.
 @Composable
 fun SettingsScreen(container: AppContainer, onConnected: () -> Unit = {}) {
+    val configured by container.settings.configured.collectAsState(initial = null)
+    var section by rememberSaveable { mutableStateOf<String?>(null) }
+
+    // Back out of a submenu before leaving settings entirely; the
+    // caller's BackHandler (enabled only when this one is not) takes
+    // the rest.
+    BackHandler(enabled = section != null && configured == true) { section = null }
+
+    when {
+        configured == false -> ConnectionPage(container, onConnected = onConnected, onBack = null)
+        section == null -> SettingsNav { section = it }
+        else -> when (section) {
+            SECTION_REPORTING -> SettingsPage(
+                title = stringResource(R.string.settings_entry_reporting),
+                onBack = { section = null },
+            ) { ReportingCard() }
+            SECTION_DEVICES -> SettingsPage(
+                title = stringResource(R.string.settings_entry_devices),
+                onBack = { section = null },
+            ) { PhonesCard(container) }
+            SECTION_PROVIDERS -> SettingsPage(
+                title = stringResource(R.string.settings_entry_providers),
+                onBack = { section = null },
+            ) { ProvidersCard(container) }
+            else -> ConnectionPage(container, onConnected = onConnected, onBack = { section = null })
+        }
+    }
+}
+
+// The nav entries. Ids are stable spellings (saveable state survives
+// rotation through them).
+private const val SECTION_REPORTING = "reporting"
+private const val SECTION_DEVICES = "devices"
+private const val SECTION_PROVIDERS = "providers"
+private const val SECTION_CONNECTION = "connection"
+
+private data class SettingsEntry(val id: String, val labelRes: Int, val descRes: Int)
+private data class SettingsSection(val labelRes: Int, val entries: List<SettingsEntry>)
+
+private val SECTIONS = listOf(
+    SettingsSection(
+        R.string.settings_group_phone,
+        listOf(
+            SettingsEntry(
+                SECTION_REPORTING,
+                R.string.settings_entry_reporting,
+                R.string.settings_entry_reporting_desc,
+            ),
+            SettingsEntry(
+                SECTION_DEVICES,
+                R.string.settings_entry_devices,
+                R.string.settings_entry_devices_desc,
+            ),
+        ),
+    ),
+    SettingsSection(
+        R.string.settings_group_claw,
+        listOf(
+            SettingsEntry(
+                SECTION_PROVIDERS,
+                R.string.settings_entry_providers,
+                R.string.settings_entry_providers_desc,
+            ),
+            SettingsEntry(
+                SECTION_CONNECTION,
+                R.string.settings_entry_connection,
+                R.string.settings_entry_connection_desc,
+            ),
+        ),
+    ),
+)
+
+@Composable
+private fun SettingsNav(onSelect: (String) -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        PageHeader(title = stringResource(R.string.settings_page_title))
+        SECTIONS.forEach { section ->
+            SectionLabel(
+                stringResource(section.labelRes),
+                modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
+            )
+            section.entries.forEach { entry ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onSelect(entry.id) }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            stringResource(entry.labelRes),
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        Text(
+                            stringResource(entry.descRes),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = JadeiteText3,
+                        )
+                    }
+                    Text("›", style = MaterialTheme.typography.titleMedium, color = JadeiteText3)
+                }
+            }
+        }
+    }
+}
+
+/** A submenu: a back arrow and title over the page's card. */
+@Composable
+private fun SettingsPage(title: String, onBack: () -> Unit, content: @Composable () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.settings_back),
+                    tint = JadeiteText2,
+                )
+            }
+            Text(title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+        }
+        Column(modifier = Modifier.padding(horizontal = 16.dp)) { content() }
+    }
+}
+
+/** The connection page: first launch lands here alone (onBack = null
+ * and the header is the plain Settings title); from the nav it is a
+ * submenu like the rest. */
+@Composable
+private fun ConnectionPage(container: AppContainer, onConnected: () -> Unit, onBack: (() -> Unit)?) {
     val scope = rememberCoroutineScope()
     var baseUrl by rememberSaveable { mutableStateOf("") }
     var token by rememberSaveable { mutableStateOf("") }
     var busy by rememberSaveable { mutableStateOf(false) }
     var status by remember { mutableStateOf<UiMessage?>(null) }
     val deviceId by container.settings.deviceIdFlow.collectAsState(initial = "…")
-    val configured by container.settings.configured.collectAsState(initial = null)
 
     LaunchedEffect(Unit) {
         val saved = container.settings.current()
@@ -60,42 +207,49 @@ fun SettingsScreen(container: AppContainer, onConnected: () -> Unit = {}) {
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp),
+            .verticalScroll(rememberScrollState()),
     ) {
-        PageHeader(title = stringResource(R.string.settings_page_title))
-
-        ConnectionCard(
-            baseUrl = baseUrl,
-            onBaseUrl = { baseUrl = it },
-            token = token,
-            onToken = { token = it },
-            busy = busy,
-            onConnect = {
-                busy = true
-                status = null
-                scope.launch {
-                    container.settings.setCredentials(baseUrl.trim(), token.trim())
-                    when (val result = container.api.health()) {
-                        is ClawResult.Ok -> onConnected()
-                        is ClawResult.HttpError -> status = UiMessage.Http(result.code, result.body)
-                        is ClawResult.Network -> status = UiMessage.Network(result.message)
-                    }
-                    busy = false
+        if (onBack == null) {
+            PageHeader(title = stringResource(R.string.settings_page_title))
+        } else {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onBack) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = stringResource(R.string.settings_back),
+                        tint = JadeiteText2,
+                    )
                 }
-            },
-            status = status,
-            deviceId = deviceId,
-        )
-
-        // The rest need a reachable claw; hidden on first launch.
-        if (configured == true) {
-            Spacer(Modifier.height(20.dp))
-            PhonesCard(container)
-            Spacer(Modifier.height(20.dp))
-            ReportingCard()
-            Spacer(Modifier.height(20.dp))
-            ProvidersCard(container)
+                Text(
+                    stringResource(R.string.settings_entry_connection),
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                )
+            }
+        }
+        Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+            ConnectionCard(
+                baseUrl = baseUrl,
+                onBaseUrl = { baseUrl = it },
+                token = token,
+                onToken = { token = it },
+                busy = busy,
+                onConnect = {
+                    busy = true
+                    status = null
+                    scope.launch {
+                        container.settings.setCredentials(baseUrl.trim(), token.trim())
+                        when (val result = container.api.health()) {
+                            is ClawResult.Ok -> onConnected()
+                            is ClawResult.HttpError -> status = UiMessage.Http(result.code, result.body)
+                            is ClawResult.Network -> status = UiMessage.Network(result.message)
+                        }
+                        busy = false
+                    }
+                },
+                status = status,
+                deviceId = deviceId,
+            )
         }
     }
 }
