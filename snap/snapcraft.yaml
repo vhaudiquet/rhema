@@ -52,6 +52,10 @@ parts:
     build-environment:
       - RHEMA_BUILD_CHANNEL: edge
     build-packages:
-      # reqwest's native-tls ends in openssl-sys
+      # The snapcraft image ships no cc and no glibc dev files: rust-lld
+      # needs the crt objects, and the C dependencies (reqwest's
+      # native-tls ends in openssl-sys; the bundled SQLite) need a real
+      # compiler.
+      - build-essential
       - pkg-config
       - libssl-dev

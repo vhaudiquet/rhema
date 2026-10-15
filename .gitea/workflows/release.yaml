@@ -124,13 +124,25 @@ jobs:
 
       # The cross legs build inside the target image: the host needs
       # nothing of openssl or pkg-config there.
-      - name: Install build and upload dependencies
+      - name: Install build dependencies
         if: matrix.rust_target == ''
-        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev awscli
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev unzip
 
-      - name: Install upload dependencies
-        if: matrix.rust_target != ''
-        run: sudo apt-get update && sudo apt-get install -y awscli
+      - name: Install the AWS CLI
+        # Ubuntu 24.04 dropped the awscli package; the official v2
+        # bundle is the source of truth. Skipped where the runner
+        # image already ships aws.
+        run: |
+          if command -v aws >/dev/null; then
+            echo "aws already present"
+          else
+            sudo apt-get update && sudo apt-get install -y unzip
+            curl -fsSL "https://awscli.amazonaws.com/awscli-v2-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
+          fi
+          aws --version
 
       - name: Install cross
         if: matrix.rust_target != ''
@@ -172,8 +184,21 @@ jobs:
     needs: release-binaries
     runs-on: ubuntu-latest
     steps:
-      - name: Install upload dependencies
-        run: sudo apt-get update && sudo apt-get install -y awscli
+      - name: Install the AWS CLI
+        # Ubuntu 24.04 dropped the awscli package; the official v2
+        # bundle is the source of truth. Skipped where the runner
+        # image already ships aws.
+        run: |
+          if command -v aws >/dev/null; then
+            echo "aws already present"
+          else
+            sudo apt-get update && sudo apt-get install -y unzip
+            curl -fsSL "https://awscli.amazonaws.com/awscli-v2-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
+          fi
+          aws --version
 
       - name: Publish the channel manifest
         env:
