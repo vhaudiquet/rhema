@@ -38,7 +38,7 @@ pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// The `HTTP-Referer` attribution header OpenRouter recommends for its
 /// rankings on openrouter.ai.
-pub const APP_REFERER: &str = "https://github.com/vhaudiquet/rhema";
+pub const APP_REFERER: &str = "https://rhema.rs";
 
 /// The `X-Title` attribution header OpenRouter recommends for its rankings
 /// on openrouter.ai.

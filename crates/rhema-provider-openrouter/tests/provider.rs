@@ -112,7 +112,7 @@ async fn streams_sse_into_events_and_an_assembled_output() {
         headers
             .get("http-referer")
             .and_then(|value| value.to_str().ok()),
-        Some("https://github.com/vhaudiquet/rhema")
+        Some("https://rhema.rs")
     );
 }
 
