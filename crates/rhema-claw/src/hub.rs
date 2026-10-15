@@ -219,15 +219,31 @@ impl EventHub {
         &self,
         key: &ResourceKey,
     ) -> (Vec<TurnEvent>, broadcast::Receiver<TurnEvent>) {
+        Self::subscribe_with_history_from(self, key, 0)
+    }
+
+    /// [`Self::subscribe_with_history`] with a cursor: `skip` names how
+    /// many of the record's oldest events the caller already holds (the
+    /// count a client tracks for its local transcript cache), and the
+    /// replay drops them, so a reconnecting client that kept its
+    /// transcript receives only what is new. A `skip` past the record's
+    /// end clamps to it — the client cannot skip into events that do not
+    /// exist, and the live feed after the cut is unaffected either way.
+    pub fn subscribe_with_history_from(
+        &self,
+        key: &ResourceKey,
+        skip: usize,
+    ) -> (Vec<TurnEvent>, broadcast::Receiver<TurnEvent>) {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = Self::entry(&mut entries, key, self.capacity);
-        let history = match self.record_store.as_ref() {
+        let mut history = match self.record_store.as_ref() {
             Some(store) => store.events(key.as_str()).unwrap_or_else(|err| {
                 eprintln!("[claw] warning: replay for {key} failed: {err}");
                 Vec::new()
             }),
             None => entry.history.iter().cloned().collect(),
         };
+        history.drain(..skip.min(history.len()));
         (history, entry.sender.subscribe())
     }
 
@@ -513,5 +529,30 @@ mod tests {
         assert_eq!(history.len(), 1);
         hub.emit(&key, text("in this life"));
         assert_eq!(receiver.try_recv().unwrap(), text("in this life"));
+    }
+
+    #[test]
+    fn a_cursor_skips_exactly_the_events_the_caller_already_holds() {
+        let hub = EventHub::default();
+        let key = key("cached");
+        for n in 0..4 {
+            hub.emit(&key, text(&n.to_string()));
+        }
+
+        // A client that cached the first three receives only the fourth;
+        // the live cut is untouched by the skip.
+        let (history, mut receiver) = hub.subscribe_with_history_from(&key, 3);
+        assert_eq!(history, vec![text("3")], "only the unseen part replays");
+        hub.emit(&key, done("hi back"));
+        assert_eq!(receiver.try_recv().unwrap(), done("hi back"));
+
+        // A cursor past the record's end clamps to it: nothing replays,
+        // and nothing the record still holds is skipped twice.
+        let (history, _) = hub.subscribe_with_history_from(&key, 100);
+        assert!(history.is_empty());
+
+        // Zero behaves as the plain replay.
+        let (history, _) = hub.subscribe_with_history_from(&key, 0);
+        assert_eq!(history.len(), 5);
     }
 }

@@ -339,6 +339,58 @@ async fn a_cold_subscription_replays_the_turns_it_missed_even_after_a_restart() 
     );
 }
 
+/// The `since` cursor: a client that already holds the record's first
+/// event receives the record minus it — the phone client's transcript
+/// cache, so reopening a session is not a rebuild from zero.
+#[tokio::test]
+async fn a_since_cursor_skips_the_replays_oldest_events() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config(&dir, None);
+    {
+        let daemon = Daemon::build(
+            &config,
+            mock_registry(Arc::new(MockProvider::new([reply("on it")]))),
+            rhema_rsd::DispatcherConfig::default(),
+        )
+        .expect("the daemon assembles");
+        let base = serve(&daemon).await;
+        let client = reqwest::Client::new();
+
+        // One turn, nobody watching; the drain flushes the record
+        // before the 202 returns.
+        let accepted = client
+            .post(format!("{base}/v1/sessions/interactive:web/messages"))
+            .json(&json!({"text": "hello"}))
+            .send()
+            .await
+            .expect("the message posts");
+        assert_eq!(accepted.status(), 202);
+    }
+
+    let daemon = Daemon::build(
+        &config,
+        mock_registry(Arc::new(MockProvider::new([]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the restarted daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events?since=1"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    assert_eq!(events.status(), 200);
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+    read_until(&mut stream, &mut seen, r#""type":"text_delta""#).await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    assert!(
+        !seen.contains(r#""type":"user_message""#),
+        "the event the cursor names does not replay: {seen}"
+    );
+}
+
 /// The other two resident prefixes take chat messages, and their turns'
 /// replies auto-notify: a `phone:` key delivers to the device its name
 /// carries, a `task:` key to the phone. Forge keys stay refused.

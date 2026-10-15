@@ -446,7 +446,20 @@ async fn messages(
         .into_response()
 }
 
-async fn events(State(state): State<ClawState>, Path(key): Path<String>) -> Response {
+/// The events route's query: `since` counts how many of the record's
+/// oldest events the client already holds in its local transcript cache,
+/// and those are skipped in the replay. Absent (the web UI keeps no
+/// cache) the replay stays whole.
+#[derive(Debug, Deserialize)]
+struct EventStreamQuery {
+    since: Option<usize>,
+}
+
+async fn events(
+    State(state): State<ClawState>,
+    Path(key): Path<String>,
+    Query(query): Query<EventStreamQuery>,
+) -> Response {
     // The same resident-key rule the messages route applies: an SSE
     // subscription to a forge key is a misuse, not a stream.
     if !crate::interactive::is_resident_key(&key) {
@@ -459,8 +472,12 @@ async fn events(State(state): State<ClawState>, Path(key): Path<String>) -> Resp
     // History first, live second, cut atomically: the snapshot and the
     // subscription leave the hub under one lock, so a client folding the
     // replay and then the stream sees every event exactly once. A reload
-    // rebuilds its transcript from this — nothing else backfills it.
-    let (history, mut receiver) = state.hub.subscribe_with_history(&ResourceKey::from(key));
+    // rebuilds its transcript from this — nothing else backfills it. A
+    // client that cached the transcript opens with `since` and receives
+    // only the events it has not seen.
+    let (history, mut receiver) = state
+        .hub
+        .subscribe_with_history_from(&ResourceKey::from(key), query.since.unwrap_or(0));
     // The pump decouples the broadcast channel from the SSE body: the
     // client's disconnect closes the body, which fails the send, which
     // ends the pump. The stream never ends on its own — a chat UI
