@@ -100,7 +100,6 @@
     <string name="sessions_group_interactive">Interactive</string>
     <string name="sessions_group_other">Other keys</string>
 
-    <string name="chat_you">you</string>
     <string name="chat_agent">rhema</string>
 </resources>
 

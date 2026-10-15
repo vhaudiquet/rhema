@@ -279,29 +279,38 @@ private fun TurnGroupRow(
 ) {
     when (group) {
         is TurnGroup.User -> Row(
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalArrangement = Arrangement.End,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            AppAvatar("·", accent = false)
-            Column {
-                Text(
-                    stringResource(R.string.chat_you),
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Bold,
-                    color = JadeiteText2,
-                )
-                // Embedded pastes render as chips, not payloads; the text
-                // around them stays verbatim.
-                var chip = 0
-                pasteParts(group.text).forEach { part ->
-                    when (part) {
-                        is PastePart.Text -> Text(part.text, style = MaterialTheme.typography.bodyLarge)
-                        is PastePart.Paste -> {
-                            chip += 1
-                            PasteChip(chipLabel(part.payload, chip))
+            // The reader's own words: a right-anchored bubble, elevated
+            // one step and marked on its trailing edge — no label or
+            // avatar, the side says whose it is.
+            Row(
+                modifier = Modifier
+                    .weight(1f, fill = false)
+                    .height(IntrinsicSize.Min)
+                    .background(JadeiteElevated, MaterialTheme.shapes.small),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .padding(horizontal = 10.dp, vertical = 8.dp)
+                        .weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    // Embedded pastes render as chips, not payloads; the
+                    // text around them stays verbatim.
+                    var chip = 0
+                    pasteParts(group.text).forEach { part ->
+                        when (part) {
+                            is PastePart.Text -> Text(part.text, style = MaterialTheme.typography.bodyLarge)
+                            is PastePart.Paste -> {
+                                chip += 1
+                                PasteChip(chipLabel(part.payload, chip))
+                            }
                         }
                     }
                 }
+                AccentBar(JadeiteAccent)
             }
         }
         is TurnGroup.Agent -> Row(
