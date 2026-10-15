@@ -3,6 +3,9 @@ package rs.rhema.phone.chat
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import rs.rhema.phone.data.CachedSession
+import rs.rhema.phone.data.SESSION_WINDOW
+import rs.rhema.phone.data.SessionCache
 import rs.rhema.phone.net.ClawApi
 import rs.rhema.phone.net.ClawEvent
 import rs.rhema.phone.net.ClawResult
@@ -12,12 +15,18 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.NonCancellable
 
-// Holds the live transcript of one open chat screen. Its lifetime is the
-// screen's: rotation or process death drops the transcript (v1 trade-off;
-// the claw-side session is unaffected).
+// Holds the live transcript of one open chat screen. The transcript is
+// seeded from the session cache before the first frame and kept in the
+// cache as events stream, so opening a session paints it at once and the
+// claw is asked only for the events past the cache (the stream's `since`
+// cursor). Rotation re-seeds from the cache; process death no longer
+// costs the transcript.
 class ChatController(
     private val api: ClawApi,
+    private val cache: SessionCache,
     private val scope: CoroutineScope,
     val sessionKey: String,
 ) {
@@ -86,34 +95,62 @@ class ChatController(
     private var nextId = 0L
     private fun newId() = nextId++
 
+    // The applied event log: the cache's tail plus what this connection
+    // delivered, and [appliedTotal] its count from the session's first
+    // event — the cursor every (re)connection opens with.
+    private var applied: MutableList<ClawEvent> = mutableListOf()
+    private var appliedTotal = 0L
+
     private var streamJob: Job? = null
 
     fun start() {
         if (streamJob != null) return
         streamJob = scope.launch {
-            while (isActive) {
-                api.eventStream(sessionKey).collect { frame ->
-                    when (frame) {
-                        // Every (re)connection opens with the claw's replay of
-                        // the recorded turns, then the live feed: drop the
-                        // mirror and let the replay rebuild it, or the replay
-                        // would double everything already on screen.
-                        SseFrame.Opened -> {
-                            items = emptyList()
-                            connection = Conn.Live
+            // Seed before the first frame: the screen shows the cached
+            // transcript at once, and the stream opens past it.
+            val cached = cache.get(sessionKey)
+            appliedTotal = cached.total
+            applied = cached.events.toMutableList()
+            items = applyEvents(emptyList(), applied)
+            try {
+                while (isActive) {
+                    api.eventStream(sessionKey, appliedTotal).collect { frame ->
+                        when (frame) {
+                            // The replay was cut at the cursor, so nothing
+                            // already on screen arrives twice; the feed just
+                            // continues from where the cache left off.
+                            SseFrame.Opened -> connection = Conn.Live
+                            is SseFrame.Event -> record(frame.event)
+                            SseFrame.Closed -> Unit
+                            is SseFrame.Failed -> connection = Conn.Failed(frame.code, frame.message)
                         }
-                        is SseFrame.Event -> apply(frame.event)
-                        SseFrame.Closed -> Unit
-                        is SseFrame.Failed -> connection = Conn.Failed(frame.code, frame.message)
                     }
+                    // A wrong token does not fix itself by retrying.
+                    val conn = connection
+                    if (conn is Conn.Failed && conn.code == 401) break
+                    connection = Conn.Reconnecting
+                    delay(RECONNECT_DELAY_MS)
                 }
-                // A wrong token does not fix itself by retrying.
-                val conn = connection
-                if (conn is Conn.Failed && conn.code == 401) break
-                connection = Conn.Reconnecting
-                delay(RECONNECT_DELAY_MS)
+            } finally {
+                // The screen's own cancellation lands here too: flush the
+                // cache so the next open seeds from the true tail.
+                withContext(NonCancellable) { persist() }
             }
         }
+    }
+
+    // Appends one delivered event to the log and the transcript. The
+    // turn's end persists the cache — once per turn, not per delta.
+    private suspend fun record(event: ClawEvent) {
+        applied.add(event)
+        appliedTotal += 1
+        items = applyEvent(items, event)
+        if (event is ClawEvent.TurnDone) persist()
+    }
+
+    private suspend fun persist() {
+        val window = applied.takeLast(SESSION_WINDOW)
+        cache.put(sessionKey, CachedSession(total = appliedTotal, events = window))
     }
 
     fun stop() {
@@ -152,48 +189,54 @@ class ChatController(
         }
     }
 
-    private fun apply(event: ClawEvent) {
+    // Folds recorded events into a transcript, the cache seed's path:
+    // the same reducer the live stream applies, run from the cache's tail.
+    private fun applyEvents(items: List<Item>, events: List<ClawEvent>): List<Item> =
+        events.fold(items) { acc, event -> applyEvent(acc, event) }
+
+    private fun applyEvent(items: List<Item>, event: ClawEvent): List<Item> {
+        var list = items
         when (event) {
             is ClawEvent.UserMessage -> {
                 // The recorded question — replayed on reload, echoed live
                 // for a message this surface just sent. An identical last
                 // row is that echo's stand-in; skip it.
-                val last = items.lastOrNull()
+                val last = list.lastOrNull()
                 if (!(last is UserMessage && last.text == event.text)) {
-                    items = items + UserMessage(newId(), event.text)
+                    list = list + UserMessage(newId(), event.text)
                 }
             }
             is ClawEvent.ThinkingDelta -> {
-                val last = items.lastOrNull()
-                items = if (last is Thinking) {
-                    items.dropLast(1) + last.copy(text = last.text + event.text)
+                val last = list.lastOrNull()
+                list = if (last is Thinking) {
+                    list.dropLast(1) + last.copy(text = last.text + event.text)
                 } else {
-                    items + Thinking(newId(), event.text)
+                    list + Thinking(newId(), event.text)
                 }
             }
             is ClawEvent.TextDelta -> {
                 // The turn has ONE reply: deltas append to the last open
                 // reply even after tool rows landed between them, so the
                 // agent's text reads continuously around its tool cards.
-                val index = items.indexOfLast { it is Reply && it.streaming }
-                items = if (index >= 0) {
-                    items.toMutableList().also { list ->
-                        val reply = list[index] as Reply
-                        list[index] = reply.copy(text = reply.text + event.text)
+                val index = list.indexOfLast { it is Reply && it.streaming }
+                list = if (index >= 0) {
+                    list.toMutableList().also { mutable ->
+                        val reply = mutable[index] as Reply
+                        mutable[index] = reply.copy(text = reply.text + event.text)
                     }
                 } else {
-                    items + Reply(newId(), event.text, streaming = true)
+                    list + Reply(newId(), event.text, streaming = true)
                 }
             }
             is ClawEvent.ToolStart ->
-                items = items + ToolCall(newId(), event.name, summary = null, isError = false, running = true)
+                list = list + ToolCall(newId(), event.name, summary = null, isError = false, running = true)
             is ClawEvent.ToolResult -> {
                 // tool_result has no index; match the last open row of the same tool.
-                val index = items.indexOfLast { it is ToolCall && it.name == event.name && it.running }
-                items = if (index >= 0) {
-                    items.toMutableList().also { list ->
-                        val tool = list[index] as ToolCall
-                        list[index] = tool.copy(
+                val index = list.indexOfLast { it is ToolCall && it.name == event.name && it.running }
+                list = if (index >= 0) {
+                    list.toMutableList().also { mutable ->
+                        val tool = mutable[index] as ToolCall
+                        mutable[index] = tool.copy(
                             summary = event.summary,
                             isError = event.isError,
                             running = false,
@@ -202,7 +245,7 @@ class ChatController(
                         )
                     }
                 } else {
-                    items + ToolCall(
+                    list + ToolCall(
                         newId(),
                         event.name,
                         event.summary,
@@ -217,9 +260,9 @@ class ChatController(
                 // Thinking is scratch: it disappears once the turn settles, and
                 // the pinned reply replaces whatever streamed in. Every reply
                 // stops streaming; the last one carries the final text.
-                val kept = items.filterNot { it is Thinking }
+                val kept = list.filterNot { it is Thinking }
                 val replyIndex = kept.indexOfLast { it is Reply }
-                items = kept.mapIndexed { i, item ->
+                list = kept.mapIndexed { i, item ->
                     if (item !is Reply) {
                         item
                     } else if (i == replyIndex && !event.reply.isNullOrEmpty()) {
@@ -228,14 +271,15 @@ class ChatController(
                         item.copy(streaming = false)
                     }
                 }
-                event.outcome?.let { outcome -> items = items + Outcome(newId(), outcome) }
+                event.outcome?.let { outcome -> list = list + Outcome(newId(), outcome) }
             }
             is ClawEvent.Attachment ->
-                items = items + Attachment(newId(), event.id, event.name, event.media, event.size, event.caption)
+                list = list + Attachment(newId(), event.id, event.name, event.media, event.size, event.caption)
             is ClawEvent.ConsentRequest ->
-                items = items + Consent(newId(), event.id, event.kind, event.summary, event.detail)
-            is ClawEvent.ConsentResolved -> flipConsent(event.id, event.granted)
+                list = list + Consent(newId(), event.id, event.kind, event.summary, event.detail)
+            is ClawEvent.ConsentResolved -> list = flipConsent(list, event.id, event.granted)
         }
+        return list
     }
 
     // Answers a consent question. The claw's consent_resolved event is the
@@ -257,17 +301,16 @@ class ChatController(
         call: suspend () -> ClawResult<Unit>,
     ): ClawResult<Unit> {
         val result = call()
-        if (result is ClawResult.Ok) flipConsent(consentId, granted)
+        if (result is ClawResult.Ok) items = flipConsent(items, consentId, granted)
         return result
     }
 
-    private fun flipConsent(consentId: String, granted: Boolean) {
+    private fun flipConsent(items: List<Item>, consentId: String, granted: Boolean): List<Item> {
         val index = items.indexOfLast { it is Consent && it.consentId == consentId }
-        if (index >= 0) {
-            items = items.toMutableList().also { list ->
-                val consent = list[index] as Consent
-                list[index] = consent.copy(granted = granted)
-            }
+        if (index < 0) return items
+        return items.toMutableList().also { list ->
+            val consent = list[index] as Consent
+            list[index] = consent.copy(granted = granted)
         }
     }
 

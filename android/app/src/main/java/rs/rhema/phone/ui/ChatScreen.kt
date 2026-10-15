@@ -79,7 +79,7 @@ import java.io.IOException
 @Composable
 fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
-    val controller = remember(sessionKey) { ChatController(container.api, scope, sessionKey) }
+    val controller = remember(sessionKey) { ChatController(container.api, container.sessionCache, scope, sessionKey) }
     // The SSE connection lives exactly as long as this screen is composed.
     DisposableEffect(sessionKey) {
         controller.start()

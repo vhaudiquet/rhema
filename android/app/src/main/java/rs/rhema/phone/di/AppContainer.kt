@@ -2,6 +2,7 @@ package rs.rhema.phone.di
 
 import android.content.Context
 import rs.rhema.phone.data.AgentIdentityRepository
+import rs.rhema.phone.data.SessionCache
 import rs.rhema.phone.data.SettingsRepository
 import rs.rhema.phone.data.StatusRepository
 import rs.rhema.phone.data.rhemaStore
@@ -21,6 +22,7 @@ class AppContainer(context: Context) {
 
     val settings = SettingsRepository(appContext.rhemaStore)
     val status = StatusRepository(appContext.rhemaStore, json)
+    val sessionCache = SessionCache(appContext.rhemaStore, json)
 
     // readTimeout is zeroed only for the SSE client; regular calls keep a
     // timeout so a wedged claw cannot hang a POST forever.

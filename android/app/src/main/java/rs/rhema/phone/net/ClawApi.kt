@@ -248,14 +248,27 @@ class ClawApi(
         return execute(builder.post(body).build()) { }
     }
 
-    fun eventStream(sessionKey: String): Flow<SseFrame> = callbackFlow {
-        val builder = v1("sessions", sessionKey, "events")
-        if (builder == null) {
+    // GET /v1/sessions/{key}/events?since=N: the claw replays the
+    // session's record minus its oldest N events, then goes live. `since`
+    // is the transcript cache's cursor — how many events this device has
+    // already applied — so a reopening screen receives only what is new
+    // instead of the whole history. Built by hand like notifications():
+    // v1() bakes the URL into the builder, leaving no room for a query.
+    fun eventStream(sessionKey: String, since: Long): Flow<SseFrame> = callbackFlow {
+        val url = baseOrNull()?.toHttpUrlOrNull()?.newBuilder()
+            ?.addPathSegments("v1/sessions")
+            ?.addPathSegment(sessionKey)
+            ?.addPathSegment("events")
+            ?.apply { if (since > 0) addQueryParameter("since", since.toString()) }
+            ?.build()
+        if (url == null) {
             trySend(SseFrame.Failed(null, "no base URL configured"))
             close()
             return@callbackFlow
         }
-        val call = streamingClient.newCall(builder.get().build())
+        val call = streamingClient.newCall(
+            Request.Builder().url(url).header("Authorization", bearer()).build(),
+        )
         // The chat screen cancels its collector on dispose; call.cancel() is
         // what unblocks the blocking read inside onResponse below.
         call.enqueue(object : Callback {
