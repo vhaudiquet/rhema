@@ -25,7 +25,8 @@ import kotlinx.serialization.json.put
 //
 // Two kinds of topic leave this worker. Battery, network, and DND posts are
 // conversation: the claw dispatches them and the agent hears the flip. The
-// rest — location, app, device, wifi, alarm — are snapshot-only on the claw
+// rest — location, app, device, wifi, alarm, heartbeat — are snapshot-only on
+// the claw
 // (its ingest door answers "observed" and never runs a turn), so their rules
 // only bound write traffic, not model traffic.
 class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
@@ -133,7 +134,17 @@ class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineW
             }
         }
 
-        if (transitions.isEmpty()) return Result.success()
+        // Nothing changed is not nothing to say: the claw's fleet
+        // registry stamps "last seen" on whatever post lands, so a run
+        // with no transitions posts a bare heartbeat to keep its row
+        // fresh at the worker's cadence instead of the last flip. The
+        // topic is snapshot-only claw-side; no turn runs on it.
+        if (transitions.isEmpty()) {
+            transitions += "heartbeat" to buildJsonObject {
+                put("topic", "heartbeat")
+                put("ts", System.currentTimeMillis())
+            }
+        }
 
         for ((topic, payload) in transitions) {
             val result = container.api.ingest(SOURCE, "phone:$deviceId:$topic", payload)
