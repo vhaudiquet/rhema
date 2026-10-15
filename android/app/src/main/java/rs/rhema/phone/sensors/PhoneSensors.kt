@@ -13,6 +13,12 @@ import android.os.Process
 import android.location.Location
 import android.location.LocationManager
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
+import androidx.core.os.CancellationSignal
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 
 /** One location observation: where, how precisely, and how old. */
 data class LocationFix(
@@ -43,6 +49,9 @@ object PhoneSensors {
     /** The age beyond which a location fix is too stale to report. */
     private const val MAX_FIX_AGE_MS = 30 * 60 * 1000L
 
+    /** How long a fresh-fix request may take before the fallback wins. */
+    private const val FIX_TIMEOUT_MS = 20_000L
+
     /** The look-back window for "the app currently in the foreground". */
     private const val USAGE_LOOKBACK_MS = 24 * 60 * 60 * 1000L
 
@@ -71,11 +80,68 @@ object PhoneSensors {
     }
 
     /**
+     * A fresh fix from the best enabled provider, falling back to
+     * [lastKnownFix] when no provider can answer inside [FIX_TIMEOUT_MS].
+     * The snapshot pass prefers this over a last-known read: last-known
+     * is whatever another app happened to leave behind, which on a
+     * stationary phone goes stale within minutes and reports where the
+     * phone was, not where it is.
+     */
+    suspend fun currentFix(context: Context): LocationFix? {
+        if (!hasLocation(context)) return null
+        val manager = context.getSystemService(LocationManager::class.java) ?: return null
+        // Fused exists from API 31 and is the one provider that answers
+        // indoors and out; below that, gps then network.
+        val provider = listOf(
+            if (Build.VERSION.SDK_INT >= 31) LocationManager.FUSED_PROVIDER else null,
+            LocationManager.GPS_PROVIDER,
+            LocationManager.NETWORK_PROVIDER,
+        ).filterNotNull().firstOrNull { candidate ->
+            runCatching { manager.isProviderEnabled(candidate) }.getOrDefault(false)
+        } ?: return lastKnownFix(context)
+
+        val signal = CancellationSignal()
+        val location = withTimeoutOrNull(FIX_TIMEOUT_MS) {
+            suspendCancellableCoroutine { continuation ->
+                val settled = AtomicBoolean(false)
+                continuation.invokeOnCancellation {
+                    settled.set(true)
+                    signal.cancel()
+                }
+                val callback = androidx.core.util.Consumer<Location> { location ->
+                    // The timeout abandons this coroutine but not the
+                    // callback: a late answer must not resume it twice.
+                    // A null answer is the provider's "no fix", which
+                    // falls through to the last-known fallback.
+                    if (settled.compareAndSet(false, true)) {
+                        continuation.resume(location)
+                    }
+                }
+                LocationManagerCompat.getCurrentLocation(
+                    manager,
+                    provider,
+                    signal,
+                    ContextCompat.getMainExecutor(context),
+                    callback,
+                )
+            }
+        }
+        return location?.let { fix ->
+            LocationFix(
+                lat = fix.latitude,
+                lon = fix.longitude,
+                accuracyM = fix.accuracy.takeIf { it > 0f }?.toDouble(),
+                provider = fix.provider,
+                ageS = (System.currentTimeMillis() - fix.time) / 1000,
+            )
+        } ?: lastKnownFix(context)
+    }
+
+    /**
      * The most recent fix any enabled provider still holds, or null
      * when location is off or every fix is older than [MAX_FIX_AGE_MS].
-     * A snapshot pass never *requests* a fix: the last-known read is
-     * free and needs no wakeups, and the payload's age says how fresh
-     * it is.
+     * The fallback read behind [currentFix], and the answer when no
+     * provider can produce a fresh fix in time.
      */
     fun lastKnownFix(context: Context): LocationFix? {
         if (!hasLocation(context)) return null
@@ -85,7 +151,7 @@ object PhoneSensors {
             manager.getProviders(true)
                 .mapNotNull { provider -> manager.getLastKnownLocation(provider) }
                 .filter { now - it.time <= MAX_FIX_AGE_MS }
-                .minByOrNull { it.time }
+                .maxByOrNull { it.time }
         } catch (_: SecurityException) {
             // The grant can be revoked between the check above and this read.
             null

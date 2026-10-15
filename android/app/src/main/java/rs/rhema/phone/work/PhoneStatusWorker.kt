@@ -33,6 +33,7 @@ class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineW
     override suspend fun doWork(): Result {
         val container = (applicationContext as RhemaApp).container
         val deviceId = container.settings.deviceId()
+        // Suspend: the location read may wait out a fresh fix.
         val reading = readSnapshot(applicationContext)
         val snapshot = reading.sensors
         val last = container.status.lastSnapshot()
@@ -151,7 +152,7 @@ class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineW
 
         fun bucket(level: Int): Int = level / 10
 
-        private fun readSnapshot(context: Context): Reading {
+        private suspend fun readSnapshot(context: Context): Reading {
             val battery = context.getSystemService(BatteryManager::class.java)
             val level = battery
                 ?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
@@ -181,7 +182,10 @@ class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineW
                 ?.takeIf { it != NotificationManager.INTERRUPTION_FILTER_UNKNOWN }
                 ?.let { if (it == NotificationManager.INTERRUPTION_FILTER_ALL) "off" else "on" }
 
-            val fix = PhoneSensors.lastKnownFix(context)
+            // A fresh fix beats the last-known cache: on a stationary
+            // phone the cache is minutes-to-hours old and reports where
+            // the phone was, not where it is.
+            val fix = PhoneSensors.currentFix(context)
             val foreground = PhoneSensors.foregroundApp(context)
             val sensors = PhoneSnapshot(
                 charging = charging,
