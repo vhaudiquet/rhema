@@ -8,12 +8,15 @@ manages the device fleet the claw keeps.
 
 ## What it does
 
-- **Settings**: first launch lands here until a base URL is saved and
-  validated with `GET /healthz`. Stores the claw base URL and bearer token
-  (plus a generated, persistent device ID) in app-private DataStore. Once
-  connected, the screen also carries the **Phones** and **Status
-  reporting** cards (both described below) and the **Model providers**
-  card: the
+- **Settings**: a nav of submenus mirroring the web UI's settings
+  sidebar — the "Phone" group (Status reporting, Devices) and the "Claw"
+  group (Model providers, Connection), one page per entry behind a back
+  arrow. First launch is the exception: it lands straight on the
+  connection page until a base URL is saved and validated with
+  `GET /healthz`. Stores the claw base URL and bearer token
+  (plus a generated, persistent device ID) in app-private DataStore. The
+  **Devices** page is the **Phones** card, **Status reporting** and
+  **Model providers** their own pages (both described below): the
   backend instances (`GET /v1/providers`), each one's live model
   listing, and the active pair staged as a draft behind an explicit save
   (`PUT /v1/providers/active`; it applies from the claw's next turn).
@@ -25,13 +28,18 @@ manages the device fleet the claw keeps.
   `dataExtractionRules`, `fullBackupContent`).
 - **Chat**: session list (`GET /v1/sessions`, interactive sessions first,
   the phone's own `phone:*` status keys hidden)
-  and one chat screen per session. While a chat screen is open the app holds
-  one SSE connection (`GET /v1/sessions/{key}/events`, OkHttp streaming GET
-  with the auth header, hand-parsed frames: blank-line delimited `data:`
-  lines, `:` comment keep-alives skipped, unknown event types skipped). The
-  stream opens with the claw's replay of the session's recorded turns before
-  the live feed, so every (re)connection resets the transcript and rebuilds
-  it from the replay. The
+  and one chat screen per session. The applied events persist in a
+  per-session cache (DataStore, newest 500 with the full count as the
+  cursor), so a screen opens on its cached transcript at once and the
+  stream connects with `?since=<count>` to receive only what is new
+  instead of replaying the whole history; the cache flushes at every
+  `turn_done` and when the screen closes. While a chat screen is open the
+  app holds one SSE connection (`GET /v1/sessions/{key}/events`, OkHttp
+  streaming GET with the auth header, hand-parsed frames: blank-line
+  delimited `data:` lines, `:` comment keep-alives skipped, unknown event
+  types skipped). The reader's own messages render as right-anchored
+  bubbles (elevated surface, accent bar on the trailing edge); the
+  agent's turns keep the avatar on the left. The
   composer POSTs `{"text"}`; the claw's documented dance is preserved:
   **subscribe first, then POST**, the reply arrives on the stream. Thinking
   deltas render dim and collapsible, tool rows show name/summary with error
@@ -74,11 +82,20 @@ manages the device fleet the claw keeps.
   | `device` | the identity fingerprint changes (basically once, and on app or OS updates) | nothing |
   | `wifi` | the connected SSID changes | location permission |
   | `alarm` | the next alarm moves | nothing |
+  | `heartbeat` | always, when a run produced no other post | nothing |
 
   A sensor that is ungranted or unreadable produces no posts for its
   topic, never an error. Rich readings carry their own honesty: a
   location payload includes accuracy and fix age, the app payload the
-  package, its label and how long it has been current.
+  package, its label and how long it has been current. The location read
+  requests a fresh fix (fused on API 31+, else gps then network) with a
+  20 s ceiling and falls back to the newest last-known fix under 30 min;
+  a plain last-known read would answer with whatever another app left
+  cached, which on a stationary phone is where the phone was, not where
+  it is. The heartbeat exists for the fleet's last-seen time: the claw
+  stamps a device "seen" on whatever post lands, so a run with no
+  transitions posts one anyway and the row stays fresh at the worker's
+  cadence instead of the last flip.
 
   Every report is an observation on the claw: it lands in the phone
   tables (the ingest answers `{"ingested": "observed"}`) and a `phone`
@@ -133,8 +150,11 @@ manages the device fleet the claw keeps.
   cold start like notifications; a refusal only silences the `location`
   and `wifi` topics). Two grants are settings toggles, not permissions:
   usage access (`PACKAGE_USAGE_STATS` is declared only so the toggle can
-  grant it) for the `app` topic, and Do Not Disturb access for the dnd
-  commands. The Status reporting card in Settings shows all three.
+  grant it) for the `app` topic, and Do Not Disturb access
+  (`ACCESS_NOTIFICATION_POLICY`, declared only so the app appears on the
+  "Do Not Disturb access" screen's list — an undeclared app opens that
+  screen and finds nothing to flip) for the dnd commands. The Status
+  reporting page in Settings shows all three.
 
 ## API contract (the claw's `/v1`)
 
@@ -149,7 +169,7 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `PUT /v1/providers/active` | switch the backend instance, persisted |
 | `GET /v1/sessions` | session list |
 | `POST /v1/sessions/{key}/messages` | `{"text"}` → 202; reply via stream |
-| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment`, `consent_request`, `consent_resolved` |
+| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment`, `consent_request`, `consent_resolved`. `?since=N` skips the replay's oldest N events — the transcript cache's cursor |
 | `GET /v1/attachments/{id}` | an attachment event's bytes (bearer) |
 | `GET /v1/consents` | pending consent questions, oldest first |
 | `POST /v1/consents/{id}` | answer one: `{"secret"}` or `{"grant"}` |
@@ -179,6 +199,7 @@ Every report is an observation on the claw: it feeds the status the
 {"topic": "device", "value": "Google Pixel 9", "manufacturer": "Google", "model": "Pixel 9", "android": "16", "sdk": 36, "app_version": "0.1.0"}
 {"topic": "wifi", "value": "home"}
 {"topic": "alarm", "value": 1760000000000, "in_min": 542}
+{"topic": "heartbeat", "ts": 1760000000000}
 ```
 
 `battery.value` is the raw level; the transition rule is charging-flip or
@@ -193,9 +214,12 @@ posts for that topic.
 - **Notification latency**: no push infrastructure; background
   notifications are as fresh as the WorkManager interval (15 min). The chat
   screen is always live via SSE.
-- **Transcript lifetime**: the transcript is screen-scoped (compose
-  `remember`, SSE restarts on rotation/process death). The claw-side session
-  is unaffected.
+- **Transcript cache**: the applied event log persists per session (the
+  newest 500 events plus the full count), so a screen opens on its cached
+  transcript and the stream resumes past it. The cache is a cursor over
+  the claw's record, not a copy of it: a claw database wiped behind the
+  phone's back leaves the cache pointing past a history that no longer
+  exists, and that session replays nothing until it catches up.
 - **First launch**: nothing works until Settings validates `/healthz`.
 
 ## One-consumer principle
