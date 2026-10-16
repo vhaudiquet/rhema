@@ -2973,6 +2973,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-calendar-integration"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rhema-claw"
 version = "0.1.0"
 dependencies = [

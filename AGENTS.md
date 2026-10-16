@@ -68,6 +68,10 @@ Rules:
   - `forge` — the forge integration: GitHub/Gitea/GitLab clients, the
     normalized event vocabulary, and the RSD ingest path
     (`integrations/rhema-forge-integration/`)
+  - `calendar` — the calendar integration: the `Calendar` client
+    contract, the ICS and Google feed adapters, and the normalized
+    occurrence vocabulary (`integrations/rhema-calendar-integration/`;
+    the claw's reminder source is `claw`)
   - `autonomous-agent` — the resident-agent core tier: sources, the
     lease-driven driver, and the tool registry
     (`crates/rhema-autonomous-agent/`)
