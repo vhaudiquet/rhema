@@ -53,6 +53,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/index");
+    // Refs move on tag create/delete too — the stable label keys off
+    // an exact tag at HEAD, so a tag operation is a label event.
+    // packed-refs covers repositories whose refs have been packed.
+    println!("cargo:rerun-if-changed=../../.git/refs");
+    println!("cargo:rerun-if-changed=../../.git/packed-refs");
 
     let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by cargo");
     let label = match git(&["rev-parse", "--short=8", "HEAD"]) {
