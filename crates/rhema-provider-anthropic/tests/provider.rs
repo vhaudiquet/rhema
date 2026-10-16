@@ -598,3 +598,13 @@ async fn trailing_slashes_in_the_base_url_are_trimmed() {
         .expect("models parse");
     assert_eq!(models.len(), 1);
 }
+
+#[tokio::test]
+async fn a_non_zai_base_has_no_allowance_to_report() {
+    // The mock server's origin is no Z.ai host: the allowance degrades
+    // to none without a call — no mock is mounted, so any request would
+    // 404 the result into an error instead.
+    let server = MockServer::start().await;
+    let allowance = provider(&server).allowance().await;
+    assert_eq!(allowance, Ok(None));
+}

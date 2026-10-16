@@ -59,6 +59,11 @@
 //!   (cursor `last_id`). The list carries only id and display name;
 //!   description, ceilings, and pricing have no wire source and default
 //!   empty.
+//! - Quota: the GLM Coding Plan's monitor endpoint
+//!   (`GET /api/monitor/usage/quota/limit`, Z.ai hosts only) reports each
+//!   metered window as a `percentage` spent; the normalized allowance is
+//!   what is left of the 5-hour and weekly windows, the tool quota left
+//!   out.
 
 use std::collections::BTreeMap;
 
@@ -68,7 +73,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::{ModelRequest, ThinkingEffort};
 use rhema_core::tool::ToolCall;
-use rhema_provider::ModelCard;
+use rhema_provider::{Allowance, ModelCard};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -431,6 +436,96 @@ impl From<WireModel> for ModelCard {
             pricing: None,
         }
     }
+}
+
+// --- Z.ai quota: the Coding Plan monitor endpoint -> normalized ---
+
+/// The `GET /api/monitor/usage/quota/limit` response of Z.ai's GLM
+/// Coding Plan — an undocumented monitor endpoint (the plan's web
+/// console builds on it) served beside the Anthropic route on the Z.ai
+/// hosts. A rejected token answers with HTTP 200 and `success` false.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireZaiQuota {
+    /// Whether the call succeeded.
+    #[serde(default)]
+    pub success: bool,
+    /// The numeric code of a failed call (`401` for a rejected token).
+    #[serde(default)]
+    pub code: Option<u32>,
+    /// The error text of a failed call.
+    #[serde(default)]
+    pub msg: Option<String>,
+    /// The quota report; `None` when the body is an error envelope.
+    #[serde(default)]
+    pub data: Option<WireZaiQuotaData>,
+}
+
+/// The `data` object of a [`WireZaiQuota`].
+#[derive(Debug, Default, Deserialize)]
+pub struct WireZaiQuotaData {
+    /// The plan tier (`LITE`, `PRO`), when reported.
+    #[serde(default)]
+    pub level: Option<String>,
+    /// One entry per metered window and per tool allowance.
+    #[serde(default)]
+    pub limits: Vec<WireZaiLimit>,
+}
+
+/// One entry of a [`WireZaiQuotaData`]'s `limits`.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireZaiLimit {
+    /// What the entry meters: `TOKENS_LIMIT` on token-metered plans
+    /// (`CREDIT_LIMIT` on credit-metered ones) is a coding window;
+    /// `TIME_LIMIT` is the monthly MCP tool-call quota, which the coding
+    /// session never gates on.
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    /// The window's length code: 3 is the 5-hour rolling window, 6 the
+    /// weekly one, 5 the monthly tool allowance.
+    #[serde(default)]
+    pub unit: Option<u32>,
+    /// The share of the window's budget already spent, 0–100.
+    #[serde(default)]
+    pub percentage: Option<f64>,
+}
+
+/// The plan allowance the quota report describes: what is left of each
+/// coding window, the 5-hour one first — `"5h 53% · wk 88%"` for the
+/// footer's badge. The tool quota stays out. `None` when the report
+/// names neither window: a shape drift maps to no badge, never to a
+/// wrong figure.
+pub fn allowance(quota: &WireZaiQuota) -> Option<Allowance> {
+    let data = quota.data.as_ref()?;
+    let mut windows = [None, None]; // The left share of 5-hour, weekly.
+    for limit in &data.limits {
+        if !matches!(
+            limit.kind.as_deref(),
+            Some("TOKENS_LIMIT") | Some("CREDIT_LIMIT")
+        ) {
+            continue;
+        }
+        let Some(percentage) = limit.percentage else {
+            continue;
+        };
+        let left = (100.0 - percentage).clamp(0.0, 100.0);
+        match limit.unit {
+            Some(3) => windows[0] = Some(left),
+            Some(6) => windows[1] = Some(left),
+            _ => {}
+        }
+    }
+    let mut amount = String::new();
+    for (left, window) in windows.iter().zip(["5h", "wk"]) {
+        let Some(left) = left else { continue };
+        if !amount.is_empty() {
+            amount.push_str(" · ");
+        }
+        amount.push_str(&format!("{window} {left:.0}%"));
+    }
+    (!amount.is_empty()).then_some(Allowance {
+        amount,
+        kind: String::new(),
+    })
 }
 
 // --- Mapping: ModelRequest -> wire ---
@@ -1830,5 +1925,74 @@ mod tests {
 
         let unshaped: WireErrorBody = serde_json::from_str("not even json").unwrap_or_default();
         assert_eq!(unshaped.message("not even json"), "not even json");
+    }
+
+    #[test]
+    fn the_zai_quota_reads_the_windows_left_share() {
+        let quota: WireZaiQuota = serde_json::from_str(
+            r#"{
+                "code": 200,
+                "msg": "Operation successful",
+                "success": true,
+                "data": {
+                    "level": "PRO",
+                    "limits": [
+                        { "type": "TIME_LIMIT", "unit": 5, "percentage": 38,
+                          "currentValue": 38, "usage": 100, "remaining": 62 },
+                        { "type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 47 },
+                        { "type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 12 }
+                    ]
+                }
+            }"#,
+        )
+        .expect("quota response parses");
+
+        // Both coding windows ride as the share still unspent, the
+        // 5-hour one first; the tool quota stays out.
+        assert_eq!(
+            allowance(&quota),
+            Some(Allowance {
+                amount: "5h 53% · wk 88%".to_owned(),
+                kind: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn credit_metered_plans_read_the_same_windows() {
+        let quota: WireZaiQuota = serde_json::from_str(
+            r#"{
+                "success": true,
+                "data": { "limits": [
+                    { "type": "CREDIT_LIMIT", "unit": 3, "number": 5, "percentage": 99.6 },
+                    { "type": "CREDIT_LIMIT", "unit": 6, "number": 1, "percentage": 100 }
+                ] }
+            }"#,
+        )
+        .expect("credit quota response parses");
+
+        // The left share clamps at zero: an overdrawn window never
+        // renders a negative badge.
+        assert_eq!(
+            allowance(&quota),
+            Some(Allowance {
+                amount: "5h 0% · wk 0%".to_owned(),
+                kind: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_quota_report_without_coding_windows_yields_no_allowance() {
+        let none: WireZaiQuota =
+            serde_json::from_str(r#"{ "success": true, "data": { "limits": [] } }"#)
+                .expect("empty quota response parses");
+        assert_eq!(allowance(&none), None);
+
+        let error: WireZaiQuota = serde_json::from_str(
+            r#"{ "code": 401, "msg": "token expired or incorrect", "success": false }"#,
+        )
+        .expect("error envelope parses");
+        assert_eq!(allowance(&error), None);
     }
 }

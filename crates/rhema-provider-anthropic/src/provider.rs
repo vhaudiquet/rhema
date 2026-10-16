@@ -28,9 +28,9 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{ModelCard, Pricing, SseDecoder};
+use rhema_provider::{Allowance, ModelCard, Pricing, SseDecoder};
 
-use crate::wire::{ChunkAssembler, StreamEvent, WireErrorBody, WireModelsPage};
+use crate::wire::{ChunkAssembler, StreamEvent, WireErrorBody, WireModelsPage, WireZaiQuota};
 
 /// The production Anthropic API base.
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
@@ -143,6 +143,58 @@ impl AnthropicProvider {
         }
     }
 
+    /// The subscription allowance the base URL's platform reports: the
+    /// GLM Coding Plan's metered windows — the 5-hour and weekly shares
+    /// its badge shows — on the Z.ai hosts, `Ok(None)` anywhere else.
+    /// Anthropic itself has no such endpoint, and a proxy in front of the
+    /// route serves no Z.ai monitor API either, so both degrade to no
+    /// badge instead of a per-turn error.
+    pub async fn allowance(&self) -> Result<Option<Allowance>, ProviderError> {
+        let Some(url) = zai_quota_url(&self.base_url) else {
+            return Ok(None);
+        };
+        self.fetch_zai_quota(&url).await.map(Some)
+    }
+
+    /// The monitor endpoint's call, factored off [`Self::allowance`] so
+    /// the offline tests can mount it without pointing the provider at a
+    /// Z.ai host.
+    async fn fetch_zai_quota(&self, url: &str) -> Result<Allowance, ProviderError> {
+        // Bearer unconditionally: the monitor endpoint is a Z.ai platform
+        // API, and Z.ai documents token auth, not `x-api-key`.
+        let response = self
+            .http
+            .get(url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            // A bounded listing-style call, not a stream.
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        if !status.is_success() {
+            return Err(ProviderError::Api(format!(
+                "zai quota error (HTTP {}): {}",
+                status.as_u16(),
+                text
+            )));
+        }
+        let quota: WireZaiQuota = serde_json::from_str(&text)
+            .map_err(|err| ProviderError::Api(format!("malformed quota response: {err}")))?;
+        if !quota.success {
+            // A rejected token rides HTTP 200; the envelope's own fields
+            // carry the failure.
+            return Err(ProviderError::Api(match (quota.code, quota.msg) {
+                (Some(code), Some(msg)) => format!("zai quota error (code {code}): {msg}"),
+                (Some(code), None) => format!("zai quota error (code {code}): {text}"),
+                _ => format!("zai quota error: {text}"),
+            }));
+        }
+        crate::wire::allowance(&quota)
+            .ok_or_else(|| ProviderError::Api("quota response carries no coding window".into()))
+    }
+
     /// Common headers of every request: the key by the configured scheme
     /// and the pinned API version.
     fn authenticated(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
@@ -159,6 +211,10 @@ impl AnthropicProvider {
 /// its `/models` serves ids alone: the Anthropic schema has no room for
 /// catalog facts.
 const ZAI_HOST: &str = "api.z.ai";
+
+/// The mainland host the same plan is sold through: its
+/// Anthropic-compatible route and monitor endpoint answer there too.
+const ZAI_CN_HOST: &str = "open.bigmodel.cn";
 
 /// One row of Z.ai's published GLM catalog: context window, output
 /// ceiling, and the standard per-MTok rates — cached input, uncached
@@ -222,6 +278,19 @@ fn decorate_zai(models: &mut [ModelCard]) {
             });
         }
     }
+}
+
+/// The monitor endpoint behind a base URL, when that base is a Z.ai
+/// host: the quota API lives beside the Anthropic route on both hosts
+/// the plan is sold through, so the base's origin supplies the URL.
+fn zai_quota_url(base_url: &str) -> Option<String> {
+    let mut url = reqwest::Url::parse(base_url).ok()?;
+    if url.host_str()? != ZAI_HOST && url.host_str()? != ZAI_CN_HOST {
+        return None;
+    }
+    url.set_path("/api/monitor/usage/quota/limit");
+    url.set_query(None);
+    Some(url.to_string())
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the Anthropic
@@ -341,5 +410,85 @@ mod tests {
         // An id outside the catalog shows no invented facts.
         assert_eq!(models[2].input_token_limit, None);
         assert_eq!(models[2].pricing, None);
+    }
+
+    #[test]
+    fn the_quota_url_lives_on_the_plan_hosts_and_nowhere_else() {
+        assert_eq!(
+            zai_quota_url("https://api.z.ai/api/anthropic").as_deref(),
+            Some("https://api.z.ai/api/monitor/usage/quota/limit")
+        );
+        assert_eq!(
+            zai_quota_url("https://open.bigmodel.cn/api/anthropic/").as_deref(),
+            Some("https://open.bigmodel.cn/api/monitor/usage/quota/limit")
+        );
+        // Another host's route — a plain Anthropic key or a proxy — has
+        // no monitor endpoint to ask, not a wrong one to leak the key to.
+        assert_eq!(zai_quota_url("https://api.anthropic.com"), None);
+        assert_eq!(zai_quota_url("http://127.0.0.1:8080/api/anthropic"), None);
+    }
+
+    #[tokio::test]
+    async fn the_quota_call_authenticates_by_bearer_and_parses_the_windows() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // A leaked `anthropic-version` pin lands here first and fails the
+        // call: the monitor endpoint is a platform API, not Messages.
+        Mock::given(header("anthropic-version", "2023-06-01"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/monitor/usage/quota/limit"))
+            .and(header("Authorization", "Bearer test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 200, "msg": "Operation successful", "success": true,
+                "data": { "level": "PRO", "limits": [
+                    { "type": "TOKENS_LIMIT", "unit": 3, "number": 5, "percentage": 47 },
+                    { "type": "TOKENS_LIMIT", "unit": 6, "number": 1, "percentage": 12 },
+                    { "type": "TIME_LIMIT", "unit": 5, "percentage": 38 }
+                ] }
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new("test-key").with_base_url(server.uri());
+        let allowance = provider
+            .fetch_zai_quota(&format!("{}/api/monitor/usage/quota/limit", server.uri()))
+            .await
+            .expect("the quota call succeeds");
+        assert_eq!(allowance.amount, "5h 53% · wk 88%");
+    }
+
+    #[tokio::test]
+    async fn a_rejected_token_surfaces_the_envelope_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/monitor/usage/quota/limit"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "code": 401, "msg": "token expired or incorrect", "success": false
+            })))
+            .mount(&server)
+            .await;
+
+        let provider = AnthropicProvider::new("test-key").with_base_url(server.uri());
+        let err = provider
+            .fetch_zai_quota(&format!("{}/api/monitor/usage/quota/limit", server.uri()))
+            .await
+            .expect_err("the failure surfaces");
+        // The envelope's own code and message carry the failure: the
+        // rejected token never rides an HTTP status here.
+        match err {
+            ProviderError::Api(msg) => {
+                assert!(msg.contains("code 401"), "{msg}");
+                assert!(msg.contains("token expired or incorrect"), "{msg}");
+            }
+            other => panic!("expected an Api error, got {other:?}"),
+        }
     }
 }
