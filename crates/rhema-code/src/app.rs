@@ -375,8 +375,9 @@ impl Backend {
 
     /// The backend's subscription allowance, when its provider reports
     /// one: prepaid credit on OpenRouter and DeepSeek, the seat's
-    /// premium requests on Copilot. `Ok(None)` for the providers with
-    /// no such endpoint — the footer just never shows their badge.
+    /// premium requests on Copilot, the Coding Plan's 5-hour and weekly
+    /// windows on Z.ai. `Ok(None)` for the providers with no such
+    /// endpoint — the footer just never shows their badge.
     pub async fn subscription_usage(&self) -> Result<Option<Allowance>, String> {
         match self {
             Backend::OpenRouter { api_key } => {
@@ -401,14 +402,16 @@ impl Backend {
                     .map(Some)
                     .map_err(|err| err.to_string())
             }
-            // No balance endpoint to ask: Google keys, local servers,
-            // Anthropic, the generic OpenAI-compatible family, and the
-            // Z.ai Coding Plan.
+            Backend::Zai { api_key, base_url } => Self::zai_provider(api_key, base_url)
+                .allowance()
+                .await
+                .map_err(|err| err.to_string()),
+            // No allowance endpoint to ask: Google keys, local servers,
+            // Anthropic, the generic OpenAI-compatible family.
             Backend::Google { .. }
             | Backend::LlamaCpp { .. }
             | Backend::Anthropic { .. }
-            | Backend::OpenAi { .. }
-            | Backend::Zai { .. } => Ok(None),
+            | Backend::OpenAi { .. } => Ok(None),
         }
     }
 
