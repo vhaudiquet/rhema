@@ -502,7 +502,8 @@ fn parse_rrule(value: &str) -> Rrule {
 /// One parsed `VEVENT`: the fields the vocabulary lifts, the rule and
 /// override marks the expansion needs, and the template event the
 /// occurrences clone.
-struct Parsed {
+struct Parsed<'a> {
+    provider: &'a str,
     uid: String,
     start: OffsetDateTime,
     duration: time::Duration,
@@ -515,7 +516,7 @@ struct Parsed {
 
 /// Parses one `VEVENT` block. A row without `UID` or `DTSTART` fails
 /// the feed loudly; everything else degrades politely.
-fn parse_event(block: &[ContentLine]) -> Result<Parsed, CalendarError> {
+fn parse_event<'a>(block: &[ContentLine], provider: &'a str) -> Result<Parsed<'a>, CalendarError> {
     let first = |name: &str| block.iter().find(|line| line.name == name);
     let uid = required(first("UID"), "a UID")?.value.trim().to_owned();
     let dtstart = required(first("DTSTART"), "a DTSTART")?;
@@ -579,7 +580,7 @@ fn parse_event(block: &[ContentLine]) -> Result<Parsed, CalendarError> {
     }
 
     let template = CalendarEvent {
-        id: format!("ics:{uid}@{}", start.unix_timestamp()),
+        id: format!("{provider}:{uid}@{}", start.unix_timestamp()),
         title: text("SUMMARY").unwrap_or_default(),
         start,
         end,
@@ -597,6 +598,7 @@ fn parse_event(block: &[ContentLine]) -> Result<Parsed, CalendarError> {
     };
 
     Ok(Parsed {
+        provider,
         uid,
         start,
         duration,
@@ -628,6 +630,17 @@ fn parse_event(block: &[ContentLine]) -> Result<Parsed, CalendarError> {
 /// Expands a whole feed: parse, expand the masters, apply the
 /// overrides, keep what starts in `window`.
 pub(crate) fn expand(raw: &str, window: &Window) -> Result<Vec<CalendarEvent>, CalendarError> {
+    expand_as(raw, "ics", window)
+}
+
+/// Expands a whole feed, occurrence ids carrying `provider` as their
+/// prefix: the CalDAV adapter re-runs this over the iCalendar objects
+/// a `REPORT` returns, spelling itself `caldav`.
+pub(crate) fn expand_as(
+    raw: &str,
+    provider: &str,
+    window: &Window,
+) -> Result<Vec<CalendarEvent>, CalendarError> {
     let mut singles = Vec::new();
     let mut masters = Vec::new();
     let mut overrides: HashMap<i64, Parsed> = HashMap::new();
@@ -636,7 +649,7 @@ pub(crate) fn expand(raw: &str, window: &Window) -> Result<Vec<CalendarEvent>, C
     // it. A cancelled master takes its whole rule with it.
     let mut cancelled_slots: HashSet<i64> = HashSet::new();
     for block in vevent_blocks(raw) {
-        let parsed = parse_event(&block)?;
+        let parsed = parse_event(&block, provider)?;
         if parsed.status.as_deref() == Some("CANCELLED") {
             if let Some(recurrence_id) = parsed.recurrence_id {
                 cancelled_slots.insert(recurrence_id.unix_timestamp());
@@ -677,7 +690,12 @@ pub(crate) fn expand(raw: &str, window: &Window) -> Result<Vec<CalendarEvent>, C
 /// start, end, and id.
 fn occurrence(parsed: &Parsed, start: OffsetDateTime) -> CalendarEvent {
     let mut event = parsed.template.clone();
-    event.id = format!("ics:{}@{}", parsed.uid, start.unix_timestamp());
+    event.id = format!(
+        "{}:{}@{}",
+        parsed.provider,
+        parsed.uid,
+        start.unix_timestamp()
+    );
     event.start = start;
     event.end = start.checked_add(parsed.duration);
     event

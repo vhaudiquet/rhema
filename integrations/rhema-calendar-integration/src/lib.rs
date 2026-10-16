@@ -18,14 +18,16 @@
 //! sees a rule, only starts it can compare against its clock:
 //! - The Google Calendar adapter asks the server to expand
 //!   (`singleEvents=true`).
-//! - The ICS adapter expands client-side, covering the rule shapes
-//!   feeds actually emit (daily, weekly with `BYDAY`, monthly,
-//!   yearly; `INTERVAL`, `COUNT`, `UNTIL`, `EXDATE`) and applies
-//!   `RECURRENCE-ID` overrides. Anything outside those shapes
-//!   surfaces once, at its `DTSTART`, never silently dropped. A
-//!   native CalDAV adapter would reuse the same expansion over
-//!   `REPORT` payloads; the feed-URL adapter covers Nextcloud,
-//!   Radicale, and Google's secret iCal address without the XML.
+//! - The ICS and CalDAV adapters expand client-side, covering the
+//!   rule shapes servers actually emit (daily, weekly with `BYDAY`,
+//!   monthly, yearly; `INTERVAL`, `COUNT`, `UNTIL`, `EXDATE`) and
+//!   applying `RECURRENCE-ID` overrides. Anything outside those
+//!   shapes surfaces once, at its `DTSTART`, never silently dropped.
+//!   CalDAV shares the exact expansion: the server returns masters
+//!   plus overrides in range, and the adapter reads them out of the
+//!   multistatus. Where a server exposes both, the feed URL and the
+//!   DAV collection are different identities: their occurrence ids
+//!   carry different provider prefixes.
 //!
 //! Times are instants, not wall-clock strings. Every wire format (RFC
 //! 3339, iCalendar's compact `YYYYMMDDTHHMMSS[Z]`, `VALUE=DATE`
@@ -53,11 +55,13 @@
 //! - [`error`] — the crate's single calendar error type
 //! - [`calendar`] — the `Calendar` client contract
 //! - [`ics`] — the ICS/webcal adapter (one GET, expanded client-side)
+//! - [`caldav`] — the CalDAV adapter (one REPORT, the same expansion)
 //! - [`google`] — the Google Calendar API adapter (expanded server-side)
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod caldav;
 pub mod calendar;
 pub mod error;
 pub mod event;
@@ -67,6 +71,7 @@ pub mod ics;
 // Re-exported so implementors of the async seam can apply #[async_trait]
 // without adding the crate themselves.
 pub use async_trait::async_trait;
+pub use caldav::CaldavCalendar;
 pub use calendar::Calendar;
 pub use error::CalendarError;
 pub use event::{CalendarEvent, Window};

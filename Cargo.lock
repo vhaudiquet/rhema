@@ -2977,6 +2977,7 @@ name = "rhema-calendar-integration"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "quick-xml",
  "reqwest",
  "serde",
  "serde_json",

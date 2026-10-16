@@ -1,6 +1,6 @@
 [package]
 name = "rhema-calendar-integration"
-description = "The calendar integration: ICS/webcal feeds and the Google Calendar API normalized into one occurrence vocabulary for reminder-style dispatch"
+description = "The calendar integration: ICS/webcal feeds, CalDAV collections, and the Google Calendar API normalized into one occurrence vocabulary for reminder-style dispatch"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -16,9 +16,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-# HTTP against the two feed kinds: one bounded GET per poll, no
+# HTTP against the three feed kinds: one bounded request per poll, no
 # streaming
 reqwest = { version = "0.12", features = ["json"] }
+# The CalDAV adapter reads 207 multistatus bodies; the element set it
+# cares about is small enough that a pull parser beats a DOM
+quick-xml = "0.41"
 # Every wire time (RFC 3339, iCalendar's compact `YYYYMMDDTHHMMSS[Z]`,
 # `VALUE=DATE` all-days) normalizes to an OffsetDateTime, and the
 # vocabulary's instants round-trip as RFC 3339.
