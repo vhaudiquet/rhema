@@ -28,6 +28,7 @@ COPY crates/rhema-provider-llama-cpp/Cargo.toml crates/rhema-provider-llama-cpp/
 COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-openai-compatible/Cargo.toml
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
+COPY integrations/rhema-calendar-integration/Cargo.toml integrations/rhema-calendar-integration/Cargo.toml
 COPY integrations/rhema-forge-integration/Cargo.toml integrations/rhema-forge-integration/Cargo.toml
 
 # Resolution reads the vendored crossterm (the root manifest path-patches
