@@ -67,7 +67,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/settings",
-        description: "providers, theme, skills, usage, about",
+        description: "providers, colors, skills, usage, about",
         argument: Argument::None,
         handler: settings,
     },

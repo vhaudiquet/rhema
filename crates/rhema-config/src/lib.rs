@@ -486,10 +486,15 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// The UI color palette: `rhema` (the default), `aquamarine`,
-    /// `black-and-white`, or `dracula`. Validated by the consumer, not
-    /// here — anything unparseable reads as the default.
+    /// `black-and-white`, `dracula`, or `m3-you`. Validated by the
+    /// consumer, not here — anything unparseable reads as the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colors: Option<String>,
+    /// The seed color of the `m3-you` palette, `#RRGGBB`: pick one from
+    /// your wallpaper (a terminal cannot see it). Unset means Material's
+    /// baseline purple. Ignored by every other palette.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub m3_source: Option<String>,
     /// The last profile that served each workspace a turn, keyed by the
     /// workspace's absolute path. Startup reopens a directory on its
     /// last-used profile — a per-directory memory, never a global
@@ -521,6 +526,7 @@ impl Default for Config {
             icons: None,
             theme: None,
             colors: None,
+            m3_source: None,
             last_profile_by_workspace: BTreeMap::new(),
         }
     }
@@ -872,6 +878,7 @@ mod tests {
             icons: None,
             theme: Some("light".into()),
             colors: Some("rhema".into()),
+            m3_source: Some("#6750A4".into()),
             last_profile_by_workspace: BTreeMap::new(),
         };
         Config::save_to(&path, &config).unwrap();
@@ -1104,11 +1111,16 @@ mod tests {
         // A loaded file missing the key gets the same seeding.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "theme: light\ncolors: dracula\n").unwrap();
+        std::fs::write(
+            &path,
+            "theme: light\ncolors: dracula\nm3_source: \"#4285F4\"\n",
+        )
+        .unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert!(loaded.profiles.contains_key("work"));
         assert_eq!(loaded.theme.as_deref(), Some("light"));
         assert_eq!(loaded.colors.as_deref(), Some("dracula"));
+        assert_eq!(loaded.m3_source.as_deref(), Some("#4285F4"));
     }
 
     #[test]
@@ -1166,6 +1178,7 @@ mod tests {
             icons: None,
             theme: None,
             colors: None,
+            m3_source: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         let work = config.effective(Some("work"));
@@ -1388,6 +1401,7 @@ mod tests {
             icons: None,
             theme: None,
             colors: None,
+            m3_source: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         let store = VolatileSecretStore::new();

@@ -8,7 +8,9 @@
 //! the primary appearance; light exists for light-terminal users and is
 //! selected with `theme: light`. Components reference tokens, never
 //! literal hex (rule 1); saturated color stays on the accent and the
-//! status set (rules 3-4).
+//! status set (rules 3-4). M3 You is the one generated palette: its
+//! tokens come from the tonal-spot scheme in [`crate::m3`], not from
+//! constants here.
 
 use ratatui::style::Color;
 
@@ -89,14 +91,19 @@ fn relative_luminance(color: Color) -> f64 {
     }
 }
 
-/// Parses a `#RRGGBB` or `RRGGBB` config color. Config colors are user
-/// data, not component literals — rule 1 governs code, not profiles.
-pub fn parse_hex_color(text: &str) -> Option<Color> {
+/// Parses a `#RRGGBB` or `RRGGBB` config color as `0xRRGGBB`.
+pub(crate) fn parse_hex_u32(text: &str) -> Option<u32> {
     let hex = text.trim().strip_prefix('#').unwrap_or(text.trim());
     if hex.len() != 6 {
         return None;
     }
-    u32::from_str_radix(hex, 16).ok().map(|value| {
+    u32::from_str_radix(hex, 16).ok()
+}
+
+/// Parses a `#RRGGBB` or `RRGGBB` config color. Config colors are user
+/// data, not component literals — rule 1 governs code, not profiles.
+pub fn parse_hex_color(text: &str) -> Option<Color> {
+    parse_hex_u32(text).map(|value| {
         Color::Rgb(
             (value >> 16) as u8,
             ((value >> 8) & 0xFF) as u8,
@@ -315,6 +322,10 @@ pub enum Palette {
     BlackWhite,
     /// The Dracula palette.
     Dracula,
+    /// The M3 You palette: a Material 3 tonal-spot scheme generated
+    /// from a seed color (`m3_source`, defaulting to Material's
+    /// baseline purple).
+    M3You,
 }
 
 impl Palette {
@@ -324,6 +335,7 @@ impl Palette {
         Palette::Aquamarine,
         Palette::BlackWhite,
         Palette::Dracula,
+        Palette::M3You,
     ];
 
     /// Parses a stored config value; `None` for no value and unknown
@@ -337,6 +349,8 @@ impl Palette {
                 Some(Self::BlackWhite)
             }
             Some("dracula") => Some(Self::Dracula),
+            Some("m3-you") | Some("m3_you") | Some("m3you") | Some("material-you")
+            | Some("material_you") => Some(Self::M3You),
             _ => None,
         }
     }
@@ -349,6 +363,7 @@ impl Palette {
             Self::Aquamarine => "aquamarine",
             Self::BlackWhite => "black-and-white",
             Self::Dracula => "dracula",
+            Self::M3You => "m3-you",
         }
     }
 
@@ -359,20 +374,32 @@ impl Palette {
             Self::Aquamarine => "Aquamarine",
             Self::BlackWhite => "Black and white",
             Self::Dracula => "Dracula",
+            Self::M3You => "M3 You",
         }
     }
 
-    /// Resolves the palette's tokens for `kind`.
-    pub fn theme(self, kind: ThemeKind) -> &'static Theme {
-        match (self, kind) {
-            (Self::Rhema, ThemeKind::Dark) => &DARK,
-            (Self::Rhema, ThemeKind::Light) => &LIGHT,
-            (Self::Aquamarine, ThemeKind::Dark) => &AQUAMARINE_DARK,
-            (Self::Aquamarine, ThemeKind::Light) => &AQUAMARINE_LIGHT,
-            (Self::BlackWhite, ThemeKind::Dark) => &BLACK_WHITE_DARK,
-            (Self::BlackWhite, ThemeKind::Light) => &BLACK_WHITE_LIGHT,
-            (Self::Dracula, ThemeKind::Dark) => &DRACULA_DARK,
-            (Self::Dracula, ThemeKind::Light) => &DRACULA_LIGHT,
+    /// Resolves the palette's tokens for `kind`. `m3_source` feeds
+    /// [`Palette::M3You`] alone (`0xRRGGBB`; `None` is its default
+    /// seed) and the fixed palettes ignore it.
+    pub fn theme(self, kind: ThemeKind, m3_source: Option<u32>) -> Theme {
+        match self {
+            Self::Rhema => match kind {
+                ThemeKind::Dark => DARK,
+                ThemeKind::Light => LIGHT,
+            },
+            Self::Aquamarine => match kind {
+                ThemeKind::Dark => AQUAMARINE_DARK,
+                ThemeKind::Light => AQUAMARINE_LIGHT,
+            },
+            Self::BlackWhite => match kind {
+                ThemeKind::Dark => BLACK_WHITE_DARK,
+                ThemeKind::Light => BLACK_WHITE_LIGHT,
+            },
+            Self::Dracula => match kind {
+                ThemeKind::Dark => DRACULA_DARK,
+                ThemeKind::Light => DRACULA_LIGHT,
+            },
+            Self::M3You => crate::m3::theme(m3_source.unwrap_or(crate::m3::DEFAULT_SOURCE), kind),
         }
     }
 }
@@ -412,8 +439,8 @@ mod tests {
         assert!(DARK.is_dark());
         assert!(!LIGHT.is_dark());
         for palette in Palette::ALL {
-            assert!(palette.theme(ThemeKind::Dark).is_dark());
-            assert!(!palette.theme(ThemeKind::Light).is_dark());
+            assert!(palette.theme(ThemeKind::Dark, None).is_dark());
+            assert!(!palette.theme(ThemeKind::Light, None).is_dark());
         }
     }
 
@@ -431,6 +458,10 @@ mod tests {
             Some(Palette::BlackWhite)
         );
         assert_eq!(
+            Palette::from_stored(Some("material_you")),
+            Some(Palette::M3You)
+        );
+        assert_eq!(
             Palette::from_stored(Some("blackandwhite")),
             Some(Palette::BlackWhite)
         );
@@ -444,17 +475,34 @@ mod tests {
     fn every_palette_resolves_both_appearances() {
         for palette in Palette::ALL {
             for kind in [ThemeKind::Dark, ThemeKind::Light] {
-                let theme = palette.theme(kind);
+                let theme = palette.theme(kind, None);
                 assert_ne!(theme.ground, theme.text, "{palette:?} {kind:?}");
             }
         }
     }
 
     #[test]
+    fn the_m3_seed_moves_the_tokens() {
+        let default = Palette::M3You.theme(ThemeKind::Dark, None);
+        let blue = Palette::M3You.theme(ThemeKind::Dark, Some(0x4285F4));
+        assert_eq!(
+            default.ground,
+            crate::m3::theme(crate::m3::DEFAULT_SOURCE, ThemeKind::Dark).ground
+        );
+        assert_ne!(default.accent, blue.accent);
+        // The fixed palettes ignore the seed.
+        assert_eq!(Palette::Dracula.theme(ThemeKind::Dark, None), DRACULA_DARK);
+        assert_eq!(
+            Palette::Dracula.theme(ThemeKind::Dark, Some(0x4285F4)),
+            DRACULA_DARK
+        );
+    }
+
+    #[test]
     fn tokens_read_on_the_ground_in_every_palette() {
         for palette in Palette::ALL {
             for kind in [ThemeKind::Dark, ThemeKind::Light] {
-                let theme = palette.theme(kind);
+                let theme = palette.theme(kind, None);
                 let label = format!("{palette:?} {kind:?}");
                 assert!(contrast(theme.text, theme.ground) >= 4.5, "{label}");
                 assert!(contrast(theme.text, theme.surface) >= 4.5, "{label}");

@@ -26,6 +26,9 @@
 //! - [`app`] — the state machine routing keys and events
 //! - [`turn`] — the tokio tasks (turn, model fetch)
 //! - [`ui`] — ratatui rendering
+//! - [`palette`] — color palettes: named token sets in two appearances;
+//!   [`hct`] and `m3` (private) carry the color math and the scheme
+//!   behind M3 You
 //! - `run` — terminal setup/teardown and the event loop
 
 #![forbid(unsafe_code)]
@@ -44,7 +47,9 @@ pub mod args;
 pub mod clipboard;
 pub mod commands;
 pub mod events;
+mod hct;
 pub mod icons;
+mod m3;
 pub mod markdown;
 pub mod palette;
 pub mod run;

@@ -520,6 +520,9 @@ pub struct RunOptions {
     pub colors: crate::palette::Palette,
     /// The palette's appearance: its dark tokens or its light ones.
     pub theme: crate::palette::ThemeKind,
+    /// The M3 You seed, `0xRRGGBB`; `None` is Material's baseline
+    /// purple. Every palette but M3 You ignores it.
+    pub m3_source: Option<u32>,
     /// Which icon flavor the footer draws with.
     pub icons: crate::icons::Flavor,
     /// The config profile this session runs under.
@@ -644,7 +647,7 @@ pub struct App {
     /// Set by the runner to end the event loop.
     pub should_quit: bool,
     /// The resolved design tokens every render pass reads.
-    pub theme: &'static crate::palette::Theme,
+    pub theme: crate::palette::Theme,
     /// The resolved footer glyphs every render pass reads.
     pub icons: &'static crate::icons::Icons,
     /// The chat input state.
@@ -844,7 +847,10 @@ impl App {
         Ok(Self {
             secrets: setup.secrets,
             // Read before `options` moves into the struct.
-            theme: setup.options.colors.theme(setup.options.theme),
+            theme: setup
+                .options
+                .colors
+                .theme(setup.options.theme, setup.options.m3_source),
             icons: setup.options.icons.set(),
             store: setup.store,
             config: setup.config,
@@ -991,7 +997,7 @@ impl App {
             crate::palette::ThemeKind::Dark
         };
         self.options.theme = kind;
-        self.theme = self.options.colors.theme(kind);
+        self.theme = self.options.colors.theme(kind, self.options.m3_source);
         self.config.theme = Some(if dark { "light" } else { "dark" }.to_owned());
         if let Screen::Settings(settings) = &mut self.screen {
             settings.theme_dark = !dark;
@@ -1011,7 +1017,7 @@ impl App {
             .unwrap_or(0);
         let next = all[(current + 1) % all.len()];
         self.options.colors = next;
-        self.theme = next.theme(self.options.theme);
+        self.theme = next.theme(self.options.theme, self.options.m3_source);
         self.config.colors = Some(next.stored_name().to_owned());
         if let Screen::Settings(settings) = &mut self.screen {
             settings.colors = next;
@@ -2382,7 +2388,7 @@ impl App {
             .and_then(|profile| profile.color.as_deref())
             .and_then(crate::palette::parse_hex_color);
         let color =
-            custom.unwrap_or_else(|| crate::palette::default_profile_color(&name, self.theme));
+            custom.unwrap_or_else(|| crate::palette::default_profile_color(&name, &self.theme));
         Some((name, color))
     }
 
@@ -2687,6 +2693,7 @@ mod tests {
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,
+                m3_source: None,
                 thinking: rhema_core::request::ThinkingEffort::Default,
                 icons: crate::icons::Flavor::Unicode,
                 profile: Some("personal".into()),
@@ -4780,6 +4787,7 @@ mod tests {
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,
+                m3_source: None,
                 thinking: rhema_core::request::ThinkingEffort::Default,
                 icons: crate::icons::Flavor::Unicode,
                 profile: Some(profile),
@@ -4864,15 +4872,15 @@ mod tests {
     #[test]
     fn settings_toggles_the_theme_live_and_persists_it() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        assert_eq!(h.app.theme, &crate::palette::DARK);
+        assert_eq!(h.app.theme, crate::palette::DARK);
         crate::commands::dispatch(&mut h.app, "/settings");
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('t')));
-        assert_eq!(h.app.theme, &crate::palette::LIGHT, "the swap is live");
+        assert_eq!(h.app.theme, crate::palette::LIGHT, "the swap is live");
         assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("light"));
         // And back.
         h.app.on_key(key(KeyCode::Char('t')));
-        assert_eq!(h.app.theme, &crate::palette::DARK);
+        assert_eq!(h.app.theme, crate::palette::DARK);
         assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("dark"));
     }
 
@@ -5233,14 +5241,14 @@ mod tests {
             })
             .expect("the theme row is clickable");
         h.app.on_click(row_x, row_y);
-        assert_eq!(h.app.theme, &crate::palette::LIGHT);
+        assert_eq!(h.app.theme, crate::palette::LIGHT);
         assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("light"));
     }
 
     #[test]
     fn settings_cycles_the_palette_live_and_persists_it() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        assert_eq!(h.app.theme, &crate::palette::DARK);
+        assert_eq!(h.app.theme, crate::palette::DARK);
         crate::commands::dispatch(&mut h.app, "/settings");
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('c')));
@@ -5249,24 +5257,25 @@ mod tests {
             crate::palette::Palette::Aquamarine,
             "rhema steps to aquamarine"
         );
-        assert_eq!(h.app.theme, &crate::palette::AQUAMARINE_DARK, "live swap");
+        assert_eq!(h.app.theme, crate::palette::AQUAMARINE_DARK, "live swap");
         assert_eq!(
             h.store.load().unwrap().colors.as_deref(),
             Some("aquamarine")
         );
         // The appearance carries over: the palette's light tokens show.
         h.app.on_key(key(KeyCode::Char('t')));
-        assert_eq!(h.app.theme, &crate::palette::AQUAMARINE_LIGHT);
+        assert_eq!(h.app.theme, crate::palette::AQUAMARINE_LIGHT);
         // Cycling wraps back to rhema through every palette.
         for expected in [
             crate::palette::Palette::BlackWhite,
             crate::palette::Palette::Dracula,
+            crate::palette::Palette::M3You,
             crate::palette::Palette::Rhema,
         ] {
             h.app.on_key(key(KeyCode::Char('c')));
             assert_eq!(h.app.options.colors, expected);
         }
-        assert_eq!(h.app.theme, &crate::palette::LIGHT);
+        assert_eq!(h.app.theme, crate::palette::LIGHT);
         assert_eq!(h.store.load().unwrap().colors.as_deref(), Some("rhema"));
     }
 

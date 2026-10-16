@@ -106,8 +106,9 @@ fn partition(lines: &[transcript::Line]) -> Vec<TranscriptBlock> {
 pub(crate) struct WrapCache {
     /// The width the rows were wrapped at.
     width: usize,
-    /// The theme they were styled with.
-    theme: Option<&'static Theme>,
+    /// The theme the rows were styled with; the whole cache dies on a
+    /// change, including a generated palette switching seeds.
+    theme: Option<Theme>,
     /// One entry per cached block, in order.
     blocks: Vec<CachedBlock>,
 }
@@ -132,6 +133,8 @@ struct CachedBlock {
 
 /// Renders one frame.
 pub fn render(app: &mut App, frame: &mut Frame) {
+    // A copy, not a borrow: the render calls below need `&mut app` and
+    // generated palettes hand out owned tokens.
     let theme = app.theme;
     let icons = app.icons;
     // The canvas: one background everywhere, the model output's. Nothing
@@ -142,10 +145,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     );
     let mut hits = Vec::new();
     match &app.screen {
-        Screen::Picker(picker) => render_picker(frame, picker, theme),
-        Screen::Profile(profile) => render_profile_picker(frame, profile, theme),
-        Screen::Resume(resume) => render_resume_picker(frame, resume, theme),
-        Screen::Settings(settings) => render_settings(frame, settings, theme, icons, &mut hits),
+        Screen::Picker(picker) => render_picker(frame, picker, &theme),
+        Screen::Profile(profile) => render_profile_picker(frame, profile, &theme),
+        Screen::Resume(resume) => render_resume_picker(frame, resume, &theme),
+        Screen::Settings(settings) => render_settings(frame, settings, &theme, icons, &mut hits),
         Screen::Chat => {
             // An error wraps, so its strip grows to the wrapped height.
             // Either strip — error or spinner — carries a blank row above
@@ -164,7 +167,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 &app.chat.input,
                 &app.chat.attachments,
                 frame.area().width,
-                theme,
+                &theme,
             );
             let [transcript_area, status_area, input_area, footer_area] = Layout::vertical([
                 Constraint::Min(0),
@@ -173,15 +176,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 Constraint::Length(1),
             ])
             .areas(frame.area());
-            render_transcript(frame, app, transcript_area, theme);
-            render_status(frame, app, status_area, theme);
-            render_input(frame, app, input_area, theme);
-            render_command_palette(frame, app, input_area, theme);
-            render_footer(frame, app, footer_area, theme);
+            render_transcript(frame, app, transcript_area, &theme);
+            render_status(frame, app, status_area, &theme);
+            render_input(frame, app, input_area, &theme);
+            render_command_palette(frame, app, input_area, &theme);
+            render_footer(frame, app, footer_area, &theme);
             if let Some(call) = &app.turn.pending_approval {
-                render_approval_modal(frame, call, theme);
+                render_approval_modal(frame, call, &theme);
             } else if app.confirm_quit {
-                render_confirm_quit(frame, theme);
+                render_confirm_quit(frame, &theme);
             }
         }
     }
@@ -933,7 +936,7 @@ fn settings_page(
         }
     }
 }
-fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &'static Theme) {
+fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
     let inner = Rect {
         x: area.x + 1,
         width: area.width.saturating_sub(2),
@@ -951,7 +954,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &'stat
     // transcript (every block dirty), answers for none.
     let reusable = {
         let cache = &app.transcript_cache;
-        if cache.width == width && cache.theme == Some(theme) {
+        if cache.width == width && cache.theme == Some(*theme) {
             blocks
                 .iter()
                 .zip(cache.blocks.iter())
@@ -969,7 +972,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &'stat
     {
         let cache = &mut app.transcript_cache;
         cache.width = width;
-        cache.theme = Some(theme);
+        cache.theme = Some(*theme);
         cache.blocks.truncate(reusable);
     }
 
@@ -2478,6 +2481,7 @@ mod scroll_tests {
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: ThemeKind::Dark,
+                m3_source: None,
                 icons: crate::icons::Flavor::Unicode,
                 thinking: rhema_core::request::ThinkingEffort::Default,
                 profile: Some("personal".into()),

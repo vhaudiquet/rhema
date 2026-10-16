@@ -501,6 +501,10 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         Some("light") => crate::palette::ThemeKind::Light,
         _ => crate::palette::ThemeKind::Dark,
     };
+    let m3_source = config
+        .m3_source
+        .as_deref()
+        .and_then(crate::palette::parse_hex_u32);
     let icons = config
         .icons
         .as_deref()
@@ -509,6 +513,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     let options = RunOptions {
         colors,
         theme,
+        m3_source,
         icons,
         profile: Some(profile),
         workspace: workspace.clone(),

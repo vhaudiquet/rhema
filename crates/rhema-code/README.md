@@ -21,12 +21,13 @@ Rhema Code is a terminal-based coding agent, built on the Rhema agent framework.
 The look and feel is machine-owned: it lives in `config.yaml`, not in flags. The `colors` key picks the palette — the setting defaults to `rhema` and cycles live from the Appearance page of `/settings`:
 
 ```yaml
-colors: rhema          # rhema | aquamarine | black-and-white | dracula
+colors: rhema          # rhema | aquamarine | black-and-white | dracula | m3-you
 theme: dark            # dark | light — the palette's appearance
 icons: unicode         # unicode | nerd — the footer's icon flavor
+m3_source: "#6750A4"   # the m3-you seed color (#RRGGBB), optional
 ```
 
-Every palette ships both appearances. Rhema is the design the TUI was drawn against; Aquamarine and Black-and-white restyle the same slots; Dracula maps the official colors onto them (its light side is derived, since Dracula ships no official light variant).
+Every palette ships both appearances. Rhema is the design the TUI was drawn against; Aquamarine and Black-and-white restyle the same slots; Dracula maps the official colors onto them (its light side is derived, since Dracula ships no official light variant). M3 You generates a [Material 3](https://m3.material.io/styles/color/system/overview) tonal-spot scheme from a seed color: set `m3_source` to a color picked from your wallpaper (a terminal cannot see it), and the whole UI — grounds, text, accent, status colors — derives from it. Without a seed it uses Material's baseline purple.
 
 ### Customizable, scriptable system-prompt
 
