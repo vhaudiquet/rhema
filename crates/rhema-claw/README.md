@@ -66,6 +66,11 @@ calendars:                       # feeds the claw reminds about
     kind: ics                    # an ics/webcal feed (Google's secret iCal
     url: https://cloud.example.net/remote.php/dav/calendars/personal.ics
     lead_minutes: [60, 15]       # default [15]; horizon_hours default 24
+  - name: cloud
+    kind: caldav                 # a CalDAV collection (REPORT; Nextcloud,
+    url: https://cloud.example.net/remote.php/dav/calendars/me/personal/
+    username: me                 # Radicale); password falls back to
+    password: app-pass           # CALDAV_PASSWORD; token: = bearer instead
   - name: work
     kind: google                 # the Google Calendar API
     calendar_id: primary

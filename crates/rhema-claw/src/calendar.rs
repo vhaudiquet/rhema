@@ -25,7 +25,9 @@
 use std::sync::Arc;
 
 use rhema_autonomous_agent::{Source, SourceError, async_trait};
-use rhema_calendar_integration::{Calendar, CalendarEvent, GoogleCalendar, IcsCalendar, Window};
+use rhema_calendar_integration::{
+    CaldavCalendar, Calendar, CalendarEvent, GoogleCalendar, IcsCalendar, Window,
+};
 use rhema_rsd::{Clock, Dispatcher, Event, KeyFn};
 use serde_json::json;
 use time::OffsetDateTime;
@@ -40,6 +42,9 @@ pub const CALENDARS_SOURCE: &str = "calendars";
 
 /// The env variable a calendar's token falls back to.
 pub const TOKEN_ENV: &str = "CALENDAR_TOKEN";
+
+/// The env variable a CalDAV password falls back to.
+pub const CALDAV_PASSWORD_ENV: &str = "CALDAV_PASSWORD";
 
 /// One calendar's reminder key: `calendar:<name>` — the session the
 /// reminder turns run in, persistent across the calendar's reminders.
@@ -88,6 +93,33 @@ fn client_for(calendar: &CalendarWatch) -> Result<Arc<dyn Calendar>, String> {
                 feed = feed.with_token(token);
             }
             Ok(Arc::new(feed))
+        }
+        CalendarKind::Caldav => {
+            let url = calendar
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+                .ok_or_else(|| "caldav needs url".to_owned())?;
+            let mut dav = CaldavCalendar::new(url);
+            // A username means Basic auth, the self-hosted norm, and
+            // the password must have resolved at validation; a token
+            // without one is the bearer spelling; neither polls
+            // anonymous, which is what open servers take.
+            if let Some(user) = calendar
+                .username
+                .as_deref()
+                .map(str::trim)
+                .filter(|user| !user.is_empty())
+            {
+                let password = calendar.resolved_password().ok_or_else(|| {
+                    "caldav needs a password: set password or CALDAV_PASSWORD".to_owned()
+                })?;
+                dav = dav.with_basic(user, password);
+            } else if let Some(token) = calendar.resolved_token() {
+                dav = dav.with_token(token);
+            }
+            Ok(Arc::new(dav))
         }
     }
 }

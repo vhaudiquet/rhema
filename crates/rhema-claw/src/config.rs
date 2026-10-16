@@ -225,6 +225,9 @@ pub enum CalendarKind {
     /// An iCalendar feed over HTTP (`webcal://` counts): Google's
     /// secret iCal address, a Nextcloud or Radicale share, Fastmail.
     Ics,
+    /// A CalDAV collection, polled with a `calendar-query` REPORT:
+    /// Nextcloud, Radicale, Fastmail, a plain DAV server.
+    Caldav,
     /// The Google Calendar API, against an OAuth access token or an
     /// API key for public calendars.
     Google,
@@ -236,6 +239,7 @@ impl CalendarKind {
     pub fn name(self) -> &'static str {
         match self {
             CalendarKind::Ics => "ics",
+            CalendarKind::Caldav => "caldav",
             CalendarKind::Google => "google",
         }
     }
@@ -245,6 +249,7 @@ impl CalendarKind {
     pub fn parse(name: &str) -> Option<Self> {
         match name.trim() {
             "ics" => Some(CalendarKind::Ics),
+            "caldav" => Some(CalendarKind::Caldav),
             "google" => Some(CalendarKind::Google),
             _ => None,
         }
@@ -266,8 +271,16 @@ pub struct CalendarWatch {
     /// Required for google.
     pub calendar_id: Option<String>,
     /// A bearer token (an OAuth access token for Google, auth for a
-    /// feed that demands it). Falls back to `CALENDAR_TOKEN`.
+    /// feed or collection that demands it). Falls back to
+    /// `CALENDAR_TOKEN`.
     pub token: Option<String>,
+    /// The CalDAV user, for Basic auth. Set only with a password (or
+    /// `CALDAV_PASSWORD`); a calendar with a username authenticates
+    /// Basic, and `token` is the fallback only when there is none.
+    pub username: Option<String>,
+    /// The CalDAV password or app-specific password. Falls back to
+    /// `CALDAV_PASSWORD`.
+    pub password: Option<String>,
     /// A Google API key for a public calendar; wins over `token`.
     pub api_key: Option<String>,
     /// Reminder lead times, minutes; each occurrence warns once per
@@ -317,6 +330,27 @@ impl CalendarWatch {
     /// The API key as configured, if any.
     pub fn resolved_api_key(&self) -> Option<String> {
         Self::trimmed(self.api_key.as_deref())
+    }
+
+    /// The CalDAV password to authenticate with: the config value,
+    /// then `CALDAV_PASSWORD`. Parameterized over the env lookup in
+    /// the pure [`CalendarWatch::resolve_password_with`].
+    pub fn resolved_password(&self) -> Option<String> {
+        Self::resolve_password_with(|name| std::env::var(name), self.password.as_deref())
+    }
+
+    /// Pure password resolution: the config value first, then
+    /// `CALDAV_PASSWORD`. Parameterized over the env lookup so tests
+    /// can hold the environment still.
+    pub fn resolve_password_with(
+        get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
+        stored: Option<&str>,
+    ) -> Option<String> {
+        Self::trimmed(stored).or_else(|| {
+            get_env("CALDAV_PASSWORD")
+                .ok()
+                .and_then(|token| Self::trimmed(Some(&token)))
+        })
     }
 
     /// The token to poll with: the config value, then `CALENDAR_TOKEN`;
@@ -622,6 +656,35 @@ impl ClawConfig {
                         )));
                     }
                 }
+                CalendarKind::Caldav => {
+                    let url = calendar
+                        .url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|url| !url.is_empty())
+                        .ok_or_else(|| {
+                            fail(
+                                "caldav is a collection: set url to the calendar's DAV \
+                                 address"
+                                    .to_owned(),
+                            )
+                        })?;
+                    if !(url.starts_with("https://") || url.starts_with("http://")) {
+                        return Err(fail(format!(
+                            "url must be https:// or http://, got {url:?}"
+                        )));
+                    }
+                    let has_user = calendar
+                        .username
+                        .as_deref()
+                        .map(str::trim)
+                        .is_some_and(|user| !user.is_empty());
+                    if has_user && calendar.resolved_password().is_none() {
+                        return Err(fail(
+                            "no password: set password in the config or CALDAV_PASSWORD".to_owned(),
+                        ));
+                    }
+                }
                 CalendarKind::Google => {
                     if calendar
                         .calendar_id
@@ -767,9 +830,14 @@ watches:
     kind: google
     calendar_id: abc123@group.calendar.google.com
     token: oauth-token
+  - name: dav
+    kind: caldav
+    url: https://cloud.example.net/remote.php/dav/calendars/me/personal/
+    username: me
+    password: app-pass
 ";
         let config: ClawConfig = serde_yaml::from_str(raw).expect("parses");
-        assert_eq!(config.calendars.len(), 3);
+        assert_eq!(config.calendars.len(), 4);
         let home = &config.calendars[0];
         assert_eq!(home.name, "home");
         assert_eq!(home.kind, CalendarKind::Ics);
@@ -782,6 +850,12 @@ watches:
         assert_eq!(
             config.calendars[2].resolved_token().as_deref(),
             Some("oauth-token")
+        );
+        assert_eq!(config.calendars[3].kind, CalendarKind::Caldav);
+        assert_eq!(config.calendars[3].username.as_deref(), Some("me"));
+        assert_eq!(
+            config.calendars[3].resolved_password().as_deref(),
+            Some("app-pass")
         );
         config.validate().expect("a complete list validates");
     }
@@ -824,6 +898,20 @@ watches:
             url: url.map(str::to_owned),
             calendar_id: None,
             token: None,
+            username: None,
+            password: None,
+            api_key: None,
+            lead_minutes: None,
+            horizon_hours: None,
+        };
+        let caldav = |name: &str, url: Option<&str>| CalendarWatch {
+            name: name.to_owned(),
+            kind: CalendarKind::Caldav,
+            url: url.map(str::to_owned),
+            calendar_id: None,
+            token: None,
+            username: None,
+            password: None,
             api_key: None,
             lead_minutes: None,
             horizon_hours: None,
@@ -834,6 +922,8 @@ watches:
             url: None,
             calendar_id: id.map(str::to_owned),
             token: None,
+            username: None,
+            password: None,
             api_key: api_key.map(str::to_owned),
             lead_minutes: None,
             horizon_hours: None,
@@ -862,6 +952,16 @@ watches:
             .expect_err("a junk scheme is loud");
         assert!(err.to_string().contains("https://"), "got: {err}");
 
+        let err = config(vec![caldav("home", None)])
+            .validate()
+            .expect_err("a url-less collection is loud");
+        assert!(err.to_string().contains("DAV"), "got: {err}");
+
+        let err = config(vec![caldav("home", Some("webcal://c.example.net/dav/"))])
+            .validate()
+            .expect_err("webcal is not a dav spelling");
+        assert!(err.to_string().contains("https://"), "got: {err}");
+
         let err = config(vec![google("work", None, Some("k"))])
             .validate()
             .expect_err("an id-less google calendar is loud");
@@ -880,13 +980,47 @@ watches:
             .expect_err("a lead past the horizon is loud");
         assert!(err.to_string().contains("horizon"), "got: {err}");
 
-        // The good spellings validate, webcal included.
+        // A username with a password validates, as does a collection
+        // with none of it (an open server) or a token instead.
+        let mut basic = caldav("home", Some("https://c.example.net/dav/home/"));
+        basic.username = Some("me".to_owned());
+        basic.password = Some("app-pass".to_owned());
+        let mut bearer = caldav("shared", Some("http://10.0.0.5/dav/shared/"));
+        bearer.token = Some("sekrit".to_owned());
         config(vec![
-            ics("home", Some("webcal://c.example.net/a.ics")),
+            ics("feed", Some("webcal://c.example.net/a.ics")),
+            basic,
+            bearer,
             google("work", Some("primary"), Some("k")),
         ])
         .validate()
         .expect("a complete list validates");
+    }
+
+    #[test]
+    fn the_caldav_password_falls_back_to_the_env_and_blank_counts_as_unset() {
+        let env = |name: &str| match name {
+            "CALDAV_PASSWORD" => Ok("from-env".to_owned()),
+            _ => Err(std::env::VarError::NotPresent),
+        };
+        assert_eq!(
+            CalendarWatch::resolve_password_with(env, Some(" from-config ")),
+            Some("from-config".to_owned()),
+            "the config password wins"
+        );
+        assert_eq!(
+            CalendarWatch::resolve_password_with(env, None),
+            Some("from-env".to_owned()),
+            "the env password serves when no config password"
+        );
+        assert_eq!(
+            CalendarWatch::resolve_password_with(
+                |_| Err(std::env::VarError::NotPresent),
+                Some(" ")
+            ),
+            None,
+            "a blank password counts as unset"
+        );
     }
 
     #[test]
