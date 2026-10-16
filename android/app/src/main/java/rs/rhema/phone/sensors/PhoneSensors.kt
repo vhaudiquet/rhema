@@ -102,7 +102,7 @@ object PhoneSensors {
 
         val signal = CancellationSignal()
         val location = withTimeoutOrNull(FIX_TIMEOUT_MS) {
-            suspendCancellableCoroutine { continuation ->
+            suspendCancellableCoroutine<Location?> { continuation ->
                 val settled = AtomicBoolean(false)
                 continuation.invokeOnCancellation {
                     settled.set(true)
@@ -117,13 +117,22 @@ object PhoneSensors {
                         continuation.resume(location)
                     }
                 }
-                LocationManagerCompat.getCurrentLocation(
-                    manager,
-                    provider,
-                    signal,
-                    ContextCompat.getMainExecutor(context),
-                    callback,
-                )
+                try {
+                    LocationManagerCompat.getCurrentLocation(
+                        manager,
+                        provider,
+                        signal,
+                        ContextCompat.getMainExecutor(context),
+                        callback,
+                    )
+                } catch (_: SecurityException) {
+                    // The grant can be revoked between the check at the
+                    // top of currentFix and this request; that read then
+                    // belongs to the last-known fallback, not a crash.
+                    if (settled.compareAndSet(false, true)) {
+                        continuation.resume(null)
+                    }
+                }
             }
         }
         return location?.let { fix ->
