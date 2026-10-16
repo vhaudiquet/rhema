@@ -1,0 +1,269 @@
+# The release channel: a v* tag ships the exact-version images (plus
+# the sha pin the chart's appVersion resolves to), the exact-version
+# chart, and the library closure to crates.io. Edge publishing on every
+# main push lives in ci.yml. Release candidates (a v* tag with a
+# prerelease suffix, v0.2.0-rc1) publish nothing, like pkh's release
+# jobs. The snap jobs are parked until the store approves classic
+# confinement (a forum request); the recipe in snap/snapcraft.yaml is
+# proven — the first run packed and the store rejected the upload.
+name: release
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: git.vhaudiquet.fr
+  OWNER: vhaudiquet
+
+jobs:
+  build-and-push-release-images:
+    # The same two deployable images as the edge channel, tagged for the
+    # release: the exact version, the rolling stable pin, and the sha
+    # the chart's appVersion resolves to.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: deploy/docker/claw.Dockerfile
+            image: rhema-claw
+          - dockerfile: deploy/docker/ui.Dockerfile
+            image: rhema-claw-ui
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: https://git.vhaudiquet.fr
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.PACKAGES_TOKEN }}
+
+      - name: Compute the release version (the tag strips the v)
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: |
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ steps.ver.outputs.version }}
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:stable
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ gitea.sha }}
+
+  release-chart:
+    # The exact tag version ships as-is so deployments can pin
+    # `--version 0.1.0`; appVersion pins the exact commit the image was
+    # built from (the chart's default image tag is appVersion, so the
+    # sha image above must exist before this runs).
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    needs: build-and-push-release-images
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Update Chart version and appVersion
+        run: |
+          sed -i "s/^version:.*/version: \"${GITHUB_REF_NAME#v}\"/" deploy/helm/rhema-claw/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ gitea.sha }}\"/" deploy/helm/rhema-claw/Chart.yaml
+
+      - name: Lint Helm chart
+        run: helm lint deploy/helm/rhema-claw
+
+      - name: Package Helm chart
+        run: helm package deploy/helm/rhema-claw
+
+      - name: Push Helm chart to Gitea registry
+        run: |
+          TOKEN=$(echo -n "${{ secrets.PACKAGES_TOKEN }}" | tr -d '\n')
+          curl --fail --user "${{ gitea.actor }}:${TOKEN}" \
+            -X POST \
+            --upload-file rhema-claw-*.tgz \
+            "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
+
+  release-binaries:
+    # The stable binary channel: the tag's tarball under its version,
+    # and the root manifest repointed at it — the shape the installer
+    # resolves. Built from the committed tree, so the vendored
+    # crossterm ships in the binary and the installer keeps its
+    # keyboard handling (the crates.io build is the one that waits).
+    # amd64 only for now: the cross legs wanted target images driven by
+    # hand and a host cargo the runner does not carry. darwin-arm64 and
+    # the rest join as native-style legs once their toolchains live
+    # somewhere runnable (Apple's license wants the SDK taken from your
+    # own Xcode). The manifest job hashes the bytes as served, so the
+    # stable pointer never moves to a partial set.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev unzip
+
+      - name: Install the AWS CLI
+        # Ubuntu 24.04 dropped the awscli package; the official v2
+        # bundle is the source of truth. Skipped where the runner
+        # image already ships aws.
+        run: |
+          if command -v aws >/dev/null; then
+            echo "aws already present"
+          else
+            sudo apt-get update && sudo apt-get install -y unzip
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
+          fi
+          aws --version
+
+      - name: Build
+        run: |
+          cargo build --release -p rhema-code
+          mkdir -p dist
+          cp target/release/rhema dist/rhema
+
+      - name: Upload the tarball
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          endpoint="https://s3.rhema.rs"
+          tar -czf "dist/rhema-linux-amd64.tar.gz" -C dist rhema
+          aws s3 cp "dist/rhema-linux-amd64.tar.gz" \
+            "s3://get/$version/" --endpoint-url "$endpoint"
+
+  release-manifest:
+    # Hashes the tarball as served (not as built), writes the version
+    # dir's checksums.txt and the root manifest with the stable pointer
+    # repointed — only reached when the build above succeeded.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    needs: release-binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install the AWS CLI
+        # Ubuntu 24.04 dropped the awscli package; the official v2
+        # bundle is the source of truth. Skipped where the runner
+        # image already ships aws.
+        run: |
+          if command -v aws >/dev/null; then
+            echo "aws already present"
+          else
+            sudo apt-get update && sudo apt-get install -y unzip
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
+          fi
+          aws --version
+
+      - name: Publish the channel manifest
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          endpoint="https://s3.rhema.rs"
+          mkdir -p dist
+          curl -fsSL "https://get.rhema.rs/$version/rhema-linux-amd64.tar.gz" -o dist/rhema-linux-amd64.tar.gz
+          (cd dist && sha256sum rhema-*.tar.gz > checksums.txt)
+          # One binary per line, on the same line as its name: the
+          # installer parses the manifest with line-wise sed, so
+          # reformatting this through json.dumps breaks every install.
+          sha="$(sha256sum dist/rhema-linux-amd64.tar.gz | awk '{print $1}')"
+          {
+            printf '{\n  "stable": "%s",\n  "binaries": {\n' "$version"
+            printf '    "rhema-linux-amd64": {"url": "https://get.rhema.rs/%s/rhema-linux-amd64.tar.gz", "sha256": "%s"}\n' \
+              "$version" "$sha"
+            printf '  }\n}\n'
+          } > dist/manifest.json
+          aws s3 cp dist/checksums.txt "s3://get/$version/" --endpoint-url "$endpoint"
+          aws s3 cp dist/manifest.json "s3://get/manifest.json" --endpoint-url "$endpoint"
+
+  publish-crates-io:
+    # The rhema-code library closure to crates.io, in dependency order —
+    # cargo walks the closure so every crate uploads after its deps.
+    # rhema-code itself stays excluded until its two crossterm patches
+    # land upstream: a published crate cannot carry [patch.crates-io]
+    # (cargo ignores patches from dependencies), and stock 0.29 does
+    # not compile the TUI's keyboard handling. Until then the vendored
+    # patch keeps every in-tree build (dev, CI, image) whole and the
+    # binary ships through the get.rhema.rs installer.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # reqwest's default TLS links openssl; rusqlite's bundled SQLite
+      # needs a C compiler.
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Check the tag matches the workspace version
+        # cargo publish ships whatever the manifest declares, regardless
+        # of the tag: a mismatch must fail loudly instead of publishing
+        # the wrong version under the release tag.
+        run: |
+          crate_version="$(awk -F'"' '/^version =/{print $2; exit}' Cargo.toml)"
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$crate_version" != "$tag_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace version $crate_version" >&2
+            exit 1
+          fi
+
+      - name: Publish
+        # Idempotent and rate-limit aware. crates.io caps NEW crates per
+        # rolling window, and a first release publishes twelve at once —
+        # the 0.1.0 bootstrap was cut off at the sixth (429). So: skip
+        # any crate whose exact version is already on the registry,
+        # tolerate the version landing between check and publish, and
+        # let a rate-limited crate fail the job without blocking later
+        # ones — re-running this job resumes where it stopped. The list
+        # is topological: dependencies publish before dependents.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ok=yes
+          for crate in rhema-core rhema-config rhema-provider rhema-agent-tools rhema-coding-agent rhema-provider-anthropic rhema-provider-copilot rhema-provider-google rhema-provider-llama-cpp rhema-provider-openai-compatible rhema-provider-openrouter rhema-acp; do
+            if curl -fsSL -A "rhema-release (git.vhaudiquet.fr/vhaudiquet/rhema)" "https://crates.io/api/v1/crates/$crate/$version" >/dev/null 2>&1; then
+              echo "$crate v$version is already on crates.io — skipping"
+              continue
+            fi
+            echo "publishing $crate v$version ..."
+            if out=$(cargo publish -p "$crate" 2>&1); then
+              echo "$out"
+            elif echo "$out" | grep -qi "already exists\|already uploaded"; then
+              echo "$crate v$version landed between check and publish — counting as done"
+            else
+              printf '%s\n' "$out" >&2
+              ok=no
+            fi
+            sleep 5
+          done
+          [ "$ok" = yes ] || {
+            echo "some crates did not publish (rate window) — re-run this job to resume" >&2
+            exit 1
+          }
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

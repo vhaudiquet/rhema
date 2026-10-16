@@ -1,0 +1,255 @@
+diff --git a/src/event.rs b/src/event.rs
+index 1c9efa0..4f915ca 100644
+--- a/src/event.rs
++++ b/src/event.rs
+@@ -272,7 +272,8 @@ bitflags! {
+     ///
+     /// See <https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement> for more information.
+     ///
+-    /// Alternate keys and Unicode codepoints are not yet supported by crossterm.
++    /// Associated text is decoded into the key code; alternate keys beyond the
++    /// shifted one are not yet supported by crossterm.
+     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize), serde(transparent))]
+     #[derive(Debug, PartialOrd, PartialEq, Eq, Clone, Copy, Hash)]
+     pub struct KeyboardEnhancementFlags: u8 {
+@@ -289,10 +290,12 @@ bitflags! {
+         /// Represent all keyboard events as CSI-u sequences. This is required to get repeat/release
+         /// events for plain-text keys.
+         const REPORT_ALL_KEYS_AS_ESCAPE_CODES = 0b0000_1000;
+-        // Send the Unicode codepoint as well as the keycode.
+-        //
+-        // *Note*: this is not yet supported by crossterm.
+-        // const REPORT_ASSOCIATED_TEXT = 0b0001_0000;
++        /// Send the Unicode text the key produced, as codepoints in the event's
++        /// final field. Text-producing events carry it in place of the bytes
++        /// legacy encoding would send; it is the only place AltGr composition,
++        /// dead keys, and IME preedit survive, so readers doing text input
++        /// should prefer it over the key code.
++        const REPORT_ASSOCIATED_TEXT = 0b0001_0000;
+     }
+ }
+ 
+diff --git a/src/event/sys/unix/parse.rs b/src/event/sys/unix/parse.rs
+index 4298a8f..5f20633 100644
+--- a/src/event/sys/unix/parse.rs
++++ b/src/event/sys/unix/parse.rs
+@@ -493,6 +493,42 @@ fn translate_functional_key_code(codepoint: u32) -> Option<(KeyCode, KeyEventSta
+     None
+ }
+ 
++/// Maps a key's codepoint onto its [`KeyCode`]: both the `CSI u`
++/// (fixterms/kitty) and the modifyOtherKeys (`CSI 27 ; modifiers ; code ~`)
++/// encodings name keys by their codepoint. `modifiers` only decides
++/// whether Tab is a BackTab.
++fn keycode_from_codepoint(
++    codepoint: u32,
++    modifiers: KeyModifiers,
++) -> Option<(KeyCode, KeyEventState)> {
++    if let Some((special_key_code, state)) = translate_functional_key_code(codepoint) {
++        return Some((special_key_code, state));
++    }
++    let c = char::from_u32(codepoint)?;
++    Some((
++        match c {
++            '\x1B' => KeyCode::Esc,
++            '\r' => KeyCode::Enter,
++            // Issue #371: \n = 0xA, which is also the keycode for Ctrl+J. The only reason
++            // we get newlines as input is because the terminal converts
++            // \r into \n for us. When we enter raw mode, we disable
++            // that, so \n no longer has any meaning - it's better to
++            // use Ctrl+J. Waiting to handle it here means it gets picked up later
++            '\n' if !crate::terminal::sys::is_raw_mode_enabled() => KeyCode::Enter,
++            '\t' => {
++                if modifiers.contains(KeyModifiers::SHIFT) {
++                    KeyCode::BackTab
++                } else {
++                    KeyCode::Tab
++                }
++            }
++            '\x7F' => KeyCode::Backspace,
++            _ => KeyCode::Char(c),
++        },
++        KeyEventState::empty(),
++    ))
++}
++
+ pub(crate) fn parse_csi_u_encoded_key_code(buffer: &[u8]) -> io::Result<Option<InternalEvent>> {
+     assert!(buffer.starts_with(b"\x1B[")); // ESC [
+     assert!(buffer.ends_with(b"u"));
+@@ -536,36 +572,8 @@ pub(crate) fn parse_csi_u_encoded_key_code(buffer: &[u8]) -> io::Result<Option<I
+             (KeyModifiers::NONE, KeyEventKind::Press, KeyEventState::NONE)
+         };
+ 
+-    let (mut keycode, state_from_keycode) = {
+-        if let Some((special_key_code, state)) = translate_functional_key_code(codepoint) {
+-            (special_key_code, state)
+-        } else if let Some(c) = char::from_u32(codepoint) {
+-            (
+-                match c {
+-                    '\x1B' => KeyCode::Esc,
+-                    '\r' => KeyCode::Enter,
+-                    // Issue #371: \n = 0xA, which is also the keycode for Ctrl+J. The only reason
+-                    // we get newlines as input is because the terminal converts
+-                    // \r into \n for us. When we enter raw mode, we disable
+-                    // that, so \n no longer has any meaning - it's better to
+-                    // use Ctrl+J. Waiting to handle it here means it gets picked up later
+-                    '\n' if !crate::terminal::sys::is_raw_mode_enabled() => KeyCode::Enter,
+-                    '\t' => {
+-                        if modifiers.contains(KeyModifiers::SHIFT) {
+-                            KeyCode::BackTab
+-                        } else {
+-                            KeyCode::Tab
+-                        }
+-                    }
+-                    '\x7F' => KeyCode::Backspace,
+-                    _ => KeyCode::Char(c),
+-                },
+-                KeyEventState::empty(),
+-            )
+-        } else {
+-            return Err(could_not_parse_event_error());
+-        }
+-    };
++    let (mut keycode, state_from_keycode) =
++        keycode_from_codepoint(codepoint, modifiers).ok_or_else(could_not_parse_event_error)?;
+ 
+     if let KeyCode::Modifier(modifier_keycode) = keycode {
+         match modifier_keycode {
+@@ -606,6 +614,26 @@ pub(crate) fn parse_csi_u_encoded_key_code(buffer: &[u8]) -> io::Result<Option<I
+         }
+     }
+ 
++    // When the "report associated text" flag is enabled in the Kitty Keyboard
++    // Protocol, text-producing events close with the text the key produced,
++    // colon-separated codepoints. The spec requires readers to prefer it over
++    // the unicode-key-code for text input: it is the only place AltGr
++    // composition (`@` is AltGr+0 on AZERTY, whose key code stays `à`), dead
++    // keys, and IME preedit survive, none of which the bare key code can name.
++    // The key code of such events may be 0 — the spec's "no key information"
++    // placeholder. The first codepoint stands in for the whole field: a
++    // KeyEvent carries one char, and multi-codepoint sequences (combining
++    // marks) degrade to their base rather than being dropped.
++    if let Some(text_c) = split
++        .next()
++        .and_then(|text| text.split(':').next())
++        .and_then(|codepoint| codepoint.parse::<u32>().ok())
++        .and_then(char::from_u32)
++        .filter(|c| !c.is_control())
++    {
++        keycode = KeyCode::Char(text_c);
++    }
++
+     let input_event = Event::Key(KeyEvent::new_with_kind_and_state(
+         keycode,
+         modifiers,
+@@ -627,6 +655,27 @@ pub(crate) fn parse_csi_special_key_code(buffer: &[u8]) -> io::Result<Option<Int
+     // This CSI sequence can be a list of semicolon-separated numbers.
+     let first = next_parsed::<u8>(&mut split)?;
+ 
++    // xterm's modifyOtherKeys mode reports modified keys that legacy
++    // encoding leaves ambiguous (shift+enter, ctrl+enter, ...) as
++    // `CSI 27 ; modifiers ; code ~` — Ghostty sends Shift+Enter this way
++    // by default. The code is the same codepoint CSI u names keys by, so
++    // it decodes with the same rules.
++    if first == 27 {
++        let modifier_mask = next_parsed::<u8>(&mut split)?;
++        let codepoint = next_parsed::<u32>(&mut split)?;
++        let modifiers = parse_modifiers(modifier_mask);
++        let (keycode, state_from_keycode) =
++            keycode_from_codepoint(codepoint, modifiers).ok_or_else(could_not_parse_event_error)?;
++        return Ok(Some(InternalEvent::Event(Event::Key(
++            KeyEvent::new_with_kind_and_state(
++                keycode,
++                modifiers,
++                KeyEventKind::Press,
++                parse_modifiers_to_state(modifier_mask) | state_from_keycode,
++            ),
++        ))));
++    }
++
+     let (modifiers, kind, state) =
+         if let Ok((modifier_mask, kind_code)) = modifier_and_kind_parsed(&mut split) {
+             (
+@@ -1034,6 +1083,45 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn test_parse_csi_special_key_code_modify_other_keys() {
++        // Shift+Enter: the sequence Ghostty sends by default.
++        assert_eq!(
++            parse_csi_special_key_code(b"\x1B[27;2;13~").unwrap(),
++            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
++                KeyCode::Enter,
++                KeyModifiers::SHIFT
++            )))),
++        );
++        // Ctrl+Backspace.
++        assert_eq!(
++            parse_csi_special_key_code(b"\x1B[27;5;127~").unwrap(),
++            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
++                KeyCode::Backspace,
++                KeyModifiers::CONTROL
++            )))),
++        );
++        // A modified text key carries its character's codepoint.
++        assert_eq!(
++            parse_csi_special_key_code(b"\x1B[27;5;97~").unwrap(),
++            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
++                KeyCode::Char('a'),
++                KeyModifiers::CONTROL
++            )))),
++        );
++        // Unmodified keys keep their legacy bytes, but a mask of 1 is
++        // still accepted and reads as no modifiers.
++        assert_eq!(
++            parse_csi_special_key_code(b"\x1B[27;1;13~").unwrap(),
++            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
++                KeyCode::Enter,
++                KeyModifiers::NONE
++            )))),
++        );
++        // A missing code field is a parse error, not a dropped key.
++        assert!(parse_csi_special_key_code(b"\x1B[27;2~").is_err());
++    }
++
+     #[test]
+     fn test_parse_csi_special_key_code() {
+         assert_eq!(
+@@ -1320,6 +1408,36 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn test_parse_basic_csi_u_encoded_key_code_associated_text() {
++        // AltGr+0 on a French AZERTY layout: the key code stays the base key
++        // `à` — the composed `@` only exists in the associated-text field.
++        assert_eq!(
++            parse_csi_u_encoded_key_code(b"\x1B[224:48:48;7;64u").unwrap(),
++            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
++                KeyCode::Char('@'),
++                KeyModifiers::ALT | KeyModifiers::CONTROL
++            )))),
++        );
++        // A dead-key composition reports key 0 — the spec's "no key
++        // information" placeholder — with the composed text.
++        assert_eq!(
++            parse_csi_u_encoded_key_code(b"\x1B[0;;233u").unwrap(),
++            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
++                KeyCode::Char('é'),
++                KeyModifiers::empty()
++            )))),
++        );
++        // Plain text keys keep working: the text repeats the key code.
++        assert_eq!(
++            parse_csi_u_encoded_key_code(b"\x1B[97;;97u").unwrap(),
++            Some(InternalEvent::Event(Event::Key(KeyEvent::new(
++                KeyCode::Char('a'),
++                KeyModifiers::empty()
++            )))),
++        );
++    }
++
+     #[test]
+     fn test_parse_basic_csi_u_encoded_key_code_special_keys() {
+         assert_eq!(

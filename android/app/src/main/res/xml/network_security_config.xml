@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The claw is self-hosted: its address is whatever the operator points
+     at — a LAN name like kosmos.lan, a bare IP, or a Tailscale name — and
+     a publicly-trusted certificate is rarely available there. Cleartext is
+     therefore permitted app-wide and user-installed CAs (mkcert) are
+     trusted: only the operator's own claw is ever contacted, and the
+     bearer token is the auth. Prefer HTTPS wherever the deployment has a
+     real certificate. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

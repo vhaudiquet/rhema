@@ -1,0 +1,126 @@
+package rs.rhema.phone
+
+import android.Manifest
+import android.os.Build
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
+import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Surface
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.toArgb
+import rs.rhema.phone.di.AppContainer
+import rs.rhema.phone.ui.ChatScreen
+import rs.rhema.phone.ui.JadeiteGround
+import rs.rhema.phone.ui.RhemaTheme
+import rs.rhema.phone.ui.SessionsScreen
+import rs.rhema.phone.ui.SettingsScreen
+import rs.rhema.phone.work.enqueuePhoneCommandsNow
+
+class MainActivity : ComponentActivity() {
+
+    private val notificationPermission =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private val locationPermissions =
+        registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        // Edge-to-edge with the design's dark ground behind the system
+        // bars; the theme draws under them, the root pads them out.
+        enableEdgeToEdge(SystemBarStyle.dark(JadeiteGround.toArgb()))
+        super.onCreate(savedInstanceState)
+        // POST_NOTIFICATIONS is a runtime permission on API 33+. Asking every
+        // cold start is deliberate; the OS throttles repeated denials itself.
+        if (Build.VERSION.SDK_INT >= 33) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        // Location is the status source's optional sensor: the request rides
+        // every cold start like the notifications one, and a refusal costs
+        // only the location topic — everything else reports as before. The
+        // Settings screen's Status reporting card names the missing grants
+        // and walks to the system toggles.
+        locationPermissions.launch(
+            arrayOf(
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.ACCESS_FINE_LOCATION,
+            ),
+        )
+        val container = (application as RhemaApp).container
+        setContent {
+            RhemaTheme {
+                Surface(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .statusBarsPadding()
+                        .navigationBarsPadding(),
+                ) {
+                    AppRoot(container)
+                }
+            }
+        }
+    }
+
+    // The control queue (phone commands) is freshest when the human is
+    // holding the phone; KEEP coalesces rapid resume bursts.
+    override fun onResume() {
+        super.onResume()
+        enqueuePhoneCommandsNow(applicationContext)
+    }
+}
+
+@Composable
+private fun AppRoot(container: AppContainer) {
+    // null means "still loading stored settings", not "unconfigured".
+    val configured by container.settings.configured.collectAsState(initial = null)
+    var chatSession by rememberSaveable { mutableStateOf<String?>(null) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
+
+    BackHandler(enabled = chatSession != null || showSettings) {
+        chatSession = null
+        showSettings = false
+    }
+
+    // The agent's identity (name, avatar) is refreshed once per app open
+    // and cached in DataStore; the sessions screen's refresh re-fetches it.
+    LaunchedEffect(configured) {
+        if (configured == true) container.identity.refresh()
+    }
+
+    when {
+        configured == null -> Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) { CircularProgressIndicator() }
+
+        // Unconfigured: first launch. SettingsScreen calls onConnected (a no-op
+        // here); flipping `configured` in DataStore recomposes this root.
+        configured == false -> SettingsScreen(container)
+        showSettings -> SettingsScreen(container) { showSettings = false }
+        chatSession != null -> {
+            val key = chatSession
+            if (key != null) ChatScreen(container, key) { chatSession = null }
+        }
+        else -> SessionsScreen(
+            container,
+            onOpenSession = { chatSession = it },
+            onOpenSettings = { showSettings = true },
+        )
+    }
+}

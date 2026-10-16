@@ -1,0 +1,26 @@
+[package]
+name = "rhema-agent-tools"
+description = "The shared agent toolkit on rhema-core's tool abstraction: the approval-gated shell, skills, paste expansion, dangling-call repair, the system-prompt renderer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+# The system-prompt template engine
+minijinja = { workspace = true }
+async-trait = { workspace = true }
+# Subprocess execution for the shell; its streams read line by
+# line (io-util) and hand their lines to the resolver's progress
+# callback across reader tasks (sync).
+tokio = { workspace = true, features = ["process", "time", "io-util", "sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

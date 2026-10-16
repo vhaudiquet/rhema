@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The cache subtree saved attachments land in before an ACTION_VIEW
+     hand-off; FileProvider maps files under it to content:// uris. -->
+<paths>
+    <cache-path name="attachments" path="attachments/" />
+</paths>

@@ -1,0 +1,82 @@
+[package]
+name = "rhema-claw"
+description = "The resident agent daemon: forge watches and the chat HTTP surface, the first consumer of rhema-autonomous-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# The resident tier is still indev: `cargo publish --workspace` skips
+# it until the claw ships.
+publish = false
+
+[lib]
+name = "rhema_claw"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rhema-claw"
+path = "src/main.rs"
+
+[features]
+# The endless canned provider for `--mock` debug runs; nothing ships in
+# a real build.
+mock = ["rhema-core/mock"]
+
+[dependencies]
+# The shared toolkit: the resident agent assembles its agent from the
+# shell, the approval seam, paste expansion, and revive-on-resume
+rhema-agent-tools = { path = "../rhema-agent-tools" }
+rhema-autonomous-agent = { path = "../rhema-autonomous-agent" }
+rhema-coding-agent = { path = "../rhema-coding-agent" }
+rhema-config = { path = "../rhema-config" }
+rhema-core = { path = "../rhema-core" }
+rhema-calendar-integration = { path = "../../integrations/rhema-calendar-integration" }
+rhema-forge-integration = { path = "../../integrations/rhema-forge-integration" }
+# The accounts layer: identities hold the forge tokens the watches poll
+# with, and the identity tools manage them over chat
+rhema-identity = { path = "../rhema-identity" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
+rhema-provider-copilot = { path = "../rhema-provider-copilot" }
+rhema-provider-google = { path = "../rhema-provider-google" }
+rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
+rhema-rsd = { path = "../rhema-rsd" }
+# The resident tier's durable memory: its tools join the resolver chain
+rhema-memory = { path = "../rhema-memory" }
+# The shared ModelCard the backend registry's listings return
+rhema-provider = { path = "../rhema-provider" }
+# Args for the two-flag binary surface
+clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+# Typed public errors
+thiserror = { workspace = true }
+# A daemon: the runtime, the poll sleep, the ctrl-c signal; the driver's
+# concurrent handler runs share it. `net` is the HTTP listener.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "signal", "time", "sync", "net"] }
+# The chat surface: native routes plus SSE, and the OpenAI shim
+axum = { workspace = true }
+# Broadcast receivers as SSE bodies
+tokio-stream = { workspace = true }
+# The watch table: a second connection to the same SQLite file as the
+# dispatcher's store — the two-connections pattern rhema-rsd's tests use
+rusqlite = { version = "0.40", features = ["bundled"] }
+# RFC3339 parsing for schedule_task's `at`
+time = { version = "0.3", default-features = false, features = ["parsing"] }
+
+[dev-dependencies]
+tempfile = "3"
+# In-process HTTP mocks for the offline e2e: zero network
+wiremock = "0.6"
+# The HTTP client for the surface tests, SSE bodies included
+reqwest = { version = "0.12", features = ["json", "stream"] }
+# Naming the SSE chunks' type in the surface tests
+bytes = "1"
+# The scripted provider for turn-level tests; mirrors rhema-code's mock
+# feature without a feature of our own — tests are the only consumer
+rhema-core = { path = "../rhema-core", features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

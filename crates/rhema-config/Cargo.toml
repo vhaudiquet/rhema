@@ -1,0 +1,22 @@
+[package]
+name = "rhema-config"
+description = "Persistent rhema settings: stored provider keys and last-used choices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+# The keychain seam's OS backends (see src/secrets.rs): the `v1` simple
+# API over macOS Keychain, Windows Credential Manager, and the Secret
+# Service on Linux
+keyring = { version = "4", default-features = false, features = ["v1"] }
+
+[dev-dependencies]
+tempfile = "3"

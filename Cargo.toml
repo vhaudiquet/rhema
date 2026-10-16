@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = ["crates/*", "integrations/*"]
+# The vendored crossterm rides under [patch.crates-io] below; excluding
+# it keeps cargo from claiming the tree when run from inside it.
+exclude = ["vendor/crossterm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://git.vhaudiquet.fr/vhaudiquet/rhema.git"
+authors = ["Valentin Haudiquet"]
+
+[workspace.dependencies]
+# Serialization: session and message types must round-trip for checkpointing
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# Typed library errors
+thiserror = "2"
+# Async traits must stay object-safe (dyn ModelProvider, dyn ToolResolver)
+async-trait = "0.1"
+# Config file format (flat scalar fields; see crates/rhema-config)
+serde_yaml = "0.9"
+# Test runtime
+tokio = { version = "1", features = ["macros", "rt"] }
+# The claw's HTTP surface: native routes plus SSE, and the OpenAI shim
+axum = { version = "0.8", features = ["json"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+# The system-prompt template (Jinja syntax); whitespace rules fit
+# markdown templates. Builtins for the standard filters — `tojson`
+# renders a tool's JSON schema into the prompt.
+minijinja = { version = "3", default-features = false, features = ["serde", "debug", "builtins", "json"] }
+# The Agent Client Protocol: schema types and the agent-side connection
+# (see crates/rhema-acp)
+agent-client-protocol = "3.3"
+
+# Vendored crossterm with the two key patches the TUI leans on (see
+# vendor/README.md for provenance and refresh; delete this section to
+# return to the crates.io release):
+# - modifyOtherKeys parsing (CSI 27;…;…~) — Ghostty's default shift+enter
+#   sequence, which crossterm 0.29 drops;
+# - kitty associated text (the `;text` tail of CSI u) decoded into the
+#   key code — without it, every AltGr character and dead key is lost,
+#   since an AltGr key's codepoint stays its base key (`@` arrives as
+#   `à`) and the composed character rides only in the text field.
+[patch.crates-io]
+crossterm = { path = "vendor/crossterm" }

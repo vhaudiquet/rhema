@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Rhema</string>
+
+    <string name="channel_name">Agent notifications</string>
+    <string name="alert_channel_name">Agent alerts</string>
+    <string name="notif_default_title">Rhema</string>
+
+    <string name="settings_title">Connect to your claw</string>
+    <string name="field_base_url">Base URL (e.g. http://192.168.1.10:8080)</string>
+    <string name="field_token">Bearer token</string>
+    <string name="save_and_connect">Save and connect</string>
+    <string name="device_id_fmt">Device ID: %1$s</string>
+    <string name="settings_health_http">Saved. The claw answered /healthz with HTTP %1$d; check the URL and token.</string>
+    <string name="settings_health_network">Saved, but /healthz is unreachable: %1$s</string>
+    <string name="settings_hint">The token is stored in this app\'s private storage. The device ID namespaces this phone\'s status events on the claw.</string>
+
+    <string name="sessions_title">Sessions</string>
+    <string name="sessions_empty">No sessions yet.</string>
+    <string name="sessions_refresh">Refresh</string>
+    <string name="sessions_open_settings">Settings</string>
+    <string name="sessions_http_error">The claw returned HTTP %1$d</string>
+    <string name="sessions_network_error">Cannot reach the claw: %1$s</string>
+    <string name="sessions_unauthorized_hint">HTTP 401 means the bearer token is wrong or missing. Update it in Settings.</string>
+
+    <string name="chat_back">Back</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_message_hint">Message the agent</string>
+    <string name="chat_status_connecting">connecting…</string>
+    <string name="chat_status_live">live</string>
+    <string name="chat_status_reconnecting">reconnecting…</string>
+    <string name="chat_status_failed">disconnected: %1$s</string>
+    <string name="chat_status_unauthorized">unauthorized; check the token in Settings</string>
+    <string name="chat_send_failed">Send failed: %1$s</string>
+    <string name="chat_tool_running">tool running: %1$s</string>
+    <string name="chat_tool_done">tool: %1$s</string>
+    <string name="chat_attachment_download">Download and open</string>
+    <string name="chat_attachment_downloading">downloading…</string>
+    <string name="chat_attachment_open">Open</string>
+    <string name="chat_attachment_open_failed">No app on this phone opens this file type.</string>
+    <string name="chat_attachment_failed">Download failed: %1$s</string>
+    <string name="consent_secret_hint">The secret the agent asked for</string>
+    <string name="consent_submit">Send secret</string>
+    <string name="consent_approve">Approve</string>
+    <string name="consent_deny">Deny</string>
+    <string name="consent_granted">granted</string>
+    <string name="consent_denied">denied</string>
+    <string name="consent_answer_failed">Answer failed: %1$s</string>
+<string name="settings_page_title">Settings</string>
+    <string name="settings_back">Back</string>
+    <string name="settings_group_phone">Phone</string>
+    <string name="settings_group_claw">Claw</string>
+    <string name="settings_entry_reporting">Status reporting</string>
+    <string name="settings_entry_reporting_desc">Location, battery, DND, and the other sensors this phone sends</string>
+    <string name="settings_entry_devices">Devices</string>
+    <string name="settings_entry_devices_desc">Every phone the claw has heard from; forget the stale ones</string>
+    <string name="settings_entry_providers">Model providers</string>
+    <string name="settings_entry_providers_desc">Which backend and model answer the claw\'s turns</string>
+    <string name="settings_entry_connection">Connection</string>
+    <string name="settings_entry_connection_desc">The claw\'s URL and bearer token</string>
+    <string name="card_connection">Connection</string>
+    <string name="card_providers">Model providers</string>
+    <string name="providers_hint">What the claw answers with</string>
+    <string name="providers_field_provider">Provider</string>
+    <string name="providers_field_model">Model</string>
+    <string name="providers_default_option">(provider default)</string>
+    <string name="providers_none">No live listing; the provider\'s default model applies.</string>
+    <string name="providers_saved">Saved: %1$s / %2$s</string>
+    <string name="providers_loading">Loading providers…</string>
+    <string name="providers_staged">Change not applied</string>
+    <string name="providers_staged_detail">The staged pair takes effect on the claw\'s next turn. Save to apply it, discard to keep the running backend.</string>
+    <string name="providers_discard">Discard</string>
+    <string name="providers_save">Save</string>
+    <string name="providers_error">The claw answered: %1$s</string>
+
+    <string name="card_phones">Phones</string>
+    <string name="phones_hint">Every device the claw has heard from</string>
+    <string name="phones_loading">Loading phones…</string>
+    <string name="phones_empty">No phones have reported yet.</string>
+    <string name="phones_this_device">this phone</string>
+    <string name="phones_forget">Forget</string>
+    <string name="phones_forget_title">Forget %1$s?</string>
+    <string name="phones_forget_text">The claw drops this phone\'s status, queued commands, and identity. A phone that still reports comes back on its next run.</string>
+    <string name="phones_seen_just_now">last seen just now</string>
+    <string name="phones_seen_fmt">last seen %1$s ago</string>
+    <string name="phones_never_reported">never reported</string>
+    <string name="phones_forgot_fmt">Forgot %1$s.</string>
+
+    <string name="card_reporting">Status reporting</string>
+    <string name="reporting_hint">What this phone sends the claw</string>
+    <string name="reporting_location_title">Location</string>
+    <string name="reporting_location_desc">Where this phone is. A fix posts when it moves 300 m or more.</string>
+    <string name="reporting_usage_title">Current app</string>
+    <string name="reporting_usage_desc">The app in the foreground, through Android\'s usage access.</string>
+    <string name="reporting_dnd_title">Do Not Disturb</string>
+    <string name="reporting_dnd_desc">Lets the claw\'s dnd_on and dnd_off commands work.</string>
+    <string name="reporting_on">on</string>
+    <string name="reporting_allow">Allow</string>
+
+    <string name="sessions_group_interactive">Interactive</string>
+    <string name="sessions_group_other">Other keys</string>
+
+    <string name="chat_agent">rhema</string>
+</resources>
+

@@ -1,0 +1,20 @@
+{{- $cfg := deepCopy (.Values.config | default dict) }}
+{{- /* The state volume is fixed at /data and the Service needs the process
+       bound to all interfaces, so these three win over whatever values say. */ -}}
+{{- $_ := set $cfg "db" "/data/claw.db" }}
+{{- $_ := set $cfg "workspace_root" "/data/workspaces" }}
+{{- $_ := set $cfg "listen" (printf "0.0.0.0:%v" .Values.service.port) }}
+{{- if .Values.token }}
+{{- $_ := set $cfg "token" .Values.token }}
+{{- else }}
+{{- $_ := unset $cfg "token" }}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rhema-claw.fullname" . }}
+  labels:
+    {{- include "rhema-claw.labels" . | nindent 4 }}
+data:
+  claw.yaml: |
+{{ toYaml $cfg | indent 4 }}

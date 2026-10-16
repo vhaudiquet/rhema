@@ -1,0 +1,61 @@
+name: rhema
+base: core24
+title: Rhema
+# The version of record: the release workflow rewrites it from the tag
+# before building, so a tag ships exactly its number (the chart's pattern).
+version: "0.1.0"
+summary: Rhema Code, a terminal-based coding agent
+description: |
+  Rhema Code is a terminal-based coding agent, built on the Rhema agent framework.
+license: MIT
+contact: vhaudiquet343@hotmail.fr
+issues: https://github.com/vhaudiquet/rhema/issues
+source-code: https://github.com/vhaudiquet/rhema
+website: https://rhema.rs
+grade: stable
+confinement: classic
+# One platform per arch, each building only on its own arch: whatever
+# runs `snapcraft pack` produces its platform's snap, and an upload
+# from that machine adds the arch to the channel. Wire an arm64 or
+# riscv64 runner into the snap jobs (or pack on the board itself) and
+# the channels gain the arch — no cross-compiling anywhere. core24
+# ships all three, and rustup serves the pinned toolchain on each.
+platforms:
+  amd64:
+  arm64:
+  riscv64:
+
+apps:
+  rhema:
+    command: bin/rhema
+
+parts:
+  rhema:
+    plugin: rust
+    # Package the committed tree, not the working directory: a git
+    # pull carries only tracked files, which keeps the (gigantic)
+    # cargo target dir out of the build and makes a local `snapcraft`
+    # match what CI would build. Land your work before packaging it.
+    source: .
+    source-type: git
+    # One member of the workspace; cargo walks up to the root, so the
+    # vendored crossterm ([patch.crates-io]) rides along.
+    rust-path: [crates/rhema-code]
+    # rust-toolchain.toml picks the toolchain; the plugin honors it.
+    # Point the ELF interpreter and rpath at the base: the binary links
+    # the core24 glibc, and a classic snap would otherwise look it up on
+    # the host and refuse to start where the host's is older.
+    build-attributes: [enable-patchelf]
+    # The banner's edge label (rhema-code's build.rs): an edge snap
+    # reads v<version>-edge.<sha>. The release workflow deletes this
+    # entry before packing, so a tag build classifies as a release.
+    build-environment:
+      - RHEMA_BUILD_CHANNEL: edge
+    build-packages:
+      # The snapcraft image ships no cc and no glibc dev files: rust-lld
+      # needs the crt objects, and the C dependencies (reqwest's
+      # native-tls ends in openssl-sys; the bundled SQLite) need a real
+      # compiler.
+      - build-essential
+      - pkg-config
+      - libssl-dev

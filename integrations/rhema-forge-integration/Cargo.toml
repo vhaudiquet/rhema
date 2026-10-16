@@ -1,0 +1,28 @@
+[package]
+name = "rhema-forge-integration"
+description = "The forge integration: GitHub, Gitea, and GitLab activity normalized and ingested into rhema-rsd dispatch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# The resident tier is still indev: `cargo publish --workspace` skips
+# it until the claw ships.
+publish = false
+
+[dependencies]
+# The dispatch seam: watches ingest into a Dispatcher
+rhema-rsd = { path = "../../crates/rhema-rsd", version = "0.1.0" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# HTTP against the three forge REST APIs: JSON request/response bodies,
+# no streaming
+reqwest = { version = "0.12", features = ["json"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+# In-process HTTP mocks for offline tests
+wiremock = "0.6"

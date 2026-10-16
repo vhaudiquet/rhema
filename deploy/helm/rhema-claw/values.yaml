@@ -1,0 +1,93 @@
+# rhema-claw is single-node by design: one daemon owns every session in one
+# SQLite store, with one dispatcher (specs/rhema-framework-v1.md §7). The
+# templates fail the render when this is anything but 1 — it is an
+# invariant, not a starting point.
+replicaCount: 1
+
+image:
+  repository: rhema-claw
+  # Defaults to Chart appVersion when empty.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Bearer token for the /v1 routes, rendered into claw.yaml. Required:
+# the daemon binds all interfaces in-cluster (the Service needs it) and
+# refuses to serve a non-loopback surface without a token, so the render
+# fails when this is empty. /healthz stays open either way.
+token: ""
+
+# The claw.yaml content. db, workspace_root, and listen are pinned by the
+# templates (the PVC is fixed at /data and the container must bind all
+# interfaces for the Service); whatever these say here is overridden.
+config:
+  poll_interval_secs: 60
+  # Seed watches: imported once, while the watch table is still empty.
+  # Example:
+  # watches:
+  #   - forge: github
+  #     repo: acme/widgets
+  watches: []
+
+service:
+  type: ClusterIP
+  port: 7799
+
+ingress:
+  # Off by default: the claw is single-user and bearer-gated, and bearer
+  # tokens must not cross the public internet in the clear. When enabled,
+  # a host is required (the render refuses without one), TLS is strongly
+  # recommended, and the whole surface — chat, /v1, /healthz — is one
+  # origin. A UI on the same host's / path composes: put the UI's
+  # ingress first, or route /v1 here from its own host.
+  enabled: false
+  # Required when enabled; the render refuses an ingress without one.
+  host: ""
+  # The ingress controller's class (nginx, traefik, ...); empty means
+  # the cluster default.
+  className: ""
+  annotations: {}
+  tls:
+    enabled: false
+    # The cert-manager (or manually provisioned) secret carrying the
+    # certificate; required when tls.enabled.
+    secretName: ""
+
+ui:
+  # The web UI on the same host as the daemon: the ingress routes /
+  # here and /v1 (+ /healthz) to the daemon, so one address serves the
+  # browser and the phone app alike, with no CORS anywhere. Stateless
+  # static files — replicas may scale freely.
+  enabled: true
+  image:
+    # Built by deploy/docker/ui.Dockerfile; published by the ui job in
+    # the publish workflow.
+    repository: git.vhaudiquet.fr/vhaudiquet/rhema-claw-ui
+    # Defaults to the chart's appVersion when empty.
+    tag: ""
+    pullPolicy: IfNotPresent
+  resources: {}
+
+persistence:
+  enabled: true
+  storageClass: ""
+  size: 5Gi
+
+# Provider and forge credentials reach the daemon as env vars (the
+# provider keys and GITHUB_TOKEN/GITEA_TOKEN/GITLAB_TOKEN fallbacks).
+# One mechanism: either name an existingSecret, or list key/value pairs
+# in stringData and the chart creates the Secret.
+secret:
+  existingSecret: ""
+  stringData: {}
+  # stringData:
+  #   ANTHROPIC_API_KEY: sk-ant-...
+  #   GITHUB_TOKEN: ghp_...
+
+resources: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}

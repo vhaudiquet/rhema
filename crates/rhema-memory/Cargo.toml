@@ -1,0 +1,32 @@
+[package]
+name = "rhema-memory"
+description = "Cross-session agent memory: the store contract, volatile and markdown-file stores, and the memory tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# The resident tier is still indev: `cargo publish --workspace` skips
+# it until the claw ships.
+publish = false
+
+[dependencies]
+# Tools implement the resolver seam; the store contract stays
+# step-engine-agnostic (specs/rhema-memory.md §0)
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# Records round-trip through serde; the file store's frontmatter is YAML
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+# Typed public errors
+thiserror = { workspace = true }
+# ToolResolver is an async seam
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# The falsification test drives the tools through a scripted provider
+rhema-core = { path = "../rhema-core", features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# Scratch roots for the file store
+tempfile = "3"

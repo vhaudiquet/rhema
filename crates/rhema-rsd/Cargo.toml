@@ -1,0 +1,37 @@
+[package]
+name = "rhema-rsd"
+description = "Resource-scoped dispatch: per-key leases, live inboxes, and revision-guarded sessions over any store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+# The resident tier is still indev: `cargo publish --workspace` skips
+# it until the claw ships.
+publish = false
+
+[features]
+default = ["sqlite"]
+# The reusable Store-contract suite, for replay against secondary store
+# backends; see `store_contract`.
+store-contract = []
+# The durable SQLite `Store` (spec §7's minimum viable store). Bundled:
+# no system sqlite is required, so the build stays self-contained.
+sqlite = ["dep:rusqlite"]
+
+[dependencies]
+# The RSD session wraps rhema-core's caller-owned session; checkpointing
+# round-trips it verbatim
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# Event payloads, plans, and session state cross the store boundary as JSON
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Typed public errors
+thiserror = { workspace = true }
+
+# Durable dispatch state (feature `sqlite`): one row per resource key
+rusqlite = { version = "0.40", features = ["bundled"], optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

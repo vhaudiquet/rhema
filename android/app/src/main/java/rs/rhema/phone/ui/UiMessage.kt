@@ -1,0 +1,9 @@
+package rs.rhema.phone.ui
+
+// Screen state holds the failure data, not a formatted string; user-visible
+// text is resolved with stringResource at render time so configuration
+// changes re-resolve it.
+sealed interface UiMessage {
+    data class Http(val code: Int, val detail: String? = null) : UiMessage
+    data class Network(val message: String) : UiMessage
+}

@@ -1,0 +1,112 @@
+name: android
+
+# The phone client's pipeline, separate from the rust/chart/docker/web
+# gates: it needs its own toolchain (JDK + the Android SDK), and the
+# release job is the only CI job holding a secret. Both artifacts feed
+# the update story: the debug one must install over any local build
+# (committed debug key), the release one anchors the future edge
+# channel (secret key, never in the source).
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - name: Set up JDK 21
+        run: |
+          sudo apt-get update && sudo apt-get install -y openjdk-21-jdk-headless
+          echo "JAVA_HOME=$(dirname "$(dirname "$(readlink -f "$(which java)")")")" >> "$GITHUB_ENV"
+
+      - name: Set up the Android SDK
+        run: |
+          sudo apt-get update && sudo apt-get install -y wget unzip
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+            -O /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$HOME/android-sdk/cmdline-tools"
+          mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" \
+            "$HOME/android-sdk/cmdline-tools/latest"
+          yes | "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+
+      - name: Build and lint
+        run: |
+          cd android
+          ./gradlew :app:assembleDebug :app:lintDebug
+
+      # The artifact must install over any previous debug build, so the
+      # identity is part of the contract: pin the committed keystore's
+      # certificate, not merely "some debug key".
+      - name: Verify the APK signature
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)
+          "$APKSIGNER" verify --print-certs android/app/build/outputs/apk/debug/app-debug.apk \
+            | grep -q 13e65a1e4fb828318077784c029e8f2664dba5ef8feece01b950b6bc2b015b64
+
+      - name: Upload the debug APK
+        uses: https://gitea.com/actions/gitea-upload-artifact@v4
+        with:
+          name: rhema-android-debug
+          path: android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    # The signed release artifact is the future edge channel's payload,
+    # so it only exists where the secrets exist: Gitea withholds
+    # secrets from fork pull_request runs, and an unsigned artifact
+    # would be a build check, not a deliverable.
+    if: gitea.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - name: Set up JDK 21
+        run: |
+          sudo apt-get update && sudo apt-get install -y openjdk-21-jdk-headless
+          echo "JAVA_HOME=$(dirname "$(dirname "$(readlink -f "$(which java)")")")" >> "$GITHUB_ENV"
+
+      - name: Set up the Android SDK
+        run: |
+          sudo apt-get update && sudo apt-get install -y wget unzip
+          mkdir -p "$HOME/android-sdk/cmdline-tools"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+            -O /tmp/cmdline-tools.zip
+          unzip -q /tmp/cmdline-tools.zip -d "$HOME/android-sdk/cmdline-tools"
+          mv "$HOME/android-sdk/cmdline-tools/cmdline-tools" \
+            "$HOME/android-sdk/cmdline-tools/latest"
+          yes | "$HOME/android-sdk/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          echo "ANDROID_HOME=$HOME/android-sdk" >> "$GITHUB_ENV"
+
+      - name: Decode the release keystore
+        run: |
+          echo "${{ secrets.ANDROID_RELEASE_KEYSTORE }}" | base64 -d > /tmp/release.keystore
+
+      - name: Build
+        run: |
+          cd android
+          ./gradlew :app:assembleRelease
+        env:
+          ANDROID_RELEASE_KEYSTORE: /tmp/release.keystore
+          ANDROID_RELEASE_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_RELEASE_KEYSTORE_PASSWORD }}
+
+      # Same contract as the debug artifact, tighter stakes: this key
+      # can update any install that trusts the channel.
+      - name: Verify the APK signature
+        run: |
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort | tail -1)
+          "$APKSIGNER" verify --print-certs android/app/build/outputs/apk/release/app-release.apk \
+            | grep -q 8bd94fd4c2fe69557ccde6dd2e5c786c5288420674044ffe2c3fc2c55eb8f4f7
+
+      - name: Upload the release APK
+        uses: https://gitea.com/actions/gitea-upload-artifact@v4
+        with:
+          name: rhema-android-release
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+          retention-days: 14

@@ -1,0 +1,29 @@
+[package]
+name = "rhema-core"
+description = "A small, embeddable, generic step engine for one exchange with a model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+# Scripted MockProvider for offline tests and examples; never on by default.
+mock = []
+
+[dependencies]
+# Session and message types must round-trip for driver-side checkpointing
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Typed public errors
+thiserror = { workspace = true }
+# Async traits stay object-safe (dyn ModelProvider, dyn ToolResolver)
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+
+[[example]]
+name = "step_demo"
+required-features = ["mock"]

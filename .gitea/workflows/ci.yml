@@ -1,0 +1,271 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  OWNER: vhaudiquet
+
+jobs:
+  # Fast checks + release build of the Rust workspace.
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      # Installs the toolchain pinned in rust-toolchain.toml.
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # reqwest's default TLS links openssl; rusqlite's bundled SQLite
+      # needs a C compiler (present on the runner image, kept explicit
+      # next to the rest).
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings are errors)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Build (release)
+        run: cargo build --release --workspace
+
+      - name: Upload the claw binary
+        uses: https://gitea.com/actions/gitea-upload-artifact@v4
+        with:
+          name: rhema-claw-linux-amd64
+          path: target/release/rhema-claw
+          if-no-files-found: error
+          retention-days: 14
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - name: Install native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      # The offline-suite rule is load-bearing here: no test talks to the
+      # network, so the runner needs nothing beyond the toolchain.
+      - name: Test
+        run: cargo test --workspace --all-features
+
+  # The deploy chart: lint, render every supported shape, validate the
+  # result against the Kubernetes schemas — and prove the single-node
+  # invariant is enforced rather than hoped for.
+  chart:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - name: Install helm and kubeconform
+        run: |
+          curl -fsSL https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz \
+            | tar -xz -C /tmp
+          sudo install /tmp/linux-amd64/helm /usr/local/bin/helm
+          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar -xz kubeconform
+          sudo install kubeconform /usr/local/bin/kubeconform
+
+      - name: Lint
+        run: helm lint deploy/helm/rhema-claw --strict --set token=ci-render-token
+
+      - name: Render and validate
+        run: |
+          check() {
+            helm template test "$@" --set token=ci-render-token | kubeconform -strict -summary
+          }
+          # The shapes: defaults (persistent), the disposable one
+          # (emptyDir), the recommended secret path, and a seeded watch.
+          # The token rides every render: the daemon binds all interfaces
+          # in-cluster and refuses a non-loopback surface without one.
+          check deploy/helm/rhema-claw
+          check deploy/helm/rhema-claw --set persistence.enabled=false
+          check deploy/helm/rhema-claw --set secret.existingSecret=rhema-claw-secrets
+          check deploy/helm/rhema-claw --set config.watches[0].forge=github --set config.watches[0].repo=acme/widgets
+
+          # The state layout is pinned to the mounted volume regardless of
+          # values, and the listener must not be loopback inside a pod.
+          render=$(helm template test deploy/helm/rhema-claw --set token=ci-render-token)
+          grep -q "db: /data/claw.db" <<<"$render"
+          grep -q "workspace_root: /data/workspaces" <<<"$render"
+          grep -q "listen: 0.0.0.0:7799" <<<"$render"
+
+          # The token is a render-time failure: an unguarded daemon with a
+          # wide bind refuses to start, and the chart says so earlier.
+          if helm template test deploy/helm/rhema-claw \
+              > /dev/null 2>&1; then
+            echo "an empty token must not render"; exit 1
+          fi
+
+          # The ingress shapes: host+class, host+TLS, and the two
+          # refusals — an enabled ingress without a host, and TLS without
+          # a certificate secret. Bearer tokens cross this ingress; neither
+          # may render silently.
+          check deploy/helm/rhema-claw --set ingress.enabled=true \
+            --set ingress.host=claw.example.com --set ingress.className=nginx
+          check deploy/helm/rhema-claw --set ingress.enabled=true \
+            --set ingress.host=claw.example.com --set ingress.tls.enabled=true \
+            --set ingress.tls.secretName=claw-tls
+          if helm template test deploy/helm/rhema-claw \
+              --set token=ci-render-token --set ingress.enabled=true > /dev/null 2>&1; then
+            echo "ingress without a host must not render"; exit 1
+          fi
+          if helm template test deploy/helm/rhema-claw \
+              --set token=ci-render-token --set ingress.enabled=true --set ingress.host=claw.example.com \
+              --set ingress.tls.enabled=true > /dev/null 2>&1; then
+            echo "tls without a secret must not render"; exit 1
+          fi
+
+          # The invariant is a render-time failure: the claw is single-node
+          # by design (one SQLite store, one dispatcher), and the chart is
+          # where that is enforced.
+          if helm template test deploy/helm/rhema-claw \
+              --set replicaCount=2 --set token=ci-render-token > /dev/null 2>&1; then
+            echo "replicaCount 2 must not render"; exit 1
+          fi
+
+  # The daemon's container image: build it, then prove the binary boots
+  # and serves /healthz inside it — config parsing, the state dirs, the
+  # keyless backend path, the dynamic linking. The image carries bash but
+  # no curl/wget, so the probe rides bash's /dev/tcp.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - name: Build image
+        run: docker build -f deploy/docker/claw.Dockerfile -t rhema-claw:ci .
+
+      - name: Smoke test
+        run: |
+          docker rm -f rhema-claw || true
+          trap 'docker rm -f rhema-claw || true' EXIT
+          # The llama-cpp backend boots keyless: no credentials are needed
+          # to prove the daemon serves. All state goes to /tmp so the
+          # smoke never depends on volume ownership.
+          docker run -d --name rhema-claw \
+            -e XDG_STATE_HOME=/tmp/state \
+            --entrypoint /bin/bash rhema-claw:ci -c '
+              mkdir -p /tmp/ws /tmp/state
+              printf "provider: llama-cpp\ndb: /tmp/claw.db\nworkspace_root: /tmp/ws\nlisten: 127.0.0.1:7799\n" > /tmp/claw.yaml
+              exec /usr/local/bin/rhema-claw --config /tmp/claw.yaml'
+          ok=0
+          for i in $(seq 1 30); do
+            # The request needs the full header terminator, and the read
+            # needs its own timeout: an accepted-but-unanswered probe
+            # would hang the exec, not fail it.
+            if docker exec rhema-claw bash -c \
+                'exec 3<>/dev/tcp/127.0.0.1/7799 && printf "GET /healthz HTTP/1.0\r\n\r\n" >&3 && timeout 5 grep -q ok <&3'; then
+              ok=1; break
+            fi
+            sleep 1
+          done
+          if [ "$ok" != 1 ]; then
+            docker logs rhema-claw
+            exit 1
+          fi
+          docker rm -f rhema-claw
+
+  # The web UI: install and produce the static bundle — the artifact an
+  # ingress serves next to /v1.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - name: Set up Node
+        run: |
+          curl -fsSL https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-x64.tar.xz \
+            | sudo tar -xJ -C /usr/local --strip-components=1
+          node --version
+
+      - name: Install dependencies
+        working-directory: web/claw
+        run: npm install
+
+      - name: Build
+        working-directory: web/claw
+        run: npm run build
+
+  # The edge channel: a main push that passed everything above ships
+  # the two deployable images as a rolling latest + sha pair. Release
+  # publishing (exact versions, the stable pin, crates.io) lives in
+  # release.yaml. The claw image is rebuilt here for the registry even
+  # though the docker job above just built and smoked it: no artifact
+  # hand-off is worth the plumbing for a build this cheap.
+  publish-edge-images:
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    needs: [checks, test, chart, docker, web]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - dockerfile: deploy/docker/claw.Dockerfile
+            image: rhema-claw
+          - dockerfile: deploy/docker/ui.Dockerfile
+            image: rhema-claw-ui
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: https://git.vhaudiquet.fr
+          username: ${{ gitea.actor }}
+          password: ${{ secrets.PACKAGES_TOKEN }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: true
+          # The edge pair: rolling latest, and the sha pin the chart's
+          # appVersion resolves to.
+          tags: |
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:latest
+            git.vhaudiquet.fr/${{ env.OWNER }}/${{ matrix.image }}:${{ gitea.sha }}
+
+  # The edge chart lands only once its images are in the registry: the
+  # chart's default image tag is appVersion, and appVersion here is
+  # this exact commit. The version rides the base version + a timestamp
+  # (ordered; SemVer pre-release rules allow no dots).
+  publish-edge-chart:
+    if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
+    needs: publish-edge-images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: https://gitea.com/actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v5
+
+      - name: Update Chart version and appVersion
+        run: |
+          BASE_VERSION=$(grep '^version:' deploy/helm/rhema-claw/Chart.yaml | awk '{print $2}')
+          TIMESTAMP=$(date -u +"%Y%m%d-%H%M%S")
+          sed -i "s/^version:.*/version: \"${BASE_VERSION}-${TIMESTAMP}\"/" deploy/helm/rhema-claw/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ gitea.sha }}\"/" deploy/helm/rhema-claw/Chart.yaml
+
+      - name: Lint Helm chart
+        run: helm lint deploy/helm/rhema-claw
+
+      - name: Package Helm chart
+        run: helm package deploy/helm/rhema-claw
+
+      - name: Push Helm chart to Gitea registry
+        run: |
+          TOKEN=$(echo -n "${{ secrets.PACKAGES_TOKEN }}" | tr -d '\n')
+          curl --fail --user "${{ gitea.actor }}:${TOKEN}" \
+            -X POST \
+            --upload-file rhema-claw-*.tgz \
+            "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
