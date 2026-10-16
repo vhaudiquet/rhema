@@ -148,3 +148,17 @@ async fn live_zai_answers_a_trivial_prompt() {
         out.usage
     );
 }
+
+#[tokio::test]
+#[ignore = "hits the live Z.ai Coding Plan endpoint; set ZAI_API_KEY and run with `cargo test -p rhema-provider-anthropic --all-features -- --ignored`"]
+async fn live_zai_reports_the_plan_windows() {
+    let allowance = zai_provider()
+        .allowance()
+        .await
+        .expect("the live quota call succeeds")
+        .expect("the plan reports at least one coding window");
+    assert!(
+        allowance.amount.contains("5h"),
+        "the 5-hour window rides the badge, got {allowance:?}"
+    );
+}
