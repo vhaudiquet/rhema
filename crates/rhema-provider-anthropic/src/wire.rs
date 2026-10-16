@@ -490,8 +490,10 @@ pub struct WireZaiLimit {
 }
 
 /// The plan allowance the quota report describes: what is left of each
-/// coding window, the 5-hour one first — `"5h 53% · wk 88%"` for the
-/// footer's badge. The tool quota stays out. `None` when the report
+/// coding window, the 5-hour one first — `"5h 53% wk 88%"` for the
+/// footer's badge, a space between the windows because they spend one
+/// pool (the footer's `·` marks a new fact, not a detail of one). The
+/// tool quota stays out. `None` when the report
 /// names neither window: a shape drift maps to no badge, never to a
 /// wrong figure.
 pub fn allowance(quota: &WireZaiQuota) -> Option<Allowance> {
@@ -518,7 +520,7 @@ pub fn allowance(quota: &WireZaiQuota) -> Option<Allowance> {
     for (left, window) in windows.iter().zip(["5h", "wk"]) {
         let Some(left) = left else { continue };
         if !amount.is_empty() {
-            amount.push_str(" · ");
+            amount.push(' ');
         }
         amount.push_str(&format!("{window} {left:.0}%"));
     }
@@ -1952,7 +1954,7 @@ mod tests {
         assert_eq!(
             allowance(&quota),
             Some(Allowance {
-                amount: "5h 53% · wk 88%".to_owned(),
+                amount: "5h 53% wk 88%".to_owned(),
                 kind: String::new(),
             })
         );
@@ -1976,7 +1978,7 @@ mod tests {
         assert_eq!(
             allowance(&quota),
             Some(Allowance {
-                amount: "5h 0% · wk 0%".to_owned(),
+                amount: "5h 0% wk 0%".to_owned(),
                 kind: String::new(),
             })
         );

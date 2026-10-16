@@ -459,7 +459,7 @@ mod tests {
             .fetch_zai_quota(&format!("{}/api/monitor/usage/quota/limit", server.uri()))
             .await
             .expect("the quota call succeeds");
-        assert_eq!(allowance.amount, "5h 53% · wk 88%");
+        assert_eq!(allowance.amount, "5h 53% wk 88%");
     }
 
     #[tokio::test]
