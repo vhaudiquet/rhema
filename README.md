@@ -63,7 +63,7 @@ See [Rhema Claw README.md](./crates/rhema-claw/README.md) for more.
 | `rhema-coding-agent` | The coding-agent driver: the turn loop over the agent toolkit, session save/resume, and a system prompt assembled from the editable SYSTEM.md template with tools and skills rendered in |
 | `rhema-acp` | The coding agent as an Agent Client Protocol subprocess, so ACP editors (T3 Code, Zed, JetBrains, Neovim, Emacs, VS Code) drive it without a per-editor plugin |
 | `rhema-code` | The `rhema` binary: the full-screen terminal UI, `rhema run` for the pipeable one-shot, `rhema acp` for editors, `rhema system edit/show/restore` for the prompt the agent works from |
-| `rhema-claw` | The resident agent daemon (work in progress): one SQLite store of sessions, forge threads answered with coding-agent turns, a `coding_agent` tool that runs coding jobs off the chat, chat over HTTP |
+| `rhema-claw` | The resident agent daemon (work in progress): one SQLite store of sessions, forge threads answered with coding-agent turns, calendar-feed reminders, a `coding_agent` tool that runs coding jobs off the chat, chat over HTTP |
 
 ## rhema-core
 

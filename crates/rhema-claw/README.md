@@ -61,6 +61,15 @@ max_turn_steps: 2048             # tool rounds one chat turn may run
 watches:                         # a seed: imported while the table is empty
   - forge: github
     repo: acme/widgets
+calendars:                       # feeds the claw reminds about
+  - name: home                   # the reminder session is calendar:home
+    kind: ics                    # an ics/webcal feed (Google's secret iCal
+    url: https://cloud.example.net/remote.php/dav/calendars/personal.ics
+    lead_minutes: [60, 15]       # default [15]; horizon_hours default 24
+  - name: work
+    kind: google                 # the Google Calendar API
+    calendar_id: primary
+    api_key: pub-key             # or token: (OAuth; env fallback CALENDAR_TOKEN)
 ```
 
 `max_turn_steps` caps one turn's tool rounds (the coding driver's own
@@ -149,7 +158,13 @@ stored login, an env key, or the stored rhema config) is active; the
 keyless llama.cpp fallback never wins a seed, so the chart pins
 nothing and a switch never needs a restart.
 
-The claw registers RSD sources three ways: watches (forge), scheduled
+The claw registers RSD sources four ways: watches (forge), calendar
+reminders (`calendars:` in the config; each tick polls every feed for
+the occurrences starting within its horizon, and an upcoming event
+warns once per `lead_minutes` on its persistent `calendar:<name>`
+session, a turn whose final text auto-notifies the phone; recurring
+series arrive expanded, overrides and cancellations applied, all-day
+events stay silent), scheduled
 tasks the agent creates in chat (`schedule_task` with `at` or
 `every_secs`; a due task dispatches through the resident agent — into
 the session the tool named, its own `task:<id>` slot by default — and
@@ -161,9 +176,9 @@ from the chat), and a generic door,
 `POST /v1/ingest`, that any external emitter addresses
 (`phone:<device>:<topic>`
 keys from the Android app, for example). The resident agent owns
-`interactive:`, `task:`, and `phone:` keys; forge threads own the rest.
-Its `notify` tool queues a notification for a device; the device polls
-and acks.
+`interactive:`, `task:`, `phone:`, and `calendar:` keys; forge threads
+own the rest. Its `notify` tool queues a notification for a device;
+the device polls and acks.
 
 When a turn needs something only a human can give, it asks and waits
 inside the tool call: `ask_secret` raises a consent request — a card in

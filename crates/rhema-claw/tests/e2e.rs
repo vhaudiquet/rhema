@@ -61,6 +61,7 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
             host: Some(server.uri()),
             token: Some("tok".to_owned()),
         }],
+        calendars: Vec::new(),
     }
 }
 

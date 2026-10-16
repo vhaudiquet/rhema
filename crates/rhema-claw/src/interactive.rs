@@ -6,9 +6,10 @@
 //! resident dispatcher's handler answers to starts with one of
 //! [`RESIDENT_PREFIXES`] — `interactive:<name>` for the live chat
 //! surface, `task:<n>` for scheduled tasks, `phone:<device>` for the
-//! phone client's sessions. Forge keys (they carry `#`) belong to the
-//! forge handler. [`is_resident_key`] is the contract's only arbiter;
-//! the HTTP surface and the source key functions defer to it.
+//! phone client's sessions, `calendar:<name>` for calendar reminders.
+//! Forge keys (they carry `#`) belong to the forge handler.
+//! [`is_resident_key`] is the contract's only arbiter; the HTTP
+//! surface and the source key functions defer to it.
 //!
 //! The live interactive surface never resolves keys (spec §6.2): every
 //! message on `interactive:<name>` belongs to that session by
@@ -19,11 +20,12 @@
 //! one reasoning step, not one per message.
 //!
 //! **The delivery rule:** `interactive:` keys reply into the live chat
-//! surface (the event hub's stream). Task and phone keys have no chat
-//! surface to reply into, so the turn's final text auto-notifies the
-//! key's device — `phone` unless the key names one — through the
-//! notification table ([`crate::notifications`]); the `notify` tool
-//! remains the model's explicit channel, this is the implicit one.
+//! surface (the event hub's stream). Task, phone, and calendar keys
+//! have no chat surface to reply into, so the turn's final text
+//! auto-notifies the key's device — `phone` unless the key names one —
+//! through the notification table ([`crate::notifications`]); the
+//! `notify` tool remains the model's explicit channel, this is the
+//! implicit one.
 //!
 //! Continuity rides the dispatcher exactly as the forge handler's does:
 //! the whole [`rhema_core::Session`] is stashed into
@@ -68,10 +70,10 @@ use crate::notifications::NotificationStore;
 use crate::watch_store::ClawStore;
 
 /// The key prefixes of the resident context (see the module docs):
-/// `interactive:`, `task:`, and `phone:`. Forge keys — they carry `#` —
-/// belong to the forge handler; these three and nothing else belong to
-/// this one.
-pub const RESIDENT_PREFIXES: [&str; 3] = ["interactive:", "task:", "phone:"];
+/// `interactive:`, `task:`, `phone:`, and `calendar:`. Forge keys —
+/// they carry `#` — belong to the forge handler; these four and
+/// nothing else belong to this one.
+pub const RESIDENT_PREFIXES: [&str; 4] = ["interactive:", "task:", "phone:", "calendar:"];
 
 /// The prefix of the live chat surface's keys: `interactive:<name>` —
 /// the name is the caller's label for the session (`web`, a chat
@@ -96,7 +98,7 @@ pub fn is_resident_key(key: &str) -> bool {
 /// The notification device a resident key replies to: the suffix a
 /// `phone:` key names (`phone:desk` → `desk`),
 /// [`DEFAULT_DEVICE`](crate::notifications::DEFAULT_DEVICE) otherwise —
-/// `task:` keys always notify the phone.
+/// `task:` and `calendar:` keys always notify the phone.
 fn notify_device(key: &str) -> &str {
     key.strip_prefix("phone:")
         .filter(|device| !device.is_empty())

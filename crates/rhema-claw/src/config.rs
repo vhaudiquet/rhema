@@ -29,6 +29,16 @@ pub const DEFAULT_MAX_TURN_STEPS: u32 = 2048;
 /// loopback only — the surface is for the machine's resident user.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7799";
 
+/// The one reminder lead, in minutes, a calendar carries when
+/// [`CalendarWatch::lead_minutes`] is unset: warn shortly before, and
+/// let a busier lead list be configured where wanted.
+pub const DEFAULT_LEAD_MINUTES: u64 = 15;
+
+/// How far ahead a calendar polls, in hours, when
+/// [`CalendarWatch::horizon_hours`] is unset. Must exceed the longest
+/// lead: a reminder cannot fire before the event is visible.
+pub const DEFAULT_HORIZON_HOURS: u32 = 24;
+
 /// Why a config operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -60,6 +70,17 @@ pub enum ConfigError {
         forge: String,
         /// The watch's `owner/name` as written.
         repo: String,
+        /// What is missing or malformed.
+        reason: String,
+    },
+    /// One calendar watch is unusable; the daemon refuses to start
+    /// rather than poll a half-configured calendar.
+    #[error("calendar #{index} ({name}): {reason}")]
+    Calendar {
+        /// The calendar's position in the config file, zero-based.
+        index: usize,
+        /// The calendar's name as written.
+        name: String,
         /// What is missing or malformed.
         reason: String,
     },
@@ -195,6 +216,131 @@ pub fn resolve_token(
         })
 }
 
+/// Which calendar feed a calendar watch polls. The wire spelling is
+/// the source name the dispatcher registers and the reminder prompt
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CalendarKind {
+    /// An iCalendar feed over HTTP (`webcal://` counts): Google's
+    /// secret iCal address, a Nextcloud or Radicale share, Fastmail.
+    Ics,
+    /// The Google Calendar API, against an OAuth access token or an
+    /// API key for public calendars.
+    Google,
+}
+
+impl CalendarKind {
+    /// The spelling the config, the reminder source, and the prompts
+    /// use.
+    pub fn name(self) -> &'static str {
+        match self {
+            CalendarKind::Ics => "ics",
+            CalendarKind::Google => "google",
+        }
+    }
+
+    /// Parses a calendar kind as the config spells it. `None` for
+    /// anything else.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "ics" => Some(CalendarKind::Ics),
+            "google" => Some(CalendarKind::Google),
+            _ => None,
+        }
+    }
+}
+
+/// One watched calendar. Unknown keys are rejected, as on a watch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CalendarWatch {
+    /// The calendar's name: unique across the list; the reminder key
+    /// is `calendar:<name>` and prompts name the calendar by it.
+    pub name: String,
+    /// Which feed kind this polls.
+    pub kind: CalendarKind,
+    /// The feed URL (`https://` or `webcal://`). Required for ics.
+    pub url: Option<String>,
+    /// The Google calendar id (`primary`, an address, a hex id).
+    /// Required for google.
+    pub calendar_id: Option<String>,
+    /// A bearer token (an OAuth access token for Google, auth for a
+    /// feed that demands it). Falls back to `CALENDAR_TOKEN`.
+    pub token: Option<String>,
+    /// A Google API key for a public calendar; wins over `token`.
+    pub api_key: Option<String>,
+    /// Reminder lead times, minutes; each occurrence warns once per
+    /// lead. `[DEFAULT_LEAD_MINUTES]` when unset.
+    pub lead_minutes: Option<Vec<u64>>,
+    /// How far ahead the poll looks, hours. `[DEFAULT_HORIZON_HOURS]`
+    /// when unset; must exceed the longest lead.
+    pub horizon_hours: Option<u32>,
+}
+
+impl CalendarWatch {
+    /// The reminder leads as configured, blank and zero entries
+    /// dropped; [`DEFAULT_LEAD_MINUTES`] alone when nothing usable is
+    /// configured.
+    pub fn leads(&self) -> Vec<u64> {
+        match self.lead_minutes.as_ref() {
+            Some(leads) => {
+                let usable: Vec<u64> = leads.iter().copied().filter(|lead| *lead > 0).collect();
+                if usable.is_empty() {
+                    vec![DEFAULT_LEAD_MINUTES]
+                } else {
+                    usable
+                }
+            }
+            None => vec![DEFAULT_LEAD_MINUTES],
+        }
+    }
+
+    /// The poll horizon as configured, [`DEFAULT_HORIZON_HOURS`] when
+    /// unset. Zero reads as the default: a horizon of nothing polls
+    /// nothing, and the config validation refuses it when it would
+    /// matter.
+    pub fn horizon(&self) -> u32 {
+        self.horizon_hours
+            .filter(|hours| *hours > 0)
+            .unwrap_or(DEFAULT_HORIZON_HOURS)
+    }
+
+    /// A trimmed `token`/`api_key` value; blank counts as unset.
+    fn trimmed(value: Option<&str>) -> Option<String> {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// The API key as configured, if any.
+    pub fn resolved_api_key(&self) -> Option<String> {
+        Self::trimmed(self.api_key.as_deref())
+    }
+
+    /// The token to poll with: the config value, then `CALENDAR_TOKEN`;
+    /// the first non-blank wins. Parameterized over the env lookup in
+    /// the pure [`CalendarWatch::resolve_token_with`].
+    pub fn resolved_token(&self) -> Option<String> {
+        Self::resolve_token_with(|name| std::env::var(name), self.token.as_deref())
+    }
+
+    /// Pure token resolution: the config value first, then
+    /// `CALENDAR_TOKEN`. Parameterized over the env lookup so tests can
+    /// hold the environment still.
+    pub fn resolve_token_with(
+        get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
+        stored: Option<&str>,
+    ) -> Option<String> {
+        Self::trimmed(stored).or_else(|| {
+            get_env("CALENDAR_TOKEN")
+                .ok()
+                .and_then(|token| Self::trimmed(Some(&token)))
+        })
+    }
+}
+
 /// Whether a `host:port` listen address binds beyond loopback.
 /// `localhost` (any case) and any loopback IP literal — `127.x.x.x`,
 /// `::1` — are loopback; an empty host (`:7799`, the bind-everything
@@ -264,6 +410,10 @@ pub struct ClawConfig {
     /// Imported once, when the table is still empty; after that the
     /// table rules, and watches are managed in chat or over HTTP.
     pub watches: Vec<Watch>,
+    /// The calendars to remind about. Config-file-only: a calendar is
+    /// read-only ambient state, not an agent-managed resource, and a
+    /// change takes the daemon restart it takes to edit the file.
+    pub calendars: Vec<CalendarWatch>,
 }
 
 impl Default for ClawConfig {
@@ -280,6 +430,7 @@ impl Default for ClawConfig {
             listen: None,
             token: None,
             watches: Vec::new(),
+            calendars: Vec::new(),
         }
     }
 }
@@ -430,6 +581,82 @@ impl ClawConfig {
                 )));
             }
         }
+        self.validate_calendars()?;
+        Ok(())
+    }
+
+    /// The calendar half of the startup checks: every calendar named,
+    /// complete for its kind, with leads a horizon can see.
+    fn validate_calendars(&self) -> Result<(), ConfigError> {
+        let mut seen = std::collections::HashSet::new();
+        for (index, calendar) in self.calendars.iter().enumerate() {
+            let fail = |reason: String| ConfigError::Calendar {
+                index,
+                name: calendar.name.clone(),
+                reason,
+            };
+            if calendar.name.trim().is_empty() {
+                return Err(fail("name must not be blank".to_owned()));
+            }
+            if !seen.insert(calendar.name.trim().to_owned()) {
+                return Err(fail(
+                    "duplicate name: reminder keys would collide".to_owned(),
+                ));
+            }
+            match calendar.kind {
+                CalendarKind::Ics => {
+                    let url = calendar
+                        .url
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|url| !url.is_empty())
+                        .ok_or_else(|| {
+                            fail("ics is a feed URL: set url to the calendar's address".to_owned())
+                        })?;
+                    if !(url.starts_with("https://")
+                        || url.starts_with("http://")
+                        || url.starts_with("webcal://"))
+                    {
+                        return Err(fail(format!(
+                            "url must be https://, http://, or webcal://, got {url:?}"
+                        )));
+                    }
+                }
+                CalendarKind::Google => {
+                    if calendar
+                        .calendar_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|id| !id.is_empty())
+                        .is_none()
+                    {
+                        return Err(fail(
+                            "google needs a calendar: set calendar_id (\"primary\", an \
+                             address, a hex id)"
+                                .to_owned(),
+                        ));
+                    }
+                    if calendar.resolved_api_key().is_none() && calendar.resolved_token().is_none()
+                    {
+                        return Err(fail(
+                            "no credential: set api_key (public calendars) or token in the \
+                             config, or CALENDAR_TOKEN"
+                                .to_owned(),
+                        ));
+                    }
+                }
+            }
+            // The horizon is what the poll can see; a lead at or past
+            // it fires on an event that was never visible.
+            let horizon_minutes = u64::from(calendar.horizon()) * 60;
+            let longest = calendar.leads().into_iter().max().unwrap_or_default();
+            if longest >= horizon_minutes {
+                return Err(fail(format!(
+                    "lead {longest}m is not under the {horizon_minutes}m horizon: a \
+                     reminder cannot fire before its event is visible"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -522,6 +749,167 @@ watches:
         assert_eq!(config.bootstrap_root, None);
         assert_eq!(config.listen_addr(), DEFAULT_LISTEN);
         assert_eq!(config.token, None);
+    }
+
+    #[test]
+    fn a_calendar_section_parses_field_for_field() {
+        let raw = "calendars:
+  - name: home
+    kind: ics
+    url: https://cloud.example.net/remote.php/dav/calendars/personal.ics
+    lead_minutes: [60, 15]
+    horizon_hours: 48
+  - name: work
+    kind: google
+    calendar_id: primary
+    api_key: pub-key
+  - name: shared
+    kind: google
+    calendar_id: abc123@group.calendar.google.com
+    token: oauth-token
+";
+        let config: ClawConfig = serde_yaml::from_str(raw).expect("parses");
+        assert_eq!(config.calendars.len(), 3);
+        let home = &config.calendars[0];
+        assert_eq!(home.name, "home");
+        assert_eq!(home.kind, CalendarKind::Ics);
+        assert_eq!(home.leads(), vec![60, 15]);
+        assert_eq!(home.horizon(), 48);
+        assert_eq!(
+            config.calendars[1].resolved_api_key().as_deref(),
+            Some("pub-key")
+        );
+        assert_eq!(
+            config.calendars[2].resolved_token().as_deref(),
+            Some("oauth-token")
+        );
+        config.validate().expect("a complete list validates");
+    }
+
+    #[test]
+    fn calendar_defaults_fill_what_the_file_omits() {
+        let config: ClawConfig = serde_yaml::from_str(
+            "calendars:\n  - name: home\n    kind: ics\n    url: https://c.example.net/a.ics\n",
+        )
+        .expect("parses");
+        assert_eq!(config.calendars[0].leads(), vec![DEFAULT_LEAD_MINUTES]);
+        assert_eq!(config.calendars[0].horizon(), DEFAULT_HORIZON_HOURS);
+        // A blank or zero lead list reads as the default, not as
+        // silence.
+        let config: ClawConfig = serde_yaml::from_str(
+            "calendars:\n  - name: home\n    kind: ics\n    url: https://c.example.net/a.ics\n    lead_minutes: []\n",
+        )
+        .expect("parses");
+        assert_eq!(config.calendars[0].leads(), vec![DEFAULT_LEAD_MINUTES]);
+    }
+
+    #[test]
+    fn a_calendar_typo_is_rejected_and_named() {
+        let err = serde_yaml::from_str::<ClawConfig>(
+            "calendars:\n  - name: home\n    kind: ics\n    uurl: https://c.example.net/a.ics\n",
+        )
+        .expect_err("a typo'd calendar key is loud");
+        assert!(err.to_string().contains("uurl"), "got: {err}");
+    }
+
+    #[test]
+    fn calendar_validation_fails_loudly_and_specifically() {
+        let config = |calendars: Vec<CalendarWatch>| ClawConfig {
+            calendars,
+            ..ClawConfig::default()
+        };
+        let ics = |name: &str, url: Option<&str>| CalendarWatch {
+            name: name.to_owned(),
+            kind: CalendarKind::Ics,
+            url: url.map(str::to_owned),
+            calendar_id: None,
+            token: None,
+            api_key: None,
+            lead_minutes: None,
+            horizon_hours: None,
+        };
+        let google = |name: &str, id: Option<&str>, api_key: Option<&str>| CalendarWatch {
+            name: name.to_owned(),
+            kind: CalendarKind::Google,
+            url: None,
+            calendar_id: id.map(str::to_owned),
+            token: None,
+            api_key: api_key.map(str::to_owned),
+            lead_minutes: None,
+            horizon_hours: None,
+        };
+
+        let err = config(vec![ics("", Some("https://c.example.net/a.ics"))])
+            .validate()
+            .expect_err("a blank name is loud");
+        assert!(err.to_string().contains("blank"), "got: {err}");
+
+        let err = config(vec![
+            ics("home", Some("https://c.example.net/a.ics")),
+            ics("home", Some("webcal://c.example.net/b.ics")),
+        ])
+        .validate()
+        .expect_err("a duplicate name is loud");
+        assert!(err.to_string().contains("duplicate"), "got: {err}");
+
+        let err = config(vec![ics("home", None)])
+            .validate()
+            .expect_err("a url-less feed is loud");
+        assert!(err.to_string().contains("feed URL"), "got: {err}");
+
+        let err = config(vec![ics("home", Some("ftp://c.example.net/a.ics"))])
+            .validate()
+            .expect_err("a junk scheme is loud");
+        assert!(err.to_string().contains("https://"), "got: {err}");
+
+        let err = config(vec![google("work", None, Some("k"))])
+            .validate()
+            .expect_err("an id-less google calendar is loud");
+        assert!(err.to_string().contains("calendar_id"), "got: {err}");
+
+        let err = config(vec![google("work", Some("primary"), None)])
+            .validate()
+            .expect_err("a credential-less google calendar is loud");
+        assert!(err.to_string().contains("CALENDAR_TOKEN"), "got: {err}");
+
+        let mut late = ics("home", Some("https://c.example.net/a.ics"));
+        late.lead_minutes = Some(vec![60]);
+        late.horizon_hours = Some(1);
+        let err = config(vec![late])
+            .validate()
+            .expect_err("a lead past the horizon is loud");
+        assert!(err.to_string().contains("horizon"), "got: {err}");
+
+        // The good spellings validate, webcal included.
+        config(vec![
+            ics("home", Some("webcal://c.example.net/a.ics")),
+            google("work", Some("primary"), Some("k")),
+        ])
+        .validate()
+        .expect("a complete list validates");
+    }
+
+    #[test]
+    fn the_calendar_token_falls_back_to_the_env_and_blank_counts_as_unset() {
+        let env = |name: &str| match name {
+            "CALENDAR_TOKEN" => Ok("from-env".to_owned()),
+            _ => Err(std::env::VarError::NotPresent),
+        };
+        assert_eq!(
+            CalendarWatch::resolve_token_with(env, Some(" from-config ")),
+            Some("from-config".to_owned()),
+            "the config token wins"
+        );
+        assert_eq!(
+            CalendarWatch::resolve_token_with(env, None),
+            Some("from-env".to_owned()),
+            "the env token serves when no config token"
+        );
+        assert_eq!(
+            CalendarWatch::resolve_token_with(|_| Err(std::env::VarError::NotPresent), Some("  ")),
+            None,
+            "a blank token counts as unset"
+        );
     }
 
     #[test]

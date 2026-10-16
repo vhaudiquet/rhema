@@ -12,11 +12,11 @@
 //! store: the forge dispatcher turns watch activity into [`ClawHandler`]
 //! runs (one turn per dispatch, the final text posted back as the
 //! thread's comment); the resident dispatcher — keys prefixed
-//! `interactive:`, `task:`, or `phone:`, the contract
+//! `interactive:`, `task:`, `phone:`, or `calendar:`, the contract
 //! [`interactive`] documents — turns chat messages, `/v1/ingest`
-//! events, and due tasks into [`InteractiveHandler`] runs (one turn per
-//! dispatch, streamed to a chat subscriber or auto-notified to a
-//! device).
+//! events, due tasks, and due calendar reminders into
+//! [`InteractiveHandler`] runs (one turn per dispatch, streamed to a
+//! chat subscriber or auto-notified to a device).
 //!
 //! Layout:
 //! - [`config`] — the YAML config: the watch seed, paths, HTTP surface,
@@ -46,6 +46,8 @@
 //! - [`notify_tools`] — the `notify` tool: the queue a device polls
 //! - [`task_tools`] — `schedule_task`, `list_tasks`, `cancel_task`
 //! - [`forge`] — the sources: one detectable stream per forge kind
+//! - [`calendar`] — the [`CalendarSource`]: due calendar reminders in,
+//!   events out
 //! - [`task_source`] — the [`TaskScheduler`]: due tasks in, events out
 //! - [`handler`] — the forge dispatch: snapshot, inbox, one turn, one
 //!   comment
@@ -64,6 +66,7 @@ pub mod accounts_tools;
 pub mod attachments;
 pub mod backends;
 pub mod bootstrap;
+pub mod calendar;
 pub mod config;
 pub mod consents;
 pub mod daemon;
@@ -97,6 +100,7 @@ pub use bootstrap::{
     BOOTSTRAP_SAVE, Bootstrap, BootstrapError, BootstrapKind, BootstrapStatus, DEFAULT_SYSTEM_MD,
     render_system,
 };
+pub use calendar::CalendarSource;
 pub use config::{ClawConfig, ConfigError, ForgeKind, Watch};
 pub use daemon::{ClawError, Daemon, TickReport, run_once};
 pub use environment::write_report;

@@ -62,6 +62,7 @@ fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
         listen: None,
         token: token.map(str::to_owned),
         watches: Vec::new(),
+        calendars: Vec::new(),
     }
 }
 

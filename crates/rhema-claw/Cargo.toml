@@ -32,6 +32,7 @@ rhema-autonomous-agent = { path = "../rhema-autonomous-agent" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
 rhema-config = { path = "../rhema-config" }
 rhema-core = { path = "../rhema-core" }
+rhema-calendar-integration = { path = "../../integrations/rhema-calendar-integration" }
 rhema-forge-integration = { path = "../../integrations/rhema-forge-integration" }
 # The accounts layer: identities hold the forge tokens the watches poll
 # with, and the identity tools manage them over chat

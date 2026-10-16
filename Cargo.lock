@@ -2996,6 +2996,7 @@ dependencies = [
  "reqwest",
  "rhema-agent-tools",
  "rhema-autonomous-agent",
+ "rhema-calendar-integration",
  "rhema-coding-agent",
  "rhema-config",
  "rhema-core",

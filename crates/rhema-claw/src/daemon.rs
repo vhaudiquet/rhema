@@ -30,6 +30,7 @@ use rhema_rsd::{
     SystemClock,
 };
 
+use crate::calendar::CalendarSource;
 use crate::config::{ClawConfig, ConfigError, ForgeKind};
 use crate::forge::ForgeSource;
 use crate::handler::ClawHandler;
@@ -124,10 +125,12 @@ fn interactive_dispatch() -> DispatcherConfig {
     }
 }
 
-/// The resident daemon: one source per forge kind, the task scheduler,
-/// the coding-job source, the three drivers, and the HTTP surface.
+/// The resident daemon: one source per forge kind, the calendar
+/// reminders, the task scheduler, the coding-job source, the three
+/// drivers, and the HTTP surface.
 pub struct Daemon {
     sources: Vec<ForgeSource>,
+    calendar_source: CalendarSource,
     scheduler: TaskScheduler,
     job_source: crate::jobs::JobsSource,
     jobs: Arc<crate::job_store::CodingJobStore>,
@@ -352,6 +355,14 @@ impl Daemon {
             Arc::new(SystemClock),
             tasks.clone(),
         );
+        // The calendar reminders join them: a due reminder is an
+        // event, never a timer near the model.
+        let calendar_source = CalendarSource::new(
+            &interactive_dispatcher,
+            Arc::new(SystemClock),
+            &config.calendars,
+        )
+        .map_err(ClawError::Backend)?;
 
         let http = ClawState::new(
             interactive_dispatcher.clone(),
@@ -374,6 +385,7 @@ impl Daemon {
 
         Ok(Self {
             sources,
+            calendar_source,
             scheduler,
             job_source,
             jobs,
@@ -438,6 +450,7 @@ impl Daemon {
     /// the key for a pass like this one.
     pub async fn tick(&self) -> Result<TickReport, ClawError> {
         let mut detected = self.scheduler.detect().await?;
+        detected += self.calendar_source.detect().await?;
         detected += self.job_source.detect().await?;
         for source in &self.sources {
             detected += source.detect().await?;
