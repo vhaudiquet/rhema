@@ -95,39 +95,25 @@ jobs:
             "https://git.vhaudiquet.fr/api/packages/${{ env.OWNER }}/helm/api/charts"
 
   release-binaries:
-    # The stable binary channel: the tag's tarballs under its version,
+    # The stable binary channel: the tag's tarball under its version,
     # and the root manifest repointed at it — the shape the installer
     # resolves. Built from the committed tree, so the vendored
     # crossterm ships in the binary and the installer keeps its
     # keyboard handling (the crates.io build is the one that waits).
-    # amd64 builds natively; arm64 and riscv64 cross-compile through
-    # cross — its target images carry the toolchains and OpenSSL that
-    # the C dependencies need (reqwest's native-tls, the bundled
-    # SQLite). Each leg uploads its tarball only; the manifest job that
-    # follows hashes the bytes as served, so the stable pointer never
-    # moves to a partial set. darwin-arm64 joins the same way once an
-    # osxcross image with a self-provided SDK exists (Apple's license
-    # wants the SDK taken from your own Xcode).
+    # amd64 only for now: the cross legs wanted target images driven by
+    # hand and a host cargo the runner does not carry. darwin-arm64 and
+    # the rest join as native-style legs once their toolchains live
+    # somewhere runnable (Apple's license wants the SDK taken from your
+    # own Xcode). The manifest job hashes the bytes as served, so the
+    # stable pointer never moves to a partial set.
     if: ${{ !contains(gitea.ref_name, '-') }}
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - target: linux-amd64
-            rust_target: ""
-          - target: linux-arm64
-            rust_target: aarch64-unknown-linux-gnu
-          - target: linux-riscv64
-            rust_target: riscv64gc-unknown-linux-gnu
     steps:
       - uses: https://gitea.com/actions/checkout@v4
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
 
-      # The cross legs build inside the target image: the host needs
-      # nothing of openssl or pkg-config there.
       - name: Install build dependencies
-        if: matrix.rust_target == ''
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev unzip
 
       - name: Install the AWS CLI
@@ -146,22 +132,11 @@ jobs:
           fi
           aws --version
 
-      - name: Install cross
-        if: matrix.rust_target != ''
-        run: |
-          curl -fsSL https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz \
-            | sudo tar -xz -C /usr/local/bin
-          cross --version
-
       - name: Build
         run: |
-          if [ -n "${{ matrix.rust_target }}" ]; then
-            cross build --release -p rhema-code --target ${{ matrix.rust_target }}
-            cp "target/${{ matrix.rust_target }}/release/rhema" dist-rhema
-          else
-            cargo build --release -p rhema-code
-            cp target/release/rhema dist-rhema
-          fi
+          cargo build --release -p rhema-code
+          mkdir -p dist
+          cp target/release/rhema dist/rhema
 
       - name: Upload the tarball
         env:
@@ -171,17 +146,15 @@ jobs:
           AWS_EC2_METADATA_DISABLED: "true"
         run: |
           version="${GITHUB_REF_NAME#v}"
-          endpoint="${{ secrets.RHEMA_DIST_ENDPOINT }}"
-          mkdir -p "dist/$version"
-          mv dist-rhema "dist/$version/rhema"
-          tar -czf "dist/$version/rhema-${{ matrix.target }}.tar.gz" -C "dist/$version" rhema
-          aws s3 cp "dist/$version/rhema-${{ matrix.target }}.tar.gz" \
+          endpoint="https://s3.rhema.rs"
+          tar -czf "dist/rhema-linux-amd64.tar.gz" -C dist rhema
+          aws s3 cp "dist/rhema-linux-amd64.tar.gz" \
             "s3://get/$version/" --endpoint-url "$endpoint"
 
   release-manifest:
-    # Hashes the tarballs as served (not as built), writes the version
+    # Hashes the tarball as served (not as built), writes the version
     # dir's checksums.txt and the root manifest with the stable pointer
-    # repointed — only reached when every leg above succeeded.
+    # repointed — only reached when the build above succeeded.
     if: ${{ !contains(gitea.ref_name, '-') }}
     needs: release-binaries
     runs-on: ubuntu-latest
@@ -210,25 +183,18 @@ jobs:
           AWS_EC2_METADATA_DISABLED: "true"
         run: |
           version="${GITHUB_REF_NAME#v}"
-          endpoint="${{ secrets.RHEMA_DIST_ENDPOINT }}"
+          endpoint="https://s3.rhema.rs"
           mkdir -p dist
-          for t in linux-amd64 linux-arm64 linux-riscv64; do
-            curl -fsSL "https://get.rhema.rs/$version/rhema-$t.tar.gz" -o "dist/rhema-$t.tar.gz"
-          done
+          curl -fsSL "https://get.rhema.rs/$version/rhema-linux-amd64.tar.gz" -o dist/rhema-linux-amd64.tar.gz
           (cd dist && sha256sum rhema-*.tar.gz > checksums.txt)
           # One binary per line, on the same line as its name: the
           # installer parses the manifest with line-wise sed, so
           # reformatting this through json.dumps breaks every install.
+          sha="$(sha256sum dist/rhema-linux-amd64.tar.gz | awk '{print $1}')"
           {
             printf '{\n  "stable": "%s",\n  "binaries": {\n' "$version"
-            first=yes
-            for t in linux-amd64 linux-arm64 linux-riscv64; do
-              sha="$(sha256sum "dist/rhema-$t.tar.gz" | awk '{print $1}')"
-              [ "$first" = yes ] || printf ',\n'
-              first=no
-              printf '    "rhema-%s": {"url": "https://get.rhema.rs/%s/rhema-%s.tar.gz", "sha256": "%s"}\n' \
-                "$t" "$version" "$t" "$sha"
-            done
+            printf '    "rhema-linux-amd64": {"url": "https://get.rhema.rs/%s/rhema-linux-amd64.tar.gz", "sha256": "%s"}\n' \
+              "$version" "$sha"
             printf '  }\n}\n'
           } > dist/manifest.json
           aws s3 cp dist/checksums.txt "s3://get/$version/" --endpoint-url "$endpoint"
@@ -268,6 +234,36 @@ jobs:
           fi
 
       - name: Publish
-        run: cargo publish --workspace --exclude rhema-code
+        # Idempotent and rate-limit aware. crates.io caps NEW crates per
+        # rolling window, and a first release publishes twelve at once —
+        # the 0.1.0 bootstrap was cut off at the sixth (429). So: skip
+        # any crate whose exact version is already on the registry,
+        # tolerate the version landing between check and publish, and
+        # let a rate-limited crate fail the job without blocking later
+        # ones — re-running this job resumes where it stopped. The list
+        # is topological: dependencies publish before dependents.
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          ok=yes
+          for crate in rhema-core rhema-config rhema-provider rhema-agent-tools rhema-coding-agent rhema-provider-anthropic rhema-provider-copilot rhema-provider-google rhema-provider-llama-cpp rhema-provider-openai-compatible rhema-provider-openrouter rhema-acp; do
+            if curl -fsSL -A "rhema-release (git.vhaudiquet.fr/vhaudiquet/rhema)" "https://crates.io/api/v1/crates/$crate/$version" >/dev/null 2>&1; then
+              echo "$crate v$version is already on crates.io — skipping"
+              continue
+            fi
+            echo "publishing $crate v$version ..."
+            if out=$(cargo publish -p "$crate" 2>&1); then
+              echo "$out"
+            elif echo "$out" | grep -qi "already exists\|already uploaded"; then
+              echo "$crate v$version landed between check and publish — counting as done"
+            else
+              printf '%s\n' "$out" >&2
+              ok=no
+            fi
+            sleep 5
+          done
+          [ "$ok" = yes ] || {
+            echo "some crates did not publish (rate window) — re-run this job to resume" >&2
+            exit 1
+          }
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
