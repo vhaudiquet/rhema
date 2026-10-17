@@ -267,6 +267,6 @@ async fn the_stamped_prompt_is_what_the_agent_sends() {
     let systems = provider.systems();
     assert_eq!(
         systems[0].as_deref(),
-        Some(stamped_system(None, &workspace).unwrap().as_str())
+        Some(stamped_system(None, &workspace, &[]).unwrap().as_str())
     );
 }

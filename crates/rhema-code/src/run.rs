@@ -239,6 +239,7 @@ fn system_show_at(
     Ok(rhema_coding_agent::stamped_system(
         resolve_base_system(path).as_deref(),
         &workspace,
+        &[],
     )?)
 }
 

@@ -15,10 +15,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use rhema_agent_tools::{Approval, ExpandPastes, ShellTools, revive_dangling_calls};
+use rhema_agent_tools::{Approval, ExpandPastes, Overlay, ShellTools, revive_dangling_calls};
 use rhema_core::{
     Agent, AgentError, ChatParams, CommitHook, EventSink, Message, ModelOutput, Role, Session,
-    ToolContext, run_turn,
+    ToolContext, ToolResolver, ToolSpec, run_turn,
 };
 
 use crate::config::CodingAgentConfig;
@@ -56,20 +56,28 @@ impl From<minijinja::Error> for CodingAgentError {
 /// The system prompt an agent stamps into every request, assembled
 /// outside an agent: `base` — the user's SYSTEM.md — when given, the
 /// built-in default otherwise, rendered over `workspace` as given, the
-/// discovered skills, and the built-in tool specs. The one assembly
-/// point: [`CodingAgent::new`] builds every agent's prompt here, and a
-/// driver that previews the prompt calls the same function, so what is
+/// discovered skills, and the tool specs — the built-ins plus
+/// `extra`, the extension resolver's specs, so the prompt and the
+/// request's tools array cannot drift. The one assembly point:
+/// [`CodingAgent::new`] builds every agent's prompt here, and a driver
+/// that previews the prompt calls the same function, so what is
 /// previewed is what turns send.
-pub fn stamped_system(base: Option<&str>, workspace: &Path) -> Result<String, CodingAgentError> {
+pub fn stamped_system(
+    base: Option<&str>,
+    workspace: &Path,
+    extra: &[ToolSpec],
+) -> Result<String, CodingAgentError> {
     // The global skills directory may not exist (no HOME) — as normal
     // as an empty one.
     let global = rhema_config::Config::skills_dir().ok();
     let skills = rhema_agent_tools::skills::discover(global.as_deref(), workspace);
+    let mut tools = ShellTools::builtin_specs();
+    tools.extend_from_slice(extra);
     rhema_agent_tools::render_system(
         base.unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD),
         workspace,
         &skills,
-        &rhema_agent_tools::ShellTools::builtin_specs(),
+        &tools,
     )
     .map_err(CodingAgentError::from)
 }
@@ -98,16 +106,31 @@ impl CodingAgent {
         // the session keeps the compact form, and this one wrapper is
         // every request path's way out.
         let provider: Arc<dyn rhema_core::ModelProvider> = Arc::new(ExpandPastes::new(provider));
-        let tools = Arc::new(ShellTools::new(config.workspace.clone()));
+        let tools = config
+            .tools
+            .clone()
+            .unwrap_or_else(|| Arc::new(ShellTools::new(config.workspace.clone())));
+        let resolver: Arc<dyn ToolResolver> = match config.extra_resolver.clone() {
+            Some(extra) => Arc::new(Overlay::new(tools.clone(), extra)),
+            None => tools.clone(),
+        };
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
             Some(system) => system,
-            None => stamped_system(config.base_system.as_deref(), tools.workspace())?,
+            None => stamped_system(
+                config.base_system.as_deref(),
+                tools.workspace(),
+                &config
+                    .extra_resolver
+                    .as_ref()
+                    .map(|resolver| resolver.specs())
+                    .unwrap_or_default(),
+            )?,
         };
         let agent = Agent::builder()
             .provider(provider)
-            .resolver(tools.clone())
+            .resolver(resolver)
             .system(system)
             .params(ChatParams {
                 thinking: config.thinking,
@@ -280,5 +303,160 @@ mod paste_tests {
         let seen = recording.0.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0], format!("look at {payload} this"));
+    }
+}
+
+#[cfg(test)]
+mod extra_tools_tests {
+    use super::*;
+    use rhema_agent_tools::AllowAll;
+    use rhema_core::{
+        Content, Event, ModelProvider, ModelRequest, ProviderError, StopReason, ToolCall,
+        ToolResult, Usage, async_trait,
+    };
+    use std::sync::Mutex;
+
+    use serde_json::json;
+
+    struct NoopSink;
+
+    impl EventSink for NoopSink {
+        fn emit(&mut self, _event: Event<'_>) {}
+    }
+
+    /// An extension tool: `echo` answers with its own `text` argument.
+    struct Echo;
+
+    #[async_trait]
+    impl rhema_core::ToolResolver for Echo {
+        fn specs(&self) -> Vec<rhema_core::ToolSpec> {
+            vec![rhema_core::ToolSpec::new(
+                "echo",
+                "Repeats the text argument back. The extension's canary.",
+                json!({
+                    "type": "object",
+                    "properties": { "text": { "type": "string" } },
+                    "required": ["text"]
+                }),
+            )]
+        }
+
+        async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
+            let text = call.args.get("text").and_then(|v| v.as_str()).unwrap_or("");
+            ToolResult::success(call.id, format!("echo: {text}"))
+        }
+    }
+
+    /// Scripts one tool-use round (calling `echo`) followed by an
+    /// end-turn; records the tool names every request advertised.
+    struct Scripted(Mutex<Vec<Vec<String>>>);
+
+    #[async_trait]
+    impl ModelProvider for Scripted {
+        async fn complete(
+            &self,
+            req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            let round = self.0.lock().unwrap().len();
+            self.0
+                .lock()
+                .unwrap()
+                .push(req.tools.iter().map(|t| t.name.clone()).collect());
+            if round == 0 {
+                Ok(ModelOutput {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: vec![Content::ToolCall(ToolCall {
+                            id: "c1".into(),
+                            name: "echo".into(),
+                            args: json!({"text": "through the overlay"}),
+                            ..ToolCall::default()
+                        })],
+                    },
+                    stop_reason: StopReason::ToolUse,
+                    usage: Usage::default(),
+                })
+            } else {
+                Ok(ModelOutput {
+                    message: Message::text(Role::Assistant, "final"),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                })
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_extra_resolver_reaches_the_request_and_resolves() {
+        let scripted = Arc::new(Scripted(Mutex::new(Vec::new())));
+        let config = CodingAgentConfig {
+            extra_resolver: Some(Arc::new(Echo)),
+            ..CodingAgentConfig::new("m", std::env::temp_dir())
+        };
+        let mut agent = CodingAgent::new(scripted.clone(), config).unwrap();
+        let output = agent
+            .turn("use the tool", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+
+        // The extension tool resolved in-band and its result reached the
+        // model, which then ended the turn.
+        let text: String = output
+            .message
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "final");
+        let rounds = scripted.0.lock().unwrap();
+        assert_eq!(rounds.len(), 2);
+        assert!(
+            rounds[0].contains(&"echo".to_owned()) && rounds[0].contains(&"bash".to_owned()),
+            "the tools array carries both: {:?}",
+            rounds[0]
+        );
+        // The prompt names the extension tool too: prompt and tools
+        // array cannot drift.
+        assert!(agent.system().contains("echo"), "{}", agent.system());
+        assert!(
+            agent.system().contains("canary"),
+            "the extension's description is in the prompt: {}",
+            agent.system()
+        );
+    }
+
+    #[tokio::test]
+    async fn without_an_extra_resolver_only_the_built_ins_are_advertised() {
+        let scripted = Arc::new(Scripted(Mutex::new(Vec::new())));
+        let mut agent = CodingAgent::new(
+            scripted.clone(),
+            CodingAgentConfig::new("m", std::env::temp_dir()),
+        )
+        .unwrap();
+        agent
+            .turn("hi", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+        let rounds = scripted.0.lock().unwrap();
+        assert_eq!(rounds[0], vec!["bash".to_owned()]);
+        assert!(!agent.system().contains("canary"));
+    }
+
+    #[test]
+    fn stamped_system_carries_the_extra_specs() {
+        let workspace = std::env::temp_dir();
+        let spec = rhema_core::ToolSpec::new(
+            "echo",
+            "Repeats text back. The extension's canary.",
+            json!({"type": "object"}),
+        );
+        let with = stamped_system(None, &workspace, std::slice::from_ref(&spec)).unwrap();
+        assert!(with.contains("echo") && with.contains("canary"), "{with}");
+        let without = stamped_system(None, &workspace, &[]).unwrap();
+        assert!(!without.contains("canary"), "{without}");
     }
 }

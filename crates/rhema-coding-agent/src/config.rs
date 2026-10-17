@@ -1,12 +1,15 @@
 //! The agent's configuration: model, prompt, workspace, turn budget.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use rhema_agent_tools::ShellTools;
+use rhema_core::ToolResolver;
 use rhema_core::request::ThinkingEffort;
 
 /// Everything a [`CodingAgent`](crate::CodingAgent) needs besides the
 /// provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CodingAgentConfig {
     /// Model identifier, passed through to
     /// [`ChatParams`](rhema_core::ChatParams).
@@ -30,6 +33,33 @@ pub struct CodingAgentConfig {
     /// How much reasoning the model should do; providers without a knob
     /// ignore it, and [`ThinkingEffort::Default`] sends nothing.
     pub thinking: ThinkingEffort,
+    /// The shell resolver the agent's tools run on. `None` builds one
+    /// over `workspace` — the default. A frontend that shares its shell
+    /// with an extension (the subagents extension reads the turn's
+    /// approval hook off it) brings its own.
+    pub tools: Option<Arc<ShellTools>>,
+    /// An extension resolver merged over the shell's tools through
+    /// [`Overlay`](rhema_agent_tools::Overlay): its specs join the
+    /// prompt's tool list and its tools resolve by name, shadowing a
+    /// built-in of the same name. `None` runs the built-ins alone.
+    pub extra_resolver: Option<Arc<dyn ToolResolver>>,
+}
+
+impl std::fmt::Debug for CodingAgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The resolvers are trait objects and stay opaque: their
+        // presence is the debug-worthy fact, not their internals.
+        f.debug_struct("CodingAgentConfig")
+            .field("model", &self.model)
+            .field("system", &self.system)
+            .field("base_system", &self.base_system)
+            .field("workspace", &self.workspace)
+            .field("max_turn_steps", &self.max_turn_steps)
+            .field("thinking", &self.thinking)
+            .field("tools", &self.tools.is_some())
+            .field("extra_resolver", &self.extra_resolver.is_some())
+            .finish()
+    }
 }
 
 impl CodingAgentConfig {
@@ -49,6 +79,8 @@ impl CodingAgentConfig {
             workspace: workspace.into(),
             max_turn_steps: Self::DEFAULT_MAX_TURN_STEPS,
             thinking: ThinkingEffort::Default,
+            tools: None,
+            extra_resolver: None,
         }
     }
 }
