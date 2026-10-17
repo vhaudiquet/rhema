@@ -57,6 +57,22 @@ Login keys are stored in your system keychain (macOS Keychain, Windows Credentia
 
 Regular coding agent features are supported, while maintaining a simplicity balance. Right now, no MCPs.
 
+### Subagents
+
+Drop a folder holding a `SUBAGENT.md` into `.rhema/subagents/` in your workspace (or `~/.config/rhema/subagents/` for every workspace; project shadows global), and the agent gains one `subagent` tool. The frontmatter `description` is the trigger the agent sees, the body is the subagent's own system prompt, and `model` / `max_steps` are optional:
+
+```markdown
+---
+description: Reviews a diff for correctness. Use for a second opinion before committing.
+model: anthropic/claude-haiku
+max_steps: 128
+---
+
+You are a code reviewer. ...
+```
+
+When the agent delegates, the subagent runs its own conversation with the same workspace tools in the same workspace, its output streams into the tool-call view, and its final report lands in the conversation as the tool's result. Inner commands ask for approval exactly like the main agent's do. A subagent never spawns further subagents.
+
 ### Program status (OSC 7501)
 
 Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimoto's program status protocol](https://mitchellh.com/writing/program-status-osc7501): `working` (with step progress and the current tool) while a turn runs, `blocked` (permission or auth) when it needs you, `idle` at the prompt, and `done` or `error` when a `rhema run` one-shot finishes — so supporting terminals (Ghostty, and terminal UIs built on libghostty) can mark tab headers, session pickers, and agentic inboxes without scraping the screen. Terminals without support ignore the sequence; piped output stays byte-exact.

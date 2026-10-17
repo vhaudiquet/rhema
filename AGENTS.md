@@ -81,6 +81,11 @@ Rules:
   - `acp` — the Agent Client Protocol adapter and the `rhema acp`
     subcommand (`crates/rhema-acp/`)
   - `config` — stored settings and credentials (`crates/rhema-config/`)
+  - `agent-tools` — the shared toolkit: the approval-gated shell, the
+    `Approval` and `Overlay` seams, skills, paste expansion, revive,
+    the prompt renderer (`crates/rhema-agent-tools/`)
+  - `subagents` — the subagent extension: definition discovery and the
+    `subagent` tool (`crates/rhema-subagents/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema-code` — the frontend crate: terminal UI and headless
     one-shot (`crates/rhema-code/`); its binary is `rhema`
