@@ -27,6 +27,8 @@ rhema-core = { path = "../rhema-core", version = "0.1.0" }
 rhema-config = { path = "../rhema-config", version = "0.1.0" }
 rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0" }
 rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0" }
+# The subagent extension: discovered definitions wired in as one tool
+rhema-subagents = { path = "../rhema-subagents", version = "0.1.0" }
 # The `rhema acp` subcommand: the Agent Client Protocol server
 rhema-acp = { path = "../rhema-acp", version = "0.1.0" }
 # The shared model card every adapter's catalog normalizes into

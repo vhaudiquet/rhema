@@ -239,7 +239,7 @@ fn system_show_at(
     Ok(rhema_coding_agent::stamped_system(
         resolve_base_system(path).as_deref(),
         &workspace,
-        &[],
+        &rhema_subagents::extra_specs(&workspace),
     )?)
 }
 
@@ -372,6 +372,8 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         base_system: resolve_base_system(Config::system_prompt_path().ok().as_deref()),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
     };
+    // Discovered subagents ride in as one tool; none, no change.
+    let agent_config = rhema_subagents::wire(backend.provider(), agent_config);
     // The workspace remembers the profile that served it, the same
     // memory the next launch here reads back. Best effort: a failed
     // write warns without failing the turn.

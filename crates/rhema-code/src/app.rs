@@ -822,7 +822,8 @@ impl App {
                     .as_ref()
                     .map(Backend::provider)
                     .ok_or(AgentError::MissingProvider)?;
-                let agent_config = agent_config(&setup.options, effective.model.clone());
+                let agent_config =
+                    wired_config(provider.clone(), &setup.options, effective.model.clone());
                 agent = Some(CodingAgent::from_session(
                     provider,
                     agent_config,
@@ -1122,7 +1123,7 @@ impl App {
             ));
             return Vec::new();
         };
-        let agent_config = agent_config(&self.options, effective.model.clone());
+        let agent_config = wired_config(backend.provider(), &self.options, effective.model.clone());
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
             Ok(agent) => {
                 self.session_profile = Some(name.to_owned());
@@ -2232,7 +2233,11 @@ impl App {
             .provider
             .clone()
             .ok_or(CodingAgentError::Agent(AgentError::MissingProvider))?;
-        let agent_config = agent_config(&self.options, self.effective().model.clone());
+        let agent_config = wired_config(
+            provider.clone(),
+            &self.options,
+            self.effective().model.clone(),
+        );
         CodingAgent::from_session(provider, agent_config, session)
     }
 
@@ -2447,6 +2452,17 @@ fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfi
         base_system: options.base_system.clone(),
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
     }
+}
+
+/// The coding-agent config with discovered subagents wired in: when any
+/// definition exists, the shared shell and the `subagent` tool attach;
+/// otherwise the config comes back untouched.
+fn wired_config(
+    provider: Arc<dyn ModelProvider>,
+    options: &RunOptions,
+    model: Option<String>,
+) -> CodingAgentConfig {
+    rhema_subagents::wire(provider, agent_config(options, model))
 }
 
 /// The context a reported usage stands for: the whole prompt plus the
