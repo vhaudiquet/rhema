@@ -10,6 +10,7 @@
 //!   workspace; reading, listing, and editing are shell work, not
 //!   separate tools
 //! - [`skills`] — discovery of markdown skills, prompt presentation
+//! - [`overlay`] — `Overlay`, one resolver over built-ins plus an extension set
 //! - [`paste`] — `ExpandPastes`, paste expansion at the provider seam
 //! - [`revive`] — `repair_dangling_calls`, `revive_dangling_calls`
 //! - [`prompt`] — the Jinja system-prompt renderer
@@ -33,6 +34,7 @@
 #![deny(missing_docs)]
 
 pub mod approval;
+pub mod overlay;
 pub mod paste;
 pub mod prompt;
 pub mod revive;
@@ -40,6 +42,7 @@ pub mod shell;
 pub mod skills;
 
 pub use approval::{AllowAll, Approval, DenyAll};
+pub use overlay::Overlay;
 pub use paste::ExpandPastes;
 pub use prompt::{render_system, render_template};
 pub use revive::{repair_dangling_calls, revive_dangling_calls};
