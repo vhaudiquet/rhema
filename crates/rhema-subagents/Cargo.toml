@@ -1,0 +1,29 @@
+[package]
+name = "rhema-subagents"
+description = "The subagent extension: markdown subagent definitions and the `subagent` tool that runs them as fresh agents"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The step engine: a subagent is a fresh Agent on a fresh Session
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# The toolkit: the inner shell, the overlay, the approval hook, the renderer
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0" }
+# `wire` attaches the tool to a coding-agent config
+rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0" }
+# The global definitions directory resolves off the config dir
+rhema-config = { path = "../rhema-config", version = "0.1.0" }
+# Definitions round-trip through YAML frontmatter
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+
+[dev-dependencies]
+# The scripted provider drives inner agents offline
+rhema-core = { path = "../rhema-core", features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = "3"
