@@ -89,6 +89,17 @@ impl ShellTools {
         *self.pending.lock().unwrap_or_else(PoisonError::into_inner) = Some(approval);
     }
 
+    /// The approval hook installed for the current turn, if any. A
+    /// resolver that runs its own inner `ShellTools` — the subagents
+    /// extension — reads this to inherit the turn's policy rather than
+    /// holding a hook of its own.
+    pub fn current_approval(&self) -> Option<Arc<dyn Approval>> {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
     /// Removes the approval hook; calls reject until one is installed
     /// again.
     pub fn clear_approval(&self) {
@@ -415,5 +426,32 @@ mod tests {
         assert_eq!(result.code, Some(3));
         assert!(result.content.contains("oops"));
         tools.clear_approval();
+    }
+
+    #[test]
+    fn the_installed_hook_reads_back_until_cleared() {
+        struct Spy;
+        impl Approval for Spy {
+            fn approve(&self, _call: &ToolCall) -> bool {
+                true
+            }
+        }
+
+        let tools = ShellTools::new("/tmp");
+        assert!(
+            tools.current_approval().is_none(),
+            "no hook installed: none readable"
+        );
+        let hook: Arc<dyn Approval> = Arc::new(Spy);
+        tools.install_approval(hook.clone());
+        let read = tools.current_approval().unwrap();
+        // The same policy answers through the read handle.
+        let probe = ToolCall {
+            name: "bash".into(),
+            ..ToolCall::default()
+        };
+        assert!(read.approve(&probe));
+        tools.clear_approval();
+        assert!(tools.current_approval().is_none());
     }
 }
