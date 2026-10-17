@@ -12,6 +12,8 @@
 //!
 //! Layout:
 //! - [`def`] — `SubagentDef`, discovery over markdown definitions
+//! - [`tools`] — `SubagentTools`, the `subagent` tool and the inner loop
+//! - [`wire`] — the explicit `CodingAgentConfig` helper frontends call
 //!
 //! The crate is an extension: it depends on the existing stack and
 //! nothing depends on it. `rhema-core` is untouched.
@@ -27,5 +29,9 @@
 #![deny(missing_docs)]
 
 pub mod def;
+pub mod tools;
+pub mod wire;
 
 pub use def::{SubagentDef, discover};
+pub use tools::SubagentTools;
+pub use wire::{extra_specs, wire, wire_at};
