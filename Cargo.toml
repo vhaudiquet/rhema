@@ -10,7 +10,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
-repository = "https://git.vhaudiquet.fr/vhaudiquet/rhema.git"
+repository = "https://github.com/vhaudiquet/rhema"
 authors = ["Valentin Haudiquet"]
 
 [workspace.dependencies]

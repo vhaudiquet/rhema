@@ -709,26 +709,26 @@ fn settings_page(
     match settings.section {
         SettingsSection::Providers => {
             let provider_value = match settings.stored.provider_name() {
-                None => Span::raw("none — add a login below".to_owned()).fg(theme.warn),
+                None => Span::raw("None".to_owned()).fg(theme.warn),
                 Some(provider) => match &settings.stored.instance {
-                    Some(instance) => Span::raw(format!("{provider} · {instance}")).fg(theme.text),
+                    Some(instance) => Span::raw(format!("{instance} ({provider})")).fg(theme.text),
                     None => Span::raw(provider).fg(theme.text),
                 },
             };
             let model_value = match &settings.stored.model {
                 Some(model) => Span::raw(model.clone()).fg(theme.text),
-                None => Span::raw("none picked".to_owned()).fg(theme.text3),
+                None => Span::raw("None".to_owned()).fg(theme.text3),
             };
             lines.extend(settings_field(
-                "profile",
+                "Profile",
                 Span::raw(settings.profile.clone()).fg(theme.text),
                 theme,
                 width,
             ));
-            lines.extend(settings_field("provider", provider_value, theme, width));
-            lines.extend(settings_field("model", model_value, theme, width));
+            lines.extend(settings_field("Provider", provider_value, theme, width));
+            lines.extend(settings_field("Model", model_value, theme, width));
             lines.push(Line::default());
-            lines.push(Line::from(Span::raw("logins").bold()));
+            lines.push(Line::from(Span::raw("Logins").bold()));
             // One interactive row per instance plus the add row.
             let mut row_hits = Vec::new();
             for (index, row) in settings.instance_rows().into_iter().enumerate() {
@@ -739,16 +739,16 @@ fn settings_page(
                     if row.add {
                         Line::from(vec![
                             marker,
-                            Span::raw("+ add a new instance…").fg(theme.text2),
+                            Span::raw("+ Add a new instance...").fg(theme.text2),
                         ])
                     } else {
                         Line::from(vec![
                             marker,
                             Span::raw("● ").fg(if row.active { theme.ok } else { theme.text3 }),
-                            Span::raw(format!("{} — {}", row.provider, row.name))
+                            Span::raw(format!("{} ({})", row.name, row.provider))
                                 .fg(if row.active { theme.text } else { theme.text2 }),
                             if row.active {
-                                Span::raw("  · active").fg(theme.text3)
+                                Span::raw(" active").fg(theme.text3)
                             } else {
                                 Span::raw("").fg(theme.text)
                             },
@@ -758,21 +758,21 @@ fn settings_page(
             }
             (
                 lines,
-                footer("enter uses it · d forgets · enter on + adds · esc back"),
+                footer("d - delete provider"),
                 row_hits,
             )
         }
         SettingsSection::Appearance => {
             let mut row_hits = Vec::new();
             let toggles = [
-                ("colors", settings.colors.label()),
-                ("theme", if settings.theme_dark { "dark" } else { "light" }),
+                ("Colors", settings.colors.label()),
+                ("Theme", if settings.theme_dark { "Dark" } else { "Light" }),
                 (
-                    "icons",
+                    "Icons",
                     if settings.icons_nerd {
-                        "nerd"
+                        "Nerd"
                     } else {
-                        "unicode"
+                        "Unicode"
                     },
                 ),
             ];
@@ -787,17 +787,7 @@ fn settings_page(
                 lines.push(settings_row(line, selected, theme));
             }
             lines.push(Line::default());
-            lines.extend(settings_hint(
-                "enter toggles · c colors · t theme · i icons",
-                theme,
-                width,
-            ));
-            lines.extend(settings_hint(
-                "applies live and is saved to config.yaml",
-                theme,
-                width,
-            ));
-            (lines, footer("enter toggle · esc back"), row_hits)
+            (lines, footer("c - colors, t - theme, i - icons"), row_hits)
         }
         SettingsSection::Memory => {
             lines.extend(wrap_line(
@@ -810,47 +800,41 @@ fn settings_page(
                 width,
             ));
             lines.push(Line::default());
-            lines.extend(settings_hint(
-                "the memory_save/search/forget tools and their MemoryStore serve the \
-                 claw daemon today; wiring them into this agent is on the roadmap",
-                theme,
-                width,
-            ));
-            (lines, footer("esc back"), Vec::new())
+            (lines, footer(""), Vec::new())
         }
         SettingsSection::Skills => {
             lines.extend(settings_field(
-                "global",
+                "Global",
                 Span::raw(
                     settings
                         .skills_global_dir
                         .clone()
-                        .unwrap_or_else(|| "none".into()),
+                        .unwrap_or_else(|| "None".into()),
                 )
                 .fg(theme.text),
                 theme,
                 width,
             ));
             lines.extend(settings_field(
-                "workspace",
+                "Workspace",
                 Span::raw(settings.skills_workspace_dir.clone()).fg(theme.text),
                 theme,
                 width,
             ));
             lines.push(Line::default());
             if settings.skills.is_empty() {
-                lines.extend(settings_hint("no skills discovered", theme, width));
+                lines.extend(settings_hint("No skills discovered", theme, width));
             }
             for skill in &settings.skills {
                 lines.extend(wrap_line(
                     &Line::from(vec![
-                        Span::raw(format!("{} — ", skill.name)).fg(theme.text),
+                        Span::raw(format!("{} - ", skill.name)).fg(theme.text),
                         Span::raw(skill.description.clone()).fg(theme.text3),
                     ]),
                     width,
                 ));
             }
-            (lines, footer("esc back"), Vec::new())
+            (lines, footer(""), Vec::new())
         }
         SettingsSection::Usage => {
             let allowance_value: Vec<Span<'static>> = match &settings.allowance {
@@ -905,34 +889,34 @@ fn settings_page(
         }
         SettingsSection::About => {
             lines.push(Line::from(
-                Span::raw(format!("rhema {}", env!("CARGO_PKG_VERSION"))).bold(),
+                Span::raw(format!("Rhema Code {}", env!("CARGO_PKG_VERSION"))).bold(),
             ));
             lines.extend(settings_field(
-                "repository",
+                "Repository",
                 Span::raw(env!("CARGO_PKG_REPOSITORY").to_owned()).fg(theme.text),
                 theme,
                 width,
             ));
             lines.extend(settings_field(
-                "config",
-                Span::raw(settings.config_path.clone().unwrap_or_else(|| "—".into()))
+                "Config",
+                Span::raw(settings.config_path.clone().unwrap_or_else(|| "-".into()))
                     .fg(theme.text),
                 theme,
                 width,
             ));
             lines.extend(settings_field(
-                "workspace",
+                "Workspace",
                 Span::raw(settings.workspace.clone()).fg(theme.text),
                 theme,
                 width,
             ));
             lines.extend(settings_field(
-                "profiles",
+                "Profiles",
                 Span::raw(settings.profile_count.to_string()).fg(theme.text),
                 theme,
                 width,
             ));
-            (lines, footer("esc back"), Vec::new())
+            (lines, footer(""), Vec::new())
         }
     }
 }
