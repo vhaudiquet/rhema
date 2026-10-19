@@ -57,6 +57,16 @@ pub trait SecretStore: Send + Sync {
     /// Removes `id`, reporting whether it was there. Absent is `Ok`,
     /// not an error: deletion is idempotent.
     fn delete(&self, id: &str) -> Result<bool, SecretError>;
+
+    /// Whether the store answers at all, probed honestly: one write of
+    /// a throwaway entry and its removal. A read of a fresh id cannot
+    /// tell a locked keyring from an absent key, so the write is what
+    /// gets probed — a locked or missing store refuses it. Frontends
+    /// run this before blaming a missing key on the config. Stores
+    /// that cannot fail answer yes; the default serves them.
+    fn reachable(&self) -> bool {
+        true
+    }
 }
 
 /// The OS keychain backend: every id is an entry under the `rhema`
@@ -94,6 +104,19 @@ impl SecretStore for KeyringSecretStore {
             Err(keyring::v1::Error::NoEntry) => Ok(false),
             Err(err) => Err(translate(err)),
         }
+    }
+
+    fn reachable(&self) -> bool {
+        // The write decides: a locked collection and an unreachable
+        // store both refuse it. A store that took the write but
+        // fumbled the delete reads as unreachable, leaving the probe
+        // entry behind — its id is unique to this call and its value
+        // is not a secret.
+        let id = fresh_id();
+        if self.set(&id, "reachability probe").is_err() {
+            return false;
+        }
+        self.delete(&id).unwrap_or_default()
     }
 }
 
@@ -193,8 +216,14 @@ pub mod contract {
         assert_eq!(store.get(&id).unwrap(), None);
     }
 
+    /// The store answers before any behavior is replayed against it.
+    pub fn is_reachable(store: &dyn SecretStore) {
+        assert!(store.reachable(), "the store answers");
+    }
+
     /// The whole suite, in order.
     pub fn run_all(store: &dyn SecretStore) {
+        is_reachable(store);
         set_then_get_round_trips(store);
         get_missing_returns_none(store);
         set_overwrites(store);
