@@ -432,12 +432,8 @@ mod tests {
         .with_url("https://git.example");
         accounts.put(account).expect("account lands");
 
-        let resolved = resolve_watch_token(
-            &accounts,
-            ForgeKind::Gitea,
-            Some("https://git.example"),
-            "",
-        );
+        let resolved =
+            resolve_watch_token(&accounts, ForgeKind::Gitea, Some("https://git.example"), "");
         assert_eq!(resolved.as_deref(), Some("acct-tok"));
     }
 
@@ -476,7 +472,12 @@ mod tests {
             .expect("account lands");
         // The same instance through case and a trailing slash matches.
         assert_eq!(
-            resolve_watch_token(&accounts, ForgeKind::Gitea, Some("HTTPS://GIT.example/"), "")
+            resolve_watch_token(
+                &accounts,
+                ForgeKind::Gitea,
+                Some("HTTPS://GIT.example/"),
+                ""
+            )
             .as_deref(),
             Some("yes")
         );
