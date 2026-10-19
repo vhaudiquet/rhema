@@ -113,6 +113,13 @@ non-empty description and a non-empty body; anything else is not a
 subagent, not an error. A subagent without instructions has no prompt to
 run on, so the body is as mandatory as the trigger.
 
+One definition is not a folder: the built-in `general-purpose` — the
+delegation every agent gets — is seeded ahead of both directories, so
+the catalog, and with it the `subagent` tool, always exist. It carries
+no `model` (the parent's) and no `max_steps` (the default), and a
+definition of the same name — global or project — shadows it, exactly
+like project shadows global.
+
 ## 4. Semantics of one `subagent` call
 
 ```
@@ -174,8 +181,8 @@ subagents on its own.
    (`None` is today's behavior byte for byte). When set, the agent runs
    `Overlay::new(shell, extra)` and `stamped_system` renders the merged
    spec list, so the prompt and the tools array cannot drift.
-3. **`wire(provider, config) -> config`** — discover; when nothing was
-   found, return the config untouched. Otherwise build the shell and the
+3. **`wire(provider, config) -> config`** — discover (the built-in
+   `general-purpose` plus the folders), then build the shell and the
    `SubagentTools`, set both fields, return. Each frontend calls it at
    its agent-construction sites (TUI, headless one-shot; the claw and
    ACP when they adopt the feature). The `/system` preview goes through
@@ -202,8 +209,9 @@ subagents on its own.
    `subagent`; with a budget of 2, the nested call resolves and the
    third level is where it stops.
 7. **Cancellation**: a pre-set flag stops the loop before the next step.
-8. **`wire`**: with no definitions the config comes back untouched; with
-   one, the resolver is the overlay and the prompt lists both tools.
+8. **`wire`**: with no definitions on disk the built-in alone is the
+   catalog; with one, the resolver is the overlay and the prompt lists
+   both tools.
 
 ## 7. Explicitly not decided here
 
@@ -223,3 +231,7 @@ subagents on its own.
   `ShellTools` at resolve time, never a blanket `AllowAll`.
 - **Explicit wiring** — frontends call `wire`; the driver stays
   subagent-agnostic, the honest reading of "pure extension".
+- **A built-in `general-purpose` definition** — the tool's `name`
+  argument needs a catalog to name into; the built-in guarantees one,
+  and a definition of the same name shadows it. A generic delegation is
+  always useful; a definition is only a system prompt with a trigger.
