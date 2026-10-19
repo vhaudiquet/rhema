@@ -208,10 +208,19 @@ impl Backend {
             .filter(|name| rhema_config::provider_info(name).is_some())
             .ok_or_else(|| NO_PROVIDER_HELP.to_owned())?;
         let missing = || {
-            rhema_config::provider_info(&active)
+            let help = rhema_config::provider_info(&active)
                 .map(|info| info.missing_key_help)
-                .unwrap_or("missing API key")
-                .to_owned()
+                .unwrap_or("missing API key");
+            match secrets {
+                // A store that does not answer reads as "not in the
+                // store": say so, or a locked keychain reads as a key
+                // the user never stored.
+                Some(store) if !store.reachable() => format!(
+                    "{help} — the system keychain is locked or unreachable, \
+                     so the stored keys were unreadable"
+                ),
+                _ => help.to_owned(),
+            }
         };
         if let Some((_, instance)) = profile.instance_for_provider(&active) {
             return Self::from_instance(profile, instance, secrets).ok_or_else(missing);
@@ -837,13 +846,20 @@ impl App {
             }),
             // No usable backend: the settings' providers page is the
             // front door now. Esc there quits — there is no chat behind
-            // it to return to.
-            (None, _) => Screen::Settings(Box::new(Self::build_settings_screen(
-                &setup.config,
-                &setup.options,
-                setup.options.profile.as_deref(),
-                SettingsPurpose::Initial,
-            ))),
+            // it to return to. The failed resolution explains itself on
+            // the page: a locked keychain must not read as a bare
+            // login screen.
+            (None, _) => {
+                let mut settings = Self::build_settings_screen(
+                    &setup.config,
+                    &setup.options,
+                    setup.options.profile.as_deref(),
+                    SettingsPurpose::Initial,
+                );
+                settings.startup_reason =
+                    Backend::from_profile_or_help(&effective, setup.secrets.as_deref()).err();
+                Screen::Settings(Box::new(settings))
+            }
         };
         Ok(Self {
             secrets: setup.secrets,
@@ -2807,6 +2823,76 @@ mod tests {
         assert_eq!(settings.section, crate::screens::SettingsSection::Providers);
         assert_eq!(settings.purpose, SettingsPurpose::Initial);
         assert!(h.app.initial_effects().is_empty());
+    }
+
+    /// A store that refuses everything: the locked-keychain shape the
+    /// reachability probe exists to catch.
+    struct LockedStore;
+
+    impl rhema_config::secrets::SecretStore for LockedStore {
+        fn reachable(&self) -> bool {
+            false
+        }
+
+        fn get(&self, _id: &str) -> Result<Option<String>, rhema_config::secrets::SecretError> {
+            Err(rhema_config::secrets::SecretError::NoStore)
+        }
+
+        fn set(&self, _id: &str, _value: &str) -> Result<(), rhema_config::secrets::SecretError> {
+            Err(rhema_config::secrets::SecretError::NoStore)
+        }
+
+        fn delete(&self, _id: &str) -> Result<bool, rhema_config::secrets::SecretError> {
+            Err(rhema_config::secrets::SecretError::NoStore)
+        }
+    }
+
+    #[test]
+    fn the_startup_settings_say_why_they_opened() {
+        let h = harness(None, None, Session::default());
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        let reason = settings
+            .startup_reason
+            .as_deref()
+            .expect("the gate names why no backend resolved");
+        assert!(reason.contains("GEMINI_API_KEY"), "{reason}");
+    }
+
+    #[test]
+    fn settings_opened_from_the_chat_carry_no_reason() {
+        let mut h = harness(Some("k"), None, Session::default());
+        h.app.open_settings_at(
+            crate::screens::SettingsSection::Providers,
+            SettingsPurpose::FromChat,
+        );
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.startup_reason, None);
+    }
+
+    #[test]
+    fn a_locked_keychain_is_named_by_the_missing_key_help() {
+        let profile = rhema_config::Profile {
+            provider: Some("google".into()),
+            ..rhema_config::Profile::default()
+        };
+        let err = Backend::from_profile_or_help(&profile, Some(&LockedStore)).unwrap_err();
+        assert!(err.contains("GEMINI_API_KEY"), "{err}");
+        assert!(err.contains("locked or unreachable"), "{err}");
+    }
+
+    #[test]
+    fn the_plain_missing_key_help_names_no_keychain() {
+        let profile = rhema_config::Profile {
+            provider: Some("google".into()),
+            ..rhema_config::Profile::default()
+        };
+        let err = Backend::from_profile_or_help(&profile, None).unwrap_err();
+        assert!(err.contains("GEMINI_API_KEY"), "{err}");
+        assert!(!err.contains("keychain"), "{err}");
     }
 
     #[test]

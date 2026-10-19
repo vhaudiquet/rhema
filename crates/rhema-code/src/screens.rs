@@ -791,6 +791,10 @@ impl AddInstanceDialog {
 pub struct SettingsScreen {
     /// What Esc and `q` do here.
     pub purpose: SettingsPurpose,
+    /// Why no backend resolved, when the settings are the startup
+    /// screen — the credential resolution's own error, shown over
+    /// every page. `None` when the settings opened from the chat.
+    pub startup_reason: Option<String>,
     /// The section whose page is showing.
     pub section: SettingsSection,
     /// The selected row within the page's interactive rows (the
@@ -840,6 +844,7 @@ impl SettingsScreen {
     pub fn new(purpose: SettingsPurpose) -> Self {
         Self {
             purpose,
+            startup_reason: None,
             section: SettingsSection::Providers,
             row: 0,
             colors: crate::palette::Palette::Rhema,

@@ -706,6 +706,16 @@ fn settings_page(
         Line::from(Span::raw("─".repeat(width)).fg(theme.border_strong)),
         Line::default(),
     ];
+    // The startup gate's explanation rides over every page: the
+    // settings opened because no backend resolved, and the reason
+    // must not vanish when the section changes.
+    if let Some(reason) = &settings.startup_reason {
+        lines.extend(wrap_line(
+            &Line::from(Span::raw(reason.clone()).fg(theme.warn)),
+            width,
+        ));
+        lines.push(Line::default());
+    }
     match settings.section {
         SettingsSection::Providers => {
             let provider_value = match settings.stored.provider_name() {
@@ -2216,6 +2226,54 @@ mod tests {
             hits.len(),
             SettingsSection::ALL.len() + 2,
             "sidebar rows and the two page rows register: {hits:?}"
+        );
+    }
+
+    /// The startup gate's explanation renders over the page the
+    /// settings open on, wrapped, and survives a section change.
+    #[test]
+    fn the_startup_reason_rides_over_the_page() {
+        let mut settings =
+            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::Initial);
+        settings.startup_reason = Some(
+            "missing API key: set GEMINI_API_KEY — the system keychain is \
+             locked or unreachable, so the stored keys were unreadable"
+                .to_owned(),
+        );
+
+        let draw = |settings: &crate::screens::SettingsScreen| {
+            let mut hits = Vec::new();
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal
+                .draw(|frame| {
+                    render_settings(frame, settings, &DARK, &crate::icons::UNICODE, &mut hits)
+                })
+                .unwrap();
+            (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let text = draw(&settings);
+        assert!(
+            text.contains("GEMINI_API_KEY"),
+            "the reason shows on the opening page: {text}"
+        );
+        assert!(
+            text.contains("locked or unreachable"),
+            "the reason wraps to the pane: {text}"
+        );
+
+        settings.section = SettingsSection::About;
+        let text = draw(&settings);
+        assert!(
+            text.contains("GEMINI_API_KEY"),
+            "the reason rides over the other pages too: {text}"
         );
     }
 
