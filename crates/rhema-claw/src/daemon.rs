@@ -241,7 +241,8 @@ impl Daemon {
         // The forge handler resolves its watches through the table at
         // dispatch time, so a watch added mid-run is answerable without a
         // restart.
-        let forge_handler = ClawHandler::new(backends.clone(), workspace_root, watches.clone());
+        let forge_handler =
+            ClawHandler::new(backends.clone(), workspace_root, watches.clone(), accounts.clone());
         // Three drivers over one store admit from the same table, so
         // each owns its slice of the key space: a forge pass must never
         // pick up a resident or job event (it would fail it, and

@@ -24,13 +24,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::config::ForgeKind;
-use crate::forge::record_client;
+use crate::forge::{record_client, resolve_watch_token};
 use crate::triage::Role;
 use crate::watch_store::ClawStore;
 use rhema_agent_tools::AllowAll;
 use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig};
 use rhema_core::{Content, Event as ModelEvent, EventSink, Message, Session};
+use rhema_identity::IdentityStore;
 use rhema_forge_integration::{
     EventKind, Forge, ForgeError, ForgeEvent, Notification, RepoRef, Snapshot, ThreadState, decode,
     parse_key,
@@ -58,6 +59,10 @@ pub struct ClawHandler {
     backends: Arc<BackendRegistry>,
     workspace_root: PathBuf,
     watches: Arc<ClawStore>,
+    /// The account store a blank watch credential resolves through: the
+    /// reply client must authenticate as the identity the poll did, or
+    /// the forge refuses the very post the poll was reading.
+    accounts: Arc<dyn IdentityStore>,
     clients: Mutex<HashMap<String, Arc<dyn Forge>>>,
 }
 
@@ -68,11 +73,13 @@ impl ClawHandler {
         backends: Arc<BackendRegistry>,
         workspace_root: impl Into<PathBuf>,
         watches: Arc<ClawStore>,
+        accounts: Arc<dyn IdentityStore>,
     ) -> Self {
         Self {
             backends,
             workspace_root: workspace_root.into(),
             watches,
+            accounts,
             clients: Mutex::new(HashMap::new()),
         }
     }
@@ -97,11 +104,22 @@ impl ClawHandler {
             .ok_or_else(|| format!("no watch configured for {key}"))?;
         let kind = ForgeKind::parse(&record.forge)
             .ok_or_else(|| format!("watch entry {watch} names an unknown forge"))?;
-        let cache_key = format!("{}|{:?}|{}", record.forge, record.host, record.token);
+        // The same chain the poll resolved: row token, env var, then
+        // the matching account identity — keyed on the resolved value,
+        // so a credential rotation (or a saved account) is a new client
+        // on the next dispatch.
+        let resolved = resolve_watch_token(
+            self.accounts.as_ref(),
+            kind,
+            record.host.as_deref(),
+            &record.token,
+        )
+        .unwrap_or_default();
+        let cache_key = format!("{}|{:?}|{}", record.forge, record.host, resolved);
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(clients
             .entry(cache_key)
-            .or_insert_with(|| record_client(kind, record.host.as_deref(), &record.token))
+            .or_insert_with(|| record_client(kind, record.host.as_deref(), &resolved))
             .clone())
     }
 
@@ -736,7 +754,12 @@ mod tests {
             )
             .expect("constructs"),
         );
-        let handler = ClawHandler::new(registry, "/tmp/w", watches);
+        let handler = ClawHandler::new(
+            registry,
+            "/tmp/w",
+            watches,
+            Arc::new(rhema_identity::VolatileIdentityStore::new()),
+        );
 
         // A watch added to the table AFTER the handler was built resolves:
         // the table is the source of truth, not a boot-time snapshot.

@@ -193,7 +193,9 @@ for a UI catching up after a reload) — and the human answers through
 The secret travels once, from the answer into the agent accounts; the
 tool wakes with the account id, never the secret, and a denial or a
 15-minute silence comes back in-band so the turn can say so and move
-on. Acting with a stored account is `identity_exec`: it runs one shell
+on. A watch with no token of its own polls — and replies — as the
+matching saved account: the same forge, and on a self-hosted forge the
+same base URL. Acting with a stored account is `identity_exec`: it runs one shell
 command in the session workspace with the secret injected —
 `ACCOUNT_SECRET` plus the service's own `GITHUB_TOKEN`/`GITEA_TOKEN`/
 `GITLAB_TOKEN`, and a git credential helper — so `git clone` and API
