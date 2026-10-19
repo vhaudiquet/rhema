@@ -534,7 +534,18 @@ async fn watches_list(State(state): State<ClawState>) -> Result<Json<Value>, (St
         .watches
         .list()
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    Ok(Json(json!({ "watches": watches })))
+    // The account watches ride along: a saved account whose forge
+    // notifications are not actually being followed is invisible
+    // otherwise — the save's `watch` flag defaults to false on both the
+    // tool and this surface, and "is my account subscribed?" is the
+    // first question a silent forge thread raises.
+    let account_watches = state
+        .watches
+        .list_account_watches()
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(
+        json!({ "watches": watches, "account_watches": account_watches }),
+    ))
 }
 
 /// `{"forge", "repo", "host"?, "token"?}` — the shape every watch entry
