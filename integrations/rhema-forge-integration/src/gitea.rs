@@ -455,10 +455,18 @@ fn parent_number(url: &str) -> Option<u64> {
     url.trim_end_matches('/').rsplit('/').next()?.parse().ok()
 }
 
+/// The fixed [`NotificationReason::Other`] spelling every reason-less
+/// notifications row maps to (see [`notification_event`]). The
+/// consumer's triage matches this spelling to act on the row —
+/// an `Other` it does not know only surfaces — so the constant is
+/// the seam's contract, not a detail of this module.
+pub const COLLAPSED_REASON: &str = "gitea";
+
 /// The notification a notifications row carries. Gitea's feed names no
 /// per-row reason — the thread subject is all a row carries — so every
-/// notification maps to [`NotificationReason::Other`] with a fixed
-/// spelling, and the consumer's triage treats it as its default role.
+/// notification maps to [`NotificationReason::Other`] under
+/// [`COLLAPSED_REASON`], and the consumer's triage acts on that
+/// spelling as its default role.
 fn notification_event(row: &WireNotification) -> Result<Option<Notification>, ForgeError> {
     let id = required(row.id, "notification id")?;
     let updated = required(row.updated_at.clone(), "notification updated_at")?;
@@ -478,7 +486,7 @@ fn notification_event(row: &WireNotification) -> Result<Option<Notification>, Fo
     })?;
     Ok(Some(Notification {
         id: format!("gitea:notification:{id}@{}", updated.raw()),
-        reason: NotificationReason::Other("gitea".to_owned()),
+        reason: NotificationReason::Other(COLLAPSED_REASON.to_owned()),
         repo: RepoRef::new(owner, name),
         number,
         is_pr: subject.kind.as_deref() == Some("Pull"),

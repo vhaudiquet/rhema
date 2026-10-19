@@ -16,6 +16,7 @@
 //! forges' vocabularies are external data, and the policy must not drift
 //! with them.
 
+use rhema_forge_integration::gitea::COLLAPSED_REASON;
 use rhema_forge_integration::{Notification, NotificationReason};
 
 /// The agent persona a dispatched notification runs as. The key stays
@@ -56,6 +57,14 @@ pub enum Triage {
 /// Classifies one notification. A forge reason the vocabulary does not
 /// know ([`NotificationReason::Other`]) surfaces rather than acts: an
 /// unknown shape is the user's to judge, never the agent's to guess at.
+/// The one exception is a forge whose feed names no per-row reason at
+/// all (Gitea's): its adapter collapses every row under one fixed,
+/// published spelling, so that spelling is a known shape — the account
+/// was notified on a thread of its own, and the thread's agent acts.
+/// The row cannot say *why* the account was notified (a comment, an
+/// assignment, and a review request ride the same shape), so the
+/// default is the do-the-work role; a reviewer framing can follow in
+/// the thread's session once the text of the activity says so.
 pub fn classify(notification: &Notification) -> Triage {
     match &notification.reason {
         NotificationReason::ReviewRequested => Triage::Agent(Role::Reviewer),
@@ -64,6 +73,9 @@ pub fn classify(notification: &Notification) -> Triage {
         NotificationReason::Author => Triage::Agent(Role::Implementer),
         NotificationReason::Mention => Triage::Surface,
         NotificationReason::CiActivity => Triage::Ignore,
+        NotificationReason::Other(kind) if kind == COLLAPSED_REASON => {
+            Triage::Agent(Role::Implementer)
+        }
         NotificationReason::Other(_) => Triage::Surface,
     }
 }
@@ -122,6 +134,25 @@ mod tests {
         assert_eq!(
             classify(&notification(NotificationReason::Other(
                 "subscription".to_owned()
+            ))),
+            Triage::Surface
+        );
+    }
+
+    #[test]
+    fn the_collapsed_reasonless_forge_dispatches_other_spellings_do_not() {
+        // Gitea's adapter collapses every notifications row under one
+        // fixed spelling; that spelling is the known shape the triage
+        // acts on — this is the path a comment on a thread the account
+        // authored takes on a reason-less forge.
+        assert_eq!(
+            classify(&notification(NotificationReason::Other("gitea".to_owned()))),
+            Triage::Agent(Role::Implementer)
+        );
+        // A spelling no adapter owns is still the user's to judge.
+        assert_eq!(
+            classify(&notification(NotificationReason::Other(
+                "something-new".to_owned()
             ))),
             Triage::Surface
         );
