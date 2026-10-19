@@ -1,11 +1,11 @@
 //! The explicit wiring: frontends call [`wire`], the driver never
 //! discovers subagents on its own.
 //!
-//! [`wire`] discovers definitions and, when any exist, attaches a
-//! [`SubagentTools`] to a `CodingAgentConfig` — the shared shell and the
-//! extra resolver the driver merges through its `Overlay`. With nothing
-//! discovered the config comes back untouched, so a workspace without
-//! subagents runs exactly as before. [`extra_specs`] feeds the same
+//! [`wire`] discovers definitions and attaches a [`SubagentTools`] to
+//! a `CodingAgentConfig` — the shared shell and the extra resolver the
+//! driver merges through its `Overlay`. The catalog is never empty: the
+//! built-in `general-purpose` definition is always in it, discovered
+//! ones beside or shadowing it. [`extra_specs`] feeds the same
 //! discovery to a prompt preview, so what is previewed is what turns
 //! send.
 
@@ -110,14 +110,45 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_set_of_definitions_leaves_the_config_alone() {
+    fn nothing_on_disk_still_wires_the_builtin() {
         let empty = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let mut config = CodingAgentConfig::new("m", workspace.path());
+        // The shell canonicalizes, so the assertion compares against the
+        // canonical form of the same directory.
+        let root = std::fs::canonicalize(workspace.path()).unwrap();
+        let mut config = CodingAgentConfig::new("m", &root);
         wire_at(Some(empty.path()), Arc::new(Never), &mut config);
-        assert!(config.tools.is_none());
-        assert!(config.extra_resolver.is_none());
-        assert!(extra_specs_at(Some(empty.path()), workspace.path()).is_empty());
+
+        // The catalog is never empty: the built-in general-purpose
+        // definition is the tool even with nothing on disk.
+        let shell = config.tools.clone().expect("the shared shell");
+        let extra = config.extra_resolver.clone().expect("the tool");
+        let names: Vec<String> = extra.specs().iter().map(|s| s.name.clone()).collect();
+        assert_eq!(names, vec!["subagent".to_owned()]);
+        assert!(
+            extra.specs()[0].description.contains("general-purpose"),
+            "{}",
+            extra.specs()[0].description
+        );
+        assert_eq!(shell.workspace(), root);
+        assert_eq!(
+            extra_specs_at(Some(empty.path()), workspace.path()).len(),
+            1,
+            "the preview sees the same built-in"
+        );
+    }
+
+    #[test]
+    fn a_user_definition_shadows_the_builtin_in_the_catalog() {
+        let (global, workspace) = workspace_with_defs();
+        def_in(global.path(), "general-purpose", "my own generalist");
+        let specs = extra_specs_at(Some(global.path()), &workspace);
+        let description = &specs[0].description;
+        assert!(description.contains("my own generalist"), "{description}");
+        assert!(
+            !description.contains("Runs one self-contained"),
+            "{description}"
+        );
     }
 
     #[test]

@@ -2507,9 +2507,9 @@ fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfi
     }
 }
 
-/// The coding-agent config with discovered subagents wired in: when any
-/// definition exists, the shared shell and the `subagent` tool attach;
-/// otherwise the config comes back untouched.
+/// The coding-agent config with subagents wired in: the shared shell
+/// and the `subagent` tool attach — the built-in `general-purpose`
+/// definition keeps the catalog non-empty, discovered ones beside it.
 fn wired_config(
     provider: Arc<dyn ModelProvider>,
     options: &RunOptions,

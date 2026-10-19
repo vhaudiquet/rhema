@@ -8,7 +8,11 @@
 //! body is not a subagent, not an error — a subagent without a trigger
 //! has nothing to show the parent, and one without instructions has no
 //! prompt to run on. Project definitions shadow global ones by folder
-//! name.
+//! name, and both shadow the built-in.
+//!
+//! One definition is not on disk: [`builtin`], the `general-purpose`
+//! subagent every agent gets, so the catalog — and with it the tool —
+//! is never empty.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -45,6 +49,49 @@ impl SubagentDef {
     }
 }
 
+/// The name the built-in definition answers to; a global or project
+/// definition with the same folder name replaces it.
+const BUILTIN_NAME: &str = "general-purpose";
+
+/// The trigger the parent sees in the catalog: when delegating pays.
+const BUILTIN_DESCRIPTION: &str = "Runs one self-contained task in a fresh \
+agent with the same tools and the same workspace: codebase exploration, \
+multi-step research, or a chore whose intermediate output would only \
+flood this conversation. Give it the full task and what to report; \
+only its final report comes back.";
+
+/// The built-in definition's system prompt. Rendered like any body,
+/// with `workspace` and `name` in context — it uses neither.
+const BUILTIN_BODY: &str = "\
+You are a general-purpose subagent: a fresh agent one task was \
+delegated to. The parent reads only your final report — its \
+conversation stays its own, and yours dies with the call.
+
+You start knowing nothing: everything you need is in the task prompt. \
+You have the standard tools — a shell over the workspace — so read the \
+code, run the commands, and verify before you believe. No questions \
+back: decide, note the decision in the report, and keep going. Stay in \
+scope: the task and its verification, nothing else.
+
+Your final message is the whole report the parent receives. Make it \
+stand alone: what you did, what you found, the paths and commands that \
+matter, and what the parent should do next, if anything.";
+
+/// The built-in `general-purpose` subagent: the delegation every agent
+/// gets without writing a definition. No model of its own (the parent's
+/// carries) and no budget of its own (the default applies), so it is
+/// exactly a discovered definition with both frontmatter fields
+/// omitted.
+pub fn builtin() -> SubagentDef {
+    SubagentDef {
+        name: BUILTIN_NAME.to_owned(),
+        description: BUILTIN_DESCRIPTION.to_owned(),
+        model: None,
+        max_steps: None,
+        body: BUILTIN_BODY.to_owned(),
+    }
+}
+
 /// The `SUBAGENT.md` frontmatter this crate reads; everything else in
 /// the block is ignored.
 #[derive(Debug, Deserialize)]
@@ -54,12 +101,15 @@ struct Frontmatter {
     max_steps: Option<u32>,
 }
 
-/// Discovers subagent definitions: the global directory first, then the
-/// workspace's `.rhema/subagents`, project shadowing global by folder
+/// Discovers subagent definitions: the built-in `general-purpose`
+/// first, then the global directory, then the workspace's
+/// `.rhema/subagents` — each level shadowing the previous by folder
 /// name. A folder is a definition only when its `SUBAGENT.md` parses
 /// with a non-empty description and a non-empty body.
 pub fn discover(global: Option<&Path>, workspace: &Path) -> Vec<SubagentDef> {
     let mut by_name: BTreeMap<String, SubagentDef> = BTreeMap::new();
+    let builtin = builtin();
+    by_name.insert(builtin.name.clone(), builtin);
     if let Some(global) = global {
         collect_into(global, &mut by_name);
     }
@@ -163,7 +213,8 @@ mod tests {
         let defs = discover(Some(global.path()), workspace.path());
         assert_eq!(
             defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(),
-            vec!["alpha", "zeta"]
+            vec!["alpha", "general-purpose", "zeta"],
+            "the built-in sorts in with the discovered ones"
         );
         assert_eq!(defs[0].description, "the a trigger");
         assert_eq!(defs[0].body, "Do the thing.");
@@ -184,8 +235,9 @@ mod tests {
         );
 
         let defs = discover(Some(global.path()), workspace.path());
-        assert_eq!(defs.len(), 1);
-        assert_eq!(defs[0].description, "project trigger");
+        assert_eq!(defs.len(), 2, "the shadowed one plus the built-in");
+        let shared = defs.iter().find(|d| d.name == "shared").unwrap();
+        assert_eq!(shared.description, "project trigger");
     }
 
     #[test]
@@ -226,15 +278,45 @@ mod tests {
         write_def(global.path(), "bodiless", bodiless);
         // A bare file, not a folder.
         std::fs::write(global.path().join("stray.md"), "x").unwrap();
-        assert!(discover(Some(global.path()), Path::new("/nowhere")).is_empty());
+        assert_eq!(
+            discover(Some(global.path()), Path::new("/nowhere")),
+            vec![builtin()],
+            "the malformed folders are not definitions; the built-in is"
+        );
     }
 
     #[test]
-    fn missing_directories_discover_to_nothing() {
+    fn missing_directories_discover_to_just_the_builtin() {
         let workspace = tempfile::tempdir().unwrap();
-        assert!(
-            discover(Some(Path::new("/nowhere")), workspace.path()).is_empty(),
+        assert_eq!(
+            discover(Some(Path::new("/nowhere")), workspace.path()),
+            vec![builtin()],
             "no global dir is normal, not an error"
         );
+    }
+
+    #[test]
+    fn the_builtin_is_a_well_formed_definition() {
+        let def = builtin();
+        assert_eq!(def.name, "general-purpose");
+        assert_eq!(def.model, None, "the parent's model carries");
+        assert_eq!(def.max_steps, None, "the default budget applies");
+        assert_eq!(def.max_steps(), DEFAULT_MAX_STEPS);
+        assert!(!def.description.is_empty());
+        assert!(!def.body.is_empty());
+    }
+
+    #[test]
+    fn a_definition_shadows_the_builtin_by_name() {
+        let global = tempfile::tempdir().unwrap();
+        write_def(
+            global.path(),
+            "general-purpose",
+            &simple("my own generalist"),
+        );
+
+        let defs = discover(Some(global.path()), Path::new("/nowhere"));
+        assert_eq!(defs.len(), 1, "the shadow leaves nothing of the built-in");
+        assert_eq!(defs[0].description, "my own generalist");
     }
 }

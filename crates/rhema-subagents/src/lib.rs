@@ -24,7 +24,9 @@
 //! a `description` (the trigger) and whose body is the subagent's system
 //! prompt. Definitions live globally under the config directory and
 //! per-workspace under `.rhema/subagents`, project shadowing global —
-//! the same rules as skills.
+//! the same rules as skills. The catalog also carries a built-in:
+//! `general-purpose`, the delegation every agent gets, shadowed by a
+//! definition of the same name.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -32,6 +34,6 @@ pub mod def;
 pub mod tools;
 pub mod wire;
 
-pub use def::{SubagentDef, discover};
+pub use def::{SubagentDef, builtin, discover};
 pub use tools::SubagentTools;
 pub use wire::{extra_specs, wire, wire_at};
