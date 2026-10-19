@@ -5444,6 +5444,9 @@ mod tests {
         for expected in [
             crate::palette::Palette::BlackWhite,
             crate::palette::Palette::Dracula,
+            crate::palette::Palette::CatppuccinFrappe,
+            crate::palette::Palette::CatppuccinMacchiato,
+            crate::palette::Palette::CatppuccinMocha,
             crate::palette::Palette::M3You,
             crate::palette::Palette::Rhema,
         ] {

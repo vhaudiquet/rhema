@@ -11,6 +11,15 @@
 //! status set (rules 3-4). M3 You is the one generated palette: its
 //! tokens come from the tonal-spot scheme in [`crate::m3`], not from
 //! constants here.
+//!
+//! The Catppuccin palettes take their hexes from the official palette
+//! and their roles from the Catppuccin style guide (base for the pane,
+//! mantle and crust for secondary panes, surface0 for elements, text /
+//! subtext0 / overlay1 for the type ladder, blue for the accent, base
+//! on accent, green/yellow/red for the status set). The appearance
+//! toggle switches the whole flavor — Latte is the set's only light
+//! flavor, so every dark flavor resolves to it on `theme: light` —
+//! because the style guide forbids blending flavors inside one theme.
 
 use ratatui::style::Color;
 
@@ -307,6 +316,101 @@ pub const DRACULA_LIGHT: Theme = Theme {
     info: Color::Rgb(0x0E, 0x7D, 0x95),
 };
 
+/// The Catppuccin Frappé appearance: the official flavor hexes in the
+/// style guide's roles.
+pub const CATPPUCCIN_FRAPPE: Theme = Theme {
+    ground: Color::Rgb(0x30, 0x34, 0x46),
+    surface: Color::Rgb(0x29, 0x2C, 0x3C),
+    elevated: Color::Rgb(0x41, 0x45, 0x59),
+    sunken: Color::Rgb(0x23, 0x26, 0x34),
+    border: Color::Rgb(0x51, 0x57, 0x6D),
+    border_strong: Color::Rgb(0x73, 0x79, 0x94),
+    text: Color::Rgb(0xC6, 0xD0, 0xF5),
+    text2: Color::Rgb(0xA5, 0xAD, 0xCE),
+    text3: Color::Rgb(0x83, 0x8B, 0xA7),
+    accent: Color::Rgb(0x8C, 0xAA, 0xEE),
+    accent_text: Color::Rgb(0x8C, 0xAA, 0xEE),
+    on_accent: Color::Rgb(0x30, 0x34, 0x46),
+    running: Color::Rgb(0x8C, 0xAA, 0xEE),
+    ok: Color::Rgb(0xA6, 0xD1, 0x89),
+    warn: Color::Rgb(0xE5, 0xC8, 0x90),
+    error: Color::Rgb(0xE7, 0x82, 0x84),
+    info: Color::Rgb(0x85, 0xC1, 0xDC),
+};
+
+/// The Catppuccin Macchiato appearance: the official flavor hexes in
+/// the style guide's roles.
+pub const CATPPUCCIN_MACCHIATO: Theme = Theme {
+    ground: Color::Rgb(0x24, 0x27, 0x3A),
+    surface: Color::Rgb(0x1E, 0x20, 0x30),
+    elevated: Color::Rgb(0x36, 0x3A, 0x4F),
+    sunken: Color::Rgb(0x18, 0x19, 0x26),
+    border: Color::Rgb(0x49, 0x4D, 0x64),
+    border_strong: Color::Rgb(0x6E, 0x73, 0x8D),
+    text: Color::Rgb(0xCA, 0xD3, 0xF5),
+    text2: Color::Rgb(0xA5, 0xAD, 0xCB),
+    text3: Color::Rgb(0x80, 0x87, 0xA2),
+    accent: Color::Rgb(0x8A, 0xAD, 0xF4),
+    accent_text: Color::Rgb(0x8A, 0xAD, 0xF4),
+    on_accent: Color::Rgb(0x24, 0x27, 0x3A),
+    running: Color::Rgb(0x8A, 0xAD, 0xF4),
+    ok: Color::Rgb(0xA6, 0xDA, 0x95),
+    warn: Color::Rgb(0xEE, 0xD4, 0x9F),
+    error: Color::Rgb(0xED, 0x87, 0x96),
+    info: Color::Rgb(0x7D, 0xC4, 0xE4),
+};
+
+/// The Catppuccin Mocha appearance: the official flavor hexes in the
+/// style guide's roles.
+pub const CATPPUCCIN_MOCHA: Theme = Theme {
+    ground: Color::Rgb(0x1E, 0x1E, 0x2E),
+    surface: Color::Rgb(0x18, 0x18, 0x25),
+    elevated: Color::Rgb(0x31, 0x32, 0x44),
+    sunken: Color::Rgb(0x11, 0x11, 0x1B),
+    border: Color::Rgb(0x45, 0x47, 0x5A),
+    border_strong: Color::Rgb(0x6C, 0x70, 0x86),
+    text: Color::Rgb(0xCD, 0xD6, 0xF4),
+    text2: Color::Rgb(0xA6, 0xAD, 0xC8),
+    text3: Color::Rgb(0x7F, 0x84, 0x9C),
+    accent: Color::Rgb(0x89, 0xB4, 0xFA),
+    accent_text: Color::Rgb(0x89, 0xB4, 0xFA),
+    on_accent: Color::Rgb(0x1E, 0x1E, 0x2E),
+    running: Color::Rgb(0x89, 0xB4, 0xFA),
+    ok: Color::Rgb(0xA6, 0xE3, 0xA1),
+    warn: Color::Rgb(0xF9, 0xE2, 0xAF),
+    error: Color::Rgb(0xF3, 0x8B, 0xA8),
+    info: Color::Rgb(0x74, 0xC7, 0xEC),
+};
+
+/// The Catppuccin Latte appearance: the light side of every Catppuccin
+/// palette here. The style guide's roles apply as on the dark flavors,
+/// with three documented deviations where the official Latte hexes sit
+/// under the contrast floors this crate enforces ("legibility always
+/// comes first", the guide's own escape hatch): hints read overlay2
+/// rather than overlay1 (2.8:1 on base), and the green/yellow/sapphire
+/// status accents are darkened just past 3:1 (#35911F, #A1720F,
+/// #147A8C). The guide's "on accent: base" lands at 4.3:1 on blue, so
+/// the label reads white like the other light sides.
+pub const CATPPUCCIN_LATTE: Theme = Theme {
+    ground: Color::Rgb(0xEF, 0xF1, 0xF5),
+    surface: Color::Rgb(0xE6, 0xE9, 0xEF),
+    elevated: Color::Rgb(0xCC, 0xD0, 0xDA),
+    sunken: Color::Rgb(0xDC, 0xE0, 0xE8),
+    border: Color::Rgb(0xBC, 0xC0, 0xCC),
+    border_strong: Color::Rgb(0x9C, 0xA0, 0xB0),
+    text: Color::Rgb(0x4C, 0x4F, 0x69),
+    text2: Color::Rgb(0x6C, 0x6F, 0x85),
+    text3: Color::Rgb(0x7C, 0x7F, 0x93),
+    accent: Color::Rgb(0x1E, 0x66, 0xF5),
+    accent_text: Color::Rgb(0x1E, 0x66, 0xF5),
+    on_accent: Color::Rgb(0xFF, 0xFF, 0xFF),
+    running: Color::Rgb(0x1E, 0x66, 0xF5),
+    ok: Color::Rgb(0x35, 0x91, 0x1F),
+    warn: Color::Rgb(0xA1, 0x72, 0x0F),
+    error: Color::Rgb(0xD2, 0x0F, 0x39),
+    info: Color::Rgb(0x14, 0x7A, 0x8C),
+};
+
 /// A named color palette: one family of tokens, each in a dark and a
 /// light appearance. The stored config names one (`colors: rhema`);
 /// anything unparseable reads as the default, like the other
@@ -322,6 +426,12 @@ pub enum Palette {
     BlackWhite,
     /// The Dracula palette.
     Dracula,
+    /// The Catppuccin Frappé palette; light reads Latte.
+    CatppuccinFrappe,
+    /// The Catppuccin Macchiato palette; light reads Latte.
+    CatppuccinMacchiato,
+    /// The Catppuccin Mocha palette; light reads Latte.
+    CatppuccinMocha,
     /// The M3 You palette: a Material 3 tonal-spot scheme generated
     /// from a seed color (`m3_source`, defaulting to Material's
     /// baseline purple).
@@ -335,6 +445,9 @@ impl Palette {
         Palette::Aquamarine,
         Palette::BlackWhite,
         Palette::Dracula,
+        Palette::CatppuccinFrappe,
+        Palette::CatppuccinMacchiato,
+        Palette::CatppuccinMocha,
         Palette::M3You,
     ];
 
@@ -349,6 +462,15 @@ impl Palette {
                 Some(Self::BlackWhite)
             }
             Some("dracula") => Some(Self::Dracula),
+            Some("catppuccin-frappe") | Some("catppuccin_frappe") | Some("catppuccinfrappe") => {
+                Some(Self::CatppuccinFrappe)
+            }
+            Some("catppuccin-macchiato")
+            | Some("catppuccin_macchiato")
+            | Some("catppuccinmacchiato") => Some(Self::CatppuccinMacchiato),
+            Some("catppuccin-mocha") | Some("catppuccin_mocha") | Some("catppuccinmocha") => {
+                Some(Self::CatppuccinMocha)
+            }
             Some("m3-you") | Some("m3_you") | Some("m3you") | Some("material-you")
             | Some("material_you") => Some(Self::M3You),
             _ => None,
@@ -363,6 +485,9 @@ impl Palette {
             Self::Aquamarine => "aquamarine",
             Self::BlackWhite => "black-and-white",
             Self::Dracula => "dracula",
+            Self::CatppuccinFrappe => "catppuccin-frappe",
+            Self::CatppuccinMacchiato => "catppuccin-macchiato",
+            Self::CatppuccinMocha => "catppuccin-mocha",
             Self::M3You => "m3-you",
         }
     }
@@ -374,6 +499,9 @@ impl Palette {
             Self::Aquamarine => "Aquamarine",
             Self::BlackWhite => "Black and white",
             Self::Dracula => "Dracula",
+            Self::CatppuccinFrappe => "Catppuccin Frapp\u{e9}",
+            Self::CatppuccinMacchiato => "Catppuccin Macchiato",
+            Self::CatppuccinMocha => "Catppuccin Mocha",
             Self::M3You => "M3 You",
         }
     }
@@ -398,6 +526,18 @@ impl Palette {
             Self::Dracula => match kind {
                 ThemeKind::Dark => DRACULA_DARK,
                 ThemeKind::Light => DRACULA_LIGHT,
+            },
+            Self::CatppuccinFrappe => match kind {
+                ThemeKind::Dark => CATPPUCCIN_FRAPPE,
+                ThemeKind::Light => CATPPUCCIN_LATTE,
+            },
+            Self::CatppuccinMacchiato => match kind {
+                ThemeKind::Dark => CATPPUCCIN_MACCHIATO,
+                ThemeKind::Light => CATPPUCCIN_LATTE,
+            },
+            Self::CatppuccinMocha => match kind {
+                ThemeKind::Dark => CATPPUCCIN_MOCHA,
+                ThemeKind::Light => CATPPUCCIN_LATTE,
             },
             Self::M3You => crate::m3::theme(m3_source.unwrap_or(crate::m3::DEFAULT_SOURCE), kind),
         }
