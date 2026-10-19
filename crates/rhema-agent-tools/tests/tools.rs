@@ -147,7 +147,7 @@ async fn large_output_is_truncated_with_a_notice() {
         &tools,
         &ctx,
         "bash",
-        json!({ "command": "yes | head -c 64k" }),
+        json!({ "command": "yes | head -c 65536" }),
     )
     .await;
     assert!(!result.is_error);
