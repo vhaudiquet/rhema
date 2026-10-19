@@ -107,9 +107,11 @@ pub struct Profile {
     /// The color this profile's name wears in the UI, as `#RRGGBB`.
     /// Unset means the UI picks a tone from the theme by profile name.
     pub color: Option<String>,
-    /// How much reasoning the model should do: `low`, `medium`, or
-    /// `high`. Unset means the provider's default stands. Anything
-    /// unparseable reads as unset.
+    /// How much reasoning the model should do: `low`, `medium`, `high`,
+    /// or `default` (the provider decides). Unset, null, and unparseable
+    /// all read as `medium` — a level is always named, because
+    /// always-thinking models left to their defaults spend the whole
+    /// output budget on reasoning and answer with nothing.
     pub thinking: Option<String>,
 }
 
@@ -164,9 +166,15 @@ impl Profile {
         )
     }
 
-    /// The profile's thinking level, when set and parseable.
-    pub fn thinking_effort(&self) -> Option<ThinkingEffort> {
-        ThinkingEffort::parse(self.thinking.as_deref()?)
+    /// The profile's thinking level: the stored name parsed, with unset,
+    /// null, and unparseable all reading as [`ThinkingEffort::Medium`].
+    /// Only an explicit `default` keeps the provider's own behavior — a
+    /// session never silently runs on "send nothing".
+    pub fn thinking_effort(&self) -> ThinkingEffort {
+        self.thinking
+            .as_deref()
+            .and_then(ThinkingEffort::parse)
+            .unwrap_or(ThinkingEffort::Medium)
     }
 
     /// Whether this profile can build a backend: it names a provider and
@@ -891,14 +899,28 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded, config);
 
-        // The thinking level parses; a junk value reads as unset.
+        // The thinking level parses; unset and junk read as the medium
+        // default, an explicit `default` keeps the provider's own.
         let mut config = config;
         assert_eq!(
             config.profiles["personal"].thinking_effort(),
-            Some(ThinkingEffort::Low)
+            ThinkingEffort::Low
         );
         config.profiles.get_mut("personal").unwrap().thinking = Some("maximum".into());
-        assert_eq!(config.profiles["personal"].thinking_effort(), None);
+        assert_eq!(
+            config.profiles["personal"].thinking_effort(),
+            ThinkingEffort::Medium
+        );
+        config.profiles.get_mut("personal").unwrap().thinking = None;
+        assert_eq!(
+            config.profiles["personal"].thinking_effort(),
+            ThinkingEffort::Medium
+        );
+        config.profiles.get_mut("personal").unwrap().thinking = Some("default".into());
+        assert_eq!(
+            config.profiles["personal"].thinking_effort(),
+            ThinkingEffort::Default
+        );
 
         #[cfg(unix)]
         {

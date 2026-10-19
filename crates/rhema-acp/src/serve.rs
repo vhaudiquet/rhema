@@ -256,8 +256,7 @@ impl App {
     fn thinking(&self) -> ThinkingEffort {
         self.options
             .thinking
-            .or_else(|| self.effective.thinking_effort())
-            .unwrap_or(ThinkingEffort::Default)
+            .unwrap_or_else(|| self.effective.thinking_effort())
     }
 
     fn agent_config(&self, model: &str, workspace: &std::path::Path) -> CodingAgentConfig {

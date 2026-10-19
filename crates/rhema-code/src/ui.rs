@@ -756,11 +756,7 @@ fn settings_page(
                     };
                 lines.push(settings_row(line, selected, theme));
             }
-            (
-                lines,
-                footer("d - delete provider"),
-                row_hits,
-            )
+            (lines, footer("d - delete provider"), row_hits)
         }
         SettingsSection::Appearance => {
             let mut row_hits = Vec::new();

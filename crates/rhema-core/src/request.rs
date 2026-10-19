@@ -40,7 +40,9 @@ impl ToolSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingEffort {
-    /// The provider decides; rhema sends no effort parameter.
+    /// The provider decides; rhema sends no effort parameter. An explicit
+    /// choice (`thinking: default`, `/thinking default`) — the frontends
+    /// resolve an unset level to [`ThinkingEffort::Medium`] instead.
     #[default]
     Default,
     /// Light reasoning — quick turns, cheap models.

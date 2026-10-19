@@ -10,7 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig, CodingAgentError};
 use rhema_config::Config;
 use rhema_core::{
-    AgentError, Content, Message, ModelOutput, ModelProvider, Session, ToolCall, Usage,
+    AgentError, Content, Message, ModelOutput, ModelProvider, Session, StopReason, ToolCall, Usage,
 };
 use rhema_provider::{Allowance, ModelCard};
 
@@ -1101,7 +1101,7 @@ impl App {
             return Vec::new();
         }
         let effective = self.config.effective(Some(name));
-        self.options.thinking = effective.thinking_effort().unwrap_or_default();
+        self.options.thinking = effective.thinking_effort();
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -1166,8 +1166,7 @@ impl App {
         self.options.thinking = effort;
         self.config
             .set_for_profile(self.session_profile.as_deref(), |settings| {
-                settings.thinking = (effort != rhema_core::request::ThinkingEffort::Default)
-                    .then(|| effort.as_str().to_owned());
+                settings.thinking = Some(effort.as_str().to_owned());
             });
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
@@ -1663,7 +1662,7 @@ impl App {
             return Vec::new();
         }
         let effective = self.config.effective(Some(&tab));
-        self.options.thinking = effective.thinking_effort().unwrap_or_default();
+        self.options.thinking = effective.thinking_effort();
         let Some(backend) = Backend::from_profile(&effective, self.secret_store()) else {
             self.error = Some(format!(
                 "no usable credentials for {} — /login first",
@@ -2348,8 +2347,34 @@ impl App {
                         + usage.output_tokens as f64 / 1_000_000.0 * pricing.output_per_mtok;
                 }
                 self.usage = Some(output.usage);
+                // Silence is a symptom, not an answer: the usual cause is
+                // a reasoning-only response — a thinking model spending
+                // its whole output budget before any text started — and
+                // the turn must not read as completed when nothing was
+                // said.
+                let said_something = output.message.content.iter().any(|content| {
+                    matches!(content, Content::Text(text) if !text.is_empty())
+                        || matches!(content, Content::ToolCall(_))
+                });
+                if !said_something {
+                    self.push_notice(&format!(
+                        "the model returned no content (stopped: {})",
+                        Self::stop_words(&output.stop_reason)
+                    ));
+                }
             }
             Err(message) => self.error = Some(message),
+        }
+    }
+
+    /// The stop reason as the few words a notice names it by.
+    fn stop_words(reason: &StopReason) -> String {
+        match reason {
+            StopReason::EndTurn => "end turn".to_owned(),
+            StopReason::ToolUse => "tool use".to_owned(),
+            StopReason::MaxTokens => "max tokens".to_owned(),
+            StopReason::StopSequence => "stop sequence".to_owned(),
+            StopReason::Other(other) => other.clone(),
         }
     }
 
@@ -2855,6 +2880,53 @@ mod tests {
             }),
         });
         assert_eq!(effects, vec![Effect::FetchUsage]);
+    }
+
+    /// A reasoning-only response — a content-less assistant message the
+    /// provider ended itself — cannot pass for an answer: the transcript
+    /// names what happened. A reply that said something raises nothing.
+    #[test]
+    fn an_empty_turn_surfaces_its_stop_reason() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Ok(ModelOutput {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![],
+                },
+                stop_reason: StopReason::MaxTokens,
+                usage: Usage::default(),
+            }),
+        });
+        assert!(h.app.transcript.lines().contains(&Line::Notice(
+            "the model returned no content (stopped: max tokens)".into()
+        )));
+
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+        });
+        // The first turn's notice rightly persists; a real reply raised
+        // no second one.
+        assert_eq!(
+            h.app
+                .transcript
+                .lines()
+                .iter()
+                .filter(|line| matches!(
+                    line,
+                    Line::Notice(text) if text.contains("no content")
+                ))
+                .count(),
+            1
+        );
     }
 
     /// A model switch lands a new backend: its allowance fetches at
@@ -4736,8 +4808,9 @@ mod tests {
                 .contains(&Line::Notice("thinking effort set to high".into()))
         );
 
-        // An unknown level is declined in-band, and default clears the
-        // stored field.
+        // An unknown level is declined in-band, and default stores its
+        // name: the config never carries a bare null, which would read
+        // as medium on the next load.
         crate::commands::dispatch(&mut h.app, "/thinking maximal");
         assert!(h.app.error.is_none());
         crate::commands::dispatch(&mut h.app, "/thinking default");
@@ -4747,7 +4820,7 @@ mod tests {
         );
         assert_eq!(
             h.store.load().unwrap().effective(Some(&profile)).thinking,
-            None
+            Some("default".to_owned())
         );
     }
 

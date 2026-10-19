@@ -364,8 +364,7 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     let thinking = args
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)
-        .or_else(|| effective.thinking_effort())
-        .unwrap_or(rhema_core::request::ThinkingEffort::Default);
+        .unwrap_or_else(|| effective.thinking_effort());
     let agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
         thinking,
@@ -494,8 +493,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     let thinking = args
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)
-        .or_else(|| config.effective(Some(&profile)).thinking_effort())
-        .unwrap_or(rhema_core::request::ThinkingEffort::Default);
+        .unwrap_or_else(|| config.effective(Some(&profile)).thinking_effort());
     // The look and feel is a machine choice, not a per-invocation one:
     // the stored palette, theme, and icon flavor decide, unparseable
     // values read as the defaults.
