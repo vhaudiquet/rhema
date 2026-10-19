@@ -2197,14 +2197,20 @@ mod tests {
             heading_row.contains("Providers"),
             "the content titles beside the heading: {heading_row}"
         );
-        assert!(text.contains("profile"), "the page's rows: {text}");
+        assert!(text.contains("Profile"), "the page's rows: {text}");
         assert!(text.contains("personal"), "{text}");
-        assert!(text.contains("google — google"), "the instance row: {text}");
         assert!(
-            text.contains("+ add a new instance…"),
+            text.contains("google (google) active"),
+            "the active instance row: {text}"
+        );
+        assert!(
+            text.contains("+ Add a new instance..."),
             "the add row: {text}"
         );
-        assert!(text.contains("enter on + adds"), "the footer hints: {text}");
+        assert!(
+            text.contains("d - delete provider"),
+            "the footer hints: {text}"
+        );
         // Every sidebar row plus the instance and add rows are clickable.
         assert_eq!(
             hits.len(),
@@ -2530,10 +2536,10 @@ mod scroll_tests {
         let screen: String = (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
-        assert!(screen.contains("llama-cpp — home"), "{screen}");
-        assert!(screen.contains("copilot — work sub"), "{screen}");
-        assert_eq!(screen.matches("· active").count(), 1, "{screen}");
-        assert!(screen.contains("+ add a new instance…"), "{screen}");
+        assert!(screen.contains("home (llama-cpp)"), "{screen}");
+        assert!(screen.contains("work sub (copilot) active"), "{screen}");
+        assert_eq!(screen.matches(" active").count(), 1, "{screen}");
+        assert!(screen.contains("+ Add a new instance..."), "{screen}");
         // One click target per rendered row: the three instance rows.
         let page_rows = hits
             .iter()
