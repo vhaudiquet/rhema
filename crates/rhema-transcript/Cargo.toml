@@ -1,0 +1,20 @@
+[package]
+name = "rhema-transcript"
+description = "The bounded view over an unbounded session: the request view, the slot algebra, and the zoom tool"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The step engine: the transcript projects a Session's history onto a request
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# Byte accounting over tool-call arguments; zoom's argument parsing
+serde_json = { workspace = true }
+# ModelProvider is an async seam
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
