@@ -1,0 +1,44 @@
+# The model-facing spec of the coding_agent tool; the operation is the
+# compiled builtin named under `run`.
+name: coding_agent
+description: >-
+  Drive a coding agent — a full rhema-coding-agent session with its
+  own shell — in a named workspace, off this chat. `add` pins a name
+  to an existing directory; `drop` removes it; `list` names the
+  instances (the workspaces a coding agent may drive); `run` enqueues
+  a job whose turn runs in the background (minutes, not seconds): the
+  answer is the job id, the final text reaches `status` and the user's
+  notifications, and the instance's coding session carries over to the
+  next run unless `fresh`. `status` reads jobs — every recent one, one
+  instance's, or one job's result. One live job per instance.
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: [add, drop, run, list, status]
+      description: Which operation.
+    name:
+      type: string
+      description: "add/drop: the instance's name."
+    path:
+      type: string
+      description: >-
+        add: the workspace directory; it must already exist.
+    instance:
+      type: string
+      description: "run/status: the instance to act on."
+    prompt:
+      type: string
+      description: "run: what the coding agent should do."
+    fresh:
+      type: boolean
+      description: >-
+        run: start a fresh coding session instead of resuming the
+        instance's last one.
+    job:
+      type: integer
+      description: "status: one job's id, for its result."
+  required: [action]
+run:
+  builtin: coding.agent

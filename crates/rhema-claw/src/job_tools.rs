@@ -14,19 +14,43 @@
 //! answers "it's running" honestly and reads the result later with
 //! `status`.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::job_store::{CodingJobStore, JobStoreError};
 
-/// The coding-agent tool set over `store`: one tool, `coding_agent`.
+/// The compiled operation behind the manifest, by `run.builtin` id.
+fn builtins(store: Arc<CodingJobStore>) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([(
+        "coding.agent".to_owned(),
+        Arc::new(CodingAgent { store }) as Arc<dyn ToolOp>,
+    )])
+}
+
+/// The coding_agent tool's `TOOL.yaml`, embedded so the daemon ships
+/// it with no filesystem layout.
+pub const MANIFESTS: &[(&str, &str)] = &[(
+    "coding_agent",
+    include_str!("../tools/coding_agent/TOOL.yaml"),
+)];
+
+/// The coding-agent tool set over `store`: one tool, `coding_agent` —
+/// its spec from the embedded manifest, the operation compiled here.
 pub fn registry(store: Arc<CodingJobStore>) -> ToolRegistry {
+    let (tools, skipped) =
+        rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(store));
+    assert!(
+        skipped.is_empty(),
+        "the coding_agent tool manifest must load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(CodingAgent { store }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
@@ -168,47 +192,7 @@ fn in_band(err: JobStoreError) -> String {
 }
 
 #[async_trait]
-impl Tool for CodingAgent {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "coding_agent",
-            "Drive a coding agent — a full rhema-coding-agent session with \
-             its own shell — in a named workspace, off this chat. `add` \
-             pins a name to an existing directory; `drop` removes it; \
-             `list` names the instances (the workspaces a coding agent \
-             may drive); `run` enqueues a job whose turn runs in the \
-             background (minutes, not seconds): the answer is the job \
-             id, the final text reaches `status` and the user's \
-             notifications, and the instance's coding session carries \
-             over to the next run unless `fresh`. `status` reads jobs — \
-             every recent one, one instance's, or one job's result. One \
-             live job per instance.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string",
-                        "enum": ["add", "drop", "run", "list", "status"],
-                        "description": "Which operation." },
-                    "name": { "type": "string",
-                        "description": "add/drop: the instance's name." },
-                    "path": { "type": "string",
-                        "description": "add: the workspace directory; it \
-                            must already exist." },
-                    "instance": { "type": "string",
-                        "description": "run/status: the instance to act on." },
-                    "prompt": { "type": "string",
-                        "description": "run: what the coding agent should do." },
-                    "fresh": { "type": "boolean",
-                        "description": "run: start a fresh coding session \
-                            instead of resuming the instance's last one." },
-                    "job": { "type": "integer",
-                        "description": "status: one job's id, for its result." }
-                },
-                "required": ["action"]
-            }),
-        )
-    }
-
+impl ToolOp for CodingAgent {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: Args =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -243,6 +227,17 @@ fn required<'a>(value: &'a Option<String>, complaint: &str) -> Result<&'a str, S
 mod tests {
     use super::*;
     use rhema_autonomous_agent::Allowlist;
+
+    #[test]
+    fn the_manifest_loads_against_its_builtin_and_serves_the_registry() {
+        let store = StdArc::new(CodingJobStore::in_memory().unwrap());
+        let resolver = registry(store).resolver_for(&Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("coding_agent"),
+            rhema_core::ReplaySafety::Unsafe,
+            "a resumed run must not re-enqueue a coding job"
+        );
+    }
     use rhema_core::{ToolCall, ToolContext, ToolResolver};
     use serde_json::json;
     use std::sync::Arc as StdArc;
