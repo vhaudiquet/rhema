@@ -66,8 +66,8 @@ Rules:
   - `rsd` — resource-scoped dispatch: the dispatcher and its stores
     (`crates/rhema-rsd/`)
   - `forge` — the forge integration: GitHub/Gitea/GitLab clients, the
-    normalized event vocabulary, and the RSD ingest path
-    (`integrations/rhema-forge-integration/`)
+    normalized event vocabulary, the notification triage, and the RSD
+    ingest path (`integrations/rhema-forge-integration/`)
   - `calendar` — the calendar integration: the `Calendar` client
     contract, the ICS, CalDAV, and Google feed adapters, and the
     normalized occurrence vocabulary

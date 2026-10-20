@@ -6,7 +6,7 @@
 //! list_account_watches`] — and loops the kind's repos through a
 //! [`Watcher`] (poll, ingest, advance the per-repo cursor), then the
 //! kind's account watches through the identity store's credentials:
-//! poll the account's notifications, [`crate::triage::classify`] each
+//! poll the account's notifications, [`triage::classify`] each
 //! one, and either ingest it as a role-tagged thread event, surface it
 //! to the account's human, or drop it. Neither pass touches the model
 //! (spec §1). Reading the tables every pass is what makes a watch added
@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use rhema_autonomous_agent::{Source, SourceError, async_trait};
 use rhema_forge_integration::forge_key_fn;
+use rhema_forge_integration::triage::{self, Triage};
 use rhema_forge_integration::{
     Forge, GitHubForge, GitLabForge, GiteaForge, Notification, Watcher, register_forge,
 };
@@ -30,7 +31,6 @@ use rhema_identity::{IdentityStore, SecretKind};
 use rhema_rsd::{Clock, Dispatcher, Event, KeyFn, SystemClock};
 
 use crate::config::{ForgeKind, resolve_token};
-use crate::triage::{self, Triage};
 use crate::watch_store::{AccountWatchRecord, ClawStore, WatchRecord};
 
 /// The cache key of a forge client: everything that changes the client

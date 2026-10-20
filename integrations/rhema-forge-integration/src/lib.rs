@@ -41,6 +41,9 @@
 //! - [`watcher`] — the dispatcher seam: polls a forge into an RSD
 //!   `Dispatcher` (keys, dedup, cursors) and decodes delivered inbox
 //!   items back into forge events
+//! - [`triage`] — what an account notification earns: the default
+//!   classification of the notification vocabulary into agent
+//!   dispatches, surfaces, and drops
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -51,6 +54,7 @@ pub mod forge;
 pub mod gitea;
 pub mod github;
 pub mod gitlab;
+pub mod triage;
 pub mod watcher;
 
 // Re-exported so implementors of the async seam can apply #[async_trait]
@@ -65,6 +69,7 @@ pub use forge::{Forge, ForgePage};
 pub use gitea::GiteaForge;
 pub use github::GitHubForge;
 pub use gitlab::GitLabForge;
+pub use triage::{Role, Triage};
 pub use watcher::{
     WatchError, Watcher, decode, forge_key_fn, parse_key, register_forge, resource_key,
 };

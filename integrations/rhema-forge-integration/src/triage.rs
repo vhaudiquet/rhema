@@ -1,23 +1,24 @@
-//! The triage: what a notification earns, decided deterministically
-//! before any model call (spec §1 — the model is never the detector).
+//! The notification triage: what a notification earns, decided
+//! deterministically before any model call.
 //!
 //! A [`Notification`] carries the forge's own reason for bothering the
-//! account; [`classify`] reduces it to one of three verdicts. An
+//! account; [`classify`] reduces it to one of three verdicts. A
 //! [`Triage::Agent`] dispatch becomes an RSD event whose payload names
 //! the [`Role`] — the persona the handler's prompt opens with, so one
 //! thread can move from review-requested to implement-feedback across
 //! dispatches with the session carrying the continuity. A
-//! [`Triage::Surface`] never dispatches an agent: a mention is not a
-//! assignment, and the account's human hears about it through the
-//! device-notification queue instead. [`Triage::Ignore`] drops the noise
-//! (CI churn) on the floor.
+//! [`Triage::Surface`] never dispatches an agent: a mention is not an
+//! assignment, and the account's human hears about it some other way.
+//! [`Triage::Ignore`] drops the noise (CI churn) on the floor.
 //!
-//! The mapping is a pure function and this module's tests pin it: the
-//! forges' vocabularies are external data, and the policy must not drift
-//! with them.
+//! The mapping lives beside the vocabulary on purpose: a reason that
+//! enters it (Gitea's collapsed shape, a new adapter's spelling) needs
+//! a verdict in the same change, and this module's tests pin the
+//! mapping so the co-edit cannot drift. A consumer may reclassify on
+//! top — [`classify`] is the default, not a mandate.
 
-use rhema_forge_integration::gitea::COLLAPSED_REASON;
-use rhema_forge_integration::{Notification, NotificationReason};
+use crate::gitea::COLLAPSED_REASON;
+use crate::{Notification, NotificationReason};
 
 /// The agent persona a dispatched notification runs as. The key stays
 /// the thread — one session, one voice per thread, ever — and the role
@@ -83,7 +84,7 @@ pub fn classify(notification: &Notification) -> Triage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhema_forge_integration::{RepoRef, Timestamp};
+    use crate::{RepoRef, Timestamp};
 
     fn notification(reason: NotificationReason) -> Notification {
         Notification {
