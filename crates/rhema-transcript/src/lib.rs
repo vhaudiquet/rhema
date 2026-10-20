@@ -12,6 +12,8 @@
 //!   prefix's doubling cover
 //! - [`summary`] — the extractive line text: heads and counts, no
 //!   model calls
+//! - [`view`] — the request view: the provider decorator, the mirror,
+//!   the budget
 //!
 //! The design is `specs/rhema-transcript.md`.
 
@@ -20,3 +22,6 @@
 
 pub mod summary;
 pub mod tree;
+pub mod view;
+
+pub use view::{Transcript, TranscriptSettings, TranscriptView};

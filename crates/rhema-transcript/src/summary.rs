@@ -110,11 +110,26 @@ pub fn line_for_message(message: &Message) -> String {
     format!("{}: {}", role_label(message.role), parts.join(" | "))
 }
 
-/// The structural line covering `range`: who spoke, what the tools
-/// were, what the user and the assistant said, by head. Tool counts
-/// carry the names, so the line tells the model what a zoom would dig
-/// through.
+/// The line covering `range`: for one message, that message's line;
+/// for more, the structural summary — who spoke, what the tools were,
+/// what failed. `messages` starts at `range.id`: the positioned slice
+/// [`crate::view::Transcript::range`] returns, not the whole log.
+/// Tool counts carry the names, so the line tells the model what a
+/// zoom would dig through.
 pub fn line_for_range(messages: &[Message], range: Range) -> String {
+    if range.n == 1 {
+        let address = format!("{}+1|", range.id);
+        if let Some(message) = messages.first() {
+            return format!("{address}{}", line_for_message(message));
+        }
+    }
+    let range = summarize_range(messages, range);
+    let body = head(&range.1, RANGE_HEAD_BYTES);
+    format!("{}+{}|{}", range.0.0, range.0.1, body)
+}
+
+/// The aggregate parts of a multi-message range, before addressing.
+fn summarize_range(messages: &[Message], range: Range) -> ((usize, usize), String) {
     let mut user_heads: Vec<String> = Vec::new();
     let mut assistant_heads: Vec<String> = Vec::new();
     let mut calls: Vec<(String, usize)> = Vec::new();
@@ -126,7 +141,7 @@ pub fn line_for_range(messages: &[Message], range: Range) -> String {
             heads.push(head(text, 80));
         }
     };
-    for message in &messages[range.id..range.id + range.n] {
+    for message in &messages[..range.n.min(messages.len())] {
         for content in &message.content {
             match content {
                 Content::Text(text) => {
@@ -160,20 +175,43 @@ pub fn line_for_range(messages: &[Message], range: Range) -> String {
             .take(3)
             .map(|(name, count)| format!("{name}\u{d7}{count}"))
             .collect();
-        let mut tool_line = format!("{} tool results ({})", results, named.join(", "));
+        let mut tool_line = if results == 0 {
+            // Calls the range opens but its results land elsewhere:
+            // say what was called, not that nothing answered.
+            format!(
+                "{} tool {} ({})",
+                calls.iter().map(|(_, n)| n).sum::<usize>(),
+                if calls.iter().map(|(_, n)| n).sum::<usize>() == 1 {
+                    "call"
+                } else {
+                    "calls"
+                },
+                named.join(", ")
+            )
+        } else {
+            format!(
+                "{} tool {} ({})",
+                results,
+                if results == 1 { "result" } else { "results" },
+                named.join(", ")
+            )
+        };
         if calls.len() > 3 {
             tool_line.push_str(", \u{2026}");
         }
         parts.push(tool_line);
     } else if results > 0 {
-        parts.push(format!("{results} tool results"));
+        parts.push(format!(
+            "{} tool {}",
+            results,
+            if results == 1 { "result" } else { "results" }
+        ));
     }
     if failures > 0 {
         parts.push(format!("{failures} failed"));
     }
     parts.extend(assistant_heads.iter().map(|h| format!("assistant: {h}")));
-    let body = head(&parts.join("; "), RANGE_HEAD_BYTES);
-    format!("{}+{}|{}", range.id, range.n, body)
+    ((range.id, range.n), parts.join("; "))
 }
 
 /// The whole render of one message, as `zoom(id, 1)` returns it: user
