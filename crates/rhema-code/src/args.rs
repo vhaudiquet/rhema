@@ -106,11 +106,12 @@ pub struct Args {
     #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
     pub max_steps: u32,
 
-    /// Bound long sessions: past a byte budget, older messages
-    /// summarize into lines the agent's `zoom` tool can open. Off by
-    /// default; small sessions are unaffected either way.
+    /// Send the whole history every step: skip the bounded request
+    /// view that summarizes older messages into lines the `zoom` tool
+    /// can open. The view is on by default and pass-through below its
+    /// budget.
     #[arg(long)]
-    pub transcript: bool,
+    pub no_transcript: bool,
 
     /// How much reasoning the model should do. Absent, the profile's
     /// setting stands, and absent there too, the provider's default.
@@ -194,11 +195,12 @@ pub struct RunArgs {
     #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
     pub max_steps: u32,
 
-    /// Bound long sessions: past a byte budget, older messages
-    /// summarize into lines the agent's `zoom` tool can open. Off by
-    /// default; small sessions are unaffected either way.
+    /// Send the whole history every step: skip the bounded request
+    /// view that summarizes older messages into lines the `zoom` tool
+    /// can open. The view is on by default and pass-through below its
+    /// budget.
     #[arg(long)]
-    pub transcript: bool,
+    pub no_transcript: bool,
 
     /// How much reasoning the model should do. Absent, the profile's
     /// setting stands, and absent there too, the provider's default.

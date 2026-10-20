@@ -265,8 +265,15 @@ async fn the_stamped_prompt_is_what_the_agent_sends() {
         .unwrap();
 
     let systems = provider.systems();
+    // The default agent's extra specs are zoom's: the preview names
+    // the same set, so what is previewed is what turns send.
+    let zoom = rhema_transcript::Zoom::spec();
     assert_eq!(
         systems[0].as_deref(),
-        Some(stamped_system(None, &workspace, &[]).unwrap().as_str())
+        Some(
+            stamped_system(None, &workspace, std::slice::from_ref(&zoom))
+                .unwrap()
+                .as_str()
+        )
     );
 }

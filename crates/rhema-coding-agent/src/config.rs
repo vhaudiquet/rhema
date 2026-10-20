@@ -44,9 +44,11 @@ pub struct CodingAgentConfig {
     /// built-in of the same name. `None` runs the built-ins alone.
     pub extra_resolver: Option<Arc<dyn ToolResolver>>,
     /// The transcript: a bounded request view over the unbounded
-    /// session, plus the `zoom` tool to read back through it. `None`,
-    /// the default, is fully off — requests carry the whole history.
-    /// See `specs/rhema-transcript.md`.
+    /// session, plus the `zoom` tool to read back through it. On by
+    /// default and below the budget a pass-through, so small sessions
+    /// are byte-identical to a transcript-less run. `None` is the off
+    /// switch: requests carry the whole history. See
+    /// `specs/rhema-transcript.md`.
     pub transcript: Option<rhema_transcript::TranscriptSettings>,
 }
 
@@ -87,7 +89,7 @@ impl CodingAgentConfig {
             thinking: ThinkingEffort::Default,
             tools: None,
             extra_resolver: None,
-            transcript: None,
+            transcript: Some(rhema_transcript::TranscriptSettings::default()),
         }
     }
 }

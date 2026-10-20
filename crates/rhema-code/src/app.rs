@@ -543,8 +543,9 @@ pub struct RunOptions {
     pub workspace: PathBuf,
     /// Max steps per turn.
     pub max_steps: u32,
-    /// Bound long sessions with the transcript's request view.
-    pub transcript: bool,
+    /// Send the whole history every step, skipping the transcript's
+    /// bounded request view.
+    pub no_transcript: bool,
     /// How much reasoning the model should do.
     pub thinking: rhema_core::request::ThinkingEffort,
     /// The base prompt from the user's SYSTEM.md, when their file
@@ -2507,9 +2508,7 @@ impl App {
 fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfig {
     CodingAgentConfig {
         max_turn_steps: options.max_steps,
-        transcript: options
-            .transcript
-            .then(rhema_transcript::TranscriptSettings::default),
+        transcript: (!options.no_transcript).then(rhema_transcript::TranscriptSettings::default),
         thinking: options.thinking,
         base_system: options.base_system.clone(),
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
@@ -2778,7 +2777,7 @@ mod tests {
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
-                transcript: false,
+                no_transcript: false,
                 base_system: None,
                 save: None,
             },
@@ -4992,7 +4991,7 @@ mod tests {
                 profile: Some(profile),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
-                transcript: false,
+                no_transcript: false,
                 base_system: None,
                 save: None,
             },

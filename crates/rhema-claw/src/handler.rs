@@ -234,9 +234,11 @@ impl ClawHandler {
     /// the view its history would ride whole on every step.
     fn agent_config(&self, model: &str, workspace: &Path) -> CodingAgentConfig {
         let mut config = CodingAgentConfig::new(model, workspace);
-        if self.transcript {
-            config.transcript = Some(rhema_transcript::TranscriptSettings::default());
-        }
+        // Write the resolved value, not an override: the coding agent's
+        // own default is on now, and the config's `false` must win.
+        config.transcript = self
+            .transcript
+            .then(rhema_transcript::TranscriptSettings::default);
         config
     }
 

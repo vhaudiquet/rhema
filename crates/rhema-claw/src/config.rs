@@ -280,10 +280,9 @@ pub struct ClawConfig {
     pub listen: Option<String>,
     /// The bounded request view over the claw's sessions — past a byte
     /// budget, older messages summarize into lines the agent's `zoom`
-    /// tool can open. On when unset; `transcript: false` sends the
-    /// whole history every step, as the coding agent does by default.
-    /// The claw turns it on because its chats and coding jobs never end
-    /// by design: a stashed session only ever grows.
+    /// tool can open. On when unset, matching the coding agent's
+    /// default; `transcript: false` sends the whole history every
+    /// step.
     pub transcript: Option<bool>,
     /// Bearer token for the `/v1` routes. Unset means the surface is
     /// open on its interface; set it when the port is reachable from

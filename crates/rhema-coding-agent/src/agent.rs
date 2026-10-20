@@ -439,7 +439,8 @@ mod extra_tools_tests {
     }
 
     #[tokio::test]
-    async fn without_an_extra_resolver_only_the_built_ins_are_advertised() {
+    async fn the_default_advertises_zoom_and_none_skips_it() {
+        // Default: the built-ins plus zoom, the prompt naming it too.
         let scripted = Arc::new(Scripted(Mutex::new(Vec::new())));
         let mut agent = CodingAgent::new(
             scripted.clone(),
@@ -450,8 +451,27 @@ mod extra_tools_tests {
             .turn("hi", &mut NoopSink, Arc::new(AllowAll))
             .await
             .unwrap();
+        {
+            let rounds = scripted.0.lock().unwrap();
+            assert_eq!(rounds[0], vec!["bash".to_owned(), "zoom".to_owned()]);
+        }
+        assert!(agent.system().contains("zoom"), "{}", agent.system());
+        assert!(!agent.system().contains("canary"));
+
+        // `transcript: None` is the off switch: the built-ins alone.
+        let scripted = Arc::new(Scripted(Mutex::new(Vec::new())));
+        let config = CodingAgentConfig {
+            transcript: None,
+            ..CodingAgentConfig::new("m", std::env::temp_dir())
+        };
+        let mut agent = CodingAgent::new(scripted.clone(), config).unwrap();
+        agent
+            .turn("hi", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
         let rounds = scripted.0.lock().unwrap();
         assert_eq!(rounds[0], vec!["bash".to_owned()]);
+        assert!(!agent.system().contains("zoom"), "{}", agent.system());
         assert!(!agent.system().contains("canary"));
     }
 
@@ -538,12 +558,12 @@ mod transcript_tests {
     #[tokio::test]
     async fn off_the_history_rides_verbatim() {
         let recording = Arc::new(Recording(Mutex::new(Vec::new())));
-        let mut agent = CodingAgent::from_session(
-            recording.clone(),
-            CodingAgentConfig::new("m", std::env::temp_dir()),
-            big_history(5),
-        )
-        .unwrap();
+        let config = CodingAgentConfig {
+            transcript: None,
+            ..CodingAgentConfig::new("m", std::env::temp_dir())
+        };
+        let mut agent =
+            CodingAgent::from_session(recording.clone(), config, big_history(5)).unwrap();
         agent
             .turn("next", &mut NoopSink, Arc::new(AllowAll))
             .await
@@ -556,7 +576,7 @@ mod transcript_tests {
     }
 
     #[tokio::test]
-    async fn on_a_big_history_is_viewed_and_the_session_stays_whole() {
+    async fn on_by_default_a_big_history_is_viewed_and_the_session_stays_whole() {
         let recording = Arc::new(Recording(Mutex::new(Vec::new())));
         let config = CodingAgentConfig {
             transcript: Some(rhema_transcript::TranscriptSettings {

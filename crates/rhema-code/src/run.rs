@@ -236,10 +236,14 @@ fn system_show_at(
     workspace: &std::path::Path,
 ) -> anyhow::Result<String> {
     let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
+    let mut extra = rhema_subagents::extra_specs(&workspace);
+    // The transcript is on by default, so the default preview names
+    // zoom, exactly as the agent's prompt does.
+    extra.push(rhema_transcript::Zoom::spec());
     Ok(rhema_coding_agent::stamped_system(
         resolve_base_system(path).as_deref(),
         &workspace,
-        &rhema_subagents::extra_specs(&workspace),
+        &extra,
     )?)
 }
 
@@ -367,9 +371,7 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         .unwrap_or_else(|| effective.thinking_effort());
     let agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
-        transcript: args
-            .transcript
-            .then(rhema_transcript::TranscriptSettings::default),
+        transcript: (!args.no_transcript).then(rhema_transcript::TranscriptSettings::default),
         thinking,
         base_system: resolve_base_system(Config::system_prompt_path().ok().as_deref()),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
@@ -524,7 +526,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         profile: Some(profile),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
-        transcript: args.transcript,
+        no_transcript: args.no_transcript,
         thinking,
         base_system: agent_base,
         save: args.save,

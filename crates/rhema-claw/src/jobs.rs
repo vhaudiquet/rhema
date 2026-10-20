@@ -200,11 +200,13 @@ impl CodingJobHandler {
         let (provider, model) = self.backends.current();
         let mut config = CodingAgentConfig::new(model, &workspace);
         config.max_turn_steps = self.max_turn_steps;
-        if self.transcript {
-            // A job's stashed session carries across runs and only ever
-            // grows; the view is what keeps a repeat run's steps cheap.
-            config.transcript = Some(rhema_transcript::TranscriptSettings::default());
-        }
+        // A job's stashed session carries across runs and only ever
+        // grows; the view is what keeps a repeat run's steps cheap.
+        // Write the resolved value, not an override: the coding agent's
+        // own default is on now, and the config's `false` must win.
+        config.transcript = self
+            .transcript
+            .then(rhema_transcript::TranscriptSettings::default);
         let stashed = self
             .store
             .session(&instance_name)

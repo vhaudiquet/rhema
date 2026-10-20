@@ -24,7 +24,8 @@ the conversation each step sends. It depends on `rhema-core` only.
 - The view: the message list a request carries, built to a byte budget.
 - The `zoom` tool: the model's way back to any original message.
 - The provider decorator and the coding-agent wiring
-  (`CodingAgentConfig::transcript`, the `--transcript` flag).
+  (`CodingAgentConfig::transcript`, on by default; `--no-transcript`
+  sends the whole history).
 
 **OUT of v1** (each deliberately out, with the reason):
 
@@ -173,9 +174,10 @@ its still-present call.
 
 ## 6. Wiring
 
-`CodingAgentConfig::transcript: Option<TranscriptSettings>` — `None`,
-the default, is fully off. `TranscriptSettings` carries `max_view_bytes`
-(default 128 000). With it set, `CodingAgent::new`:
+`CodingAgentConfig::transcript: Option<TranscriptSettings>` — set by
+default (`new` carries `Some(default)`); `None` is the off switch.
+`TranscriptSettings` carries `max_view_bytes` (default 128 000). With it
+set, `CodingAgent::new`:
 
 1. wraps the provider: `attach(ExpandPastes(inner), settings)`;
 2. overlays the `zoom` resolver over the existing resolver chain (a
@@ -183,10 +185,14 @@ the default, is fully off. `TranscriptSettings` carries `max_view_bytes`
 3. adds the `zoom` spec to the prompt's tool list, so the prompt and the
    request's tools cannot drift.
 
-`rhema-code` gains `--transcript` on the full-screen UI and `rhema run`.
-The `system show` preview stays base-plus-subagents: it previews the
-static assembly, and the zoom spec is runtime-gated like the turn flags
-it joins.
+Because the default lives in `CodingAgentConfig::new`, every consumer
+inherits it: the TUI, `rhema run`, the ACP subprocess, and the claw —
+whose config turns it off with `transcript: false`, writing the
+resolved value into the coding agent's field rather than conditionally
+overriding it, so `false` still means off. `rhema-code` spells the
+opt-out `--no-transcript` on the full-screen UI and `rhema run`. The
+`system show` preview names zoom too: with the view on by default, the
+preview that omitted it would not be what turns send.
 
 ## 7. Invariants
 
@@ -224,9 +230,16 @@ it joins.
 - **Tolerant `n`.** Power-of-two-only would encode the compactor's
   future tree into today's tool errors. Halves of any `n` degrade to
   the same thing a binary tree gives.
-- **Flag, not default-on.** The view changes what the model sees past
-  the threshold; the user turns that on. The threshold pass-through
-  keeps the flag honest: below it, nothing differs.
+- **Default on, `None` the escape hatch.** First landed flag-gated:
+  the view changes what the model sees past the threshold, and the
+  mechanics were unproven at coding-traffic scale. The claw then ran
+  every surface on it by default and nothing fell over, the only user
+  is the deployment's own, and the sessions most likely to hit the
+  budget were the ones least likely to find a flag — so the default
+  flipped. Below the budget the decorator is a pass-through, so the
+  default's only always-on cost is the zoom spec in the prompt; and a
+  session saved under the old default views fine, because the view
+  derives from the log per request.
 
 ## 9. Follow-ups (not v1)
 
