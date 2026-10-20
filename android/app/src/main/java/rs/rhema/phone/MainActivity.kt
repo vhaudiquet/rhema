@@ -32,6 +32,7 @@ import rs.rhema.phone.ui.RhemaTheme
 import rs.rhema.phone.ui.SessionsScreen
 import rs.rhema.phone.ui.SettingsScreen
 import rs.rhema.phone.work.enqueuePhoneCommandsNow
+import rs.rhema.phone.work.enqueuePhoneStatusNow
 
 class MainActivity : ComponentActivity() {
 
@@ -77,11 +78,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    // The control queue (phone commands) is freshest when the human is
-    // holding the phone; KEEP coalesces rapid resume bursts.
+    // Both queues are freshest when the human is holding the phone; KEEP
+    // coalesces rapid resume bursts. The status run is the one that matters
+    // to the fleet: periodic work is deferred while the device idles (Doze
+    // stretches the 15-minute floor to hours), so without this kick the
+    // phone's own row can say it was last seen hours ago while it sits in
+    // the human's hand.
     override fun onResume() {
         super.onResume()
         enqueuePhoneCommandsNow(applicationContext)
+        enqueuePhoneStatusNow(applicationContext)
     }
 }
 

@@ -58,6 +58,11 @@ fun PhonesCard(container: AppContainer) {
     var forgetCandidate by remember { mutableStateOf<PhoneInfo?>(null) }
     var forgotName by remember { mutableStateOf<String?>(null) }
     val deviceId by container.settings.deviceIdFlow.collectAsState(initial = "")
+    // The last run that landed every post. The fleet is read from the claw,
+    // so this device's last-seen only moves when a report has actually
+    // reached it; reloading on this flow keeps the phone from calling
+    // itself hours stale while it is in hand.
+    val lastReportAt by container.status.lastReportAt.collectAsState(initial = 0L)
 
     fun load() {
         scope.launch {
@@ -73,7 +78,9 @@ fun PhonesCard(container: AppContainer) {
         }
     }
 
-    LaunchedEffect(Unit) { load() }
+    // First paint loads the fleet as-is; every landed status run reloads it,
+    // so the row this phone reads about itself carries the new last-seen.
+    LaunchedEffect(lastReportAt) { load() }
 
     RhemaCard(title = stringResource(R.string.card_phones), meta = stringResource(R.string.phones_hint)) {
         Column(

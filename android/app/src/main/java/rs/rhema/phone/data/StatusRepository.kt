@@ -3,6 +3,7 @@ package rs.rhema.phone.data
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
@@ -38,6 +39,7 @@ class StatusRepository(private val store: DataStore<Preferences>, private val js
 
     private object Keys {
         val snapshot = stringPreferencesKey("last_phone_snapshot")
+        val reportedAt = longPreferencesKey("last_phone_report_at")
         val notificationCursor = stringPreferencesKey("last_notification_id")
     }
 
@@ -46,10 +48,20 @@ class StatusRepository(private val store: DataStore<Preferences>, private val js
             runCatching { json.decodeFromString<PhoneSnapshot>(raw) }.getOrNull()
         }
 
+    // When the last run landed every post, epoch millis; 0 before the
+    // first one. The fleet card watches this so it reloads after a report
+    // lands: the last-seen it draws is the claw's clock, which only moves
+    // when a run has actually reached it.
+    val lastReportAt: Flow<Long> =
+        store.data.map { it[Keys.reportedAt] ?: 0L }
+
     // Only called after every ingest post of a run succeeded, so a failed run
     // retries the whole transition set next time instead of swallowing it.
     suspend fun setSnapshot(snapshot: PhoneSnapshot) {
-        store.edit { it[Keys.snapshot] = json.encodeToString(snapshot) }
+        store.edit {
+            it[Keys.snapshot] = json.encodeToString(snapshot)
+            it[Keys.reportedAt] = System.currentTimeMillis()
+        }
     }
 
     // Cursor into the claw's notification list: the last id this device showed.

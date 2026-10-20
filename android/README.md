@@ -95,7 +95,16 @@ manages the device fleet the claw keeps.
   it is. The heartbeat exists for the fleet's last-seen time: the claw
   stamps a device "seen" on whatever post lands, so a run with no
   transitions posts one anyway and the row stays fresh at the worker's
-  cadence instead of the last flip.
+  cadence instead of the last flip. A failed post ends the run anyway —
+  the snapshot is only saved when every post landed, so the next
+  scheduled run re-derives the whole transition set; `retry()` would
+  hand the cadence to WorkManager's exponential backoff (hours) and the
+  phone would read as gone. And because idle devices defer periodic work
+  (Doze stretches the fifteen-minute floor to hours), the app kicks a
+  status run on every foreground: a phone in hand reports then and
+  there, and the fleet card reloads on each landed run (`lastReportAt`)
+  so its own row reads from the new clock instead of the one it was
+  opened at.
 
   Every report is an observation on the claw: it lands in the phone
   tables (the ingest answers `{"ingested": "observed"}`) and a `phone`
