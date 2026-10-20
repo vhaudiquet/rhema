@@ -33,8 +33,10 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 # renders a tool's JSON schema into the prompt.
 minijinja = { version = "3", default-features = false, features = ["serde", "debug", "builtins", "json"] }
 # The Agent Client Protocol: schema types and the agent-side connection
-# (see crates/rhema-acp)
-agent-client-protocol = "3.3"
+# (see crates/rhema-acp). `unstable_end_turn_token_usage` lets the agent
+# attach per-turn token totals to the `session/prompt` response; the
+# field is additive on the wire, so clients without it ignore it.
+agent-client-protocol = { version = "3.3", features = ["unstable_end_turn_token_usage"] }
 
 # Vendored crossterm with the two key patches the TUI leans on (see
 # vendor/README.md for provenance and refresh; delete this section to
