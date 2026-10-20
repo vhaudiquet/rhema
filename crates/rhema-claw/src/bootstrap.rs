@@ -22,11 +22,12 @@
 //! section renders only while either file is unwritten, so the offer
 //! self-terminates.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rhema_agent_tools::render_template;
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use rhema_core::ToolSpec;
 use serde_json::{Value, json};
 
@@ -251,28 +252,7 @@ pub struct BootstrapSave {
 }
 
 #[async_trait]
-impl Tool for BootstrapSave {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            BOOTSTRAP_SAVE,
-            "Write one of your identity files. `kind` is `soul` (who you \
-             are: name, tone, purpose) or `user` (who the user is). \
-             Overwrites the file, so send the whole document every time. \
-             Both files enter every request: keep each one small, \
-             stable, and high-signal.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "kind": { "type": "string", "enum": ["soul", "user"],
-                        "description": "Which file to write: soul or user." },
-                    "content": { "type": "string",
-                        "description": "The file's full markdown contents." }
-                },
-                "required": ["kind", "content"]
-            }),
-        )
-    }
-
+impl ToolOp for BootstrapSave {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: SaveArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -285,11 +265,35 @@ impl Tool for BootstrapSave {
     }
 }
 
+/// The compiled operation behind the manifest, by `run.builtin` id.
+fn builtins(bootstrap: Arc<Bootstrap>) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([(
+        "bootstrap.save".to_owned(),
+        Arc::new(BootstrapSave { bootstrap }) as Arc<dyn ToolOp>,
+    )])
+}
+
+/// The `TOOL.yaml` of the bootstrap tool, embedded so the daemon ships
+/// it with no filesystem layout.
+pub const MANIFESTS: &[(&str, &str)] = &[(
+    "bootstrap_save",
+    include_str!("../tools/bootstrap_save/TOOL.yaml"),
+)];
+
 /// The bootstrap tool set over `store`: `bootstrap_save`, the shape the
-/// interactive resolver chain composes.
+/// interactive resolver chain composes — its spec from the embedded
+/// manifest, the operation compiled here.
 pub fn registry(bootstrap: Arc<Bootstrap>) -> ToolRegistry {
+    let (tools, skipped) =
+        rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(bootstrap));
+    assert!(
+        skipped.is_empty(),
+        "the bootstrap tool manifest must load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(BootstrapSave { bootstrap }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
