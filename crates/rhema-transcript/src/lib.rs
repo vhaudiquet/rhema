@@ -14,6 +14,7 @@
 //!   model calls
 //! - [`view`] — the request view: the provider decorator, the mirror,
 //!   the budget
+//! - [`zoom`] — the `zoom` tool
 //!
 //! The design is `specs/rhema-transcript.md`.
 
@@ -23,5 +24,27 @@
 pub mod summary;
 pub mod tree;
 pub mod view;
+pub mod zoom;
 
 pub use view::{Transcript, TranscriptSettings, TranscriptView};
+pub use zoom::{ZOOM_MAX_BYTES, Zoom};
+
+use std::sync::{Arc, Mutex};
+
+/// Wires a transcript over `inner`: the view decorator plus the `zoom`
+/// resolver, sharing one mirror. A consumer that builds its own
+/// [`rhema_core::Agent`] sends the wrapped provider through to the
+/// builder and overlays the resolver over its tool chain; the coding
+/// agent does both inside [`rhema_coding_agent::CodingAgent::new`]
+/// when its config enables the transcript.
+///
+/// The mirror starts empty; the first request fills it.
+pub fn attach(
+    inner: Arc<dyn rhema_core::ModelProvider>,
+    settings: TranscriptSettings,
+) -> (Arc<dyn rhema_core::ModelProvider>, Zoom) {
+    let transcript = Arc::new(Mutex::new(Transcript::new(settings)));
+    let view = TranscriptView::new(inner, transcript.clone());
+    let zoom = Zoom::new(transcript);
+    (Arc::new(view), zoom)
+}
