@@ -1629,6 +1629,7 @@ fn palette_row_name(row: &crate::screens::PaletteRow) -> String {
         crate::screens::PaletteRow::Command(spec) => spec.name.to_owned(),
         crate::screens::PaletteRow::Model { provider, id, .. } => format!("{provider}/{id}"),
         crate::screens::PaletteRow::Profile { name, .. } => name.clone(),
+        crate::screens::PaletteRow::Choice { value, .. } => (*value).to_owned(),
         crate::screens::PaletteRow::Path { name, .. } => name.clone(),
     }
 }
@@ -1647,6 +1648,9 @@ fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
         crate::screens::PaletteRow::Profile { description, .. } => {
             (palette_row_name(row), description.clone())
         }
+        crate::screens::PaletteRow::Choice { description, .. } => {
+            (palette_row_name(row), (*description).to_owned())
+        }
         crate::screens::PaletteRow::Path { is_dir, .. } => (
             palette_row_name(row),
             if *is_dir {
@@ -1655,6 +1659,18 @@ fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
                 String::new()
             },
         ),
+    }
+}
+
+/// The thinking badge's letter: the glyph reads with one letter beside
+/// it, L for low through H for high.
+fn effort_letter(effort: rhema_core::request::ThinkingEffort) -> &'static str {
+    use rhema_core::request::ThinkingEffort;
+    match effort {
+        ThinkingEffort::Default => "",
+        ThinkingEffort::Low => "L",
+        ThinkingEffort::Medium => "M",
+        ThinkingEffort::High => "H",
     }
 }
 
@@ -1692,13 +1708,15 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         }
     }
     // A named thinking effort is session-relevant telemetry: the badge
-    // only appears when the level would change the request.
+    // only appears when the level would change the request. The letter
+    // rides the glyph; the word it abbreviates is the /thinking
+    // argument, one keystroke away in the palette.
     if app.options.thinking != rhema_core::request::ThinkingEffort::Default {
         parts.push(
             Span::raw(format!(
-                " · {}  {}",
+                " · {} {}",
                 app.icons.thinking,
-                app.options.thinking.as_str()
+                effort_letter(app.options.thinking)
             ))
             .fg(theme.text3),
         );
@@ -2800,7 +2818,7 @@ mod scroll_tests {
                 })
                 .collect::<String>()
         };
-        assert!(!draw(&mut app).contains("⁂ high"), "absent at default");
+        assert!(!draw(&mut app).contains("⁂ H"), "absent at default");
         assert!(
             draw(&mut app).contains("◔ 0"),
             "the empty gauge still shows"
@@ -2828,7 +2846,7 @@ mod scroll_tests {
             cached_input_tokens: 0,
         });
         let screen = draw(&mut app);
-        assert!(screen.contains("⁂  high"), "{screen}");
+        assert!(screen.contains("⁂ H"), "{screen}");
         // 131_072 of 1_048_576 is ~12%: the emptiest quarter.
         assert!(screen.contains("◔ 131k/1.0M (12.5%)"), "{screen}");
     }
@@ -3149,6 +3167,31 @@ mod scroll_tests {
         assert!(
             screen.contains("google/gemini-3.8-flash"),
             "the model row is on screen: {screen}"
+        );
+    }
+
+    /// Typing `/thinking ` must raise the level palette over the input:
+    /// one row per level, the description dimmed beside it.
+    #[test]
+    fn the_thinking_palette_renders_above_the_input() {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        fn key(code: KeyCode) -> crossterm::event::KeyEvent {
+            crossterm::event::KeyEvent::new(code, KeyModifiers::empty())
+        }
+        let mut app = chat_app();
+        for c in "/thinking ".chars() {
+            app.chat.handle_key(key(KeyCode::Char(c)), &app.models, &[]);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        assert!(
+            screen.contains("medium") && screen.contains("the default effort"),
+            "the level rows are on screen: {screen}"
         );
     }
 
