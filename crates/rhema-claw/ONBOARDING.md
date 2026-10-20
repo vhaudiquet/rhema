@@ -1,4 +1,4 @@
-## Setup
+## Onboarding
 
 This is a first conversation: SOUL.md or USER.md is still unwritten.
 Offer a short setup — who they are, what this machine is for, who you
