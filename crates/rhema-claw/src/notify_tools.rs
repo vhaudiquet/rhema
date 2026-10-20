@@ -3,24 +3,46 @@
 //! call, the row lands in the [`NotificationStore`], and the device's
 //! next poll carries it. No restart, no second mechanism.
 //!
-//! This is a [`Tool`] implementation for a [`ToolRegistry`], so the
-//! interactive handler offers it through the same allowlist-filtered
-//! seam as everything else the model may call (spec §8). Answers are
-//! short JSON; failures are in-band strings the model can react to.
+//! The spec lives in a `TOOL.yaml` (one folder under `tools/`); the
+//! code here is the operation half only — a [`ToolOp`] behind a
+//! [`ToolRegistry`], offered through the same allowlist-filtered seam
+//! as everything else the model may call (spec §8). Answers are short
+//! JSON; failures are in-band strings the model can react to.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::notifications::{DEFAULT_DEVICE, NotificationStore};
 
-/// The notification tool set over `store`: `notify`.
+/// The compiled operation behind the manifest, by `run.builtin` id.
+fn builtins(store: Arc<NotificationStore>) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([(
+        "notify.push".to_owned(),
+        Arc::new(Notify { store }) as Arc<dyn ToolOp>,
+    )])
+}
+
+/// The notify tool's `TOOL.yaml`, embedded so the daemon ships it with
+/// no filesystem layout.
+pub const MANIFESTS: &[(&str, &str)] = &[("notify", include_str!("../tools/notify/TOOL.yaml"))];
+
+/// The notification tool set over `store`: `notify` — its spec from
+/// the embedded manifest, the operation compiled here.
 pub fn registry(store: Arc<NotificationStore>) -> ToolRegistry {
+    let (tools, skipped) =
+        rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(store));
+    assert!(
+        skipped.is_empty(),
+        "the notify tool manifest must load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(Notify { store }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
@@ -39,30 +61,7 @@ struct Notify {
 }
 
 #[async_trait]
-impl Tool for Notify {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "notify",
-            "Send a notification to one of the user's devices: the phone \
-             by default. Use it to reach the user away from this chat — \
-             a reminder they asked to be passed on, finished background \
-             work, anything that must not wait for their next message.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string",
-                        "description": "The one-line headline." },
-                    "body": { "type": "string",
-                        "description": "The message body." },
-                    "device": { "type": "string",
-                        "description": "The target device; the phone \
-                            when omitted." }
-                },
-                "required": ["title", "body"]
-            }),
-        )
-    }
-
+impl ToolOp for Notify {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: NotifyArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -115,6 +114,22 @@ mod tests {
                 &rhema_core::ToolContext::default(),
             )
             .await
+    }
+
+    #[test]
+    fn the_manifest_loads_against_its_builtin_and_serves_the_spec() {
+        let (tools, skipped) =
+            rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(store()));
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].spec().name, "notify");
+        let resolver =
+            registry(store()).resolver_for(&rhema_autonomous_agent::Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("notify"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running a notify call on resume would re-notify"
+        );
     }
 
     #[tokio::test]

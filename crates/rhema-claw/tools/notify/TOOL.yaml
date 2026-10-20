@@ -1,0 +1,23 @@
+# The model-facing spec of the notify tool; the operation is the
+# compiled builtin named under `run`.
+name: notify
+description: >-
+  Send a notification to one of the user's devices: the phone by
+  default. Use it to reach the user away from this chat — a reminder
+  they asked to be passed on, finished background work, anything that
+  must not wait for their next message.
+parameters:
+  type: object
+  properties:
+    title:
+      type: string
+      description: The one-line headline.
+    body:
+      type: string
+      description: The message body.
+    device:
+      type: string
+      description: The target device; the phone when omitted.
+  required: [title, body]
+run:
+  builtin: notify.push
