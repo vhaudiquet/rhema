@@ -10,10 +10,13 @@
 //!
 //! - [`tree`] — the slot algebra: ranges `(id, n)`, halves, the old
 //!   prefix's doubling cover
+//! - [`summary`] — the extractive line text: heads and counts, no
+//!   model calls
 //!
 //! The design is `specs/rhema-transcript.md`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod summary;
 pub mod tree;
