@@ -342,29 +342,31 @@ impl App {
         selects
     }
 
-    /// The `Thinking` select: the session's current effort and the four
-    /// the engine knows, each naming its tradeoff.
+    /// The `Thinking` select: the session's current effort and the
+    /// levels a client can pick, each naming its tradeoff. `Default`
+    /// is not exposed: a session stored at default reads as `Medium`,
+    /// the level an unset one resolves to. Display names are
+    /// capitalized; the wire ids stay lowercase.
     fn thinking_select(&self, current: ThinkingEffort) -> SessionConfigOption {
         let choices = [
             (
-                ThinkingEffort::Default,
-                "The provider decides; rhema sends no effort",
-            ),
-            (
                 ThinkingEffort::Low,
-                "Light reasoning — quick turns, cheap models",
+                "Low thinking effort, faster answers, smaller problems.",
             ),
-            (ThinkingEffort::Medium, "The middle setting"),
-            (ThinkingEffort::High, "Maximum reasoning effort"),
+            (ThinkingEffort::Medium, "Default. Adapted for most."),
+            (
+                ThinkingEffort::High,
+                "High thinking effort, slower answers, bigger problems.",
+            ),
         ];
         let options: Vec<SessionConfigSelectOption> = choices
             .iter()
             .map(|(effort, description)| {
-                SessionConfigSelectOption::new(effort_id(*effort), effort_id(*effort))
+                SessionConfigSelectOption::new(effort_id(*effort), effort_name(*effort))
                     .description(*description)
             })
             .collect();
-        SessionConfigOption::select("thinking", "Thinking", effort_id(current), options)
+        SessionConfigOption::select("thinking", "Thinking", effort_id(exposed(current)), options)
             .category(Some(SessionConfigOptionCategory::ThoughtLevel))
     }
 
@@ -530,7 +532,7 @@ impl App {
     fn switch_thinking(&self, id: &str, value: &str) -> Result<Vec<SessionConfigOption>, Error> {
         let effort = effort_of(value).ok_or_else(|| {
             Error::invalid_params().data(format!(
-                "thinking expects default, low, medium, or high; got {value:?}"
+                "thinking expects low, medium, or high; got {value:?}"
             ))
         })?;
         // The swap runs under the lock, as a model switch does.
@@ -571,7 +573,7 @@ impl App {
                 "Switch the reasoning effort this session thinks with",
             )
             .input(AvailableCommandInput::Unstructured(
-                UnstructuredCommandInput::new("default, low, medium, or high"),
+                UnstructuredCommandInput::new("low, medium, or high"),
             )),
             AvailableCommand::new("model", "Switch the model this session runs on").input(
                 AvailableCommandInput::Unstructured(UnstructuredCommandInput::new(
@@ -611,8 +613,8 @@ impl App {
             };
             return Ok(CommandAnswer {
                 message: format!(
-                    "reasoning effort is {} — pass one of default, low, medium, high to switch",
-                    effort_id(thinking)
+                    "reasoning effort is {} — pass one of low, medium, high to switch",
+                    effort_id(exposed(thinking))
                 ),
                 selects,
             });
@@ -1154,10 +1156,10 @@ struct CommandAnswer {
     selects: Vec<SessionConfigOption>,
 }
 
-/// The reasoning effort a command argument or config value names.
+/// The reasoning effort a switch value names. `Default` parses
+/// nowhere: over ACP it is not exposed, so a client cannot set it.
 fn effort_of(value: &str) -> Option<ThinkingEffort> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "default" => Some(ThinkingEffort::Default),
         "low" => Some(ThinkingEffort::Low),
         "medium" => Some(ThinkingEffort::Medium),
         "high" => Some(ThinkingEffort::High),
@@ -1172,6 +1174,26 @@ fn effort_id(effort: ThinkingEffort) -> &'static str {
         ThinkingEffort::Low => "low",
         ThinkingEffort::Medium => "medium",
         ThinkingEffort::High => "high",
+    }
+}
+
+/// A reasoning effort's display name, capitalized where the wire id
+/// stays lowercase.
+fn effort_name(effort: ThinkingEffort) -> &'static str {
+    match effort {
+        ThinkingEffort::Default => "Default",
+        ThinkingEffort::Low => "Low",
+        ThinkingEffort::Medium => "Medium",
+        ThinkingEffort::High => "High",
+    }
+}
+
+/// The effort a client sees. `Default` is not among the exposed
+/// levels, so it reads as the level an unset one resolves to.
+fn exposed(effort: ThinkingEffort) -> ThinkingEffort {
+    match effort {
+        ThinkingEffort::Default => ThinkingEffort::Medium,
+        named => named,
     }
 }
 

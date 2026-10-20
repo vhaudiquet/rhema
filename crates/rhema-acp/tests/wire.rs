@@ -887,6 +887,58 @@ async fn the_thinking_select_switches_effort() {
             let current = thinking_current(session.config_options.as_ref().expect("selects"));
             assert_eq!(current.as_deref(), Some("medium"));
 
+            // The select exposes exactly the three levels, capitalized,
+            // each naming its tradeoff; `default` is not among them.
+            let thinking = session
+                .config_options
+                .as_ref()
+                .expect("selects")
+                .iter()
+                .find(|option| {
+                    option.category.as_ref() == Some(&SessionConfigOptionCategory::ThoughtLevel)
+                })
+                .expect("the thinking select ships");
+            let agent_client_protocol::schema::v1::SessionConfigKind::Select(select) =
+                &thinking.kind
+            else {
+                panic!("the thinking option is a select");
+            };
+            let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(choices) =
+                &select.options
+            else {
+                panic!("the thinking select's choices are ungrouped");
+            };
+            let ids: Vec<&str> = choices
+                .iter()
+                .map(|option| option.value.0.as_ref())
+                .collect();
+            assert_eq!(ids, ["low", "medium", "high"]);
+            let names: Vec<&str> = choices.iter().map(|option| option.name.as_str()).collect();
+            assert_eq!(names, ["Low", "Medium", "High"]);
+            assert!(
+                choices.iter().all(|option| option
+                    .description
+                    .as_deref()
+                    .is_some_and(|text| !text.is_empty())),
+                "every level names its tradeoff"
+            );
+
+            // `default` is not exposed: switching to it is a named
+            // parameter error, as for any unknown value.
+            let default = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session.session_id.clone(),
+                    "thinking",
+                    "default",
+                ))
+                .block_task()
+                .await
+                .expect_err("default is not an exposed level");
+            assert_eq!(
+                default.code,
+                agent_client_protocol::schema::v1::ErrorCode::InvalidParams
+            );
+
             // An unknown effort is a named parameter error.
             let bogus = cx
                 .send_request(SetSessionConfigOptionRequest::new(
@@ -1014,7 +1066,7 @@ async fn slash_commands_switch_and_confirm_in_band() {
             assert!(
                 chunk_texts(&collected)
                     .last()
-                    .is_some_and(|message| { message.contains("default, low, medium, or high") })
+                    .is_some_and(|message| message.contains("low, medium, or high"))
             );
 
             // Any other slash spelling is model input like any other
