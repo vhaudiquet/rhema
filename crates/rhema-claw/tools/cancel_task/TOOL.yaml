@@ -1,0 +1,15 @@
+# The model-facing spec of the cancel_task tool; the operation is the
+# compiled builtin named under `run`.
+name: cancel_task
+description: >-
+  Cancel a scheduled task by id (as list_tasks reports it).
+  Already-fired one-shots report cancelled: false.
+parameters:
+  type: object
+  properties:
+    id:
+      type: integer
+      description: The task's id.
+  required: [id]
+run:
+  builtin: task.cancel

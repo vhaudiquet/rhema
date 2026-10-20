@@ -1,0 +1,27 @@
+# The model-facing spec of the schedule_task tool; the operation is the
+# compiled builtin named under `run`.
+name: schedule_task
+description: >-
+  Schedule a future turn of yours. `prompt` runs as this agent's own
+  turn, once at `at`, or repeatedly every `every_secs` seconds; set
+  exactly one of the two. The scheduled turn has no chat surface: its
+  reply reaches the user as a notification, so write prompts that
+  produce one. Use list_tasks and cancel_task to manage what is
+  scheduled.
+parameters:
+  type: object
+  properties:
+    prompt:
+      type: string
+      description: What the scheduled turn should do.
+    at:
+      type: [string, number]
+      description: >-
+        When to fire once: an RFC3339 timestamp
+        ("2026-10-10T15:00:00Z") or epoch milliseconds.
+    every_secs:
+      type: integer
+      description: Repeat every this many seconds.
+  required: [prompt]
+run:
+  builtin: task.schedule

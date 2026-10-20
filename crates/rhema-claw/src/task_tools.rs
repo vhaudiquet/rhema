@@ -5,15 +5,17 @@
 //! restart, no second mechanism, and no timer anywhere: a due task is
 //! an event (spec §1), never a heartbeat.
 //!
-//! These are [`Tool`] implementations for a [`ToolRegistry`], so the
-//! interactive handler offers them through the same allowlist-filtered
-//! seam as everything else the model may call (spec §8). Answers are
-//! short JSON; failures are in-band strings the model can react to.
+//! The spec the model sees lives in a `TOOL.yaml` per tool (one
+//! folder under `tools/`, embedded at compile time); the code here is
+//! the operation half only — [`ToolOp`] implementations behind a
+//! [`ToolRegistry`], offered through the same allowlist-filtered seam
+//! as everything else the model may call (spec §8). Answers are short
+//! JSON; failures are in-band strings the model can react to.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -22,17 +24,57 @@ use time::format_description::well_known::Rfc3339;
 use crate::interactive::is_resident_key;
 use crate::task_store::TaskStore;
 
+/// The compiled operations behind the manifests, by `run.builtin` id:
+/// the id is a manifest's only link to this code.
+fn builtins(store: Arc<TaskStore>) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([
+        (
+            "task.schedule".to_owned(),
+            Arc::new(ScheduleTask {
+                store: store.clone(),
+            }) as Arc<dyn ToolOp>,
+        ),
+        (
+            "task.list".to_owned(),
+            Arc::new(ListTasks {
+                store: store.clone(),
+            }) as Arc<dyn ToolOp>,
+        ),
+        (
+            "task.cancel".to_owned(),
+            Arc::new(CancelTask { store }) as Arc<dyn ToolOp>,
+        ),
+    ])
+}
+
+/// Every task tool's `TOOL.yaml`, embedded so the daemon ships them
+/// with no filesystem layout: one folder per tool, named by tool.
+pub const MANIFESTS: &[(&str, &str)] = &[
+    (
+        "schedule_task",
+        include_str!("../tools/schedule_task/TOOL.yaml"),
+    ),
+    ("list_tasks", include_str!("../tools/list_tasks/TOOL.yaml")),
+    (
+        "cancel_task",
+        include_str!("../tools/cancel_task/TOOL.yaml"),
+    ),
+];
+
 /// The task tool set over `store`: `schedule_task`, `list_tasks`,
-/// `cancel_task`.
+/// `cancel_task` — specs from the embedded manifests, operations
+/// compiled here.
 pub fn registry(store: Arc<TaskStore>) -> ToolRegistry {
+    let (tools, skipped) =
+        rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(store));
+    assert!(
+        skipped.is_empty(),
+        "the task tool manifests must all load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(ScheduleTask {
-        store: store.clone(),
-    }));
-    registry.register(Arc::new(ListTasks {
-        store: store.clone(),
-    }));
-    registry.register(Arc::new(CancelTask { store }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
@@ -91,33 +133,7 @@ struct ScheduleTask {
 }
 
 #[async_trait]
-impl Tool for ScheduleTask {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "schedule_task",
-            "Schedule a future turn of yours. `prompt` runs as this \
-             agent's own turn — once at `at`, or repeatedly every \
-             `every_secs` seconds; set exactly one of the two. The \
-             scheduled turn has no chat surface: its reply reaches the \
-             user as a notification, so write prompts that produce one. \
-             Use list_tasks and cancel_task to manage what is scheduled.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "prompt": { "type": "string",
-                        "description": "What the scheduled turn should do." },
-                    "at": { "type": ["string", "number"],
-                        "description": "When to fire once: an RFC3339 \
-                            timestamp (\"2026-10-10T15:00:00Z\") or epoch \
-                            milliseconds." },
-                    "every_secs": { "type": "integer",
-                        "description": "Repeat every this many seconds." }
-                },
-                "required": ["prompt"]
-            }),
-        )
-    }
-
+impl ToolOp for ScheduleTask {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: ScheduleArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -183,19 +199,7 @@ struct ListTasks {
 }
 
 #[async_trait]
-impl Tool for ListTasks {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "list_tasks",
-            "List the scheduled tasks: id, prompt, kind (at or every), \
-             and next_due_millis — when each one fires next.",
-            json!({
-                "type": "object",
-                "properties": {},
-            }),
-        )
-    }
-
+impl ToolOp for ListTasks {
     async fn invoke(&self, _args: Value) -> Result<String, String> {
         let tasks = self.store.list().map_err(|err| err.to_string())?;
         Ok(json!({ "tasks": tasks }).to_string())
@@ -208,23 +212,7 @@ struct CancelTask {
 }
 
 #[async_trait]
-impl Tool for CancelTask {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "cancel_task",
-            "Cancel a scheduled task by id (as list_tasks reports it). \
-             Already-fired one-shots report cancelled: false.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "integer",
-                        "description": "The task's id." }
-                },
-                "required": ["id"]
-            }),
-        )
-    }
-
+impl ToolOp for CancelTask {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: CancelArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -257,6 +245,79 @@ mod tests {
                 &rhema_core::ToolContext::default(),
             )
             .await
+    }
+
+    #[test]
+    fn every_manifest_loads_against_its_builtin() {
+        let (tools, skipped) =
+            rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(store()));
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let names: Vec<String> = tools.iter().map(|tool| tool.spec().name).collect();
+        assert_eq!(
+            names,
+            vec![
+                "schedule_task".to_owned(),
+                "list_tasks".to_owned(),
+                "cancel_task".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn every_builtin_is_named_by_a_manifest() {
+        let mut covered = Vec::new();
+        for (source, raw) in MANIFESTS {
+            covered.push(
+                rhema_autonomous_agent::manifest::parse(raw)
+                    .unwrap_or_else(|err| panic!("{source}: {err}"))
+                    .builtin,
+            );
+        }
+        for id in builtins(store()).keys() {
+            assert!(
+                covered.iter().any(|builtin| builtin == id),
+                "{id} has no TOOL.yaml"
+            );
+        }
+    }
+
+    #[test]
+    fn the_registry_serves_the_manifest_specs() {
+        let resolver =
+            registry(store()).resolver_for(&rhema_autonomous_agent::Allowlist::permissive());
+        let specs = resolver.specs();
+        for (name, raw) in MANIFESTS {
+            let manifest = rhema_autonomous_agent::manifest::parse(raw)
+                .unwrap_or_else(|err| panic!("{name}: {err}"));
+            let spec = specs
+                .iter()
+                .find(|spec| spec.name == *name)
+                .unwrap_or_else(|| panic!("{name} is not offered"));
+            assert_eq!(
+                spec,
+                &rhema_core::ToolSpec::new(
+                    manifest.name,
+                    manifest.description,
+                    manifest.parameters,
+                ),
+                "{name} serves its manifest"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_safety_comes_from_the_manifest() {
+        let resolver =
+            registry(store()).resolver_for(&rhema_autonomous_agent::Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("list_tasks"),
+            rhema_core::ReplaySafety::Safe
+        );
+        assert_eq!(
+            resolver.replay_safety("schedule_task"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running a schedule call on resume could double-schedule"
+        );
     }
 
     #[tokio::test]

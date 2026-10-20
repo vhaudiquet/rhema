@@ -1,0 +1,12 @@
+# The model-facing spec of the list_tasks tool; the operation is the
+# compiled builtin named under `run`.
+name: list_tasks
+description: >-
+  List the scheduled tasks: id, prompt, kind (at or every), and
+  next_due_millis — when each one fires next.
+replay_safety: safe
+parameters:
+  type: object
+  properties: {}
+run:
+  builtin: task.list
