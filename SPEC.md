@@ -365,6 +365,22 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   change, a 300 m move for location) bounds the writes; dropping the
   dispatch bounds the tokens and the notification noise to zero.
 
+- ~~**Where a tool's static data lives**~~, **decided:** a `TOOL.yaml`
+  manifest per tool folder, parsed by `rhema-autonomous-agent`'s
+  `manifest` module: name, description, argument schema, replay
+  classification, and a `run` binding. The first binding is
+  `run: { builtin: <id> }` — the operation stays compiled Rust that the
+  consumer registers under that id, and a `ManifestTool` marries the
+  manifest's spec to it — so a tool's spec stops living in Rust string
+  literals and one folder names one tool, the same shape the skill and
+  subagent folders already use. A manifest that does not parse, or
+  names no known builtin, is skipped (reported, not fatal), like an
+  undescribed skill folder; a shipped set pins itself with a drift
+  test. The format takes further `run` kinds without a migration —
+  `exec` (spawn a command, args on stdin, stdout is the result) is the
+  noted next one, which is what lets non-Rust authors add tools. The
+  claw's task tools are the first consumers.
+
 ---
 
 ## 9. Follow-ups (not v1)

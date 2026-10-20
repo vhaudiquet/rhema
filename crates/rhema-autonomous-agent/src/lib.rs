@@ -26,6 +26,7 @@
 //! Layout:
 //! - [`allowlist`] — `Allowlist`: the permissive default and tool-name sets
 //! - [`chain`] — `ResolverChain`: several resolvers behind one seam
+//! - [`manifest`] — `TOOL.yaml` manifests: the tool spec as data, the operation as code
 //! - [`registry`] — the `Tool` contract and the allowlist-filtering `ToolRegistry`
 //! - [`source`] — the `Source` contract: deterministic detection into the dispatcher
 //! - [`driver`] — the `Driver`, `Handler`, and `SessionContext`: the lease-driven loop
@@ -36,6 +37,7 @@
 pub mod allowlist;
 pub mod chain;
 pub mod driver;
+pub mod manifest;
 pub mod registry;
 pub mod source;
 
@@ -45,5 +47,6 @@ pub use allowlist::Allowlist;
 pub use async_trait::async_trait;
 pub use chain::ResolverChain;
 pub use driver::{Driver, Handler, SessionContext};
+pub use manifest::{Manifest, ManifestError, ManifestTool, ToolOp};
 pub use registry::{Tool, ToolRegistry};
 pub use source::{Source, SourceError};

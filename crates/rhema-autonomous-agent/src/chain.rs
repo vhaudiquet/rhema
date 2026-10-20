@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
+use rhema_core::{ReplaySafety, ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 
 /// Several resolvers behind one seam: specs concatenate in order, and a
 /// call is served by the first resolver offering that tool's name. Tool
@@ -33,6 +33,14 @@ impl ToolResolver for ResolverChain {
             .iter()
             .flat_map(|resolver| resolver.specs())
             .collect()
+    }
+
+    fn replay_safety(&self, name: &str) -> ReplaySafety {
+        self.resolvers
+            .iter()
+            .find(|resolver| resolver.specs().iter().any(|spec| spec.name == name))
+            .map(|resolver| resolver.replay_safety(name))
+            .unwrap_or(ReplaySafety::Unsafe)
     }
 
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
@@ -126,6 +134,51 @@ mod tests {
             )
             .await;
         assert!(served.is_error);
+    }
+
+    /// A resolver that classifies one of its tools replay-safe, so the
+    /// chain's forwarding has something to find.
+    struct Classified {
+        name: &'static str,
+        safety: ReplaySafety,
+    }
+
+    #[async_trait]
+    impl ToolResolver for Classified {
+        fn specs(&self) -> Vec<ToolSpec> {
+            vec![ToolSpec::new(
+                self.name,
+                "classified",
+                serde_json::json!({}),
+            )]
+        }
+        fn replay_safety(&self, _name: &str) -> ReplaySafety {
+            self.safety
+        }
+        async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> CoreToolResult {
+            CoreToolResult::success(&call.id, "x")
+        }
+    }
+
+    #[test]
+    fn replay_safety_routes_to_the_tool_owning_resolver() {
+        let chain = ResolverChain::new(vec![
+            Arc::new(Fixed {
+                name: "bash",
+                answer: "x",
+            }),
+            Arc::new(Classified {
+                name: "zoom",
+                safety: ReplaySafety::Safe,
+            }),
+        ]);
+        assert_eq!(chain.replay_safety("zoom"), ReplaySafety::Safe);
+        assert_eq!(
+            chain.replay_safety("bash"),
+            ReplaySafety::Unsafe,
+            "an unclassified tool stays side-effecting"
+        );
+        assert_eq!(chain.replay_safety("nope"), ReplaySafety::Unsafe);
     }
 
     #[tokio::test]

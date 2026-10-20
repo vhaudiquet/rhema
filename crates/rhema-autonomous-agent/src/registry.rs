@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
+use rhema_core::{ReplaySafety, ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 use serde_json::Value;
 
 use crate::Allowlist;
@@ -24,6 +24,14 @@ pub trait Tool: Send + Sync {
     /// The tool's schema, passed through to the provider's native
     /// tool-calling format. The description lives here and nowhere else.
     fn spec(&self) -> ToolSpec;
+
+    /// Whether a resume may re-execute one of this tool's committed
+    /// calls that lost its result. [`ReplaySafety::Unsafe`] unless
+    /// declared otherwise: an unclassified tool is treated as
+    /// side-effecting.
+    fn replay_safety(&self) -> ReplaySafety {
+        ReplaySafety::Unsafe
+    }
 
     /// Runs the tool. The registry turns `Err` into an in-band failure
     /// result; `Ok` text is the tool's answer.
@@ -82,6 +90,13 @@ struct FilteredResolver {
 impl ToolResolver for FilteredResolver {
     fn specs(&self) -> Vec<ToolSpec> {
         self.tools.values().map(|tool| tool.spec()).collect()
+    }
+
+    fn replay_safety(&self, name: &str) -> ReplaySafety {
+        self.tools
+            .get(name)
+            .map(|tool| tool.replay_safety())
+            .unwrap_or(ReplaySafety::Unsafe)
     }
 
     async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
