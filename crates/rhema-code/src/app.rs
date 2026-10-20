@@ -2367,19 +2367,11 @@ impl App {
             Ok(output) => {
                 if let Some(pricing) = self.current_model_pricing() {
                     let usage = output.usage;
-                    // Cached prompt tokens bill at a fraction of base
-                    // input everywhere — Anthropic reads ~10%, OpenAI
-                    // 50%, DeepSeek and Gemini ~25%; the cross-provider
-                    // middle stands in where no exact rate is published.
-                    // Cache writes ride the full input bucket.
-                    const CACHED_INPUT_FALLBACK: f64 = 0.25;
-                    let cached_rate = pricing
-                        .cached_input_per_mtok
-                        .unwrap_or(pricing.input_per_mtok * CACHED_INPUT_FALLBACK);
-                    let uncached = usage.input_tokens.saturating_sub(usage.cached_input_tokens);
-                    self.session_cost += uncached as f64 / 1_000_000.0 * pricing.input_per_mtok
-                        + usage.cached_input_tokens as f64 / 1_000_000.0 * cached_rate
-                        + usage.output_tokens as f64 / 1_000_000.0 * pricing.output_per_mtok;
+                    self.session_cost += pricing.cost(
+                        u64::from(usage.input_tokens),
+                        u64::from(usage.output_tokens),
+                        u64::from(usage.cached_input_tokens),
+                    );
                 }
                 self.usage = Some(output.usage);
                 // Silence is a symptom, not an answer: the usual cause is

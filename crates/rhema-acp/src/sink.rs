@@ -41,8 +41,7 @@ pub(crate) struct SessionMeter {
     output_tokens: u64,
     /// The cached subset of those prompts.
     cached_read_tokens: u64,
-    /// USD the session has cost, priced like the TUI's footer prices a
-    /// turn: per-model rates when the card carries them.
+    /// USD the session has cost, at the card's rates.
     cost_usd: f64,
     /// Tokens the most recent step left in context — its prompt plus
     /// its reply, the shape of the next request. Zero before the first
@@ -61,18 +60,7 @@ impl SessionMeter {
         self.cached_read_tokens += cached;
         self.context_used = input + output;
         if let Some(pricing) = pricing {
-            // The TUI's rate card: cached prompt tokens bill at a
-            // fraction of base input everywhere, and the cross-provider
-            // middle (a quarter) stands in where no exact rate is
-            // published. Cache writes ride the full input bucket.
-            const CACHED_INPUT_FALLBACK: f64 = 0.25;
-            let cached_rate = pricing
-                .cached_input_per_mtok
-                .unwrap_or(pricing.input_per_mtok * CACHED_INPUT_FALLBACK);
-            let uncached = input.saturating_sub(cached);
-            self.cost_usd += uncached as f64 / 1_000_000.0 * pricing.input_per_mtok
-                + cached as f64 / 1_000_000.0 * cached_rate
-                + output as f64 / 1_000_000.0 * pricing.output_per_mtok;
+            self.cost_usd += pricing.cost(input, output, cached);
         }
     }
 
