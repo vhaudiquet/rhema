@@ -43,6 +43,11 @@ pub struct CodingAgentConfig {
     /// prompt's tool list and its tools resolve by name, shadowing a
     /// built-in of the same name. `None` runs the built-ins alone.
     pub extra_resolver: Option<Arc<dyn ToolResolver>>,
+    /// The transcript: a bounded request view over the unbounded
+    /// session, plus the `zoom` tool to read back through it. `None`,
+    /// the default, is fully off — requests carry the whole history.
+    /// See `specs/rhema-transcript.md`.
+    pub transcript: Option<rhema_transcript::TranscriptSettings>,
 }
 
 impl std::fmt::Debug for CodingAgentConfig {
@@ -58,6 +63,7 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("thinking", &self.thinking)
             .field("tools", &self.tools.is_some())
             .field("extra_resolver", &self.extra_resolver.is_some())
+            .field("transcript", &self.transcript.is_some())
             .finish()
     }
 }
@@ -81,6 +87,7 @@ impl CodingAgentConfig {
             thinking: ThinkingEffort::Default,
             tools: None,
             extra_resolver: None,
+            transcript: None,
         }
     }
 }

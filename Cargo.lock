@@ -3064,6 +3064,7 @@ dependencies = [
  "rhema-agent-tools",
  "rhema-config",
  "rhema-core",
+ "rhema-transcript",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",

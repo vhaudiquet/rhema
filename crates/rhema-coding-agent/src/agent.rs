@@ -114,19 +114,28 @@ impl CodingAgent {
             Some(extra) => Arc::new(Overlay::new(tools.clone(), extra)),
             None => tools.clone(),
         };
+        // The transcript: the bounded view rides the provider, `zoom`
+        // joins the resolver chain, and the prompt's tool list grows to
+        // match — the prompt and the request's tools cannot drift.
+        let mut extra: Vec<ToolSpec> = config
+            .extra_resolver
+            .as_ref()
+            .map(|resolver| resolver.specs())
+            .unwrap_or_default();
+        let (provider, resolver) = match config.transcript {
+            Some(settings) => {
+                extra.push(rhema_transcript::Zoom::spec());
+                let (provider, zoom) = rhema_transcript::attach(provider, settings);
+                let resolver = Arc::new(Overlay::new(resolver, Arc::new(zoom)));
+                (provider, Arc::clone(&resolver) as Arc<dyn ToolResolver>)
+            }
+            None => (provider, resolver),
+        };
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
             Some(system) => system,
-            None => stamped_system(
-                config.base_system.as_deref(),
-                tools.workspace(),
-                &config
-                    .extra_resolver
-                    .as_ref()
-                    .map(|resolver| resolver.specs())
-                    .unwrap_or_default(),
-            )?,
+            None => stamped_system(config.base_system.as_deref(), tools.workspace(), &extra)?,
         };
         let agent = Agent::builder()
             .provider(provider)
@@ -458,5 +467,127 @@ mod extra_tools_tests {
         assert!(with.contains("echo") && with.contains("canary"), "{with}");
         let without = stamped_system(None, &workspace, &[]).unwrap();
         assert!(!without.contains("canary"), "{without}");
+    }
+}
+
+#[cfg(test)]
+mod transcript_tests {
+    use super::*;
+    use rhema_agent_tools::AllowAll;
+    use rhema_core::{
+        Content, Event, ModelProvider, ModelRequest, ProviderError, StopReason, ToolCall,
+        ToolResult, Usage, async_trait,
+    };
+    use std::sync::Mutex;
+
+    /// Records every request's message list, then ends the turn.
+    struct Recording(Mutex<Vec<Vec<Message>>>);
+
+    #[async_trait]
+    impl ModelProvider for Recording {
+        async fn complete(
+            &self,
+            req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            self.0.lock().unwrap().push(req.messages);
+            Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    struct NoopSink;
+
+    impl EventSink for NoopSink {
+        fn emit(&mut self, _event: Event<'_>) {}
+    }
+
+    /// A history over any small budget: user, then big tool rounds.
+    fn big_history(rounds: usize) -> Session {
+        let mut history = vec![Message::text(Role::User, "fix the build")];
+        for i in 0..rounds {
+            history.push(Message {
+                role: Role::Assistant,
+                content: vec![
+                    Content::Text(format!("round {i}")),
+                    Content::ToolCall(ToolCall {
+                        id: format!("c{i}"),
+                        name: "bash".into(),
+                        args: serde_json::json!({ "command": "make" }),
+                        provider_data: serde_json::Value::Null,
+                    }),
+                ],
+            });
+            history.push(Message {
+                role: Role::Tool,
+                content: vec![Content::ToolResult(ToolResult::success(
+                    format!("c{i}"),
+                    "x".repeat(2048),
+                ))],
+            });
+        }
+        Session {
+            history,
+            ..Session::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn off_the_history_rides_verbatim() {
+        let recording = Arc::new(Recording(Mutex::new(Vec::new())));
+        let mut agent = CodingAgent::from_session(
+            recording.clone(),
+            CodingAgentConfig::new("m", std::env::temp_dir()),
+            big_history(5),
+        )
+        .unwrap();
+        agent
+            .turn("next", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+        let sent = recording.0.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        // Restored history plus this turn's input, nothing rewritten.
+        assert_eq!(sent[0].len(), 5 * 2 + 2);
+        assert_eq!(sent[0][0], Message::text(Role::User, "fix the build"));
+    }
+
+    #[tokio::test]
+    async fn on_a_big_history_is_viewed_and_the_session_stays_whole() {
+        let recording = Arc::new(Recording(Mutex::new(Vec::new())));
+        let config = CodingAgentConfig {
+            transcript: Some(rhema_transcript::TranscriptSettings {
+                max_view_bytes: 4_000,
+            }),
+            ..CodingAgentConfig::new("m", std::env::temp_dir())
+        };
+        let mut agent =
+            CodingAgent::from_session(recording.clone(), config, big_history(5)).unwrap();
+        // The prompt advertises zoom: the tool and the prompt cannot drift.
+        assert!(agent.system().contains("zoom"), "{}", agent.system());
+        agent
+            .turn("next", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+
+        let sent = recording.0.lock().unwrap();
+        let messages = &sent[0];
+        assert!(
+            messages.len() < 5 * 2 + 2,
+            "the view is shorter: {} messages",
+            messages.len()
+        );
+        let rhema_core::Content::Text(text) = &messages[0].content[0] else {
+            panic!("a text view message");
+        };
+        assert!(text.starts_with("<transcript>"), "{text}");
+        assert_eq!(messages.last().unwrap(), &Message::text(Role::User, "next"));
+
+        // The session kept every message — restored, this turn's
+        // input, and the turn's reply — the log is untouched.
+        assert_eq!(agent.session().history.len(), 5 * 2 + 3);
     }
 }

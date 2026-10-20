@@ -18,6 +18,8 @@ mock = ["rhema-core/mock"]
 rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0" }
 rhema-config = { path = "../rhema-config", version = "0.1.0" }
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# The bounded view over an unbounded session, when the config enables it
+rhema-transcript = { path = "../rhema-transcript", version = "0.1.0" }
 # The SYSTEM.md template engine: the renderer lives in the toolkit,
 # the template error type stays with the driver
 minijinja = { workspace = true }
