@@ -29,6 +29,7 @@ COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-op
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
 COPY crates/rhema-subagents/Cargo.toml crates/rhema-subagents/Cargo.toml
+COPY crates/rhema-transcript/Cargo.toml crates/rhema-transcript/Cargo.toml
 COPY integrations/rhema-calendar-integration/Cargo.toml integrations/rhema-calendar-integration/Cargo.toml
 COPY integrations/rhema-forge-integration/Cargo.toml integrations/rhema-forge-integration/Cargo.toml
 
