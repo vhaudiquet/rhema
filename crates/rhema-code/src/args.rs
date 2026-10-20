@@ -106,6 +106,12 @@ pub struct Args {
     #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
     pub max_steps: u32,
 
+    /// Bound long sessions: past a byte budget, older messages
+    /// summarize into lines the agent's `zoom` tool can open. Off by
+    /// default; small sessions are unaffected either way.
+    #[arg(long)]
+    pub transcript: bool,
+
     /// How much reasoning the model should do. Absent, the profile's
     /// setting stands, and absent there too, the provider's default.
     #[arg(long)]
@@ -187,6 +193,12 @@ pub struct RunArgs {
     /// Max steps per turn.
     #[arg(long, default_value_t = CodingAgentConfig::DEFAULT_MAX_TURN_STEPS)]
     pub max_steps: u32,
+
+    /// Bound long sessions: past a byte budget, older messages
+    /// summarize into lines the agent's `zoom` tool can open. Off by
+    /// default; small sessions are unaffected either way.
+    #[arg(long)]
+    pub transcript: bool,
 
     /// How much reasoning the model should do. Absent, the profile's
     /// setting stands, and absent there too, the provider's default.

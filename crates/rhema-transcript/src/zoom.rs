@@ -68,8 +68,9 @@ impl Zoom {
         )
     }
 
-    /// Resolves one zoom call; the in-band form of [`ToolResolver::resolve`],
-    /// public for tests and embedders.
+    /// Resolves one zoom call; the in-band form of
+    /// [`rhema_core::ToolResolver::resolve`], public for tests and
+    /// embedders.
     pub fn zoom(&self, call: &ToolCall) -> ToolResult {
         let Some(id) = call.args.get("id").and_then(|v| v.as_u64()) else {
             return ToolResult::failure(&call.id, "zoom needs an integer `id`");

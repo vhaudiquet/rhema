@@ -367,6 +367,9 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         .unwrap_or_else(|| effective.thinking_effort());
     let agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
+        transcript: args
+            .transcript
+            .then(rhema_transcript::TranscriptSettings::default),
         thinking,
         base_system: resolve_base_system(Config::system_prompt_path().ok().as_deref()),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
@@ -521,6 +524,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         profile: Some(profile),
         workspace: workspace.clone(),
         max_steps: args.max_steps,
+        transcript: args.transcript,
         thinking,
         base_system: agent_base,
         save: args.save,

@@ -35,8 +35,8 @@ use std::sync::{Arc, Mutex};
 /// resolver, sharing one mirror. A consumer that builds its own
 /// [`rhema_core::Agent`] sends the wrapped provider through to the
 /// builder and overlays the resolver over its tool chain; the coding
-/// agent does both inside [`rhema_coding_agent::CodingAgent::new`]
-/// when its config enables the transcript.
+/// agent does both in its constructor when its config enables the
+/// transcript.
 ///
 /// The mirror starts empty; the first request fills it.
 pub fn attach(

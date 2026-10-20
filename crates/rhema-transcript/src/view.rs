@@ -205,7 +205,7 @@ impl std::fmt::Debug for TranscriptView {
 impl TranscriptView {
     /// The wrapper over `inner`, mirroring into `transcript` — the same
     /// mirror a [`crate::zoom::Zoom`] resolver reads. Build both from
-    /// one mirror, or take [`attach`] once it exists.
+    /// one mirror, or let [`crate::attach`] do it.
     pub fn new(inner: Arc<dyn ModelProvider>, transcript: Arc<Mutex<Transcript>>) -> Self {
         Self { inner, transcript }
     }

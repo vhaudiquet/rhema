@@ -2532,6 +2532,7 @@ mod scroll_tests {
                 profile: Some("personal".into()),
                 workspace: PathBuf::from("."),
                 max_steps: 4,
+                transcript: false,
                 base_system: None,
                 save: None,
             },

@@ -3050,6 +3050,7 @@ dependencies = [
  "rhema-provider-openai-compatible",
  "rhema-provider-openrouter",
  "rhema-subagents",
+ "rhema-transcript",
  "serde_json",
  "tempfile",
  "tokio",

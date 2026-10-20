@@ -85,6 +85,9 @@ Rules:
     the prompt renderer (`crates/rhema-agent-tools/`)
   - `subagents` — the subagent extension: definition discovery and the
     `subagent` tool (`crates/rhema-subagents/`)
+  - `transcript` — the bounded view over an unbounded session: the
+    request view decorator, the slot algebra, the `zoom` tool
+    (`crates/rhema-transcript/`)
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema-code` — the frontend crate: terminal UI and headless
     one-shot (`crates/rhema-code/`); its binary is `rhema`
