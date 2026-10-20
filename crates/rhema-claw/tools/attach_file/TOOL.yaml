@@ -1,0 +1,21 @@
+# The model-facing spec of the attach_file tool; the operation is the
+# compiled builtin named under `run`.
+name: attach_file
+description: >-
+  Attach a file from this session's workspace to the chat: the human
+  gets a card with the file's name and can view or download it. Use it
+  to hand over artifacts a reply snippet cannot carry — a screenshot,
+  a diff, a generated report, a log. The path is workspace-relative.
+  Large files are refused; attach the relevant cut instead.
+parameters:
+  type: object
+  properties:
+    path:
+      type: string
+      description: "The workspace-relative file path, e.g. 'screenshots/failure.png'."
+    caption:
+      type: string
+      description: One line about what the file is and why it matters.
+  required: [path]
+run:
+  builtin: attach.file

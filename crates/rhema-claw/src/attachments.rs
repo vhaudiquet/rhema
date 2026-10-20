@@ -11,13 +11,13 @@
 //! from turning the store into a workspace mirror; a file past the cap
 //! is an in-band error, and the model can cut it down first.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -194,9 +194,6 @@ pub fn content_type(name: &str) -> &'static str {
     }
 }
 
-/// The tool's name on the wire.
-pub const ATTACH_FILE: &str = "attach_file";
-
 /// `attach_file`: copy a workspace file into the attachment store and
 /// put its card on the stream. Built per dispatch — the event must
 /// land on the asking session.
@@ -216,31 +213,7 @@ struct AttachArgs {
 }
 
 #[async_trait]
-impl Tool for AttachFile {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            ATTACH_FILE,
-            "Attach a file from this session's workspace to the chat: the \
-             human gets a card with the file's name and can view or \
-             download it. Use it to hand over artifacts a reply snippet \
-             cannot carry — a screenshot, a diff, a generated report, a \
-             log. The path is workspace-relative. Large files are \
-             refused; attach the relevant cut instead.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string",
-                        "description": "The workspace-relative file path, \
-                            e.g. 'screenshots/failure.png'." },
-                    "caption": { "type": "string",
-                        "description": "One line about what the file is \
-                            and why it matters." }
-                },
-                "required": ["path"]
-            }),
-        )
-    }
-
+impl ToolOp for AttachFile {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: AttachArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -301,25 +274,75 @@ impl Tool for AttachFile {
 }
 
 /// The attachment tool set over `store`: `attach_file`.
+/// The compiled operation behind the manifest, by `run.builtin` id.
+fn builtins(
+    store: Arc<AttachmentStore>,
+    workspace: PathBuf,
+    hub: Arc<EventHub>,
+    key: ResourceKey,
+) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([(
+        "attach.file".to_owned(),
+        Arc::new(AttachFile {
+            store,
+            workspace,
+            hub,
+            key,
+        }) as Arc<dyn ToolOp>,
+    )])
+}
+
+/// The attach tool's `TOOL.yaml`, embedded so the daemon ships it with
+/// no filesystem layout.
+pub const MANIFESTS: &[(&str, &str)] = &[(
+    "attach_file",
+    include_str!("../tools/attach_file/TOOL.yaml"),
+)];
+
+/// The attachment tool set over `store`: `attach_file` — its spec from
+/// the embedded manifest, the operation compiled here.
 pub fn registry(
     store: Arc<AttachmentStore>,
     workspace: impl Into<PathBuf>,
     hub: Arc<EventHub>,
     key: ResourceKey,
 ) -> ToolRegistry {
+    let (tools, skipped) = rhema_autonomous_agent::manifest::builtin_tools(
+        MANIFESTS,
+        &builtins(store, workspace.into(), hub, key),
+    );
+    assert!(
+        skipped.is_empty(),
+        "the attach_file tool manifest must load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(AttachFile {
-        store,
-        workspace: workspace.into(),
-        hub,
-        key,
-    }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_autonomous_agent::Allowlist;
+
+    #[test]
+    fn the_manifest_loads_against_its_builtin_and_serves_the_registry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolver = registry(
+            store(dir.path()),
+            dir.path().join("ws"),
+            Arc::new(EventHub::with_capacity(16)),
+            ResourceKey::new("r"),
+        )
+        .resolver_for(&Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("attach_file"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running an attach on resume would duplicate the card"
+        );
+    }
 
     fn store(dir: &Path) -> Arc<AttachmentStore> {
         Arc::new(AttachmentStore::open(dir.join("attachments")).expect("store opens"))
