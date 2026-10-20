@@ -1,0 +1,38 @@
+# The model-facing spec of the identity_save tool; the operation is the
+# compiled builtin named under `run`.
+name: identity_save
+description: >-
+  Store an account the daemon holds on a service: a label, the
+  service's name (e.g. 'github'), optionally its URL and the username,
+  and the secret (an API token, or a password). Act with a stored
+  account through identity_exec — the credential itself is never shown
+  to you. With watch=true and a forge the daemon watches, the
+  account's notifications are followed.
+parameters:
+  type: object
+  properties:
+    label:
+      type: string
+      description: "Display name, e.g. 'acme releases'."
+    service:
+      type: string
+      description: "The service, lowercase: github, gitlab, gitea, or any name."
+    url:
+      type: string
+      description: Base URL, for self-hosted instances.
+    username:
+      type: string
+      description: The login name on the service.
+    secret:
+      type: string
+      description: The credential to store. Never echoed back.
+    secret_kind:
+      type: string
+      enum: [token, password]
+      description: What the secret is; default token.
+    watch:
+      type: boolean
+      description: Follow this forge identity's notifications; default false.
+  required: [label, service, secret]
+run:
+  builtin: identity.save

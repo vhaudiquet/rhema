@@ -16,13 +16,20 @@
 //! prompt is text a stranger wrote — never resolves them, so an injected
 //! comment cannot ask its way to the accounts or act with their
 //! credentials.
+//!
+//! The three store tools' specs live in `TOOL.yaml`s (one folder under
+//! `tools/`); the code here is the operation half only. identity_exec
+//! is its own [`ToolResolver`] and carries its spec inline — the one
+//! deliberate exception, since its registry shape is the exec seam
+//! itself.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 use rhema_identity::{Account, AccountDraft, IdentityStore, Secret, SecretKind};
 use serde::Deserialize;
@@ -158,39 +165,7 @@ pub fn forget_account(
 }
 
 #[async_trait]
-impl Tool for IdentitySave {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "identity_save",
-            "Store an account the daemon holds on a service: a label, the service's name (e.g. \
-             'github'), optionally its URL and the username, and the secret (an API token, or a \
-             password). Act with a stored account through identity_exec — the credential \
-             itself is never shown to you. With watch=true and a forge the daemon watches, \
-             the account's notifications are followed.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "label": { "type": "string",
-                        "description": "Display name, e.g. 'acme releases'." },
-                    "service": { "type": "string",
-                        "description": "The service, lowercase: github, gitlab, gitea, or any name." },
-                    "url": { "type": "string",
-                        "description": "Base URL, for self-hosted instances." },
-                    "username": { "type": "string",
-                        "description": "The login name on the service." },
-                    "secret": { "type": "string",
-                        "description": "The credential to store. Never echoed back." },
-                    "secret_kind": { "type": "string",
-                        "enum": ["token", "password"],
-                        "description": "What the secret is; default token." },
-                    "watch": { "type": "boolean",
-                        "description": "Follow this forge identity's notifications; default false." }
-                },
-                "required": ["label", "service", "secret"]
-            }),
-        )
-    }
-
+impl ToolOp for IdentitySave {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: SaveArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -228,16 +203,7 @@ struct IdentityList {
 }
 
 #[async_trait]
-impl Tool for IdentityList {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "identity_list",
-            "List the accounts the daemon holds. Secrets are never shown — only each account's \
-             label, service, url, username, and what kind of secret it keeps.",
-            json!({ "type": "object", "properties": {} }),
-        )
-    }
-
+impl ToolOp for IdentityList {
     async fn invoke(&self, _args: Value) -> Result<String, String> {
         let accounts = self.accounts.list().map_err(|err| err.to_string())?;
         Ok(json!({ "accounts": accounts }).to_string())
@@ -258,22 +224,7 @@ struct ForgetArgs {
 }
 
 #[async_trait]
-impl Tool for IdentityForget {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "identity_forget",
-            "Forget a stored account by id: the secret goes with it, and any forge watch that \
-             followed this identity is removed too.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "The account id (identity_list's ids)." }
-                },
-                "required": ["id"]
-            }),
-        )
-    }
-
+impl ToolOp for IdentityForget {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: ForgetArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -287,17 +238,63 @@ impl Tool for IdentityForget {
     }
 }
 
-/// The identity tool set over the account store and the watch table.
+/// The compiled operations behind the manifests, by `run.builtin` id.
+fn builtins(
+    accounts: Arc<dyn IdentityStore>,
+    watches: Arc<ClawStore>,
+) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([
+        (
+            "identity.forget".to_owned(),
+            Arc::new(IdentityForget {
+                accounts: accounts.clone(),
+                watches: watches.clone(),
+            }) as Arc<dyn ToolOp>,
+        ),
+        (
+            "identity.list".to_owned(),
+            Arc::new(IdentityList {
+                accounts: accounts.clone(),
+            }) as Arc<dyn ToolOp>,
+        ),
+        (
+            "identity.save".to_owned(),
+            Arc::new(IdentitySave { accounts, watches }) as Arc<dyn ToolOp>,
+        ),
+    ])
+}
+
+/// The store tools' `TOOL.yaml`s, embedded so the daemon ships them
+/// with no filesystem layout: one folder per tool, named by tool, in
+/// the order the registry serves them.
+pub const MANIFESTS: &[(&str, &str)] = &[
+    (
+        "identity_forget",
+        include_str!("../tools/identity_forget/TOOL.yaml"),
+    ),
+    (
+        "identity_list",
+        include_str!("../tools/identity_list/TOOL.yaml"),
+    ),
+    (
+        "identity_save",
+        include_str!("../tools/identity_save/TOOL.yaml"),
+    ),
+];
+
+/// The identity tool set over the account store and the watch table —
+/// specs from the embedded manifests, operations compiled here.
 pub fn registry(accounts: Arc<dyn IdentityStore>, watches: Arc<ClawStore>) -> ToolRegistry {
+    let (tools, skipped) =
+        rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(accounts, watches));
+    assert!(
+        skipped.is_empty(),
+        "the identity tool manifests must all load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(IdentitySave {
-        accounts: accounts.clone(),
-        watches: watches.clone(),
-    }));
-    registry.register(Arc::new(IdentityList {
-        accounts: accounts.clone(),
-    }));
-    registry.register(Arc::new(IdentityForget { accounts, watches }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
@@ -587,6 +584,7 @@ impl ToolResolver for IdentityExec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_autonomous_agent::ToolOp;
 
     fn parts() -> (Arc<dyn IdentityStore>, Arc<ClawStore>) {
         (
@@ -595,8 +593,36 @@ mod tests {
         )
     }
 
-    fn call(tool: &dyn Tool, args: Value) -> Result<String, String> {
+    fn call(tool: &dyn ToolOp, args: Value) -> Result<String, String> {
         futures_block_on(tool.invoke(args))
+    }
+
+    #[test]
+    fn every_manifest_loads_against_its_builtin_and_serves_the_registry() {
+        let (accounts, watches) = parts();
+        let (tools, skipped) = rhema_autonomous_agent::manifest::builtin_tools(
+            MANIFESTS,
+            &builtins(accounts, watches),
+        );
+        assert!(skipped.is_empty(), "{skipped:?}");
+        assert_eq!(tools.len(), 3);
+        let (accounts, watches) = parts();
+        let resolver = registry(accounts, watches)
+            .resolver_for(&rhema_autonomous_agent::Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("identity_list"),
+            rhema_core::ReplaySafety::Safe
+        );
+        assert_eq!(
+            resolver.replay_safety("identity_save"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running a save on resume would re-store and re-watch"
+        );
+        assert_eq!(
+            resolver.replay_safety("identity_forget"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running a forget on resume would drop the account twice-over"
+        );
     }
 
     /// The tools are async over a sync store: one block-on harness for

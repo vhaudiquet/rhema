@@ -1,0 +1,13 @@
+# The model-facing spec of the identity_list tool; the operation is the
+# compiled builtin named under `run`.
+name: identity_list
+description: >-
+  List the accounts the daemon holds. Secrets are never shown — only
+  each account's label, service, url, username, and what kind of
+  secret it keeps.
+replay_safety: safe
+parameters:
+  type: object
+  properties: {}
+run:
+  builtin: identity.list

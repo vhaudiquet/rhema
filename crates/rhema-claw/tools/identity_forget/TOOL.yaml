@@ -1,0 +1,15 @@
+# The model-facing spec of the identity_forget tool; the operation is
+# the compiled builtin named under `run`.
+name: identity_forget
+description: >-
+  Forget a stored account by id: the secret goes with it, and any
+  forge watch that followed this identity is removed too.
+parameters:
+  type: object
+  properties:
+    id:
+      type: string
+      description: The account id (identity_list's ids).
+  required: [id]
+run:
+  builtin: identity.forget
