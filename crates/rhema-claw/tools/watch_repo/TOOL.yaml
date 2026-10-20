@@ -1,0 +1,28 @@
+# The model-facing spec of the watch_repo tool; the operation is the
+# compiled builtin named under `run`.
+name: watch_repo
+description: >-
+  Start watching a repository: new activity (issues, pull requests,
+  comments, reviews) arrives as its own dispatch. `forge` is `github`,
+  `gitea`, or `gitlab`; `repo` is `owner/name` (GitLab:
+  `namespace/project`); gitea also needs `host`, its instance base
+  URL. `token` is optional and falls back to the forge's environment
+  variable.
+parameters:
+  type: object
+  properties:
+    forge:
+      type: string
+      description: github, gitea, or gitlab.
+    repo:
+      type: string
+      description: The repository as owner/name.
+    host:
+      type: string
+      description: Instance base URL; required for gitea.
+    token:
+      type: string
+      description: Forge token; optional, env fallback.
+  required: [forge, repo]
+run:
+  builtin: watch.repo

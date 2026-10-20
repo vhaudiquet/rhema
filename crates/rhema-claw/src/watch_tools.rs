@@ -3,34 +3,75 @@
 //! tool call, the row lands in the [`ClawStore`], and the next detect
 //! pass picks it up. No restart, no second mechanism.
 //!
-//! These are [`Tool`] implementations for a [`ToolRegistry`], so the
-//! interactive handler offers them through the same allowlist-filtered
-//! seam as everything else the model may call (spec §8: the allowlist is
-//! fixed before the first step, never decided mid-run). Answers are
-//! short JSON; failures are in-band strings the model can react to.
-//! Tokens never appear in an answer.
+//! Each tool's spec lives in a `TOOL.yaml` (one folder under
+//! `tools/`); the code here is the operation half only — [`ToolOp`]
+//! implementations behind a [`ToolRegistry`], offered through the same
+//! allowlist-filtered seam as everything else the model may call
+//! (spec §8: the allowlist is fixed before the first step, never
+//! decided mid-run). Answers are short JSON; failures are in-band
+//! strings the model can react to. Tokens never appear in an answer.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::config::ForgeKind;
 use crate::watch_store::{ClawStore, validate_watch};
 
+/// The compiled operations behind the manifests, by `run.builtin` id.
+fn builtins(store: Arc<ClawStore>) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([
+        (
+            "watch.repo".to_owned(),
+            Arc::new(WatchRepo {
+                store: store.clone(),
+            }) as Arc<dyn ToolOp>,
+        ),
+        (
+            "watch.unwatch".to_owned(),
+            Arc::new(UnwatchRepo {
+                store: store.clone(),
+            }) as Arc<dyn ToolOp>,
+        ),
+        (
+            "watch.list".to_owned(),
+            Arc::new(ListWatches { store }) as Arc<dyn ToolOp>,
+        ),
+    ])
+}
+
+/// Every watch tool's `TOOL.yaml`, embedded so the daemon ships them
+/// with no filesystem layout: one folder per tool, named by tool, in
+/// the order the registry serves them.
+pub const MANIFESTS: &[(&str, &str)] = &[
+    (
+        "list_watches",
+        include_str!("../tools/list_watches/TOOL.yaml"),
+    ),
+    (
+        "unwatch_repo",
+        include_str!("../tools/unwatch_repo/TOOL.yaml"),
+    ),
+    ("watch_repo", include_str!("../tools/watch_repo/TOOL.yaml")),
+];
+
 /// The watch-management tool set over `store`: `watch_repo`,
-/// `unwatch_repo`, `list_watches`.
+/// `unwatch_repo`, `list_watches` — specs from the embedded manifests,
+/// operations compiled here.
 pub fn registry(store: Arc<ClawStore>) -> ToolRegistry {
+    let (tools, skipped) =
+        rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(store));
+    assert!(
+        skipped.is_empty(),
+        "the watch tool manifests must all load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(WatchRepo {
-        store: store.clone(),
-    }));
-    registry.register(Arc::new(UnwatchRepo {
-        store: store.clone(),
-    }));
-    registry.register(Arc::new(ListWatches { store }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
@@ -56,33 +97,7 @@ struct WatchRepo {
 }
 
 #[async_trait]
-impl Tool for WatchRepo {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "watch_repo",
-            "Start watching a repository: new activity (issues, pull \
-             requests, comments, reviews) arrives as its own dispatch. \
-             `forge` is `github`, `gitea`, or `gitlab`; `repo` is \
-             `owner/name` (GitLab: `namespace/project`); gitea also needs \
-             `host`, its instance base URL. `token` is optional and falls \
-             back to the forge's environment variable.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "forge": { "type": "string",
-                        "description": "github, gitea, or gitlab." },
-                    "repo": { "type": "string",
-                        "description": "The repository as owner/name." },
-                    "host": { "type": "string",
-                        "description": "Instance base URL; required for gitea." },
-                    "token": { "type": "string",
-                        "description": "Forge token; optional, env fallback." }
-                },
-                "required": ["forge", "repo"]
-            }),
-        )
-    }
-
+impl ToolOp for WatchRepo {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: WatchArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -115,25 +130,7 @@ struct UnwatchRepo {
 }
 
 #[async_trait]
-impl Tool for UnwatchRepo {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "unwatch_repo",
-            "Stop watching a repository: no more activity arrives from \
-             it. Same `forge` and `repo` spelling as `watch_repo`.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "forge": { "type": "string",
-                        "description": "github, gitea, or gitlab." },
-                    "repo": { "type": "string",
-                        "description": "The repository as owner/name." }
-                },
-                "required": ["forge", "repo"]
-            }),
-        )
-    }
-
+impl ToolOp for UnwatchRepo {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: UnwatchArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -159,19 +156,7 @@ struct ListWatches {
 }
 
 #[async_trait]
-impl Tool for ListWatches {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            "list_watches",
-            "List the watched repositories: forge, repo, and host for \
-             each.",
-            json!({
-                "type": "object",
-                "properties": {},
-            }),
-        )
-    }
-
+impl ToolOp for ListWatches {
     async fn invoke(&self, _args: Value) -> Result<String, String> {
         let watches = self.store.list().map_err(|err| err.to_string())?;
         let rows: Vec<Value> = watches
@@ -203,6 +188,51 @@ mod tests {
             .into_iter()
             .map(|spec| spec.name)
             .collect()
+    }
+
+    #[test]
+    fn every_manifest_loads_against_its_builtin() {
+        let (tools, skipped) =
+            rhema_autonomous_agent::manifest::builtin_tools(MANIFESTS, &builtins(store()));
+        assert!(skipped.is_empty(), "{skipped:?}");
+        let names: Vec<String> = tools.iter().map(|tool| tool.spec().name).collect();
+        assert_eq!(
+            names,
+            ["list_watches", "unwatch_repo", "watch_repo"].map(str::to_owned)
+        );
+    }
+
+    #[test]
+    fn every_builtin_is_named_by_a_manifest() {
+        let mut covered = Vec::new();
+        for (source, raw) in MANIFESTS {
+            covered.push(
+                rhema_autonomous_agent::manifest::parse(raw)
+                    .unwrap_or_else(|err| panic!("{source}: {err}"))
+                    .builtin,
+            );
+        }
+        for id in builtins(store()).keys() {
+            assert!(
+                covered.iter().any(|builtin| builtin == id),
+                "{id} has no TOOL.yaml"
+            );
+        }
+    }
+
+    #[test]
+    fn replay_safety_comes_from_the_manifest() {
+        let resolver =
+            registry(store()).resolver_for(&rhema_autonomous_agent::Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("list_watches"),
+            rhema_core::ReplaySafety::Safe
+        );
+        assert_eq!(
+            resolver.replay_safety("watch_repo"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running a watch call on resume could double-watch"
+        );
     }
 
     #[tokio::test]

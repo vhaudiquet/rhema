@@ -1,0 +1,11 @@
+# The model-facing spec of the list_watches tool; the operation is the
+# compiled builtin named under `run`.
+name: list_watches
+description: >-
+  List the watched repositories: forge, repo, and host for each.
+replay_safety: safe
+parameters:
+  type: object
+  properties: {}
+run:
+  builtin: watch.list

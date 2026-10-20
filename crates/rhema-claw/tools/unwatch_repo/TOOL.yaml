@@ -1,0 +1,18 @@
+# The model-facing spec of the unwatch_repo tool; the operation is the
+# compiled builtin named under `run`.
+name: unwatch_repo
+description: >-
+  Stop watching a repository: no more activity arrives from it. Same
+  `forge` and `repo` spelling as `watch_repo`.
+parameters:
+  type: object
+  properties:
+    forge:
+      type: string
+      description: github, gitea, or gitlab.
+    repo:
+      type: string
+      description: The repository as owner/name.
+  required: [forge, repo]
+run:
+  builtin: watch.unwatch
