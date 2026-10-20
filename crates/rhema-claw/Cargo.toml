@@ -32,6 +32,8 @@ rhema-autonomous-agent = { path = "../rhema-autonomous-agent" }
 rhema-coding-agent = { path = "../rhema-coding-agent" }
 rhema-config = { path = "../rhema-config" }
 rhema-core = { path = "../rhema-core" }
+# The bounded request view over the claw sessions, on by default here
+rhema-transcript = { path = "../rhema-transcript" }
 rhema-calendar-integration = { path = "../../integrations/rhema-calendar-integration" }
 rhema-forge-integration = { path = "../../integrations/rhema-forge-integration" }
 # The accounts layer: identities hold the forge tokens the watches poll

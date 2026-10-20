@@ -44,6 +44,16 @@ budget — in a named workspace, with one tool and an `action` argument:
   two agents editing the same files. Across instances, jobs run in
   parallel.
 
+### The bounded request view
+
+A claw session never ends: the interactive chat is one conversation,
+forge threads live as long as their pull requests, and a coding job's
+session carries to its next run. From the start, the claw therefore
+runs the transcript's bounded request view (`rhema-transcript`):
+past a byte budget, older messages summarize into `id+n|text` lines
+the agent's `zoom` tool opens to read any original back. The config
+turns it off with `transcript: false`.
+
 For the debug loop, daemon plus UI against throwaway state and zero
 credentials: `scripts/dev.sh --mock` (canned streamed replies; the UI
 is at `localhost:3000`, the claw at `127.0.0.1:7799`). Drop `--mock`

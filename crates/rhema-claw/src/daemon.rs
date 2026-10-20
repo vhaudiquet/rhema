@@ -233,6 +233,7 @@ impl Daemon {
             workspace_root,
             watches.clone(),
             accounts.clone(),
+            config.transcript_enabled(),
         );
         // Three drivers over one store admit from the same table, so
         // each owns its slice of the key space: a forge pass must never
@@ -326,6 +327,7 @@ impl Daemon {
             notifications.clone(),
             config.max_turn_steps,
             extensions.clone(),
+            config.transcript_enabled(),
         );
         let interactive_driver = Arc::new(
             Driver::new(
@@ -345,6 +347,7 @@ impl Daemon {
             jobs.clone(),
             notifications.clone(),
             config.max_turn_steps,
+            config.transcript_enabled(),
         );
         let jobs_driver = Arc::new(
             Driver::new(jobs_dispatcher.clone(), Arc::new(jobs_handler))

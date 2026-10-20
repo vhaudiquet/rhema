@@ -3014,6 +3014,7 @@ dependencies = [
  "rhema-provider-openai-compatible",
  "rhema-provider-openrouter",
  "rhema-rsd",
+ "rhema-transcript",
  "rusqlite",
  "serde",
  "serde_json",

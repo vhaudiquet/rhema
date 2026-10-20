@@ -278,6 +278,13 @@ pub struct ClawConfig {
     pub model: Option<String>,
     /// The HTTP surface's `host:port`. [`DEFAULT_LISTEN`] when unset.
     pub listen: Option<String>,
+    /// The bounded request view over the claw's sessions — past a byte
+    /// budget, older messages summarize into lines the agent's `zoom`
+    /// tool can open. On when unset; `transcript: false` sends the
+    /// whole history every step, as the coding agent does by default.
+    /// The claw turns it on because its chats and coding jobs never end
+    /// by design: a stashed session only ever grows.
+    pub transcript: Option<bool>,
     /// Bearer token for the `/v1` routes. Unset means the surface is
     /// open on its interface; set it when the port is reachable from
     /// anywhere but loopback. `/healthz` stays open either way.
@@ -290,6 +297,14 @@ pub struct ClawConfig {
     /// read-only ambient state, not an agent-managed resource, and a
     /// change takes the daemon restart it takes to edit the file.
     pub calendars: Vec<CalendarWatch>,
+}
+
+impl ClawConfig {
+    /// Whether the claw's sessions run the bounded request view: on
+    /// unless the config says `transcript: false`.
+    pub fn transcript_enabled(&self) -> bool {
+        self.transcript != Some(false)
+    }
 }
 
 impl Default for ClawConfig {
@@ -305,6 +320,7 @@ impl Default for ClawConfig {
             model: None,
             listen: None,
             token: None,
+            transcript: None,
             watches: Vec::new(),
             calendars: Vec::new(),
         }
@@ -568,6 +584,21 @@ impl ClawConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_transcript_is_on_unless_the_config_turns_it_off() {
+        assert!(ClawConfig::default().transcript_enabled());
+        let off = ClawConfig {
+            transcript: Some(false),
+            ..ClawConfig::default()
+        };
+        assert!(!off.transcript_enabled());
+        let explicit_on = ClawConfig {
+            transcript: Some(true),
+            ..ClawConfig::default()
+        };
+        assert!(explicit_on.transcript_enabled());
+    }
+
     use super::*;
 
     #[test]

@@ -65,7 +65,7 @@ See [Rhema Claw README.md](./crates/rhema-claw/README.md) for more.
 | `rhema-transcript` | The bounded view over an unbounded session: the request decorator that rewrites a step's messages under a byte budget — the current turn and the recent past whole, the old prefix one structural line per doubling block — the `zoom` tool reading any original message back, and the mirror both share; no model calls in v1, the compactor is a later fill policy behind the same view |
 | `rhema-acp` | The coding agent as an Agent Client Protocol subprocess, so ACP editors (T3 Code, Zed, JetBrains, Neovim, Emacs, VS Code) drive it without a per-editor plugin |
 | `rhema-code` | The `rhema` binary: the full-screen terminal UI, `rhema run` for the pipeable one-shot, `rhema acp` for editors, `rhema system edit/show/restore` for the prompt the agent works from |
-| `rhema-claw` | The resident agent daemon (work in progress): one SQLite store of sessions, forge threads answered with coding-agent turns, calendar-feed reminders, a `coding_agent` tool that runs coding jobs off the chat, chat over HTTP |
+| `rhema-claw` | The resident agent daemon (work in progress): one SQLite store of sessions, forge threads answered with coding-agent turns, calendar-feed reminders, a `coding_agent` tool that runs coding jobs off the chat, chat over HTTP; the claw's sessions run the bounded request view (`rhema-transcript`) by default, so a stashed session can grow forever without growing every step's cost |
 
 ## rhema-core
 

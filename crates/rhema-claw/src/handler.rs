@@ -57,6 +57,9 @@ fn allowlist() -> rhema_autonomous_agent::Allowlist {
 pub struct ClawHandler {
     /// The deployment's providers and the active pair, read per dispatch.
     backends: Arc<BackendRegistry>,
+    /// Whether the sessions run the bounded request view (the config's
+    /// `transcript`, on unless set false).
+    transcript: bool,
     workspace_root: PathBuf,
     watches: Arc<ClawStore>,
     /// The account store a blank watch credential resolves through: the
@@ -74,9 +77,11 @@ impl ClawHandler {
         workspace_root: impl Into<PathBuf>,
         watches: Arc<ClawStore>,
         accounts: Arc<dyn IdentityStore>,
+        transcript: bool,
     ) -> Self {
         Self {
             backends,
+            transcript,
             workspace_root: workspace_root.into(),
             watches,
             accounts,
@@ -210,7 +215,7 @@ impl ClawHandler {
         key: &str,
     ) -> Result<CodingAgent, String> {
         let (provider, model) = self.backends.current();
-        let config = CodingAgentConfig::new(model, workspace);
+        let config = self.agent_config(&model, workspace);
         let agent = match &ctx.session.core.driver_state {
             // A never-dispatched key carries no stash: start clean.
             serde_json::Value::Null => CodingAgent::new(provider, config),
@@ -221,6 +226,18 @@ impl ClawHandler {
             }
         };
         agent.map_err(|err| format!("cannot start the coding agent for {key}: {err}"))
+    }
+
+    /// The config one dispatch's agent runs on: the default coding
+    /// agent's, with the bounded request view when the config has it on.
+    /// A forge thread answers for as long as the thread lives; without
+    /// the view its history would ride whole on every step.
+    fn agent_config(&self, model: &str, workspace: &Path) -> CodingAgentConfig {
+        let mut config = CodingAgentConfig::new(model, workspace);
+        if self.transcript {
+            config.transcript = Some(rhema_transcript::TranscriptSettings::default());
+        }
+        config
     }
 
     /// The per-thread workspace: one directory under the root, created on
@@ -759,6 +776,7 @@ mod tests {
             "/tmp/w",
             watches,
             Arc::new(rhema_identity::VolatileIdentityStore::new()),
+            true,
         );
 
         // A watch added to the table AFTER the handler was built resolves:
@@ -777,6 +795,40 @@ mod tests {
                 .watch_forge(&ResourceKey::from("github:nonsense"))
                 .is_err(),
             "a non-thread key does not"
+        );
+    }
+
+    #[test]
+    fn the_transcript_setting_reaches_the_dispatch_config() {
+        let watches = Arc::new(ClawStore::in_memory().expect("store opens"));
+        let registry = Arc::new(
+            crate::backends::BackendRegistry::new(
+                vec![crate::backends::Backend::headless(
+                    "mock",
+                    Arc::new(NoopProvider),
+                )],
+                None,
+            )
+            .expect("constructs"),
+        );
+        let accounts = Arc::new(rhema_identity::VolatileIdentityStore::new());
+        let on = ClawHandler::new(
+            registry.clone(),
+            "/tmp/w",
+            watches.clone(),
+            accounts.clone(),
+            true,
+        );
+        let off = ClawHandler::new(registry, "/tmp/w", watches, accounts, false);
+        assert!(
+            on.agent_config("m", Path::new("/tmp/w"))
+                .transcript
+                .is_some()
+        );
+        assert!(
+            off.agent_config("m", Path::new("/tmp/w"))
+                .transcript
+                .is_none()
         );
     }
 

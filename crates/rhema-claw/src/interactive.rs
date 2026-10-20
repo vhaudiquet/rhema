@@ -182,6 +182,10 @@ pub struct InteractiveHandler {
     /// dispatch, in the standard set's order — the same set whose
     /// sources the daemon's tick drives and whose boot pass runs first.
     extensions: Arc<crate::extension::Extensions>,
+    /// The transcript's mirror, when the config has the view on: the
+    /// decorator refreshes it per request, `zoom` reads it, and it
+    /// lives here — the agent rebuilds per dispatch, the log must not.
+    transcript_mirror: Option<Arc<std::sync::Mutex<rhema_transcript::Transcript>>>,
 }
 
 impl InteractiveHandler {
@@ -193,7 +197,7 @@ impl InteractiveHandler {
     /// shell (approval v1-permissive — the shell is the point of a
     /// resident coding agent — installed once, since resolution is
     /// synchronous within a turn), memory, and `bootstrap_save`.
-    #[allow(clippy::too_many_arguments)] // eight parts, each load-bearing
+    #[allow(clippy::too_many_arguments)] // nine parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -203,6 +207,7 @@ impl InteractiveHandler {
         notifications: Arc<NotificationStore>,
         max_turn_steps: u32,
         extensions: Arc<crate::extension::Extensions>,
+        transcript: bool,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(ShellTools::new(&workspace));
@@ -220,6 +225,11 @@ impl InteractiveHandler {
             notifications,
             max_turn_steps,
             extensions,
+            transcript_mirror: transcript.then(|| {
+                Arc::new(std::sync::Mutex::new(rhema_transcript::Transcript::new(
+                    rhema_transcript::TranscriptSettings::default(),
+                )))
+            }),
         }
     }
 
@@ -238,6 +248,15 @@ impl InteractiveHandler {
         // the same expansion the coding driver wraps its own with: the
         // model sees plain text, the transcript keeps the chips.
         let provider: Arc<dyn ModelProvider> = Arc::new(ExpandPastes::new(provider));
+        // The view rides outside the expansion: stubs, whole messages,
+        // and zoom output all show the text the model would have seen.
+        let provider: Arc<dyn ModelProvider> = match &self.transcript_mirror {
+            Some(mirror) => Arc::new(rhema_transcript::TranscriptView::new(
+                provider,
+                mirror.clone(),
+            )),
+            None => provider,
+        };
         let resolver = self.resolver(key);
         let system = render_system(
             DEFAULT_SYSTEM_MD,
@@ -273,6 +292,11 @@ impl InteractiveHandler {
             self.bootstrap_resolver.clone(),
         ];
         resolvers.extend(self.extensions.tools(key));
+        if let Some(mirror) = &self.transcript_mirror {
+            // Unique name, read-only: it shadows nothing and a replay
+            // may re-run it after a crash resume.
+            resolvers.push(Arc::new(rhema_transcript::Zoom::new(mirror.clone())));
+        }
         Arc::new(ResolverChain::new(resolvers))
     }
 
@@ -730,6 +754,47 @@ mod tests {
         }
     }
 
+    /// The transcript wiring: on, the prompt advertises zoom and the
+    /// mirror exists; off, neither appears and the request rides whole.
+    #[test]
+    fn the_transcript_joins_zoom_when_on_and_nothing_when_off() {
+        for on in [true, false] {
+            let workspace = tempfile::tempdir().expect("tempdir");
+            let hub = Arc::new(EventHub::default());
+            let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+            let notifications = notifications();
+            let extensions = test_extensions(
+                hub.clone(),
+                store,
+                notifications.clone(),
+                tasks(),
+                jobs(),
+                accounts(),
+                consents(),
+                bridge(),
+                attachments(),
+                phone(),
+                identity(),
+                &workspace.path().join("interactive"),
+            );
+            let handler = InteractiveHandler::new(
+                test_registry(RecordingProvider::new()),
+                workspace.path().join("interactive"),
+                Arc::new(rhema_memory::VolatileStore::new()),
+                Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+                hub,
+                notifications,
+                crate::config::DEFAULT_MAX_TURN_STEPS,
+                extensions,
+                on,
+            );
+            let key = Key::from("interactive:web");
+            let agent = handler.agent(&key).expect("the agent builds");
+            assert_eq!(agent.system().contains("zoom"), on, "on={on}");
+            assert_eq!(handler.transcript_mirror.is_some(), on, "on={on}");
+        }
+    }
+
     /// The paste contract across the provider seam: a chat input that
     /// carries an embedded paste (the compact form the UIs mint) is
     /// expanded before the request leaves, while the transcript the hub
@@ -764,6 +829,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         );
         let dispatcher = Arc::new(Dispatcher::new(
             DispatcherConfig {
@@ -851,6 +917,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         );
         let specs = handler.resolver(&Key::from("interactive:web")).specs();
         assert!(
@@ -1121,6 +1188,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1216,6 +1284,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1320,6 +1389,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1400,6 +1470,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1481,6 +1552,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1604,6 +1676,7 @@ mod tests {
             notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
+            true,
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(

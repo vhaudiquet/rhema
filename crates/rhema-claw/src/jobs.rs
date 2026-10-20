@@ -138,6 +138,9 @@ pub struct CodingJobHandler {
     store: Arc<CodingJobStore>,
     notifications: Arc<NotificationStore>,
     max_turn_steps: u32,
+    /// Whether the jobs run the bounded request view (the config's
+    /// `transcript`, on unless set false).
+    transcript: bool,
 }
 
 impl CodingJobHandler {
@@ -149,12 +152,14 @@ impl CodingJobHandler {
         store: Arc<CodingJobStore>,
         notifications: Arc<NotificationStore>,
         max_turn_steps: u32,
+        transcript: bool,
     ) -> Self {
         Self {
             backends,
             store,
             notifications,
             max_turn_steps,
+            transcript,
         }
     }
 
@@ -195,6 +200,11 @@ impl CodingJobHandler {
         let (provider, model) = self.backends.current();
         let mut config = CodingAgentConfig::new(model, &workspace);
         config.max_turn_steps = self.max_turn_steps;
+        if self.transcript {
+            // A job's stashed session carries across runs and only ever
+            // grows; the view is what keeps a repeat run's steps cheap.
+            config.transcript = Some(rhema_transcript::TranscriptSettings::default());
+        }
         let stashed = self
             .store
             .session(&instance_name)
@@ -332,7 +342,7 @@ mod tests {
             BackendRegistry::new(vec![Backend::headless("mock", provider)], None)
                 .expect("a single mock backend always constructs"),
         );
-        CodingJobHandler::new(backends, store, notifications, 16)
+        CodingJobHandler::new(backends, store, notifications, 16, true)
     }
 
     fn reply(text: &str) -> ModelOutput {
