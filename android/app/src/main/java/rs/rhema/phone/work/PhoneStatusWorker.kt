@@ -21,7 +21,11 @@ import kotlinx.serialization.json.put
 
 // Periodic phone-status source. Reads one snapshot, diffs it against the last
 // one that was fully POSTed, and ingests only the transitions. If any post
-// fails the snapshot is not saved, so the next run retries the transitions.
+// fails the snapshot is not saved, so the next run retries the transitions
+// from the same reading — which is why a failed run still succeeds: the
+// schedule is the retry, and `Result.retry()` would move the next run onto
+// WorkManager's exponential backoff (up to hours), the exact silence the
+// fleet reads as "last seen hours ago".
 //
 // Two kinds of topic leave this worker. Battery, network, and DND posts are
 // conversation: the claw dispatches them and the agent hears the flip. The
@@ -148,7 +152,11 @@ class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineW
 
         for ((topic, payload) in transitions) {
             val result = container.api.ingest(SOURCE, "phone:$deviceId:$topic", payload)
-            if (result !is ClawResult.Ok) return Result.retry()
+            // The snapshot stays unsaved, so the next scheduled run re-derives
+            // this whole transition set and posts it again. Retrying here
+            // instead would push that run out on WorkManager's backoff, and a
+            // phone in a pocket would go quiet for hours.
+            if (result !is ClawResult.Ok) return Result.success()
         }
         container.status.setSnapshot(snapshot)
         return Result.success()
