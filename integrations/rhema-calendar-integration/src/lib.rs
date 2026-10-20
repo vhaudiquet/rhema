@@ -3,16 +3,19 @@
 //! calendar feeds a resident agent can remind about, with the adapters
 //! that read them.
 //!
-//! An integration, not an agent: no driver, no loop, and no reminder
-//! policy lives here. A consumer composes the crate with its own agent
-//! tier — it picks a [`crate::Window`], polls a [`crate::Calendar`]
-//! for the occurrences starting inside it, and decides what a start
-//! time means (the claw daemon today: one reminder slot per lead time,
-//! dispatched into the resident agent). Every [`crate::CalendarEvent`]
-//! carries an id that stays the same across polls of the same
-//! occurrence, so a consumer re-polling on its own cadence never
-//! re-fires a reminder it already fed; the repetition is the
-//! consumer's dispatcher's dedup, not this crate's problem.
+//! An integration, not an agent: no driver, no model, and no loop
+//! lives here. A consumer composes the crate with its own agent tier —
+//! it picks a [`crate::Window`], polls a [`crate::Calendar`] for the
+//! occurrences starting inside it, and decides what a start time
+//! means. The default answer ships in [`crate::reminder`]: one
+//! reminder slot per lead time, keyed `calendar:<name>`, fed to the
+//! consumer's dispatcher as a `Source` — every reminder-shaped
+//! consumer starts there. A consumer with different semantics brings
+//! its own; every [`crate::CalendarEvent`] carries an id that stays
+//! the same across polls of the same occurrence, so any
+//! implementation re-polling on its own cadence never re-fires a
+//! reminder it already fed. The repetition is the consumer's
+//! dispatcher's dedup, not this crate's problem.
 //!
 //! Recurrence is expanded before a poll answers, so a consumer never
 //! sees a rule, only starts it can compare against its clock:
@@ -57,6 +60,8 @@
 //! - [`ics`] — the ICS/webcal adapter (one GET, expanded client-side)
 //! - [`caldav`] — the CalDAV adapter (one REPORT, the same expansion)
 //! - [`google`] — the Google Calendar API adapter (expanded server-side)
+//! - [`reminder`] — the default reminder source: due slots per lead
+//!   time, `calendar:<name>` keys, one `Source` over the configured feeds
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -67,6 +72,7 @@ pub mod error;
 pub mod event;
 pub mod google;
 pub mod ics;
+pub mod reminder;
 
 // Re-exported so implementors of the async seam can apply #[async_trait]
 // without adding the crate themselves.
@@ -77,3 +83,4 @@ pub use error::CalendarError;
 pub use event::{CalendarEvent, Window};
 pub use google::GoogleCalendar;
 pub use ics::IcsCalendar;
+pub use reminder::{CalendarKind, CalendarSource, CalendarWatch, calendar_key};

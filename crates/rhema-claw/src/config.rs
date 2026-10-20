@@ -15,6 +15,12 @@ use std::path::PathBuf;
 use rhema_forge_integration::RepoRef;
 use serde::{Deserialize, Serialize};
 
+// The calendar feed types are the integration's: the reminder source
+// polls them there, and the claw's config only describes them.
+pub use rhema_calendar_integration::reminder::{
+    CalendarKind, CalendarWatch, DEFAULT_HORIZON_HOURS, DEFAULT_LEAD_MINUTES,
+};
+
 /// How often the resident loop runs a detect pass, when
 /// [`ClawConfig::poll_interval_secs`] is unset.
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
@@ -28,16 +34,6 @@ pub const DEFAULT_MAX_TURN_STEPS: u32 = 2048;
 /// Where the HTTP surface listens when [`ClawConfig::listen`] is unset:
 /// loopback only — the surface is for the machine's resident user.
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7799";
-
-/// The one reminder lead, in minutes, a calendar carries when
-/// [`CalendarWatch::lead_minutes`] is unset: warn shortly before, and
-/// let a busier lead list be configured where wanted.
-pub const DEFAULT_LEAD_MINUTES: u64 = 15;
-
-/// How far ahead a calendar polls, in hours, when
-/// [`CalendarWatch::horizon_hours`] is unset. Must exceed the longest
-/// lead: a reminder cannot fire before the event is visible.
-pub const DEFAULT_HORIZON_HOURS: u32 = 24;
 
 /// Why a config operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -219,165 +215,6 @@ pub fn resolve_token(
                 .map(|token| token.trim().to_owned())
                 .filter(|token| !token.is_empty())
         })
-}
-
-/// Which calendar feed a calendar watch polls. The wire spelling is
-/// the source name the dispatcher registers and the reminder prompt
-/// names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CalendarKind {
-    /// An iCalendar feed over HTTP (`webcal://` counts): Google's
-    /// secret iCal address, a Nextcloud or Radicale share, Fastmail.
-    Ics,
-    /// A CalDAV collection, polled with a `calendar-query` REPORT:
-    /// Nextcloud, Radicale, Fastmail, a plain DAV server.
-    Caldav,
-    /// The Google Calendar API, against an OAuth access token or an
-    /// API key for public calendars.
-    Google,
-}
-
-impl CalendarKind {
-    /// The spelling the config, the reminder source, and the prompts
-    /// use.
-    pub fn name(self) -> &'static str {
-        match self {
-            CalendarKind::Ics => "ics",
-            CalendarKind::Caldav => "caldav",
-            CalendarKind::Google => "google",
-        }
-    }
-
-    /// Parses a calendar kind as the config spells it. `None` for
-    /// anything else.
-    pub fn parse(name: &str) -> Option<Self> {
-        match name.trim() {
-            "ics" => Some(CalendarKind::Ics),
-            "caldav" => Some(CalendarKind::Caldav),
-            "google" => Some(CalendarKind::Google),
-            _ => None,
-        }
-    }
-}
-
-/// One watched calendar. Unknown keys are rejected, as on a watch.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct CalendarWatch {
-    /// The calendar's name: unique across the list; the reminder key
-    /// is `calendar:<name>` and prompts name the calendar by it.
-    pub name: String,
-    /// Which feed kind this polls.
-    pub kind: CalendarKind,
-    /// The feed URL (`https://` or `webcal://`). Required for ics.
-    pub url: Option<String>,
-    /// The Google calendar id (`primary`, an address, a hex id).
-    /// Required for google.
-    pub calendar_id: Option<String>,
-    /// A bearer token (an OAuth access token for Google, auth for a
-    /// feed or collection that demands it). Falls back to
-    /// `CALENDAR_TOKEN`.
-    pub token: Option<String>,
-    /// The CalDAV user, for Basic auth. Set only with a password (or
-    /// `CALDAV_PASSWORD`); a calendar with a username authenticates
-    /// Basic, and `token` is the fallback only when there is none.
-    pub username: Option<String>,
-    /// The CalDAV password or app-specific password. Falls back to
-    /// `CALDAV_PASSWORD`.
-    pub password: Option<String>,
-    /// A Google API key for a public calendar; wins over `token`.
-    pub api_key: Option<String>,
-    /// Reminder lead times, minutes; each occurrence warns once per
-    /// lead. `[DEFAULT_LEAD_MINUTES]` when unset.
-    pub lead_minutes: Option<Vec<u64>>,
-    /// How far ahead the poll looks, hours. `[DEFAULT_HORIZON_HOURS]`
-    /// when unset; must exceed the longest lead.
-    pub horizon_hours: Option<u32>,
-}
-
-impl CalendarWatch {
-    /// The reminder leads as configured, blank and zero entries
-    /// dropped; [`DEFAULT_LEAD_MINUTES`] alone when nothing usable is
-    /// configured.
-    pub fn leads(&self) -> Vec<u64> {
-        match self.lead_minutes.as_ref() {
-            Some(leads) => {
-                let usable: Vec<u64> = leads.iter().copied().filter(|lead| *lead > 0).collect();
-                if usable.is_empty() {
-                    vec![DEFAULT_LEAD_MINUTES]
-                } else {
-                    usable
-                }
-            }
-            None => vec![DEFAULT_LEAD_MINUTES],
-        }
-    }
-
-    /// The poll horizon as configured, [`DEFAULT_HORIZON_HOURS`] when
-    /// unset. Zero reads as the default: a horizon of nothing polls
-    /// nothing, and the config validation refuses it when it would
-    /// matter.
-    pub fn horizon(&self) -> u32 {
-        self.horizon_hours
-            .filter(|hours| *hours > 0)
-            .unwrap_or(DEFAULT_HORIZON_HOURS)
-    }
-
-    /// A trimmed `token`/`api_key` value; blank counts as unset.
-    fn trimmed(value: Option<&str>) -> Option<String> {
-        value
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
-    }
-
-    /// The API key as configured, if any.
-    pub fn resolved_api_key(&self) -> Option<String> {
-        Self::trimmed(self.api_key.as_deref())
-    }
-
-    /// The CalDAV password to authenticate with: the config value,
-    /// then `CALDAV_PASSWORD`. Parameterized over the env lookup in
-    /// the pure [`CalendarWatch::resolve_password_with`].
-    pub fn resolved_password(&self) -> Option<String> {
-        Self::resolve_password_with(|name| std::env::var(name), self.password.as_deref())
-    }
-
-    /// Pure password resolution: the config value first, then
-    /// `CALDAV_PASSWORD`. Parameterized over the env lookup so tests
-    /// can hold the environment still.
-    pub fn resolve_password_with(
-        get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
-        stored: Option<&str>,
-    ) -> Option<String> {
-        Self::trimmed(stored).or_else(|| {
-            get_env("CALDAV_PASSWORD")
-                .ok()
-                .and_then(|token| Self::trimmed(Some(&token)))
-        })
-    }
-
-    /// The token to poll with: the config value, then `CALENDAR_TOKEN`;
-    /// the first non-blank wins. Parameterized over the env lookup in
-    /// the pure [`CalendarWatch::resolve_token_with`].
-    pub fn resolved_token(&self) -> Option<String> {
-        Self::resolve_token_with(|name| std::env::var(name), self.token.as_deref())
-    }
-
-    /// Pure token resolution: the config value first, then
-    /// `CALENDAR_TOKEN`. Parameterized over the env lookup so tests can
-    /// hold the environment still.
-    pub fn resolve_token_with(
-        get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
-        stored: Option<&str>,
-    ) -> Option<String> {
-        Self::trimmed(stored).or_else(|| {
-            get_env("CALENDAR_TOKEN")
-                .ok()
-                .and_then(|token| Self::trimmed(Some(&token)))
-        })
-    }
 }
 
 /// Whether a `host:port` listen address binds beyond loopback.

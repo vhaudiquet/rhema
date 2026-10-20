@@ -1,4 +1,4 @@
-//! The calendar source: deterministic detection of due reminders, the
+//! The reminder source: deterministic detection of due reminders, the
 //! task scheduler's shape over a calendar feed.
 //!
 //! The [`CalendarSource`] is a [`Source`] named `"calendars"` on the
@@ -13,32 +13,37 @@
 //! never fire: a lead in minutes against a midnight start is noise,
 //! and a date-shaped nudge is what the task tools are for.
 //!
-//! The model is never reached here; the turn happens because the
-//! dispatcher admitted the `calendar:<name>` key, exactly as for a
-//! task firing, and the resident handler's delivery rule auto-notifies
-//! the final text to the user's devices. One session per calendar
-//! persists across its reminders, so the claw remembers what it said
-//! about the last one. A dead feed is logged and skipped, never fatal:
-//! an outage must not eat the other calendars' reminders on the same
-//! pass. Cadence belongs to the daemon's loop.
+//! This is the default reminder policy, shipped beside the feeds it
+//! polls: one slot per lead time, `calendar:<name>` keys, all-day
+//! occurrences never fired. A consumer with different semantics brings
+//! its own source — the vocabulary's stable occurrence ids keep any
+//! implementation dedup-safe — but every reminder-shaped one starts
+//! here. The model is never reached; the turn happens because the
+//! consumer's dispatcher admitted the `calendar:<name>` key. One
+//! session per calendar persists across its reminders, so the resident
+//! remembers what it said about the last one. A dead feed is logged
+//! and skipped, never fatal: an outage must not eat the other
+//! calendars' reminders on the same pass. Cadence belongs to the
+//! consumer's loop.
 
 use std::sync::Arc;
 
 use rhema_autonomous_agent::{Source, SourceError, async_trait};
-use rhema_calendar_integration::{
-    CaldavCalendar, Calendar, CalendarEvent, GoogleCalendar, IcsCalendar, Window,
-};
-use rhema_rsd::{Clock, Dispatcher, Event, KeyFn};
-use serde_json::json;
+use rhema_rsd::{Clock, Dispatcher, Event, KeyFn, ResourceKey};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::config::{CalendarKind, CalendarWatch};
-use crate::interactive::passthrough_key_fn;
+use crate::{CaldavCalendar, Calendar, CalendarEvent, GoogleCalendar, IcsCalendar, Window};
 
 /// The source name the calendar reminders ingest under; registered on
-/// the resident dispatcher, so allowlists and `/v1/ingest` can name it.
+/// the consumer's dispatcher, so allowlists and ingest doors can name
+/// it.
 pub const CALENDARS_SOURCE: &str = "calendars";
+
+/// The key prefix the reminder sessions live under: `calendar:<name>`.
+pub const KEY_PREFIX: &str = "calendar:";
 
 /// The env variable a calendar's token falls back to.
 pub const TOKEN_ENV: &str = "CALENDAR_TOKEN";
@@ -49,7 +54,22 @@ pub const CALDAV_PASSWORD_ENV: &str = "CALDAV_PASSWORD";
 /// One calendar's reminder key: `calendar:<name>` — the session the
 /// reminder turns run in, persistent across the calendar's reminders.
 pub fn calendar_key(name: &str) -> String {
-    format!("calendar:{name}")
+    format!("{KEY_PREFIX}{name}")
+}
+
+/// The key function the source registers: the payload's `key`
+/// verbatim — one key, one owned session — with the infallible
+/// fallback, so a keyless payload can neither clobber a session nor
+/// wedge the dispatcher; it lands in the unroutable slot.
+fn reminder_key_fn() -> Arc<KeyFn> {
+    Arc::new(|event: &Event| {
+        event
+            .payload
+            .get("key")
+            .and_then(Value::as_str)
+            .map(ResourceKey::from)
+            .unwrap_or_else(|| ResourceKey::from(format!("{KEY_PREFIX}unroutable#{}", event.id)))
+    })
 }
 
 /// One configured calendar, resolved to a client the source polls.
@@ -238,7 +258,7 @@ impl CalendarSource {
                 horizon_hours: calendar.horizon(),
             });
         }
-        dispatcher.register_source(CALENDARS_SOURCE, passthrough_key_fn());
+        dispatcher.register_source(CALENDARS_SOURCE, reminder_key_fn());
         Ok(Self {
             dispatcher: dispatcher.clone(),
             clock,
@@ -254,7 +274,7 @@ impl CalendarSource {
         clock: Arc<dyn Clock>,
         feeds: Vec<Feed>,
     ) -> Self {
-        dispatcher.register_source(CALENDARS_SOURCE, passthrough_key_fn());
+        dispatcher.register_source(CALENDARS_SOURCE, reminder_key_fn());
         Self {
             dispatcher: dispatcher.clone(),
             clock,
@@ -270,7 +290,7 @@ impl Source for CalendarSource {
     }
 
     fn key_fn(&self) -> Arc<KeyFn> {
-        passthrough_key_fn()
+        reminder_key_fn()
     }
 
     async fn detect(&self) -> Result<usize, SourceError> {
@@ -289,7 +309,7 @@ impl Source for CalendarSource {
                 // the next pass polls it again, and the other
                 // calendars' reminders never wait behind it.
                 Err(err) => {
-                    eprintln!("[claw] warning: calendar {} failed: {err}", feed.name);
+                    eprintln!("[calendar] warning: {} feed failed: {err}", feed.name);
                     continue;
                 }
             };
@@ -311,6 +331,7 @@ impl Source for CalendarSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::CalendarError;
     use rhema_rsd::{DispatcherConfig, FixedClock, ResourceKey, SystemClock, VolatileStore};
 
     /// 2026-10-20T00:00:00Z, in milliseconds.
@@ -332,10 +353,7 @@ mod tests {
 
     #[async_trait]
     impl Calendar for Fixed {
-        async fn events(
-            &self,
-            _window: &Window,
-        ) -> Result<Vec<CalendarEvent>, rhema_calendar_integration::CalendarError> {
+        async fn events(&self, _window: &Window) -> Result<Vec<CalendarEvent>, CalendarError> {
             Ok(self.0.clone())
         }
     }
@@ -462,13 +480,8 @@ mod tests {
 
         #[async_trait]
         impl Calendar for Dead {
-            async fn events(
-                &self,
-                _window: &Window,
-            ) -> Result<Vec<CalendarEvent>, rhema_calendar_integration::CalendarError> {
-                Err(rhema_calendar_integration::CalendarError::Network(
-                    "down".to_owned(),
-                ))
+            async fn events(&self, _window: &Window) -> Result<Vec<CalendarEvent>, CalendarError> {
+                Err(CalendarError::Network("down".to_owned()))
             }
         }
 
@@ -542,5 +555,174 @@ mod tests {
         let prompt = slot.payload["prompt"].as_str().expect("prompt");
         assert!(prompt.contains("(untitled)"), "got: {prompt}");
         assert!(prompt.contains("in 3 minutes"), "got: {prompt}");
+    }
+}
+
+/// The one reminder lead, in minutes, a calendar carries when
+/// [`CalendarWatch::lead_minutes`] is unset: warn shortly before, and
+/// let a busier lead list be configured where wanted.
+pub const DEFAULT_LEAD_MINUTES: u64 = 15;
+
+/// How far ahead a calendar polls, in hours, when
+/// [`CalendarWatch::horizon_hours`] is unset. Must exceed the longest
+/// lead: a reminder cannot fire before the event is visible.
+pub const DEFAULT_HORIZON_HOURS: u32 = 24;
+
+/// Which calendar feed a calendar watch polls. The wire spelling is
+/// the source name the dispatcher registers and the reminder prompt
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CalendarKind {
+    /// An iCalendar feed over HTTP (`webcal://` counts): Google's
+    /// secret iCal address, a Nextcloud or Radicale share, Fastmail.
+    Ics,
+    /// A CalDAV collection, polled with a `calendar-query` REPORT:
+    /// Nextcloud, Radicale, Fastmail, a plain DAV server.
+    Caldav,
+    /// The Google Calendar API, against an OAuth access token or an
+    /// API key for public calendars.
+    Google,
+}
+
+impl CalendarKind {
+    /// The spelling the config, the reminder source, and the prompts
+    /// use.
+    pub fn name(self) -> &'static str {
+        match self {
+            CalendarKind::Ics => "ics",
+            CalendarKind::Caldav => "caldav",
+            CalendarKind::Google => "google",
+        }
+    }
+
+    /// Parses a calendar kind as the config spells it. `None` for
+    /// anything else.
+    pub fn parse(name: &str) -> Option<Self> {
+        match name.trim() {
+            "ics" => Some(CalendarKind::Ics),
+            "caldav" => Some(CalendarKind::Caldav),
+            "google" => Some(CalendarKind::Google),
+            _ => None,
+        }
+    }
+}
+
+/// One watched calendar. Unknown keys are rejected, as on a watch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct CalendarWatch {
+    /// The calendar's name: unique across the list; the reminder key
+    /// is `calendar:<name>` and prompts name the calendar by it.
+    pub name: String,
+    /// Which feed kind this polls.
+    pub kind: CalendarKind,
+    /// The feed URL (`https://` or `webcal://`). Required for ics.
+    pub url: Option<String>,
+    /// The Google calendar id (`primary`, an address, a hex id).
+    /// Required for google.
+    pub calendar_id: Option<String>,
+    /// A bearer token (an OAuth access token for Google, auth for a
+    /// feed or collection that demands it). Falls back to
+    /// `CALENDAR_TOKEN`.
+    pub token: Option<String>,
+    /// The CalDAV user, for Basic auth. Set only with a password (or
+    /// `CALDAV_PASSWORD`); a calendar with a username authenticates
+    /// Basic, and `token` is the fallback only when there is none.
+    pub username: Option<String>,
+    /// The CalDAV password or app-specific password. Falls back to
+    /// `CALDAV_PASSWORD`.
+    pub password: Option<String>,
+    /// A Google API key for a public calendar; wins over `token`.
+    pub api_key: Option<String>,
+    /// Reminder lead times, minutes; each occurrence warns once per
+    /// lead. `[DEFAULT_LEAD_MINUTES]` when unset.
+    pub lead_minutes: Option<Vec<u64>>,
+    /// How far ahead the poll looks, hours. `[DEFAULT_HORIZON_HOURS]`
+    /// when unset; must exceed the longest lead.
+    pub horizon_hours: Option<u32>,
+}
+
+impl CalendarWatch {
+    /// The reminder leads as configured, blank and zero entries
+    /// dropped; [`DEFAULT_LEAD_MINUTES`] alone when nothing usable is
+    /// configured.
+    pub fn leads(&self) -> Vec<u64> {
+        match self.lead_minutes.as_ref() {
+            Some(leads) => {
+                let usable: Vec<u64> = leads.iter().copied().filter(|lead| *lead > 0).collect();
+                if usable.is_empty() {
+                    vec![DEFAULT_LEAD_MINUTES]
+                } else {
+                    usable
+                }
+            }
+            None => vec![DEFAULT_LEAD_MINUTES],
+        }
+    }
+
+    /// The poll horizon as configured, [`DEFAULT_HORIZON_HOURS`] when
+    /// unset. Zero reads as the default: a horizon of nothing polls
+    /// nothing, and the config validation refuses it when it would
+    /// matter.
+    pub fn horizon(&self) -> u32 {
+        self.horizon_hours
+            .filter(|hours| *hours > 0)
+            .unwrap_or(DEFAULT_HORIZON_HOURS)
+    }
+
+    /// A trimmed `token`/`api_key` value; blank counts as unset.
+    fn trimmed(value: Option<&str>) -> Option<String> {
+        value
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// The API key as configured, if any.
+    pub fn resolved_api_key(&self) -> Option<String> {
+        Self::trimmed(self.api_key.as_deref())
+    }
+
+    /// The CalDAV password to authenticate with: the config value,
+    /// then `CALDAV_PASSWORD`. Parameterized over the env lookup in
+    /// the pure [`CalendarWatch::resolve_password_with`].
+    pub fn resolved_password(&self) -> Option<String> {
+        Self::resolve_password_with(|name| std::env::var(name), self.password.as_deref())
+    }
+
+    /// Pure password resolution: the config value first, then
+    /// `CALDAV_PASSWORD`. Parameterized over the env lookup so tests
+    /// can hold the environment still.
+    pub fn resolve_password_with(
+        get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
+        stored: Option<&str>,
+    ) -> Option<String> {
+        Self::trimmed(stored).or_else(|| {
+            get_env("CALDAV_PASSWORD")
+                .ok()
+                .and_then(|token| Self::trimmed(Some(&token)))
+        })
+    }
+
+    /// The token to poll with: the config value, then `CALENDAR_TOKEN`;
+    /// the first non-blank wins. Parameterized over the env lookup in
+    /// the pure [`CalendarWatch::resolve_token_with`].
+    pub fn resolved_token(&self) -> Option<String> {
+        Self::resolve_token_with(|name| std::env::var(name), self.token.as_deref())
+    }
+
+    /// Pure token resolution: the config value first, then
+    /// `CALENDAR_TOKEN`. Parameterized over the env lookup so tests can
+    /// hold the environment still.
+    pub fn resolve_token_with(
+        get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
+        stored: Option<&str>,
+    ) -> Option<String> {
+        Self::trimmed(stored).or_else(|| {
+            get_env("CALENDAR_TOKEN")
+                .ok()
+                .and_then(|token| Self::trimmed(Some(&token)))
+        })
     }
 }

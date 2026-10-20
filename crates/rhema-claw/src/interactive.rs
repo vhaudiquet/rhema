@@ -73,7 +73,12 @@ use crate::notifications::NotificationStore;
 /// `interactive:`, `task:`, `phone:`, and `calendar:`. Forge keys —
 /// they carry `#` — belong to the forge handler; these four and
 /// nothing else belong to this one.
-pub const RESIDENT_PREFIXES: [&str; 4] = ["interactive:", "task:", "phone:", "calendar:"];
+pub const RESIDENT_PREFIXES: [&str; 4] = [
+    "interactive:",
+    "task:",
+    "phone:",
+    rhema_calendar_integration::reminder::KEY_PREFIX,
+];
 
 /// The prefix of the live chat surface's keys: `interactive:<name>` —
 /// the name is the caller's label for the session (`web`, a chat

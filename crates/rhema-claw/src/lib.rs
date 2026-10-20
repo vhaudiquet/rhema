@@ -49,8 +49,6 @@
 //!   the standard set — the tool chain, the detect passes, and the
 //!   boot pass all iterate it
 //! - [`forge`] — the sources: one detectable stream per forge kind
-//! - [`calendar`] — the [`CalendarSource`]: due calendar reminders in,
-//!   events out
 //! - [`task_source`] — the [`TaskScheduler`]: due tasks in, events out
 //! - [`handler`] — the forge dispatch: snapshot, inbox, one turn, one
 //!   comment
@@ -69,7 +67,6 @@ pub mod accounts_tools;
 pub mod attachments;
 pub mod backends;
 pub mod bootstrap;
-pub mod calendar;
 pub mod config;
 pub mod consents;
 pub mod daemon;
@@ -103,7 +100,6 @@ pub use bootstrap::{
     BOOTSTRAP_SAVE, Bootstrap, BootstrapError, BootstrapKind, BootstrapStatus, DEFAULT_SYSTEM_MD,
     render_system,
 };
-pub use calendar::CalendarSource;
 pub use config::{ClawConfig, ConfigError, ForgeKind, Watch};
 pub use daemon::{ClawError, Daemon, TickReport, run_once};
 pub use environment::write_report;
