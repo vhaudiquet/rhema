@@ -13,8 +13,8 @@ use agent_client_protocol::schema::v1::{
     AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest, InitializeResponse,
     LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOptionId, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionConfigOptionCategory, SessionId, SessionNotification,
-    SessionUpdate, SetSessionConfigOptionRequest, StopReason,
+    SelectedPermissionOutcome, SessionConfigOption, SessionConfigOptionCategory, SessionId,
+    SessionNotification, SessionUpdate, SetSessionConfigOptionRequest, StopReason,
 };
 use agent_client_protocol::{Channel, Client, on_receive_notification, on_receive_request};
 use rhema_acp::AcpOptions;
@@ -22,10 +22,24 @@ use rhema_core::{Content, Message, ModelOutput, Role, StopReason as EngineStop, 
 
 /// A text reply: `text` streamed and appended, turn over.
 fn reply(text: &str) -> ModelOutput {
+    reply_using(text, Usage::default())
+}
+
+/// A text reply that bills `usage`.
+fn reply_using(text: &str, usage: Usage) -> ModelOutput {
     ModelOutput {
         message: Message::text(Role::Assistant, text),
         stop_reason: EngineStop::EndTurn,
-        usage: Usage::default(),
+        usage,
+    }
+}
+
+/// The token accounting one step bills.
+fn usage(input: u32, output: u32, cached: u32) -> Usage {
+    Usage {
+        input_tokens: input,
+        output_tokens: output,
+        cached_input_tokens: cached,
     }
 }
 
@@ -87,6 +101,86 @@ fn tool_updates(updates: &Updates) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+/// The context-and-cost updates, as `(used, size, cost amount)` — the
+/// cost `None` when the model card carries no prices.
+fn usage_updates(updates: &Updates) -> Vec<(u64, u64, Option<f64>)> {
+    updates
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::UsageUpdate(usage) => Some((
+                usage.used,
+                usage.size,
+                usage.cost.as_ref().map(|cost| cost.amount),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The session-info updates, as `(title, updated_at)`.
+fn info_updates(updates: &Updates) -> Vec<(Option<String>, Option<String>)> {
+    updates
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::SessionInfoUpdate(info) => {
+                let title = info.title.value().cloned();
+                let updated_at = info.updated_at.value().cloned();
+                Some((title, updated_at))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The config-option updates a session pushed.
+fn config_updates(updates: &Updates) -> Vec<Vec<SessionConfigOption>> {
+    updates
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::ConfigOptionUpdate(config) => Some(config.config_options.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The advertised command names, one list per update.
+fn command_updates(updates: &Updates) -> Vec<Vec<String>> {
+    updates
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|update| match update {
+            SessionUpdate::AvailableCommandsUpdate(commands) => Some(
+                commands
+                    .available_commands
+                    .iter()
+                    .map(|command| command.name.clone())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The thinking select's current value among `options`.
+fn thinking_current(options: &[SessionConfigOption]) -> Option<String> {
+    options
+        .iter()
+        .find(|option| option.category.as_ref() == Some(&SessionConfigOptionCategory::ThoughtLevel))
+        .and_then(|option| match &option.kind {
+            agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
+                Some(select.current_value.0.to_string())
+            }
+            _ => None,
+        })
 }
 
 fn options(replies: Vec<ModelOutput>, session_dir: &Path) -> AcpOptions {
@@ -256,11 +350,18 @@ async fn a_tool_call_round_trips_permissions() {
                 Some("echo wired")
             );
 
-            // The call opened pending and closed completed; the tool ran.
+            // The call opened pending, streamed its output as it ran,
+            // and closed completed; the tool ran.
             let closed = tool_updates(&collected);
-            assert_eq!(closed.len(), 1, "{:?}", collected.lock().unwrap());
-            assert_eq!(closed[0].0, "call-1");
-            assert!(closed[0].1.contains("Completed"), "{closed:?}");
+            assert!(closed.len() >= 2, "{:?}", collected.lock().unwrap());
+            assert!(
+                closed
+                    .iter()
+                    .any(|(id, status)| id == "call-1" && status.contains("InProgress"))
+            );
+            let last = closed.last().expect("at least two updates");
+            assert_eq!(last.0, "call-1");
+            assert!(last.1.contains("Completed"), "{closed:?}");
             assert_eq!(
                 chunk_texts(&collected),
                 vec!["done".to_owned()],
@@ -558,7 +659,16 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 .iter()
                 .find(|option| option.value.0.as_ref() == "mock/mock")
                 .expect("the current value is among the choices");
-            assert_eq!(first.description.as_deref(), Some("mock"));
+            // The description names the provider and, now the mock card
+            // carries a rate and a window, the picker shows them too.
+            assert!(
+                first
+                    .description
+                    .as_deref()
+                    .is_some_and(|description| description.starts_with("mock · $1.00/M in")),
+                "{}",
+                first.description.as_deref().unwrap_or_default()
+            );
 
             // A first turn runs on the advertised model.
             let first = cx
@@ -648,6 +758,280 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 .await
                 .expect("second prompt");
             assert_eq!(second.stop_reason, StopReason::EndTurn);
+            Ok(())
+        },
+    )
+    .await;
+    let _ = outcome;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_turn_reports_usage_context_cost_and_a_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_dir = dir.path().join("sessions");
+    let updates = updates();
+    let collected = updates.clone();
+
+    let permissions: Permissions = Arc::new(Mutex::new(Vec::new()));
+    let outcome = with_agent(
+        options(
+            vec![
+                reply_using("hello agent", usage(1_000, 100, 400)),
+                reply_using("again", usage(2_000, 50, 0)),
+            ],
+            &session_dir,
+        ),
+        updates,
+        permissions,
+        RequestPermissionOutcome::Cancelled,
+        async move |cx| {
+            initialize(&cx).await;
+            let session = new_session(&cx, &workspace).await.session_id;
+
+            let first = cx
+                .send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::from("hi there, help")],
+                ))
+                .block_task()
+                .await
+                .expect("first prompt");
+            assert_eq!(first.stop_reason, StopReason::EndTurn);
+            // The response carries the session's running totals.
+            let billed = first.usage.expect("the response carries usage");
+            assert_eq!(billed.total_tokens, 1_100);
+            assert_eq!(billed.input_tokens, 1_000);
+            assert_eq!(billed.output_tokens, 100);
+            assert_eq!(billed.cached_read_tokens, Some(400));
+
+            // The step left its context and cost on the wire: 1_100
+            // tokens in a 200k window, 600 uncached input at $1/M plus
+            // 400 cached at the quarter fallback plus 100 output at
+            // $3/M.
+            let seen = usage_updates(&collected);
+            let last = seen.last().expect("a usage update per turn");
+            assert_eq!(*last, (1_100, 200_000, Some(0.001)), "{seen:?}");
+
+            // The session titled itself from the first prompt and
+            // stamped its activity.
+            let infos = info_updates(&collected);
+            let (title, updated_at) = infos.last().expect("an info update per turn");
+            assert_eq!(title.as_deref(), Some("hi there, help"));
+            assert!(
+                updated_at
+                    .as_deref()
+                    .is_some_and(|at| at.ends_with('Z') && at.len() > 20),
+                "{updated_at:?}"
+            );
+
+            let second = cx
+                .send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::from("more")],
+                ))
+                .block_task()
+                .await
+                .expect("second prompt");
+            assert_eq!(second.stop_reason, StopReason::EndTurn);
+            let billed = second.usage.expect("the response carries usage");
+            assert_eq!(billed.total_tokens, 3_150);
+            assert_eq!(billed.input_tokens, 3_000);
+            assert_eq!(billed.output_tokens, 150);
+
+            // The context now rides the second step's shape, and the
+            // cost accumulated: 2_000 input at $1/M plus 50 output at
+            // $3/M on top of the first turn's 0.001.
+            let seen = usage_updates(&collected);
+            let last = seen.last().expect("a usage update per turn");
+            assert_eq!(last.0, 2_050);
+            assert_eq!(last.1, 200_000);
+            let cost = last.2.expect("the mock card prices its model");
+            assert!((cost - 0.00315).abs() < 1e-9, "{cost}");
+
+            // The title rode once; this update stamps activity only.
+            let infos = info_updates(&collected);
+            let (title, updated_at) = infos.last().expect("an info update per turn");
+            assert_eq!(title.as_deref(), None);
+            assert!(updated_at.is_some());
+            Ok(())
+        },
+    )
+    .await;
+    let _ = outcome;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_thinking_select_switches_effort() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_dir = dir.path().join("sessions");
+    let updates = updates();
+
+    let permissions: Permissions = Arc::new(Mutex::new(Vec::new()));
+    let outcome = with_agent(
+        options(vec![reply("first"), reply("second")], &session_dir),
+        updates,
+        permissions,
+        RequestPermissionOutcome::Cancelled,
+        async move |cx| {
+            initialize(&cx).await;
+            let session = new_session(&cx, &workspace).await;
+
+            // Both selects ship: the model and, current first, the
+            // profile's reasoning effort — medium when nothing stored
+            // names one.
+            assert_eq!(session.config_options.as_ref().map(Vec::len), Some(2));
+            let current = thinking_current(session.config_options.as_ref().expect("selects"));
+            assert_eq!(current.as_deref(), Some("medium"));
+
+            // An unknown effort is a named parameter error.
+            let bogus = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session.session_id.clone(),
+                    "thinking",
+                    "turbo",
+                ))
+                .block_task()
+                .await
+                .expect_err("an unknown effort must not switch");
+            assert_eq!(
+                bogus.code,
+                agent_client_protocol::schema::v1::ErrorCode::InvalidParams
+            );
+
+            // Switching rebuilds the agent over the same history; the
+            // response carries both selects with the new current.
+            let switched = cx
+                .send_request(SetSessionConfigOptionRequest::new(
+                    session.session_id.clone(),
+                    "thinking",
+                    "high",
+                ))
+                .block_task()
+                .await
+                .expect("set_config_option");
+            assert_eq!(
+                thinking_current(&switched.config_options).as_deref(),
+                Some("high")
+            );
+
+            // The session still serves turns on the rebuilt agent.
+            let first = cx
+                .send_request(PromptRequest::new(
+                    session.session_id.clone(),
+                    vec![ContentBlock::from("hi")],
+                ))
+                .block_task()
+                .await
+                .expect("first prompt");
+            assert_eq!(first.stop_reason, StopReason::EndTurn);
+            Ok(())
+        },
+    )
+    .await;
+    let _ = outcome;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slash_commands_switch_and_confirm_in_band() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_dir = dir.path().join("sessions");
+    let updates = updates();
+    let collected = updates.clone();
+
+    let permissions: Permissions = Arc::new(Mutex::new(Vec::new()));
+    let outcome = with_agent(
+        options(vec![reply("hello agent")], &session_dir),
+        updates,
+        permissions,
+        RequestPermissionOutcome::Cancelled,
+        async move |cx| {
+            initialize(&cx).await;
+            let session = new_session(&cx, &workspace).await.session_id;
+
+            // session/new advertised the commands the session takes.
+            assert_eq!(
+                command_updates(&collected).last(),
+                Some(&vec!["thinking".to_owned(), "model".to_owned()]),
+                "{:?}",
+                collected.lock().unwrap()
+            );
+
+            // /thinking switches in place: a confirmation streams as
+            // the turn's message and the pickers re-render.
+            let answer = cx
+                .send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::from("/thinking high")],
+                ))
+                .block_task()
+                .await
+                .expect("/thinking");
+            assert_eq!(answer.stop_reason, StopReason::EndTurn);
+            assert_eq!(
+                chunk_texts(&collected).last(),
+                Some(&"reasoning effort set to high".to_owned())
+            );
+            let pushed = config_updates(&collected);
+            assert_eq!(
+                thinking_current(pushed.last().expect("selects ride along")).as_deref(),
+                Some("high")
+            );
+
+            // A bare /model lists the current model and its choices.
+            let answer = cx
+                .send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::from("/model")],
+                ))
+                .block_task()
+                .await
+                .expect("/model");
+            assert_eq!(answer.stop_reason, StopReason::EndTurn);
+            assert!(
+                chunk_texts(&collected)
+                    .last()
+                    .is_some_and(|message| message.contains("model is mock/mock")),
+                "{:?}",
+                chunk_texts(&collected)
+            );
+
+            // A bad argument answers in band with the valid ones.
+            let answer = cx
+                .send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::from("/thinking turbo")],
+                ))
+                .block_task()
+                .await
+                .expect("/thinking turbo");
+            assert_eq!(answer.stop_reason, StopReason::EndTurn);
+            assert!(
+                chunk_texts(&collected)
+                    .last()
+                    .is_some_and(|message| { message.contains("default, low, medium, or high") })
+            );
+
+            // Any other slash spelling is model input like any other
+            // text: the turn runs and the model answers.
+            let answer = cx
+                .send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::from("/no/such command for real")],
+                ))
+                .block_task()
+                .await
+                .expect("an unknown command falls through");
+            assert_eq!(answer.stop_reason, StopReason::EndTurn);
+            assert_eq!(
+                chunk_texts(&collected).last(),
+                Some(&"hello agent".to_owned())
+            );
             Ok(())
         },
     )

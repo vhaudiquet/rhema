@@ -15,13 +15,15 @@
 //! engine events stream to the client as `session/update` notifications,
 //! the approval seam is answered by `session/request_permission`, and a
 //! turn drop repairs dangling tool calls — every seam the TUI already
-//! exercises, none of them new.
+//! exercises, none of them new. The session's spending is reported
+//! too: context window, cost, and per-turn token totals.
 //!
 //! Layout:
 //! - [`serve`] — the agent surface: handlers, session slots, `serve()`
 //! - [`backend`] — provider/model resolution from stored config + flags
 //! - [`store`] — session persistence keyed by the ACP session id
-//! - [`sink`] — engine events to `session/update` (crate-private)
+//! - [`sink`] — engine events to `session/update`, and the session's
+//!   usage meter (crate-private)
 //! - [`approval`] — `Approval` to `session/request_permission`
 //!   (crate-private)
 //!
