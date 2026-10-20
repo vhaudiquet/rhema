@@ -17,12 +17,11 @@
 //! a stale card. The tool answers a denial or an expiry in-band — a
 //! turn that asked and was refused is a turn that can say so.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -368,9 +367,6 @@ pub async fn wait_for_resolution(
     }
 }
 
-/// The tool's name on the wire.
-pub const ASK_SECRET: &str = "ask_secret";
-
 /// `ask_secret`: store an account through the human. The tool asks, the
 /// chat surface shows a card, the human pastes the secret, the HTTP
 /// route stores it into the identity store, and the tool wakes with the
@@ -402,42 +398,7 @@ struct AskSecretArgs {
 }
 
 #[async_trait]
-impl Tool for AskSecret {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            ASK_SECRET,
-            "Ask the human for a credential and store it in the agent \
-             accounts: a card appears in their chat where they paste the \
-             secret. Use it when a task needs an account (a forge token, \
-             an API key) that identity_list does not show yet — never ask \
-             for something already stored. The answer carries no secret, \
-             only whether it was stored and the account's id. The human \
-             may decline, or answer never; both come back in-band. Act \
-             with the stored account afterwards through identity_exec.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "service": { "type": "string",
-                        "description": "The service the credential is for, \
-                            e.g. 'github' or an internal tool's name." },
-                    "label": { "type": "string",
-                            "description": "Display name for the account; \
-                                defaults to the service name." },
-                    "username": { "type": "string",
-                        "description": "The login name on the service." },
-                    "url": { "type": "string",
-                        "description": "Base URL, for self-hosted instances." },
-                    "secret_kind": { "type": "string",
-                        "enum": ["token", "password"],
-                        "description": "What the secret is; default token." },
-                    "reason": { "type": "string",
-                        "description": "Why you need it — shown on the card." }
-                },
-                "required": ["service"]
-            }),
-        )
-    }
-
+impl ToolOp for AskSecret {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: AskSecretArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -516,26 +477,73 @@ impl Tool for AskSecret {
 
 /// The consent tool set over `store`: `ask_secret`. Built per dispatch,
 /// so the request names the session that asked.
+/// The compiled operation behind the manifest, by `run.builtin` id.
+fn builtins(
+    consents: Arc<ConsentStore>,
+    bridge: Arc<WaitBridge>,
+    hub: Arc<EventHub>,
+    key: ResourceKey,
+) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([(
+        "consent.ask".to_owned(),
+        Arc::new(AskSecret {
+            consents,
+            bridge,
+            hub,
+            key,
+            wait: CONSENT_WAIT,
+        }) as Arc<dyn ToolOp>,
+    )])
+}
+
+/// The consent tool's `TOOL.yaml`, embedded so the daemon ships it
+/// with no filesystem layout.
+pub const MANIFESTS: &[(&str, &str)] =
+    &[("ask_secret", include_str!("../tools/ask_secret/TOOL.yaml"))];
+
+/// The consent tool set: `ask_secret` — its spec from the embedded
+/// manifest, the operation compiled here.
 pub fn registry(
     consents: Arc<ConsentStore>,
     bridge: Arc<WaitBridge>,
     hub: Arc<EventHub>,
     key: ResourceKey,
 ) -> ToolRegistry {
+    let (tools, skipped) = rhema_autonomous_agent::manifest::builtin_tools(
+        MANIFESTS,
+        &builtins(consents, bridge, hub, key),
+    );
+    assert!(
+        skipped.is_empty(),
+        "the ask_secret tool manifest must load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(AskSecret {
-        consents,
-        bridge,
-        hub,
-        key,
-        wait: CONSENT_WAIT,
-    }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_autonomous_agent::Allowlist;
+
+    #[test]
+    fn the_manifest_loads_against_its_builtin_and_serves_the_registry() {
+        let resolver = registry(
+            store(),
+            Arc::new(WaitBridge::new()),
+            Arc::new(EventHub::with_capacity(16)),
+            ResourceKey::new("r"),
+        )
+        .resolver_for(&Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("ask_secret"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running an ask on resume would re-prompt and could re-store"
+        );
+    }
 
     fn store() -> Arc<ConsentStore> {
         Arc::new(ConsentStore::in_memory().expect("store opens"))

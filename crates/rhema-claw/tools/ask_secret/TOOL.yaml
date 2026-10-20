@@ -1,0 +1,37 @@
+# The model-facing spec of the ask_secret tool; the operation is the
+# compiled builtin named under `run`.
+name: ask_secret
+description: >-
+  Ask the human for a credential and store it in the agent accounts: a
+  card appears in their chat where they paste the secret. Use it when
+  a task needs an account (a forge token, an API key) that
+  identity_list does not show yet — never ask for something already
+  stored. The answer carries no secret, only whether it was stored and
+  the account's id. The human may decline, or answer never; both come
+  back in-band. Act with the stored account afterwards through
+  identity_exec.
+parameters:
+  type: object
+  properties:
+    service:
+      type: string
+      description: "The service the credential is for, e.g. 'github' or an internal tool's name."
+    label:
+      type: string
+      description: Display name for the account; defaults to the service name.
+    username:
+      type: string
+      description: The login name on the service.
+    url:
+      type: string
+      description: Base URL, for self-hosted instances.
+    secret_kind:
+      type: string
+      enum: [token, password]
+      description: What the secret is; default token.
+    reason:
+      type: string
+      description: "Why you need it — shown on the card."
+  required: [service]
+run:
+  builtin: consent.ask
