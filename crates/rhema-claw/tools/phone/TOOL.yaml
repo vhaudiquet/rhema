@@ -1,0 +1,44 @@
+# The model-facing spec of the phone tool; the operation is the
+# compiled builtin named under `run`.
+name: phone
+description: >-
+  Read or act on the user's phones. status and devices are read-only
+  and always allowed: status is one phone's latest reported state
+  (battery, charging, network, do-not-disturb, and — when the phone
+  reports them — location, foreground app, wifi, next alarm, each with
+  its observed_at), devices is the fleet with each phone's label and
+  last-seen time. A reinstall or upgrade can leave a stale identity
+  behind; devices shows it (old last-seen, no reports) and forget
+  retires it. The control actions — dnd_on, dnd_off, alert, forget —
+  first ask the human through a consent card in the chat; an approved
+  dnd_on/dnd_off/alert queues on the phone, which confirms on its own
+  poll (minutes, not seconds). Use controls sparingly and always with
+  a reason; a denial or a silence comes back in-band.
+parameters:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: [status, devices, forget, dnd_on, dnd_off, alert]
+      description: >-
+        status reads one phone's reported state; devices lists the
+        fleet with labels and last-seen; forget retires a device's
+        records (with consent); the rest control the phone (with
+        consent).
+    device:
+      type: string
+      description: >-
+        The target device id; the default phone when omitted. status
+        and devices accept any id; forget names the device to retire.
+    reason:
+      type: string
+      description: "Why the action is needed — shown on the consent card."
+    title:
+      type: string
+      description: An alert's headline.
+    body:
+      type: string
+      description: An alert's body.
+  required: [action]
+run:
+  builtin: phone.call

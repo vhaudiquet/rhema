@@ -45,11 +45,11 @@
 //! clock — a WorkManager floor of fifteen minutes — so the tool's
 //! answer may honestly be "queued, not yet confirmed".
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -511,51 +511,7 @@ struct PhoneArgs {
 }
 
 #[async_trait]
-impl Tool for PhoneTool {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            PHONE,
-            "Read or act on the user's phones. status and devices are \
-             read-only and always allowed: status is one phone's latest \
-             reported state (battery, charging, network, do-not-disturb, \
-             and — when the phone reports them — location, foreground \
-             app, wifi, next alarm, each with its observed_at), devices \
-             is the fleet with each phone's label and last-seen time. A \
-             reinstall or upgrade can leave a stale identity behind; \
-             devices shows it (old last-seen, no reports) and forget \
-             retires it. The control actions — dnd_on, dnd_off, alert, \
-             forget — first ask the human through a consent card in the \
-             chat; an approved dnd_on/dnd_off/alert queues on the phone, \
-             which confirms on its own poll (minutes, not seconds). Use \
-             controls sparingly and always with a reason; a denial or a \
-             silence comes back in-band.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string",
-                        "enum": ["status", "devices", "forget", "dnd_on", "dnd_off", "alert"],
-                        "description": "status reads one phone's reported \
-                            state; devices lists the fleet with labels and \
-                            last-seen; forget retires a device's records \
-                            (with consent); the rest control the phone \
-                            (with consent)." },
-                    "device": { "type": "string",
-                        "description": "The target device id; the default \
-                            phone when omitted. status and devices accept \
-                            any id; forget names the device to retire." },
-                    "reason": { "type": "string",
-                        "description": "Why the action is needed — shown on \
-                            the consent card." },
-                    "title": { "type": "string",
-                        "description": "An alert's headline." },
-                    "body": { "type": "string",
-                        "description": "An alert's body." }
-                },
-                "required": ["action"]
-            }),
-        )
-    }
-
+impl ToolOp for PhoneTool {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         let args: PhoneArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
@@ -730,6 +686,33 @@ enum Ask {
 
 /// The phone tool set over `store`: `phone`. Built per dispatch — a
 /// consent ask must name the session that asked.
+/// The compiled operation behind the manifest, by `run.builtin` id.
+fn builtins(
+    store: Arc<PhoneStore>,
+    consents: Arc<crate::consents::ConsentStore>,
+    bridge: Arc<WaitBridge>,
+    hub: Arc<EventHub>,
+    key: ResourceKey,
+) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([(
+        "phone.call".to_owned(),
+        Arc::new(PhoneTool {
+            store,
+            consents,
+            bridge,
+            hub,
+            key,
+            wait: CONSENT_WAIT,
+        }) as Arc<dyn ToolOp>,
+    )])
+}
+
+/// The phone tool's `TOOL.yaml`, embedded so the daemon ships it with
+/// no filesystem layout.
+pub const MANIFESTS: &[(&str, &str)] = &[("phone", include_str!("../tools/phone/TOOL.yaml"))];
+
+/// The phone tool set over `store`: `phone` — its spec from the
+/// embedded manifest, the operation compiled here.
 pub fn registry(
     store: Arc<PhoneStore>,
     consents: Arc<crate::consents::ConsentStore>,
@@ -737,21 +720,42 @@ pub fn registry(
     hub: Arc<EventHub>,
     key: ResourceKey,
 ) -> ToolRegistry {
+    let (tools, skipped) = rhema_autonomous_agent::manifest::builtin_tools(
+        MANIFESTS,
+        &builtins(store, consents, bridge, hub, key),
+    );
+    assert!(
+        skipped.is_empty(),
+        "the phone tool manifest must load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(PhoneTool {
-        store,
-        consents,
-        bridge,
-        hub,
-        key,
-        wait: CONSENT_WAIT,
-    }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_autonomous_agent::Allowlist;
+
+    #[test]
+    fn the_manifest_loads_against_its_builtin_and_serves_the_registry() {
+        let resolver = registry(
+            store(),
+            Arc::new(crate::consents::ConsentStore::in_memory().expect("store opens")),
+            Arc::new(WaitBridge::new()),
+            Arc::new(EventHub::with_capacity(16)),
+            ResourceKey::new("r"),
+        )
+        .resolver_for(&Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("phone"),
+            rhema_core::ReplaySafety::Unsafe,
+            "a resumed run must not re-queue a control or re-retire a device"
+        );
+    }
 
     fn store() -> Arc<PhoneStore> {
         Arc::new(PhoneStore::in_memory().expect("store opens"))
