@@ -50,8 +50,20 @@ function onScroll(): void {
   pinned.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48
 }
 
+// Thinking grows inside the trailing entry without changing the
+// entries length, so its total length joins the watch to keep the
+// stream pinned at the bottom.
+function liveThinkingLength(): number {
+  return (
+    props.live?.entries.reduce(
+      (count, entry) => (entry.kind === 'thinking' ? count + entry.text.length : count),
+      0,
+    ) ?? 0
+  )
+}
+
 watch(
-  () => [props.items.length, props.live?.reply.length, props.live?.thinking.length, props.live?.entries.length],
+  () => [props.items.length, props.live?.reply.length, liveThinkingLength(), props.live?.entries.length],
   async () => {
     if (!pinned.value) return
     await nextTick()
@@ -224,10 +236,6 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="32" />
           <div class="msg-body">
             <div class="who">{{ agentName }}</div>
-            <details v-if="item.turn.thinking" class="thinking">
-              <summary>thinking</summary>
-              <pre>{{ item.turn.thinking }}</pre>
-            </details>
             <TurnEntries
               :entries="item.turn.entries"
               @consent-answer="(id, answer) => emit('consentAnswer', id, answer)"
@@ -260,12 +268,9 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
         <AgentAvatar :avatar-url="avatarUrl" :mark="identity?.mark" :initials="identity?.initials ?? identity?.name?.slice(0, 1)" :size="32" />
         <div class="msg-body">
           <div class="who">{{ agentName }}</div>
-          <details v-if="live.thinking" class="thinking" open>
-            <summary>thinking</summary>
-            <pre>{{ live.thinking }}</pre>
-          </details>
           <TurnEntries
             :entries="live.entries"
+            :open-thinking="true"
             @consent-answer="(id, answer) => emit('consentAnswer', id, answer)"
             @consent-deny="(id) => emit('consentDeny', id)"
             @download-attachment="(id, name) => emit('downloadAttachment', id, name)"
@@ -434,30 +439,6 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
 
 .live .who {
   color: var(--accent-text);
-}
-
-.thinking {
-  margin-bottom: 8px;
-  color: var(--text3);
-}
-
-.thinking summary {
-  cursor: pointer;
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-}
-
-.thinking pre {
-  margin: 6px 0 0;
-  padding: 8px 10px;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text3);
-  font-style: italic;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
 }
 
 .reply {

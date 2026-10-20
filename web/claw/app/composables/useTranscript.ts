@@ -20,19 +20,21 @@ export interface ToolRow {
   command: string | null
 }
 
-/** One stream-ordered thing inside a turn: a tool call, the agent's ask
- * (a consent card), or a handover (an attachment). The turn renders its
- * entries in stream order, so a card sits where the event that raised
- * it happened — an ask appears at its tool call, not at the turn's top. */
+/** One stream-ordered thing inside a turn: a tool call, a piece of the
+ * thinking trace (adjacent deltas merged into one block), the agent's
+ * ask (a consent card), or a handover (an attachment). The turn renders
+ * its entries in stream order, so a card sits where the event that
+ * raised it happened — an ask appears at its tool call, not at the
+ * turn's top, and thinking sits between the calls it precedes. */
 export type TurnEntry =
   | { kind: 'tool'; row: ToolRow }
+  | { kind: 'thinking'; text: string }
   | { kind: 'consent'; consent: ConsentCard }
   | { kind: 'attachment'; attachment: AttachmentCard }
 
-/** One turn as the UI renders it: thinking trace, the stream-ordered
- * entries, the streamed reply. */
+/** One turn as the UI renders it: the stream-ordered entries and the
+ * streamed reply. */
 export interface TurnBlock {
-  thinking: string
   reply: string
   entries: TurnEntry[]
   /** Set by `turn_done`: `handled`, `failed`, or whatever the claw reports. */
@@ -148,7 +150,7 @@ export function useTranscript() {
   let nextId = 1
 
   function ensureLive(): TurnBlock {
-    if (!live.value) live.value = { thinking: '', reply: '', entries: [], outcome: null }
+    if (!live.value) live.value = { reply: '', entries: [], outcome: null }
     return live.value
   }
 
@@ -156,6 +158,7 @@ export function useTranscript() {
    * not alias the live slot's objects. */
   function cloneEntry(entry: TurnEntry): TurnEntry {
     if (entry.kind === 'tool') return { kind: 'tool', row: { ...entry.row } }
+    if (entry.kind === 'thinking') return { kind: 'thinking', text: entry.text }
     if (entry.kind === 'consent') return { kind: 'consent', consent: { ...entry.consent } }
     return { kind: 'attachment', attachment: { ...entry.attachment } }
   }
@@ -172,9 +175,16 @@ export function useTranscript() {
         items.value.push({ kind: 'sent', id: nextId++, text: event.text })
         break
       }
-      case 'thinking_delta':
-        ensureLive().thinking += event.text
+      case 'thinking_delta': {
+        // Thinking joins the entries at its stream position: a delta
+        // extends the trailing block, a gap (a tool call, a reply)
+        // opens the next one.
+        const entries = ensureLive().entries
+        const last = entries[entries.length - 1]
+        if (last?.kind === 'thinking') last.text += event.text
+        else entries.push({ kind: 'thinking', text: event.text })
         break
+      }
       case 'text_delta':
         ensureLive().reply += event.text
         break
