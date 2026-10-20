@@ -40,11 +40,12 @@
 //! the rest report interrupted.
 //!
 //! Deterministic setup first (spec §1, §8): the allowlist — permissive,
-//! v1's starting point — and the resolver chain (the shell toolset over
-//! the interactive workspace, the memory tools, `bootstrap_save`, the
-//! notify tool, the task tools, and the watch tools) are assembled
-//! before the first model call; the model never decides its own
-//! permissions. The system prompt is rendered per dispatch from the
+//! v1's starting point — and the resolver chain are assembled before
+//! the first model call; the model never decides its own permissions.
+//! The chain is the core toolsets (the shell over the interactive
+//! workspace, memory, `bootstrap_save`) plus every
+//! [`crate::extension::ClawExtension`]'s tools in the standard set's
+//! order. The system prompt is rendered per dispatch from the
 //! bootstrap template over the live SOUL/USER files.
 
 use std::collections::HashMap;
@@ -67,7 +68,6 @@ use crate::backends::BackendRegistry;
 use crate::bootstrap::{Bootstrap, DEFAULT_SYSTEM_MD, render_system};
 use crate::hub::{EventHub, TurnEvent};
 use crate::notifications::NotificationStore;
-use crate::watch_store::ClawStore;
 
 /// The key prefixes of the resident context (see the module docs):
 /// `interactive:`, `task:`, `phone:`, and `calendar:`. Forge keys —
@@ -158,16 +158,6 @@ pub struct InteractiveHandler {
     backends: Arc<BackendRegistry>,
     workspace: PathBuf,
     tools: Arc<ShellTools>,
-    watch_resolver: Arc<dyn rhema_core::ToolResolver>,
-    /// The identity tools: interactive-only by construction — the forge
-    /// handler never resolves them, so a forge comment cannot reach the
-    /// accounts.
-    accounts_resolver: Arc<dyn rhema_core::ToolResolver>,
-    /// The one tool that acts with a stored credential: the secret is
-    /// injected into a command's environment and never returns.
-    identity_exec: Arc<dyn rhema_core::ToolResolver>,
-    notify_resolver: Arc<dyn rhema_core::ToolResolver>,
-    task_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// The durable cross-session store the memory tools act on; the
     /// resolver is built per dispatch so its scope tracks the workspace.
     memory: Arc<dyn MemoryStore>,
@@ -179,98 +169,52 @@ pub struct InteractiveHandler {
     /// The notification table: the `notify` tool writes it, and
     /// non-interactive replies auto-notify through it.
     notifications: Arc<NotificationStore>,
-    /// The consent table the `ask_secret` tool asks through and the
-    /// consent routes answer into.
-    consents: Arc<crate::consents::ConsentStore>,
-    /// The wake bridge between those routes and the tools waiting on
-    /// their rows.
-    bridge: Arc<crate::consents::WaitBridge>,
-    /// The presentation-identity tool: the same store the settings
-    /// pages write, offered to the model as `identity_set`.
-    identity_resolver: Arc<dyn rhema_core::ToolResolver>,
-    /// The attachment store the `attach_file` tool copies into and the
-    /// fetch route serves from.
-    attachments: Arc<crate::attachments::AttachmentStore>,
-    /// The phone state and command queue the `phone` tool reads and
-    /// queues through.
-    phone: Arc<crate::phone::PhoneStore>,
-    /// The coding-agent tool: instances and async jobs the resident
-    /// drives a full rhema-coding-agent session through.
-    job_resolver: Arc<dyn rhema_core::ToolResolver>,
     /// How many tool rounds one turn may run before it is cut off — the
     /// config's runaway guard for an agent meant to work unattended; a
     /// follow-up message keeps going.
     max_turn_steps: u32,
+    /// The extension set the tool half of the chain is cut from, per
+    /// dispatch, in the standard set's order — the same set whose
+    /// sources the daemon's tick drives and whose boot pass runs first.
+    extensions: Arc<crate::extension::Extensions>,
 }
 
 impl InteractiveHandler {
     /// A handler whose chat turns run in `workspace` (the interactive
-    /// scratch space under the daemon's workspace root), whose watch
-    /// tools mutate `watches`, whose notifications land in
-    /// `notifications`, whose task tools manage `tasks`, and whose
-    /// `coding_agent` tool enqueues jobs into `jobs`. Approval is
-    /// v1-permissive — the shell is the point of a resident coding
-    /// agent — installed once, since resolution is synchronous within a
-    /// turn.
-    #[allow(clippy::too_many_arguments)] // sixteen parts, each load-bearing
+    /// scratch space under the daemon's workspace root) and whose tool
+    /// half of the resolver chain comes from `extensions` — the same
+    /// set whose sources the daemon's tick drives and whose boot pass
+    /// runs at assembly. The core toolsets are the handler's own: the
+    /// shell (approval v1-permissive — the shell is the point of a
+    /// resident coding agent — installed once, since resolution is
+    /// synchronous within a turn), memory, and `bootstrap_save`.
+    #[allow(clippy::too_many_arguments)] // eight parts, each load-bearing
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
-        watches: Arc<ClawStore>,
         memory: Arc<dyn MemoryStore>,
         bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
         notifications: Arc<NotificationStore>,
-        tasks: Arc<crate::task_store::TaskStore>,
-        jobs: Arc<crate::job_store::CodingJobStore>,
-        accounts: Arc<dyn rhema_identity::IdentityStore>,
         max_turn_steps: u32,
-        consents: Arc<crate::consents::ConsentStore>,
-        bridge: Arc<crate::consents::WaitBridge>,
-        attachments: Arc<crate::attachments::AttachmentStore>,
-        phone: Arc<crate::phone::PhoneStore>,
-        identity: Arc<crate::identity::IdentityStore>,
+        extensions: Arc<crate::extension::Extensions>,
     ) -> Self {
         let workspace = workspace.into();
         let tools = Arc::new(ShellTools::new(&workspace));
         tools.install_approval(Arc::new(AllowAll));
-        let watch_resolver =
-            crate::watch_tools::registry(watches.clone()).resolver_for(&Allowlist::permissive());
-        let accounts_resolver = crate::accounts_tools::registry(accounts.clone(), watches)
-            .resolver_for(&Allowlist::permissive());
-        let identity_exec: Arc<dyn rhema_core::ToolResolver> = Arc::new(
-            crate::accounts_tools::IdentityExec::new(accounts, workspace.clone()),
-        );
-        let notify_resolver = crate::notify_tools::registry(notifications.clone())
-            .resolver_for(&Allowlist::permissive());
-        let task_resolver =
-            crate::task_tools::registry(tasks).resolver_for(&Allowlist::permissive());
-        let job_resolver = crate::job_tools::registry(jobs).resolver_for(&Allowlist::permissive());
         let bootstrap_resolver =
             crate::bootstrap::registry(bootstrap.clone()).resolver_for(&Allowlist::permissive());
-        let identity_resolver = crate::identity::registry(identity.clone(), workspace.clone())
-            .resolver_for(&Allowlist::permissive());
         Self {
             backends,
             workspace,
             tools,
-            job_resolver,
-            watch_resolver,
-            accounts_resolver,
-            identity_exec,
-            notify_resolver,
-            task_resolver,
             memory,
             bootstrap,
             bootstrap_resolver,
-            identity_resolver,
             hub,
             notifications,
-            consents,
-            bridge,
-            attachments,
-            phone,
             max_turn_steps,
+            extensions,
         }
     }
 
@@ -307,49 +251,24 @@ impl InteractiveHandler {
             .map_err(|err| format!("cannot build the interactive agent: {err}"))
     }
 
-    /// The resolver chain one dispatch runs under: the shell toolset
-    /// over the interactive workspace, then the resident toolsets. The
-    /// consent and attachment tools build per dispatch — their asks and
-    /// cards must land on the session that asked, and the handler
+    /// The resolver chain one dispatch runs under: the core toolsets —
+    /// the shell over the interactive workspace, memory,
+    /// `bootstrap_save` — then every extension's tools in the standard
+    /// set's order. The whole chain is cut per dispatch: the
+    /// key-scoped toolsets (consents, attachments, phone) must bind
+    /// their asks and cards to the session that asked, and the handler
     /// serves every session.
     fn resolver(&self, key: &ResourceKey) -> Arc<ResolverChain> {
-        Arc::new(ResolverChain::new(vec![
+        let mut resolvers: Vec<Arc<dyn rhema_core::ToolResolver>> = vec![
             self.tools.clone(),
             Arc::new(MemoryResolver::new(
                 self.memory.clone(),
                 Scope::Workspace(self.workspace.clone()),
             )),
             self.bootstrap_resolver.clone(),
-            self.notify_resolver.clone(),
-            self.task_resolver.clone(),
-            self.job_resolver.clone(),
-            self.watch_resolver.clone(),
-            self.accounts_resolver.clone(),
-            self.identity_exec.clone(),
-            self.identity_resolver.clone(),
-            crate::consents::registry(
-                self.consents.clone(),
-                self.bridge.clone(),
-                self.hub.clone(),
-                key.clone(),
-            )
-            .resolver_for(&Allowlist::permissive()),
-            crate::attachments::registry(
-                self.attachments.clone(),
-                self.workspace.clone(),
-                self.hub.clone(),
-                key.clone(),
-            )
-            .resolver_for(&Allowlist::permissive()),
-            crate::phone::registry(
-                self.phone.clone(),
-                self.consents.clone(),
-                self.bridge.clone(),
-                self.hub.clone(),
-                key.clone(),
-            )
-            .resolver_for(&Allowlist::permissive()),
-        ]))
+        ];
+        resolvers.extend(self.extensions.tools(key));
+        Arc::new(ResolverChain::new(resolvers))
     }
 
     /// One dispatch: drain, restore, turn, stash, reply.
@@ -634,6 +553,7 @@ mod tests {
 
     use crate::notifications::NotificationStore;
     use crate::task_store::TaskStore;
+    use crate::watch_store::ClawStore;
 
     use crate::backends::{Backend, BackendRegistry};
     use rhema_core::{
@@ -713,6 +633,43 @@ mod tests {
         Arc::new(crate::attachments::AttachmentStore::open(root).expect("store opens"))
     }
 
+    /// The standard extension set over the tests' throwaway stores —
+    /// the same chain the daemon assembles, built per test so each
+    /// assertion runs against its own tables.
+    #[allow(clippy::too_many_arguments)]
+    fn test_extensions(
+        hub: Arc<EventHub>,
+        watches: Arc<ClawStore>,
+        notifications: Arc<NotificationStore>,
+        tasks: Arc<TaskStore>,
+        jobs: Arc<crate::job_store::CodingJobStore>,
+        accounts: Arc<dyn rhema_identity::IdentityStore>,
+        consents: Arc<crate::consents::ConsentStore>,
+        bridge: Arc<crate::consents::WaitBridge>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
+        phone: Arc<crate::phone::PhoneStore>,
+        identity: Arc<crate::identity::IdentityStore>,
+        workspace: &Path,
+    ) -> Arc<crate::extension::Extensions> {
+        Arc::new(crate::extension::Extensions::standard(
+            crate::extension::ExtensionDeps {
+                watches,
+                accounts,
+                notifications,
+                tasks,
+                jobs,
+                consents,
+                bridge,
+                attachments,
+                phone,
+                identity,
+                hub,
+                workspace: workspace.to_path_buf(),
+                calendars: Vec::new(),
+            },
+        ))
+    }
+
     fn test_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<BackendRegistry> {
         Arc::new(
             BackendRegistry::new(vec![Backend::headless("mock", provider)], None)
@@ -778,23 +735,30 @@ mod tests {
         let store = Arc::new(ClawStore::in_memory().expect("store opens"));
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
-        let handler = InteractiveHandler::new(
-            test_registry(recorder.clone()),
-            workspace.path().join("interactive"),
-            store,
-            Arc::new(rhema_memory::VolatileStore::new()),
-            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+        let notifications = notifications();
+        let extensions = test_extensions(
             hub.clone(),
-            notifications(),
+            store,
+            notifications.clone(),
             tasks(),
             jobs(),
             accounts(),
-            crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
             attachments(),
             phone(),
             identity(),
+            &workspace.path().join("interactive"),
+        );
+        let handler = InteractiveHandler::new(
+            test_registry(recorder.clone()),
+            workspace.path().join("interactive"),
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub.clone(),
+            notifications.clone(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+            extensions,
         );
         let dispatcher = Arc::new(Dispatcher::new(
             DispatcherConfig {
@@ -857,23 +821,31 @@ mod tests {
         // must name every tool the chain advertises, with its schema —
         // what the prompt lists is what the request carries.
         let workspace = tempfile::tempdir().expect("tempdir");
-        let handler = InteractiveHandler::new(
-            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
-            workspace.path().join("interactive"),
+        let hub = Arc::new(EventHub::default());
+        let notifications = notifications();
+        let extensions = test_extensions(
+            hub.clone(),
             Arc::new(ClawStore::in_memory().expect("store opens")),
-            Arc::new(rhema_memory::VolatileStore::new()),
-            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
-            Arc::new(EventHub::default()),
-            notifications(),
+            notifications.clone(),
             tasks(),
             jobs(),
             accounts(),
-            crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
             attachments(),
             phone(),
             identity(),
+            &workspace.path().join("interactive"),
+        );
+        let handler = InteractiveHandler::new(
+            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
+            workspace.path().join("interactive"),
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub.clone(),
+            notifications.clone(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+            extensions,
         );
         let specs = handler.resolver(&Key::from("interactive:web")).specs();
         assert!(
@@ -1120,23 +1092,30 @@ mod tests {
         let store = Arc::new(ClawStore::in_memory().expect("store opens"));
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
-        let handler = InteractiveHandler::new(
-            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
-            workspace.path().join("interactive"),
-            store,
-            Arc::new(rhema_memory::VolatileStore::new()),
-            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+        let notifications = notifications();
+        let extensions = test_extensions(
             hub.clone(),
-            notifications(),
+            store,
+            notifications.clone(),
             tasks(),
             jobs(),
             accounts(),
-            crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
             attachments(),
             phone(),
             identity(),
+            &workspace.path().join("interactive"),
+        );
+        let handler = InteractiveHandler::new(
+            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
+            workspace.path().join("interactive"),
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub.clone(),
+            notifications.clone(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+            extensions,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1199,6 +1178,21 @@ mod tests {
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
         let workspace_path = workspace.path().join("interactive");
+        let notifications = notifications();
+        let extensions = test_extensions(
+            hub.clone(),
+            store,
+            notifications.clone(),
+            tasks(),
+            jobs(),
+            accounts(),
+            consents(),
+            bridge(),
+            attachments(),
+            phone(),
+            identity(),
+            &workspace_path,
+        );
         let handler = InteractiveHandler::new(
             test_registry(Arc::new(MockProvider::new([
                 scripted_call(
@@ -1211,20 +1205,12 @@ mod tests {
                 reply("the release channel is #deploys."),
             ]))),
             workspace_path.clone(),
-            store,
             memory.clone(),
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
-            hub,
-            notifications(),
-            tasks(),
-            jobs(),
-            accounts(),
+            hub.clone(),
+            notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
-            consents(),
-            bridge(),
-            attachments(),
-            phone(),
-            identity(),
+            extensions,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1292,6 +1278,21 @@ mod tests {
         let store = Arc::new(ClawStore::in_memory().expect("store opens"));
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
+        let notifications = notifications();
+        let extensions = test_extensions(
+            hub.clone(),
+            store,
+            notifications.clone(),
+            tasks(),
+            jobs(),
+            accounts(),
+            consents(),
+            bridge(),
+            attachments(),
+            phone(),
+            identity(),
+            &workspace.path().join("interactive"),
+        );
         let handler = InteractiveHandler::new(
             test_registry(Arc::new(MockProvider::new([
                 scripted_call(
@@ -1308,20 +1309,12 @@ mod tests {
                 reply("setup is done."),
             ]))),
             workspace.path().join("interactive"),
-            store,
             Arc::new(rhema_memory::VolatileStore::new()),
             bootstrap.clone(),
-            hub,
-            notifications(),
-            tasks(),
-            jobs(),
-            accounts(),
+            hub.clone(),
+            notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
-            consents(),
-            bridge(),
-            attachments(),
-            phone(),
-            identity(),
+            extensions,
         );
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1378,23 +1371,30 @@ mod tests {
         let store = Arc::new(ClawStore::in_memory().expect("store opens"));
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
-        let handler = InteractiveHandler::new(
-            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
-            workspace.path().join("interactive"),
+        let notifications = notifications();
+        let extensions = test_extensions(
+            hub.clone(),
             store,
-            Arc::new(rhema_memory::VolatileStore::new()),
-            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
-            hub,
-            notifications(),
+            notifications.clone(),
             tasks(),
             jobs(),
             accounts(),
-            crate::config::DEFAULT_MAX_TURN_STEPS,
             consents(),
             bridge(),
             attachments(),
             phone(),
             identity(),
+            &workspace.path().join("interactive"),
+        );
+        let handler = InteractiveHandler::new(
+            test_registry(Arc::new(MockProvider::new([reply("hi back")]))),
+            workspace.path().join("interactive"),
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub.clone(),
+            notifications.clone(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+            extensions,
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1450,26 +1450,32 @@ mod tests {
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
         let backing = Arc::new(VolatileStore::new());
+        let extensions = test_extensions(
+            hub.clone(),
+            store,
+            notifications.clone(),
+            tasks(),
+            jobs(),
+            accounts(),
+            consents(),
+            bridge(),
+            attachments(),
+            phone(),
+            identity(),
+            &workspace.path().join("interactive"),
+        );
         let handler = Arc::new(InteractiveHandler::new(
             test_registry(Arc::new(MockProvider::new([
                 reply("the bread is done."),
                 reply("hi back"),
             ]))),
             workspace.path().join("interactive"),
-            store,
             Arc::new(rhema_memory::VolatileStore::new()),
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
-            hub,
+            hub.clone(),
             notifications.clone(),
-            tasks(),
-            jobs(),
-            accounts(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
-            consents(),
-            bridge(),
-            attachments(),
-            phone(),
-            identity(),
+            extensions,
         ));
 
         let dispatcher = Arc::new(Dispatcher::new(
@@ -1566,26 +1572,33 @@ mod tests {
         let store = Arc::new(ClawStore::in_memory().expect("store opens"));
         let hub = Arc::new(EventHub::default());
         let workspace = tempfile::tempdir().expect("tempdir");
+        let notifications = notifications();
+        let extensions = test_extensions(
+            hub.clone(),
+            store,
+            notifications.clone(),
+            tasks(),
+            jobs(),
+            accounts(),
+            consents(),
+            bridge(),
+            attachments(),
+            phone(),
+            identity(),
+            &workspace.path().join("interactive"),
+        );
         let handler = InteractiveHandler::new(
             test_registry(Arc::new(MockProvider::new([
                 reply("noted, leaving early."),
                 reply("evening summary: shipped the claw."),
             ]))),
             workspace.path().join("interactive"),
-            store,
             Arc::new(rhema_memory::VolatileStore::new()),
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
-            hub,
-            notifications(),
-            tasks(),
-            jobs(),
-            accounts(),
+            hub.clone(),
+            notifications.clone(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
-            consents(),
-            bridge(),
-            attachments(),
-            phone(),
-            identity(),
+            extensions,
         );
         let backing = Arc::new(VolatileStore::new());
         let dispatcher = Arc::new(Dispatcher::new(

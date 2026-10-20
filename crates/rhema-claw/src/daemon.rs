@@ -30,13 +30,11 @@ use rhema_rsd::{
     SystemClock,
 };
 
-use crate::calendar::CalendarSource;
-use crate::config::{ClawConfig, ConfigError, ForgeKind};
-use crate::forge::ForgeSource;
+use crate::config::{ClawConfig, ConfigError};
+use crate::extension::{ExtensionDeps, Extensions, Lanes};
 use crate::handler::ClawHandler;
 use crate::http::ClawState;
 use crate::notifications::NotificationStore;
-use crate::task_source::TaskScheduler;
 use crate::task_store::TaskStore;
 use rhema_memory::FileMemoryStore;
 
@@ -125,15 +123,16 @@ fn interactive_dispatch() -> DispatcherConfig {
     }
 }
 
-/// The resident daemon: one source per forge kind, the calendar
-/// reminders, the task scheduler, the coding-job source, the three
-/// drivers, and the HTTP surface.
+/// The resident daemon: the extension set's sources (the forge watches,
+/// the task scheduler, the coding jobs, the calendar reminders), the
+/// three drivers, and the HTTP surface.
 pub struct Daemon {
-    sources: Vec<ForgeSource>,
-    calendar_source: CalendarSource,
-    scheduler: TaskScheduler,
-    job_source: crate::jobs::JobsSource,
-    jobs: Arc<crate::job_store::CodingJobStore>,
+    /// The extension set: the boot pass runs its hooks, and the tick
+    /// detects through the sources collected from it at assembly.
+    extensions: Arc<Extensions>,
+    /// The set's sources, in set order, each registered on the lane it
+    /// feeds; built once, at assembly.
+    sources: Vec<Box<dyn Source>>,
     forge_dispatcher: Arc<Dispatcher>,
     interactive_dispatcher: Arc<Dispatcher>,
     jobs_dispatcher: Arc<Dispatcher>,
@@ -183,6 +182,11 @@ impl Daemon {
         let notifications = Arc::new(NotificationStore::open(&db)?);
         let tasks = Arc::new(TaskStore::open(&db)?);
         let turns = Arc::new(crate::turn_store::TurnStore::open(&db)?);
+        // The hub replays what past turns streamed: every event appends
+        // to the turn-history table as it streams, so a restart's replay
+        // reads the table back — a restart continues the transcript,
+        // whole, with no boot-time seed pass.
+        let hub = Arc::new(EventHub::with_record_store(turns.clone()));
         // The coding-job tables: instances the `coding_agent` tool
         // drives, jobs the jobs dispatcher answers.
         let jobs = Arc::new(crate::job_store::CodingJobStore::open(&db)?);
@@ -221,23 +225,6 @@ impl Daemon {
                 .map_err(|err| ClawError::Backend(err.to_string()))?,
         );
 
-        // One source per known forge kind, whatever the table currently
-        // holds: a watch added later (chat tool, HTTP route) of a kind
-        // nobody watched at startup still has its key function
-        // registered. A source over zero watches detects nothing.
-        let sources = [ForgeKind::GitHub, ForgeKind::Gitea, ForgeKind::GitLab]
-            .into_iter()
-            .map(|kind| {
-                ForgeSource::new(
-                    &forge_dispatcher,
-                    kind.name(),
-                    watches.clone(),
-                    accounts.clone(),
-                    notifications.clone(),
-                )
-            })
-            .collect();
-
         // The forge handler resolves its watches through the table at
         // dispatch time, so a watch added mid-run is answerable without a
         // restart.
@@ -260,11 +247,6 @@ impl Daemon {
                 })),
         );
 
-        // The hub replays what past turns streamed: every event appends
-        // to the turn-history table as it streams, so a restart's replay
-        // reads the table back — a restart continues the transcript,
-        // whole, with no boot-time seed pass.
-        let hub = Arc::new(EventHub::with_record_store(turns.clone()));
         // The consent table and its wake bridge: the `ask_secret` tool
         // asks through them, the consent routes answer through them.
         let consents = Arc::new(crate::consents::ConsentStore::open(&db)?);
@@ -306,23 +288,44 @@ impl Daemon {
         // at every boot by deterministic discovery, never by the model,
         // and regenerated over whatever the last boot wrote.
         crate::environment::write_report(config.bootstrap_dir()?.join("ENVIRONMENT.md"))?;
+        // The extension set: every resident feature beyond the core, one
+        // struct per integration. The handler's tool chain, the tick's
+        // detect passes, and the boot pass below all iterate it — the
+        // daemon names no feature twice.
+        let extensions = Arc::new(Extensions::standard(ExtensionDeps {
+            watches: watches.clone(),
+            accounts: accounts.clone(),
+            notifications: notifications.clone(),
+            tasks: tasks.clone(),
+            jobs: jobs.clone(),
+            consents: consents.clone(),
+            bridge: bridge.clone(),
+            attachments: attachments.clone(),
+            phone: phone.clone(),
+            identity: identity.clone(),
+            hub: hub.clone(),
+            workspace: interactive_workspace.clone(),
+            calendars: config.calendars.clone(),
+        }));
+        eprintln!("[claw] extensions: {}", extensions.names().join(", "));
+        // The sources register on their lanes as they build: a watch of
+        // a kind nobody watched at startup still has its key function
+        // registered, and a source over zero watches detects nothing.
+        let lanes = Lanes {
+            forge: forge_dispatcher.clone(),
+            interactive: interactive_dispatcher.clone(),
+            jobs: jobs_dispatcher.clone(),
+        };
+        let sources = extensions.sources(&lanes)?;
         let interactive_handler = InteractiveHandler::new(
             backends.clone(),
             interactive_workspace,
-            watches.clone(),
             memory,
             bootstrap.clone(),
             hub.clone(),
             notifications.clone(),
-            tasks.clone(),
-            jobs.clone(),
-            accounts.clone(),
             config.max_turn_steps,
-            consents.clone(),
-            bridge.clone(),
-            attachments.clone(),
-            phone.clone(),
-            identity.clone(),
+            extensions.clone(),
         );
         let interactive_driver = Arc::new(
             Driver::new(
@@ -350,24 +353,7 @@ impl Daemon {
                     crate::jobs::is_job_key(key.as_str())
                 })),
         );
-        let job_source = crate::jobs::JobsSource::new(&jobs_dispatcher, jobs.clone());
         crate::interactive::register_user(&interactive_dispatcher);
-        // The scheduler is the resident dispatcher's second own source:
-        // its detect pass (the daemon's tick drives it) is what turns a
-        // due task row into an event, never a timer near the model.
-        let scheduler = TaskScheduler::new(
-            &interactive_dispatcher,
-            Arc::new(SystemClock),
-            tasks.clone(),
-        );
-        // The calendar reminders join them: a due reminder is an
-        // event, never a timer near the model.
-        let calendar_source = CalendarSource::new(
-            &interactive_dispatcher,
-            Arc::new(SystemClock),
-            &config.calendars,
-        )
-        .map_err(ClawError::Backend)?;
 
         let http = ClawState::new(
             interactive_dispatcher.clone(),
@@ -389,11 +375,8 @@ impl Daemon {
         );
 
         Ok(Self {
+            extensions,
             sources,
-            calendar_source,
-            scheduler,
-            job_source,
-            jobs,
             forge_dispatcher,
             interactive_dispatcher,
             jobs_dispatcher,
@@ -435,13 +418,10 @@ impl Daemon {
     /// top of the next dispatch (safe tools re-run, the rest report
     /// interrupted). Idempotent; called before the first pass.
     pub async fn bootstrap(&self) -> Result<(), ClawError> {
-        // The job rows first: a turn the restart cut is failed
-        // interrupted before anything re-runs, and a still-queued row
-        // is re-armed with a fresh dedup id.
-        let touched = self.jobs.recover()?;
-        if touched > 0 {
-            eprintln!("[claw] jobs: {touched} row(s) recovered at boot");
-        }
+        // The extension boot hooks first: a coding job the restart cut
+        // is failed interrupted before anything re-runs, and a
+        // still-queued row is re-armed with a fresh dedup id.
+        self.extensions.boot()?;
         self.forge_dispatcher.recover_all()?;
         self.jobs_dispatcher.recover_all()?;
         self.interactive_dispatcher.recover_all()?;
@@ -454,9 +434,10 @@ impl Daemon {
     /// backstop — a message delivered live into a running turn waits at
     /// the key for a pass like this one.
     pub async fn tick(&self) -> Result<TickReport, ClawError> {
-        let mut detected = self.scheduler.detect().await?;
-        detected += self.calendar_source.detect().await?;
-        detected += self.job_source.detect().await?;
+        // The tick only detects — every timer here drives
+        // deterministic detection, and the set's order is the contract:
+        // due tasks before the calendar reminders that fire for them.
+        let mut detected = 0usize;
         for source in &self.sources {
             detected += source.detect().await?;
         }

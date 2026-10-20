@@ -45,6 +45,9 @@
 //! - [`watch_tools`] — the agent's watch-management tool set
 //! - [`notify_tools`] — the `notify` tool: the queue a device polls
 //! - [`task_tools`] — `schedule_task`, `list_tasks`, `cancel_task`
+//! - [`extension`] — the extension seam: the `ClawExtension` trait and
+//!   the standard set — the tool chain, the detect passes, and the
+//!   boot pass all iterate it
 //! - [`forge`] — the sources: one detectable stream per forge kind
 //! - [`calendar`] — the [`CalendarSource`]: due calendar reminders in,
 //!   events out
@@ -71,6 +74,7 @@ pub mod config;
 pub mod consents;
 pub mod daemon;
 pub mod environment;
+pub mod extension;
 pub mod forge;
 pub mod handler;
 pub mod http;
@@ -104,6 +108,7 @@ pub use calendar::CalendarSource;
 pub use config::{ClawConfig, ConfigError, ForgeKind, Watch};
 pub use daemon::{ClawError, Daemon, TickReport, run_once};
 pub use environment::write_report;
+pub use extension::{ClawExtension, ExtensionDeps, Extensions, Lanes};
 pub use forge::ForgeSource;
 pub use handler::ClawHandler;
 pub use hub::{EventHub, TurnEvent};

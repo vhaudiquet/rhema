@@ -111,6 +111,11 @@ pub enum ForgeKind {
 }
 
 impl ForgeKind {
+    /// Every kind the claw ships a source for, in registration order.
+    /// A kind missing here has no watch poller, whatever the table
+    /// holds.
+    pub const ALL: [ForgeKind; 3] = [ForgeKind::GitHub, ForgeKind::Gitea, ForgeKind::GitLab];
+
     /// The source name this kind registers and dispatches under.
     pub fn name(self) -> &'static str {
         match self {
