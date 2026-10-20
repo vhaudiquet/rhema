@@ -10,11 +10,11 @@
 //! talks, what it is like — is deliberately not here: that is SOUL.md,
 //! the bootstrap store's domain, edited with the agent over onboarding.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{Tool, ToolRegistry, async_trait};
-use rhema_core::ToolSpec;
+use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -239,9 +239,6 @@ impl IdentityStore {
     }
 }
 
-/// The tool's name on the wire.
-pub const IDENTITY_SET: &str = "identity_set";
-
 /// `identity_set`: the model's surface over its own presentation —
 /// the same store the settings pages write, so what it sets here is
 /// what every client renders. Personality stays out of reach: that is
@@ -252,50 +249,7 @@ struct IdentitySet {
 }
 
 #[async_trait]
-impl Tool for IdentitySet {
-    fn spec(&self) -> ToolSpec {
-        ToolSpec::new(
-            IDENTITY_SET,
-            "Set your own presentation identity: the name, mark, \
-             initials, tagline, and signoff the interfaces render, and \
-             your avatar or logo images. This is how you look, not who \
-             you are — personality lives in SOUL.md. Leave a field out \
-             to keep what is set; an empty string clears it. The avatar \
-             and logo take a workspace-relative path to an image file \
-             (png, jpeg, gif, or webp, under 2 MiB — svg is refused).",
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string",
-                        "description": "Display name: message author, \
-                            window title, notifications. Up to 64 chars." },
-                    "mark": { "type": "string",
-                        "description": "Glyph or emoji for the rail and \
-                            favicon. Up to 8 chars." },
-                    "initials": { "type": "string",
-                        "description": "Shown when there is no mark and \
-                            no avatar. Up to 4 chars." },
-                    "tagline": { "type": "string",
-                        "description": "One line under the name. Up to \
-                            120 chars." },
-                    "signoff": { "type": "string",
-                        "description": "Appended to messages sent \
-                            outside the interface. Up to 120 chars." },
-                    "avatar": { "type": "string",
-                        "description": "Workspace-relative path to the \
-                            avatar image." },
-                    "logo": { "type": "string",
-                        "description": "Workspace-relative path to the \
-                            logo image." },
-                    "clear": { "type": "array",
-                        "items": { "type": "string",
-                            "enum": ["avatar", "logo"] },
-                        "description": "Images to remove." }
-                },
-            }),
-        )
-    }
-
+impl ToolOp for IdentitySet {
     async fn invoke(&self, args: Value) -> Result<String, String> {
         if !args.is_object() {
             return Err("bad arguments: expected an object".to_owned());
@@ -373,19 +327,54 @@ fn workspace_image(workspace: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(workspace.join(relative))
 }
 
-/// The identity tool set over `store`: `identity_set`.
+/// The compiled operation behind the manifest, by `run.builtin` id.
+fn builtins(store: Arc<IdentityStore>, workspace: PathBuf) -> BTreeMap<String, Arc<dyn ToolOp>> {
+    BTreeMap::from([(
+        "identity.set".to_owned(),
+        Arc::new(IdentitySet { store, workspace }) as Arc<dyn ToolOp>,
+    )])
+}
+
+/// The identity tool's `TOOL.yaml`, embedded so the daemon ships it
+/// with no filesystem layout.
+pub const MANIFESTS: &[(&str, &str)] = &[(
+    "identity_set",
+    include_str!("../tools/identity_set/TOOL.yaml"),
+)];
+
+/// The identity tool set over `store`: `identity_set` — its spec from
+/// the embedded manifest, the operation compiled here.
 pub fn registry(store: Arc<IdentityStore>, workspace: impl Into<PathBuf>) -> ToolRegistry {
+    let (tools, skipped) = rhema_autonomous_agent::manifest::builtin_tools(
+        MANIFESTS,
+        &builtins(store, workspace.into()),
+    );
+    assert!(
+        skipped.is_empty(),
+        "the identity_set tool manifest must load: {skipped:?}"
+    );
     let mut registry = ToolRegistry::new();
-    registry.register(Arc::new(IdentitySet {
-        store,
-        workspace: workspace.into(),
-    }));
+    for tool in tools {
+        registry.register(tool);
+    }
     registry
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_autonomous_agent::Allowlist;
+
+    #[test]
+    fn the_manifest_loads_against_its_builtin_and_serves_the_registry() {
+        let (store, _dir) = store();
+        let resolver = registry(store.into(), "/ws").resolver_for(&Allowlist::permissive());
+        assert_eq!(
+            resolver.replay_safety("identity_set"),
+            rhema_core::ReplaySafety::Unsafe,
+            "re-running a set on resume would re-write the identity"
+        );
+    }
 
     /// The store over a tempdir, with the guard returned so the
     /// directory outlives the calls under test.

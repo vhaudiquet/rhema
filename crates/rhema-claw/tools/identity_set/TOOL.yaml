@@ -1,0 +1,47 @@
+# The model-facing spec of the identity_set tool; the operation is the
+# compiled builtin named under `run`.
+name: identity_set
+description: >-
+  Set your own presentation identity: the name, mark, initials,
+  tagline, and signoff the interfaces render, and your avatar or logo
+  images. This is how you look, not who you are — personality lives in
+  SOUL.md. Leave a field out to keep what is set; an empty string
+  clears it. The avatar and logo take a workspace-relative path to an
+  image file (png, jpeg, gif, or webp, under 2 MiB — svg is refused).
+parameters:
+  type: object
+  properties:
+    name:
+      type: string
+      description: >-
+        Display name: message author, window title, notifications. Up
+        to 64 chars.
+    mark:
+      type: string
+      description: Glyph or emoji for the rail and favicon. Up to 8 chars.
+    initials:
+      type: string
+      description: >-
+        Shown when there is no mark and no avatar. Up to 4 chars.
+    tagline:
+      type: string
+      description: One line under the name. Up to 120 chars.
+    signoff:
+      type: string
+      description: >-
+        Appended to messages sent outside the interface. Up to 120
+        chars.
+    avatar:
+      type: string
+      description: Workspace-relative path to the avatar image.
+    logo:
+      type: string
+      description: Workspace-relative path to the logo image.
+    clear:
+      type: array
+      items:
+        type: string
+        enum: [avatar, logo]
+      description: Images to remove.
+run:
+  builtin: identity.set
