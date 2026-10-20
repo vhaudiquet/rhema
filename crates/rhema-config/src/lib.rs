@@ -551,9 +551,9 @@ pub struct Config {
     pub theme: Option<String>,
     /// The UI color palette: `rhema` (the default), `aquamarine`,
     /// `black-and-white`, `dracula`, `catppuccin-frappe`,
-    /// `catppuccin-macchiato`, `catppuccin-mocha`, `m3-you`, or
-    /// `custom`. Validated by the consumer, not here — anything
-    /// unparseable reads as the default.
+    /// `catppuccin-macchiato`, `catppuccin-mocha`, `nord`, `gruvbox`,
+    /// `solarized`, `m3-you`, or `custom`. Validated by the consumer,
+    /// not here — anything unparseable reads as the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colors: Option<String>,
     /// The seed color of the `m3-you` palette, `#RRGGBB`: pick one from

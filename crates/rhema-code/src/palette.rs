@@ -421,6 +421,153 @@ pub struct PaletteInputs<'a> {
     pub custom: Option<&'a rhema_config::CustomPalette>,
 }
 
+/// The Nord appearance: the official sixteen colors in the roles the
+/// Nord docs assign — polar night for the grounds, snow storm for the
+/// type ladder, frost for the accent, aurora for the status set. The
+/// well (#262B38) and the strong divider (#7B88A1, the muted tone from
+/// Nord's own site) fill slots the sixteen do not name.
+pub const NORD_DARK: Theme = Theme {
+    ground: Color::Rgb(0x2E, 0x34, 0x40),
+    surface: Color::Rgb(0x3B, 0x42, 0x52),
+    elevated: Color::Rgb(0x43, 0x4C, 0x5E),
+    sunken: Color::Rgb(0x26, 0x2B, 0x38),
+    border: Color::Rgb(0x4C, 0x56, 0x6A),
+    border_strong: Color::Rgb(0x7B, 0x88, 0xA1),
+    text: Color::Rgb(0xEC, 0xEF, 0xF4),
+    text2: Color::Rgb(0xD8, 0xDE, 0xE9),
+    text3: Color::Rgb(0x7B, 0x88, 0xA1),
+    accent: Color::Rgb(0x88, 0xC0, 0xD0),
+    accent_text: Color::Rgb(0x88, 0xC0, 0xD0),
+    on_accent: Color::Rgb(0x2E, 0x34, 0x40),
+    running: Color::Rgb(0x88, 0xC0, 0xD0),
+    ok: Color::Rgb(0xA3, 0xBE, 0x8C),
+    warn: Color::Rgb(0xEB, 0xCB, 0x8B),
+    error: Color::Rgb(0xBF, 0x61, 0x6A),
+    info: Color::Rgb(0x81, 0xA1, 0xC1),
+};
+
+/// The light Nord appearance. Nord ships one dark palette; these keep
+/// the hue families — snow storm grounds, a deepened frost accent, and
+/// darkened aurora status colors, since the pastels cannot sit on a
+/// light ground — and reuse the muted tones (#6D7A96, #F2F4F8) from
+/// Nord's own light pages.
+pub const NORD_LIGHT: Theme = Theme {
+    ground: Color::Rgb(0xEC, 0xEF, 0xF4),
+    surface: Color::Rgb(0xF2, 0xF4, 0xF8),
+    elevated: Color::Rgb(0xFF, 0xFF, 0xFF),
+    sunken: Color::Rgb(0xE5, 0xE9, 0xF0),
+    border: Color::Rgb(0xD8, 0xDE, 0xE9),
+    border_strong: Color::Rgb(0xB9, 0xC4, 0xD1),
+    text: Color::Rgb(0x2E, 0x34, 0x40),
+    text2: Color::Rgb(0x4C, 0x56, 0x6A),
+    text3: Color::Rgb(0x6D, 0x7A, 0x96),
+    accent: Color::Rgb(0x4C, 0x6A, 0x94),
+    accent_text: Color::Rgb(0x4C, 0x6A, 0x94),
+    on_accent: Color::Rgb(0xFF, 0xFF, 0xFF),
+    running: Color::Rgb(0x4C, 0x6A, 0x94),
+    ok: Color::Rgb(0x58, 0x7E, 0x3B),
+    warn: Color::Rgb(0x9A, 0x6E, 0x1B),
+    error: Color::Rgb(0xA2, 0x42, 0x4B),
+    info: Color::Rgb(0x4E, 0x79, 0xA8),
+};
+
+/// The Gruvbox dark appearance: the official palette — bg0 through bg2
+/// for the grounds (the hard dark bg0_h as the well), fg and its fades
+/// for the type ladder, the bright set for accent and status.
+pub const GRUVBOX_DARK: Theme = Theme {
+    ground: Color::Rgb(0x28, 0x28, 0x28),
+    surface: Color::Rgb(0x3C, 0x38, 0x36),
+    elevated: Color::Rgb(0x50, 0x49, 0x45),
+    sunken: Color::Rgb(0x1D, 0x20, 0x21),
+    border: Color::Rgb(0x50, 0x49, 0x45),
+    border_strong: Color::Rgb(0xA8, 0x99, 0x84),
+    text: Color::Rgb(0xEB, 0xDB, 0xB2),
+    text2: Color::Rgb(0xBD, 0xAE, 0x93),
+    text3: Color::Rgb(0xA8, 0x99, 0x84),
+    accent: Color::Rgb(0x83, 0xA5, 0x98),
+    accent_text: Color::Rgb(0x83, 0xA5, 0x98),
+    on_accent: Color::Rgb(0x28, 0x28, 0x28),
+    running: Color::Rgb(0x83, 0xA5, 0x98),
+    ok: Color::Rgb(0xB8, 0xBB, 0x26),
+    warn: Color::Rgb(0xFA, 0xBD, 0x2F),
+    error: Color::Rgb(0xFB, 0x49, 0x34),
+    info: Color::Rgb(0x8E, 0xC0, 0x7C),
+};
+
+/// The Gruvbox light appearance: the official light palette, bg0
+/// through bg2 for the grounds, the neutral set for the type ladder
+/// and status.
+pub const GRUVBOX_LIGHT: Theme = Theme {
+    ground: Color::Rgb(0xFB, 0xF1, 0xC7),
+    surface: Color::Rgb(0xF2, 0xE5, 0xBC),
+    elevated: Color::Rgb(0xEB, 0xDB, 0xB2),
+    sunken: Color::Rgb(0xD5, 0xC4, 0xA1),
+    border: Color::Rgb(0xBD, 0xAE, 0x93),
+    border_strong: Color::Rgb(0x7C, 0x6F, 0x64),
+    text: Color::Rgb(0x3C, 0x38, 0x36),
+    text2: Color::Rgb(0x66, 0x5C, 0x54),
+    text3: Color::Rgb(0x7C, 0x6F, 0x64),
+    accent: Color::Rgb(0x07, 0x66, 0x78),
+    accent_text: Color::Rgb(0x07, 0x66, 0x78),
+    on_accent: Color::Rgb(0xFB, 0xF1, 0xC7),
+    running: Color::Rgb(0x07, 0x66, 0x78),
+    ok: Color::Rgb(0x79, 0x74, 0x0E),
+    warn: Color::Rgb(0xB5, 0x76, 0x14),
+    error: Color::Rgb(0x9D, 0x00, 0x06),
+    info: Color::Rgb(0x42, 0x7B, 0x58),
+};
+
+/// The Solarized dark appearance: the official base03-base1 tones in
+/// their documented roles. The accent is cyan (the blue misses the
+/// on-accent label floor by half a step), info is violet, and the two
+/// grounds the eight-color palette does not name (#0B4653 elevated,
+/// #001F28 well) are derived between its tones.
+pub const SOLARIZED_DARK: Theme = Theme {
+    ground: Color::Rgb(0x00, 0x2B, 0x36),
+    surface: Color::Rgb(0x07, 0x36, 0x42),
+    elevated: Color::Rgb(0x0B, 0x46, 0x53),
+    sunken: Color::Rgb(0x00, 0x1F, 0x28),
+    border: Color::Rgb(0x58, 0x6E, 0x75),
+    border_strong: Color::Rgb(0x65, 0x7B, 0x83),
+    text: Color::Rgb(0x93, 0xA1, 0xA1),
+    text2: Color::Rgb(0x83, 0x94, 0x96),
+    text3: Color::Rgb(0x65, 0x7B, 0x83),
+    accent: Color::Rgb(0x2A, 0xA1, 0x98),
+    accent_text: Color::Rgb(0x2A, 0xA1, 0x98),
+    on_accent: Color::Rgb(0x00, 0x2B, 0x36),
+    running: Color::Rgb(0x2A, 0xA1, 0x98),
+    ok: Color::Rgb(0x85, 0x99, 0x00),
+    warn: Color::Rgb(0xB5, 0x89, 0x00),
+    error: Color::Rgb(0xDC, 0x32, 0x2F),
+    info: Color::Rgb(0x6C, 0x71, 0xC4),
+};
+
+/// The Solarized light appearance: base3 and base2 grounds, the
+/// base01/base00 type pair the official light mode prescribes (its
+/// base0 body color reads 2.9:1 — under the floor). The accent
+/// deepens past the label floor, ok and warn darken past 3:1, and
+/// #F5EFDC, #E4DCC6, #7E8C93 fill the ladder slots the palette does
+/// not name.
+pub const SOLARIZED_LIGHT: Theme = Theme {
+    ground: Color::Rgb(0xFD, 0xF6, 0xE3),
+    surface: Color::Rgb(0xF5, 0xEF, 0xDC),
+    elevated: Color::Rgb(0xE4, 0xDC, 0xC6),
+    sunken: Color::Rgb(0xEE, 0xE8, 0xD5),
+    border: Color::Rgb(0x93, 0xA1, 0xA1),
+    border_strong: Color::Rgb(0x83, 0x94, 0x96),
+    text: Color::Rgb(0x58, 0x6E, 0x75),
+    text2: Color::Rgb(0x65, 0x7B, 0x83),
+    text3: Color::Rgb(0x7E, 0x8C, 0x93),
+    accent: Color::Rgb(0x1A, 0x63, 0x99),
+    accent_text: Color::Rgb(0x1A, 0x63, 0x99),
+    on_accent: Color::Rgb(0xFD, 0xF6, 0xE3),
+    running: Color::Rgb(0x1A, 0x63, 0x99),
+    ok: Color::Rgb(0x55, 0x7A, 0x00),
+    warn: Color::Rgb(0x8C, 0x6A, 0x00),
+    error: Color::Rgb(0xDC, 0x32, 0x2F),
+    info: Color::Rgb(0x6C, 0x71, 0xC4),
+};
+
 /// A named color palette: one family of tokens, each in a dark and a
 /// light appearance. The stored config names one (`colors: rhema`);
 /// anything unparseable reads as the default, like the other
@@ -442,6 +589,12 @@ pub enum Palette {
     CatppuccinMacchiato,
     /// The Catppuccin Mocha palette; light reads Latte.
     CatppuccinMocha,
+    /// The Nord palette.
+    Nord,
+    /// The Gruvbox palette.
+    Gruvbox,
+    /// The Solarized palette.
+    Solarized,
     /// The M3 You palette: a Material 3 tonal-spot scheme generated
     /// from a seed color (`m3_source`, defaulting to Material's
     /// baseline purple).
@@ -463,6 +616,9 @@ impl Palette {
         Palette::CatppuccinFrappe,
         Palette::CatppuccinMacchiato,
         Palette::CatppuccinMocha,
+        Palette::Nord,
+        Palette::Gruvbox,
+        Palette::Solarized,
         Palette::M3You,
         Palette::Custom,
     ];
@@ -487,6 +643,9 @@ impl Palette {
             Some("catppuccin-mocha") | Some("catppuccin_mocha") | Some("catppuccinmocha") => {
                 Some(Self::CatppuccinMocha)
             }
+            Some("nord") => Some(Self::Nord),
+            Some("gruvbox") => Some(Self::Gruvbox),
+            Some("solarized") => Some(Self::Solarized),
             Some("m3-you") | Some("m3_you") | Some("m3you") | Some("material-you")
             | Some("material_you") => Some(Self::M3You),
             Some("custom") => Some(Self::Custom),
@@ -505,6 +664,9 @@ impl Palette {
             Self::CatppuccinFrappe => "catppuccin-frappe",
             Self::CatppuccinMacchiato => "catppuccin-macchiato",
             Self::CatppuccinMocha => "catppuccin-mocha",
+            Self::Nord => "nord",
+            Self::Gruvbox => "gruvbox",
+            Self::Solarized => "solarized",
             Self::M3You => "m3-you",
             Self::Custom => "custom",
         }
@@ -520,6 +682,9 @@ impl Palette {
             Self::CatppuccinFrappe => "Catppuccin Frapp\u{e9}",
             Self::CatppuccinMacchiato => "Catppuccin Macchiato",
             Self::CatppuccinMocha => "Catppuccin Mocha",
+            Self::Nord => "Nord",
+            Self::Gruvbox => "Gruvbox",
+            Self::Solarized => "Solarized",
             Self::M3You => "M3 You",
             Self::Custom => "Custom",
         }
@@ -558,6 +723,18 @@ impl Palette {
             Self::CatppuccinMocha => match kind {
                 ThemeKind::Dark => CATPPUCCIN_MOCHA,
                 ThemeKind::Light => CATPPUCCIN_LATTE,
+            },
+            Self::Nord => match kind {
+                ThemeKind::Dark => NORD_DARK,
+                ThemeKind::Light => NORD_LIGHT,
+            },
+            Self::Gruvbox => match kind {
+                ThemeKind::Dark => GRUVBOX_DARK,
+                ThemeKind::Light => GRUVBOX_LIGHT,
+            },
+            Self::Solarized => match kind {
+                ThemeKind::Dark => SOLARIZED_DARK,
+                ThemeKind::Light => SOLARIZED_LIGHT,
             },
             Self::M3You => {
                 crate::m3::theme(inputs.m3_source.unwrap_or(crate::m3::DEFAULT_SOURCE), kind)
