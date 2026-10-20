@@ -506,6 +506,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .m3_source
         .as_deref()
         .and_then(crate::palette::parse_hex_u32);
+    let custom = config.custom.clone();
     let icons = config
         .icons
         .as_deref()
@@ -515,6 +516,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         colors,
         theme,
         m3_source,
+        custom,
         icons,
         profile: Some(profile),
         workspace: workspace.clone(),

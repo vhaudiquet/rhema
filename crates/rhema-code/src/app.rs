@@ -532,6 +532,9 @@ pub struct RunOptions {
     /// The M3 You seed, `0xRRGGBB`; `None` is Material's baseline
     /// purple. Every palette but M3 You ignores it.
     pub m3_source: Option<u32>,
+    /// The custom palette's token overrides; every palette but Custom
+    /// ignores it.
+    pub custom: Option<rhema_config::CustomPalette>,
     /// Which icon flavor the footer draws with.
     pub icons: crate::icons::Flavor,
     /// The config profile this session runs under.
@@ -548,6 +551,16 @@ pub struct RunOptions {
     /// Approve all gated tool calls without asking.
     /// Checkpoint the session after every turn.
     pub save: Option<PathBuf>,
+}
+
+impl RunOptions {
+    /// The per-startup inputs the generated palettes read.
+    pub(crate) fn palette_inputs(&self) -> crate::palette::PaletteInputs<'_> {
+        crate::palette::PaletteInputs {
+            m3_source: self.m3_source,
+            custom: self.custom.as_ref(),
+        }
+    }
 }
 
 /// The current screen. The settings screen is boxed: its live providers
@@ -867,7 +880,7 @@ impl App {
             theme: setup
                 .options
                 .colors
-                .theme(setup.options.theme, setup.options.m3_source),
+                .theme(setup.options.theme, setup.options.palette_inputs()),
             icons: setup.options.icons.set(),
             store: setup.store,
             config: setup.config,
@@ -1014,7 +1027,10 @@ impl App {
             crate::palette::ThemeKind::Dark
         };
         self.options.theme = kind;
-        self.theme = self.options.colors.theme(kind, self.options.m3_source);
+        self.theme = self
+            .options
+            .colors
+            .theme(kind, self.options.palette_inputs());
         self.config.theme = Some(if dark { "light" } else { "dark" }.to_owned());
         if let Screen::Settings(settings) = &mut self.screen {
             settings.theme_dark = !dark;
@@ -1034,7 +1050,7 @@ impl App {
             .unwrap_or(0);
         let next = all[(current + 1) % all.len()];
         self.options.colors = next;
-        self.theme = next.theme(self.options.theme, self.options.m3_source);
+        self.theme = next.theme(self.options.theme, self.options.palette_inputs());
         self.config.colors = Some(next.stored_name().to_owned());
         if let Screen::Settings(settings) = &mut self.screen {
             settings.colors = next;
@@ -2751,6 +2767,7 @@ mod tests {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,
                 m3_source: None,
+                custom: None,
                 thinking: rhema_core::request::ThinkingEffort::Default,
                 icons: crate::icons::Flavor::Unicode,
                 profile: Some("personal".into()),
@@ -4963,6 +4980,7 @@ mod tests {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,
                 m3_source: None,
+                custom: None,
                 thinking: rhema_core::request::ThinkingEffort::Default,
                 icons: crate::icons::Flavor::Unicode,
                 profile: Some(profile),
@@ -5448,6 +5466,7 @@ mod tests {
             crate::palette::Palette::CatppuccinMacchiato,
             crate::palette::Palette::CatppuccinMocha,
             crate::palette::Palette::M3You,
+            crate::palette::Palette::Custom,
             crate::palette::Palette::Rhema,
         ] {
             h.app.on_key(key(KeyCode::Char('c')));

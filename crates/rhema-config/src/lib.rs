@@ -472,6 +472,62 @@ fn provider_env_names(provider: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
+/// The `custom` palette's token overrides, per appearance. A shell
+/// process (a wallpaper watcher, a pywal-style generator) writes these;
+/// the TUI reads them at startup. Any token left out — or written in a
+/// form that is not a `#RRGGBB` color — reads as the rhema default for
+/// that slot, so a partial file is an overlay, not a broken theme.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CustomPalette {
+    /// The dark appearance's tokens.
+    pub dark: Option<CustomTokens>,
+    /// The light appearance's tokens.
+    pub light: Option<CustomTokens>,
+}
+
+/// One appearance of the `custom` palette: the design tokens by name,
+/// each an optional `#RRGGBB` (or `RRGGBB`) string. Unknown keys are
+/// rejected: a typo'd token must not silently read as unset.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CustomTokens {
+    /// Page canvas.
+    pub ground: Option<String>,
+    /// Panels and cards.
+    pub surface: Option<String>,
+    /// Popovers, hovered rows.
+    pub elevated: Option<String>,
+    /// Code blocks, log view, the transcript well.
+    pub sunken: Option<String>,
+    /// Hairlines.
+    pub border: Option<String>,
+    /// Dividers that must read.
+    pub border_strong: Option<String>,
+    /// Body text.
+    pub text: Option<String>,
+    /// Secondary text.
+    pub text2: Option<String>,
+    /// Hints only.
+    pub text3: Option<String>,
+    /// Fills, rules, the mark.
+    pub accent: Option<String>,
+    /// Accent as text or icon.
+    pub accent_text: Option<String>,
+    /// Labels ON an accent fill.
+    pub on_accent: Option<String>,
+    /// A call in flight.
+    pub running: Option<String>,
+    /// Success.
+    pub ok: Option<String>,
+    /// Caution.
+    pub warn: Option<String>,
+    /// A real failure.
+    pub error: Option<String>,
+    /// Queued, idle, neutral notice.
+    pub info: Option<String>,
+}
+
 /// The persisted settings: the registry of named profiles. Unknown keys
 /// are rejected: a typo'd key must not silently read as its default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -495,9 +551,9 @@ pub struct Config {
     pub theme: Option<String>,
     /// The UI color palette: `rhema` (the default), `aquamarine`,
     /// `black-and-white`, `dracula`, `catppuccin-frappe`,
-    /// `catppuccin-macchiato`, `catppuccin-mocha`, or `m3-you`.
-    /// Validated by the consumer, not here — anything unparseable reads
-    /// as the default.
+    /// `catppuccin-macchiato`, `catppuccin-mocha`, `m3-you`, or
+    /// `custom`. Validated by the consumer, not here — anything
+    /// unparseable reads as the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colors: Option<String>,
     /// The seed color of the `m3-you` palette, `#RRGGBB`: pick one from
@@ -505,6 +561,12 @@ pub struct Config {
     /// baseline purple. Ignored by every other palette.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub m3_source: Option<String>,
+    /// The `custom` palette's token overrides, per appearance: the hook
+    /// a wallpaper watcher or scheme generator writes. Read by the
+    /// consumer when `colors` is `custom`; anything it leaves out reads
+    /// as the rhema default for that slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<CustomPalette>,
     /// The last profile that served each workspace a turn, keyed by the
     /// workspace's absolute path. Startup reopens a directory on its
     /// last-used profile — a per-directory memory, never a global
@@ -537,6 +599,7 @@ impl Default for Config {
             theme: None,
             colors: None,
             m3_source: None,
+            custom: None,
             last_profile_by_workspace: BTreeMap::new(),
         }
     }
@@ -889,6 +952,7 @@ mod tests {
             theme: Some("light".into()),
             colors: Some("rhema".into()),
             m3_source: Some("#6750A4".into()),
+            custom: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         Config::save_to(&path, &config).unwrap();
@@ -1148,6 +1212,35 @@ mod tests {
     }
 
     #[test]
+    fn the_custom_palette_round_trips_and_rejects_typos() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "colors: custom\ncustom:\n  dark:\n    accent: \"#FF8800\"\n",
+        )
+        .unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(
+            loaded
+                .custom
+                .as_ref()
+                .and_then(|c| c.dark.as_ref())
+                .and_then(|t| t.accent.as_deref()),
+            Some("#FF8800")
+        );
+        assert!(loaded.custom.as_ref().unwrap().light.is_none());
+        // A typo'd token name is an error, not a silent default.
+        std::fs::write(
+            &path,
+            "colors: custom\ncustom:\n  dark:\n    graond: \"#FF8800\"\n",
+        )
+        .unwrap();
+        let err = Config::load_from(&path).expect_err("a typo'd token must not read as unset");
+        assert!(err.to_string().contains("graond"), "names the key: {err}");
+    }
+
+    #[test]
     fn an_unknown_key_is_rejected_and_named() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -1203,6 +1296,7 @@ mod tests {
             theme: None,
             colors: None,
             m3_source: None,
+            custom: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         let work = config.effective(Some("work"));
@@ -1426,6 +1520,7 @@ mod tests {
             theme: None,
             colors: None,
             m3_source: None,
+            custom: None,
             last_profile_by_workspace: BTreeMap::new(),
         };
         let store = VolatileSecretStore::new();

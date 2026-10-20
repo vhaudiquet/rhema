@@ -411,6 +411,16 @@ pub const CATPPUCCIN_LATTE: Theme = Theme {
     info: Color::Rgb(0x14, 0x7A, 0x8C),
 };
 
+/// The per-startup inputs the generated palettes read. The fixed
+/// palettes ignore all of it.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PaletteInputs<'a> {
+    /// The M3 You seed, `0xRRGGBB`; `None` is its default seed.
+    pub m3_source: Option<u32>,
+    /// The custom palette's token overrides; `None` reads as rhema.
+    pub custom: Option<&'a rhema_config::CustomPalette>,
+}
+
 /// A named color palette: one family of tokens, each in a dark and a
 /// light appearance. The stored config names one (`colors: rhema`);
 /// anything unparseable reads as the default, like the other
@@ -436,6 +446,11 @@ pub enum Palette {
     /// from a seed color (`m3_source`, defaulting to Material's
     /// baseline purple).
     M3You,
+    /// The custom palette: the config's token overrides over the rhema
+    /// defaults (`custom` in the config file) — the hook a wallpaper
+    /// watcher or scheme generator writes. With nothing stored it reads
+    /// exactly as rhema.
+    Custom,
 }
 
 impl Palette {
@@ -449,6 +464,7 @@ impl Palette {
         Palette::CatppuccinMacchiato,
         Palette::CatppuccinMocha,
         Palette::M3You,
+        Palette::Custom,
     ];
 
     /// Parses a stored config value; `None` for no value and unknown
@@ -473,6 +489,7 @@ impl Palette {
             }
             Some("m3-you") | Some("m3_you") | Some("m3you") | Some("material-you")
             | Some("material_you") => Some(Self::M3You),
+            Some("custom") => Some(Self::Custom),
             _ => None,
         }
     }
@@ -489,6 +506,7 @@ impl Palette {
             Self::CatppuccinMacchiato => "catppuccin-macchiato",
             Self::CatppuccinMocha => "catppuccin-mocha",
             Self::M3You => "m3-you",
+            Self::Custom => "custom",
         }
     }
 
@@ -503,13 +521,15 @@ impl Palette {
             Self::CatppuccinMacchiato => "Catppuccin Macchiato",
             Self::CatppuccinMocha => "Catppuccin Mocha",
             Self::M3You => "M3 You",
+            Self::Custom => "Custom",
         }
     }
 
-    /// Resolves the palette's tokens for `kind`. `m3_source` feeds
-    /// [`Palette::M3You`] alone (`0xRRGGBB`; `None` is its default
-    /// seed) and the fixed palettes ignore it.
-    pub fn theme(self, kind: ThemeKind, m3_source: Option<u32>) -> Theme {
+    /// Resolves the palette's tokens for `kind`. `inputs` feeds the
+    /// generated palettes alone — the seed for [`Palette::M3You`], the
+    /// token overrides for [`Palette::Custom`] — and the fixed palettes
+    /// ignore it.
+    pub fn theme(self, kind: ThemeKind, inputs: PaletteInputs<'_>) -> Theme {
         match self {
             Self::Rhema => match kind {
                 ThemeKind::Dark => DARK,
@@ -539,8 +559,64 @@ impl Palette {
                 ThemeKind::Dark => CATPPUCCIN_MOCHA,
                 ThemeKind::Light => CATPPUCCIN_LATTE,
             },
-            Self::M3You => crate::m3::theme(m3_source.unwrap_or(crate::m3::DEFAULT_SOURCE), kind),
+            Self::M3You => {
+                crate::m3::theme(inputs.m3_source.unwrap_or(crate::m3::DEFAULT_SOURCE), kind)
+            }
+            Self::Custom => custom_theme(kind, inputs.custom),
         }
+    }
+}
+
+/// Resolves the custom palette: the rhema tokens for `kind` with the
+/// config's overrides applied. An appearance the config does not give
+/// reads as the other one's full resolution — a generator writing only
+/// `dark` paints its whole scheme, never a half-light hybrid — and an
+/// unparseable value reads as the rhema default for its slot, matching
+/// the other look-and-feel keys.
+fn custom_theme(kind: ThemeKind, custom: Option<&rhema_config::CustomPalette>) -> Theme {
+    let base = match kind {
+        ThemeKind::Dark => DARK,
+        ThemeKind::Light => LIGHT,
+    };
+    let Some(palette) = custom else {
+        return base;
+    };
+    let tokens = match kind {
+        ThemeKind::Dark => palette.dark.as_ref(),
+        ThemeKind::Light => palette.light.as_ref(),
+    };
+    let Some(tokens) = tokens else {
+        // Not given for this appearance: the other one paints whole.
+        let other = match kind {
+            ThemeKind::Dark => ThemeKind::Light,
+            ThemeKind::Light => ThemeKind::Dark,
+        };
+        return custom_theme(other, Some(palette));
+    };
+    let pick = |value: &Option<String>, fallback: Color| {
+        value
+            .as_deref()
+            .and_then(parse_hex_color)
+            .unwrap_or(fallback)
+    };
+    Theme {
+        ground: pick(&tokens.ground, base.ground),
+        surface: pick(&tokens.surface, base.surface),
+        elevated: pick(&tokens.elevated, base.elevated),
+        sunken: pick(&tokens.sunken, base.sunken),
+        border: pick(&tokens.border, base.border),
+        border_strong: pick(&tokens.border_strong, base.border_strong),
+        text: pick(&tokens.text, base.text),
+        text2: pick(&tokens.text2, base.text2),
+        text3: pick(&tokens.text3, base.text3),
+        accent: pick(&tokens.accent, base.accent),
+        accent_text: pick(&tokens.accent_text, base.accent_text),
+        on_accent: pick(&tokens.on_accent, base.on_accent),
+        running: pick(&tokens.running, base.running),
+        ok: pick(&tokens.ok, base.ok),
+        warn: pick(&tokens.warn, base.warn),
+        error: pick(&tokens.error, base.error),
+        info: pick(&tokens.info, base.info),
     }
 }
 
@@ -579,8 +655,16 @@ mod tests {
         assert!(DARK.is_dark());
         assert!(!LIGHT.is_dark());
         for palette in Palette::ALL {
-            assert!(palette.theme(ThemeKind::Dark, None).is_dark());
-            assert!(!palette.theme(ThemeKind::Light, None).is_dark());
+            assert!(
+                palette
+                    .theme(ThemeKind::Dark, PaletteInputs::default())
+                    .is_dark()
+            );
+            assert!(
+                !palette
+                    .theme(ThemeKind::Light, PaletteInputs::default())
+                    .is_dark()
+            );
         }
     }
 
@@ -615,7 +699,7 @@ mod tests {
     fn every_palette_resolves_both_appearances() {
         for palette in Palette::ALL {
             for kind in [ThemeKind::Dark, ThemeKind::Light] {
-                let theme = palette.theme(kind, None);
+                let theme = palette.theme(kind, PaletteInputs::default());
                 assert_ne!(theme.ground, theme.text, "{palette:?} {kind:?}");
             }
         }
@@ -623,18 +707,68 @@ mod tests {
 
     #[test]
     fn the_m3_seed_moves_the_tokens() {
-        let default = Palette::M3You.theme(ThemeKind::Dark, None);
-        let blue = Palette::M3You.theme(ThemeKind::Dark, Some(0x4285F4));
+        let default = Palette::M3You.theme(ThemeKind::Dark, PaletteInputs::default());
+        let blue = Palette::M3You.theme(
+            ThemeKind::Dark,
+            PaletteInputs {
+                m3_source: Some(0x4285F4),
+                ..PaletteInputs::default()
+            },
+        );
         assert_eq!(
             default.ground,
             crate::m3::theme(crate::m3::DEFAULT_SOURCE, ThemeKind::Dark).ground
         );
         assert_ne!(default.accent, blue.accent);
         // The fixed palettes ignore the seed.
-        assert_eq!(Palette::Dracula.theme(ThemeKind::Dark, None), DRACULA_DARK);
         assert_eq!(
-            Palette::Dracula.theme(ThemeKind::Dark, Some(0x4285F4)),
+            Palette::Dracula.theme(ThemeKind::Dark, PaletteInputs::default()),
             DRACULA_DARK
+        );
+        assert_eq!(
+            Palette::Dracula.theme(
+                ThemeKind::Dark,
+                PaletteInputs {
+                    m3_source: Some(0x4285F4),
+                    ..PaletteInputs::default()
+                }
+            ),
+            DRACULA_DARK
+        );
+    }
+
+    #[test]
+    fn the_custom_palette_overlays_the_rhema_defaults() {
+        let tokens = rhema_config::CustomTokens {
+            accent: Some("#FF8800".into()),
+            ground: Some("nothex".into()),
+            ..rhema_config::CustomTokens::default()
+        };
+        let custom = rhema_config::CustomPalette {
+            dark: Some(tokens),
+            light: None,
+        };
+        fn inputs(custom: &rhema_config::CustomPalette) -> PaletteInputs<'_> {
+            PaletteInputs {
+                custom: Some(custom),
+                ..PaletteInputs::default()
+            }
+        }
+        let dark = Palette::Custom.theme(ThemeKind::Dark, inputs(&custom));
+        // The given token applies, the bad hex reads as the slot's
+        // default, and everything untouched stays rhema.
+        assert_eq!(dark.accent, Color::Rgb(0xFF, 0x88, 0x00));
+        assert_eq!(dark.ground, DARK.ground);
+        assert_eq!(dark.text, DARK.text);
+        // An appearance the config does not give reads as the other one.
+        assert_eq!(
+            dark,
+            Palette::Custom.theme(ThemeKind::Light, inputs(&custom))
+        );
+        // Nothing stored reads as rhema outright.
+        assert_eq!(
+            Palette::Custom.theme(ThemeKind::Dark, PaletteInputs::default()),
+            DARK
         );
     }
 
@@ -642,7 +776,7 @@ mod tests {
     fn tokens_read_on_the_ground_in_every_palette() {
         for palette in Palette::ALL {
             for kind in [ThemeKind::Dark, ThemeKind::Light] {
-                let theme = palette.theme(kind, None);
+                let theme = palette.theme(kind, PaletteInputs::default());
                 let label = format!("{palette:?} {kind:?}");
                 assert!(contrast(theme.text, theme.ground) >= 4.5, "{label}");
                 assert!(contrast(theme.text, theme.surface) >= 4.5, "{label}");

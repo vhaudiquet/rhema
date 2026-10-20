@@ -2526,6 +2526,7 @@ mod scroll_tests {
                 colors: crate::palette::Palette::Rhema,
                 theme: ThemeKind::Dark,
                 m3_source: None,
+                custom: None,
                 icons: crate::icons::Flavor::Unicode,
                 thinking: rhema_core::request::ThinkingEffort::Default,
                 profile: Some("personal".into()),
