@@ -427,7 +427,7 @@ mod tests {
         assert!(prompt.contains("## ENVIRONMENT"), "{prompt}");
         assert_eq!(prompt.matches(PENDING).count(), 2, "{prompt}");
         assert!(prompt.contains(GENERATED_AT_BOOT), "{prompt}");
-        assert!(prompt.contains("## Setup"), "{prompt}");
+        assert!(prompt.contains("## Onboarding"), "{prompt}");
         assert!(prompt.contains("/ws"), "the workspace named: {prompt}");
         assert!(prompt.contains("bootstrap_save"), "{prompt}");
     }
@@ -461,7 +461,7 @@ mod tests {
         assert!(prompt.contains("Linux, 32 cores, no GPU."), "{prompt}");
         assert!(!prompt.contains(PENDING), "{prompt}");
         assert!(!prompt.contains(GENERATED_AT_BOOT), "{prompt}");
-        assert!(!prompt.contains("## Setup"), "{prompt}");
+        assert!(!prompt.contains("## Onboarding"), "{prompt}");
     }
 
     #[test]

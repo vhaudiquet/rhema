@@ -958,7 +958,7 @@ mod tests {
         );
         assert!(prompt.contains("final message"), "{prompt}");
         // A fresh store is pending onboarding: the offered setup renders.
-        assert!(prompt.contains("## Setup"), "{prompt}");
+        assert!(prompt.contains("## Onboarding"), "{prompt}");
         assert!(prompt.contains("(pending onboarding)"), "{prompt}");
     }
 
