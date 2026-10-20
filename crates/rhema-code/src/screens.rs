@@ -1027,6 +1027,23 @@ pub fn filtered_commands(input: &str) -> Vec<&'static crate::commands::CommandSp
         .collect()
 }
 
+/// The command a slash input names together with the fixed words its
+/// argument completes from, when the command's argument is one:
+/// `/thinking h` names `/thinking` and its levels. None when the input
+/// names no command, or one whose argument completes from live rows
+/// (the models, the profiles).
+fn choice_argument(input: &str) -> Option<(&'static str, &'static [crate::commands::Choice])> {
+    let body = input.strip_prefix('/')?;
+    let (name, _) = body.split_once(' ')?;
+    let spec = crate::commands::COMMANDS
+        .iter()
+        .find(|spec| &spec.name[1..] == name)?;
+    match spec.argument {
+        crate::commands::Argument::Choice(choices) => Some((spec.name, choices)),
+        _ => None,
+    }
+}
+
 /// One completable profile row, built from the config registry: the
 /// palette reads it, `/profile <name>` switches onto it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1065,6 +1082,16 @@ pub enum PaletteRow {
         name: String,
         /// What the row says about the profile, after the name.
         description: String,
+    },
+    /// A fixed word under a command that names one (`/thinking`);
+    /// completing fills the argument.
+    Choice {
+        /// The command the word belongs to, with the slash.
+        command: &'static str,
+        /// The word completion inserts.
+        value: &'static str,
+        /// What the row says about the word, after it.
+        description: &'static str,
     },
     /// A filesystem path under the cursor; completing splices the
     /// entry over the token it came from.
@@ -1140,6 +1167,26 @@ pub fn palette_rows(
             .map(|profile| PaletteRow::Profile {
                 name: profile.name.clone(),
                 description: profile_description(profile),
+            })
+            .collect();
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+    // A choice argument lists its command's fixed words, filtered by
+    // the half-typed one: `/thinking h` matches `high`.
+    if let Some((command, choices)) = choice_argument(input) {
+        let needle = input
+            .split_once(' ')
+            .map(|(_, rest)| rest.trim().to_lowercase())
+            .unwrap_or_default();
+        let rows: Vec<PaletteRow> = choices
+            .iter()
+            .filter(|choice| needle.is_empty() || choice.name.starts_with(&needle))
+            .map(|choice| PaletteRow::Choice {
+                command,
+                value: choice.name,
+                description: choice.description,
             })
             .collect();
         if !rows.is_empty() {
@@ -1886,6 +1933,11 @@ impl ChatState {
                         PaletteRow::Profile { name, .. } => {
                             self.attachments.clear();
                             self.input = format!("/profile {name}");
+                            self.cursor = self.input.chars().count();
+                        }
+                        PaletteRow::Choice { command, value, .. } => {
+                            self.attachments.clear();
+                            self.input = format!("{command} {value}");
                             self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Path {
@@ -3041,6 +3093,49 @@ mod tests {
         chat.handle_key(key(KeyCode::Tab), &models, &[]);
         assert_eq!(chat.input, "/model openrouter/auto");
         assert_eq!(chat.cursor, "/model openrouter/auto".chars().count());
+    }
+
+    #[test]
+    fn the_thinking_palette_lists_its_levels_and_tab_fills_them() {
+        let mut chat = ChatState::new();
+        for c in "/thinking ".chars() {
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[]);
+        }
+        // The empty argument lists every level; a stem narrows it.
+        let values = |chat: &ChatState| {
+            crate::screens::palette_rows(&chat.input, chat.cursor, &[], &[])
+                .into_iter()
+                .filter_map(|row| match row {
+                    crate::screens::PaletteRow::Choice { value, .. } => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(values(&chat), ["low", "medium", "high", "default"]);
+        for c in "hi".chars() {
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[]);
+        }
+        assert_eq!(values(&chat), ["high"]);
+        // Tab completes the level, keeping the command prefix.
+        chat.handle_key(key(KeyCode::Tab), &[], &[]);
+        assert_eq!(chat.input, "/thinking high");
+        assert_eq!(chat.cursor, "/thinking high".chars().count());
+        // A stem no level answers leaves the palette empty.
+        let mut chat = ChatState::new();
+        for c in "/thinking zzz".chars() {
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[]);
+        }
+        assert!(crate::screens::palette_rows(&chat.input, chat.cursor, &[], &[]).is_empty());
+        // Without the argument's space the command row itself matches,
+        // not the levels.
+        let mut chat = ChatState::new();
+        for c in "/think".chars() {
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[]);
+        }
+        assert!(matches!(
+            crate::screens::palette_rows(&chat.input, chat.cursor, &[], &[]).as_slice(),
+            [crate::screens::PaletteRow::Command(spec)] if spec.name == "/thinking"
+        ));
     }
 
     #[test]

@@ -17,7 +17,39 @@ pub enum Argument {
     None,
     /// An optional free-form word (e.g. a profile name).
     Optional,
+    /// One of a fixed set of words; the palette completes them.
+    Choice(&'static [Choice]),
 }
+
+/// One word an [`Argument::Choice`] argument takes: the value the
+/// command runs on and the line the palette shows beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Choice {
+    /// The word as typed and run.
+    pub name: &'static str,
+    /// What the palette says about the word.
+    pub description: &'static str,
+}
+
+/// The levels `/thinking` takes, quietest first.
+const THINKING_LEVELS: &[Choice] = &[
+    Choice {
+        name: "low",
+        description: "less effort, faster answers, smaller problems",
+    },
+    Choice {
+        name: "medium",
+        description: "the default effort, adapted for most",
+    },
+    Choice {
+        name: "high",
+        description: "the most effort, slower answers, bigger problems",
+    },
+    Choice {
+        name: "default",
+        description: "the provider decides",
+    },
+];
 
 /// One row of the command table.
 #[derive(Debug, Clone, Copy)]
@@ -55,8 +87,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/thinking",
-        description: "reasoning effort (low, medium, high)",
-        argument: Argument::Optional,
+        description: "reasoning effort (type for suggestions)",
+        argument: Argument::Choice(THINKING_LEVELS),
         handler: thinking,
     },
     CommandSpec {
@@ -151,7 +183,7 @@ pub fn parse(input: &str) -> Parsed {
     match COMMANDS.iter().find(|spec| &spec.name[1..] == name) {
         Some(spec) => match (spec.argument, argument) {
             (Argument::None, Some(_)) => Parsed::Unknown(input.to_owned()),
-            (Argument::Optional, argument) => Parsed::Command {
+            (Argument::Optional, argument) | (Argument::Choice(_), argument) => Parsed::Command {
                 spec,
                 argument: argument.map(|a| a.to_owned()).filter(|a| !a.is_empty()),
             },
