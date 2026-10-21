@@ -1,0 +1,49 @@
+[package]
+name = "rhema-cloudflare-code"
+description = "The coding agent as a Cloudflare Durable Object: WebSocket chat, DO-storage checkpoints, bash in a Cloudflare Sandbox"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = []
+# The scripted sandbox for offline tests; mirrors rhema-core's feature.
+mock = ["dep:tokio"]
+# The workers-rs glue (the `worker` module). The feature only takes
+# effect on wasm32 — workerd is the one host that provides the
+# bindings — so native `--all-features` builds stay clean.
+worker = []
+[dependencies]
+# The toolkit and driver run on the seams, not on a filesystem: both
+# come in without the local shell, which this crate replaces with the
+# sandbox executor.
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0", default-features = false }
+rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0", default-features = false }
+rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# The transport seam the fetch transport implements, and the Sleeper
+# the Delay sleeper implements
+rhema-provider = { path = "../rhema-provider", version = "0.1.0" }
+# The Anthropic dialect over a caller-supplied transport; the native
+# reqwest feature stays off — workerd has no sockets
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.1.0", default-features = false }
+# The revision-guarded record the DO checkpoints sessions through
+rhema-rsd = { path = "../rhema-rsd", version = "0.1.0", default-features = false }
+rhema-transcript = { path = "../rhema-transcript", version = "0.1.0" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# The scripted sandbox's parked exec (feature `mock`)
+tokio = { workspace = true, optional = true, features = ["sync"] }
+
+[dev-dependencies]
+# The scripted provider drives the turn loop offline
+rhema-core = { path = "../rhema-core", features = ["mock"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+
+[[test]]
+name = "e2e"
+required-features = ["mock"]
