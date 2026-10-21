@@ -44,6 +44,17 @@ tokio = { workspace = true, optional = true, features = ["sync"] }
 rhema-core = { path = "../rhema-core", features = ["mock"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# Pinned to 0.8 (verified against this tree): the DurableObject trait,
+# SqlStorage, WebSocket, and Delay APIs this crate uses are 0.8-shaped;
+# the crate is 0.x and its API moves, so the pin is deliberate.
+worker = { version = "0.8.7" }
+# The shim's file payloads ride base64
+base64 = "0.22"
+# The !Send fetch-stream bridge (spawn_local) and the turn task
+wasm-bindgen-futures = "0.4"
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
 [[test]]
 name = "e2e"
 required-features = ["mock"]

@@ -1,7 +1,7 @@
 //! rhema-cloudflare-code — the coding agent as a Cloudflare Durable
 //! Object.
 //!
-//! One [`worker::CodingAgentDo`](worker::CodingAgentDo) instance per
+//! One [`worker::CodingAgent`](worker::CodingAgent) instance per
 //! session id. The agent itself is the ordinary
 //! [`CodingAgent`](rhema_coding_agent::CodingAgent) driver over the
 //! ordinary step engine — this crate is a *frontend*, the third one,
@@ -53,6 +53,9 @@ pub mod shell;
 
 #[cfg(feature = "mock")]
 pub mod mock;
+
+#[cfg(all(feature = "worker", target_arch = "wasm32"))]
+pub mod worker;
 
 pub use assembly::{AgentAssembly, ApprovalPolicy, PolicyApproval};
 pub use gate::{ApprovalChannel, ClientGate};
