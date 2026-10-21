@@ -8,6 +8,13 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = ["native"]
+# The reqwest transport behind the default constructor. Off in wasm
+# builds, whose host has no sockets to speak of: they bring their own
+# `Transport` over host fetch, bridging the `!Send` JS stream inside.
+native = ["dep:reqwest"]
+
 [dependencies]
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
 # The shared model card and SSE decoder
@@ -16,8 +23,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
-# HTTP + SSE streaming against the Messages API
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# HTTP + SSE streaming against the Messages API (feature `native`)
+reqwest = { version = "0.12", features = ["stream"], optional = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [dev-dependencies]

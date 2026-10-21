@@ -1,5 +1,5 @@
-//! The [`AnthropicProvider`]: HTTP and SSE transport for the Anthropic
-//! Messages API.
+//! The [`AnthropicProvider`]: the Anthropic Messages API over the
+//! [`Transport`] seam.
 //!
 //! Auth is by API key in the `x-api-key` header — never a query parameter,
 //! so the key never lands in URLs or access logs — with the pinned
@@ -7,19 +7,28 @@
 //! endpoints that authenticate by bearer token instead (Z.ai's GLM Coding
 //! Plan route, [`ZAI_BASE_URL`]) switch the header scheme with
 //! `with_bearer_auth`; the dialect is unchanged. Only the streaming
-//! dialect is spoken; every call streams and assembles. Transport failures
-//! map onto [`ProviderError`]: timeouts to [`ProviderError::Timeout`],
-//! other network failures to [`ProviderError::Other`], non-2xx responses
-//! (with the body's `error.message` when present) to [`ProviderError::Api`],
-//! and unparseable stream chunks and mid-stream error events to
-//! [`ProviderError::Api`] too.
+//! dialect is spoken; every call streams and assembles.
 //!
-//! Timeouts are layered: the client bounds connection setup (10s) and each
-//! stream read (90s — a stall guard, not a duration cap, because a long
-//! generation is legitimate), and non-streaming calls (the models list)
-//! additionally carry a 20s overall request timeout. Streaming calls get no
-//! total timeout for the same reason.
+//! The HTTP ride is injectable: the default constructor speaks reqwest
+//! (feature `native`), and [`AnthropicProvider::new_with_transport`]
+//! accepts any [`Transport`] — the wasm frontends bring one over host
+//! fetch, whose `!Send` JS stream is bridged inside the transport so the
+//! seam stays `Send`. Transport failures map onto [`ProviderError`]:
+//! timeouts to [`ProviderError::Timeout`], everything else to
+//! `network error: ...` (the prefix that makes [`ProviderError::Other`]
+//! retryable), non-2xx responses (with the body's `error.message` when
+//! present) to [`ProviderError::Api`] keeping the
+//! `"... (HTTP <status>): ..."` shape, and unparseable stream chunks and
+//! mid-stream error events to [`ProviderError::Api`] too.
+//!
+//! Timeouts are layered where the transport allows: the native client
+//! bounds connection setup (10s) and each stream read (90s — a stall
+//! guard, not a duration cap, because a long generation is legitimate),
+//! and non-streaming calls (the models list, the quota probe) carry a
+//! 20s overall budget on their request. Streaming calls get no total
+//! timeout for the same reason.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -28,7 +37,9 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{Allowance, ModelCard, Pricing, SseDecoder};
+use rhema_provider::{
+    Allowance, HttpRequest, HttpResponse, ModelCard, Pricing, SseDecoder, Transport, TransportError,
+};
 
 use crate::wire::{ChunkAssembler, StreamEvent, WireErrorBody, WireModelsPage, WireZaiQuota};
 
@@ -51,34 +62,37 @@ pub const USER_AGENT: &str = concat!("rhema/", env!("CARGO_PKG_VERSION"));
 /// The largest page size the models endpoint honors.
 const MODELS_PAGE_LIMIT: u32 = 1000;
 
+/// The overall budget of the bounded, listing-style calls: the models
+/// list and the quota probe. Not a stream's budget — a generation runs
+/// unbounded.
+const LIST_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Anthropic backend, speaking the Messages API.
 pub struct AnthropicProvider {
     api_key: String,
     base_url: String,
     /// Bearer instead of `x-api-key`, per `with_bearer_auth`.
     bearer_auth: bool,
-    http: reqwest::Client,
+    transport: Arc<dyn Transport>,
 }
 
 impl AnthropicProvider {
     /// A provider authenticating with `api_key` against
-    /// [`DEFAULT_BASE_URL`].
+    /// [`DEFAULT_BASE_URL`], over the native reqwest transport.
+    #[cfg(feature = "native")]
     pub fn new(api_key: impl Into<String>) -> Self {
-        let http = reqwest::Client::builder()
-            // One connect attempt; a dead network fails fast instead of
-            // hanging the agent step.
-            .connect_timeout(Duration::from_secs(10))
-            // Per-read stall guard for streams: bounds the silence between
-            // chunks, never the total generation time.
-            .read_timeout(Duration::from_secs(90))
-            .user_agent(USER_AGENT)
-            .build()
-            .expect("a client builder with only timeouts cannot fail");
+        Self::new_with_transport(api_key, Arc::new(crate::transport::ReqwestTransport::new()))
+    }
+
+    /// A provider over a caller-supplied transport — the seam the wasm
+    /// frontends come in through. Any [`Transport`] fits; the provider
+    /// never sees what the bytes ride on.
+    pub fn new_with_transport(api_key: impl Into<String>, transport: Arc<dyn Transport>) -> Self {
         Self {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_owned(),
             bearer_auth: false,
-            http,
+            transport,
         }
     }
 
@@ -108,24 +122,29 @@ impl AnthropicProvider {
         let mut models = Vec::new();
         let mut after_id: Option<String> = None;
         loop {
-            let mut request = self
-                .authenticated(self.http.get(format!("{}/v1/models", self.base_url)))
-                .query(&[("limit", MODELS_PAGE_LIMIT.to_string())])
-                // The one overall timeout: a bounded catalog call, not a
-                // stream of unbounded length.
-                .timeout(Duration::from_secs(20));
+            // The query is assembled by hand: the only parameter that
+            // varies is a cursor the same endpoint handed out (an id of
+            // letters, digits, and dashes), so there is nothing to
+            // percent-encode.
+            let mut url = format!("{}/v1/models?limit={MODELS_PAGE_LIMIT}", self.base_url);
             if let Some(after) = &after_id {
-                request = request.query(&[("after_id", after)]);
+                url.push_str("&after_id=");
+                url.push_str(after);
             }
-            let response = request.send().await.map_err(network_error)?;
-            let status = response.status();
-            if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
-                return Err(api_error(status, &text));
-            }
-            let page: WireModelsPage = response
-                .json()
+            let mut response = self
+                .transport
+                .send(
+                    self.authenticated(HttpRequest::new("GET", url))
+                        .with_timeout(LIST_TIMEOUT),
+                )
                 .await
+                .map_err(transport_error)?;
+            if !is_success(response.status) {
+                let text = read_all(&mut response).await?;
+                return Err(api_error(response.status, &String::from_utf8_lossy(&text)));
+            }
+            let body = read_all(&mut response).await?;
+            let page: WireModelsPage = serde_json::from_slice(&body)
                 .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
             let fetched = page.data.len();
             models.extend(page.data.into_iter().map(ModelCard::from));
@@ -162,33 +181,39 @@ impl AnthropicProvider {
     async fn fetch_zai_quota(&self, url: &str) -> Result<Allowance, ProviderError> {
         // Bearer unconditionally: the monitor endpoint is a Z.ai platform
         // API, and Z.ai documents token auth, not `x-api-key`.
-        let response = self
-            .http
-            .get(url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            // A bounded listing-style call, not a stream.
-            .timeout(Duration::from_secs(20))
-            .send()
+        let mut response = self
+            .transport
+            .send(
+                HttpRequest::new("GET", url.to_owned())
+                    .with_header("Authorization", format!("Bearer {}", self.api_key))
+                    .with_timeout(LIST_TIMEOUT),
+            )
             .await
-            .map_err(network_error)?;
-        let status = response.status();
-        let text = response.text().await.unwrap_or_default();
-        if !status.is_success() {
+            .map_err(transport_error)?;
+        let status = response.status;
+        let text = read_all(&mut response).await?;
+        if !is_success(status) {
             return Err(ProviderError::Api(format!(
                 "zai quota error (HTTP {}): {}",
-                status.as_u16(),
-                text
+                status,
+                String::from_utf8_lossy(&text)
             )));
         }
-        let quota: WireZaiQuota = serde_json::from_str(&text)
+        let quota: WireZaiQuota = serde_json::from_slice(&text)
             .map_err(|err| ProviderError::Api(format!("malformed quota response: {err}")))?;
         if !quota.success {
             // A rejected token rides HTTP 200; the envelope's own fields
             // carry the failure.
             return Err(ProviderError::Api(match (quota.code, quota.msg) {
                 (Some(code), Some(msg)) => format!("zai quota error (code {code}): {msg}"),
-                (Some(code), None) => format!("zai quota error (code {code}): {text}"),
-                _ => format!("zai quota error: {text}"),
+                (Some(code), None) => format!(
+                    "zai quota error (code {code}): {text}",
+                    text = String::from_utf8_lossy(&text)
+                ),
+                _ => format!(
+                    "zai quota error: {text}",
+                    text = String::from_utf8_lossy(&text)
+                ),
             }));
         }
         crate::wire::allowance(&quota)
@@ -197,13 +222,21 @@ impl AnthropicProvider {
 
     /// Common headers of every request: the key by the configured scheme
     /// and the pinned API version.
-    fn authenticated(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let request = if self.bearer_auth {
-            request.header("Authorization", format!("Bearer {}", self.api_key))
+    fn authenticated(&self, mut request: HttpRequest) -> HttpRequest {
+        if self.bearer_auth {
+            request.headers.push((
+                "Authorization".to_owned(),
+                format!("Bearer {}", self.api_key),
+            ));
         } else {
-            request.header("x-api-key", &self.api_key)
-        };
-        request.header("anthropic-version", ANTHROPIC_VERSION)
+            request
+                .headers
+                .push(("x-api-key".to_owned(), self.api_key.clone()));
+        }
+        request
+            .headers
+            .push(("anthropic-version".to_owned(), ANTHROPIC_VERSION.to_owned()));
+        request
     }
 }
 
@@ -280,37 +313,77 @@ fn decorate_zai(models: &mut [ModelCard]) {
     }
 }
 
+/// The host of a `scheme://host[:port]/...` URL, port stripped — the one
+/// piece of URL parsing this crate needs, done by hand so the wasm build
+/// carries no URL crate.
+fn url_host(url: &str) -> Option<&str> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let authority_end = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    authority.split(':').next()
+}
+
+/// The origin of a URL: scheme and authority, no path or query.
+fn url_origin(url: &str) -> &str {
+    match url.find("//") {
+        Some(slashes) => match url[slashes + 2..].find('/') {
+            Some(path_start) => &url[..slashes + 2 + path_start],
+            None => url,
+        },
+        None => url,
+    }
+}
+
 /// The monitor endpoint behind a base URL, when that base is a Z.ai
 /// host: the quota API lives beside the Anthropic route on both hosts
 /// the plan is sold through, so the base's origin supplies the URL.
 fn zai_quota_url(base_url: &str) -> Option<String> {
-    let mut url = reqwest::Url::parse(base_url).ok()?;
-    if url.host_str()? != ZAI_HOST && url.host_str()? != ZAI_CN_HOST {
+    let host = url_host(base_url)?;
+    if host != ZAI_HOST && host != ZAI_CN_HOST {
         return None;
     }
-    url.set_path("/api/monitor/usage/quota/limit");
-    url.set_query(None);
-    Some(url.to_string())
+    Some(format!(
+        "{}/api/monitor/usage/quota/limit",
+        url_origin(base_url)
+    ))
+}
+
+/// The 2xx test over the transport's numeric status.
+fn is_success(status: u16) -> bool {
+    (200..300).contains(&status)
+}
+
+/// Reads the whole body. For bounded payloads only: error bodies,
+/// listing pages, quota envelopes — never a generation stream.
+async fn read_all(response: &mut HttpResponse) -> Result<Vec<u8>, ProviderError> {
+    let mut bytes = Vec::new();
+    while let Some(item) = response.body.next().await {
+        bytes.extend_from_slice(&item.map_err(transport_error)?);
+    }
+    Ok(bytes)
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the Anthropic
-/// error shape's `error.message` when the body has it.
-fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
+/// error shape's `error.message` when the body has it — and the
+/// `(HTTP <status>)` group [`ProviderError::is_retryable`] reads back.
+fn api_error(status: u16, raw: &str) -> ProviderError {
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
     ProviderError::Api(format!(
         "anthropic api error (HTTP {}): {}",
-        status.as_u16(),
+        status,
         parsed.message(raw)
     ))
 }
 
-/// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
-/// carried in [`ProviderError`] directly (it is `Clone + Eq`).
-fn network_error(err: reqwest::Error) -> ProviderError {
-    if err.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Other(format!("network error: {err}"))
+/// Maps a transport failure onto [`ProviderError`]: a timeout is its own
+/// variant, and every other failure carries the `network error: ` prefix
+/// — that prefix is what makes the error retryable.
+fn transport_error(err: TransportError) -> ProviderError {
+    match err {
+        TransportError::Timeout => ProviderError::Timeout,
+        TransportError::Other(msg) => ProviderError::Other(format!("network error: {msg}")),
     }
 }
 
@@ -339,26 +412,27 @@ impl ModelProvider for AnthropicProvider {
         let body = crate::wire::request_body(&req)?;
         let url = format!("{}/v1/messages", self.base_url);
 
-        let response = self
-            .authenticated(self.http.post(&url))
-            .json(&body)
-            .send()
+        let mut response = self
+            .transport
+            .send(
+                self.authenticated(HttpRequest::new("POST", url))
+                    .with_json_body(&body),
+            )
             .await
-            .map_err(network_error)?;
+            .map_err(transport_error)?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
+        if !is_success(response.status) {
+            let text = read_all(&mut response).await?;
+            return Err(api_error(response.status, &String::from_utf8_lossy(&text)));
         }
 
         // No overall timeout: a long generation is legitimate, and the
-        // client's read timeout already bounds stalls between chunks.
-        let mut stream = response.bytes_stream();
+        // transport's read stall guard already bounds silences between
+        // chunks where one exists.
         let mut decoder = SseDecoder::new();
         let mut assembler = ChunkAssembler::new();
-        while let Some(item) = stream.next().await {
-            let bytes = item.map_err(network_error)?;
+        while let Some(item) = response.body.next().await {
+            let bytes = item.map_err(transport_error)?;
             for payload in decoder.push(&bytes) {
                 feed_chunk(&payload, &mut assembler, sink)?;
             }
@@ -426,6 +500,8 @@ mod tests {
         // no monitor endpoint to ask, not a wrong one to leak the key to.
         assert_eq!(zai_quota_url("https://api.anthropic.com"), None);
         assert_eq!(zai_quota_url("http://127.0.0.1:8080/api/anthropic"), None);
+        // No scheme, no host: refused, not misparsed.
+        assert_eq!(zai_quota_url("api.z.ai/api/anthropic"), None);
     }
 
     #[tokio::test]

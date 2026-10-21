@@ -45,14 +45,23 @@
 //!   [`rhema_core::ModelRequest`] / SSE events and
 //!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
 //!   mapping onto `ModelCard`
-//! - [`provider`] — the HTTP transport and the
+//! - [`transport`] — the native reqwest transport (feature `native`);
+//!   wasm builds turn the feature off and hand the provider their own
+//!   [`Transport`](rhema_provider::Transport) over host fetch
+//! - [`provider`] — the dialect over the transport seam and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 pub mod provider;
+#[cfg(feature = "native")]
+pub mod transport;
 pub mod wire;
 
-pub use provider::{ANTHROPIC_VERSION, AnthropicProvider, DEFAULT_BASE_URL, ZAI_BASE_URL};
+pub use provider::{
+    ANTHROPIC_VERSION, AnthropicProvider, DEFAULT_BASE_URL, USER_AGENT, ZAI_BASE_URL,
+};
+#[cfg(feature = "native")]
+pub use transport::ReqwestTransport;
 pub use wire::{ChunkAssembler, DEFAULT_MAX_TOKENS, MessagesRequest, StreamEvent};
