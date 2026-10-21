@@ -6,6 +6,7 @@
 //! implements them:
 //!
 //! - [`approval`] — the `Approval` hook and `AllowAll`/`DenyAll`
+//! - [`exec`] — the `ShellExecutor` seam: where `bash` commands run
 //! - [`shell`] — `ShellTools`, one approval-gated `bash` scoped to a
 //!   workspace; reading, listing, and editing are shell work, not
 //!   separate tools
@@ -34,6 +35,7 @@
 #![deny(missing_docs)]
 
 pub mod approval;
+pub mod exec;
 pub mod overlay;
 pub mod paste;
 pub mod prompt;
@@ -42,6 +44,9 @@ pub mod shell;
 pub mod skills;
 
 pub use approval::{AllowAll, Approval, DenyAll};
+#[cfg(feature = "local-shell")]
+pub use exec::LocalShell;
+pub use exec::{Executed, ShellError, ShellExecutor};
 pub use overlay::Overlay;
 pub use paste::ExpandPastes;
 pub use prompt::{render_system, render_template};

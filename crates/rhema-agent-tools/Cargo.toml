@@ -16,10 +16,24 @@ serde_yaml = { workspace = true }
 # The system-prompt template engine
 minijinja = { workspace = true }
 async-trait = { workspace = true }
-# Subprocess execution for the shell; its streams read line by
-# line (io-util) and hand their lines to the resolver's progress
-# callback across reader tasks (sync).
-tokio = { workspace = true, features = ["process", "time", "io-util", "sync"] }
+# Typed shell errors
+thiserror = { workspace = true }
+# Subprocess execution for the shell (feature `local-shell`); its
+# streams read line by line (io-util) and hand their lines to the
+# resolver's progress callback across reader tasks (sync). Off in
+# builds whose shell lives elsewhere, which drops tokio from the crate.
+tokio = { workspace = true, optional = true, features = [
+    "process",
+    "time",
+    "io-util",
+    "sync",
+] }
+
+[features]
+default = ["local-shell"]
+# The local executor: commands run as `bash -c` child processes on this
+# host. Off in wasm builds whose shell lives in a remote sandbox.
+local-shell = ["dep:tokio"]
 
 [dev-dependencies]
 tempfile = "3"
