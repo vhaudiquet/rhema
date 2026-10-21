@@ -39,7 +39,7 @@ pub mod agent;
 pub mod config;
 pub mod prompt;
 
-pub use agent::{CodingAgent, CodingAgentError, stamped_system};
+pub use agent::{CodingAgent, CodingAgentError, stamped_system, stamped_system_with_skills};
 pub use config::CodingAgentConfig;
 pub use prompt::{DEFAULT_SYSTEM_MD, default_system};
 // The toolkit the driver is built on, under this crate's name: every

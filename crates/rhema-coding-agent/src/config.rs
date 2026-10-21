@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use rhema_agent_tools::ShellTools;
+use rhema_agent_tools::{ShellTools, Skill};
 use rhema_core::ToolResolver;
 use rhema_core::request::ThinkingEffort;
 
@@ -27,6 +27,13 @@ pub struct CodingAgentConfig {
     /// Root all tools are scoped to; paths that escape it are rejected
     /// in-band to the model.
     pub workspace: PathBuf,
+    /// Skills already collected elsewhere, for the prompt's skills list.
+    /// `None` discovers from the filesystem — the global config
+    /// directory and the workspace's `.rhema/skills`. A frontend with no
+    /// filesystem to discover from (the cloud sandbox) seeds the skill
+    /// files itself and passes the list; the model reads bodies through
+    /// the shell, so each path must resolve inside the workspace.
+    pub skills: Option<Vec<Skill>>,
     /// Cap on steps per turn; a turn still requesting tools past it fails
     /// with `AgentError::MaxIterations`.
     pub max_turn_steps: u32,
@@ -61,6 +68,7 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("system", &self.system)
             .field("base_system", &self.base_system)
             .field("workspace", &self.workspace)
+            .field("skills", &self.skills.is_some())
             .field("max_turn_steps", &self.max_turn_steps)
             .field("thinking", &self.thinking)
             .field("tools", &self.tools.is_some())
@@ -85,6 +93,7 @@ impl CodingAgentConfig {
             system: None,
             base_system: None,
             workspace: workspace.into(),
+            skills: None,
             max_turn_steps: Self::DEFAULT_MAX_TURN_STEPS,
             thinking: ThinkingEffort::Default,
             tools: None,

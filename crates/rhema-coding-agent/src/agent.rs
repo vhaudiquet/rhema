@@ -15,7 +15,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use rhema_agent_tools::{Approval, ExpandPastes, Overlay, ShellTools, revive_dangling_calls};
+use rhema_agent_tools::{
+    Approval, ExpandPastes, Overlay, ShellTools, Skill, revive_dangling_calls,
+};
 use rhema_core::{
     Agent, AgentError, ChatParams, CommitHook, EventSink, Message, ModelOutput, Role, Session,
     ToolContext, ToolResolver, ToolSpec, run_turn,
@@ -71,12 +73,27 @@ pub fn stamped_system(
     // as an empty one.
     let global = rhema_config::Config::skills_dir().ok();
     let skills = rhema_agent_tools::skills::discover(global.as_deref(), workspace);
+    stamped_system_with_skills(base, workspace, extra, &skills)
+}
+
+/// [`stamped_system`] over skills collected elsewhere — the input path
+/// for frontends with no filesystem to discover from: the cloud
+/// deployment keeps skills in its durable storage, seeds them into the
+/// sandbox workspace, and feeds the list here. The model still reads a
+/// skill's body through the shell, so each `Skill::path` must resolve
+/// inside the workspace the tools run on.
+pub fn stamped_system_with_skills(
+    base: Option<&str>,
+    workspace: &Path,
+    extra: &[ToolSpec],
+    skills: &[Skill],
+) -> Result<String, CodingAgentError> {
     let mut tools = ShellTools::builtin_specs();
     tools.extend_from_slice(extra);
     rhema_agent_tools::render_system(
         base.unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD),
         workspace,
-        &skills,
+        skills,
         &tools,
     )
     .map_err(CodingAgentError::from)
@@ -135,7 +152,15 @@ impl CodingAgent {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
             Some(system) => system,
-            None => stamped_system(config.base_system.as_deref(), tools.workspace(), &extra)?,
+            None => match &config.skills {
+                Some(skills) => stamped_system_with_skills(
+                    config.base_system.as_deref(),
+                    tools.workspace(),
+                    &extra,
+                    skills,
+                )?,
+                None => stamped_system(config.base_system.as_deref(), tools.workspace(), &extra)?,
+            },
         };
         let agent = Agent::builder()
             .provider(provider)
@@ -473,6 +498,22 @@ mod extra_tools_tests {
         assert_eq!(rounds[0], vec!["bash".to_owned()]);
         assert!(!agent.system().contains("zoom"), "{}", agent.system());
         assert!(!agent.system().contains("canary"));
+    }
+
+    #[test]
+    fn pre_collected_skills_reach_the_prompt_without_a_filesystem() {
+        let workspace = std::env::temp_dir();
+        let skill = Skill {
+            name: "deploy".into(),
+            description: "Triggers on deploy tasks.".into(),
+            path: workspace.join(".rhema/skills/deploy/SKILL.md"),
+        };
+        let prompt = stamped_system_with_skills(None, &workspace, &[], &[skill]).unwrap();
+        assert!(prompt.contains("deploy"), "{prompt}");
+        assert!(prompt.contains("Triggers on deploy tasks."), "{prompt}");
+        // The discovery default is untouched: no such skill on disk.
+        let without = stamped_system(None, &workspace, &[]).unwrap();
+        assert!(!without.contains("Triggers on deploy tasks."), "{without}");
     }
 
     #[test]
