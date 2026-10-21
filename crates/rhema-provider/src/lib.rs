@@ -20,6 +20,8 @@
 //! - [`stream`] — the SSE byte-stream decoder
 //! - [`login`] — the interactive login flow seam
 //! - [`retry`] — the transient-failure retry every turn provider rides
+//! - [`transport`] — the HTTP seam under the adapters: one request in,
+//!   a status and a `Send` byte stream out
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -30,10 +32,12 @@ pub mod login;
 pub mod pricing;
 pub mod retry;
 pub mod stream;
+pub mod transport;
 
 pub use allowance::Allowance;
 pub use card::ModelCard;
 pub use login::{InteractiveLogin, LoginInstruction, LoginSink, LoginUpdate};
 pub use pricing::Pricing;
-pub use retry::Retrying;
+pub use retry::{Retrying, Sleeper, TokioSleeper};
 pub use stream::SseDecoder;
+pub use transport::{ByteStream, HttpRequest, HttpResponse, Transport, TransportError};

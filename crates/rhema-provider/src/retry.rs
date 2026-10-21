@@ -38,6 +38,9 @@ pub struct Retrying {
     base_delay: Duration,
     /// The longest pause any retry waits.
     max_delay: Duration,
+    /// The pause between attempts, injected so runtimes without tokio's
+    /// timers (the wasm hosts) supply their own.
+    sleeper: Arc<dyn Sleeper>,
 }
 
 impl Retrying {
@@ -60,7 +63,34 @@ impl Retrying {
             attempts,
             base_delay,
             max_delay,
+            sleeper: Arc::new(TokioSleeper),
         }
+    }
+
+    /// [`with_policy`](Self::with_policy) with the pause supplied — the
+    /// constructor for runtimes without tokio's timers. The policy is
+    /// unchanged: the sleeper only waits the ladder out.
+    pub fn policy_with_sleeper(
+        inner: Arc<dyn ModelProvider>,
+        attempts: u32,
+        base_delay: Duration,
+        max_delay: Duration,
+        sleeper: Arc<dyn Sleeper>,
+    ) -> Self {
+        Self {
+            inner,
+            attempts,
+            base_delay,
+            max_delay,
+            sleeper,
+        }
+    }
+
+    /// Replaces the pause. The additive knob a wasm frontend turns to
+    /// swap tokio's timers for its runtime's sleep.
+    pub fn with_sleeper(mut self, sleeper: Arc<dyn Sleeper>) -> Self {
+        self.sleeper = sleeper;
+        self
     }
 
     /// The pause before retry number `retry`, zero-based.
@@ -69,6 +99,27 @@ impl Retrying {
         // multiplication; the cap makes the exact bound irrelevant.
         let doubling = 1u32 << retry.min(16);
         self.base_delay.saturating_mul(doubling).min(self.max_delay)
+    }
+}
+
+/// The pause between retries. A seam because runtimes differ: tokio's
+/// timers do not exist in every host (workerd gives wasm no Rust-side
+/// timers to fire), so a host injects its own — the same ladder, a
+/// different sleep.
+#[async_trait]
+pub trait Sleeper: Send + Sync {
+    /// Waits `duration` out.
+    async fn sleep(&self, duration: Duration);
+}
+
+/// The tokio pause — today's behavior, the default sleeper.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TokioSleeper;
+
+#[async_trait]
+impl Sleeper for TokioSleeper {
+    async fn sleep(&self, duration: Duration) {
+        tokio::time::sleep(duration).await;
     }
 }
 
@@ -95,7 +146,7 @@ impl ModelProvider for Retrying {
     ) -> Result<ModelOutput, ProviderError> {
         for attempt in 0..self.attempts {
             if attempt > 0 {
-                tokio::time::sleep(self.delay(attempt - 1)).await;
+                self.sleeper.sleep(self.delay(attempt - 1)).await;
             }
             let mut counted = CountingSink {
                 inner: &mut *sink,
@@ -298,6 +349,40 @@ mod tests {
             "names the failure: {err}"
         );
         assert_eq!(scripted.calls(), 3, "the policy ran out");
+    }
+
+    /// A sleeper that records the waits it was asked for and answers
+    /// immediately: proves the ladder is consulted through the seam.
+    struct RecordingShared(Arc<Mutex<Vec<Duration>>>);
+
+    #[async_trait]
+    impl Sleeper for RecordingShared {
+        async fn sleep(&self, duration: Duration) {
+            self.0.lock().unwrap().push(duration);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pause_rides_the_injected_sleeper() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::Timeout,
+            Attempt::Succeed("through the seam"),
+        ]));
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let sleeper = Arc::new(RecordingShared(waits.clone()));
+        let retrying = Retrying::policy_with_sleeper(
+            scripted.clone(),
+            3,
+            Duration::from_millis(40),
+            Duration::from_millis(80),
+            sleeper,
+        );
+        let mut sink = Deltas::default();
+        retrying
+            .complete(request(), &mut sink)
+            .await
+            .expect("the second attempt answers");
+        assert_eq!(*waits.lock().unwrap(), vec![Duration::from_millis(40)]);
     }
 
     #[tokio::test(start_paused = true)]

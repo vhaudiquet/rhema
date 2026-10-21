@@ -12,8 +12,15 @@ authors.workspace = true
 # The ModelProvider seam the retry decorator implements and the
 # ProviderError it classifies
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# The Stream trait under the transport seam's byte-stream type; the
+# core trait only, no runtime
+futures-core = { version = "0.3", default-features = false }
 # The card and the price record round-trip through stored catalogs
 serde = { workspace = true }
+# The transport seam's JSON body helper
+serde_json = { workspace = true }
+# Typed transport errors
+thiserror = { workspace = true }
 # dyn InteractiveLogin: the frontends hold boxed flows
 async-trait = { workspace = true }
 # The retry decorator's backoff sleeps
