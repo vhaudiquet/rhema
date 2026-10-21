@@ -56,6 +56,24 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features
 
+  # The cloud closure compiles to wasm32: the Durable Object with the
+  # worker feature is the real build, and the platform-neutral closure
+  # must also stay wasm-clean without the local shell.
+  cloudflare-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: https://gitea.com/actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: wasm32-unknown-unknown
+
+      - name: Check the Durable Object build
+        run: cargo check -p rhema-cloudflare-code --target wasm32-unknown-unknown --features worker
+
+      - name: Check the platform-neutral closure
+        run: cargo check -p rhema-agent-tools -p rhema-subagents -p rhema-cloudflare-code --target wasm32-unknown-unknown --no-default-features
+
   # The deploy chart: lint, render every supported shape, validate the
   # result against the Kubernetes schemas — and prove the single-node
   # invariant is enforced rather than hoped for.
@@ -202,7 +220,7 @@ jobs:
   # hand-off is worth the plumbing for a build this cheap.
   publish-edge-images:
     if: gitea.event_name == 'push' && gitea.ref == 'refs/heads/main'
-    needs: [checks, test, chart, docker, web]
+    needs: [checks, test, chart, docker, web, cloudflare-wasm]
     runs-on: ubuntu-latest
     strategy:
       matrix:

@@ -1,0 +1,43 @@
+# The rhema cloud agent: one Worker exporting the Rust `CodingAgent`
+# Durable Object (built by `worker-build` into build/worker/), the JS
+# `SandboxShim` container DO, and the /sessions/<id>/ route.
+#
+# Build and deploy:
+#   npx worker-build --release        # or: cargo install worker-build
+#   wrangler deploy
+# See README.md beside this file for the full walk-through.
+
+name = "rhema-cloudflare-code"
+main = "entry.mjs"
+compatibility_date = "2026-01-15"
+compatibility_flags = ["nodejs_compat"]
+
+# The agent DO and the sandbox shim of a session share a name, so the
+# container's lifetime hangs off the same name the checkpoints do.
+[[durable_objects.bindings]]
+name = "CODING_AGENT"
+class_name = "CodingAgent"
+
+[[durable_objects.bindings]]
+name = "SANDBOX"
+class_name = "SandboxShim"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CodingAgent", "SandboxShim"]
+
+# The container: `scheduling_policy = "durable_object"` lets the shim
+# choose the image in `container.start()`.
+[[containers]]
+class_name = "SandboxShim"
+scheduling_policy = "durable_object"
+
+[vars]
+# The default model, until a session's POST /config carries its own.
+RHEMA_MODEL = "claude-sonnet-4-5"
+
+# Secrets — set with `wrangler secret put`, never in this file, never
+# in DO storage:
+#   ANTHROPIC_API_KEY  the model key the agent DO authenticates with
+#   SANDBOX_TOKEN      the shared secret between the agent DO and the
+#                      sandbox shim's HTTP surface
