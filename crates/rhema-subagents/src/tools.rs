@@ -111,7 +111,10 @@ impl SubagentTools {
     /// approval hook installed. No hook installed means the inner tools
     /// reject — the fail-safe default, never the case mid-turn.
     fn inner_shell(&self) -> Arc<ShellTools> {
-        let shell = Arc::new(ShellTools::new(self.shell.workspace().to_path_buf()));
+        let shell = Arc::new(ShellTools::with_executor(
+            self.shell.workspace().to_path_buf(),
+            self.shell.executor(),
+        ));
         if let Some(hook) = self.shell.current_approval() {
             shell.install_approval(hook);
         }

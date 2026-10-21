@@ -11,10 +11,13 @@ authors.workspace = true
 [dependencies]
 # The step engine: a subagent is a fresh Agent on a fresh Session
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
-# The toolkit: the inner shell, the overlay, the approval hook, the renderer
-rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0" }
+# The toolkit: the inner shell, the overlay, the approval hook, the
+# renderer. Default features off so a wasm build (remote-shell sandbox,
+# no tokio processes) excludes them; the inner shell shares the parent
+# turn's executor, so nothing here needs the local shell.
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0", default-features = false }
 # `wire` attaches the tool to a coding-agent config
-rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0" }
+rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0", default-features = false }
 # The global definitions directory resolves off the config dir
 rhema-config = { path = "../rhema-config", version = "0.1.0" }
 # Definitions round-trip through YAML frontmatter
@@ -25,7 +28,10 @@ serde_yaml = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
-# The scripted provider drives inner agents offline
+# The scripted provider drives inner agents offline; the local shell
+# comes back for the tests that really run commands.
 rhema-core = { path = "../rhema-core", features = ["mock"] }
+rhema-agent-tools = { path = "../rhema-agent-tools", features = ["local-shell"] }
+rhema-coding-agent = { path = "../rhema-coding-agent", features = ["local-shell"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
