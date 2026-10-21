@@ -394,3 +394,80 @@ the driver seams that demanded no core changes and one justified
 approval-bridge addition (`repair_dangling_calls` shared with the
 TUI). Structured file tools remain the gate for ACP's diff and
 follow-along UX; the adapter already answers `session/request_permission`.
+
+---
+
+## 10. The cloud frontend (`rhema-cloudflare-code`)
+
+The fourth `CodingAgent` consumer, and the first whose platform is not
+a POSIX process: the coding agent as a Cloudflare Durable Object, one
+instance per session id. The engine, the driver, and the toolkit are
+unchanged — what the cloud changes is where things live, and the
+seams that took the move are the record of why.
+
+**Why a DO plus a Sandbox container.** The DO gives the session one
+addressable instance with durable SQLite storage and a WebSocket
+surface; the Sandbox (a container bound to the same session name)
+gives `bash` a real Linux workspace that persists across turns and
+idle sleeps. The agent DO is the single writer of the session row, so
+the `rhema-rsd` `Store` contract — one record per key, the revision
+the compare-and-swap token — lands on DO storage without a
+dispatcher.
+
+**Container eviction is the committed-but-unanswered call.** Files
+survive idle sleeps; a full container eviction does not, and a command
+in flight dies with the machine. That is exactly the case the engine's
+revive machinery exists for: `bash` is `ReplaySafety::Unsafe`, so the
+resume reports the call interrupted instead of re-running it, and the
+model verifies state before retrying. The offline e2e scripts the same
+shape host-side: commit lands, the command parks, the turn dies, the
+resume reports interrupted. The workspace itself is a checkout, not a
+store — the session re-seeds what its config names (a git clone, the
+skill files), and the meta-table marker keeps a resumed DO from
+re-cloning over a workspace the client has since changed.
+
+**The approval model.** `Approval::approve` is synchronous, and every
+existing frontend blocks inside it (the ACP adapter parks a worker
+thread). workerd has no second thread: a native block would stall the
+isolate and deadlock the socket the answer arrives on. So the cloud
+gate asks *before* tool resolution, at an await point: `ClientGate` is
+a resolver that shadows `bash` with the same spec, answers from the
+per-session policy (`deny_all`, an allowlist, `allow_all`), and hands
+undecided calls to the connected client over the WebSocket — deny on
+timeout (120 s), deny with no client. The turn-level hook stays
+`DenyAll`: the gate is the only path a call takes, and the fail-safe
+default stands behind it.
+
+**Turn driving, v1.** A turn runs inside the client's live WebSocket
+connection; checkpoints land at the commit hook — before every side
+effect — and after each turn, so any eviction resumes through the
+existing revive path. The known refinement is the alarm-driven step
+queue, which would let a turn outlive any request and checkpoint after
+every step; v1 declines to fight the invocation limits with it until a
+turn shape actually needs it.
+
+**The wasm discipline, kept.** The crate is two halves with one rule:
+the platform lives at the edges. The neutral half (`sandbox`, `shell`,
+`gate`, `assembly`, the scripted `mock`) compiles and tests on any
+host with no `worker`, no wasm-bindgen, no fetch — the offline e2e is
+the scripted sandbox plus the scripted provider, and it is the same
+behavior the DO wraps. The `worker` module holds every host binding:
+the fetch transport (whose `!Send` JS stream is pumped into plain-data
+chunks inside one local task — the seam stays `Send` because the JS
+handles never leave the bridge), the `worker::Delay` retry sleeper,
+the DO storage `Store`, the WebSocket pump, and the JSON shim client
+for the sandbox container (whose runtime is JS-only; the shim is the
+sanctioned ~90-line translation, not a fight with JS RPC).
+`worker = "0.8"` is pinned deliberately: the crate is 0.x and the
+`DurableObject`/`SqlStorage`/`WebSocket` shapes this module uses are
+0.8's. The `#[durable_object]` macro emits `unsafe` internally, so the
+crate carries `deny(missing_docs)` but not a crate-level
+`forbid(unsafe_code)`: the exception is scoped to the one class module
+and documented where it is declared. Secrets ride wrangler secrets,
+never DO storage; profiles ride the DO's meta table, never the XDG
+config store.
+
+Non-goals, v1: one provider adapter (Anthropic); no memory tools and
+no subagents (both need storage-backed discovery to be honest on a
+host with no filesystem); no hibernating WebSockets (the live-request
+turn drives v1; hibernation rides the alarm-driven queue).

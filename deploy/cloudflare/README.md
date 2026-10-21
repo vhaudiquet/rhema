@@ -31,7 +31,7 @@ Two wrangler secrets, never config files, never DO storage:
 
 ```sh
 npx wrangler secret put ANTHROPIC_API_KEY -c deploy/cloudflare/wrangler.toml
-npx wrangler secret put SANDBOX_TOKEN      -c deploy/cloudflare/wrangler.toml
+npx wrangler secret put SANDBOX_TOKEN     -c deploy/cloudflare/wrangler.toml
 ```
 
 `ANTHROPIC_API_KEY` authenticates the model calls. `SANDBOX_TOKEN` is

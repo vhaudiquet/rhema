@@ -91,6 +91,10 @@ Rules:
   - `agent` — the coding-agent driver and tools (`crates/rhema-coding-agent/`)
   - `rhema-code` — the frontend crate: terminal UI and headless
     one-shot (`crates/rhema-code/`); its binary is `rhema`
+  - `cloudflare-code` — the cloud frontend: the coding agent as a
+    Cloudflare Durable Object — the sandbox seam, the approval gate,
+    the assembly, the workers-rs glue, the deploy assets
+    (`crates/rhema-cloudflare-code/`, `deploy/cloudflare/`)
   - `deploy` — the docker image and helm chart under `deploy/`
   - `web` — the claw's Nuxt UI under `web/`
   - `android` — the claw's phone client: chat, status source,

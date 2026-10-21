@@ -4,9 +4,9 @@
 //! One [`worker::CodingAgent`](worker::CodingAgent) instance per
 //! session id. The agent itself is the ordinary
 //! [`CodingAgent`](rhema_coding_agent::CodingAgent) driver over the
-//! ordinary step engine — this crate is a *frontend*, the third one,
-//! next to the terminal and the ACP adapter. What the cloud changes is
-//! where things live:
+//! ordinary step engine — this crate is a frontend, next to the
+//! terminal and the ACP adapter. What the cloud changes is where
+//! things live:
 //!
 //! - the model rides [`worker::FetchTransport`], a
 //!   [`Transport`](rhema_provider::Transport) over workerd's host
@@ -14,8 +14,9 @@
 //! - `bash` runs in a Cloudflare Sandbox container bound to the same
 //!   session name, reached through the [`Sandbox`] seam
 //!   ([`ShellSandbox`] adapts it onto the shell executor);
-//! - the session checkpoints into the DO's SQLite storage after every
-//!   step, revision-guarded, through a
+//! - the session checkpoints into the DO's SQLite storage — at the
+//!   commit hook, before every side effect, and after each turn —
+//!   revision-guarded, through a
 //!   [`rhema_rsd::Store`](rhema_rsd::Store) implementation, so any
 //!   eviction resumes through the engine's existing revive machinery;
 //! - approvals are a per-session policy
@@ -26,9 +27,9 @@
 //!
 //! The platform lives at the edges, in the `worker` module and nowhere
 //! else: wasm-bindgen, `worker`, and host-fetch dependencies are absent
-//! from [`sandbox`], [`shell`], and [`assembly`], which compile and
-//! test on any host. Every platform-neutral module carries its own
-//! `#![forbid(unsafe_code)]`.
+//! from [`sandbox`], [`shell`], [`gate`], and [`assembly`], which
+//! compile and test on any host. Every platform-neutral module carries
+//! its own `#![forbid(unsafe_code)]`.
 //!
 //! The crate as a whole carries `#![deny(missing_docs)]` but **not**
 //! `#![forbid(unsafe_code)]`: the `worker` module's `#[durable_object]`
