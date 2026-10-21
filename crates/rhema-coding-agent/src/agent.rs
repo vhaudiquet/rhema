@@ -230,11 +230,28 @@ impl CodingAgent {
         sink: &mut dyn EventSink,
         approval: Arc<dyn Approval>,
     ) -> Result<ModelOutput, CodingAgentError> {
+        self.turn_with_cancel(input, sink, approval, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// [`Self::turn`] with a driver-held cancel flag: flipping
+    /// `cancelled` mid-turn asks in-flight tools to stop (the executor
+    /// polls it) and the next resolution to refuse. A driver whose stop
+    /// arrives from outside the turn — a frontend's stop message, a
+    /// disconnected socket — holds one flag per turn and passes it here;
+    /// the plain [`Self::turn`] builds a flag nobody else can reach.
+    pub async fn turn_with_cancel(
+        &mut self,
+        input: impl Into<String>,
+        sink: &mut dyn EventSink,
+        approval: Arc<dyn Approval>,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<ModelOutput, CodingAgentError> {
         self.turns += 1;
         let ctx = ToolContext {
             cwd: self.tools.workspace().to_path_buf(),
             run_id: format!("turn-{}", self.turns),
-            cancelled: Arc::new(AtomicBool::new(false)),
+            cancelled,
         };
         revive_dangling_calls(&mut self.session, self.tools.as_ref(), &ctx).await;
         self.tools.install_approval(approval);
