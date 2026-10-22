@@ -471,3 +471,51 @@ Non-goals, v1: one provider adapter (Anthropic); no memory tools and
 no subagents (both need storage-backed discovery to be honest on a
 host with no filesystem); no hibernating WebSockets (the live-request
 turn drives v1; hibernation rides the alarm-driven queue).
+
+## 11. The frontend family (`rhema-cloud-agent`, `rhema-vercel-agent`)
+
+The second cloud frontend made the harness its own crate. The rule
+the extraction encodes: a cloud frontend is platform glue over the
+same three pieces — an assembly that touches no filesystem, approval
+decisions that round-trip through the connected client, and `bash` in
+someone else's machine — and the pieces are one crate
+(`rhema-cloud-agent`) that no platform dependency enters. The
+per-session `SessionConfig` (model, base prompt, approval policy,
+workspace, seed, skills, step cap) moved with it: it was never
+platform code. A frontend persists it wherever its platform keeps
+durable bytes — the DO's meta table, a Postgres row keyed by session —
+and hands it to the assembly.
+
+The client wire protocol is the shared surface too: one small
+serde-typed module in the harness (`wire`), pinned by tests to the
+byte shapes the DO already spoke, so a client written against one
+frontend talks to the other and a shape drift fails a test here, not
+a debugging session there.
+
+`rhema-vercel-agent` is the proof the extraction was real: an axum
+server (a Vercel container runs native Rust, so no JS shim and no
+`!Send` bridge), the Sandbox REST client behind its own seam so the
+offline tests run without a token, and Postgres carrying the same
+revision-guarded `Store` records the DO's SQLite does. The sync
+`Store` contract stands: the engine's commit hook calls it from
+inside the turn, and a turn's checkpoint parking its worker thread
+for a local-pool round trip is the same trade the ACP adapter makes
+parking one for the editor. Turn driving stays v1 (the live
+connection's request); an alarm-driven queue would let turns outlive
+connections and is the same future refinement on both platforms.
+
+**On "coding" agent.** Nothing in the engine, the harness, or the
+cloud frontends knows code from anything else: `bash` is a tool, the
+seams are domain-neutral, and "coding" is the default toolset and
+prompt assembled on top. A computer-use frontend — the agent driving
+an arbitrary machine rather than a repo — is a different toolset and
+prompt over these same seams, not a fork. The crate names keep
+`coding-agent` for the assembled default; the layer below never
+assumed it.
+
+**On forking.** Conversation topology (branch a session, run a child
+against the parent's prefix) waits for a product shape that wants it.
+The record format would carry it: a session's parent pointer and the
+messages' first-line prefix in the RSD record, the stores
+key-structured and JSON-native, no backend rewrite — deferred, not
+designed away.

@@ -100,6 +100,10 @@ Rules:
     Cloudflare Durable Object — the workers-rs glue over the shared
     harness, and the deploy assets
     (`crates/rhema-cloudflare-code/`, `deploy/cloudflare/`)
+  - `vercel-agent` — the cloud frontend on Vercel: an axum server
+    (native, in a Vercel container) over the shared harness — the
+    Sandbox REST client behind a seam, the Postgres Store, the same
+    wire protocol (`crates/rhema-vercel-agent/`)
   - `deploy` — the docker image and helm chart under `deploy/`
   - `web` — the claw's Nuxt UI under `web/`
   - `android` — the claw's phone client: chat, status source,
