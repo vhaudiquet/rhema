@@ -44,6 +44,7 @@ pub mod config;
 pub mod gate;
 pub mod sandbox;
 pub mod shell;
+pub mod wire;
 
 #[cfg(feature = "mock")]
 pub mod mock;
@@ -53,3 +54,4 @@ pub use config::{SessionConfig, SkillSeed};
 pub use gate::{ApprovalChannel, ClientGate};
 pub use sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 pub use shell::ShellSandbox;
+pub use wire::{ClientMessage, ServerMessage};

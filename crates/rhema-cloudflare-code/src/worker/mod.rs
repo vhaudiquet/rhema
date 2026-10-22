@@ -49,24 +49,15 @@ use rhema_provider::Retrying;
 use rhema_provider_anthropic::AnthropicProvider;
 use rhema_rsd::{ResourceKey, Store};
 
-use rhema_cloud_agent::{AgentAssembly, Sandbox, SessionConfig, ShellSandbox, WorkspaceSeed};
+use rhema_cloud_agent::{
+    AgentAssembly, ClientMessage, Sandbox, ServerMessage, SessionConfig, ShellSandbox,
+    WorkspaceSeed,
+};
 use storage::session_key;
 
 /// How long an approval ask waits for its client before the gate
 /// denies. The client sees `approval_expired` when it happens.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// What a connected client sends.
-#[derive(Debug, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ClientMessage {
-    /// Start one turn with this user text.
-    Chat { text: String },
-    /// Answer a pending approval.
-    Approve { id: String, approve: bool },
-    /// Ask the running turn to stop.
-    Stop,
-}
 
 /// The streaming sink: every engine event serialized to the socket.
 struct WsSink {
@@ -75,41 +66,7 @@ struct WsSink {
 
 impl EventSink for WsSink {
     fn emit(&mut self, event: Event<'_>) {
-        self.live.send_json(&event_json(event));
-    }
-}
-
-/// One engine event as the protocol carries it.
-fn event_json(event: Event<'_>) -> serde_json::Value {
-    match event {
-        Event::StepStart { iteration } => {
-            serde_json::json!({ "type": "step_start", "iteration": iteration })
-        }
-        Event::ThinkingDelta(delta) => {
-            serde_json::json!({ "type": "thinking_delta", "delta": delta })
-        }
-        Event::TextDelta(delta) => serde_json::json!({ "type": "text_delta", "delta": delta }),
-        Event::ToolCallStart { id, name } => {
-            serde_json::json!({ "type": "tool_call_start", "id": id, "name": name })
-        }
-        Event::ToolCallArgsDelta { id, delta } => {
-            serde_json::json!({ "type": "tool_call_args_delta", "id": id, "delta": delta })
-        }
-        Event::ToolOutputDelta { id, chunk } => {
-            serde_json::json!({ "type": "tool_output_delta", "id": id, "chunk": chunk })
-        }
-        Event::ToolResult {
-            id,
-            content,
-            is_error,
-            code,
-        } => serde_json::json!({
-            "type": "tool_result", "id": id, "content": content,
-            "is_error": is_error, "code": code,
-        }),
-        Event::StepEnd { usage, stop_reason } => {
-            serde_json::json!({ "type": "step_end", "usage": usage, "stop_reason": stop_reason })
-        }
+        self.live.send(&ServerMessage::from_event(event));
     }
 }
 
@@ -287,10 +244,9 @@ async fn pump(
                     Ok(ClientMessage::Chat { text }) => {
                         // One turn at a time.
                         if live.busy.swap(true, Ordering::SeqCst) {
-                            live.send_json(&serde_json::json!({
-                                "type": "error",
-                                "message": "a turn is already running",
-                            }));
+                            live.send(&ServerMessage::Error {
+                                message: "a turn is already running".into(),
+                            });
                             continue;
                         }
                         live.cancelled.store(false, Ordering::SeqCst);
@@ -313,10 +269,9 @@ async fn pump(
                         live.cancelled.store(true, Ordering::SeqCst);
                     }
                     Err(err) => {
-                        live.send_json(&serde_json::json!({
-                            "type": "error",
-                            "message": format!("unrecognized message: {err}"),
-                        }));
+                        live.send(&ServerMessage::Error {
+                            message: format!("unrecognized message: {err}"),
+                        });
                     }
                 }
             }
@@ -363,7 +318,7 @@ async fn run_turn(
         Ok(None) => (0, Session::default()),
         Err(message) => {
             live.busy.store(false, Ordering::SeqCst);
-            live.send_json(&serde_json::json!({ "type": "error", "message": message }));
+            live.send(&ServerMessage::Error { message });
             return;
         }
     };
@@ -385,7 +340,7 @@ async fn run_turn(
     let sandbox = Arc::new(SandboxDo::new(namespace, session_id.clone(), sandbox_token));
     if let Err(message) = ensure_seeded(&store, sandbox.as_ref(), &config).await {
         live.busy.store(false, Ordering::SeqCst);
-        live.send_json(&serde_json::json!({ "type": "error", "message": message }));
+        live.send(&ServerMessage::Error { message });
         return;
     }
 
@@ -407,7 +362,9 @@ async fn run_turn(
         Ok(agent) => agent,
         Err(err) => {
             live.busy.store(false, Ordering::SeqCst);
-            live.send_json(&serde_json::json!({ "type": "error", "message": err.to_string() }));
+            live.send(&ServerMessage::Error {
+                message: err.to_string(),
+            });
             return;
         }
     };
@@ -437,26 +394,21 @@ async fn run_turn(
     match result {
         Ok(output) => {
             if let Err(message) = checkpoint(&store, &key, &revision, agent.session()) {
-                live.send_json(&serde_json::json!({
-                    "type": "error",
-                    "message": format!("post-turn checkpoint failed: {message}"),
-                }));
+                live.send(&ServerMessage::Error {
+                    message: format!("post-turn checkpoint failed: {message}"),
+                });
             }
-            live.send_json(&serde_json::json!({
-                "type": "turn_complete",
-                "stop_reason": output.stop_reason,
-                "usage": output.usage,
-                "cost_usd": agent.session().cost_usd,
-            }));
+            live.send(&ServerMessage::turn_complete(
+                output.stop_reason,
+                output.usage,
+                agent.session().cost_usd,
+            ));
         }
         Err(err) => {
             // The history is whole; checkpoint so a follow-up continues
             // instead of replaying.
             let _ = checkpoint(&store, &key, &revision, agent.session());
-            live.send_json(&serde_json::json!({
-                "type": "turn_complete",
-                "error": err.to_string(),
-            }));
+            live.send(&ServerMessage::turn_failed(err.to_string()));
         }
     }
     live.busy.store(false, Ordering::SeqCst);

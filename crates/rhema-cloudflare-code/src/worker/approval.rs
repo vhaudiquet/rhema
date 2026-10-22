@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use rhema_core::ToolCall;
 
-use rhema_cloud_agent::ApprovalChannel;
+use rhema_cloud_agent::{ApprovalChannel, ServerMessage};
 
 /// What one live connection shares between the pump and the turn: the
 /// socket answers go out on, the pending approvals, and the turn's
@@ -36,9 +36,9 @@ pub struct Live {
 }
 
 impl Live {
-    /// Sends one JSON message to the client.
-    pub fn send_json(&self, value: &serde_json::Value) {
-        let Ok(text) = serde_json::to_string(value) else {
+    /// Sends one protocol message to the client.
+    pub fn send(&self, message: &ServerMessage) {
+        let Ok(text) = serde_json::to_string(message) else {
             return;
         };
         let _ = self.socket.send_with_str(text);
@@ -99,12 +99,11 @@ impl ApprovalChannel for WsChannel {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(call.id.clone(), sender);
-        self.live.send_json(&serde_json::json!({
-            "type": "approval_request",
-            "id": call.id,
-            "tool": call.name,
-            "command": command_of(call),
-        }));
+        self.live.send(&ServerMessage::ApprovalRequest {
+            id: call.id.clone(),
+            tool: call.name.clone(),
+            command: command_of(call),
+        });
         // The answer arrives through the pump; the timeout arrives
         // through the host's timer. Either way this task suspends and
         // the socket stays live — no thread is held. The timer's
@@ -128,10 +127,9 @@ impl ApprovalChannel for WsChannel {
             futures::future::Either::Left((Err(_), _)) => None,
             // Timed out: denied, and the client is told.
             futures::future::Either::Right(_) => {
-                self.live.send_json(&serde_json::json!({
-                    "type": "approval_expired",
-                    "id": call.id,
-                }));
+                self.live.send(&ServerMessage::ApprovalExpired {
+                    id: call.id.clone(),
+                });
                 None
             }
         }
