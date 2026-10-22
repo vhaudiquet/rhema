@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use rhema_agent_tools::Skill;
-use rhema_cloudflare_code::mock::ScriptedSandbox;
-use rhema_cloudflare_code::{
+use rhema_cloud_agent::mock::ScriptedSandbox;
+use rhema_cloud_agent::{
     AgentAssembly, ApprovalChannel, ApprovalPolicy, ExecOutcome, Sandbox, ShellSandbox,
 };
 use rhema_core::{

@@ -72,7 +72,7 @@ jobs:
         run: cargo check -p rhema-cloudflare-code --target wasm32-unknown-unknown --features worker
 
       - name: Check the platform-neutral closure
-        run: cargo check -p rhema-agent-tools -p rhema-subagents -p rhema-cloudflare-code --target wasm32-unknown-unknown --no-default-features
+        run: cargo check -p rhema-agent-tools -p rhema-subagents -p rhema-cloud-agent -p rhema-cloudflare-code --target wasm32-unknown-unknown --no-default-features
 
   # The deploy chart: lint, render every supported shape, validate the
   # result against the Kubernetes schemas — and prove the single-node

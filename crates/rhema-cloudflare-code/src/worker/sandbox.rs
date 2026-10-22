@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use worker::{Headers, Method, ObjectNamespace, Request, RequestInit};
 
-use crate::sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use rhema_cloud_agent::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 
 /// The sandbox of one session, over its DO binding.
 pub struct SandboxDo {

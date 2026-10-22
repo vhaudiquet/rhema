@@ -3038,6 +3038,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-cloud-agent"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rhema-agent-tools",
+ "rhema-coding-agent",
+ "rhema-core",
+ "rhema-transcript",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
 name = "rhema-cloudflare-code"
 version = "0.1.0"
 dependencies = [
@@ -3045,7 +3060,7 @@ dependencies = [
  "base64 0.22.1",
  "futures",
  "rhema-agent-tools",
- "rhema-coding-agent",
+ "rhema-cloud-agent",
  "rhema-core",
  "rhema-provider",
  "rhema-provider-anthropic",
@@ -3053,8 +3068,6 @@ dependencies = [
  "rhema-transcript",
  "serde",
  "serde_json",
- "thiserror 2.0.21",
- "tokio",
  "wasm-bindgen-futures",
  "worker",
 ]

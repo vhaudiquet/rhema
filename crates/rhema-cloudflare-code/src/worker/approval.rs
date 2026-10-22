@@ -1,6 +1,6 @@
 //! The WebSocket approval channel: the async round-trip workerd needs.
 //!
-//! The gate ([`crate::gate::ClientGate`]) consults this channel at an
+//! The gate ([`rhema_cloud_agent::ClientGate`]) consults this channel at an
 //! await point; the ask goes out on the socket, the answer comes back
 //! through the socket's pump, which resolves the matching one-shot by
 //! call id. No thread is ever blocked — there is only one thread, and
@@ -17,7 +17,7 @@ use async_trait::async_trait;
 use futures::FutureExt;
 use rhema_core::ToolCall;
 
-use crate::gate::ApprovalChannel;
+use rhema_cloud_agent::ApprovalChannel;
 
 /// What one live connection shares between the pump and the turn: the
 /// socket answers go out on, the pending approvals, and the turn's

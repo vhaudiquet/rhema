@@ -43,86 +43,18 @@ use std::time::Duration;
 use futures::StreamExt;
 use worker::{Env, Error, Method, Request, Response, Result, State, WebSocketPair};
 
-use rhema_agent_tools::{DenyAll, Skill};
+use rhema_agent_tools::DenyAll;
 use rhema_core::{Event, EventSink, ModelProvider, Session};
 use rhema_provider::Retrying;
 use rhema_provider_anthropic::AnthropicProvider;
 use rhema_rsd::{ResourceKey, Store};
 
-use crate::assembly::ApprovalPolicy;
-use crate::sandbox::{Sandbox, WorkspaceSeed};
-use crate::shell::ShellSandbox;
+use rhema_cloud_agent::{AgentAssembly, Sandbox, SessionConfig, ShellSandbox, WorkspaceSeed};
 use storage::session_key;
 
 /// How long an approval ask waits for its client before the gate
 /// denies. The client sees `approval_expired` when it happens.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// The default model, when the session carries no config yet.
-const DEFAULT_MODEL: &str = "claude-sonnet-4-5";
-
-/// The sandbox workspace path.
-const DEFAULT_WORKSPACE: &str = "/workspace";
-
-/// One skill seeded into the sandbox and rendered into the prompt.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SkillSeed {
-    /// The skill's folder name.
-    pub name: String,
-    /// The frontmatter description — the trigger.
-    pub description: String,
-    /// The whole `SKILL.md`, frontmatter included.
-    pub body: String,
-}
-
-/// The per-session configuration, persisted in the DO's meta table and
-/// set by a client over `POST /config`.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SessionConfig {
-    /// Model identifier, passed through to the provider.
-    pub model: String,
-    /// The session's SYSTEM.md, stored verbatim; `None` renders the
-    /// built-in default.
-    #[serde(default)]
-    pub base_system: Option<String>,
-    /// The approval policy gating `bash`.
-    #[serde(default)]
-    pub approval: ApprovalPolicy,
-    /// The workspace path inside the sandbox.
-    #[serde(default = "default_workspace")]
-    pub workspace: String,
-    /// A git URL to clone when the workspace is first (re)seeded.
-    #[serde(default)]
-    pub seed_git: Option<String>,
-    /// Skills seeded into the sandbox and rendered into the prompt.
-    #[serde(default)]
-    pub skills: Vec<SkillSeed>,
-    /// Cap on steps per turn.
-    #[serde(default = "default_max_turn_steps")]
-    pub max_turn_steps: u32,
-}
-
-fn default_workspace() -> String {
-    DEFAULT_WORKSPACE.to_owned()
-}
-
-fn default_max_turn_steps() -> u32 {
-    128
-}
-
-impl Default for SessionConfig {
-    fn default() -> Self {
-        Self {
-            model: DEFAULT_MODEL.to_owned(),
-            base_system: None,
-            approval: ApprovalPolicy::default(),
-            workspace: default_workspace(),
-            seed_git: None,
-            skills: Vec::new(),
-            max_turn_steps: default_max_turn_steps(),
-        }
-    }
-}
 
 /// What a connected client sends.
 #[derive(Debug, serde::Deserialize)]
@@ -458,8 +390,8 @@ async fn run_turn(
     }
 
     // 4. The agent: the ordinary assembly, resumed from the checkpoint.
-    let skills = seeded_skills(&config, &config.workspace);
-    let assembly = crate::assembly::AgentAssembly {
+    let skills = config.skills();
+    let assembly = AgentAssembly {
         model: config.model.clone(),
         base_system: config.base_system.clone(),
         skills,
@@ -561,20 +493,6 @@ async fn ensure_seeded(
     store
         .set_meta("workspace:seeded", "1")
         .map_err(|err| err.to_string())
-}
-
-/// The skill list the prompt renders, against the paths the files were
-/// seeded at — the model reads the bodies through the shell.
-fn seeded_skills(config: &SessionConfig, workspace: &str) -> Vec<Skill> {
-    config
-        .skills
-        .iter()
-        .map(|seed| Skill {
-            name: seed.name.clone(),
-            description: seed.description.clone(),
-            path: format!("{workspace}/.rhema/skills/{}/SKILL.md", seed.name).into(),
-        })
-        .collect()
 }
 
 /// Persists `session` under the key at `current + 1`. Called from the
