@@ -73,6 +73,7 @@ fn reminder_key_fn() -> Arc<KeyFn> {
 }
 
 /// One configured calendar, resolved to a client the source polls.
+#[derive(Clone)]
 pub(crate) struct Feed {
     name: String,
     client: Arc<dyn Calendar>,
@@ -236,7 +237,15 @@ fn nonempty(value: Option<&str>) -> Option<&str> {
 pub struct CalendarSource {
     dispatcher: Arc<Dispatcher>,
     clock: Arc<dyn Clock>,
-    feeds: Vec<Feed>,
+    /// Where this pass's feeds come from: a static list (tests, and
+    /// callers that hold the specs) or the calendar table, read fresh
+    /// on every detect pass so a runtime add is live next tick.
+    feeds: FeedSource,
+}
+
+enum FeedSource {
+    Static(Vec<Feed>),
+    Store(Arc<crate::store::CalendarStore>),
 }
 
 impl CalendarSource {
@@ -262,8 +271,35 @@ impl CalendarSource {
         Ok(Self {
             dispatcher: dispatcher.clone(),
             clock,
-            feeds,
+            feeds: FeedSource::Static(feeds),
         })
+    }
+
+    /// Builds from the calendar table instead of a static list: the
+    /// source reads it fresh every pass, so a calendar added over the
+    /// HTTP route (or a chat tool) is live without a restart, and a
+    /// removed one stops polling on the next tick. Config validation
+    /// ran when the row landed; a calendar that still fails to resolve
+    /// here names itself and costs its tick, not the daemon.
+    pub fn from_store(
+        dispatcher: &Arc<Dispatcher>,
+        clock: Arc<dyn Clock>,
+        store: Arc<crate::store::CalendarStore>,
+    ) -> Self {
+        dispatcher.register_source(CALENDARS_SOURCE, reminder_key_fn());
+        Self {
+            dispatcher: dispatcher.clone(),
+            clock,
+            feeds: FeedSource::Store(store),
+        }
+    }
+
+    /// The feeds this source polls, resolved for one detect pass.
+    fn feeds_for_pass(&self) -> Result<Vec<Feed>, String> {
+        match &self.feeds {
+            FeedSource::Static(feeds) => Ok(feeds.to_vec()),
+            FeedSource::Store(store) => store_feeds(store),
+        }
     }
 
     /// A source over ready-made feeds. Tests use this; production
@@ -278,9 +314,28 @@ impl CalendarSource {
         Self {
             dispatcher: dispatcher.clone(),
             clock,
-            feeds,
+            feeds: FeedSource::Static(feeds),
         }
     }
+}
+
+/// Resolves the table's calendars into this pass's feeds. A feed's
+/// client is rebuilt per pass — the table is small, and correctness
+/// (a runtime add is live) beats a pool the row could outlive.
+fn store_feeds(store: &crate::store::CalendarStore) -> Result<Vec<Feed>, String> {
+    let calendars = store
+        .list()
+        .map_err(|err| format!("calendar table: {err}"))?;
+    let mut feeds = Vec::with_capacity(calendars.len());
+    for calendar in &calendars {
+        feeds.push(Feed {
+            name: calendar.name.trim().to_owned(),
+            client: client_for(calendar)?,
+            leads: calendar.leads(),
+            horizon_hours: calendar.horizon(),
+        });
+    }
+    Ok(feeds)
 }
 
 #[async_trait]
@@ -298,7 +353,8 @@ impl Source for CalendarSource {
         let now = OffsetDateTime::from_unix_timestamp_nanos(now_ms as i128 * 1_000_000)
             .map_err(|err| SourceError::Backend(format!("clock: {err}")))?;
         let mut fed = 0;
-        for feed in &self.feeds {
+        let feeds = self.feeds_for_pass().map_err(SourceError::Backend)?;
+        for feed in &feeds {
             let window = Window::new(
                 now,
                 now + time::Duration::hours(i64::from(feed.horizon_hours)),
@@ -605,6 +661,68 @@ impl CalendarKind {
             "google" => Some(CalendarKind::Google),
             _ => None,
         }
+    }
+}
+
+impl CalendarWatch {
+    /// The rules a calendar must satisfy to poll — the checks the
+    /// config's boot validation used to run, now at the one door every
+    /// writer shares: the table's `add`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("name must not be blank".to_owned());
+        }
+        match self.kind {
+            CalendarKind::Ics => {
+                let url = nonempty(self.url.as_deref()).ok_or_else(|| {
+                    "ics is a feed URL: set url to the calendar's address".to_owned()
+                })?;
+                if !(url.starts_with("https://")
+                    || url.starts_with("http://")
+                    || url.starts_with("webcal://"))
+                {
+                    return Err(format!(
+                        "url must be https://, http://, or webcal://, got {url:?}"
+                    ));
+                }
+            }
+            CalendarKind::Caldav => {
+                let url = nonempty(self.url.as_deref()).ok_or_else(|| {
+                    "caldav is a collection: set url to the calendar's DAV address".to_owned()
+                })?;
+                if !(url.starts_with("https://") || url.starts_with("http://")) {
+                    return Err(format!("url must be https:// or http://, got {url:?}"));
+                }
+                let has_user = nonempty(self.username.as_deref()).is_some();
+                if has_user && self.resolved_password().is_none() {
+                    return Err("no password: set password or CALDAV_PASSWORD".to_owned());
+                }
+            }
+            CalendarKind::Google => {
+                if nonempty(self.calendar_id.as_deref()).is_none() {
+                    return Err(
+                        "google needs a calendar: set calendar_id (\"primary\", an address, a hex id)"
+                            .to_owned(),
+                    );
+                }
+                if self.resolved_api_key().is_none() && self.resolved_token().is_none() {
+                    return Err(
+                        "no credential: set api_key (public calendars) or token, or CALENDAR_TOKEN"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+        // The horizon is what the poll can see; a lead at or past it
+        // fires on an event that was never visible.
+        let horizon_minutes = u64::from(self.horizon()) * 60;
+        let longest = self.leads().into_iter().max().unwrap_or_default();
+        if longest >= horizon_minutes {
+            return Err(format!(
+                "lead {longest}m is not under the {horizon_minutes}m horizon: a reminder cannot fire before its event is visible"
+            ));
+        }
+        Ok(())
     }
 }
 

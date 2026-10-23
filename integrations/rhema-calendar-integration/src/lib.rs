@@ -73,6 +73,8 @@ pub mod event;
 pub mod google;
 pub mod ics;
 pub mod reminder;
+pub mod store;
+pub use store::CalendarStore;
 
 // Re-exported so implementors of the async seam can apply #[async_trait]
 // without adding the crate themselves.

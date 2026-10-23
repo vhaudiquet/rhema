@@ -67,6 +67,9 @@ pub struct ClawState {
     driver: Arc<Driver>,
     store: Arc<SqliteStore>,
     watches: Arc<ClawStore>,
+    /// The calendar table: `/v1/calendars` writes it, the reminders
+    /// source reads it fresh every pass.
+    calendars: Arc<rhema_calendar_integration::CalendarStore>,
     notifications: Arc<NotificationStore>,
     /// The scheduled-task table the `/v1/tasks` routes serve — the same
     /// rows the resident scheduler fires.
@@ -117,6 +120,7 @@ impl ClawState {
         driver: Arc<Driver>,
         store: Arc<SqliteStore>,
         watches: Arc<ClawStore>,
+        calendars: Arc<rhema_calendar_integration::CalendarStore>,
         notifications: Arc<NotificationStore>,
         tasks: Arc<TaskStore>,
         bootstrap: Arc<Bootstrap>,
@@ -138,6 +142,7 @@ impl ClawState {
             driver,
             store,
             watches,
+            calendars,
             notifications,
             tasks,
             bootstrap,
@@ -232,6 +237,12 @@ pub fn router(state: ClawState) -> Router {
         .route("/bootstrap", get(bootstrap_status))
         .route("/watches", get(watches_list).post(watches_add))
         .route("/watches/{forge}/{*repo}", delete(watches_remove))
+        .route(
+            "/calendars",
+            get(calendars_list)
+                .post(calendars_add)
+                .delete(calendars_remove),
+        )
         .route("/accounts", get(accounts_list).post(accounts_add))
         .route("/accounts/{id}", delete(accounts_remove))
         .route("/consents", get(consents_list))
@@ -282,7 +293,7 @@ pub fn router(state: ClawState) -> Router {
                 Json(json!({
                     "service": "rhema-claw",
                     "chat": "/v1/sessions",
-                    "api": ["/v1/sessions", "/v1/providers", "/v1/watches",
+                    "api": ["/v1/sessions", "/v1/providers", "/v1/watches", "/v1/calendars",
                             "/v1/accounts", "/v1/notifications", "/v1/phones",
                             "/v1/bootstrap", "/v1/ingest"],
                 }))
@@ -616,6 +627,74 @@ async fn events(
                 .text("keep-alive"),
         )
         .into_response()
+}
+
+/// `POST /v1/calendars`: one calendar spec, the integration's
+/// `CalendarWatch` shape, validated at the table's door — the same
+/// rules the config's boot check used to run.
+async fn calendars_add(
+    State(state): State<ClawState>,
+    Json(body): Json<rhema_calendar_integration::CalendarWatch>,
+) -> Response {
+    match state.calendars.add(&body) {
+        Ok(true) => (
+            StatusCode::CREATED,
+            Json(json!({"added": body.name.trim()})),
+        )
+            .into_response(),
+        Ok(false) => (
+            StatusCode::OK,
+            Json(json!({
+                "added": body.name.trim(),
+                "note": "a calendar with that name already exists"
+            })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /v1/calendars?name=…`: forget a calendar; the reminders
+/// source stops polling it on the next tick.
+async fn calendars_remove(
+    State(state): State<ClawState>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(name) = params
+        .get("name")
+        .map(|n| n.trim())
+        .filter(|n| !n.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "name is required"})),
+        )
+            .into_response();
+    };
+    match state.calendars.remove(name) {
+        Ok(removed) => Json(json!({"removed": removed, "name": name})).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// `GET /v1/calendars`: every calendar, in creation order.
+async fn calendars_list(State(state): State<ClawState>) -> Response {
+    match state.calendars.list() {
+        Ok(list) => Json(json!({"calendars": list})).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 /// One `TurnEvent` as an SSE frame: `data: {json}`. A lagged subscriber

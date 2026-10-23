@@ -191,6 +191,10 @@ impl Daemon {
         // drives, jobs the jobs dispatcher answers.
         let jobs = Arc::new(crate::job_store::CodingJobStore::open(&db)?);
 
+        // The calendar table: one truth, read fresh by the reminders
+        // source every pass; `/v1/calendars` writes it.
+        let calendars = Arc::new(rhema_calendar_integration::CalendarStore::open(&db)?);
+
         let forge_dispatcher = Arc::new(Dispatcher::new(
             dispatch,
             Arc::new(SystemClock),
@@ -327,7 +331,9 @@ impl Daemon {
             identity: identity.clone(),
             hub: hub.clone(),
             workspace: interactive_workspace.clone(),
-            calendars: config.calendars.clone(),
+            // The calendar table: one truth, read fresh by the
+            // reminders source every pass; `/v1/calendars` writes it.
+            calendars: calendars.clone(),
         }));
         eprintln!("[claw] extensions: {}", extensions.names().join(", "));
         // The sources register on their lanes as they build: a watch of
@@ -384,6 +390,7 @@ impl Daemon {
             interactive_driver.clone(),
             store,
             watches,
+            calendars.clone(),
             notifications,
             tasks,
             bootstrap,

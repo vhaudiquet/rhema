@@ -59,7 +59,6 @@ fn config(dir: &tempfile::TempDir) -> ClawConfig {
         tools_bin: None,
         transcript: None,
         ingest_token: None,
-        calendars: Vec::new(),
     }
 }
 

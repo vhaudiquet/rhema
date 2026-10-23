@@ -694,7 +694,12 @@ mod tests {
                 identity,
                 hub,
                 workspace: workspace.to_path_buf(),
-                calendars: Vec::new(),
+                // The test assembly"s calendar table: in-memory, and
+                // empty — the interactive tests do not remind.
+                calendars: std::sync::Arc::new(
+                    rhema_calendar_integration::CalendarStore::in_memory()
+                        .expect("the calendar table opens"),
+                ),
             },
         ))
     }

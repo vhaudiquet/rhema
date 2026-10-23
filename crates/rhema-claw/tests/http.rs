@@ -65,7 +65,6 @@ fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
         tools_bin: None,
         ingest_token: None,
         transcript: None,
-        calendars: Vec::new(),
     }
 }
 
@@ -891,6 +890,89 @@ async fn a_configured_token_guards_v1_and_leaves_healthz_open() {
         .await
         .expect("the completion parses");
     assert_eq!(whole["choices"][0]["message"]["content"], "on it");
+}
+
+/// The calendar table, over its door: add, list, refuse the invalid
+/// loudly, remove — and the route shares the table the reminders
+/// source reads, so no restart is in the story.
+#[tokio::test]
+async fn calendars_round_trip_over_their_door() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    // A valid ics lands.
+    let res = client
+        .post(format!("{base}/v1/calendars"))
+        .json(&json!({"name": "team", "kind": "ics", "url": "https://c.example.net/a.ics"}))
+        .send()
+        .await
+        .expect("the post answers");
+    assert_eq!(res.status(), 201, "a new calendar is created");
+
+    // The invalid is loud, wherever it would enter.
+    let res = client
+        .post(format!("{base}/v1/calendars"))
+        .json(&json!({"name": "broken", "kind": "ics"}))
+        .send()
+        .await
+        .expect("the post answers");
+    assert_eq!(
+        res.status(),
+        400,
+        "an urlless ics is refused: {}",
+        res.status()
+    );
+    let err: serde_json::Value = res.json().await.expect("the error parses");
+    assert!(
+        err["error"].as_str().unwrap().contains("ics is a feed URL"),
+        "{err}"
+    );
+
+    // The list carries what landed, and nothing else.
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/calendars"))
+        .send()
+        .await
+        .expect("the list answers")
+        .json()
+        .await
+        .expect("the list parses");
+    let names: Vec<&str> = listed["calendars"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .map(|c| c["name"].as_str().expect("a name"))
+        .collect();
+    assert_eq!(names, vec!["team"], "{listed}");
+
+    // Removal is a delete on the name; the next pass simply has one
+    // fewer feed.
+    let res = client
+        .delete(format!("{base}/v1/calendars?name=team"))
+        .send()
+        .await
+        .expect("the delete answers");
+    assert_eq!(res.status(), 200);
+    let listed: serde_json::Value = client
+        .get(format!("{base}/v1/calendars"))
+        .send()
+        .await
+        .expect("the list answers")
+        .json()
+        .await
+        .expect("the list parses");
+    assert_eq!(
+        listed["calendars"].as_array().map(Vec::len),
+        Some(0),
+        "{listed}"
+    );
 }
 
 /// The ingest door: an external event lands on its key in the resident

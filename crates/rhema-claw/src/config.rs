@@ -14,12 +14,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-// The calendar feed types are the integration's: the reminder source
-// polls them there, and the claw's config only describes them.
-pub use rhema_calendar_integration::reminder::{
-    CalendarKind, CalendarWatch, DEFAULT_HORIZON_HOURS, DEFAULT_LEAD_MINUTES,
-};
-
 /// How often the resident loop runs a detect pass, when
 /// [`ClawConfig::poll_interval_secs`] is unset.
 pub const DEFAULT_POLL_INTERVAL_SECS: u64 = 60;
@@ -69,17 +63,6 @@ pub enum ConfigError {
         "ingest_token is the same value as another credential; the ingest token must be its own secret, write-only on the event door"
     )]
     IngestTokenCollision,
-    /// One calendar watch is unusable; the daemon refuses to start
-    /// rather than poll a half-configured calendar.
-    #[error("calendar #{index} ({name}): {reason}")]
-    Calendar {
-        /// The calendar's position in the config file, zero-based.
-        index: usize,
-        /// The calendar's name as written.
-        name: String,
-        /// What is missing or malformed.
-        reason: String,
-    },
     /// The HTTP surface would listen beyond loopback with no bearer
     /// token: anyone who can reach the port could run tools on this
     /// machine.
@@ -261,10 +244,6 @@ pub struct ClawConfig {
     /// Unset closes the door to credentials; the human token can still
     /// ingest.
     pub ingest_token: Option<String>,
-    /// The calendars to remind about. Config-file-only: a calendar is
-    /// read-only ambient state, not an agent-managed resource, and a
-    /// change takes the daemon restart it takes to edit the file.
-    pub calendars: Vec<CalendarWatch>,
 }
 
 impl ClawConfig {
@@ -292,7 +271,6 @@ impl Default for ClawConfig {
             tools_bin: None,
             ingest_token: None,
             transcript: None,
-            calendars: Vec::new(),
         }
     }
 }
@@ -432,111 +410,6 @@ impl ClawConfig {
                 || Some(ingest_token) == self.agent_token.as_deref()
             {
                 return Err(ConfigError::IngestTokenCollision);
-            }
-        }
-        self.validate_calendars()?;
-        Ok(())
-    }
-
-    /// The calendar half of the startup checks: every calendar named,
-    /// complete for its kind, with leads a horizon can see.
-    fn validate_calendars(&self) -> Result<(), ConfigError> {
-        let mut seen = std::collections::HashSet::new();
-        for (index, calendar) in self.calendars.iter().enumerate() {
-            let fail = |reason: String| ConfigError::Calendar {
-                index,
-                name: calendar.name.clone(),
-                reason,
-            };
-            if calendar.name.trim().is_empty() {
-                return Err(fail("name must not be blank".to_owned()));
-            }
-            if !seen.insert(calendar.name.trim().to_owned()) {
-                return Err(fail(
-                    "duplicate name: reminder keys would collide".to_owned(),
-                ));
-            }
-            match calendar.kind {
-                CalendarKind::Ics => {
-                    let url = calendar
-                        .url
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|url| !url.is_empty())
-                        .ok_or_else(|| {
-                            fail("ics is a feed URL: set url to the calendar's address".to_owned())
-                        })?;
-                    if !(url.starts_with("https://")
-                        || url.starts_with("http://")
-                        || url.starts_with("webcal://"))
-                    {
-                        return Err(fail(format!(
-                            "url must be https://, http://, or webcal://, got {url:?}"
-                        )));
-                    }
-                }
-                CalendarKind::Caldav => {
-                    let url = calendar
-                        .url
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|url| !url.is_empty())
-                        .ok_or_else(|| {
-                            fail(
-                                "caldav is a collection: set url to the calendar's DAV \
-                                 address"
-                                    .to_owned(),
-                            )
-                        })?;
-                    if !(url.starts_with("https://") || url.starts_with("http://")) {
-                        return Err(fail(format!(
-                            "url must be https:// or http://, got {url:?}"
-                        )));
-                    }
-                    let has_user = calendar
-                        .username
-                        .as_deref()
-                        .map(str::trim)
-                        .is_some_and(|user| !user.is_empty());
-                    if has_user && calendar.resolved_password().is_none() {
-                        return Err(fail(
-                            "no password: set password in the config or CALDAV_PASSWORD".to_owned(),
-                        ));
-                    }
-                }
-                CalendarKind::Google => {
-                    if calendar
-                        .calendar_id
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|id| !id.is_empty())
-                        .is_none()
-                    {
-                        return Err(fail(
-                            "google needs a calendar: set calendar_id (\"primary\", an \
-                             address, a hex id)"
-                                .to_owned(),
-                        ));
-                    }
-                    if calendar.resolved_api_key().is_none() && calendar.resolved_token().is_none()
-                    {
-                        return Err(fail(
-                            "no credential: set api_key (public calendars) or token in the \
-                             config, or CALENDAR_TOKEN"
-                                .to_owned(),
-                        ));
-                    }
-                }
-            }
-            // The horizon is what the poll can see; a lead at or past
-            // it fires on an event that was never visible.
-            let horizon_minutes = u64::from(calendar.horizon()) * 60;
-            let longest = calendar.leads().into_iter().max().unwrap_or_default();
-            if longest >= horizon_minutes {
-                return Err(fail(format!(
-                    "lead {longest}m is not under the {horizon_minutes}m horizon: a \
-                     reminder cannot fire before its event is visible"
-                )));
             }
         }
         Ok(())
@@ -687,239 +560,6 @@ ingest_token: door-key
         assert_eq!(config.listen_addr(), DEFAULT_LISTEN);
         assert_eq!(config.token, None);
     }
-
-    #[test]
-    fn a_calendar_section_parses_field_for_field() {
-        let raw = "calendars:
-  - name: home
-    kind: ics
-    url: https://cloud.example.net/remote.php/dav/calendars/personal.ics
-    lead_minutes: [60, 15]
-    horizon_hours: 48
-  - name: work
-    kind: google
-    calendar_id: primary
-    api_key: pub-key
-  - name: shared
-    kind: google
-    calendar_id: abc123@group.calendar.google.com
-    token: oauth-token
-  - name: dav
-    kind: caldav
-    url: https://cloud.example.net/remote.php/dav/calendars/me/personal/
-    username: me
-    password: app-pass
-";
-        let config: ClawConfig = serde_yaml::from_str(raw).expect("parses");
-        assert_eq!(config.calendars.len(), 4);
-        let home = &config.calendars[0];
-        assert_eq!(home.name, "home");
-        assert_eq!(home.kind, CalendarKind::Ics);
-        assert_eq!(home.leads(), vec![60, 15]);
-        assert_eq!(home.horizon(), 48);
-        assert_eq!(
-            config.calendars[1].resolved_api_key().as_deref(),
-            Some("pub-key")
-        );
-        assert_eq!(
-            config.calendars[2].resolved_token().as_deref(),
-            Some("oauth-token")
-        );
-        assert_eq!(config.calendars[3].kind, CalendarKind::Caldav);
-        assert_eq!(config.calendars[3].username.as_deref(), Some("me"));
-        assert_eq!(
-            config.calendars[3].resolved_password().as_deref(),
-            Some("app-pass")
-        );
-        config.validate().expect("a complete list validates");
-    }
-
-    #[test]
-    fn calendar_defaults_fill_what_the_file_omits() {
-        let config: ClawConfig = serde_yaml::from_str(
-            "calendars:\n  - name: home\n    kind: ics\n    url: https://c.example.net/a.ics\n",
-        )
-        .expect("parses");
-        assert_eq!(config.calendars[0].leads(), vec![DEFAULT_LEAD_MINUTES]);
-        assert_eq!(config.calendars[0].horizon(), DEFAULT_HORIZON_HOURS);
-        // A blank or zero lead list reads as the default, not as
-        // silence.
-        let config: ClawConfig = serde_yaml::from_str(
-            "calendars:\n  - name: home\n    kind: ics\n    url: https://c.example.net/a.ics\n    lead_minutes: []\n",
-        )
-        .expect("parses");
-        assert_eq!(config.calendars[0].leads(), vec![DEFAULT_LEAD_MINUTES]);
-    }
-
-    #[test]
-    fn a_calendar_typo_is_rejected_and_named() {
-        let err = serde_yaml::from_str::<ClawConfig>(
-            "calendars:\n  - name: home\n    kind: ics\n    uurl: https://c.example.net/a.ics\n",
-        )
-        .expect_err("a typo'd calendar key is loud");
-        assert!(err.to_string().contains("uurl"), "got: {err}");
-    }
-
-    #[test]
-    fn calendar_validation_fails_loudly_and_specifically() {
-        let config = |calendars: Vec<CalendarWatch>| ClawConfig {
-            calendars,
-            ..ClawConfig::default()
-        };
-        let ics = |name: &str, url: Option<&str>| CalendarWatch {
-            name: name.to_owned(),
-            kind: CalendarKind::Ics,
-            url: url.map(str::to_owned),
-            calendar_id: None,
-            token: None,
-            username: None,
-            password: None,
-            api_key: None,
-            lead_minutes: None,
-            horizon_hours: None,
-        };
-        let caldav = |name: &str, url: Option<&str>| CalendarWatch {
-            name: name.to_owned(),
-            kind: CalendarKind::Caldav,
-            url: url.map(str::to_owned),
-            calendar_id: None,
-            token: None,
-            username: None,
-            password: None,
-            api_key: None,
-            lead_minutes: None,
-            horizon_hours: None,
-        };
-        let google = |name: &str, id: Option<&str>, api_key: Option<&str>| CalendarWatch {
-            name: name.to_owned(),
-            kind: CalendarKind::Google,
-            url: None,
-            calendar_id: id.map(str::to_owned),
-            token: None,
-            username: None,
-            password: None,
-            api_key: api_key.map(str::to_owned),
-            lead_minutes: None,
-            horizon_hours: None,
-        };
-
-        let err = config(vec![ics("", Some("https://c.example.net/a.ics"))])
-            .validate()
-            .expect_err("a blank name is loud");
-        assert!(err.to_string().contains("blank"), "got: {err}");
-
-        let err = config(vec![
-            ics("home", Some("https://c.example.net/a.ics")),
-            ics("home", Some("webcal://c.example.net/b.ics")),
-        ])
-        .validate()
-        .expect_err("a duplicate name is loud");
-        assert!(err.to_string().contains("duplicate"), "got: {err}");
-
-        let err = config(vec![ics("home", None)])
-            .validate()
-            .expect_err("a url-less feed is loud");
-        assert!(err.to_string().contains("feed URL"), "got: {err}");
-
-        let err = config(vec![ics("home", Some("ftp://c.example.net/a.ics"))])
-            .validate()
-            .expect_err("a junk scheme is loud");
-        assert!(err.to_string().contains("https://"), "got: {err}");
-
-        let err = config(vec![caldav("home", None)])
-            .validate()
-            .expect_err("a url-less collection is loud");
-        assert!(err.to_string().contains("DAV"), "got: {err}");
-
-        let err = config(vec![caldav("home", Some("webcal://c.example.net/dav/"))])
-            .validate()
-            .expect_err("webcal is not a dav spelling");
-        assert!(err.to_string().contains("https://"), "got: {err}");
-
-        let err = config(vec![google("work", None, Some("k"))])
-            .validate()
-            .expect_err("an id-less google calendar is loud");
-        assert!(err.to_string().contains("calendar_id"), "got: {err}");
-
-        let err = config(vec![google("work", Some("primary"), None)])
-            .validate()
-            .expect_err("a credential-less google calendar is loud");
-        assert!(err.to_string().contains("CALENDAR_TOKEN"), "got: {err}");
-
-        let mut late = ics("home", Some("https://c.example.net/a.ics"));
-        late.lead_minutes = Some(vec![60]);
-        late.horizon_hours = Some(1);
-        let err = config(vec![late])
-            .validate()
-            .expect_err("a lead past the horizon is loud");
-        assert!(err.to_string().contains("horizon"), "got: {err}");
-
-        // A username with a password validates, as does a collection
-        // with none of it (an open server) or a token instead.
-        let mut basic = caldav("home", Some("https://c.example.net/dav/home/"));
-        basic.username = Some("me".to_owned());
-        basic.password = Some("app-pass".to_owned());
-        let mut bearer = caldav("shared", Some("http://10.0.0.5/dav/shared/"));
-        bearer.token = Some("sekrit".to_owned());
-        config(vec![
-            ics("feed", Some("webcal://c.example.net/a.ics")),
-            basic,
-            bearer,
-            google("work", Some("primary"), Some("k")),
-        ])
-        .validate()
-        .expect("a complete list validates");
-    }
-
-    #[test]
-    fn the_caldav_password_falls_back_to_the_env_and_blank_counts_as_unset() {
-        let env = |name: &str| match name {
-            "CALDAV_PASSWORD" => Ok("from-env".to_owned()),
-            _ => Err(std::env::VarError::NotPresent),
-        };
-        assert_eq!(
-            CalendarWatch::resolve_password_with(env, Some(" from-config ")),
-            Some("from-config".to_owned()),
-            "the config password wins"
-        );
-        assert_eq!(
-            CalendarWatch::resolve_password_with(env, None),
-            Some("from-env".to_owned()),
-            "the env password serves when no config password"
-        );
-        assert_eq!(
-            CalendarWatch::resolve_password_with(
-                |_| Err(std::env::VarError::NotPresent),
-                Some(" ")
-            ),
-            None,
-            "a blank password counts as unset"
-        );
-    }
-
-    #[test]
-    fn the_calendar_token_falls_back_to_the_env_and_blank_counts_as_unset() {
-        let env = |name: &str| match name {
-            "CALENDAR_TOKEN" => Ok("from-env".to_owned()),
-            _ => Err(std::env::VarError::NotPresent),
-        };
-        assert_eq!(
-            CalendarWatch::resolve_token_with(env, Some(" from-config ")),
-            Some("from-config".to_owned()),
-            "the config token wins"
-        );
-        assert_eq!(
-            CalendarWatch::resolve_token_with(env, None),
-            Some("from-env".to_owned()),
-            "the env token serves when no config token"
-        );
-        assert_eq!(
-            CalendarWatch::resolve_token_with(|_| Err(std::env::VarError::NotPresent), Some("  ")),
-            None,
-            "a blank token counts as unset"
-        );
-    }
-
     #[test]
     fn forge_names_parse_as_the_sources_spell_them() {
         assert_eq!(ForgeKind::parse("github"), Some(ForgeKind::GitHub));

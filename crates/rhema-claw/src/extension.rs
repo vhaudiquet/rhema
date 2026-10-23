@@ -36,12 +36,13 @@ use rhema_autonomous_agent::{Allowlist, Source, ToolRegistry};
 use rhema_core::ToolResolver;
 use rhema_rsd::{Dispatcher, ResourceKey, SystemClock};
 
-use crate::config::{CalendarWatch, ForgeKind};
+use crate::config::ForgeKind;
 use crate::consents::WaitBridge;
 use crate::daemon::ClawError;
 use crate::forge::ForgeSource;
 use crate::hub::EventHub;
 use rhema_calendar_integration::CalendarSource;
+use rhema_calendar_integration::CalendarStore;
 
 /// The store handles the standard set is assembled over. One struct,
 /// so a new extension is a field plus a constructor line, not another
@@ -78,8 +79,9 @@ pub struct ExtensionDeps {
     /// The interactive workspace the account exec and the identity
     /// registry resolve against.
     pub workspace: PathBuf,
-    /// The calendar feeds the reminders source polls.
-    pub calendars: Vec<CalendarWatch>,
+    /// The calendar table, shared with `/v1/calendars`: the source
+    /// reads it fresh every pass, so a row added at runtime is live.
+    pub calendars: Arc<CalendarStore>,
 }
 
 /// The dispatch lanes a source can feed, handed to
@@ -477,7 +479,7 @@ impl ClawExtension for PhoneExtension {
 /// The calendar reminders: a due occurrence is an event on the resident
 /// lane, never a timer near the model.
 struct CalendarExtension {
-    calendars: Vec<CalendarWatch>,
+    calendars: Arc<CalendarStore>,
 }
 
 impl ClawExtension for CalendarExtension {
@@ -486,9 +488,11 @@ impl ClawExtension for CalendarExtension {
     }
 
     fn sources(&self, lanes: &Lanes) -> Result<Vec<Box<dyn Source>>, ClawError> {
-        let source =
-            CalendarSource::new(&lanes.interactive, Arc::new(SystemClock), &self.calendars)
-                .map_err(ClawError::Backend)?;
+        let source = CalendarSource::from_store(
+            &lanes.interactive,
+            Arc::new(SystemClock),
+            self.calendars.clone(),
+        );
         Ok(vec![Box::new(source)])
     }
 }
