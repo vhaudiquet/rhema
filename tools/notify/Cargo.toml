@@ -1,0 +1,28 @@
+[package]
+name = "notify"
+description = "The claw's notification client: push one notification to a device — the daemon queues it, the device's next poll carries it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "notify"
+path = "src/main.rs"
+
+[dependencies]
+rhema-tools-common = { path = "../common" }
+rhema-tools-contract = { path = "../contract" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+axum.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
