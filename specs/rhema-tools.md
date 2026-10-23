@@ -116,9 +116,20 @@ Transport: the daemon's existing axum router (`crates/rhema-claw/src/http.rs`)
 puts the sandbox on another host.
 
 Routes that already serve clients as-is: `GET/POST /v1/watches`,
-`DELETE /v1/watches/{forge}/{repo}`, `GET/POST /v1/accounts`,
-`DELETE /v1/accounts/{id}`, `GET /v1/notifications`,
-`POST /v1/notifications/{id}/ack`, `GET /v1/phones`.
+`DELETE /v1/watches/{forge}/{repo}`, `GET/POST/DELETE /v1/calendars`
+(removal takes `/v1/calendars/{name}`; the reminders source reads the
+calendar table fresh every pass, so a route write is live without a
+restart), `GET/POST /v1/accounts`, `DELETE /v1/accounts/{id}`,
+`GET /v1/notifications`, `POST /v1/notifications/{id}/ack`,
+`GET /v1/phones`.
+
+Watches and calendars are the pattern for every data domain the
+daemon reconfigures at runtime: the domain lives in a SQLite table —
+not in `claw.yaml` — the routes are the one write door, validation
+runs at the door (an invalid watch or calendar is refused loudly
+wherever it enters), and the config file carries only what boot
+needs. A config still carrying the retired `watches:` or
+`calendars:` keys is refused at parse time, not silently ignored.
 
 Routes the extraction adds, because the operation exists today only as an
 in-process tool: `POST /v1/notifications` (the push), `GET/POST /v1/tasks`,

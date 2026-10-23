@@ -3303,6 +3303,7 @@ dependencies = [
  "reqwest",
  "rhema-autonomous-agent",
  "rhema-rsd",
+ "rusqlite",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

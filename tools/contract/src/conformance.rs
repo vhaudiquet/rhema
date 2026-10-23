@@ -96,6 +96,53 @@ where
     )
     .await?;
 
+    // — Calendars: add, the invalid refused, listed, removed —
+    ctx.expect(
+        "the agent lists calendars",
+        req("GET", "/v1/calendars", Auth::Agent, Some(1), None),
+        200,
+    )
+    .await?;
+    ctx.expect_success(
+        "the agent adds a calendar",
+        req(
+            "POST",
+            "/v1/calendars",
+            Auth::Agent,
+            Some(1),
+            Some(serde_json::json!({
+                "name": "team", "kind": "ics", "url": "https://c.example.net/a.ics"
+            })),
+        ),
+    )
+    .await?;
+    ctx.expect(
+        "an urlless ics is refused loudly",
+        req(
+            "POST",
+            "/v1/calendars",
+            Auth::Agent,
+            Some(1),
+            Some(serde_json::json!({"name": "broken", "kind": "ics"})),
+        ),
+        400,
+    )
+    .await?;
+    let listed = ctx
+        .expect_success(
+            "the added calendar is listed",
+            req("GET", "/v1/calendars", Auth::Agent, Some(1), None),
+        )
+        .await?;
+    if !listed.body.to_string().contains("team") {
+        return Err("the added calendar is listed: the name is missing".into());
+    }
+    ctx.expect_success(
+        "the agent removes the calendar",
+        req("DELETE", "/v1/calendars/team", Auth::Agent, Some(1), None),
+    )
+    .await?;
+
     // — Notifications: push with and without a device —
     let pushed = ctx
         .expect_success(

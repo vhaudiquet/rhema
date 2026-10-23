@@ -955,7 +955,7 @@ async fn calendars_round_trip_over_their_door() {
     // Removal is a delete on the name; the next pass simply has one
     // fewer feed.
     let res = client
-        .delete(format!("{base}/v1/calendars?name=team"))
+        .delete(format!("{base}/v1/calendars/team"))
         .send()
         .await
         .expect("the delete answers");

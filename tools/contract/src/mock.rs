@@ -24,6 +24,7 @@ pub struct MockClaw {
     notifications: Mutex<Vec<NotificationOut>>,
     tasks: Mutex<Vec<TaskOut>>,
     watches: Mutex<Vec<Value>>,
+    calendars: Mutex<Vec<Value>>,
     notification_ids: Mutex<i64>,
     task_ids: Mutex<i64>,
 }
@@ -43,6 +44,7 @@ impl MockClaw {
             notifications: Mutex::new(Vec::new()),
             tasks: Mutex::new(Vec::new()),
             watches: Mutex::new(Vec::new()),
+            calendars: Mutex::new(Vec::new()),
             notification_ids: Mutex::new(0),
             task_ids: Mutex::new(0),
         }
@@ -99,6 +101,38 @@ impl MockClaw {
                 watches.retain(|w| w["repo"] != body.repo);
                 watches.push(json!({"forge": body.forge, "repo": body.repo}));
                 Ok(self.answer(200, json!({"forge": body.forge, "repo": body.repo})))
+            }
+            ("GET", ["v1", "calendars"]) => Ok(self.answer(200, json!({
+                "calendars": self.calendars.lock().unwrap_or_else(PoisonError::into_inner).clone(),
+            }))),
+            ("POST", ["v1", "calendars"]) => {
+                // The mock enforces the door's loudest rule — a named
+                // calendar, and for an ics a URL — so the suite's
+                // refusal case reads the same on both sides.
+                let body = request.body.clone().unwrap_or(Value::Null);
+                let name = body["name"].as_str().map(str::trim).unwrap_or("");
+                let kind = body["kind"].as_str().unwrap_or("");
+                let url = body["url"].as_str().map(str::trim).unwrap_or("");
+                if name.is_empty() {
+                    return Ok(self.error(400, "name must not be blank"));
+                }
+                if kind == "ics" && url.is_empty() {
+                    return Ok(self.error(400, "ics is a feed URL: set url to the calendar's address"));
+                }
+                let mut calendars = self.calendars.lock().unwrap_or_else(PoisonError::into_inner);
+                calendars.retain(|c| c["name"] != name);
+                calendars.push(json!({"name": name, "kind": kind}));
+                Ok(self.answer(201, json!({"added": name})))
+            }
+            ("DELETE", ["v1", "calendars", name]) => {
+                if name.trim().is_empty() {
+                    return Ok(self.error(400, "name is required"));
+                }
+                let name = *name;
+                let mut calendars = self.calendars.lock().unwrap_or_else(PoisonError::into_inner);
+                let before = calendars.len();
+                calendars.retain(|c| c["name"] != name);
+                Ok(self.answer(200, json!({"removed": calendars.len() != before})))
             }
             ("DELETE", ["v1", "watches", forge, rest @ ..]) => {
                 let repo = rest.join("/");

@@ -237,12 +237,8 @@ pub fn router(state: ClawState) -> Router {
         .route("/bootstrap", get(bootstrap_status))
         .route("/watches", get(watches_list).post(watches_add))
         .route("/watches/{forge}/{*repo}", delete(watches_remove))
-        .route(
-            "/calendars",
-            get(calendars_list)
-                .post(calendars_add)
-                .delete(calendars_remove),
-        )
+        .route("/calendars", get(calendars_list).post(calendars_add))
+        .route("/calendars/{name}", delete(calendars_remove))
         .route("/accounts", get(accounts_list).post(accounts_add))
         .route("/accounts/{id}", delete(accounts_remove))
         .route("/consents", get(consents_list))
@@ -658,17 +654,10 @@ async fn calendars_add(
     }
 }
 
-/// `DELETE /v1/calendars?name=…`: forget a calendar; the reminders
+/// `DELETE /v1/calendars/{name}`: forget a calendar; the reminders
 /// source stops polling it on the next tick.
-async fn calendars_remove(
-    State(state): State<ClawState>,
-    Query(params): Query<std::collections::HashMap<String, String>>,
-) -> Response {
-    let Some(name) = params
-        .get("name")
-        .map(|n| n.trim())
-        .filter(|n| !n.is_empty())
-    else {
+async fn calendars_remove(State(state): State<ClawState>, Path(name): Path<String>) -> Response {
+    let Some(name) = Some(name.trim()).filter(|n| !n.is_empty()) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "name is required"})),

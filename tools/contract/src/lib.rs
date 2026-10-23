@@ -39,6 +39,10 @@ pub const TASKS: &str = "/v1/tasks";
 /// `DELETE /v1/watches/{forge}/{repo}` removes.
 pub const WATCHES: &str = "/v1/watches";
 
+/// The calendar table: `GET` lists, `POST` adds (a validated
+/// calendar spec), `DELETE /v1/calendars/{name}` removes.
+pub const CALENDARS: &str = "/v1/calendars";
+
 /// The route allowlist the agent token answers for. The claw's auth
 /// middleware and the mock router both run this — one list, so the
 /// daemon's enforcement and the contract's conformance suite cannot
@@ -56,6 +60,9 @@ pub fn agent_allowed(method: &str, path: &str) -> bool {
         ("GET", &["v1", "watches"]),
         ("POST", &["v1", "watches"]),
         ("DELETE", &["v1", "watches", "*", "**"]),
+        ("GET", &["v1", "calendars"]),
+        ("POST", &["v1", "calendars"]),
+        ("DELETE", &["v1", "calendars", "*"]),
         ("GET", &["v1", "notifications"]),
         ("POST", &["v1", "notifications"]),
         ("GET", &["v1", "tasks"]),
