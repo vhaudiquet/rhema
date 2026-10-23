@@ -86,10 +86,15 @@ pub enum TransportError {
     Other(String),
 }
 
-/// A response: the status and the body as an ordered byte-chunk stream.
+/// A response: the head and the body as an ordered byte-chunk stream.
 pub struct HttpResponse {
     /// The HTTP status code.
     pub status: u16,
+    /// The response headers, name and value in wire order. Names are
+    /// lowercase as HTTP/2 spells them; the same name may appear more
+    /// than once. What a consumer reads is its own business — the rate
+    /// limit's `retry-after` is the one this stack reads today.
+    pub headers: Vec<(String, String)>,
     /// The body, chunks in order.
     pub body: ByteStream,
 }
