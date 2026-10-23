@@ -13,6 +13,8 @@ authors.workspace = true
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
 # Byte accounting over tool-call arguments; zoom's argument parsing
 serde_json = { workspace = true }
+# The stats snapshot serializes for frontends
+serde = { workspace = true }
 # ModelProvider is an async seam
 async-trait = { workspace = true }
 
