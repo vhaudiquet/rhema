@@ -13,6 +13,7 @@
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 
 use rhema_agent_tools::{
@@ -106,6 +107,9 @@ pub struct CodingAgent {
     config: CodingAgentConfig,
     session: Session,
     tools: Arc<ShellTools>,
+    /// The transcript's shared mirror, when the config enables it: the
+    /// benchmark stats read from here.
+    transcript: Option<Arc<Mutex<rhema_transcript::Transcript>>>,
     turns: u64,
 }
 
@@ -141,14 +145,22 @@ impl CodingAgent {
             .as_ref()
             .map(|resolver| resolver.specs())
             .unwrap_or_default();
-        let (provider, resolver) = match config.transcript {
+        let (provider, resolver, transcript) = match config.transcript {
             Some(settings) => {
                 extra.push(rhema_transcript::Zoom::spec());
-                let (provider, zoom) = rhema_transcript::attach(provider, settings);
+                let (provider, zoom, mirror) = rhema_transcript::attach_with_summarizer(
+                    provider,
+                    settings,
+                    config.summary_worker.clone(),
+                );
                 let resolver = Arc::new(Overlay::new(resolver, Arc::new(zoom)));
-                (provider, Arc::clone(&resolver) as Arc<dyn ToolResolver>)
+                (
+                    provider,
+                    Arc::clone(&resolver) as Arc<dyn ToolResolver>,
+                    Some(mirror),
+                )
             }
-            None => (provider, resolver),
+            None => (provider, resolver, None),
         };
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
@@ -178,6 +190,7 @@ impl CodingAgent {
             config,
             session: Session::default(),
             tools,
+            transcript,
             turns: 0,
         })
     }
@@ -212,6 +225,15 @@ impl CodingAgent {
     /// The rendered system prompt this agent stamps into every request.
     pub fn system(&self) -> &str {
         self.agent.system()
+    }
+
+    /// The transcript's compaction benchmark snapshot — request
+    /// counts, flushes, block size, and the providers' own prompt-cache
+    /// hit rate — when the transcript is on. `None` with it off.
+    pub fn transcript_stats(&self) -> Option<rhema_transcript::TranscriptStats> {
+        self.transcript
+            .as_ref()
+            .map(|mirror| mirror.lock().expect("transcript lock poisoned").stats())
     }
 
     /// Mutable access between turns; the engine owns the history only
@@ -641,6 +663,7 @@ mod transcript_tests {
         let config = CodingAgentConfig {
             transcript: Some(rhema_transcript::TranscriptSettings {
                 max_view_bytes: 4_000,
+                ..rhema_transcript::TranscriptSettings::default()
             }),
             ..CodingAgentConfig::new("m", std::env::temp_dir())
         };

@@ -57,6 +57,14 @@ pub struct CodingAgentConfig {
     /// switch: requests carry the whole history. See
     /// `specs/rhema-transcript.md`.
     pub transcript: Option<rhema_transcript::TranscriptSettings>,
+    /// The compaction's model fill: a cheap worker the transcript's
+    /// stepped compaction runs at flushes, rewriting each new block
+    /// section's extractive stand-in into a dense markdown block. The
+    /// worker never blocks or fails a request — a failed call leaves
+    /// the stand-in in place. `None` keeps the compaction extractive:
+    /// still stepped, still cache-stable, only less dense. See
+    /// `specs/rhema-transcript.md`.
+    pub summary_worker: Option<Arc<dyn rhema_transcript::Summarizer>>,
     /// Extra environment the shell tool's commands run with, layered
     /// over the inherited one — how a frontend provisions its agent's
     /// client tools (a daemon URL, a scoped token, a PATH addition)
@@ -79,6 +87,7 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("tools", &self.tools.is_some())
             .field("extra_resolver", &self.extra_resolver.is_some())
             .field("transcript", &self.transcript.is_some())
+            .field("summary_worker", &self.summary_worker.is_some())
             .field("shell_env", &self.shell_env.len())
             .finish()
     }
@@ -105,6 +114,7 @@ impl CodingAgentConfig {
             tools: None,
             extra_resolver: None,
             transcript: Some(rhema_transcript::TranscriptSettings::default()),
+            summary_worker: None,
             shell_env: std::collections::BTreeMap::new(),
         }
     }
