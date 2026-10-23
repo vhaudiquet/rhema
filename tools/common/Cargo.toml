@@ -1,0 +1,20 @@
+[package]
+name = "rhema-tools-common"
+description = "Shared plumbing for the rhema claw's thin client tools: connection config, the HTTP calls, the one error shape, the exit codes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-tools-contract = { path = "../contract" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+ureq.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "deny"
