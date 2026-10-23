@@ -123,10 +123,12 @@ impl CodingAgent {
         // the session keeps the compact form, and this one wrapper is
         // every request path's way out.
         let provider: Arc<dyn rhema_core::ModelProvider> = Arc::new(ExpandPastes::new(provider));
-        let tools = config
-            .tools
-            .clone()
-            .unwrap_or_else(|| Arc::new(ShellTools::new(config.workspace.clone())));
+        let tools = config.tools.clone().unwrap_or_else(|| {
+            Arc::new(ShellTools::with_env(
+                config.workspace.clone(),
+                &config.shell_env,
+            ))
+        });
         let resolver: Arc<dyn ToolResolver> = match config.extra_resolver.clone() {
             Some(extra) => Arc::new(Overlay::new(tools.clone(), extra)),
             None => tools.clone(),

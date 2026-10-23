@@ -16,6 +16,7 @@
 //! caps, and the error shaping stay here, so a command's tool result
 //! reads the same from either side.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -83,6 +84,16 @@ impl ShellTools {
     /// installed.
     pub fn new(workspace: impl Into<PathBuf>) -> Self {
         Self::with_executor(workspace, crate::exec::default_executor())
+    }
+
+    /// Tools rooted at `workspace` whose commands run with `env`
+    /// layered over the inherited environment — how a frontend hands
+    /// its agent's tools a connection (a daemon URL, a scoped token, a
+    /// PATH addition) without touching the process environment. A build
+    /// without the `local-shell` feature installs the no-shell executor
+    /// either way: the env has nothing to ride on.
+    pub fn with_env(workspace: impl Into<PathBuf>, env: &BTreeMap<String, String>) -> Self {
+        Self::with_executor(workspace, crate::exec::default_executor_with(env))
     }
 
     /// Tools rooted at `workspace` whose commands run on `exec` — the

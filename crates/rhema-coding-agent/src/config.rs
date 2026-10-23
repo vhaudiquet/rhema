@@ -57,6 +57,11 @@ pub struct CodingAgentConfig {
     /// switch: requests carry the whole history. See
     /// `specs/rhema-transcript.md`.
     pub transcript: Option<rhema_transcript::TranscriptSettings>,
+    /// Extra environment the shell tool's commands run with, layered
+    /// over the inherited one — how a frontend provisions its agent's
+    /// client tools (a daemon URL, a scoped token, a PATH addition)
+    /// without touching the process environment.
+    pub shell_env: std::collections::BTreeMap<String, String>,
 }
 
 impl std::fmt::Debug for CodingAgentConfig {
@@ -74,6 +79,7 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("tools", &self.tools.is_some())
             .field("extra_resolver", &self.extra_resolver.is_some())
             .field("transcript", &self.transcript.is_some())
+            .field("shell_env", &self.shell_env.len())
             .finish()
     }
 }
@@ -99,6 +105,7 @@ impl CodingAgentConfig {
             tools: None,
             extra_resolver: None,
             transcript: Some(rhema_transcript::TranscriptSettings::default()),
+            shell_env: std::collections::BTreeMap::new(),
         }
     }
 }

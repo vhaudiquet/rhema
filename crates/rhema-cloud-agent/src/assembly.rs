@@ -163,6 +163,9 @@ impl AgentAssembly {
             thinking: self.thinking,
             tools: Some(shell.clone()),
             extra_resolver: Some(gate),
+            // The cloud agent's commands run in the remote sandbox; a
+            // local env layer has nothing to ride on.
+            shell_env: std::collections::BTreeMap::new(),
             transcript: self.transcript,
         };
         (config, shell)

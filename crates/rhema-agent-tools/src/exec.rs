@@ -9,7 +9,9 @@
 //! seam. The trait's futures are `Send` like every seam in this tree, so
 //! the executor object crosses await points freely.
 
+use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
@@ -71,8 +73,20 @@ pub trait ShellExecutor: Send + Sync {
 /// host, streamed line by line, killed past their timeout (`kill_on_drop`
 /// so the dropped child handle kills a still-running process).
 #[cfg(feature = "local-shell")]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct LocalShell;
+#[derive(Debug, Clone)]
+pub struct LocalShell {
+    /// Extra environment every command runs with, layered over the
+    /// inherited one — how a frontend provisions its agent's tools (a
+    /// daemon URL, a scoped token, a PATH addition) without touching
+    /// the process environment.
+    env: Arc<[(String, String)]>,
+}
+
+impl Default for LocalShell {
+    fn default() -> Self {
+        Self { env: Arc::from([]) }
+    }
+}
 
 #[cfg(feature = "local-shell")]
 #[async_trait]
@@ -94,6 +108,11 @@ impl ShellExecutor for LocalShell {
             .arg("-c")
             .arg(command)
             .current_dir(cwd)
+            .envs(
+                self.env
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str())),
+            )
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -203,7 +222,29 @@ impl ShellExecutor for NoShell {
 /// the build has one, the in-band no-shell stub where it does not.
 #[cfg(feature = "local-shell")]
 pub fn default_executor() -> std::sync::Arc<dyn ShellExecutor> {
-    std::sync::Arc::new(LocalShell)
+    std::sync::Arc::new(LocalShell::default())
+}
+
+/// The default executor with `env` layered over every command's
+/// environment — the provisioning seam a frontend's agent tools ride
+/// in on. A build without the `local-shell` feature has no commands to
+/// provision; the stub ignores `env`.
+#[cfg(feature = "local-shell")]
+pub fn default_executor_with(env: &BTreeMap<String, String>) -> std::sync::Arc<dyn ShellExecutor> {
+    std::sync::Arc::new(LocalShell {
+        env: Arc::from(
+            env.iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<Vec<_>>(),
+        ),
+    })
+}
+
+/// The stub counterpart of [`default_executor_with`]: nothing runs, so
+/// there is nothing to provision.
+#[cfg(not(feature = "local-shell"))]
+pub fn default_executor_with(_env: &BTreeMap<String, String>) -> std::sync::Arc<dyn ShellExecutor> {
+    std::sync::Arc::new(NoShell)
 }
 
 /// The executor `ShellTools::new` installs: the local process shell where
