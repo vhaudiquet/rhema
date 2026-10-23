@@ -75,7 +75,11 @@ scope: the task and its verification, nothing else.
 
 Your final message is the whole report the parent receives. Make it \
 stand alone: what you did, what you found, the paths and commands that \
-matter, and what the parent should do next, if anything.";
+matter, and what the parent should do next, if anything. Every \
+verification claim carries its evidence: a \"checks pass\" statement \
+names the exact commands you ran and the exit codes they returned, so \
+the parent can diff what you claim against what you ran and re-run the \
+gates without guessing.";
 
 /// The built-in `general-purpose` subagent: the delegation every agent
 /// gets without writing a definition. No model of its own (the parent's
@@ -304,6 +308,10 @@ mod tests {
         assert_eq!(def.max_steps(), DEFAULT_MAX_STEPS);
         assert!(!def.description.is_empty());
         assert!(!def.body.is_empty());
+        // The report contract: a "checks pass" claim is only as good as
+        // the commands and exit codes behind it — the built-in prompt
+        // says so, because the parent re-runs the gates on faith.
+        assert!(def.body.contains("exit codes"), "{}", def.body);
     }
 
     #[test]
