@@ -31,18 +31,25 @@ pub enum ProviderError {
 impl ProviderError {
     /// Whether re-issuing the same request could succeed: a transport
     /// timeout, a network failure, or a server-side status worth asking
-    /// again (408 request timeout, 429 rate limit, any 5xx). The
-    /// adapters format HTTP failures as `"... (HTTP <status>): ..."` —
-    /// every `api_error` helper in the `rhema-provider-*` crates keeps
-    /// that shape, and this reads it back. A message without a status is
-    /// a malformed body or a mid-stream protocol error, and the other
-    /// variants are request defects: none of those a retry fixes.
+    /// again (408 request timeout, any 5xx). The adapters format HTTP
+    /// failures as `"... (HTTP <status>): ..."` — every `api_error`
+    /// helper in the `rhema-provider-*` crates keeps that shape, and
+    /// this reads it back. A message without a status is a malformed
+    /// body or a mid-stream protocol error, and the other variants are
+    /// request defects: none of those a retry fixes.
+    ///
+    /// A 429 rate limit is deliberately absent: its wall is a quota
+    /// window, not a hiccup, and the retry ladder waits seconds — a
+    /// 5-hour usage limit does not clear inside it, so the retries only
+    /// burn turns and tokens. The caller sees the error at once (with
+    /// the provider's own reset time, where the adapter could read one)
+    /// and decides when to come back.
     pub fn is_retryable(&self) -> bool {
         match self {
             ProviderError::Timeout => true,
             ProviderError::Other(msg) => msg.starts_with("network error: "),
             ProviderError::Api(msg) => {
-                matches!(http_status(msg), Some(408 | 429 | 500..=599))
+                matches!(http_status(msg), Some(408 | 500..=599))
             }
             ProviderError::InvalidRequest(_) => false,
         }
@@ -77,16 +84,20 @@ mod tests {
     fn transport_and_server_failures_are_retryable() {
         assert!(ProviderError::Timeout.is_retryable());
         assert!(ProviderError::Other("network error: connection reset".into()).is_retryable());
-        for status in [
-            "(HTTP 408)",
-            "(HTTP 429)",
-            "(HTTP 500)",
-            "(HTTP 503)",
-            "(HTTP 529)",
-        ] {
+        for status in ["(HTTP 408)", "(HTTP 500)", "(HTTP 503)", "(HTTP 529)"] {
             let err = ProviderError::Api(format!("gemini api error {status}: overloaded"));
             assert!(err.is_retryable(), "{status} retries");
         }
+    }
+
+    #[test]
+    fn a_rate_limit_fails_fast() {
+        // A quota wall outlives the retry ladder: a 5-hour usage limit
+        // does not clear inside a two-second backoff, so the retries
+        // would only burn turns and tokens. The caller decides when to
+        // come back.
+        let err = ProviderError::Api("anthropic api error (HTTP 429): rate_limit_error".into());
+        assert!(!err.is_retryable(), "429 does not retry");
     }
 
     #[test]
