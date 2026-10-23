@@ -1,6 +1,7 @@
 # rhema-transcript — the bounded view over an unbounded session
 
-> **Status:** v1, 2026-10-20 (decisions in §8).
+> **Status:** v1, 2026-10-20 (decisions in §8); the stepped compaction
+> landed 2026-10-24 (§3.4, §3a).
 > **Framework grounding:** SPEC.md §4 (the engine clones `session.history`
 > into every request), §6 (the Session is the durable record; the driver
 > may checkpoint it at any step boundary).
@@ -105,17 +106,16 @@ blocks, tool-call arguments, and tool-result content):
    first whole message is a `Tool` result whose call lives before the
    band, or an assistant message whose calls are answered inside the
    band, the band start moves back to include the call.
-4. **The old prefix.** `[0, c)` — the cut — is covered by doubling
-   blocks anchored at the cut: sizes 1, 2, 4, 8, … walking back, the
-   oldest block taking the remainder. One structural line per block.
-   A prefix of `c` messages costs `O(log c)` lines, a few kilobytes at
-   any age, so the old band always fits.
+4. **The old prefix.** `[0, c)` — the cut — is covered by the stepped
+   compaction block: sections tiling the prefix, one condensed text
+   each (§3a). Everything a section omits is one `zoom` away, and the
+   block's header says so.
 
-A structural line names the band's user messages by head (their words
-are the decisions and they are short), the assistant finals by head, and
-the tool traffic by count and names — `line_head` caps each quoted head,
-`RANGE_HEAD` caps the line. Everything it omits is one `zoom` away, and
-the line says so.
+The extractive section digest names the band's user messages by head
+(their words are the decisions and they are short), the assistant finals
+by head, and the tool traffic by count and names — `line_head` caps each
+quoted head, `RANGE_HEAD` caps the digest. The model fill (§3a) rewrites
+the same ranges as dense markdown.
 
 **Engagement.** Below `B` total request bytes the view is the log,
 byte-identical: the decorator is a pass-through and small sessions
@@ -125,9 +125,64 @@ exists regardless.
 
 **Stability.** The construction is deterministic in the log, so between
 two requests that differ only by appended messages the view differs only
-at its end. The whole band's cut moves backward as the tail grows, never
-forward; the structural cover sits left of every change. The prefix a
-prompt cache holds stays valid as long as the vendor's own TTL does.
+at its end. The cut moves only at flushes (§3a), never per step; the
+block sits left of every per-step change and is append-only between
+flushes. The prefix a prompt cache holds stays valid across the whole
+stretch between flushes, as long as the vendor's own TTL does.
+
+## 3a. The stepped compaction
+
+The compactor is the model-written fill over the old prefix, and the
+reason the cut is **stepped** rather than recomputed per request.
+
+**Sections.** The block is a list of sections tiling `[0, cut)` without
+gaps: each a `Range` of the log plus one condensed text, headed
+`id+n|` in the view. A section, once committed, never moves and never
+changes range — the block grows by appending new sections left of the
+band, so between flushes the block is byte-identical and the request
+prefix (system prompt, then block, then whole band) is append-only.
+This is what a prompt cache needs: the prefix breaks only at flushes,
+consolidations, and the vendor's own TTL.
+
+**Flushes.** When a request's bytes breach the budget, the cut moves to
+the smallest position whose remaining band fits in *half* the
+allowance. The overshoot is the hysteresis: the next breach needs a
+whole half-budget of growth to arrive, so flushes — the only prefix
+breaks — stay far apart instead of landing on every step. Between
+flushes the planner touches nothing.
+
+**Sectioning.** The flushed span `[cut, c_new)` is chunked at message
+boundaries — each chunk within `step_bytes` (the summarizer's input
+bound) and `max_section_messages` — and no chunk may end where the next
+would open on a tool result whose call it holds: the trailing results
+come along. The same pairing rule keeps every tool call and its result
+on one side of every boundary, wire-safe for the adapters that pair
+`tool_use` with `tool_result`.
+
+**The two fills.** A section's text starts as the extractive digest
+(§3, mechanical, a few hundred bytes, cannot be wrong about what
+happened, only short). With a summarizer configured, the decorator then
+runs the model fill: the chunk goes to a cheap worker — the structural
+prompt asks for Goals Met / Environmental State / Discovered Issues /
+Current Blockers-Decisions — and the answer replaces the stand-in,
+capped at 8 KiB. A failed or retry-exhausted worker call never blocks
+the request: the extractive stand-in stands, and the section keeps the
+address it already committed. The worker runs *outside* the mirror's
+lock — plan under the lock, await outside, commit (with a range check
+that rejects a stale upgrade) under it again — so the mirror is never
+held across a model call and every intermediate state is a valid view.
+
+**Consolidation.** The one append-only exception. When the block passes
+`max_block_bytes`, the two oldest sections merge into one — the union
+range re-derived from the log, never summary-of-summary — until the
+block is at half the cap. A consolidation rewrites the block and so
+breaks the cache in full; the cap gates it to stay rare, and the stats
+count every one.
+
+**Resume.** Nothing derived is persisted. A resumed session's first
+request replaces the mirror wholesale and the compaction state rebuilds
+from nothing; the block's cache is cold after a restart regardless of
+what was saved.
 
 ## 4. The `zoom` tool
 
@@ -202,9 +257,10 @@ preview that omitted it would not be what turns send.
    unwrapped provider's.
 3. **The tail is whole and the last user message is present** in every
    request.
-4. **No model call belongs to the transcript in v1.** The extractive
-   fill is a pure function; latency added is the cost of walking the
-   log.
+4. **A summarizer call never blocks or fails a request.** Without one,
+   the extractive fill is a pure function and the transcript makes no
+   model calls; with one, a failed worker call leaves the extractive
+   stand-in in place and the request goes out.
 5. **Every tool result in a view has its call in the same view.**
 6. **`zoom` never fails silently**: a bad id is an in-band error naming
    the log's length.
@@ -243,11 +299,15 @@ preview that omitted it would not be what turns send.
 
 ## 9. Follow-ups (not v1)
 
-- **The compactor fill.** Node text for structural bands written by a
-  cheap model pair from rhema-config, patient retries, idempotent per
-  slot; behind the same slot algebra, adopted per consumer.
+- **Landed, 2026-10-24:** the stepped compaction (§3a) — the
+  append-only block, the flush hysteresis, the summarizer seam with the
+  extractive fallback, consolidation, and the benchmark stats
+  (`TranscriptStats`: request counts, flushes, block size, the
+  providers' own cache hit rate), surfaced in rhema-code's Usage page.
 - **Cache breakpoints** in the Anthropic adapter, fed from the view's
   stable prefix.
-- **ACP and claw opt-ins**, and a `rhema-config` profile key.
-- **View telemetry**: a sink event carrying the bands' sizes, so a
-  frontend can show what the model saw.
+- **ACP and claw opt-ins** for the summarizer, and a `rhema-config`
+  profile key naming the worker model.
+- **Per-step telemetry as a sink event**, so frontends other than
+  rhema-code can show what the model saw; the in-memory
+  `TranscriptStats` snapshot covers the session aggregate today.
