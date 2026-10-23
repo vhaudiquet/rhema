@@ -173,7 +173,9 @@ pub struct Args {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Command {
     /// Run one prompt headless — no full-screen UI, plain text on
-    /// stdout, tool events on stderr, exit 0 on success.
+    /// stdout, tool events on stderr, exit 0 on success, 2 when the
+    /// model backend failed (a rate limit, a dead endpoint — a wrapper
+    /// retries on its own schedule), 1 otherwise.
     Run(RunArgs),
     /// Serve the Agent Client Protocol over stdio: the coding agent as
     /// an editor-launched subprocess (Zed, Neovim, JetBrains, Emacs).

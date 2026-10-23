@@ -69,7 +69,7 @@ pub use approval::{ApprovalAnswerer, TuiApproval};
 pub use args::Args;
 pub use events::{FetchWhy, OwnedEvent, UiEvent};
 pub use palette::{DARK, LIGHT, Palette, Theme, ThemeKind, parse_hex_color};
-pub use run::run;
+pub use run::{exit_code, run};
 pub use screens::{
     AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, ResumeAction,
     ResumeScreen, SettingsAction, SettingsPurpose, SettingsScreen, SettingsSection,

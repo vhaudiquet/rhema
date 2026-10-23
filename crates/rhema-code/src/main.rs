@@ -11,9 +11,11 @@ use rhema::Args;
 async fn main() {
     let args = Args::parse();
     if let Err(err) = rhema::run(args).await {
-        // One clean line on stderr; non-zero exit. The terminal is already
-        // restored by the time `run` returns.
+        // One clean line on stderr; non-zero exit — 2 when the model
+        // backend failed (a wrapper retries on its own schedule), 1
+        // otherwise. The terminal is already restored by the time `run`
+        // returns.
         eprintln!("error: {err:#}");
-        std::process::exit(1);
+        std::process::exit(rhema::exit_code(&err));
     }
 }

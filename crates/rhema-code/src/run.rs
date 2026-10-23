@@ -424,27 +424,112 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     // allowlists will land.
     let approval: Arc<dyn Approval> = Arc::new(rhema_coding_agent::AllowAll);
 
+    // The checkpoint, headless as the TUI runs it: when `--save` names a
+    // file, the engine hands the session over after the assistant message
+    // lands and before the first tool of each round runs — a crash or a
+    // kill mid-round leaves a committed intent there, which the next
+    // `--resume`'s revive closes, instead of no record at all.
+    let save = args.save.clone();
+    if let Some(dir) = save.as_ref().and_then(|path| path.parent()) {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("cannot create the checkpoint directory {}", dir.display()))?;
+    }
+    if let Some(path) = &save {
+        let hook_path = path.clone();
+        agent.set_commit_hook(Some(Box::new(move |session: &Session| {
+            crate::sessions::write_session(&hook_path, session).map_err(|err| err.to_string())
+        })));
+    }
+
     let mut sink = HeadlessSink {
         msg: Some(first_line(&prompt)),
         step: None,
         max_steps: args.max_steps,
     };
-    let output = agent.turn(prompt, &mut sink, approval).await?;
-    eprintln!(
-        "· {} · ctx {}",
-        model,
-        crate::screens::format_tokens(Some(crate::app::context_tokens(&output.usage)))
-    );
-    // The workspace remembers the sandbox kind that just served it —
-    // the twin of the profile memory above. Best effort, the same
-    // style: a failed write warns without failing the run.
-    if config.last_sandbox_in(&workspace).as_deref() != Some(choice.stored_name()) {
-        config.note_sandbox_in(&workspace, choice.stored_name());
-        if let Err(err) = config.save() {
-            eprintln!("warning: the sandbox choice was not remembered: {err}");
+    let outcome = agent.turn(prompt, &mut sink, approval).await;
+    match outcome {
+        Ok(output) => {
+            // Checkpoint after the completed turn: the file's freshest
+            // complete state, the same shape the TUI leaves.
+            if let Some(path) = &save {
+                if let Err(err) = agent.save_session_to(path) {
+                    eprintln!("warning: the session was not checkpointed: {err}");
+                }
+            }
+            eprintln!(
+                "· {} · ctx {}",
+                model,
+                crate::screens::format_tokens(Some(crate::app::context_tokens(&output.usage)))
+            );
+            // The workspace remembers the sandbox kind that just served it —
+            // the twin of the profile memory above. Best effort, the same
+            // style: a failed write warns without failing the run.
+            if config.last_sandbox_in(&workspace).as_deref() != Some(choice.stored_name()) {
+                config.note_sandbox_in(&workspace, choice.stored_name());
+                if let Err(err) = config.save() {
+                    eprintln!("warning: the sandbox choice was not remembered: {err}");
+                }
+            }
+            Ok(())
+        }
+        Err(err) => {
+            // The run dies here, but the work need not: the streamed reply
+            // is already on stdout and the tool traffic on stderr, and the
+            // partial session — everything the turn built up to the
+            // failure — lands in a checkpoint the next `--resume` picks
+            // up. A provider death mid-delegation is recoverable, not a
+            // black hole.
+            let path = save
+                .clone()
+                .unwrap_or_else(|| failed_checkpoint_path(&workspace));
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            match crate::sessions::write_session(&path, agent.session()) {
+                Ok(()) => println!(
+                    "· checkpoint: the partial session is at {} (resume with --resume {})",
+                    path.display(),
+                    path.display()
+                ),
+                Err(write_err) => {
+                    eprintln!("warning: the partial session was not checkpointed: {write_err}")
+                }
+            }
+            Err(err.into())
         }
     }
-    Ok(())
+}
+
+/// Where a failed headless turn leaves its partial session when no
+/// `--save` was named: under the workspace's `.rhema` — the directory
+/// rhema already owns — stamped with the unix time so one failure never
+/// overwrites the record of a previous one.
+fn failed_checkpoint_path(workspace: &std::path::Path) -> std::path::PathBuf {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or_default();
+    workspace
+        .join(".rhema")
+        .join("runs")
+        .join(format!("failed-{secs}.json"))
+}
+
+/// The process exit code for a failed run: 2 when the failure is the
+/// model backend's — a rate limit, a dead endpoint, an auth rejection —
+/// so a wrapper can tell a quota wall from a rhema bug and decide on its
+/// own when to retry; 1 for everything else. Codes above 1 are shell
+/// convention for distinct failures.
+pub fn exit_code(err: &anyhow::Error) -> i32 {
+    use rhema_coding_agent::CodingAgentError;
+    for cause in err.chain() {
+        if let Some(CodingAgentError::Agent(rhema_core::AgentError::Provider(_))) =
+            cause.downcast_ref::<CodingAgentError>()
+        {
+            return 2;
+        }
+    }
+    1
 }
 
 /// Runs the TUI: resolves credentials, sets up the terminal, and runs the
@@ -856,6 +941,49 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, status: &mut Tracker, 
                 tx.clone(),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use super::*;
+    use rhema_coding_agent::CodingAgentError;
+    use rhema_core::ProviderError;
+
+    #[test]
+    fn a_provider_failure_is_exit_code_2() {
+        let err = anyhow::Error::new(CodingAgentError::Agent(rhema_core::AgentError::Provider(
+            ProviderError::Api("anthropic api error (HTTP 429): rate_limit_error".into()),
+        )));
+        assert_eq!(exit_code(&err), 2);
+    }
+
+    #[test]
+    fn a_wrapped_provider_failure_still_reads_as_2() {
+        // The chain, not the top error, decides: the failure surfaces
+        // through whatever context wrapped it on the way up.
+        let err = anyhow::Error::new(CodingAgentError::Agent(rhema_core::AgentError::Provider(
+            ProviderError::Timeout,
+        )))
+        .context("the turn failed");
+        assert_eq!(exit_code(&err), 2);
+    }
+
+    #[test]
+    fn any_other_failure_is_exit_code_1() {
+        assert_eq!(exit_code(&anyhow::anyhow!("no prompt")), 1);
+        let maxed = anyhow::Error::new(CodingAgentError::Agent(
+            rhema_core::AgentError::MaxIterations(8),
+        ));
+        assert_eq!(exit_code(&maxed), 1, "a step budget is a rhema limit");
+    }
+
+    #[test]
+    fn the_failure_checkpoint_lives_under_the_workspace_rhema() {
+        let path = failed_checkpoint_path(std::path::Path::new("/tmp/ws"));
+        let text = path.to_string_lossy();
+        assert!(text.starts_with("/tmp/ws/.rhema/runs/failed-"), "{text}");
+        assert!(text.ends_with(".json"), "{text}");
     }
 }
 
