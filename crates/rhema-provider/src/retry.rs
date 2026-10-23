@@ -195,6 +195,8 @@ mod tests {
         Timeout,
         /// A client error: never retryable.
         Auth,
+        /// A quota wall: never retryable, whatever the status family.
+        RateLimit,
         /// One text delta, then a timeout mid-stream.
         DeltaThenTimeout,
         /// Success; the string is the whole reply ("" = empty).
@@ -226,6 +228,9 @@ mod tests {
                 Attempt::Timeout => Err(ProviderError::Timeout),
                 Attempt::Auth => Err(ProviderError::Api(
                     "anthropic api error (HTTP 401): bad key".into(),
+                )),
+                Attempt::RateLimit => Err(ProviderError::Api(
+                    "anthropic api error (HTTP 429): rate_limit_error".into(),
                 )),
                 Attempt::DeltaThenTimeout => {
                     sink.emit(Event::TextDelta("partial "));
@@ -316,6 +321,20 @@ mod tests {
             .await;
         assert!(result.is_err(), "a bad key survives no retry");
         assert_eq!(scripted.calls(), 1, "no attempts wasted");
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_returns_at_once() {
+        // The ladder waits seconds; a 5-hour usage limit does not clear
+        // inside it. Retrying would spend a turn and its tokens for a
+        // certain second 429, so the wall surfaces at once.
+        let scripted = Arc::new(Scripted::new(vec![Attempt::RateLimit]));
+        let mut sink = Deltas::default();
+        let result = retried(scripted.clone())
+            .complete(request(), &mut sink)
+            .await;
+        assert!(result.is_err(), "the quota wall surfaces immediately");
+        assert_eq!(scripted.calls(), 1, "no attempts wasted on the window");
     }
 
     #[tokio::test]
