@@ -191,13 +191,6 @@ impl Daemon {
         // drives, jobs the jobs dispatcher answers.
         let jobs = Arc::new(crate::job_store::CodingJobStore::open(&db)?);
 
-        // The YAML watch list is the one-time seed; the table rules
-        // after that.
-        let seeded = watches.seed_from_config(&config.watches)?;
-        if seeded > 0 {
-            eprintln!("[claw] seeded {seeded} watch(es) from the config");
-        }
-
         let forge_dispatcher = Arc::new(Dispatcher::new(
             dispatch,
             Arc::new(SystemClock),

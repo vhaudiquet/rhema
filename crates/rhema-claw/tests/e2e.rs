@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use rhema_claw::{ClawConfig, ForgeKind, Watch, run_once};
+use rhema_claw::{ClawConfig, run_once};
 use rhema_core::{Message, MockProvider, ModelOutput, Role, StopReason, Usage};
 use rhema_rsd::{
     Dispatcher, DispatcherConfig, KeyState, Outcome, ResourceKey, SqliteStore, SystemClock,
@@ -43,7 +43,7 @@ fn reply(text: &str) -> ModelOutput {
 /// The test's claw config: everything under one tempdir, the watch aimed
 /// at the mock server. The provider never resolves through it — the
 /// daemon library takes the built provider, and the test builds a mock.
-fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
+fn config(dir: &tempfile::TempDir) -> ClawConfig {
     ClawConfig {
         db: Some(dir.path().join("dispatch.db")),
         workspace_root: Some(dir.path().join("workspaces")),
@@ -59,14 +59,18 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
         tools_bin: None,
         transcript: None,
         ingest_token: None,
-        watches: vec![Watch {
-            forge: ForgeKind::GitHub,
-            repo: "acme/widgets".to_owned(),
-            host: Some(server.uri()),
-            token: Some("tok".to_owned()),
-        }],
         calendars: Vec::new(),
     }
+}
+
+/// Seeds the watch row straight into the table — the config stopped
+/// carrying watches, and the test speaks to the daemon the way an
+/// integration would: through the store the routes share.
+fn seed_watch(dir: &tempfile::TempDir, host: &str) {
+    rhema_claw::ClawStore::open(dir.path().join("dispatch.db"))
+        .expect("the watch table opens")
+        .add("github", "acme/widgets", Some(host), "tok")
+        .expect("the seed row lands");
 }
 
 #[tokio::test]
@@ -103,7 +107,8 @@ async fn one_pass_polls_reasons_and_posts() {
         .await;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = config(&server, &dir);
+    let config = config(&dir);
+    seed_watch(&dir, &server.uri());
     let provider = Arc::new(MockProvider::new([reply("on it")]));
     let report = run_once(&config, mock_registry(provider))
         .await

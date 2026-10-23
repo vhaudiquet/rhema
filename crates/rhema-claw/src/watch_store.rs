@@ -4,10 +4,9 @@
 //! Watches are data the daemon reconfigures at runtime — the chat
 //! surface's [`watch_repo`](crate::watch_tools) tool and the HTTP
 //! `POST /v1/watches` route both land here — so the table is read fresh
-//! on every detect pass instead of living only in the YAML config. The
-//! config's `watches:` list is a one-time seed ([`ClawStore::
-//! seed_from_config`]): imported when the table is still empty, ignored
-//! once the table has rows.
+//! on every detect pass instead of living only in a static list. The
+//! config no longer carries watches at all — the table is the one
+//! truth, managed over `/v1/watches` and (from chat) the watch tools.
 //!
 //! Two connections, one file: this store opens its own rusqlite
 //! connection to the same database as the dispatcher's store — WAL and a
@@ -23,7 +22,54 @@ use rhema_forge_integration::RepoRef;
 use rusqlite::params;
 use serde::Serialize;
 
-use crate::config::{ForgeKind, Watch};
+use crate::config::{ForgeKind, resolve_token};
+
+/// One watched repository — the row's vocabulary, and the type the
+/// routes parse into. It used to live in the config as the YAML seed's
+/// shape; the config no longer carries watches (the table is managed
+/// over `/v1/watches`), and the type moved here with the rest of the
+/// forge state. Unknown keys are rejected: a typo'd key must not
+/// silently read as unset.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub struct Watch {
+    /// Which forge this watch polls.
+    pub forge: ForgeKind,
+    /// The repository, `owner/name` (GitLab: `namespace/project`).
+    pub repo: String,
+    /// The instance base URL. Required for gitea (self-hosted only);
+    /// github and gitlab default to their production bases.
+    pub host: Option<String>,
+    /// The forge token. Falls back to `GITHUB_TOKEN` / `GITEA_TOKEN` /
+    /// `GITLAB_TOKEN`; a blank either way counts as unset.
+    pub token: Option<String>,
+}
+
+impl Watch {
+    /// The repository coordinates, splitting `owner/name`. GitLab's owner
+    /// keeps its full namespace path, which is why the split is lazy: the
+    /// first `/` separates owner from name, never a deeper one.
+    pub fn repo_ref(&self) -> Result<RepoRef, String> {
+        let (owner, name) = self
+            .repo
+            .split_once('/')
+            .ok_or_else(|| format!("repo must be owner/name, got {:?}", self.repo))?;
+        if owner.is_empty() || name.is_empty() {
+            return Err(format!("repo must be owner/name, got {:?}", self.repo));
+        }
+        Ok(RepoRef::new(owner, name))
+    }
+
+    /// The token to poll with: the stored value, then the forge's env
+    /// variable; whitespace-only counts as unset everywhere.
+    pub fn resolve_token(&self) -> Option<String> {
+        resolve_token(
+            |name| std::env::var(name),
+            self.forge,
+            self.token.as_deref(),
+        )
+    }
+}
 
 /// The watch table, and the account-watch table beside it: one row per
 /// identity whose forge notifications the daemon polls. An account watch
@@ -214,31 +260,6 @@ impl ClawStore {
         Ok(rows)
     }
 
-    /// The config seed: imports `watches` when the table is empty — the
-    /// one-time bootstrap of a fresh deployment — and reports how many
-    /// landed. A populated table is never rewritten by the seed: once
-    /// any watch exists, the table rules and the config list is inert.
-    /// Only the config's own token is stored; the forge's environment
-    /// variable still serves at poll time when the stored one is blank.
-    pub fn seed_from_config(&self, watches: &[Watch]) -> Result<usize, WatchStoreError> {
-        if !self.list()?.is_empty() {
-            return Ok(0);
-        }
-        let mut seeded = 0;
-        for watch in watches {
-            let token = watch.token.as_deref().map(str::trim).unwrap_or("");
-            if self.add(
-                watch.forge.name(),
-                &watch.repo,
-                watch.host.as_deref(),
-                token,
-            )? {
-                seeded += 1;
-            }
-        }
-        Ok(seeded)
-    }
-
     /// Registers the account watch: the daemon polls `forge`'s
     /// notifications as the account. `false` when the account is already
     /// watched on that forge. The identity's own secret is *not* passed
@@ -327,7 +348,7 @@ fn now_millis() -> i64 {
 }
 
 /// The shape checks every watch must pass, wherever it enters (the
-/// config seed, the HTTP route, the agent tool): a parseable forge, an
+/// HTTP route, the agent tool): a parseable forge, an
 /// `owner/name` repo, and — gitea being self-hosted only — a host for
 /// gitea. Tokens are not required here: a blank one falls back to the
 /// forge's environment variable at poll time.
@@ -348,6 +369,29 @@ pub fn validate_watch(forge: ForgeKind, repo: &str, host: Option<&str>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validation_fails_a_watch_loudly_and_specificly() {
+        assert!(
+            validate_watch(ForgeKind::GitHub, "acme", None)
+                .unwrap_err()
+                .contains("owner/name"),
+            "an ownerless repo is loud"
+        );
+        assert!(
+            validate_watch(ForgeKind::Gitea, "acme/barn", None)
+                .unwrap_err()
+                .contains("self-hosted"),
+            "a hostless gitea watch is loud"
+        );
+        validate_watch(ForgeKind::GitHub, "acme/widgets", None).expect("github validates");
+        validate_watch(
+            ForgeKind::Gitea,
+            "acme/barn",
+            Some("https://git.example.net"),
+        )
+        .expect("gitea validates");
+    }
 
     #[test]
     fn a_watch_round_trips_through_the_table() {
@@ -413,76 +457,5 @@ mod tests {
             created_at: 0,
         };
         assert!(bad.repo_ref().is_err());
-    }
-
-    #[test]
-    fn the_seed_imports_only_an_empty_table() {
-        let store = ClawStore::in_memory().expect("store opens");
-        let watches = vec![Watch {
-            forge: ForgeKind::GitHub,
-            repo: "acme/widgets".to_owned(),
-            host: None,
-            token: Some("  ".to_owned()),
-        }];
-        assert_eq!(
-            store.seed_from_config(&watches).expect("seeds"),
-            1,
-            "the empty table takes the seed"
-        );
-        assert_eq!(
-            store.list().expect("list reads")[0].token,
-            "",
-            "blank stays blank"
-        );
-        assert_eq!(
-            store.seed_from_config(&watches).expect("skips"),
-            0,
-            "a populated table ignores the seed"
-        );
-    }
-
-    #[test]
-    fn validation_checks_shape_and_giteas_host() {
-        assert!(validate_watch(ForgeKind::GitHub, "acme/widgets", None).is_ok());
-        assert!(validate_watch(ForgeKind::GitHub, "ownerless", None).is_err());
-        assert!(validate_watch(ForgeKind::GitHub, "acme/", None).is_err());
-        assert!(validate_watch(ForgeKind::Gitea, "acme/barn", None).is_err());
-        assert!(validate_watch(ForgeKind::Gitea, "acme/barn", Some("   ")).is_err());
-        assert!(
-            validate_watch(
-                ForgeKind::Gitea,
-                "acme/barn",
-                Some("https://git.example.net")
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_watch(ForgeKind::GitLab, "group/subgroup/widgets", None).is_ok(),
-            "gitlab has a production base"
-        );
-    }
-
-    #[test]
-    fn the_token_never_serializes() {
-        let store = ClawStore::in_memory().expect("store opens");
-        store
-            .add("github", "acme/widgets", None, "sekrit")
-            .expect("add");
-        let json =
-            serde_json::to_string(&store.list().expect("list reads")[0]).expect("serializes");
-        assert!(!json.contains("sekrit"), "token leaked: {json}");
-        assert!(json.contains("acme/widgets"), "{json}");
-    }
-
-    #[test]
-    fn two_connections_share_one_file() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("dispatch.db");
-        let writer = ClawStore::open(&path).expect("first connection");
-        let reader = ClawStore::open(&path).expect("second connection");
-        writer.add("github", "acme/widgets", None, "").expect("add");
-        let watches = reader.list().expect("the other connection sees it");
-        assert_eq!(watches.len(), 1);
-        assert_eq!(watches[0].repo, "acme/widgets");
     }
 }

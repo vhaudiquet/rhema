@@ -12,7 +12,6 @@
 
 use std::path::PathBuf;
 
-use rhema_forge_integration::RepoRef;
 use serde::{Deserialize, Serialize};
 
 // The calendar feed types are the integration's: the reminder source
@@ -70,19 +69,6 @@ pub enum ConfigError {
         "ingest_token is the same value as another credential; the ingest token must be its own secret, write-only on the event door"
     )]
     IngestTokenCollision,
-    /// One watch is unusable; the daemon refuses to start rather than
-    /// poll a half-configured watch set.
-    #[error("watch #{index} ({forge} {repo}): {reason}")]
-    Watch {
-        /// The watch's position in the config file, zero-based.
-        index: usize,
-        /// The watch's forge kind.
-        forge: String,
-        /// The watch's `owner/name` as written.
-        repo: String,
-        /// What is missing or malformed.
-        reason: String,
-    },
     /// One calendar watch is unusable; the daemon refuses to start
     /// rather than poll a half-configured calendar.
     #[error("calendar #{index} ({name}): {reason}")]
@@ -163,51 +149,6 @@ impl ForgeKind {
             ForgeKind::Gitea => None,
             ForgeKind::GitLab => Some(rhema_forge_integration::gitlab::DEFAULT_BASE_URL),
         }
-    }
-}
-
-/// One watched repository. Unknown keys are rejected: a typo'd key
-/// must not silently read as unset.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub struct Watch {
-    /// Which forge this watch polls.
-    pub forge: ForgeKind,
-    /// The repository, `owner/name` (GitLab: `namespace/project`).
-    pub repo: String,
-    /// The instance base URL. Required for gitea (self-hosted only);
-    /// github and gitlab default to their production bases.
-    pub host: Option<String>,
-    /// The forge token. Falls back to `GITHUB_TOKEN` / `GITEA_TOKEN` /
-    /// `GITLAB_TOKEN`; a blank either way counts as unset.
-    pub token: Option<String>,
-}
-
-impl Watch {
-    /// The repository coordinates, splitting `owner/name`. GitLab's owner
-    /// keeps its full namespace path, which is why the split is lazy: the
-    /// first `/` separates owner from name, never a deeper one.
-    pub fn repo_ref(&self) -> Result<RepoRef, String> {
-        let (owner, name) = self
-            .repo
-            .split_once('/')
-            .ok_or_else(|| format!("repo must be owner/name, got {:?}", self.repo))?;
-        if owner.is_empty() || name.is_empty() {
-            return Err(format!("repo must be owner/name, got {:?}", self.repo));
-        }
-        Ok(RepoRef::new(owner, name))
-    }
-
-    /// The token to poll with: the config value, then the forge's env
-    /// variable; whitespace-only counts as unset everywhere.
-    pub fn resolve_token(&self) -> Option<String> {
-        // A closure, not `std::env::var` itself: the generic fn does not
-        // implement `Fn(&str)` for all lifetimes.
-        resolve_token(
-            |name| std::env::var(name),
-            self.forge,
-            self.token.as_deref(),
-        )
     }
 }
 
@@ -320,10 +261,6 @@ pub struct ClawConfig {
     /// Unset closes the door to credentials; the human token can still
     /// ingest.
     pub ingest_token: Option<String>,
-    /// What to watch — the optional seed for the persistent watch table.
-    /// Imported once, when the table is still empty; after that the
-    /// table rules, and watches are managed in chat or over HTTP.
-    pub watches: Vec<Watch>,
     /// The calendars to remind about. Config-file-only: a calendar is
     /// read-only ambient state, not an agent-managed resource, and a
     /// change takes the daemon restart it takes to edit the file.
@@ -355,7 +292,6 @@ impl Default for ClawConfig {
             tools_bin: None,
             ingest_token: None,
             transcript: None,
-            watches: Vec::new(),
             calendars: Vec::new(),
         }
     }
@@ -496,33 +432,6 @@ impl ClawConfig {
                 || Some(ingest_token) == self.agent_token.as_deref()
             {
                 return Err(ConfigError::IngestTokenCollision);
-            }
-        }
-        for (index, watch) in self.watches.iter().enumerate() {
-            let fail = |reason: String| ConfigError::Watch {
-                index,
-                forge: watch.forge.name().to_owned(),
-                repo: watch.repo.clone(),
-                reason,
-            };
-            watch.repo_ref().map_err(fail)?;
-            if watch.forge == ForgeKind::Gitea
-                && watch
-                    .host
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|h| !h.is_empty())
-                    .is_none()
-            {
-                return Err(fail(
-                    "gitea is self-hosted: set host to the instance base URL".to_owned(),
-                ));
-            }
-            if watch.resolve_token().is_none() {
-                return Err(fail(format!(
-                    "no token: set token in the config or {}",
-                    watch.forge.token_env()
-                )));
             }
         }
         self.validate_calendars()?;
@@ -725,15 +634,7 @@ provider: anthropic
 model: claude-sonnet-4-5
 listen: 192.168.1.10:7800
 token: sekrit
-watches:
-  - forge: github
-    repo: acme/widgets
-  - forge: gitea
-    repo: acme/barn
-    host: https://git.example.net
-    token: gitea-pat
-  - forge: gitlab
-    repo: group/subgroup/widgets
+ingest_token: door-key
 ";
         let config: ClawConfig = serde_yaml::from_str(raw).expect("parses");
         assert_eq!(config.poll_interval_secs, 30);
@@ -750,20 +651,6 @@ watches:
             config.bootstrap_root.as_deref(),
             Some(std::path::Path::new("/var/lib/rhema/claw-bootstrap"))
         );
-        assert_eq!(config.watches.len(), 3);
-        assert_eq!(config.watches[0].forge, ForgeKind::GitHub);
-        assert_eq!(config.watches[0].host, None);
-        assert_eq!(config.watches[1].forge, ForgeKind::Gitea);
-        assert_eq!(
-            config.watches[1].host.as_deref(),
-            Some("https://git.example.net")
-        );
-        assert_eq!(config.watches[1].token.as_deref(), Some("gitea-pat"));
-        // GitLab's namespace path survives as the owner.
-        assert_eq!(
-            config.watches[2].repo_ref().expect("parses").path(),
-            "group/subgroup/widgets"
-        );
     }
 
     #[test]
@@ -774,19 +661,22 @@ watches:
             err.to_string().contains("listne") && err.to_string().contains("expected one of"),
             "the error names the key: {err}"
         );
-        // The same strictness inside a watch.
+        // A config still carrying the old watches seed is refused
+        // outright: the table rules now, and a silent seed would look
+        // like it worked.
         let err = serde_yaml::from_str::<ClawConfig>(
-            "watches:\n  - forge: github\n    repo: acme/widgets\n    hst: https://git.example.net\n",
+            "watches:\n  - forge: github\n    repo: acme/widgets\n",
         )
-        .expect_err("a typo'd watch key is loud too");
-        assert!(err.to_string().contains("hst"), "got: {err}");
+        .expect_err("the old watch seed is not config anymore");
+        assert!(
+            err.to_string().contains("watches"),
+            "the error names the retired key: {err}"
+        );
     }
 
     #[test]
     fn defaults_fill_what_the_file_omits() {
-        let config: ClawConfig =
-            serde_yaml::from_str("watches:\n  - forge: github\n    repo: acme/widgets\n")
-                .expect("parses");
+        let config: ClawConfig = serde_yaml::from_str("listen: 127.0.0.1:7799\n").expect("parses");
         assert_eq!(config.poll_interval_secs, DEFAULT_POLL_INTERVAL_SECS);
         assert_eq!(config.max_turn_steps, DEFAULT_MAX_TURN_STEPS);
         assert_eq!(config.provider, None);
@@ -1072,56 +962,6 @@ watches:
             ),
             None
         );
-    }
-
-    #[test]
-    fn validation_fails_a_watch_loudly_and_specifically() {
-        let watch = |forge, repo: &str, host: Option<&str>, token: Option<&str>| Watch {
-            forge,
-            repo: repo.to_owned(),
-            host: host.map(str::to_owned),
-            token: token.map(str::to_owned),
-        };
-        let config = |watches: Vec<Watch>| ClawConfig {
-            watches,
-            ..ClawConfig::default()
-        };
-
-        // An empty list is a valid starting point now: the table is
-        // seeded from it, and the agent manages watches from chat.
-        config(vec![]).validate().expect("an empty list validates");
-
-        let err = config(vec![watch(ForgeKind::GitHub, "acme", None, Some("t"))])
-            .validate()
-            .expect_err("ownerless repo is loud");
-        assert!(err.to_string().contains("owner/name"), "got: {err}");
-
-        let err = config(vec![watch(ForgeKind::Gitea, "acme/barn", None, Some("t"))])
-            .validate()
-            .expect_err("hostless gitea is loud");
-        assert!(err.to_string().contains("self-hosted"), "got: {err}");
-
-        let err = config(vec![watch(ForgeKind::GitLab, "acme/barn", None, None)])
-            .validate()
-            .expect_err("tokenless watch is loud");
-        assert!(err.to_string().contains("GITLAB_TOKEN"), "got: {err}");
-
-        config(vec![watch(
-            ForgeKind::GitHub,
-            "acme/widgets",
-            None,
-            Some("t"),
-        )])
-        .validate()
-        .expect("a complete github watch validates");
-        config(vec![watch(
-            ForgeKind::Gitea,
-            "acme/barn",
-            Some("https://git.example.net"),
-            Some("t"),
-        )])
-        .validate()
-        .expect("a complete gitea watch validates");
     }
 
     #[test]

@@ -960,8 +960,7 @@ mod tests {
 
     fn test_config() -> crate::config::ClawConfig {
         serde_json::from_value(serde_json::json!({
-            "poll_interval_secs": 60,
-            "watches": []
+            "poll_interval_secs": 60
         }))
         .expect("a minimal claw config")
     }

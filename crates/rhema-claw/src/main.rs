@@ -59,8 +59,7 @@ async fn run(args: Args) -> Result<(), ClawError> {
         resolve_backends(&config)?
     };
     eprintln!(
-        "[claw] {} seeded watch(es), active {}/{}, db {}, http {}",
-        config.watches.len(),
+        "[claw] active {}/{}, db {}, http {}",
         backends.active().0,
         backends.active().1,
         config
@@ -74,9 +73,7 @@ async fn run(args: Args) -> Result<(), ClawError> {
         // The approval posture is deliberate (spec §8): say it once at
         // startup so the operator reads it next to the config that
         // turns it on, not in a README three weeks in.
-        if !config.watches.is_empty() {
-            eprintln!("[claw] note: forge dispatches run tool calls without approval prompts");
-        }
+        eprintln!("[claw] note: forge dispatches run tool calls without approval prompts");
         let report = run_once(&config, backends.clone()).await?;
         // A cron pass reports its failures through the exit code.
         if report

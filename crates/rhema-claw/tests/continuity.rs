@@ -7,7 +7,17 @@
 
 use std::sync::Arc;
 
-use rhema_claw::{ClawConfig, ForgeKind, Watch, run_once};
+use rhema_claw::{ClawConfig, run_once};
+
+/// Seeds the watch row straight into the table — the config stopped
+/// carrying watches, and the test speaks to the daemon the way an
+/// integration would: through the store the routes share.
+fn seed_watch(dir: &tempfile::TempDir, host: &str) {
+    rhema_claw::ClawStore::open(dir.path().join("dispatch.db"))
+        .expect("the watch table opens")
+        .add("github", "acme/widgets", Some(host), "tok")
+        .expect("the seed row lands");
+}
 use rhema_core::{Message, MockProvider, ModelOutput, Role, Session, StopReason, Usage};
 use rhema_rsd::{KeyState, Outcome, ResourceKey, SqliteStore, Store};
 use serde_json::{Value, json};
@@ -55,7 +65,7 @@ fn reply(text: &str) -> ModelOutput {
     }
 }
 
-fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
+fn config(dir: &tempfile::TempDir) -> ClawConfig {
     ClawConfig {
         db: Some(dir.path().join("dispatch.db")),
         workspace_root: Some(dir.path().join("workspaces")),
@@ -71,12 +81,6 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
         tools_bin: None,
         transcript: None,
         ingest_token: None,
-        watches: vec![Watch {
-            forge: ForgeKind::GitHub,
-            repo: "acme/widgets".to_owned(),
-            host: Some(server.uri()),
-            token: Some("tok".to_owned()),
-        }],
         calendars: Vec::new(),
     }
 }
@@ -131,7 +135,8 @@ async fn the_second_dispatch_resumes_the_first_conversation() {
         .await;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let config = config(&server, &dir);
+    let config = config(&dir);
+    seed_watch(&dir, &server.uri());
     let key = ResourceKey::from("github:acme/widgets#7");
 
     // Pass one: the opened event alone. The cron shape — a fresh process,

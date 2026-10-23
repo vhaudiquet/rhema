@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use rhema_autonomous_agent::Allowlist;
 use rhema_claw::watch_tools;
-use rhema_claw::{ClawConfig, Daemon, ForgeKind, Watch};
+use rhema_claw::{ClawConfig, Daemon};
 use rhema_core::{Content, Message, MockProvider, ModelOutput, Role, Session, StopReason, Usage};
 use rhema_rsd::{ResourceKey, SqliteStore, Store};
 use serde_json::{Value, json};
@@ -65,7 +65,6 @@ fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
         tools_bin: None,
         ingest_token: None,
         transcript: None,
-        watches: Vec::new(),
         calendars: Vec::new(),
     }
 }
@@ -892,70 +891,6 @@ async fn a_configured_token_guards_v1_and_leaves_healthz_open() {
         .await
         .expect("the completion parses");
     assert_eq!(whole["choices"][0]["message"]["content"], "on it");
-}
-
-/// The watch list as the HTTP route serves it for `daemon`.
-async fn list_watches(daemon: &Daemon) -> Value {
-    let base = serve(daemon).await;
-    reqwest::Client::new()
-        .get(format!("{base}/v1/watches"))
-        .send()
-        .await
-        .expect("the list reads")
-        .json()
-        .await
-        .expect("the list parses")
-}
-
-/// The seed rule, through the daemon's assembly: an empty table takes
-/// the config's watches; a populated table ignores the seed, so a
-/// restart with a different YAML never rewrites what the table holds.
-#[tokio::test]
-async fn the_seed_imports_into_an_empty_table_and_then_the_table_rules() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let yaml_seed = || ClawConfig {
-        watches: vec![Watch {
-            forge: ForgeKind::GitHub,
-            repo: "acme/seeded".to_owned(),
-            host: None,
-            token: Some("tok".to_owned()),
-        }],
-        ..config(&dir, None)
-    };
-    let changed_seed = || ClawConfig {
-        watches: vec![Watch {
-            forge: ForgeKind::GitLab,
-            repo: "group/other".to_owned(),
-            host: None,
-            token: Some("tok".to_owned()),
-        }],
-        ..config(&dir, None)
-    };
-
-    // First boot: the empty table takes the seed.
-    let first = Daemon::build(
-        &yaml_seed(),
-        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
-        rhema_rsd::DispatcherConfig::default(),
-    )
-    .expect("the first daemon assembles");
-    let listed = list_watches(&first).await;
-    assert_eq!(listed["watches"][0]["repo"], "acme/seeded", "{listed}");
-
-    // Second boot, different YAML, populated table: the table rules.
-    let second = Daemon::build(
-        &changed_seed(),
-        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
-        rhema_rsd::DispatcherConfig::default(),
-    )
-    .expect("the second daemon assembles");
-    let listed = list_watches(&second).await;
-    assert_eq!(
-        listed["watches"].as_array().map(Vec::len),
-        Some(1),
-        "the seed never rewrites a populated table: {listed}"
-    );
-    assert_eq!(listed["watches"][0]["repo"], "acme/seeded", "{listed}");
 }
 
 /// The ingest door: an external event lands on its key in the resident

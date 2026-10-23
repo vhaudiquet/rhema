@@ -100,7 +100,7 @@ pub use bootstrap::{
     BOOTSTRAP_SAVE, Bootstrap, BootstrapError, BootstrapKind, BootstrapStatus, DEFAULT_SYSTEM_MD,
     render_system,
 };
-pub use config::{ClawConfig, ConfigError, ForgeKind, Watch};
+pub use config::{ClawConfig, ConfigError, ForgeKind};
 pub use daemon::{ClawError, Daemon, TickReport, run_once};
 pub use environment::write_report;
 pub use extension::{ClawExtension, ExtensionDeps, Extensions, Lanes};
@@ -116,4 +116,4 @@ pub use settings::SettingsStore;
 pub use task_source::{TASKS_SOURCE, TaskScheduler};
 pub use task_store::{TaskKind, TaskRecord, TaskStore, TaskStoreError};
 pub use turn_store::{TurnStore, TurnStoreError};
-pub use watch_store::{ClawStore, WatchRecord, WatchStoreError};
+pub use watch_store::{ClawStore, Watch, WatchRecord, WatchStoreError};
