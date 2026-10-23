@@ -67,19 +67,20 @@ impl Transport for FetchTransport {
         // reports the status up front and pumps plain chunks into a
         // channel the seam's receiver can own.
         let (chunks, receiver) = futures::channel::mpsc::unbounded();
-        let (status_slot, status) = futures::channel::oneshot::channel();
+        let (head_slot, head) = futures::channel::oneshot::channel();
         wasm_bindgen_futures::spawn_local(async move {
             let mut sink = chunks;
             let failure = |err: String| TransportError::Other(err);
             let mut response = match Fetch::Request(fetch_request).send().await {
                 Ok(response) => response,
                 Err(err) => {
-                    let _ = status_slot.send(0);
+                    let _ = head_slot.send(None);
                     let _ = sink.send(Err(failure(err.to_string()))).await;
                     return;
                 }
             };
-            let _ = status_slot.send(response.status_code());
+            let headers: Vec<(String, String)> = response.headers().iter().collect();
+            let _ = head_slot.send(Some((response.status_code(), headers)));
             let mut body = match response.stream() {
                 Ok(body) => body,
                 Err(err) => {
@@ -94,11 +95,15 @@ impl Transport for FetchTransport {
                 }
             }
         });
-        let status = status
+        let (status, headers) = head
             .await
-            .map_err(|_| TransportError::Other("the fetch task ended before its status".into()))?;
+            .map_err(|_| TransportError::Other("the fetch task ended before its status".into()))?
+            .ok_or_else(|| {
+                TransportError::Other("the fetch failed before a response head".into())
+            })?;
         Ok(HttpResponse {
             status,
+            headers,
             body: Box::new(receiver),
         })
     }
