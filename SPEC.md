@@ -519,3 +519,38 @@ The record format would carry it: a session's parent pointer and the
 messages' first-line prefix in the RSD record, the stores
 key-structured and JSON-native, no backend rewrite — deferred, not
 designed away.
+
+## 12. The sandbox seam (`rhema-sandbox`) and the execution choice
+
+The sandbox began as cloud furniture: the `Sandbox` seam lived in the
+shared harness, and each frontend constructed its platform's client
+directly — the DO its `SandboxDo`, the Vercel server its
+`VercelSandbox` — while the terminal frontend had no path to any of it.
+The extraction makes the seam a crate of its own and the choice a matter
+of configuration. `rhema-sandbox` is the seam crate of a family, the
+provider family's shape applied to machines: the trait and its types,
+the `ShellSandbox` adapter onto the executor seam, the scripted mock,
+and — the part already written but unnamed — the wire protocol,
+promoted from the Cloudflare shim's JSON surface (`exec`/`put`/`get`/
+`seed`, a token header, tail-capped streams). `HttpSandbox` speaks it
+over plain HTTPS and `rhema-sandboxd` serves it from any host, one root
+directory per session; a DO pointed at one needs no container binding at
+all, and the shim becomes optional. Backend selection rides deployment
+env (`SANDBOX_BACKEND`), not the per-session config: it is a deployment
+decision, and a client-chosen sandbox URL would be an SSRF on a machine
+that executes commands.
+
+The same crate is what lets `rhema-code` choose where its `bash` runs:
+`local | docker | ssh | http` in v1 — stored, remembered per workspace
+beside the remembered profile, pickable in the TUI, probed for
+availability. Backends sort into two families — fs-sharing (`FsRoot`
+plus an exec prefix: local direct, bubblewrap, a bind-mounted container)
+and fs-disjoint (copied containers, VMs, SSH, the protocol family) — and
+a VM costs no client code at all: an image running `sandboxd` is
+packaging. The falsification test from the provider family repeats
+here: every new backend must land with zero trait changes. `local`
+stays today's fast path; non-local kinds seed skills into the sandbox
+while session history, credentials, and the TUI stay host-side, which
+they already are. Said plainly: local and mount postures are process
+hygiene, not security boundaries, and the gate stays installed in every
+mode. Full design and commit plan: `specs/rhema-sandbox.md`.

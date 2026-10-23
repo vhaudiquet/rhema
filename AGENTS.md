@@ -83,6 +83,9 @@ Rules:
   - `agent-tools` — the shared toolkit: the approval-gated shell, the
     `Approval` and `Overlay` seams, skills, paste expansion, revive,
     the prompt renderer (`crates/rhema-agent-tools/`)
+  - `sandbox` — the sandbox seam: the `Sandbox` contract, the
+    `ShellSandbox` adapter, the wire protocol, the HTTP client and
+    `rhema-sandboxd`, and the local sandbox (`crates/rhema-sandbox/`)
   - `subagents` — the subagent extension: definition discovery and the
     `subagent` tool (`crates/rhema-subagents/`)
   - `transcript` — the bounded view over an unbounded session: the
@@ -92,10 +95,9 @@ Rules:
   - `rhema-code` — the frontend crate: terminal UI and headless
     one-shot (`crates/rhema-code/`); its binary is `rhema`
   - `cloud-agent` — the cloud harness the frontends share: the
-    filesystem-less assembly, the client approval gate, the sandbox
-    seam, the per-session config, and the offline end-to-end — no
-    platform dependency enters this crate
-    (`crates/rhema-cloud-agent/`)
+    filesystem-less assembly, the client approval gate, the per-session
+    config, and the offline end-to-end — no platform dependency enters
+    this crate (`crates/rhema-cloud-agent/`)
   - `cloudflare-code` — the cloud frontend: the coding agent as a
     Cloudflare Durable Object — the workers-rs glue over the shared
     harness, and the deploy assets
