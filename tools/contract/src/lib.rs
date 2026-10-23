@@ -77,6 +77,23 @@ pub fn agent_allowed(method: &str, path: &str) -> bool {
         .any(|(route_method, pattern)| *route_method == method && match_pattern(pattern, &segments))
 }
 
+/// Whether the ingest credential may call this route: the event door
+/// and nothing else. The ingest class is write-only by construction —
+/// it can hand events in, and read nothing back — so its allowlist is
+/// one row, and `false` for every method it does not name.
+pub fn ingest_allowed(method: &str, path: &str) -> bool {
+    // The routes are daemon-side (`/v1/...`), but a daemon whose auth
+    // middleware runs inside its `/v1` nest sees the stripped path —
+    // accept both spellings, one allowlist.
+    let path = if path.starts_with("/v1") {
+        path
+    } else {
+        &format!("/v1{path}")
+    };
+    let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+    method == "POST" && match_pattern(&["v1", "ingest"], &segments)
+}
+
 /// Matches one allowlist pattern against a request's path segments.
 fn match_pattern(pattern: &[&str], segments: &[&str]) -> bool {
     match (pattern.first(), segments.first()) {
@@ -192,6 +209,9 @@ pub enum Auth {
     Human,
     /// The agent token: the [`agent_allowed`] routes only.
     Agent,
+    /// The ingest credential: the event door ([`ingest_allowed`])
+    /// only, and nothing readable.
+    Ingest,
     /// A bearer that matches neither configured token.
     Invalid,
 }

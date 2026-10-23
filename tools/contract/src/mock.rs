@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 
 use std::sync::PoisonError;
 
+use crate::ingest_allowed;
 use crate::{
     Auth, CONTRACT_VERSION, CallRequest, CallResponse, NotificationOut, NotificationPush, TaskAdd,
     TaskOut, agent_allowed, now_millis,
@@ -19,6 +20,7 @@ use crate::{
 pub struct MockClaw {
     human_token: Option<String>,
     agent_token: Option<String>,
+    ingest_token: Option<String>,
     notifications: Mutex<Vec<NotificationOut>>,
     tasks: Mutex<Vec<TaskOut>>,
     watches: Mutex<Vec<Value>>,
@@ -29,10 +31,15 @@ pub struct MockClaw {
 impl MockClaw {
     /// A mock with the daemon's two tokens; `None` means that class is
     /// unconfigured and its bearers are strangers.
-    pub fn new(human_token: Option<&str>, agent_token: Option<&str>) -> Self {
+    pub fn new(
+        human_token: Option<&str>,
+        agent_token: Option<&str>,
+        ingest_token: Option<&str>,
+    ) -> Self {
         Self {
             human_token: human_token.map(str::to_owned),
             agent_token: agent_token.map(str::to_owned),
+            ingest_token: ingest_token.map(str::to_owned),
             notifications: Mutex::new(Vec::new()),
             tasks: Mutex::new(Vec::new()),
             watches: Mutex::new(Vec::new()),
@@ -46,7 +53,8 @@ impl MockClaw {
     pub async fn call(&self, request: CallRequest) -> Result<CallResponse, String> {
         // The bearer gate. With no tokens configured the surface is
         // open; with either, a stranger is a 401.
-        let open = self.human_token.is_none() && self.agent_token.is_none();
+        let open =
+            self.human_token.is_none() && self.agent_token.is_none() && self.ingest_token.is_none();
         if !open && matches!(request.auth, Auth::None | Auth::Invalid) {
             return Ok(self.error(401, "unauthorized"));
         }
@@ -57,6 +65,16 @@ impl MockClaw {
             }
             if !agent_allowed(request.method, &request.path) {
                 return Ok(self.error(403, "this route is not the agent token's"));
+            }
+        }
+        // The ingest class: the event door, contract version required —
+        // an integration speaks the same handshake the tools do.
+        if request.auth == Auth::Ingest {
+            if request.contract != Some(CONTRACT_VERSION) {
+                return Ok(self.error(409, "contract version mismatch"));
+            }
+            if !ingest_allowed(request.method, &request.path) {
+                return Ok(self.error(403, "this route is not the ingest token's"));
             }
         }
 

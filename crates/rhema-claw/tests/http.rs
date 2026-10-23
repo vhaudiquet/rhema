@@ -63,6 +63,7 @@ fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
         token: token.map(str::to_owned),
         agent_token: None,
         tools_bin: None,
+        ingest_token: None,
         transcript: None,
         watches: Vec::new(),
         calendars: Vec::new(),
@@ -1200,6 +1201,7 @@ async fn the_surface_speaks_the_tool_contract() {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config = config(&dir, Some("human-token"));
     config.agent_token = Some("agent-token".to_owned());
+    config.ingest_token = Some("ingest-token".to_owned());
     let daemon = Daemon::build(
         &config,
         mock_registry(Arc::new(MockProvider::new(Vec::new()))),
@@ -1225,6 +1227,9 @@ async fn the_surface_speaks_the_tool_contract() {
                 }
                 rhema_tools_contract::Auth::Invalid => {
                     builder.header(reqwest::header::AUTHORIZATION, "Bearer a-stranger")
+                }
+                rhema_tools_contract::Auth::Ingest => {
+                    builder.header(reqwest::header::AUTHORIZATION, "Bearer ingest-token")
                 }
             };
             let builder = match request.contract {

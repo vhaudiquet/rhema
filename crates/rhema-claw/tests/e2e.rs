@@ -58,6 +58,7 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
         agent_token: None,
         tools_bin: None,
         transcript: None,
+        ingest_token: None,
         watches: vec![Watch {
             forge: ForgeKind::GitHub,
             repo: "acme/widgets".to_owned(),

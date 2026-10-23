@@ -95,6 +95,9 @@ pub struct ClawState {
     /// answering only the contract's data routes (see
     /// [`require_auth`]).
     agent_token: Option<String>,
+    /// The ingest credential integrations hold: a third bearer
+    /// answering the event door only (see [`require_auth`]).
+    ingest_token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
     /// events race in through it.
@@ -128,6 +131,7 @@ impl ClawState {
         phone: Arc<crate::phone::PhoneStore>,
         token: Option<String>,
         agent_token: Option<String>,
+        ingest_token: Option<String>,
     ) -> Self {
         Self {
             dispatcher,
@@ -148,6 +152,7 @@ impl ClawState {
             phone,
             token,
             agent_token,
+            ingest_token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
@@ -312,28 +317,39 @@ fn tokens_match(presented: &str, expected: &str) -> bool {
     diff == 0
 }
 
-/// The bearer check, in two classes. With neither token configured the
+/// The bearer check, in three classes. With no token configured the
 /// surface is open, as before. The human token answers every `/v1`
 /// route. The agent token — what the client tools hold — answers only
 /// the data routes the tool contract allowlists, and only with the
 /// contract header at the matching version: a tool cannot reach
 /// consents, sessions, or ingest, so a leaked agent token cannot
-/// answer the agent's own `ask_secret` (rhema-tools spec §5). Any
-/// other bearer is a 401. `/healthz` never reaches this.
+/// answer the agent's own `ask_secret` (rhema-tools spec §5). The
+/// ingest credential — what integrations hold — answers the event
+/// door and nothing else: write-only by construction, it can hand
+/// events in and read nothing back. Any other bearer is a 401.
+/// `/healthz` never reaches this.
 async fn require_auth(State(state): State<ClawState>, request: Request, next: Next) -> Response {
     let presented = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "));
-    let class = match (&state.token, &state.agent_token, presented) {
+    let class = match (
+        &state.token,
+        &state.agent_token,
+        &state.ingest_token,
+        presented,
+    ) {
         // Nothing configured: the open surface, bearers ignored.
-        (None, None, _) => Auth::Human,
-        (Some(expected), _, Some(presented)) if tokens_match(presented, expected) => Auth::Human,
-        (_, Some(expected), Some(presented)) if tokens_match(presented, expected) => Auth::Agent,
+        (None, None, None, _) => Auth::Human,
+        (Some(expected), _, _, Some(presented)) if tokens_match(presented, expected) => Auth::Human,
+        (_, Some(expected), _, Some(presented)) if tokens_match(presented, expected) => Auth::Agent,
+        (_, _, Some(expected), Some(presented)) if tokens_match(presented, expected) => {
+            Auth::Ingest
+        }
         // A token configured and no bearer, or a bearer matching
         // neither.
-        (_, _, _) => Auth::Invalid,
+        (_, _, _, _) => Auth::Invalid,
     };
     match class {
         Auth::Human => next.run(request).await,
@@ -366,6 +382,32 @@ async fn require_auth(State(state): State<ClawState>, request: Request, next: Ne
                 (
                     StatusCode::FORBIDDEN,
                     Json(json!({"error": "this route is not the agent token's"})),
+                )
+                    .into_response()
+            }
+        }
+        Auth::Ingest => {
+            let version = request
+                .headers()
+                .get(CONTRACT_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == CONTRACT_VERSION.to_string());
+            if !version {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": format!(
+                        "ingest calls carry the {CONTRACT_HEADER} header at version {CONTRACT_VERSION}"
+                    )})),
+                )
+                    .into_response();
+            }
+            if rhema_tools_contract::ingest_allowed(request.method().as_str(), request.uri().path())
+            {
+                next.run(request).await
+            } else {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "this route is not the ingest token's"})),
                 )
                     .into_response()
             }

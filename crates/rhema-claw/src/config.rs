@@ -62,6 +62,14 @@ pub enum ConfigError {
         "agent_token is the same value as token; the agent token must be its own secret, scoped to the tool routes"
     )]
     SameAgentToken,
+    /// The ingest credential is the same value as the human token or
+    /// the agent token: boot refuses, because the ingest credential's
+    /// safety is that it is write-only and the event door only — a
+    /// value shared with a wider class silently widens it.
+    #[error(
+        "ingest_token is the same value as another credential; the ingest token must be its own secret, write-only on the event door"
+    )]
+    IngestTokenCollision,
     /// One watch is unusable; the daemon refuses to start rather than
     /// poll a half-configured watch set.
     #[error("watch #{index} ({forge} {repo}): {reason}")]
@@ -304,6 +312,14 @@ pub struct ClawConfig {
     /// A directory of client-tool binaries (the rhema-tools project's)
     /// layered onto the agent's shell PATH. Unset leaves PATH alone.
     pub tools_bin: Option<PathBuf>,
+    /// The ingest credential: a third bearer class, handed to
+    /// integrations (a sidecar poller, an OS cron job) so they can hand
+    /// events to `/v1/ingest` — and do nothing else. Write-only by
+    /// construction: the middleware keeps it to the event door, and it
+    /// must differ from both other tokens (boot refuses otherwise).
+    /// Unset closes the door to credentials; the human token can still
+    /// ingest.
+    pub ingest_token: Option<String>,
     /// What to watch — the optional seed for the persistent watch table.
     /// Imported once, when the table is still empty; after that the
     /// table rules, and watches are managed in chat or over HTTP.
@@ -337,6 +353,7 @@ impl Default for ClawConfig {
             token: None,
             agent_token: None,
             tools_bin: None,
+            ingest_token: None,
             transcript: None,
             watches: Vec::new(),
             calendars: Vec::new(),
@@ -469,6 +486,16 @@ impl ClawConfig {
         if let (Some(token), Some(agent_token)) = (&self.token, &self.agent_token) {
             if !token.is_empty() && token == agent_token {
                 return Err(ConfigError::SameAgentToken);
+            }
+        }
+        // The ingest credential's safety is that it is write-only and
+        // one route deep; a value shared with a wider class silently
+        // widens it, so boot refuses the collision with either token.
+        if let Some(ingest_token) = self.ingest_token.as_deref().filter(|t| !t.is_empty()) {
+            if Some(ingest_token) == self.token.as_deref()
+                || Some(ingest_token) == self.agent_token.as_deref()
+            {
+                return Err(ConfigError::IngestTokenCollision);
             }
         }
         for (index, watch) in self.watches.iter().enumerate() {
@@ -609,6 +636,40 @@ impl ClawConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_ingest_token_must_differ_from_both_other_credentials() {
+        let config = ClawConfig {
+            token: Some("same".to_owned()),
+            ingest_token: Some("same".to_owned()),
+            ..ClawConfig::default()
+        };
+        assert!(
+            matches!(config.validate(), Err(ConfigError::IngestTokenCollision)),
+            "an ingest credential sharing the human token is refused"
+        );
+        let config = ClawConfig {
+            token: Some("human".to_owned()),
+            agent_token: Some("same".to_owned()),
+            ..config
+        };
+        assert!(
+            matches!(config.validate(), Err(ConfigError::IngestTokenCollision)),
+            "an ingest credential sharing the agent token is refused"
+        );
+        let config = ClawConfig {
+            agent_token: Some("agent".to_owned()),
+            ingest_token: Some("ingest".to_owned()),
+            ..config
+        };
+        assert!(config.validate().is_ok(), "three distinct tokens pass");
+        // An empty ingest token is no token: no collision to refuse.
+        let blank = ClawConfig {
+            ingest_token: Some(String::new()),
+            ..ClawConfig::default()
+        };
+        assert!(blank.validate().is_ok(), "a blank ingest token is unset");
+    }
+
     #[test]
     fn the_agent_token_must_differ_from_the_human_token() {
         let config = ClawConfig {

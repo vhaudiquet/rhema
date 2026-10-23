@@ -242,6 +242,12 @@ impl Daemon {
             );
             tool_env.insert("RHEMA_TOKEN".to_owned(), agent_token.clone());
         }
+        // The ingest credential rides its own variable: a tool asks
+        // for exactly the class it needs, and a tool that only pushes
+        // events never sees the wider agent token at all.
+        if let Some(ingest_token) = &config.ingest_token {
+            tool_env.insert("RHEMA_INGEST_TOKEN".to_owned(), ingest_token.clone());
+        }
         if let Some(tools_bin) = &config.tools_bin {
             let inherited = std::env::var("PATH").unwrap_or_default();
             tool_env.insert(
@@ -399,6 +405,7 @@ impl Daemon {
             phone,
             config.token.clone(),
             config.agent_token.clone(),
+            config.ingest_token.clone(),
         );
 
         Ok(Self {

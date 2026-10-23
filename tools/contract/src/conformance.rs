@@ -9,12 +9,12 @@ use crate::{ApiError, Auth, CallRequest, CallResponse, now_millis};
 /// The first failure is returned, named by the check that failed; `Ok`
 /// means the transport speaks the contract.
 ///
-/// The suite assumes a daemon configured with both tokens — a human
-/// one and an agent one — because the agent-token class is the
-/// contract's load-bearing guarantee. A daemon running an open surface
-/// (no tokens) cannot pass it, by design: the credential section of
-/// the spec (§5) makes the scoped agent token a precondition of the
-/// client tools.
+/// The suite assumes a daemon configured with the tokens — the human
+/// one, the agent one, and the ingest one — because the scoped
+/// credential classes are the contract's load-bearing guarantee. A
+/// daemon running an open surface (no tokens) cannot pass it, by
+/// design: the credential section of the spec (§5) makes the scoped
+/// agent token a precondition of the client tools.
 pub async fn conformance<F, Fut>(call: F) -> Result<(), String>
 where
     F: Fn(CallRequest) -> Fut,
@@ -332,6 +332,39 @@ where
                 "source": "ciwatch", "key": "ci:build/1", "payload": {"text": "ping"}
             })),
         ),
+    )
+    .await?;
+
+    // — The ingest credential: the event door, write-only —
+    ctx.expect_success(
+        "the ingest credential hands one event in",
+        req(
+            "POST",
+            "/v1/ingest",
+            Auth::Ingest,
+            Some(1),
+            Some(serde_json::json!({
+                "source": "ciwatch", "key": "ci:door/1", "payload": {"text": "ping"}
+            })),
+        ),
+    )
+    .await?;
+    ctx.expect(
+        "the ingest credential cannot read the watches",
+        req("GET", "/v1/watches", Auth::Ingest, Some(1), None),
+        403,
+    )
+    .await?;
+    ctx.expect(
+        "the ingest credential cannot answer a consent",
+        req(
+            "POST",
+            "/v1/consents/c-1",
+            Auth::Ingest,
+            Some(1),
+            Some(serde_json::json!({"grant": true})),
+        ),
+        403,
     )
     .await?;
 

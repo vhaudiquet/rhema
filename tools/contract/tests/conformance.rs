@@ -6,7 +6,11 @@ use rhema_tools_contract::{CallRequest, MockClaw, conformance};
 
 #[tokio::test]
 async fn the_suite_passes_against_the_mock_router() {
-    let mock = MockClaw::new(Some("human-token"), Some("agent-token"));
+    let mock = MockClaw::new(
+        Some("human-token"),
+        Some("agent-token"),
+        Some("ingest-token"),
+    );
     let result =
         conformance(|request: CallRequest| async { Ok(mock.call(request).await.unwrap()) }).await;
     assert_eq!(result, Ok(()), "the mock router speaks the contract");
@@ -16,7 +20,7 @@ async fn the_suite_passes_against_the_mock_router() {
 async fn an_open_mock_fails_the_suite() {
     // No tokens: the agent-token guarantees the suite exists to check
     // are gone. The suite must say so, not sail through.
-    let mock = MockClaw::new(None, None);
+    let mock = MockClaw::new(None, None, None);
     let result =
         conformance(|request: CallRequest| async { Ok(mock.call(request).await.unwrap()) }).await;
     assert!(result.is_err(), "an open surface cannot pass the suite");
