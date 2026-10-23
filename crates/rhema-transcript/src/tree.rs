@@ -8,7 +8,7 @@
 //! policy keeps: the lines change, the addresses never.
 
 /// A range of the log: the `n` messages from `id` on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Range {
     /// Index of the first message.
     pub id: usize,

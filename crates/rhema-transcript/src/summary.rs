@@ -129,7 +129,9 @@ pub fn line_for_range(messages: &[Message], range: Range) -> String {
 }
 
 /// The aggregate parts of a multi-message range, before addressing.
-fn summarize_range(messages: &[Message], range: Range) -> ((usize, usize), String) {
+/// Also the body of the extractive section digest
+/// ([`crate::compact::section_digest`]).
+pub(crate) fn summarize_range(messages: &[Message], range: Range) -> ((usize, usize), String) {
     let mut user_heads: Vec<String> = Vec::new();
     let mut assistant_heads: Vec<String> = Vec::new();
     let mut calls: Vec<(String, usize)> = Vec::new();
