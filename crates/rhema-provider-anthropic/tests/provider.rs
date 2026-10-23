@@ -460,6 +460,49 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
 }
 
 #[tokio::test]
+async fn a_rate_limit_names_its_reset_time_and_does_not_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "37")
+                .set_body_string(
+                    json!({
+                        "type": "error",
+                        "error": {
+                            "type": "rate_limit_error",
+                            "message": "usage limit reached"
+                        }
+                    })
+                    .to_string(),
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let mut sink = Collector(vec![]);
+    let err = provider(&server)
+        .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
+        .await
+        .expect_err("a rate limit is an error");
+
+    match &err {
+        ProviderError::Api(message) => {
+            assert!(message.contains("429"), "got: {message}");
+            assert!(message.contains("usage limit reached"), "got: {message}");
+            assert!(
+                message.contains("retry-after: 37"),
+                "the reset time rides the message: {message}"
+            );
+        }
+        other => panic!("expected Api error, got: {other:?}"),
+    }
+    // The wall does not retry above this seam either: the ladder cannot
+    // clear a quota window.
+    assert!(!err.is_retryable());
+}
+
+#[tokio::test]
 async fn a_transport_failure_maps_to_other() {
     // An unroutable address: nothing is listening, so the connect fails.
     let provider = AnthropicProvider::new("k").with_base_url("http://127.0.0.1:1");

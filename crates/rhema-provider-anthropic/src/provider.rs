@@ -141,7 +141,11 @@ impl AnthropicProvider {
                 .map_err(transport_error)?;
             if !is_success(response.status) {
                 let text = read_all(&mut response).await?;
-                return Err(api_error(response.status, &String::from_utf8_lossy(&text)));
+                return Err(api_error(
+                    response.status,
+                    &String::from_utf8_lossy(&text),
+                    &response.headers,
+                ));
             }
             let body = read_all(&mut response).await?;
             let page: WireModelsPage = serde_json::from_slice(&body)
@@ -368,13 +372,29 @@ async fn read_all(response: &mut HttpResponse) -> Result<Vec<u8>, ProviderError>
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the Anthropic
 /// error shape's `error.message` when the body has it — and the
 /// `(HTTP <status>)` group [`ProviderError::is_retryable`] reads back.
-fn api_error(status: u16, raw: &str) -> ProviderError {
+/// A `retry-after` response header rides the message: a rate limit does
+/// not retry (the ladder cannot clear a quota window), so the reset time
+/// is the one fact the caller needs to decide when to come back.
+fn api_error(status: u16, raw: &str, headers: &[(String, String)]) -> ProviderError {
+    let retry_after = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .map(|(_, value)| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
-    ProviderError::Api(format!(
-        "anthropic api error (HTTP {}): {}",
-        status,
-        parsed.message(raw)
-    ))
+    ProviderError::Api(match retry_after {
+        Some(seconds) => format!(
+            "anthropic api error (HTTP {}): {} (retry-after: {})",
+            status,
+            parsed.message(raw),
+            seconds
+        ),
+        None => format!(
+            "anthropic api error (HTTP {}): {}",
+            status,
+            parsed.message(raw)
+        ),
+    })
 }
 
 /// Maps a transport failure onto [`ProviderError`]: a timeout is its own
@@ -423,7 +443,11 @@ impl ModelProvider for AnthropicProvider {
 
         if !is_success(response.status) {
             let text = read_all(&mut response).await?;
-            return Err(api_error(response.status, &String::from_utf8_lossy(&text)));
+            return Err(api_error(
+                response.status,
+                &String::from_utf8_lossy(&text),
+                &response.headers,
+            ));
         }
 
         // No overall timeout: a long generation is legitimate, and the

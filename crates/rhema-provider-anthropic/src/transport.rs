@@ -71,6 +71,16 @@ impl Transport for ReqwestTransport {
         }
         let response = builder.send().await.map_err(transport_error)?;
         let status = response.status().as_u16();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.as_str().to_owned(),
+                    String::from_utf8_lossy(value.as_bytes()).into_owned(),
+                )
+            })
+            .collect();
         // The chunk stream stays `Send` here: reqwest's native stream
         // items are plain bytes. (On wasm reqwest's stream is JS-backed
         // and `!Send` — which is exactly why this transport is a
@@ -80,6 +90,7 @@ impl Transport for ReqwestTransport {
             .map(|item| item.map(|bytes| bytes.to_vec()).map_err(transport_error));
         Ok(HttpResponse {
             status,
+            headers,
             body: Box::new(stream),
         })
     }
