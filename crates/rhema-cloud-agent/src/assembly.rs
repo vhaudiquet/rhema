@@ -167,6 +167,9 @@ impl AgentAssembly {
             // local env layer has nothing to ride on.
             shell_env: std::collections::BTreeMap::new(),
             transcript: self.transcript,
+            // No summary worker yet: the cloud harness has one model
+            // handle, and a cheap second one is a later decision.
+            summary_worker: None,
         };
         (config, shell)
     }
