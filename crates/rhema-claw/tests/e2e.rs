@@ -55,6 +55,8 @@ fn config(server: &MockServer, dir: &tempfile::TempDir) -> ClawConfig {
         model: Some("test-model".to_owned()),
         listen: None,
         token: None,
+        agent_token: None,
+        tools_bin: None,
         transcript: None,
         watches: vec![Watch {
             forge: ForgeKind::GitHub,

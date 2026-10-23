@@ -228,12 +228,34 @@ impl Daemon {
         // The forge handler resolves its watches through the table at
         // dispatch time, so a watch added mid-run is answerable without a
         // restart.
+        // The client tools' connection, handed to the agent's shell as
+        // environment: the URL the surface answers on, the scoped
+        // agent token (the middleware keeps it to the contract's data
+        // routes, so the model holding it cannot reach consents or
+        // ingest), and the tools' bin dir on PATH. No token, no
+        // environment — the tools are simply absent.
+        let mut tool_env = std::collections::BTreeMap::new();
+        if let Some(agent_token) = &config.agent_token {
+            tool_env.insert(
+                "RHEMA_URL".to_owned(),
+                format!("http://{}", config.listen_addr()),
+            );
+            tool_env.insert("RHEMA_TOKEN".to_owned(), agent_token.clone());
+        }
+        if let Some(tools_bin) = &config.tools_bin {
+            let inherited = std::env::var("PATH").unwrap_or_default();
+            tool_env.insert(
+                "PATH".to_owned(),
+                format!("{}:{inherited}", tools_bin.display()),
+            );
+        }
         let forge_handler = ClawHandler::new(
             backends.clone(),
             workspace_root,
             watches.clone(),
             accounts.clone(),
             config.transcript_enabled(),
+            tool_env.clone(),
         );
         // Three drivers over one store admit from the same table, so
         // each owns its slice of the key space: a forge pass must never
@@ -364,6 +386,7 @@ impl Daemon {
             store,
             watches,
             notifications,
+            tasks,
             bootstrap,
             hub,
             backends.clone(),
@@ -375,6 +398,7 @@ impl Daemon {
             attachments,
             phone,
             config.token.clone(),
+            config.agent_token.clone(),
         );
 
         Ok(Self {

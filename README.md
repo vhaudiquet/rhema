@@ -42,6 +42,15 @@ See <a href="./crates/rhema-code/README.md">Rhema Code README.md</a> for more.
 Still Work-In-Progress.
 See [Rhema Claw README.md](./crates/rhema-claw/README.md) for more.
 
+### The client tools (`tools/`)
+
+A separate Cargo workspace holding what runs on the *user's machine*
+and talks to a claw-shaped daemon: the shared contract crate
+(`rhema-tools-contract` — the scoped agent-token allowlist, the
+version header, and the conformance suite) and the tools themselves
+(`notify` today). The arrow runs tool → daemon only, over the scoped
+agent token, never the reverse; `specs/rhema-tools.md` is the design.
+
 ### All crates
 
 | Crate | What it does |
@@ -68,6 +77,9 @@ See [Rhema Claw README.md](./crates/rhema-claw/README.md) for more.
 | `rhema-vercel-agent` | The coding agent on Vercel: an axum server a Vercel container runs natively, speaking the Cloudflare DO's client protocol byte for byte, with `bash` in a persistent named Vercel Sandbox (REST, polled) and sessions checkpointed into Postgres through the same revision-guarded Store contract |
 | `rhema-cloudflare-code` | The coding agent as a Cloudflare Durable Object: WebSocket chat with streaming events, `bash` in a Cloudflare Sandbox container, revision-guarded session checkpoints in the DO's SQLite storage that survive DO and container eviction, approvals as a per-session policy plus a WebSocket round-trip with deny-on-timeout. One provider (Anthropic) over host fetch; the workspace persists across idle sleeps, a full container eviction resumes through the engine's revive machinery (`deploy/cloudflare/` has the walk-through) |
 | `rhema-code` | The `rhema` binary: the full-screen terminal UI, `rhema run` for the pipeable one-shot, `rhema acp` for editors, `rhema system edit/show/restore` for the prompt the agent works from |
+| `rhema-tools-contract` | The client tools' contract (`tools/` workspace): the scoped agent-token allowlist, the version header, the one error shape, and the conformance suite any client-tools server runs against its own router — the same binary test answers for the mock and the daemon |
+| `rhema-tools-common` | The client tools' shared plumbing: connection config from `RHEMA_URL`/`RHEMA_TOKEN`, the one HTTP call carrying the bearer and the contract header, and the answer-or-error-shape print with the exit code — no client reimplements the three moves, so all clients fail identically |
+| `notify` | The one built-in client tool: desktop notifications through `notify-rust` (Linux/macOS/Windows), on the shared plumbing, so it speaks the same bearer + header envelope the suite verifies |
 | `rhema-claw` | The resident agent daemon (work in progress): one SQLite store of sessions, forge threads answered with coding-agent turns, calendar-feed reminders, a `coding_agent` tool that runs coding jobs off the chat, chat over HTTP; the claw's sessions run the bounded request view (`rhema-transcript`) by default, so a stashed session can grow forever without growing every step's cost |
 
 ## rhema-core

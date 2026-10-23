@@ -66,6 +66,10 @@ pub struct ClawHandler {
     /// reply client must authenticate as the identity the poll did, or
     /// the forge refuses the very post the poll was reading.
     accounts: Arc<dyn IdentityStore>,
+    /// The client tools' environment, layered onto every dispatch's
+    /// agent shell: the daemon URL, the scoped agent token, the tools'
+    /// bin dir on PATH. Empty when the config issues no agent token.
+    tool_env: std::collections::BTreeMap<String, String>,
     clients: Mutex<HashMap<String, Arc<dyn Forge>>>,
 }
 
@@ -78,6 +82,7 @@ impl ClawHandler {
         watches: Arc<ClawStore>,
         accounts: Arc<dyn IdentityStore>,
         transcript: bool,
+        tool_env: std::collections::BTreeMap<String, String>,
     ) -> Self {
         Self {
             backends,
@@ -85,6 +90,7 @@ impl ClawHandler {
             workspace_root: workspace_root.into(),
             watches,
             accounts,
+            tool_env,
             clients: Mutex::new(HashMap::new()),
         }
     }
@@ -239,6 +245,7 @@ impl ClawHandler {
         config.transcript = self
             .transcript
             .then(rhema_transcript::TranscriptSettings::default);
+        config.shell_env = self.tool_env.clone();
         config
     }
 
@@ -779,6 +786,7 @@ mod tests {
             watches,
             Arc::new(rhema_identity::VolatileIdentityStore::new()),
             true,
+            std::collections::BTreeMap::new(),
         );
 
         // A watch added to the table AFTER the handler was built resolves:
@@ -820,8 +828,16 @@ mod tests {
             watches.clone(),
             accounts.clone(),
             true,
+            std::collections::BTreeMap::new(),
         );
-        let off = ClawHandler::new(registry, "/tmp/w", watches, accounts, false);
+        let off = ClawHandler::new(
+            registry,
+            "/tmp/w",
+            watches,
+            accounts,
+            false,
+            std::collections::BTreeMap::new(),
+        );
         assert!(
             on.agent_config("m", Path::new("/tmp/w"))
                 .transcript

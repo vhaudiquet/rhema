@@ -56,6 +56,12 @@ pub enum ConfigError {
     /// path or workspace root cannot be located.
     #[error("cannot locate the state directory: neither XDG_STATE_HOME nor HOME is set")]
     NoStateHome,
+    /// The agent token is the human token: boot refuses, because the
+    /// agent token's safety is that it is scoped, and this copy is not.
+    #[error(
+        "agent_token is the same value as token; the agent token must be its own secret, scoped to the tool routes"
+    )]
+    SameAgentToken,
     /// One watch is unusable; the daemon refuses to start rather than
     /// poll a half-configured watch set.
     #[error("watch #{index} ({forge} {repo}): {reason}")]
@@ -288,6 +294,16 @@ pub struct ClawConfig {
     /// open on its interface; set it when the port is reachable from
     /// anywhere but loopback. `/healthz` stays open either way.
     pub token: Option<String>,
+    /// The scoped agent token the client tools hold: it answers only
+    /// the data routes the tool contract allowlists — watches,
+    /// notifications, tasks — never consents, sessions, or ingest, so
+    /// handing it to the model's shell is safe (rhema-tools spec §5).
+    /// Unset disables the client tools; the daemon then provisions no
+    /// tool environment.
+    pub agent_token: Option<String>,
+    /// A directory of client-tool binaries (the rhema-tools project's)
+    /// layered onto the agent's shell PATH. Unset leaves PATH alone.
+    pub tools_bin: Option<PathBuf>,
     /// What to watch — the optional seed for the persistent watch table.
     /// Imported once, when the table is still empty; after that the
     /// table rules, and watches are managed in chat or over HTTP.
@@ -319,6 +335,8 @@ impl Default for ClawConfig {
             model: None,
             listen: None,
             token: None,
+            agent_token: None,
+            tools_bin: None,
             transcript: None,
             watches: Vec::new(),
             calendars: Vec::new(),
@@ -445,6 +463,14 @@ impl ClawConfig {
     /// watches from there; a daemon that starts with nothing to guard
     /// still serves chat.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        // The agent token's safety is that it is scoped; making it the
+        // human token silently unscopes everything the model's shell
+        // holds. Boot refuses the configuration instead.
+        if let (Some(token), Some(agent_token)) = (&self.token, &self.agent_token) {
+            if !token.is_empty() && token == agent_token {
+                return Err(ConfigError::SameAgentToken);
+            }
+        }
         for (index, watch) in self.watches.iter().enumerate() {
             let fail = |reason: String| ConfigError::Watch {
                 index,
@@ -583,6 +609,31 @@ impl ClawConfig {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_agent_token_must_differ_from_the_human_token() {
+        let config = ClawConfig {
+            token: Some("same".to_owned()),
+            agent_token: Some("same".to_owned()),
+            ..ClawConfig::default()
+        };
+        assert!(
+            matches!(config.validate(), Err(ConfigError::SameAgentToken)),
+            "one token playing both roles is refused"
+        );
+        let config = ClawConfig {
+            agent_token: Some("other".to_owned()),
+            ..config
+        };
+        assert!(config.validate().is_ok(), "two tokens pass");
+        // An agent token with no human token at all is the tools-only
+        // surface: legal, and scoped by construction.
+        let tools_only = ClawConfig {
+            agent_token: Some("agent".to_owned()),
+            ..ClawConfig::default()
+        };
+        assert!(tools_only.validate().is_ok());
+    }
+
     #[test]
     fn the_transcript_is_on_unless_the_config_turns_it_off() {
         assert!(ClawConfig::default().transcript_enabled());

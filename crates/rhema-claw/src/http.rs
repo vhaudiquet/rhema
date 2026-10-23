@@ -38,6 +38,9 @@ use rhema_autonomous_agent::Driver;
 use rhema_rsd::{
     DispatchError, Dispatcher, IngestResult, KeyRecord, KeyState, ResourceKey, SqliteStore, Store,
 };
+use rhema_tools_contract::Auth;
+use rhema_tools_contract::CONTRACT_HEADER;
+use rhema_tools_contract::CONTRACT_VERSION;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
@@ -47,6 +50,7 @@ use crate::backends::BackendRegistry;
 use crate::bootstrap::Bootstrap;
 use crate::hub::{EventHub, TurnEvent};
 use crate::notifications::NotificationStore;
+use crate::task_store::TaskStore;
 use crate::watch_store::{ClawStore, validate_watch};
 
 /// How many `run_once` passes one POST may spend draining.
@@ -64,6 +68,9 @@ pub struct ClawState {
     store: Arc<SqliteStore>,
     watches: Arc<ClawStore>,
     notifications: Arc<NotificationStore>,
+    /// The scheduled-task table the `/v1/tasks` routes serve — the same
+    /// rows the resident scheduler fires.
+    tasks: Arc<TaskStore>,
     bootstrap: Arc<Bootstrap>,
     hub: Arc<EventHub>,
     backends: Arc<BackendRegistry>,
@@ -84,6 +91,10 @@ pub struct ClawState {
     /// reported state the ingest door feeds.
     phone: Arc<crate::phone::PhoneStore>,
     token: Option<String>,
+    /// The scoped agent token the client tools hold: a second bearer
+    /// answering only the contract's data routes (see
+    /// [`require_auth`]).
+    agent_token: Option<String>,
     /// The generic sources `/v1/ingest` has registered on the
     /// dispatcher, so a source name registers exactly once however many
     /// events race in through it.
@@ -92,17 +103,19 @@ pub struct ClawState {
 
 impl ClawState {
     /// The state over the interactive dispatcher and its driver, the
-    /// shared dispatch store, the watch table, the notification table,
-    /// the bootstrap store, the event hub, the account store, the
-    /// consent table, the attachment store, and the configured bearer
-    /// `token`.
-    #[allow(clippy::too_many_arguments)] // fifteen parts, each load-bearing
+    /// shared dispatch store, the watch table, the notification and
+    /// task tables, the bootstrap store, the event hub, the account
+    /// store, the consent table, the attachment store, and the
+    /// configured bearers — the human `token` and the scoped
+    /// `agent_token`.
+    #[allow(clippy::too_many_arguments)] // seventeen parts, each load-bearing
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
         store: Arc<SqliteStore>,
         watches: Arc<ClawStore>,
         notifications: Arc<NotificationStore>,
+        tasks: Arc<TaskStore>,
         bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
         backends: Arc<BackendRegistry>,
@@ -114,6 +127,7 @@ impl ClawState {
         attachments: Arc<crate::attachments::AttachmentStore>,
         phone: Arc<crate::phone::PhoneStore>,
         token: Option<String>,
+        agent_token: Option<String>,
     ) -> Self {
         Self {
             dispatcher,
@@ -121,6 +135,7 @@ impl ClawState {
             store,
             watches,
             notifications,
+            tasks,
             bootstrap,
             hub,
             backends,
@@ -132,6 +147,7 @@ impl ClawState {
             attachments,
             phone,
             token,
+            agent_token,
             generic_sources: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
@@ -224,7 +240,12 @@ pub fn router(state: ClawState) -> Router {
         .route("/phones", get(phones_list))
         .route("/phones/{device}", delete(phones_forget))
         .route("/ingest", post(ingest))
-        .route("/notifications", get(notifications_list))
+        .route(
+            "/notifications",
+            get(notifications_list).post(notifications_push),
+        )
+        .route("/tasks", get(tasks_list).post(tasks_add))
+        .route("/tasks/{id}", delete(tasks_remove))
         .route("/notifications/{id}/ack", post(notifications_ack))
         .route("/agent", get(agent_get).put(agent_put))
         .route(
@@ -244,6 +265,9 @@ pub fn router(state: ClawState) -> Router {
         .route("/chat/completions", post(crate::openai::chat_completions))
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
+        // The one error shape everywhere, unknown routes included: a
+        // client's typo answers JSON it can read, not axum's bare text.
+        .fallback(not_found)
         .route(
             "/",
             get(|| async {
@@ -264,6 +288,15 @@ pub fn router(state: ClawState) -> Router {
         .with_state(state)
 }
 
+/// The unknown-route answer: the contract's error shape.
+async fn not_found() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({"error": "no such route"})),
+    )
+        .into_response()
+}
+
 /// Byte-length-safe constant-time equality over the two strings' UTF-8
 /// bytes: every compared byte is XOR-folded into one difference word
 /// along with the length difference, so the answer takes the same work
@@ -279,32 +312,64 @@ fn tokens_match(presented: &str, expected: &str) -> bool {
     diff == 0
 }
 
-/// The bearer check: with no configured token the surface is open; with
-/// one, `Authorization: Bearer <token>` is required on every `/v1`
-/// route. `/healthz` never reaches this.
+/// The bearer check, in two classes. With neither token configured the
+/// surface is open, as before. The human token answers every `/v1`
+/// route. The agent token — what the client tools hold — answers only
+/// the data routes the tool contract allowlists, and only with the
+/// contract header at the matching version: a tool cannot reach
+/// consents, sessions, or ingest, so a leaked agent token cannot
+/// answer the agent's own `ask_secret` (rhema-tools spec §5). Any
+/// other bearer is a 401. `/healthz` never reaches this.
 async fn require_auth(State(state): State<ClawState>, request: Request, next: Next) -> Response {
-    let authorized = match &state.token {
-        None => true,
-        Some(expected) => request
-            .headers()
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| {
-                value
-                    .strip_prefix("Bearer ")
-                    .is_some_and(|presented| tokens_match(presented, expected))
-            }),
+    let presented = request
+        .headers()
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let class = match (&state.token, &state.agent_token, presented) {
+        // Nothing configured: the open surface, bearers ignored.
+        (None, None, _) => Auth::Human,
+        (Some(expected), _, Some(presented)) if tokens_match(presented, expected) => Auth::Human,
+        (_, Some(expected), Some(presented)) if tokens_match(presented, expected) => Auth::Agent,
+        // A token configured and no bearer, or a bearer matching
+        // neither.
+        (_, _, _) => Auth::Invalid,
     };
-    if authorized {
-        next.run(request).await
-    } else {
-        // A body, however small: a silent 401 reads as a network fault
-        // to every client debugging its token.
-        (
+    match class {
+        Auth::Human => next.run(request).await,
+        // Both mean "no credential": Auth::None never leaves the
+        // classifier, but the match stays total.
+        Auth::None | Auth::Invalid => (
             StatusCode::UNAUTHORIZED,
             Json(json!({"error": "missing or wrong bearer token"})),
         )
-            .into_response()
+            .into_response(),
+        Auth::Agent => {
+            let version = request
+                .headers()
+                .get(CONTRACT_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value == CONTRACT_VERSION.to_string());
+            if !version {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({"error": format!(
+                        "agent calls carry the {CONTRACT_HEADER} header at version {CONTRACT_VERSION}"
+                    )})),
+                )
+                    .into_response();
+            }
+            if rhema_tools_contract::agent_allowed(request.method().as_str(), request.uri().path())
+            {
+                next.run(request).await
+            } else {
+                (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": "this route is not the agent token's"})),
+                )
+                    .into_response()
+            }
+        }
     }
 }
 
@@ -1229,6 +1294,161 @@ async fn notifications_list(
         .pending(device, since)
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
     Ok(Json(json!({ "notifications": notifications })))
+}
+
+/// The body `POST /v1/notifications` takes: the client tools' push.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotificationPushBody {
+    title: String,
+    body: String,
+    device: Option<String>,
+}
+
+/// The client tools' push: the same queue the notification poll
+/// serves, entered over the surface — one row, delivered at the
+/// device's next poll-and-ack (rhema-tools spec §6). The route the
+/// `POST /v1/notifications` client speaks.
+async fn notifications_push(
+    State(state): State<ClawState>,
+    Json(body): Json<NotificationPushBody>,
+) -> Response {
+    if body.title.trim().is_empty() || body.body.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "title and body must not be empty"})),
+        )
+            .into_response();
+    }
+    let device = body
+        .device
+        .as_deref()
+        .map(str::trim)
+        .filter(|device| !device.is_empty())
+        .unwrap_or(crate::notifications::DEFAULT_DEVICE);
+    match state
+        .notifications
+        .push(device, body.title.trim(), body.body.trim())
+    {
+        Ok(record) => (StatusCode::OK, Json(record)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// The body `POST /v1/tasks` takes: the client tools' schedule. `kind`
+/// picks the shape, exactly the two the resident scheduler fires.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TaskAddBody {
+    kind: String,
+    prompt: String,
+    at_millis: Option<i64>,
+    interval_millis: Option<i64>,
+    deliver_to: Option<String>,
+}
+
+/// The scheduled-task table, oldest first — the same rows the
+/// resident's tick fires.
+async fn tasks_list(State(state): State<ClawState>) -> Result<Json<Value>, (StatusCode, String)> {
+    let tasks = state
+        .tasks
+        .list()
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(json!({ "tasks": tasks })))
+}
+
+/// The client tools' schedule: one task, fired by the resident's tick
+/// when due (rhema-tools spec §6). The route the `POST /v1/tasks`
+/// client speaks.
+async fn tasks_add(State(state): State<ClawState>, Json(body): Json<TaskAddBody>) -> Response {
+    if body.prompt.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "prompt must not be empty"})),
+        )
+            .into_response();
+    }
+    let now = now_millis();
+    let scheduled = match body.kind.as_str() {
+        "at" => {
+            let Some(at_millis) = body.at_millis else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "a one-shot task needs at_millis"})),
+                )
+                    .into_response();
+            };
+            state.tasks.schedule_at(
+                body.prompt.trim(),
+                at_millis,
+                now,
+                body.deliver_to.as_deref(),
+            )
+        }
+        "every" => {
+            let Some(interval_millis) = body.interval_millis else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "a recurring task needs interval_millis"})),
+                )
+                    .into_response();
+            };
+            if interval_millis <= 0 {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "interval_millis must be positive"})),
+                )
+                    .into_response();
+            }
+            state.tasks.schedule_every(
+                body.prompt.trim(),
+                interval_millis,
+                now,
+                body.deliver_to.as_deref(),
+            )
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "kind must be at or every"})),
+            )
+                .into_response();
+        }
+    };
+    match scheduled {
+        Ok(record) => (StatusCode::OK, Json(record)).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
+/// Milliseconds since the Unix epoch — the task table's clock.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Cancels one task. Like the watch removal, the answer is
+/// `{"removed": false}` for an id already gone — a retried cancel
+/// converges instead of 404ing.
+async fn tasks_remove(State(state): State<ClawState>, Path(id): Path<i64>) -> Response {
+    match state.tasks.remove(id) {
+        Ok(removed) => (StatusCode::OK, Json(json!({"removed": removed}))).into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": err.to_string()})),
+        )
+            .into_response(),
+    }
 }
 
 /// Marks one notification delivered. Idempotent: `false` when the id is

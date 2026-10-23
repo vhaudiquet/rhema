@@ -66,6 +66,8 @@ provider: anthropic
 model: claude-sonnet-4-5
 listen: 127.0.0.1:7799
 token: change-me                 # optional; when set, /v1/* requires it
+agent_token: change-me-too       # the client tools' scoped bearer (rhema-tools)
+tools_bin: ~/.local/share/rhema-tools/bin  # put the client tools on PATH
 poll_interval_secs: 120
 max_turn_steps: 2048             # tool rounds one chat turn may run
 watches:                         # a seed: imported while the table is empty
@@ -100,6 +102,20 @@ bind a loopback address. Resident sessions run the coding agent with
 its approval seam auto-approved: tool calls, the shell included,
 execute without a prompt. The daemon says so at startup, and the
 bearer-gated surface plus the watch list are the trust boundary.
+
+`agent_token` provisions the client tools: a second bearer the daemon
+hands the agent's shell as `RHEMA_TOKEN` (with `RHEMA_URL`), valid
+only for the data routes the tool contract allowlists — watches,
+notifications, tasks — and only with the contract header at the
+matching version. It cannot reach consents, sessions, ingest, or the
+phones, so a model holding the token cannot prompt-inject its way past
+the scoping (see `specs/rhema-tools.md`; the daemon runs the
+contract's conformance suite against its own router at test time). It
+must differ from `token` — the daemon refuses to start when the two
+are the same. `tools_bin` layers a directory onto the shell PATH so
+the provisioned tools resolve. With no `agent_token`, the daemon
+provisions no tool environment: the agent's shell is exactly as it
+was.
 
 The native surface:
 

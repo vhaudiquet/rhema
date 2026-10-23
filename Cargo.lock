@@ -3336,6 +3336,7 @@ dependencies = [
  "rhema-provider-openai-compatible",
  "rhema-provider-openrouter",
  "rhema-rsd",
+ "rhema-tools-contract",
  "rhema-transcript",
  "rusqlite",
  "serde",
@@ -3645,6 +3646,15 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-tools-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
  "tokio",
 ]
 

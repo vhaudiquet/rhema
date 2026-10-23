@@ -61,6 +61,8 @@ fn config(dir: &tempfile::TempDir, token: Option<&str>) -> ClawConfig {
         model: Some("test-model".to_owned()),
         listen: None,
         token: token.map(str::to_owned),
+        agent_token: None,
+        tools_bin: None,
         transcript: None,
         watches: Vec::new(),
         calendars: Vec::new(),
@@ -1186,6 +1188,63 @@ async fn notifications_round_trip_over_http() {
 }
 
 /// A registry whose only backend is the scripted mock.
+/// The tool contract's conformance suite against the daemon's real
+/// router, over real HTTP — the same suite the contract crate runs
+/// against its mock router. Same results is the definition of the
+/// daemon implementing the contract (rhema-tools spec §7): the scoped
+/// agent token reads and writes the data domains under the contract
+/// header, and consents, sessions, ingest, and the phones stay
+/// human-only.
+#[tokio::test]
+async fn the_surface_speaks_the_tool_contract() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = config(&dir, Some("human-token"));
+    config.agent_token = Some("agent-token".to_owned());
+    let daemon = Daemon::build(
+        &config,
+        mock_registry(Arc::new(MockProvider::new(Vec::new()))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+    let result = rhema_tools_contract::conformance(|request: rhema_tools_contract::CallRequest| {
+        let client = client.clone();
+        let base = base.clone();
+        async move {
+            let method = reqwest::Method::from_bytes(request.method.as_bytes())
+                .map_err(|e| e.to_string())?;
+            let builder = client.request(method, format!("{base}{}", request.path));
+            let builder = match request.auth {
+                rhema_tools_contract::Auth::None => builder,
+                rhema_tools_contract::Auth::Human => {
+                    builder.header(reqwest::header::AUTHORIZATION, "Bearer human-token")
+                }
+                rhema_tools_contract::Auth::Agent => {
+                    builder.header(reqwest::header::AUTHORIZATION, "Bearer agent-token")
+                }
+                rhema_tools_contract::Auth::Invalid => {
+                    builder.header(reqwest::header::AUTHORIZATION, "Bearer a-stranger")
+                }
+            };
+            let builder = match request.contract {
+                Some(version) => builder.header("x-rhema-contract", version.to_string()),
+                None => builder,
+            };
+            let builder = match request.body {
+                Some(body) => builder.json(&body),
+                None => builder,
+            };
+            let response = builder.send().await.map_err(|e| e.to_string())?;
+            let status = response.status().as_u16();
+            let body = response.json().await.unwrap_or(serde_json::json!({}));
+            Ok(rhema_tools_contract::CallResponse { status, body })
+        }
+    })
+    .await;
+    assert_eq!(result, Ok(()), "the daemon speaks the tool contract");
+}
+
 fn mock_registry(provider: Arc<dyn rhema_core::ModelProvider>) -> Arc<rhema_claw::BackendRegistry> {
     Arc::new(
         rhema_claw::BackendRegistry::new(
