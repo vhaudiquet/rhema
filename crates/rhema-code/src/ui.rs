@@ -960,6 +960,48 @@ fn settings_page(
                 width,
             ));
             lines.extend(settings_field("last turn", last_turn, theme, width));
+            // The compaction benchmark, when the transcript is on: the
+            // cache rate is the providers' own accounting, the rest is
+            // what the stepped view did this session.
+            if let Some(stats) = settings.transcript {
+                let cache = match stats.cache_hit_rate() {
+                    Some(rate) => format!(
+                        "{:.0}% · {} of {} tokens",
+                        rate * 100.0,
+                        format_tokens(Some(stats.cached_input_tokens)),
+                        format_tokens(Some(stats.input_tokens)),
+                    ),
+                    None => "no usage yet".to_owned(),
+                };
+                lines.extend(settings_field(
+                    "cache",
+                    Span::raw(cache).fg(theme.text),
+                    theme,
+                    width,
+                ));
+                let worker = if stats.summarizer_calls > 0 {
+                    format!(
+                        "worker {} calls, {} failed",
+                        stats.summarizer_calls, stats.summarizer_failures
+                    )
+                } else {
+                    "extractive".to_owned()
+                };
+                let compaction = format!(
+                    "{}/{} requests viewed, {} flushes, block {}, {}",
+                    stats.viewed,
+                    stats.requests,
+                    stats.flushes,
+                    format_tokens(Some(stats.block_bytes as u64)),
+                    worker,
+                );
+                lines.extend(settings_field(
+                    "compaction",
+                    Span::raw(compaction).fg(theme.text),
+                    theme,
+                    width,
+                ));
+            }
             (lines, footer("esc back"), Vec::new())
         }
         SettingsSection::About => {

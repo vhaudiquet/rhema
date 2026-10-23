@@ -917,6 +917,9 @@ pub struct SettingsScreen {
     pub allowance: Option<(&'static str, Option<rhema_provider::Allowance>)>,
     /// The last finished turn's token accounting.
     pub last_turn: Option<rhema_core::Usage>,
+    /// The transcript's compaction benchmark, when the agent runs with
+    /// the transcript on.
+    pub transcript: Option<rhema_transcript::TranscriptStats>,
     /// The session's accumulated cost in USD.
     pub session_cost: f64,
     // The About page's snapshot.
@@ -948,6 +951,7 @@ impl SettingsScreen {
             skills_workspace_dir: String::new(),
             allowance: None,
             last_turn: None,
+            transcript: None,
             session_cost: 0.0,
             config_path: None,
             workspace: String::new(),

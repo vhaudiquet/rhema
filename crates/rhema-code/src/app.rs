@@ -669,6 +669,10 @@ pub struct App {
     pub transcript: Transcript,
     /// Token accounting of the last finished turn.
     pub usage: Option<Usage>,
+    /// The compaction benchmark from the last turn that ran with an
+    /// agent present: request counts, flushes, and the prompt-cache
+    /// hit rate the providers reported.
+    pub transcript_stats: Option<rhema_transcript::TranscriptStats>,
     /// Accumulated cost of the session in USD, summed per turn from the
     /// current model's pricing; turns on unpriced models add nothing.
     pub session_cost: f64,
@@ -938,6 +942,7 @@ impl App {
             turn: TurnState::idle(),
             transcript,
             usage: None,
+            transcript_stats: None,
             session_cost: 0.0,
             error: None,
             confirm_quit: false,
@@ -1133,6 +1138,11 @@ impl App {
         settings.section = section;
         settings.allowance = self.subscription.clone();
         settings.last_turn = self.usage;
+        settings.transcript = self
+            .agent
+            .as_ref()
+            .and_then(CodingAgent::transcript_stats)
+            .or(self.transcript_stats);
         settings.session_cost = self.session_cost;
         self.screen = Screen::Settings(Box::new(settings));
     }
@@ -2552,6 +2562,7 @@ impl App {
     /// The turn task was cancelled from the keyboard: take the agent
     /// back, drop the turn's state, and mark the cutoff in the transcript.
     fn cancel_finished(&mut self, agent: Box<CodingAgent>) {
+        self.transcript_stats = agent.transcript_stats();
         self.agent = Some(*agent);
         self.turn.finished();
         self.transcript.push_notice("turn cancelled");
@@ -2562,6 +2573,7 @@ impl App {
     /// an approval is unanswered, so a leftover modal means the answer
     /// channel is gone).
     fn end_turn(&mut self, agent: Box<CodingAgent>, result: Result<ModelOutput, String>) {
+        self.transcript_stats = agent.transcript_stats();
         self.agent = Some(*agent);
         self.turn.finished();
         match result {
