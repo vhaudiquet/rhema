@@ -231,7 +231,7 @@ its still-present call.
 
 `CodingAgentConfig::transcript: Option<TranscriptSettings>` — set by
 default (`new` carries `Some(default)`); `None` is the off switch.
-`TranscriptSettings` carries `max_view_bytes` (default 128 000). With it
+`TranscriptSettings` carries `max_view_bytes` (default 256 000). With it
 set, `CodingAgent::new`:
 
 1. wraps the provider: `attach(ExpandPastes(inner), settings)`;

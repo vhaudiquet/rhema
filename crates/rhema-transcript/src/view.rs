@@ -53,7 +53,11 @@ pub struct TranscriptSettings {
 impl Default for TranscriptSettings {
     fn default() -> Self {
         Self {
-            max_view_bytes: 128_000,
+            // Tool-heavy sessions (build logs, file dumps in results)
+            // run oversized tails constantly; 256 KB keeps the
+            // allowance — and with it the stretch between flushes —
+            // worth the name at that workload.
+            max_view_bytes: 256_000,
             step_bytes: 24_000,
             max_section_messages: 128,
             max_block_bytes: 32_000,
