@@ -8,7 +8,11 @@
 //! machinery in one crate, one adapter per backend beside it; the
 //! backends (`local`, `client`, `server`) land feature-gated in their
 //! own phases, and the scripted mock rides the `mock` feature so tests
-//! run the same seam against a fake. The wire protocol — the sandbox
+//! run the same seam against a fake. With the `local` feature the family
+//! gains its direct backend: [`LocalSandbox`] runs the commands as
+//! processes rooted at one host directory mapped by [`FsRoot`], and
+//! [`seed_workspace`] is the shared half of the seeding the cloud
+//! frontends each repeat. The wire protocol — the sandbox
 //! shim's JSON surface, promoted — is pinned in [`protocol`]: the
 //! shapes, the routes, and the auth header every backend speaks. In the
 //! cloud deployment the seam
@@ -29,17 +33,27 @@
 #![deny(missing_docs)]
 
 pub mod adapter;
+#[cfg(feature = "local")]
+pub mod fsroot;
 #[cfg(feature = "client")]
 pub mod http;
+#[cfg(feature = "local")]
+pub mod local;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod protocol;
+pub mod seed;
 
 pub use adapter::ShellSandbox;
+#[cfg(feature = "local")]
+pub use fsroot::FsRoot;
+#[cfg(feature = "local")]
+pub use local::LocalSandbox;
 pub use protocol::{
     Ack, EXEC, ExecCall, ExecReply, FileReply, GET, PUT, PutFile, SEED, SeedRequest, TOKEN_HEADER,
     stream_reply,
 };
+pub use seed::seed_workspace;
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

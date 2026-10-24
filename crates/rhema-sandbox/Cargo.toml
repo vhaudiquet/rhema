@@ -9,9 +9,15 @@ repository.workspace = true
 authors.workspace = true
 
 [features]
-default = ["mock"]
+default = ["local", "mock"]
 # The scripted sandbox for offline tests; mirrors rhema-core's feature.
 mock = ["dep:tokio"]
+# The local backend: commands run as processes rooted at one host
+# directory (`fsroot.rs`, `local.rs`). tokio rides with the features
+# this code adds — process exec, buffered line reads, the cancel tick's
+# timer, and plain fs for the file routes; `sync`, `macros`, and `rt`
+# come with the dependency itself, which the mock's parked exec needs.
+local = ["dep:tokio", "tokio/process", "tokio/io-util", "tokio/time", "tokio/fs"]
 # The protocol over plain HTTPS (feature `client`), reqwest behind the
 # native transport, rustls for TLS so no system store is linked. Wasm
 # builds leave the feature off and bring their own `HttpTransport` over
@@ -26,7 +32,8 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-# The scripted sandbox's parked exec (feature `mock`)
+# The scripted sandbox's parked exec (feature `mock`) and the local
+# backend's processes (feature `local`)
 tokio = { workspace = true, optional = true, features = ["sync"] }
 # File contents cross the put/get routes base64
 base64 = "0.22"
@@ -42,3 +49,5 @@ reqwest = { version = "0.12", default-features = false, features = [
 # HTTP/1.1 replies, so the test pins the wire, not a framework's
 # reading of it
 tokio = { workspace = true, features = ["io-util", "net"] }
+# The fsroot and local tests run against throwaway host directories
+tempfile = "3"
