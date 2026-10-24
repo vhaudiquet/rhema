@@ -41,7 +41,8 @@ pub fn wire_at(
         .tools
         .clone()
         .unwrap_or_else(|| Arc::new(ShellTools::new(config.workspace.clone())));
-    let tools = SubagentTools::new(provider, defs, shell.clone(), config.model.clone());
+    let tools = SubagentTools::new(provider, defs, shell.clone(), config.model.clone())
+        .with_thinking(config.thinking);
     config.tools = Some(shell);
     config.extra_resolver = Some(Arc::new(tools));
 }

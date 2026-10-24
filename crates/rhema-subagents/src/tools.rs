@@ -5,10 +5,12 @@
 //! [`SubagentDef`]'s body as system prompt, runs a bounded step loop on a
 //! fresh [`Session`](rhema_core::Session) whose first message is the
 //! `prompt`, and returns the final assistant text as the result. The
-//! inner turn inherits three things from the parent turn and nothing
+//! inner turn inherits four things from the parent turn and nothing
 //! else: the provider, the approval hook (read off the parent's
-//! [`ShellTools`] per call, so the policy travels with the turn), and
-//! the cancel flag. Its history lives and dies with the call.
+//! [`ShellTools`] per call, so the policy travels with the turn), the
+//! cancel flag, and the thinking effort (a subagent reasons the way the
+//! agent that delegated it reasons — a provider default can think the
+//! whole reply budget away). Its history lives and dies with the call.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -17,6 +19,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use rhema_agent_tools::{Overlay, ShellTools, render_template};
+use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     Agent, ChatParams, Content, Event, EventSink, Message, ModelProvider, Role, Session, ToolCall,
     ToolContext, ToolResolver, ToolResult, ToolSpec,
@@ -42,6 +45,13 @@ pub struct SubagentTools {
     /// The model identifier a definition without its own `model` runs
     /// on: the parent's.
     default_model: String,
+    /// The thinking effort the inner requests carry: the parent turn's,
+    /// set by [`Self::with_thinking`]. The default,
+    /// [`ThinkingEffort::Default`], lets the provider decide — and on a
+    /// thinking-by-default backend with a bounded reply budget, that
+    /// decision can spend the whole budget on reasoning and leave the
+    /// report empty. The parent's posture is the safe inheritance.
+    thinking: ThinkingEffort,
     /// How many nesting levels remain. One is the default: a subagent
     /// gets no `subagent` tool of its own. Zero advertises nothing.
     max_depth: u32,
@@ -61,8 +71,17 @@ impl SubagentTools {
             defs,
             shell,
             default_model: default_model.into(),
+            thinking: ThinkingEffort::Default,
             max_depth: 1,
         }
+    }
+
+    /// Sets the thinking effort the inner requests carry; the caller
+    /// passes the parent turn's, so a subagent samples the way the
+    /// agent that delegated it samples.
+    pub fn with_thinking(mut self, thinking: ThinkingEffort) -> Self {
+        self.thinking = thinking;
+        self
     }
 
     /// Sets the remaining nesting budget; each nested level gets one
@@ -159,11 +178,14 @@ impl SubagentTools {
             .provider(self.provider.clone())
             .resolver(resolver)
             .system(system)
-            .params(ChatParams::new(
-                def.model
-                    .clone()
-                    .unwrap_or_else(|| self.default_model.clone()),
-            ))
+            .params(ChatParams {
+                thinking: self.thinking,
+                ..ChatParams::new(
+                    def.model
+                        .clone()
+                        .unwrap_or_else(|| self.default_model.clone()),
+                )
+            })
             .build()
             .map_err(|err| format!("its engine failed to build: {err}"))?;
 

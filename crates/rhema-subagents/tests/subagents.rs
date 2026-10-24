@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use rhema_agent_tools::{AllowAll, Approval, ShellTools};
+use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     Content, EventSink, Message, ModelOutput, ModelProvider, ModelRequest, ProviderError, Role,
     StopReason, ToolCall, ToolContext, ToolResolver, Usage,
@@ -48,6 +49,7 @@ struct Scripted {
     served: AtomicUsize,
     tool_names: Mutex<Vec<Vec<String>>>,
     tool_results: Mutex<Vec<String>>,
+    thinking: Mutex<Vec<ThinkingEffort>>,
 }
 
 impl Scripted {
@@ -57,6 +59,7 @@ impl Scripted {
             served: AtomicUsize::new(0),
             tool_names: Mutex::new(Vec::new()),
             tool_results: Mutex::new(Vec::new()),
+            thinking: Mutex::new(Vec::new()),
         })
     }
 
@@ -73,6 +76,14 @@ impl Scripted {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// The thinking effort every request carried, in order.
+    fn thinkings_seen(&self) -> Vec<ThinkingEffort> {
+        self.thinking
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -83,6 +94,10 @@ impl ModelProvider for Scripted {
         _sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
         let index = self.served.fetch_add(1, Ordering::SeqCst);
+        self.thinking
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(req.params.thinking);
         self.tool_names
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -462,5 +477,52 @@ fn engine_errors_surface_in_band() {
             .await;
         assert!(result.is_error);
         assert!(result.content.contains("template"), "{}", result.content);
+    });
+}
+
+#[test]
+fn the_inner_requests_carry_the_configured_thinking() {
+    // The parent turn's posture rides into the inner agent: the caller
+    // sets it, the default is the provider's own decision.
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let provider = Scripted::new(vec![end_turn("done")]);
+        let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
+        let tools = Arc::new(
+            SubagentTools::new(provider.clone(), vec![worker_def()], shell, "m")
+                .with_thinking(ThinkingEffort::Low),
+        );
+        let result = tools
+            .resolve(call("worker", "do it"), &ToolContext::default())
+            .await;
+        assert!(!result.is_error, "{}", result.content);
+        assert_eq!(
+            provider.thinkings_seen(),
+            vec![ThinkingEffort::Low],
+            "the configured effort reaches the inner request"
+        );
+    });
+}
+
+#[test]
+fn without_a_set_thinking_the_inner_requests_stay_default() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let provider = Scripted::new(vec![end_turn("done")]);
+        let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
+        let tools = Arc::new(SubagentTools::new(
+            provider.clone(),
+            vec![worker_def()],
+            shell,
+            "m",
+        ));
+        let _ = tools
+            .resolve(call("worker", "do it"), &ToolContext::default())
+            .await;
+        assert_eq!(
+            provider.thinkings_seen(),
+            vec![ThinkingEffort::Default],
+            "no caller choice means the provider default"
+        );
     });
 }
