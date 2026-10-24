@@ -23,6 +23,11 @@ local = ["dep:tokio", "tokio/process", "tokio/io-util", "tokio/time", "tokio/fs"
 # builds leave the feature off and bring their own `HttpTransport` over
 # host fetch — the provider family's `native` precedent.
 client = ["dep:reqwest", "dep:tokio"]
+# The protocol served from a host (`server.rs`, the `rhema-sandboxd`
+# binary): axum for the routes, a multi-thread runtime and sockets for
+# serving, the local backend for the exec and seed routes (a
+# `LocalSandbox` per request), clap for the binary's args.
+server = ["dep:axum", "dep:clap", "local", "tokio/rt-multi-thread", "tokio/net"]
 
 [dependencies]
 # The seam adapts onto the toolkit's exec-only shell; it arrives
@@ -43,6 +48,11 @@ reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ], optional = true }
+# The daemon's HTTP surface (feature `server`), the workspace's pin
+axum = { workspace = true, optional = true }
+# The daemon binary's args (feature `server`); the version pin mirrors
+# the rest of the workspace's
+clap = { version = "4.5", features = ["derive"], optional = true }
 
 [dev-dependencies]
 # Driving the loopback HTTP tests: a raw listener and hand-rolled
@@ -51,3 +61,10 @@ reqwest = { version = "0.12", default-features = false, features = [
 tokio = { workspace = true, features = ["io-util", "net"] }
 # The fsroot and local tests run against throwaway host directories
 tempfile = "3"
+
+# The daemon; skipped without the `server` feature, which is what its
+# code compiles behind.
+[[bin]]
+name = "rhema-sandboxd"
+path = "src/bin/rhema-sandboxd.rs"
+required-features = ["server"]

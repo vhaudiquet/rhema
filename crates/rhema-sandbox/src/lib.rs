@@ -6,17 +6,19 @@
 //! configuration, never by which crate a frontend was born in. The
 //! family mirrors the provider family: the contract and the shared
 //! machinery in one crate, one adapter per backend beside it; the
-//! backends (`local`, `client`, `server`) land feature-gated in their
-//! own phases, and the scripted mock rides the `mock` feature so tests
-//! run the same seam against a fake. With the `local` feature the family
+//! backends (`local`, `client`, `server`) are feature-gated, and the
+//! scripted mock rides the `mock` feature so tests run the same seam
+//! against a fake. With the `local` feature the family
 //! gains its direct backend: [`LocalSandbox`] runs the commands as
 //! processes rooted at one host directory mapped by [`FsRoot`], and
 //! [`seed_workspace`] is the shared half of the seeding the cloud
 //! frontends each repeat. The wire protocol — the sandbox
 //! shim's JSON surface, promoted — is pinned in [`protocol`]: the
-//! shapes, the routes, and the auth header every backend speaks. In the
-//! cloud deployment the seam
-//! is a Cloudflare Sandbox — a container bound to the session's
+//! shapes, the routes, and the auth header every backend speaks; with
+//! the `server` feature the daemon half exists — [`server`], the
+//! `rhema-sandboxd` binary, one root directory per session name under
+//! its base, the token checked on every route. In the cloud deployment
+//! the seam is a Cloudflare Sandbox — a container bound to the session's
 //! Durable Object, persisted across turns and idle sleeps.
 //!
 //! The trait is object-safe and async, with `Send` futures like every
@@ -43,6 +45,8 @@ pub mod local;
 pub mod mock;
 pub mod protocol;
 pub mod seed;
+#[cfg(feature = "server")]
+pub mod server;
 
 pub use adapter::ShellSandbox;
 #[cfg(feature = "local")]
