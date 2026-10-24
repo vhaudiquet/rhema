@@ -62,9 +62,7 @@ impl CalendarStore {
     /// route and a future chat tool alike — so an invalid calendar is
     /// loud wherever it enters.
     pub fn add(&self, calendar: &CalendarWatch) -> Result<bool, std::io::Error> {
-        calendar
-            .validate()
-            .map_err(std::io::Error::other)?;
+        calendar.validate().map_err(std::io::Error::other)?;
         let conn = self
             .conn
             .lock()
