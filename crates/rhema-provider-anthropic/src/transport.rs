@@ -4,7 +4,7 @@
 //! carry — the connect timeout and the per-read stall guard — and the
 //! mapping of reqwest's error type onto [`TransportError`], the shape
 //! the adapters translate into `ProviderError` (a non-timeout becomes
-//! `"network error: ..."` there, which is what makes it retryable).
+//! `ProviderError::Network` there, the retryable variant).
 //! Feature `native`, default on; wasm builds turn it off and bring
 //! their own transport over host fetch.
 
@@ -15,7 +15,7 @@ use rhema_provider::{HttpRequest, HttpResponse, Transport, TransportError};
 use std::time::Duration;
 
 /// A `reqwest::Client` speaking the [`Transport`] seam.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ReqwestTransport {
     http: reqwest::Client,
 }

@@ -534,6 +534,8 @@ pub fn allowance(quota: &WireZaiQuota) -> Option<Allowance> {
 
 /// Builds the Messages request body for `req`.
 ///
+/// # Errors
+///
 /// Fails with [`ProviderError::InvalidRequest`] when the model is unset or
 /// the request would produce no messages (the API rejects empty `messages`).
 pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError> {
@@ -806,8 +808,12 @@ impl ChunkAssembler {
         Self::default()
     }
 
-    /// Feeds one stream event, emitting its streaming events. Fails with
-    /// [`ProviderError::Api`] when the event is the stream's `error` object.
+    /// Feeds one stream event, emitting its streaming events.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Api`] (no status) when the event is
+    /// the stream's `error` object.
     pub fn push(
         &mut self,
         event: StreamEvent,
@@ -816,12 +822,13 @@ impl ChunkAssembler {
         // The event type is authoritative: even a bare error frame with no
         // detail must fail the stream.
         if event.kind == "error" {
-            return Err(ProviderError::Api(
-                event
+            return Err(ProviderError::Api {
+                message: event
                     .error
                     .and_then(|error| error.message)
                     .unwrap_or_else(|| "mid-stream error".to_owned()),
-            ));
+                status: None,
+            });
         }
         // `message_start` nests its usage under the message header,
         // `message_delta` carries it top-level.
@@ -1850,7 +1857,13 @@ mod tests {
                 &mut sink,
             )
             .expect_err("an error event is an error");
-        assert_eq!(err, ProviderError::Api("Overloaded".into()));
+        assert_eq!(
+            err,
+            ProviderError::Api {
+                message: "Overloaded".into(),
+                status: None,
+            }
+        );
         assert!(sink.0.is_empty());
 
         // An unshaped error body falls back to the fixed raw text.
@@ -1859,7 +1872,13 @@ mod tests {
         let err = assembler
             .push(event(r#"{"type":"error"}"#), &mut sink)
             .expect_err("unshaped error is still an error");
-        assert_eq!(err, ProviderError::Api("mid-stream error".into()));
+        assert_eq!(
+            err,
+            ProviderError::Api {
+                message: "mid-stream error".into(),
+                status: None,
+            }
+        );
     }
 
     #[test]

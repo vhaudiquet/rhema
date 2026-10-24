@@ -439,7 +439,13 @@ async fn an_sse_error_event_maps_to_an_api_error() {
         .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
         .await
         .expect_err("a mid-stream error event is an error");
-    assert_eq!(err, ProviderError::Api("Overloaded".into()));
+    assert_eq!(
+        err,
+        ProviderError::Api {
+            message: "Overloaded".into(),
+            status: None,
+        }
+    );
 }
 
 #[tokio::test]
@@ -468,7 +474,8 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
         .expect_err("non-2xx is an error");
 
     match err {
-        ProviderError::Api(message) => {
+        ProviderError::Api { message, status } => {
+            assert_eq!(status, Some(401));
             assert!(message.contains("401"), "got: {message}");
             assert!(message.contains("invalid x-api-key"), "got: {message}");
         }
@@ -505,7 +512,8 @@ async fn a_rate_limit_names_its_reset_time_and_does_not_retry() {
         .expect_err("a rate limit is an error");
 
     match &err {
-        ProviderError::Api(message) => {
+        ProviderError::Api { message, status } => {
+            assert_eq!(*status, Some(429));
             assert!(message.contains("429"), "got: {message}");
             assert!(message.contains("usage limit reached"), "got: {message}");
             assert!(
@@ -529,7 +537,7 @@ async fn a_transport_failure_maps_to_other() {
         .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
         .await
         .expect_err("connection refused is an error");
-    assert!(matches!(err, ProviderError::Other(_)), "got: {err:?}");
+    assert!(matches!(err, ProviderError::Network(_)), "got: {err:?}");
 }
 
 #[tokio::test]

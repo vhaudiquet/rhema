@@ -15,11 +15,11 @@
 //! fetch, whose `!Send` JS stream is bridged inside the transport so the
 //! seam stays `Send`. Transport failures map onto [`ProviderError`]:
 //! timeouts to [`ProviderError::Timeout`], everything else to
-//! `network error: ...` (the prefix that makes [`ProviderError::Other`]
-//! retryable), non-2xx responses (with the body's `error.message` when
-//! present) to [`ProviderError::Api`] keeping the
-//! `"... (HTTP <status>): ..."` shape, and unparseable stream chunks and
-//! mid-stream error events to [`ProviderError::Api`] too.
+//! `network error: ...` ([`ProviderError::Network`], retryable), non-2xx
+//! responses (with the body's `error.message` when present) to
+//! [`ProviderError::Api`] carrying the HTTP status structurally, and
+//! unparseable stream chunks and mid-stream error events to
+//! [`ProviderError::Api`] without one.
 //!
 //! Timeouts are layered where the transport allows: the native client
 //! bounds connection setup (10s) and each stream read (90s — a stall
@@ -74,6 +74,19 @@ pub struct AnthropicProvider {
     /// Bearer instead of `x-api-key`, per `with_bearer_auth`.
     bearer_auth: bool,
     transport: Arc<dyn Transport>,
+}
+
+impl std::fmt::Debug for AnthropicProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The transport is a dyn seam: it prints as a placeholder, the
+        // plain data prints in full. The key never prints.
+        f.debug_struct("AnthropicProvider")
+            .field("base_url", &self.base_url)
+            .field("bearer_auth", &self.bearer_auth)
+            .field("transport", &"<dyn Transport>")
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 impl AnthropicProvider {
@@ -148,8 +161,11 @@ impl AnthropicProvider {
                 ));
             }
             let body = read_all(&mut response).await?;
-            let page: WireModelsPage = serde_json::from_slice(&body)
-                .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
+            let page: WireModelsPage =
+                serde_json::from_slice(&body).map_err(|err| ProviderError::Api {
+                    message: format!("malformed models page: {err}"),
+                    status: None,
+                })?;
             let fetched = page.data.len();
             models.extend(page.data.into_iter().map(ModelCard::from));
             // A missing cursor or a zero-row page keeps a misbehaving mirror
@@ -197,31 +213,44 @@ impl AnthropicProvider {
         let status = response.status;
         let text = read_all(&mut response).await?;
         if !is_success(status) {
-            return Err(ProviderError::Api(format!(
-                "zai quota error (HTTP {}): {}",
-                status,
-                String::from_utf8_lossy(&text)
-            )));
+            return Err(ProviderError::Api {
+                message: format!(
+                    "zai quota error (HTTP {}): {}",
+                    status,
+                    String::from_utf8_lossy(&text)
+                ),
+                status: Some(status),
+            });
         }
-        let quota: WireZaiQuota = serde_json::from_slice(&text)
-            .map_err(|err| ProviderError::Api(format!("malformed quota response: {err}")))?;
+        let quota: WireZaiQuota =
+            serde_json::from_slice(&text).map_err(|err| ProviderError::Api {
+                message: format!("malformed quota response: {err}"),
+                status: None,
+            })?;
         if !quota.success {
             // A rejected token rides HTTP 200; the envelope's own fields
             // carry the failure.
-            return Err(ProviderError::Api(match (quota.code, quota.msg) {
-                (Some(code), Some(msg)) => format!("zai quota error (code {code}): {msg}"),
-                (Some(code), None) => format!(
-                    "zai quota error (code {code}): {text}",
-                    text = String::from_utf8_lossy(&text)
-                ),
-                _ => format!(
-                    "zai quota error: {text}",
-                    text = String::from_utf8_lossy(&text)
-                ),
-            }));
+            return Err(ProviderError::Api {
+                message: match (quota.code, quota.msg) {
+                    (Some(code), Some(msg)) => format!("zai quota error (code {code}): {msg}"),
+                    (Some(code), None) => format!(
+                        "zai quota error (code {code}): {text}",
+                        text = String::from_utf8_lossy(&text)
+                    ),
+                    _ => format!(
+                        "zai quota error: {text}",
+                        text = String::from_utf8_lossy(&text)
+                    ),
+                },
+                // A rejected token answers HTTP 200: the envelope's code
+                // is the failure, not a transport status.
+                status: None,
+            });
         }
-        crate::wire::allowance(&quota)
-            .ok_or_else(|| ProviderError::Api("quota response carries no coding window".into()))
+        crate::wire::allowance(&quota).ok_or_else(|| ProviderError::Api {
+            message: "quota response carries no coding window".into(),
+            status: None,
+        })
     }
 
     /// Common headers of every request: the key by the configured scheme
@@ -370,9 +399,9 @@ async fn read_all(response: &mut HttpResponse) -> Result<Vec<u8>, ProviderError>
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the Anthropic
-/// error shape's `error.message` when the body has it — and the
-/// `(HTTP <status>)` group [`ProviderError::is_retryable`] reads back.
-/// A `retry-after` response header rides the message: a rate limit does
+/// error shape's `error.message` when the body has it, and carrying the
+/// HTTP status structurally for [`ProviderError::is_retryable`]. A
+/// `retry-after` response header rides the message: a rate limit does
 /// not retry (the ladder cannot clear a quota window), so the reset time
 /// is the one fact the caller needs to decide when to come back.
 fn api_error(status: u16, raw: &str, headers: &[(String, String)]) -> ProviderError {
@@ -382,28 +411,31 @@ fn api_error(status: u16, raw: &str, headers: &[(String, String)]) -> ProviderEr
         .map(|(_, value)| value.trim().to_owned())
         .filter(|value| !value.is_empty());
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
-    ProviderError::Api(match retry_after {
-        Some(seconds) => format!(
-            "anthropic api error (HTTP {}): {} (retry-after: {})",
-            status,
-            parsed.message(raw),
-            seconds
-        ),
-        None => format!(
-            "anthropic api error (HTTP {}): {}",
-            status,
-            parsed.message(raw)
-        ),
-    })
+    ProviderError::Api {
+        message: match retry_after {
+            Some(seconds) => format!(
+                "anthropic api error (HTTP {}): {} (retry-after: {})",
+                status,
+                parsed.message(raw),
+                seconds
+            ),
+            None => format!(
+                "anthropic api error (HTTP {}): {}",
+                status,
+                parsed.message(raw)
+            ),
+        },
+        status: Some(status),
+    }
 }
 
 /// Maps a transport failure onto [`ProviderError`]: a timeout is its own
-/// variant, and every other failure carries the `network error: ` prefix
-/// — that prefix is what makes the error retryable.
+/// variant, and every other failure is a network error — its own variant,
+/// and the retryable one.
 fn transport_error(err: TransportError) -> ProviderError {
     match err {
         TransportError::Timeout => ProviderError::Timeout,
-        TransportError::Other(msg) => ProviderError::Other(format!("network error: {msg}")),
+        TransportError::Other(msg) => ProviderError::Network(msg),
     }
 }
 
@@ -417,13 +449,22 @@ fn feed_chunk(
     if payload.trim().is_empty() {
         return Ok(());
     }
-    let event: StreamEvent = serde_json::from_str(payload)
-        .map_err(|err| ProviderError::Api(format!("malformed SSE chunk: {err}")))?;
+    let event: StreamEvent = serde_json::from_str(payload).map_err(|err| ProviderError::Api {
+        message: format!("malformed SSE chunk: {err}"),
+        status: None,
+    })?;
     assembler.push(event, sink)
 }
 
 #[async_trait]
 impl ModelProvider for AnthropicProvider {
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::InvalidRequest`] when the request
+    /// cannot map onto the wire, [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport fails, [`ProviderError::Api`] with the HTTP
+    /// status on a non-2xx response, and [`ProviderError::Api`] without
+    /// one on a malformed stream chunk or a mid-stream error event.
     async fn complete(
         &self,
         req: ModelRequest,
@@ -584,9 +625,10 @@ mod tests {
         // The envelope's own code and message carry the failure: the
         // rejected token never rides an HTTP status here.
         match err {
-            ProviderError::Api(msg) => {
-                assert!(msg.contains("code 401"), "{msg}");
-                assert!(msg.contains("token expired or incorrect"), "{msg}");
+            ProviderError::Api { message, status } => {
+                assert_eq!(status, None);
+                assert!(message.contains("code 401"), "{message}");
+                assert!(message.contains("token expired or incorrect"), "{message}");
             }
             other => panic!("expected an Api error, got {other:?}"),
         }
