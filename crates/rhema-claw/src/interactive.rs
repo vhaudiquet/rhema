@@ -566,11 +566,14 @@ impl EventSink for HubSink {
                 }
             }
             // Step bookkeeping is the engine's business, not the wire's;
-            // a running tool's live output lands with its result, and a
-            // streaming tool's status has no turn-event shape to ride.
+            // a running tool's live output lands with its result, a
+            // streaming tool's status has no turn-event shape to ride,
+            // and the running usage tally is gauge material, not
+            // transcript.
             ModelEvent::StepStart { .. }
             | ModelEvent::ToolOutputDelta { .. }
             | ModelEvent::ToolStatus { .. }
+            | ModelEvent::Usage(_)
             | ModelEvent::StepEnd { .. } => return,
         };
         self.hub.emit(&self.key, turn);
