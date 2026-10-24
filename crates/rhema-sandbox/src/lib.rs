@@ -29,6 +29,8 @@
 #![deny(missing_docs)]
 
 pub mod adapter;
+#[cfg(feature = "client")]
+pub mod http;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod protocol;
