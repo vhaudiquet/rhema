@@ -719,6 +719,20 @@ fn render_settings(
     }
 }
 
+/// Tokens as the Usage page spells an amount: kilo-scaled once past
+/// a thousand, one decimal, the trailing `.0` trimmed.
+fn usage_k(tokens: u64) -> String {
+    if tokens >= 1_000 {
+        let k = format!("{:.1}k", tokens as f64 / 1_000.0);
+        match k.strip_suffix(".0k") {
+            Some(base) => format!("{base}k"),
+            None => k,
+        }
+    } else {
+        tokens.to_string()
+    }
+}
+
 /// One `label  value` row of a settings page; the label column reads
 /// dim. Wrapped to the pane, so the rendered line count is the
 /// builder's to know.
@@ -730,7 +744,7 @@ fn settings_field(
 ) -> Vec<Line<'static>> {
     wrap_line(
         &Line::from(vec![
-            Span::raw(format!("{:<12}", label)).fg(theme.text3),
+            Span::raw(format!("{:<18}", label)).fg(theme.text3),
             value,
         ]),
         width,
@@ -1001,6 +1015,33 @@ fn settings_page(
                     theme,
                     width,
                 ));
+            }
+            // The detailed split: what the session's tokens bought,
+            // each as its share of the total and its own amount. The
+            // numbers ride the transcript's breakdown, so a
+            // transcript-less session has nothing to show.
+            lines.push(Line::default());
+            lines.push(Line::from(Span::raw("Detailed session usage")).bold());
+            match settings.transcript {
+                Some(stats) => {
+                    let total = stats.usage.total();
+                    for (label, tokens) in stats.usage.labeled() {
+                        let pct = if total > 0 {
+                            tokens as f64 / total as f64 * 100.0
+                        } else {
+                            0.0
+                        };
+                        lines.extend(settings_field(
+                            label,
+                            Span::raw(format!("{:.0}% ({})", pct, usage_k(tokens))).fg(theme.text),
+                            theme,
+                            width,
+                        ));
+                    }
+                }
+                None => {
+                    lines.extend(settings_hint("no transcript in this session", theme, width));
+                }
             }
             (lines, footer("esc back"), Vec::new())
         }
@@ -2278,6 +2319,53 @@ mod tests {
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
         }
+    }
+
+    /// The Usage page's detailed split: the subtitle, the six rows as
+    /// percentages of the total with their kilo-scaled amounts.
+    #[test]
+    fn the_usage_page_shows_the_detailed_split() {
+        let mut settings =
+            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        settings.section = SettingsSection::Usage;
+        settings.transcript = Some(rhema_transcript::TranscriptStats {
+            requests: 10,
+            viewed: 4,
+            flushes: 1,
+            input_tokens: 90_000,
+            cached_input_tokens: 70_000,
+            output_tokens: 10_000,
+            usage: rhema_transcript::UsageBreakdown {
+                system_prompt_tokens: 20_000,
+                skills_tokens: 2_000,
+                tool_calls_input_tokens: 30_000,
+                tool_calls_output_tokens: 30_000,
+                user_messages_tokens: 8_000,
+                model_output_tokens: 10_000,
+            },
+            ..Default::default()
+        });
+
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        let text: String = (0..40)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(text.contains("Detailed session usage"), "{text}");
+        assert!(text.contains("20% (20k)"), "{text}");
+        assert!(text.contains("2% (2k)"), "{text}");
+        assert!(text.contains("30% (30k)"), "{text}");
+        assert!(text.contains("8% (8k)"), "{text}");
+        assert!(text.contains("10% (10k)"), "{text}");
     }
 
     /// The settings screen draws the whole sidebar with the selected
