@@ -2,8 +2,8 @@
 //! receives them.
 //!
 //! Ownership of events: the [`crate::ModelProvider`] emits streaming deltas
-//! (`ThinkingDelta`, `TextDelta`, `ToolCallStart`, `ToolCallArgsDelta`)
-//! while it streams; the [`crate::Agent`] emits the lifecycle events
+//! (`ThinkingDelta`, `TextDelta`, `ToolCallStart`, `ToolCallArgsDelta`,
+//! `Usage`) while it streams; the [`crate::Agent`] emits the lifecycle events
 //! (`StepStart`, `ToolResult`, `StepEnd`). A provider that announces a tool
 //! call while streaming it is not echoed by the engine — the engine only
 //! emits `ToolCallStart` for calls the provider did not announce.
@@ -73,6 +73,16 @@ pub enum Event<'a> {
         /// The process exit code of command-like tools; `None` otherwise.
         code: Option<i32>,
     },
+    /// The running token tally for the in-flight model call, as the
+    /// provider reports it inside the stream itself. The fields are
+    /// cumulative for the call — each event replaces the previous tally,
+    /// never adds to it. Emitted whenever the wire carries a usage frame:
+    /// Anthropic-shaped wires report the prompt with `message_start` and
+    /// the completion with cumulative `message_delta` frames; Gemini
+    /// reports on every chunk; OpenAI-shaped wires only on the final
+    /// chunk, so there the event adds nothing over [`Event::StepEnd`].
+    /// Sinks that only need the final accounting may ignore it.
+    Usage(crate::output::Usage),
     /// The step ends.
     StepEnd {
         /// Token accounting for the model call.

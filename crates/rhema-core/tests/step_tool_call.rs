@@ -60,6 +60,8 @@ enum Recorded {
         is_error: bool,
         code: Option<i32>,
     },
+    /// The running usage tally; the mock never emits one.
+    Usage(Usage),
     StepEnd {
         usage: Usage,
         stop_reason: StopReason,
@@ -96,6 +98,7 @@ impl From<Event<'_>> for Recorded {
                 is_error,
                 code,
             },
+            Event::Usage(usage) => Self::Usage(usage),
             Event::StepEnd { usage, stop_reason } => Self::StepEnd {
                 usage,
                 stop_reason: stop_reason.clone(),
