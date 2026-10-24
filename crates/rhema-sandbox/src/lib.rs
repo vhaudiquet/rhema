@@ -8,9 +8,12 @@
 //! machinery in one crate, one adapter per backend beside it; the
 //! backends (`local`, `client`, `server`) are feature-gated, and the
 //! scripted mock rides the `mock` feature so tests run the same seam
-//! against a fake. With the `local` feature the family
-//! gains its direct backend: [`LocalSandbox`] runs the commands as
-//! processes rooted at one host directory mapped by [`FsRoot`], and
+//! against a fake. With the `local` feature the family gains three
+//! process-spawning backends beside [`LocalSandbox`] — which runs the
+//! commands as processes rooted at one host directory mapped by
+//! [`FsRoot`] — namely [`DockerSandbox`], the bind-mounted container
+//! driven through the `docker` CLI (the same `FsRoot`, a `docker exec`
+//! prefix), and [`SshSandbox`], the daemonless remote over `ssh`; and
 //! [`seed_workspace`] is the shared half of the seeding the cloud
 //! frontends each repeat. The wire protocol — the sandbox
 //! shim's JSON surface, promoted — is pinned in [`protocol`]: the
@@ -36,6 +39,10 @@
 
 pub mod adapter;
 #[cfg(feature = "local")]
+pub mod docker;
+#[cfg(feature = "local")]
+mod exec_util;
+#[cfg(feature = "local")]
 pub mod fsroot;
 #[cfg(feature = "client")]
 pub mod http;
@@ -47,8 +54,12 @@ pub mod protocol;
 pub mod seed;
 #[cfg(feature = "server")]
 pub mod server;
+#[cfg(feature = "local")]
+pub mod ssh;
 
 pub use adapter::ShellSandbox;
+#[cfg(feature = "local")]
+pub use docker::DockerSandbox;
 #[cfg(feature = "local")]
 pub use fsroot::FsRoot;
 #[cfg(feature = "local")]
@@ -58,6 +69,8 @@ pub use protocol::{
     stream_reply,
 };
 pub use seed::seed_workspace;
+#[cfg(feature = "local")]
+pub use ssh::SshSandbox;
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

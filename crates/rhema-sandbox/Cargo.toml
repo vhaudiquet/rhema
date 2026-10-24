@@ -12,8 +12,10 @@ authors.workspace = true
 default = ["local", "mock"]
 # The scripted sandbox for offline tests; mirrors rhema-core's feature.
 mock = ["dep:tokio"]
-# The local backend: commands run as processes rooted at one host
-# directory (`fsroot.rs`, `local.rs`). tokio rides with the features
+# The process-spawning backends: commands as host processes rooted at
+# one directory (`fsroot.rs`, `local.rs`), in a bind-mounted container
+# through the docker CLI (`docker.rs`), or over ssh (`ssh.rs`) — with
+# `exec_util.rs` the machinery they share. tokio rides with the features
 # this code adds — process exec, buffered line reads, the cancel tick's
 # timer, and plain fs for the file routes; `sync`, `macros`, and `rt`
 # come with the dependency itself, which the mock's parked exec needs.
