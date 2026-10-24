@@ -556,3 +556,157 @@ while session history, credentials, and the TUI stay host-side, which
 they already are. Said plainly: local and mount postures are process
 hygiene, not security boundaries, and the gate stays installed in every
 mode. Full design and commit plan: `specs/rhema-sandbox.md`.
+
+## 13. Async subagents (`rhema-subagents`)
+
+The `subagent` tool stops resolving inside the step. A call **starts**
+the subagent in the background and returns a job id in-band
+immediately; subagents run in parallel; a finished job is announced to
+the model by an automatic notification, and the model fetches the
+report by running the tool against the job id. Escape stops the main
+session and never a running subagent.
+
+**Ownership.** The seams do not move (§0, §1):
+
+- `rhema-subagents` owns everything about jobs: the registry (ids,
+  states, report cache), the spawn, the fetch, the per-job cancel
+  flags, the concurrency cap, and the notification text. It is the
+  tool resolver; nothing outside it knows a job exists. `rhema-core`
+  grows nothing — no scheduling, no injection, no job types.
+- The driver tier (`rhema-coding-agent`, and any other `run_turn`
+  owner) owns the step loop and the steering: draining finished jobs
+  at step boundaries and appending the notification to the history.
+  It does so behind one inert seam — `CodingAgentConfig` grows
+  `steering: Option<Arc<dyn Steering>>`, `Steering::drain() ->
+  Vec<String>` — so the driver stays subagent-agnostic, the same
+  reading as `extra_resolver` (`specs/rhema-subagents.md` §5);
+  `rhema-subagents` implements the trait on the registry. The coding
+  driver's loop is its own from this change on — the same ~15 lines
+  as the provided `run_turn` plus the two drain points; the provided
+  one remains the no-steering convenience. A driver without a
+  steering source behaves exactly as today.
+- The engine (`Agent::step`) is untouched. Injecting between steps is
+  a driver act, the same act the RSD driver already performs with its
+  inbox (§5, §7 test 5); the second-consumer discipline is why no
+  notification type enters crate 1.
+
+**The tool's two shapes.** One tool, one spec, an optional third
+argument:
+
+```
+subagent(name, prompt)   → starts; the result carries the job id at once
+subagent(id)             → fetches the report of a started job
+```
+
+Same tool rather than a second one: one spec keeps the prompt's tool
+list and the request's tools array from drifting, `replay_safety` is
+per name so both shapes share one honest `Unsafe` (a fetch must not
+launder the start's classification), and the description already
+carries the catalog, so it carries the protocol too — calls start in
+the background, a notification names the job when it finishes, the
+report exists only in the fetch. Ids are the registry's, `job-<n>`
+per agent. `name`+`prompt` and `id` are exclusive; both present, or
+neither, is an in-band error.
+
+**Steering — the notification.** A User-role message the driver
+appends, one line per finished job:
+
+    Subagent scout (job-3) has finished.
+    Subagent reviewer (job-4) has finished with an error: hit its step budget of 256.
+
+Chosen over the alternatives: a synthetic Tool-role result would need
+a call id the model never emitted, and providers pair results to
+calls by id — an unannounced id is rejected or dropped, and the
+commit hook would be persisting an intent the model never decided. A
+new engine event or seam fails §0/§1 outright. A User message is a
+valid conversation for every provider (the Anthropic adapter already
+merges User turns with tool-result turns), it is content the model
+reads — not an ephemeral event — and it needs no synthetic id,
+because the fetch is a real call the model itself decides, commits,
+and can revive on.
+
+Mechanics, exactly: the driver drains at two points — once at turn
+start, before pushing the user input (consecutive User messages are
+valid; anything finished while no turn was running is announced
+here, whether or not it was announced before), and between steps,
+after each `ToolUse` step and before the next. Drained lines
+coalesce into one message; the append lands at a step boundary, so
+the next commit hook and the driver's post-round checkpoint persist
+it like any history. Notifications consume no step budget; the fetch
+is an ordinary step. Within a turn each finish is announced once; at
+each turn start every finished-but-unfetched job is announced again.
+The drain is a query over registry state, never a mutation of
+record: a crash between append and checkpoint only re-delivers.
+
+**Lifecycle.** `queued → running → finished(ok, report) |
+finished(error, reason)`. A fetch marks the job fetched — its UI
+line leaves, the report stays cached until the agent is dropped —
+so a double-fetch returns the cached report, never a re-run:
+subagents are `ReplaySafety::Unsafe`, and the fetch is a read of the
+registry, not an execution.
+
+- The start result names the job id and says a notification will
+  follow; it never blocks on the job.
+- A fetch of an ok job returns the cached report (capped at 50 KiB,
+  tail kept, at report production). A fetch of a failed job returns
+  `is_error` with the reason. A fetch of a running or queued job
+  returns `is_error` "still running". An unknown id is an error
+  naming it.
+- A job the model never fetches keeps its report until the agent is
+  dropped, and is re-announced at every turn start while unfetched.
+  There is no forced delivery at turn end.
+
+**Cancellation.** A job's `ToolContext.cancelled` is its own flag,
+minted at spawn — never the parent turn's. Escape flips only the
+turn's flag: the main session stops, running subagents do not. No
+cancel-job path exists in v1 — the model cannot stop a job it
+started, and the user stops one only by closing the agent; jobs are
+bounded anyway (their step budget), and a stop verb over unattended
+work is a later decision with its own approval question. Jobs are
+bound to the agent's lifetime, not the turn's: a turn may end with
+jobs running, they keep running, and the next turn's start announces
+them. When the agent is dropped, running and queued jobs are
+aborted and their reports are lost — the registry is in-memory, and
+§6's plain-data session never carries it.
+
+**Concurrency.** The registry runs at most 4 jobs at once (a
+constructor knob, set like the nesting budget); a start beyond the
+cap queues — the id is still minted and returned at once, and the
+job begins when a slot frees. Queue, not reject: a rejection would
+make a delegation fail on machine load the model cannot observe.
+The cap counts top-level jobs only. A background job's own
+`subagent` tool (when the nesting budget allows one) keeps today's
+synchronous shape and runs to its report inside the job's step loop:
+the notification path has exactly one steering consumer — the
+driver's turn loop — and a nested job would have none.
+
+**Approvals.** Background jobs inherit the turn's approval hook the
+way foreground ones do — read off the parent shell at spawn,
+installed on the job's inner shell — and the hook is captured at
+spawn and held for the job's lifetime, so a gate firing after the
+parent turn's end consults the turn's policy, never the fail-safe
+reject. A gated call inside a background job raises the same modal,
+blocking the job until it is answered, even while the parent
+streams or after the parent turn has ended. Not deny-by-default:
+background delegation would then be a recipe for every gated
+command to fail whenever the user is not looking, and a blanket
+allow would be a new unattended-execution path — exactly what the
+hook exists to prevent. Denial answers in-band to the job, as to a
+foreground one.
+
+**UI surface.** One pinned live line per running job. The registry
+publishes each job's status — the same `ToolStatus` vocabulary the
+forwarder reports today (phase, spend, model) — on a subscription
+`wire` hands back beside the config; the TUI pumps it beside the
+engine events and keys a line by job id. A finished-but-unfetched
+job's line stops spinning and reads "finished"; it leaves when the
+fetch lands or the agent goes away. The notification message
+renders as a muted system line, not a user bubble.
+
+**Resume and replay.** Jobs are in-memory, so a crash mid-turn with
+jobs running loses them. The committed history shows the start calls
+answered with their job ids — nothing dangles, revive has nothing to
+report. In the resumed session the registry is empty: a fetch of a
+lost id returns `is_error` saying the job is gone, and the model
+re-delegates. A start call that lost its result to the crash is
+`Unsafe`: reported interrupted, never re-run.
