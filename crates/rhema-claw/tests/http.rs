@@ -1643,7 +1643,7 @@ fn discovered_registry(dir: &tempfile::TempDir) -> Arc<rhema_claw::BackendRegist
             .ok()
             .and_then(|store| {
                 store
-                    .get_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)
+                    .rows_by_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)
                     .ok()
             })
             .unwrap_or_default()

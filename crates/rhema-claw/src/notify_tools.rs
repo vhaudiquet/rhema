@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -62,16 +62,16 @@ struct Notify {
 
 #[async_trait]
 impl ToolOp for Notify {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: NotifyArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let title = args.title.trim();
         let body = args.body.trim();
         if title.is_empty() {
-            return Err("title must not be empty".to_owned());
+            return Err("title must not be empty".to_owned().into());
         }
         if body.is_empty() {
-            return Err("body must not be empty".to_owned());
+            return Err("body must not be empty".to_owned().into());
         }
         let device = args
             .device

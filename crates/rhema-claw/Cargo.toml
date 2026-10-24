@@ -86,3 +86,6 @@ bytes = "1"
 # feature without a feature of our own — tests are the only consumer
 rhema-core = { path = "../rhema-core", features = ["mock"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+[lints]
+workspace = true

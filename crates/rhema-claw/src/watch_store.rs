@@ -49,13 +49,17 @@ impl Watch {
     /// The repository coordinates, splitting `owner/name`. GitLab's owner
     /// keeps its full namespace path, which is why the split is lazy: the
     /// first `/` separates owner from name, never a deeper one.
-    pub fn repo_ref(&self) -> Result<RepoRef, String> {
-        let (owner, name) = self
-            .repo
-            .split_once('/')
-            .ok_or_else(|| format!("repo must be owner/name, got {:?}", self.repo))?;
+    pub fn repo_ref(&self) -> Result<RepoRef, WatchShapeError> {
+        let (owner, name) =
+            self.repo
+                .split_once('/')
+                .ok_or_else(|| WatchShapeError::RepoShape {
+                    repo: self.repo.clone(),
+                })?;
         if owner.is_empty() || name.is_empty() {
-            return Err(format!("repo must be owner/name, got {:?}", self.repo));
+            return Err(WatchShapeError::RepoShape {
+                repo: self.repo.clone(),
+            });
         }
         Ok(RepoRef::new(owner, name))
     }
@@ -104,6 +108,25 @@ pub enum WatchStoreError {
     Backend(#[from] rusqlite::Error),
 }
 
+/// Why a watch's coordinates failed their shape checks: a repo that is
+/// not `owner/name`, or a gitea watch with no instance base URL. One
+/// type for every entry path — the HTTP route, the agent tool, the
+/// config watch — so the refusals read the same everywhere.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum WatchShapeError {
+    /// The repo field is not `owner/name` (GitLab's owner may itself
+    /// carry slashes; the first `/` still separates).
+    #[error("repo must be owner/name, got {repo:?}")]
+    RepoShape {
+        /// The repo value as stored, for the error message.
+        repo: String,
+    },
+    /// A gitea watch with no host: gitea is self-hosted only, so there
+    /// is nothing to poll.
+    #[error("gitea is self-hosted: set host to the instance base URL")]
+    MissingHost,
+}
+
 /// One watched repository, as stored. `token` never serializes: it
 /// reaches the forge clients, not the wire or the model.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -129,13 +152,17 @@ impl WatchRecord {
     /// The repository coordinates, splitting `owner/name` — the same
     /// shape check a config watch passes. GitLab's owner keeps its full
     /// namespace path, which is why the split is lazy.
-    pub fn repo_ref(&self) -> Result<RepoRef, String> {
-        let (owner, name) = self
-            .repo
-            .split_once('/')
-            .ok_or_else(|| format!("repo must be owner/name, got {:?}", self.repo))?;
+    pub fn repo_ref(&self) -> Result<RepoRef, WatchShapeError> {
+        let (owner, name) =
+            self.repo
+                .split_once('/')
+                .ok_or_else(|| WatchShapeError::RepoShape {
+                    repo: self.repo.clone(),
+                })?;
         if owner.is_empty() || name.is_empty() {
-            return Err(format!("repo must be owner/name, got {:?}", self.repo));
+            return Err(WatchShapeError::RepoShape {
+                repo: self.repo.clone(),
+            });
         }
         Ok(RepoRef::new(owner, name))
     }
@@ -352,7 +379,11 @@ fn now_millis() -> i64 {
 /// `owner/name` repo, and — gitea being self-hosted only — a host for
 /// gitea. Tokens are not required here: a blank one falls back to the
 /// forge's environment variable at poll time.
-pub fn validate_watch(forge: ForgeKind, repo: &str, host: Option<&str>) -> Result<(), String> {
+pub fn validate_watch(
+    forge: ForgeKind,
+    repo: &str,
+    host: Option<&str>,
+) -> Result<(), WatchShapeError> {
     let watch = Watch {
         forge,
         repo: repo.trim().to_owned(),
@@ -361,7 +392,7 @@ pub fn validate_watch(forge: ForgeKind, repo: &str, host: Option<&str>) -> Resul
     };
     watch.repo_ref()?;
     if forge == ForgeKind::Gitea && watch.host.as_deref().filter(|h| !h.is_empty()).is_none() {
-        return Err("gitea is self-hosted: set host to the instance base URL".to_owned());
+        return Err(WatchShapeError::MissingHost);
     }
     Ok(())
 }
@@ -372,16 +403,16 @@ mod tests {
 
     #[test]
     fn validation_fails_a_watch_loudly_and_specificly() {
-        assert!(
-            validate_watch(ForgeKind::GitHub, "acme", None)
-                .unwrap_err()
-                .contains("owner/name"),
+        assert_eq!(
+            validate_watch(ForgeKind::GitHub, "acme", None).unwrap_err(),
+            WatchShapeError::RepoShape {
+                repo: "acme".to_owned()
+            },
             "an ownerless repo is loud"
         );
-        assert!(
-            validate_watch(ForgeKind::Gitea, "acme/barn", None)
-                .unwrap_err()
-                .contains("self-hosted"),
+        assert_eq!(
+            validate_watch(ForgeKind::Gitea, "acme/barn", None).unwrap_err(),
+            WatchShapeError::MissingHost,
             "a hostless gitea watch is loud"
         );
         validate_watch(ForgeKind::GitHub, "acme/widgets", None).expect("github validates");

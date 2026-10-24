@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -214,7 +214,7 @@ struct AttachArgs {
 
 #[async_trait]
 impl ToolOp for AttachFile {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: AttachArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let relative = Path::new(&args.path);
@@ -226,7 +226,8 @@ impl ToolOp for AttachFile {
             return Err(format!(
                 "path must be relative to the workspace, without '..': {:?}",
                 args.path
-            ));
+            )
+            .into());
         }
         let path = self.workspace.join(relative);
         let metadata = std::fs::metadata(&path)
@@ -237,7 +238,8 @@ impl ToolOp for AttachFile {
                 args.path,
                 metadata.len(),
                 MAX_ATTACHMENT_BYTES
-            ));
+            )
+            .into());
         }
         let bytes =
             std::fs::read(&path).map_err(|err| format!("cannot attach {:?}: {err}", args.path))?;

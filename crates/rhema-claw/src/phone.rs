@@ -49,7 +49,7 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -412,7 +412,7 @@ impl PhoneStore {
     }
 
     /// The command with this id, when it exists.
-    pub fn get_command(&self, id: &str) -> Result<Option<Command>, PhoneStoreError> {
+    pub fn command_by_id(&self, id: &str) -> Result<Option<Command>, PhoneStoreError> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let mut stmt = conn
             .prepare(
@@ -462,7 +462,7 @@ pub async fn wait_for_command_result(
 ) -> CommandOutcome {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        if let Ok(Some(command)) = store.get_command(id) {
+        if let Ok(Some(command)) = store.command_by_id(id) {
             if let Some(ok) = command.result_ok {
                 return CommandOutcome::Confirmed {
                     ok,
@@ -512,7 +512,7 @@ struct PhoneArgs {
 
 #[async_trait]
 impl ToolOp for PhoneTool {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: PhoneArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let device = args
@@ -551,6 +551,7 @@ impl ToolOp for PhoneTool {
                 "unknown action {other:?}: status, devices, forget, or one of {CONTROL_ACTIONS:?}"
             )),
         }
+        .map_err(ToolError::from)
     }
 }
 
@@ -980,7 +981,7 @@ mod tests {
             "a redelivery does not flip the verdict"
         );
         let confirmed = store
-            .get_command(&command.id)
+            .command_by_id(&command.id)
             .expect("reads")
             .expect("exists");
         assert_eq!(confirmed.result_ok, Some(true));

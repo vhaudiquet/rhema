@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -98,13 +98,15 @@ struct WatchRepo {
 
 #[async_trait]
 impl ToolOp for WatchRepo {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: WatchArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let kind = ForgeKind::parse(&args.forge)
             .ok_or_else(|| format!("unknown forge {:?}: github, gitea, or gitlab", args.forge))?;
         let host = args.host.as_deref().map(str::trim);
-        validate_watch(kind, &args.repo, host)?;
+        // The tool contract answers in band: the model sees the shape
+        // refusal as text it can correct.
+        validate_watch(kind, &args.repo, host).map_err(|err| err.to_string())?;
         let added = self
             .store
             .add(
@@ -131,7 +133,7 @@ struct UnwatchRepo {
 
 #[async_trait]
 impl ToolOp for UnwatchRepo {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: UnwatchArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let kind = ForgeKind::parse(&args.forge)
@@ -157,7 +159,7 @@ struct ListWatches {
 
 #[async_trait]
 impl ToolOp for ListWatches {
-    async fn invoke(&self, _args: Value) -> Result<String, String> {
+    async fn invoke(&self, _args: Value) -> Result<String, ToolError> {
         let watches = self.store.list().map_err(|err| err.to_string())?;
         let rows: Vec<Value> = watches
             .iter()

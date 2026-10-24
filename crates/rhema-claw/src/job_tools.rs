@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -193,7 +193,7 @@ fn in_band(err: JobStoreError) -> String {
 
 #[async_trait]
 impl ToolOp for CodingAgent {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: Args =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         match args.action.as_str() {
@@ -213,6 +213,7 @@ impl ToolOp for CodingAgent {
                 "unknown action {other:?}; one of add, drop, run, list, status"
             )),
         }
+        .map_err(ToolError::from)
     }
 }
 

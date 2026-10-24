@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use time::OffsetDateTime;
@@ -134,12 +134,12 @@ struct ScheduleTask {
 
 #[async_trait]
 impl ToolOp for ScheduleTask {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: ScheduleArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let prompt = args.prompt.trim();
         if prompt.is_empty() {
-            return Err("prompt must not be empty".to_owned());
+            return Err("prompt must not be empty".to_owned().into());
         }
         // A blank session reads as unset, and only a resident key can be
         // woken: the delivery target must be a session the resident
@@ -153,7 +153,8 @@ impl ToolOp for ScheduleTask {
             if !is_resident_key(session) {
                 return Err(format!(
                     "session must be a resident key (interactive:, task:, or phone:), got {session:?}"
-                ));
+                )
+                .into());
             }
         }
         let record = match (args.at, args.every_secs) {
@@ -165,7 +166,7 @@ impl ToolOp for ScheduleTask {
             }
             (None, Some(every_secs)) => {
                 if every_secs == 0 {
-                    return Err("every_secs must be at least 1".to_owned());
+                    return Err("every_secs must be at least 1".to_owned().into());
                 }
                 let interval = every_secs
                     .checked_mul(1000)
@@ -176,10 +177,12 @@ impl ToolOp for ScheduleTask {
                     .map_err(|err| err.to_string())?
             }
             (Some(_), Some(_)) => {
-                return Err("set exactly one of `at` or `every_secs`, not both".to_owned());
+                return Err("set exactly one of `at` or `every_secs`, not both"
+                    .to_owned()
+                    .into());
             }
             (None, None) => {
-                return Err("set one of `at` or `every_secs`".to_owned());
+                return Err("set one of `at` or `every_secs`".to_owned().into());
             }
         };
         Ok(json!({
@@ -200,7 +203,7 @@ struct ListTasks {
 
 #[async_trait]
 impl ToolOp for ListTasks {
-    async fn invoke(&self, _args: Value) -> Result<String, String> {
+    async fn invoke(&self, _args: Value) -> Result<String, ToolError> {
         let tasks = self.store.list().map_err(|err| err.to_string())?;
         Ok(json!({ "tasks": tasks }).to_string())
     }
@@ -213,7 +216,7 @@ struct CancelTask {
 
 #[async_trait]
 impl ToolOp for CancelTask {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: CancelArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let removed = self.store.remove(args.id).map_err(|err| err.to_string())?;

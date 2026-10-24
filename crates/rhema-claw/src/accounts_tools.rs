@@ -29,7 +29,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
 use rhema_identity::{Account, AccountDraft, IdentityStore, Secret, SecretKind};
 use serde::Deserialize;
@@ -166,7 +166,7 @@ pub fn forget_account(
 
 #[async_trait]
 impl ToolOp for IdentitySave {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: SaveArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let kind = parse_kind(args.secret_kind.as_deref())?;
@@ -204,7 +204,7 @@ struct IdentityList {
 
 #[async_trait]
 impl ToolOp for IdentityList {
-    async fn invoke(&self, _args: Value) -> Result<String, String> {
+    async fn invoke(&self, _args: Value) -> Result<String, ToolError> {
         let accounts = self.accounts.list().map_err(|err| err.to_string())?;
         Ok(json!({ "accounts": accounts }).to_string())
     }
@@ -225,7 +225,7 @@ struct ForgetArgs {
 
 #[async_trait]
 impl ToolOp for IdentityForget {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: ForgetArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let (forgot, watches_removed) =
@@ -593,7 +593,7 @@ mod tests {
         )
     }
 
-    fn call(tool: &dyn ToolOp, args: Value) -> Result<String, String> {
+    fn call(tool: &dyn ToolOp, args: Value) -> Result<String, ToolError> {
         futures_block_on(tool.invoke(args))
     }
 
@@ -745,7 +745,7 @@ mod tests {
             }),
         )
         .expect_err("rejected");
-        assert!(err.contains("unknown secret_kind"), "{err}");
+        assert!(err.message().contains("unknown secret_kind"), "{err}");
     }
 
     /// The use half of the accounts: the command runs with the

@@ -883,7 +883,10 @@ mod tests {
             _req: rhema_core::ModelRequest,
             _sink: &mut dyn EventSink,
         ) -> Result<rhema_core::ModelOutput, rhema_core::ProviderError> {
-            Err(rhema_core::ProviderError::Api("never called".into()))
+            Err(rhema_core::ProviderError::Api {
+                message: "never called".to_owned(),
+                status: None,
+            })
         }
     }
 

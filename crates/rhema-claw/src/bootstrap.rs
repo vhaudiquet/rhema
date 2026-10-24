@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rhema_agent_tools::render_template;
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use rhema_core::ToolSpec;
 use serde_json::{Value, json};
 
@@ -253,7 +253,7 @@ pub struct BootstrapSave {
 
 #[async_trait]
 impl ToolOp for BootstrapSave {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: SaveArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let kind = BootstrapKind::parse(&args.kind)

@@ -38,6 +38,31 @@ use rhema_provider_openrouter::OpenRouterProvider;
 use rhema_provider::ModelCard;
 use serde::{Deserialize, Serialize};
 
+/// Why a registry operation or a backend construction failed: an id or
+/// kind that names nothing, a change that would leave the registry
+/// empty, or a keyed provider constructed without its credential.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BackendError {
+    /// The id names no backend the registry holds.
+    #[error("unknown provider backend {0:?}")]
+    UnknownBackend(String),
+    /// Removing it would empty the registry, and handlers never face an
+    /// absent backend.
+    #[error("cannot remove the last provider backend")]
+    LastBackend,
+    /// No provider was constructible at boot: no credential resolved
+    /// for any keyed kind.
+    #[error("no provider backend is constructible: no key resolved for any provider")]
+    EmptyRegistry,
+    /// The kind names no adapter (`mock` is registry-injected, never
+    /// constructed).
+    #[error("unknown provider kind {0:?}")]
+    UnknownKind(String),
+    /// The kind is keyed and the params carry no usable `api_key`.
+    #[error("{0} needs an api_key")]
+    MissingKey(String),
+}
+
 /// The default model per backend kind, when neither the operator nor the
 /// settings store names one.
 pub fn default_model_for(kind: &str) -> &'static str {
@@ -128,11 +153,9 @@ impl BackendRegistry {
     pub fn new(
         backends: Vec<Backend>,
         seed: Option<(String, Option<String>)>,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, BackendError> {
         if backends.is_empty() {
-            return Err(
-                "no provider backend is constructible: no key resolved for any provider".to_owned(),
-            );
+            return Err(BackendError::EmptyRegistry);
         }
         let map: BTreeMap<String, Arc<Backend>> = backends
             .into_iter()
@@ -179,14 +202,14 @@ impl BackendRegistry {
     /// When the removed instance was active, the first remaining
     /// backend (ascending) takes over with its default model — the
     /// caller re-persists the pair it reads back from [`Self::active`].
-    pub fn remove(&self, id: &str) -> Result<(), String> {
+    pub fn remove(&self, id: &str) -> Result<(), BackendError> {
         let mut backends = self.backends_lock();
         if backends.len() == 1 && backends.contains_key(id) {
-            return Err("cannot remove the last provider backend".to_owned());
+            return Err(BackendError::LastBackend);
         }
         let removed_was_active = self.active_lock().id == id;
         if backends.remove(id).is_none() {
-            return Err(format!("unknown provider backend {id:?}"));
+            return Err(BackendError::UnknownBackend(id.to_owned()));
         }
         if removed_was_active {
             let first = backends.values().next().expect("a backend remains");
@@ -213,12 +236,12 @@ impl BackendRegistry {
 
     /// Switches the active pair. An unknown instance id is an error; a
     /// model left unset falls back to that instance's default.
-    pub fn set_active(&self, id: &str, model: Option<&str>) -> Result<(), String> {
+    pub fn set_active(&self, id: &str, model: Option<&str>) -> Result<(), BackendError> {
         let default = {
             let backends = self.backends_lock();
             let backend = backends
                 .get(id)
-                .ok_or_else(|| format!("unknown provider backend {id:?}"))?;
+                .ok_or_else(|| BackendError::UnknownBackend(id.to_owned()))?;
             backend.default_model.clone()
         };
         let model = model.map(str::to_owned).unwrap_or_else(|| default);
@@ -297,9 +320,7 @@ pub enum AnyProvider {
 }
 
 impl AnyProvider {
-    /// The kind's live model listing. Llama servers list their own
-    /// `LlamaModel` rows, which carry ids only: mapped into the shared
-    /// card shape with nothing but the id filled.
+    /// The kind's live model listing, in the shared card shape.
     pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         match self {
             AnyProvider::Google(provider) => provider.list_models().await,
@@ -309,21 +330,7 @@ impl AnyProvider {
             AnyProvider::DeepSeek(provider) => provider.list_models().await,
             AnyProvider::Zai(provider) => provider.list_models().await,
             AnyProvider::Copilot(provider) => provider.list_models().await,
-            AnyProvider::LlamaCpp(provider) => {
-                let models = provider.list_models().await?;
-                Ok(models
-                    .into_iter()
-                    .map(|model| ModelCard {
-                        display_name: model.id.clone(),
-                        id: model.id,
-                        description: String::new(),
-                        input_token_limit: model.context_length,
-                        output_token_limit: None,
-                        generation_methods: vec!["generateContent".to_owned()],
-                        pricing: None,
-                    })
-                    .collect())
-            }
+            AnyProvider::LlamaCpp(provider) => provider.list_models().await,
         }
     }
 
@@ -472,7 +479,7 @@ pub fn param_fields_for(kind: &str) -> &'static [ParamField] {
 /// llama.cpp wants a `url` (the keyless default still applies when
 /// neither is given). Unknown kinds are an error — "mock" is
 /// registry-injected, never constructed.
-pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String> {
+pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, BackendError> {
     let provider = match kind {
         "google" => AnyProvider::Google(GoogleProvider::new(require_key(kind, params)?)),
         "anthropic" => AnyProvider::Anthropic(AnthropicProvider::new(require_key(kind, params)?)),
@@ -505,7 +512,7 @@ pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String>
             }
             AnyProvider::LlamaCpp(provider)
         }
-        _ => return Err(format!("unknown provider kind {kind:?}")),
+        _ => return Err(BackendError::UnknownKind(kind.to_owned())),
     };
     let default_model = default_model_for(kind).to_owned();
     let provider = Arc::new(provider);
@@ -522,12 +529,12 @@ pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, String>
 }
 
 /// The kind's API key, or the error the credentials route answers with.
-fn require_key(kind: &str, params: &ProviderParams) -> Result<String, String> {
+fn require_key(kind: &str, params: &ProviderParams) -> Result<String, BackendError> {
     params
         .api_key
         .clone()
         .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| format!("{kind} needs an api_key"))
+        .ok_or_else(|| BackendError::MissingKey(kind.to_owned()))
 }
 
 /// Discovers every constructible backend instance from the claw's own

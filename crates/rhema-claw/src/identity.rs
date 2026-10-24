@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -250,9 +250,9 @@ struct IdentitySet {
 
 #[async_trait]
 impl ToolOp for IdentitySet {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         if !args.is_object() {
-            return Err("bad arguments: expected an object".to_owned());
+            return Err("bad arguments: expected an object".to_owned().into());
         }
         // The texts save whole, so an argument the call omits must carry
         // the stored value forward — the same absent-means-keep rule the
@@ -286,7 +286,7 @@ impl ToolOp for IdentitySet {
                 clears.push(match name {
                     "avatar" => ImageKind::Avatar,
                     "logo" => ImageKind::Logo,
-                    other => return Err(format!("unknown image {other:?}")),
+                    other => return Err(format!("unknown image {other:?}").into()),
                 });
             }
         }

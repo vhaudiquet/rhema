@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
+use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -399,12 +399,12 @@ struct AskSecretArgs {
 
 #[async_trait]
 impl ToolOp for AskSecret {
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         let args: AskSecretArgs =
             serde_json::from_value(args).map_err(|err| format!("bad arguments: {err}"))?;
         let service = args.service.trim();
         if service.is_empty() {
-            return Err("service must not be empty".to_owned());
+            return Err("service must not be empty".to_owned().into());
         }
         // Validate the kind spelling before the card exists: a typo'd
         // enum must fail the call, not the human's answer.

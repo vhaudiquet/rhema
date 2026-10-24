@@ -197,7 +197,7 @@ impl InteractiveHandler {
     /// shell (approval v1-permissive — the shell is the point of a
     /// resident coding agent — installed once, since resolution is
     /// synchronous within a turn), memory, and `bootstrap_save`.
-    #[allow(clippy::too_many_arguments)] // nine parts, each load-bearing
+    #[expect(clippy::too_many_arguments, reason = "nine parts, each load-bearing")]
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -670,7 +670,10 @@ mod tests {
     /// The standard extension set over the tests' throwaway stores —
     /// the same chain the daemon assembles, built per test so each
     /// assertion runs against its own tables.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one store per table, per test: each assertion gets its own"
+    )]
     fn test_extensions(
         hub: Arc<EventHub>,
         watches: Arc<ClawStore>,
@@ -800,7 +803,11 @@ mod tests {
             );
             let key = Key::from("interactive:web");
             let agent = handler.agent(&key).expect("the agent builds");
-            assert_eq!(agent.system().contains("zoom"), on, "on={on}");
+            assert_eq!(
+                agent.system().is_some_and(|prompt| prompt.contains("zoom")),
+                on,
+                "on={on}"
+            );
             assert_eq!(handler.transcript_mirror.is_some(), on, "on={on}");
         }
     }

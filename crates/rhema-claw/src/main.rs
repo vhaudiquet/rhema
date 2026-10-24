@@ -145,7 +145,7 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
             .as_ref()
             .and_then(|store| {
                 store
-                    .get_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)
+                    .rows_by_prefix(rhema_claw::backends::PROVIDER_KEY_PREFIX)
                     .ok()
             })
             .unwrap_or_default()
@@ -178,6 +178,7 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
         .map(|kind| (kind.to_owned(), config.model.clone()))
         .or_else(|| rhema_claw::backends::credential_seed(&backends));
     Ok(Arc::new(
-        rhema_claw::BackendRegistry::new(backends, seed).map_err(ClawError::Backend)?,
+        rhema_claw::BackendRegistry::new(backends, seed)
+            .map_err(|err| ClawError::Backend(err.to_string()))?,
     ))
 }

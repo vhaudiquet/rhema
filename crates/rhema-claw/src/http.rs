@@ -114,7 +114,10 @@ impl ClawState {
     /// store, the consent table, the attachment store, and the
     /// configured bearers — the human `token` and the scoped
     /// `agent_token`.
-    #[allow(clippy::too_many_arguments)] // seventeen parts, each load-bearing
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "seventeen parts, each load-bearing"
+    )]
     pub fn new(
         dispatcher: Arc<Dispatcher>,
         driver: Arc<Driver>,
@@ -746,7 +749,11 @@ async fn watches_add(State(state): State<ClawState>, Json(body): Json<WatchBody>
             .into_response();
     };
     if let Err(reason) = validate_watch(kind, &body.repo, body.host.as_deref()) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": reason}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": reason.to_string()})),
+        )
+            .into_response();
     }
     let added = match state.watches.add(
         kind.name(),
@@ -1099,7 +1106,7 @@ async fn phone_command_result(
     Path(id): Path<String>,
     Json(body): Json<PhoneCommandResult>,
 ) -> Response {
-    let command = match state.phone.get_command(&id) {
+    let command = match state.phone.command_by_id(&id) {
         Ok(Some(command)) => command,
         Ok(None) => {
             return (
@@ -1760,7 +1767,10 @@ async fn providers_active(
     };
     let model = body["model"].as_str();
     if let Err(reason) = state.backends().set_active(provider, model) {
-        return Err((StatusCode::BAD_REQUEST, Json(json!({"error": reason}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": reason.to_string()})),
+        ));
     }
     state
         .settings()

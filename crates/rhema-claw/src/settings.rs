@@ -73,7 +73,7 @@ impl SettingsStore {
 
     /// Every `(key, value)` whose key starts with `prefix`, ascending
     /// by key — discovery's view of the stored provider rows.
-    pub fn get_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, SettingsError> {
+    pub fn rows_by_prefix(&self, prefix: &str) -> Result<Vec<(String, String)>, SettingsError> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
         let mut statement = conn
             .prepare("SELECT key, value FROM settings WHERE key LIKE (?1 || '%') ORDER BY key")
