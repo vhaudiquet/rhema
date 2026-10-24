@@ -41,3 +41,6 @@ rhema-agent-tools = { path = "../rhema-agent-tools", features = ["local-shell"] 
 rhema-coding-agent = { path = "../rhema-coding-agent", features = ["local-shell"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tempfile = "3"
+
+[lints]
+workspace = true

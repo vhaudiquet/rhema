@@ -31,3 +31,6 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 # In-process HTTP mock for offline SSE tests
 wiremock = "0.6"
+
+[lints]
+workspace = true

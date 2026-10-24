@@ -48,7 +48,6 @@
 //! crate owns no storage. Conversation topology (forks, per-session
 //! agent beyond this config) waits for a product shape that wants it.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod assembly;
 pub mod config;

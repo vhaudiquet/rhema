@@ -376,7 +376,10 @@ async fn seeded_skills_reach_the_prompt_without_a_filesystem() {
             Arc::new(ShellSandbox::new(sandbox)),
         )
         .unwrap();
-    assert!(agent.system().contains("deploy"), "{}", agent.system());
+    let prompt = agent
+        .system()
+        .expect("the assembled agent carries a system prompt");
+    assert!(prompt.contains("deploy"), "{prompt}");
     // The model id the assembly carried is the one the requests use.
     assert_eq!(
         ChatParams::new("claude-sonnet-4-5").model,

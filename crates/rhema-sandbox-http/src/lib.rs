@@ -14,7 +14,6 @@
 //! `AnthropicProvider` precedent. reqwest is a native-only dependency,
 //! absent from the wasm build even with the feature on.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

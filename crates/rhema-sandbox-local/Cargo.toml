@@ -22,3 +22,6 @@ tokio = { workspace = true, features = ["process", "io-util", "time", "fs"] }
 # The tests run on the test runtime, against throwaway host directories
 tokio = { workspace = true }
 tempfile = "3"
+
+[lints]
+workspace = true

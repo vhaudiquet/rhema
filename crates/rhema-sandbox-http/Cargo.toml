@@ -41,3 +41,6 @@ reqwest = { version = "0.12", default-features = false, features = [
 # HTTP/1.1 replies, so the test pins the wire, not a framework's
 # reading of it
 tokio = { workspace = true, features = ["io-util", "net", "sync"] }
+
+[lints]
+workspace = true

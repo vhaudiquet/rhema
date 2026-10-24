@@ -30,3 +30,6 @@ tokio = { workspace = true, features = ["time"] }
 # The login-flow tests run on the test runtime; start_paused (test-util)
 # drives the retry ladder's sleeps virtually.
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+
+[lints]
+workspace = true

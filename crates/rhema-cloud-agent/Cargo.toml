@@ -44,3 +44,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 [[test]]
 name = "e2e"
 required-features = ["mock"]
+
+[lints]
+workspace = true

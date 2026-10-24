@@ -24,3 +24,6 @@ tokio = { workspace = true, features = ["process", "io-util", "time"] }
 tokio = { workspace = true }
 # The tests stage remote trees in throwaway directories
 tempfile = "3"
+
+[lints]
+workspace = true

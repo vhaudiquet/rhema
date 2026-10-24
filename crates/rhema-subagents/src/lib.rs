@@ -41,7 +41,6 @@
 //! `general-purpose`, the delegation every agent gets, shadowed by a
 //! definition of the same name.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod def;
 pub mod registry;

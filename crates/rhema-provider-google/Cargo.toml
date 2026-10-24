@@ -25,3 +25,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 # In-process HTTP mock for offline SSE tests
 wiremock = "0.6"
 tempfile = "3"
+
+[lints]
+workspace = true

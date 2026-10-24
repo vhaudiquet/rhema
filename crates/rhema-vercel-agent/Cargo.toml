@@ -60,3 +60,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 [[bin]]
 name = "rhema-vercel-agent"
 path = "src/main.rs"
+
+[lints]
+workspace = true

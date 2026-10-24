@@ -32,7 +32,6 @@
 //! protocol v1, the stable baseline every current client implements.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod backend;
 pub mod serve;

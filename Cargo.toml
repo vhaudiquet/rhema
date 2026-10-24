@@ -13,6 +13,9 @@ license = "MIT"
 repository = "https://github.com/vhaudiquet/rhema"
 authors = ["Valentin Haudiquet"]
 
+[workspace.lints.rust]
+missing_docs = "deny"
+
 [workspace.dependencies]
 # Serialization: session and message types must round-trip for checkpointing
 serde = { version = "1.0", features = ["derive"] }

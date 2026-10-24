@@ -13,7 +13,6 @@
 //! no local root to resolve against, so the model-influenced paths are
 //! guarded textually by `check_remote_path` (`exec_util`).
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

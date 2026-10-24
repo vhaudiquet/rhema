@@ -42,3 +42,6 @@ time = { version = "0.3", default-features = false, features = [
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 # In-process HTTP mocks for offline tests
 wiremock = "0.6"
+
+[lints]
+workspace = true

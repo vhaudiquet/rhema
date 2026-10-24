@@ -38,3 +38,6 @@ local-shell = ["dep:tokio"]
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

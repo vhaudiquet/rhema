@@ -27,3 +27,6 @@ tokio = { workspace = true, features = ["sync", "time"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 # In-process HTTP mock for offline SSE and device-flow tests
 wiremock = "0.6"
+
+[lints]
+workspace = true
