@@ -737,6 +737,11 @@ pub struct App {
     pub models: Vec<crate::screens::CatalogModel>,
     /// The agent; `None` while a turn runs (the turn task owns it).
     pub agent: Option<CodingAgent>,
+    /// The subagent job registry the current agent's tool resolver
+    /// starts jobs into — the wire's handle, replaced at every agent
+    /// rebuild, exactly when the old registry dies with its agent. The
+    /// status strip renders one live line per job from it.
+    pub subagents: Option<rhema_subagents::SubagentHandle>,
     /// The turn lifecycle: what the keyboard, the renderer, and the
     /// status tracker need while the agent is out with a task.
     pub turn: TurnState,
@@ -829,37 +834,6 @@ pub struct TurnState {
     /// preview stays hidden until the command has earned it — a second
     /// of runtime or a second line.
     pub tool_output_at: Option<std::time::Instant>,
-    /// The running `subagent` call's live line, when one works: its
-    /// phase, context, and spend as the call reports them.
-    /// Screen-facing only — the transcript's tool rows and the session
-    /// history never read it.
-    pub subagent: Option<SubagentLive>,
-}
-
-/// The live line for one running `subagent` call: opened by the call's
-/// first `ToolStatus`, replaced by its later ones, closed by its result.
-#[derive(Debug)]
-pub struct SubagentLive {
-    /// The call's correlation id.
-    pub id: String,
-    /// The subagent's name, read off the call's streamed arguments;
-    /// `None` while they have not reached the `name` field yet.
-    pub name: Option<String>,
-    /// The phase the subagent last reported ("thinking", "running").
-    pub phase: String,
-    /// The subagent's current model call's usage — the figure its
-    /// context gauge sizes against its model's window — when it reports
-    /// one.
-    pub context: Option<Usage>,
-    /// The subagent's cumulative token spend across its model calls —
-    /// the figure its cost prices — when it reports one.
-    pub spent: Option<Usage>,
-    /// The model the subagent runs on, when it reports one — the
-    /// catalog id its window and pricing are looked up by.
-    pub model: Option<String>,
-    /// When the subagent started working: the clock its elapsed time
-    /// reads.
-    pub started_at: std::time::Instant,
 }
 
 impl TurnState {
@@ -876,7 +850,6 @@ impl TurnState {
             thinking: String::new(),
             tool_output: String::new(),
             tool_output_at: None,
-            subagent: None,
         }
     }
 
@@ -907,7 +880,6 @@ impl TurnState {
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
-        self.subagent = None;
     }
 
     /// Answers the pending approval and clears the modal; without a
@@ -979,6 +951,7 @@ impl App {
         // The settings that apply to this session's profile are computed
         // on demand (they change when the model switches or a login lands).
         let mut agent = None;
+        let mut subagents_handle = None;
         // Startup reads straight off the config: App::effective exists on
         // the struct, which does not exist yet.
         let effective = setup.config.effective(setup.options.profile.as_deref());
@@ -989,7 +962,7 @@ impl App {
                     .as_ref()
                     .map(Backend::provider)
                     .ok_or(AgentError::MissingProvider)?;
-                let agent_config = session_agent_config(
+                let (agent_config, subagents) = session_agent_config(
                     &setup.options,
                     setup.sandboxed.as_ref(),
                     effective.model.clone(),
@@ -1000,6 +973,7 @@ impl App {
                     agent_config,
                     session.clone(),
                 )?);
+                subagents_handle = Some(subagents);
                 Screen::Chat
             }
             (Some(_), None) => Screen::Picker(PickerScreen {
@@ -1057,6 +1031,7 @@ impl App {
             screen,
             models: Vec::new(),
             agent,
+            subagents: subagents_handle,
             turn: TurnState::idle(),
             transcript,
             usage: None,
@@ -1220,7 +1195,10 @@ impl App {
         if let Some(agent) = self.agent.take() {
             let session = agent.session().clone();
             match self.build_agent(session) {
-                Ok(rebuilt) => self.agent = Some(rebuilt),
+                Ok((rebuilt, subagents)) => {
+                    self.agent = Some(rebuilt);
+                    self.subagents = Some(subagents);
+                }
                 Err(err) => {
                     self.error = Some(err.to_string());
                     return;
@@ -1520,7 +1498,7 @@ impl App {
         // The session's sandbox survives the profile switch: where
         // `bash` runs is this session's machine choice until the picker
         // says otherwise, even when the profile it rides on changes.
-        let agent_config = session_agent_config(
+        let (agent_config, subagents) = session_agent_config(
             &self.options,
             self.sandboxed.as_ref(),
             effective.model.clone(),
@@ -1533,6 +1511,7 @@ impl App {
                 self.provider = Some(backend.provider());
                 self.models.clear();
                 self.agent = Some(agent);
+                self.subagents = Some(subagents);
                 self.screen = Screen::Chat;
                 // An explicit switch is a choice: recorded for this
                 // workspace now, not at the next turn.
@@ -1577,7 +1556,10 @@ impl App {
         if let Some(agent) = self.agent.take() {
             let session = agent.session().clone();
             match self.build_agent(session) {
-                Ok(rebuilt) => self.agent = Some(rebuilt),
+                Ok((rebuilt, subagents)) => {
+                    self.agent = Some(rebuilt);
+                    self.subagents = Some(subagents);
+                }
                 Err(err) => {
                     self.error = Some(err.to_string());
                     return;
@@ -1669,8 +1651,8 @@ impl App {
                 return;
             }
         };
-        let agent = match self.build_agent(session.clone()) {
-            Ok(agent) => agent,
+        let (agent, subagents) = match self.build_agent(session.clone()) {
+            Ok(built) => built,
             Err(err) => {
                 self.error = Some(err.to_string());
                 return;
@@ -1679,6 +1661,7 @@ impl App {
         let messages = session.history.len();
         self.session = session;
         self.agent = Some(agent);
+        self.subagents = Some(subagents);
         self.resumed_from = Some(path.to_path_buf());
         self.transcript = Transcript::from_history(&self.session.history);
         self.usage = None;
@@ -2095,9 +2078,10 @@ impl App {
         self.provider = Some(backend.provider());
         self.backend = Some(backend);
         match self.build_agent(session) {
-            Ok(agent) => {
+            Ok((agent, subagents)) => {
                 self.session_profile = Some(tab);
                 self.agent = Some(agent);
+                self.subagents = Some(subagents);
                 if let Some(model) = effective.model {
                     self.screen = Screen::Chat;
                     self.transcript
@@ -2638,7 +2622,7 @@ impl App {
         self.backend = Some(backend.clone());
         self.provider = Some(backend.provider());
         match self.build_agent(session) {
-            Ok(agent) => {
+            Ok((agent, subagents)) => {
                 // An interactive switch — the picker opened from the chat,
                 // or a `/model <needle>` typed there — says where it
                 // landed; the login and startup auto-selects stay quiet.
@@ -2648,6 +2632,7 @@ impl App {
                         .push_notice(&format!("model switched to {provider}/{id}"));
                 }
                 self.agent = Some(agent);
+                self.subagents = Some(subagents);
                 self.screen = Screen::Chat;
                 // A new backend counts a new plan: the allowance badge
                 // fetches now, not at the first turn's end.
@@ -2661,18 +2646,26 @@ impl App {
     }
 
     /// Builds an agent over `session` with the current model and flags.
-    fn build_agent(&self, session: Session) -> Result<CodingAgent, CodingAgentError> {
+    /// The wire's registry handle rides beside the agent: a rebuilt
+    /// agent carries a fresh registry, and the UI must read that one.
+    fn build_agent(
+        &self,
+        session: Session,
+    ) -> Result<(CodingAgent, rhema_subagents::SubagentHandle), CodingAgentError> {
         let provider = self
             .provider
             .clone()
             .ok_or(CodingAgentError::Agent(AgentError::MissingProvider))?;
-        let agent_config = session_agent_config(
+        let (agent_config, subagents) = session_agent_config(
             &self.options,
             self.sandboxed.as_ref(),
             self.effective().model.clone(),
             provider.clone(),
         );
-        CodingAgent::from_session(provider, agent_config, session)
+        Ok((
+            CodingAgent::from_session(provider, agent_config, session)?,
+            subagents,
+        ))
     }
 
     /// The runner accepted a turn: a fresh lifecycle state with the
@@ -2733,59 +2726,14 @@ impl App {
                 self.turn.clear_tool_output();
             }
             OwnedEvent::ToolOutputDelta { chunk, .. } => self.turn.push_tool_output(chunk),
-            OwnedEvent::ToolStatus { id, status } => self.track_subagent(id, status),
-            OwnedEvent::ToolResult { id, .. } => {
-                if self
-                    .turn
-                    .subagent
-                    .as_ref()
-                    .is_some_and(|subagent| subagent.id == *id)
-                {
-                    // The report landed: the live line goes, the
-                    // transcript's tool row carries the outcome now.
-                    self.turn.subagent = None;
-                }
-                self.turn.clear_tool_output();
-            }
+            // A background subagent job reports through the registry
+            // (the wire's handle), not through the call's own status
+            // stream: the start call answers with its job id at once.
+            OwnedEvent::ToolStatus { .. } => {}
+            OwnedEvent::ToolResult { .. } => self.turn.clear_tool_output(),
             OwnedEvent::Usage(usage) => self.usage = Some(*usage),
             _ => {}
         }
-    }
-
-    /// Folds one streaming tool's status into the live subagent line:
-    /// the first status from a call opens it — the subagent is working,
-    /// its clock starts — and a status from another call replaces it,
-    /// the engine resolving calls one at a time. The subagent's name is
-    /// read off the transcript's streamed arguments; until they reach
-    /// the `name` field, the line reads the tool's name.
-    fn track_subagent(&mut self, id: &str, status: &rhema_core::ToolStatus) {
-        let fresh = self
-            .turn
-            .subagent
-            .as_ref()
-            .is_none_or(|subagent| subagent.id != id);
-        if fresh {
-            self.turn.subagent = Some(SubagentLive {
-                id: id.to_owned(),
-                name: self.transcript.call_name(id),
-                phase: status.phase.clone(),
-                context: status.context,
-                spent: status.spent,
-                model: status.model.clone(),
-                started_at: std::time::Instant::now(),
-            });
-            return;
-        }
-        let Some(subagent) = self.turn.subagent.as_mut() else {
-            return;
-        };
-        if subagent.name.is_none() {
-            subagent.name = self.transcript.call_name(id);
-        }
-        subagent.phase = status.phase.clone();
-        subagent.context = status.context;
-        subagent.spent = status.spent;
-        subagent.model = status.model.clone();
     }
 
     /// Cancels the running turn from the keyboard. The approval bridge
@@ -2916,6 +2864,16 @@ impl App {
             .and_then(|entry| entry.model.pricing)
     }
 
+    /// The background subagent jobs' live state, read off the wire's
+    /// registry handle: one entry per queued, running, or finished-but-
+    /// unfetched job. Empty without an agent or a wire.
+    pub(crate) fn subagent_jobs(&self) -> Vec<rhema_subagents::JobStatus> {
+        self.subagents
+            .as_ref()
+            .map(|handle| handle.status())
+            .unwrap_or_default()
+    }
+
     /// The pricing of any catalog model by id — the running subagent's
     /// model may differ from the session's, and its cost prices by its
     /// own card. An unknown id (the catalog never fetched it) prices to
@@ -2989,23 +2947,24 @@ fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfi
 /// subagents' inner shell inherits the executor
 /// (`ShellTools::executor()`), their definition discovery stays
 /// host-side — and the sandbox-side workspace path lands AFTER it.
+/// Returns the wire's handle beside the config: the registry-backed
+/// status subscription the status strip renders one live line per
+/// background subagent job from.
 fn session_agent_config(
     options: &RunOptions,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
     model: Option<String>,
     provider: Arc<dyn ModelProvider>,
-) -> CodingAgentConfig {
+) -> (CodingAgentConfig, rhema_subagents::SubagentHandle) {
     let mut config = agent_config(options, model);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_tools(&mut config);
     }
-    // The handle rides to the UI in the wire-up piece; the registry
-    // is live either way.
-    let (mut config, _subagents) = rhema_subagents::wire(provider, config);
+    let (mut config, subagents) = rhema_subagents::wire(provider, config);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_workspace(&mut config);
     }
-    config
+    (config, subagents)
 }
 
 /// The context a reported usage stands for: the whole prompt plus the
@@ -6733,5 +6692,158 @@ mod tests {
             tracker.status_for(&h.app),
             crate::status::Status::Idle
         ));
+    }
+    /// A background subagent job pins its live line off the wire's
+    /// registry: running, it spins with its name, job id, and phase;
+    /// finished-but-unfetched, it stops spinning and reads `finished`;
+    /// fetched, the line leaves. The render reads the snapshot fresh,
+    /// so the strip's reserve matches what is on screen.
+    #[tokio::test]
+    async fn a_background_subagent_job_pins_its_live_line() {
+        use rhema_core::{EventSink, ProviderError};
+        use rhema_subagents::{SubagentDef, SubagentTools};
+
+        /// Never answers: a job parked in its model stream.
+        struct Hanging;
+        /// Answers one report and ends.
+        struct Report;
+
+        #[async_trait::async_trait]
+        impl ModelProvider for Hanging {
+            async fn complete(
+                &self,
+                _req: rhema_core::ModelRequest,
+                _sink: &mut dyn EventSink,
+            ) -> Result<rhema_core::ModelOutput, ProviderError> {
+                std::future::pending().await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl ModelProvider for Report {
+            async fn complete(
+                &self,
+                _req: rhema_core::ModelRequest,
+                _sink: &mut dyn EventSink,
+            ) -> Result<rhema_core::ModelOutput, ProviderError> {
+                Ok(rhema_core::ModelOutput {
+                    message: Message::text(Role::Assistant, "the report"),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        fn start_call() -> ToolCall {
+            ToolCall {
+                id: "c1".into(),
+                name: "subagent".into(),
+                args: serde_json::json!({"name": "scout", "prompt": "look"}),
+                ..ToolCall::default()
+            }
+        }
+
+        fn fetch_call() -> ToolCall {
+            ToolCall {
+                id: "c2".into(),
+                name: "subagent".into(),
+                args: serde_json::json!({"id": "job-1"}),
+                ..ToolCall::default()
+            }
+        }
+
+        fn scout_tools(provider: Arc<dyn ModelProvider>) -> Arc<SubagentTools> {
+            let shell = Arc::new(rhema_coding_agent::ShellTools::new(std::env::temp_dir()));
+            let def = SubagentDef {
+                name: "scout".into(),
+                description: "looks around".into(),
+                model: None,
+                max_steps: None,
+                body: "Look.".into(),
+            };
+            Arc::new(SubagentTools::new(provider, vec![def], shell, "m"))
+        }
+
+        fn frame_text(app: &mut App) -> String {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 40)).unwrap();
+            terminal
+                .draw(|frame| crate::ui::render(app, frame))
+                .unwrap();
+            (0..40)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect()
+        }
+
+        let mut harness = harness(Some("key"), Some("m"), Session::default());
+
+        // A running job: the line spins with its name, id, and phase,
+        // even with no turn running — jobs outlive turns.
+        let tools = scout_tools(Arc::new(Hanging));
+        harness.app.subagents = Some(tools.handle());
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            start_call(),
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while harness
+            .app
+            .subagent_jobs()
+            .first()
+            .is_none_or(|job| job.phase == "queued")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the job never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let text = frame_text(&mut harness.app);
+        assert!(text.contains("scout (job-1)"), "{text}");
+        assert!(text.contains("thinking"), "{text}");
+
+        // Finished but unfetched: the line stops spinning and reads its
+        // state until the fetch lands.
+        let tools = scout_tools(Arc::new(Report));
+        harness.app.subagents = Some(tools.handle());
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            start_call(),
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while harness
+            .app
+            .subagent_jobs()
+            .first()
+            .is_none_or(|job| job.phase != "finished")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the job never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let text = frame_text(&mut harness.app);
+        assert!(text.contains("scout (job-1)"), "{text}");
+        assert!(text.contains("finished"), "{text}");
+
+        // The fetch retires the line.
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            fetch_call(),
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        let text = frame_text(&mut harness.app);
+        assert!(!text.contains("scout (job-1)"), "{text}");
+        assert!(harness.app.subagent_jobs().is_empty());
     }
 }

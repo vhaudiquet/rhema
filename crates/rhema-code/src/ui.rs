@@ -164,10 +164,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                         + 1
                 }
                 None if app.turn.running => {
-                    2 + u16::from(app.turn.subagent.is_some())
+                    2 + subagent_lines(app, &theme).len() as u16
                         + thinking_rows(app, frame.area().width as usize)
                 }
-                None => 1,
+                // A job outliving its turn keeps its line: jobs are
+                // bound to the agent's lifetime, not the turn's.
+                None => 1 + subagent_lines(app, &theme).len() as u16,
             };
             let input_rows = input_rows(
                 &app.chat.input,
@@ -1702,10 +1704,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     } else {
         Vec::new()
     };
-    // A working subagent pins its own line right below the spinner: the
-    // robot badge, the animated delegate, its phase, spend, and age.
-    if let Some(subagent) = &app.turn.subagent {
-        lines.push(subagent_line(app, subagent, theme));
+    // Every live subagent job pins its own line right below the
+    // spinner: the robot badge, its phase, spend, and age. The registry
+    // is the single source — a job's line lives while it works (or its
+    // report waits unfetched), whatever turn is running.
+    for subagent in subagent_lines(app, theme) {
+        lines.push(subagent);
     }
     // The live preview rides under the spinner — the reasoning trace's
     // tail, or a running command's earned output — at most three dim
@@ -1767,28 +1771,39 @@ fn cost_text(cost: f64) -> String {
     }
 }
 
-/// The pinned live line of a working subagent: the robot badge and its
-/// spinner, the delegate's name, the phase it last reported, the
-/// context its current model call carries against its model's window,
-/// the cost its cumulative spend prices to, and its age. A figure the
-/// catalog cannot price or size degrades to what is known — tokens
-/// alone, no cost.
-fn subagent_line(app: &App, subagent: &crate::app::SubagentLive, theme: &Theme) -> Line<'static> {
-    let spinner = spinner_frame(subagent.started_at.elapsed());
+/// The pinned live lines, oldest job first: one per queued, running,
+/// or finished-but-unfetched job on the wire's registry, read fresh
+/// every redraw — the strip's layout counts them and its drawing renders
+/// them, so the reserve matches what is on screen.
+fn subagent_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
+    app.subagent_jobs()
+        .iter()
+        .map(|job| subagent_line(app, job, theme))
+        .collect()
+}
+
+/// The pinned live line of one subagent job: the robot badge and its
+/// spinner, the delegate's name and job id, the phase it last reported,
+/// the context its current model call carries against its model's
+/// window, the cost its cumulative spend prices to, and its age. A
+/// figure the catalog cannot price or size degrades to what is known —
+/// tokens alone, no cost.
+fn subagent_line(app: &App, subagent: &rhema_subagents::JobStatus, theme: &Theme) -> Line<'static> {
     let mut spans = vec![
         Span::raw(format!("{} ", app.icons.robot)).fg(theme.text3),
-        Span::styled(
-            SPINNER[spinner].to_string(),
-            Style::default().fg(theme.info),
-        ),
+        // A running job animates its spinner; a finished-but-unfetched
+        // one stops spinning and reads its state — the line leaves when
+        // the fetch lands.
+        if subagent.phase == "finished" {
+            Span::raw("✓".to_owned()).fg(theme.ok)
+        } else {
+            Span::styled(
+                SPINNER[spinner_frame(subagent.started_at.elapsed())].to_string(),
+                Style::default().fg(theme.info),
+            )
+        },
         Span::raw(" "),
-        Span::raw(
-            subagent
-                .name
-                .clone()
-                .unwrap_or_else(|| "subagent".to_owned()),
-        )
-        .fg(theme.info),
+        Span::raw(format!("{} ({})", subagent.name, subagent.id)).fg(theme.info),
         Span::raw(format!(" · {}", subagent.phase)).fg(theme.running),
     ];
     // The gauge reads the current call only: summed across steps, the
@@ -3049,70 +3064,83 @@ mod scroll_tests {
         );
     }
 
-    /// A working subagent pins its live line under the spinner: the
-    /// delegate's name, its phase, its current context against the
-    /// model's window, its spend priced to cost; the result takes it
-    /// off.
-    #[test]
-    fn a_working_subagent_pins_its_line_under_the_spinner() {
+    /// A background subagent job pins its live line under the spinner,
+    /// read off the wire's registry at every redraw: running, it spins
+    /// with the delegate's name and job id and phase; finished but
+    /// unfetched, it stops spinning and reads `finished`; fetched, the
+    /// line leaves.
+    #[tokio::test]
+    async fn a_working_subagent_pins_its_line_under_the_spinner() {
+        use rhema_core::{EventSink, ProviderError};
+        use rhema_subagents::{SubagentDef, SubagentTools};
+
+        /// Never answers: a job parked in its model stream.
+        struct Hanging;
+        /// Answers one report and ends.
+        struct Report;
+
+        #[async_trait::async_trait]
+        impl rhema_core::ModelProvider for Hanging {
+            async fn complete(
+                &self,
+                _req: rhema_core::ModelRequest,
+                _sink: &mut dyn EventSink,
+            ) -> Result<rhema_core::ModelOutput, ProviderError> {
+                std::future::pending().await
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl rhema_core::ModelProvider for Report {
+            async fn complete(
+                &self,
+                _req: rhema_core::ModelRequest,
+                _sink: &mut dyn EventSink,
+            ) -> Result<rhema_core::ModelOutput, ProviderError> {
+                Ok(rhema_core::ModelOutput {
+                    message: rhema_core::Message::text(rhema_core::Role::Assistant, "the report"),
+                    stop_reason: rhema_core::StopReason::EndTurn,
+                    usage: rhema_core::Usage::default(),
+                })
+            }
+        }
+
         let mut app = chat_app();
         app.turn.running = true;
-        app.turn.processing = true;
-        // The catalog card the gauge sizes and the cost prices by.
-        app.models.push(CatalogModel {
-            provider: "google",
-            instance: None,
-            model: rhema_provider::ModelCard {
-                id: "m".into(),
-                display_name: "m".into(),
-                description: String::new(),
-                input_token_limit: Some(1_000_000),
-                output_token_limit: None,
-                generation_methods: vec!["generateContent".to_owned()],
-                pricing: Some(rhema_provider::Pricing {
-                    input_per_mtok: 1.0,
-                    output_per_mtok: 5.0,
-                    cached_input_per_mtok: None,
-                }),
-            },
-        });
-        let on = |app: &mut App, event| {
-            app.on_event(crate::events::UiEvent::Engine(event));
+        let shell = Arc::new(rhema_coding_agent::ShellTools::new(std::env::temp_dir()));
+        let def = SubagentDef {
+            name: "general-purpose".into(),
+            description: "explore".into(),
+            model: None,
+            max_steps: None,
+            body: "Explore.".into(),
         };
-        on(
-            &mut app,
-            OwnedEvent::ToolCallStart {
-                id: "c1".into(),
-                name: "subagent".into(),
-            },
-        );
-        on(
-            &mut app,
-            OwnedEvent::ToolCallArgsDelta {
-                id: "c1".into(),
-                delta: r#"{"name": "general-purpose", "prompt": "explore"}"#.into(),
-            },
-        );
-        on(
-            &mut app,
-            OwnedEvent::ToolStatus {
-                id: "c1".into(),
-                status: rhema_core::ToolStatus {
-                    phase: "writing output".into(),
-                    context: Some(rhema_core::Usage {
-                        input_tokens: 45_000,
-                        output_tokens: 500,
-                        cached_input_tokens: 0,
-                    }),
-                    spent: Some(rhema_core::Usage {
-                        input_tokens: 410_000,
-                        output_tokens: 6_000,
-                        cached_input_tokens: 0,
-                    }),
-                    model: Some("m".into()),
-                },
-            },
-        );
+        let tools = Arc::new(SubagentTools::new(Arc::new(Hanging), vec![def], shell, "m"));
+        app.subagents = Some(tools.handle());
+        let start = rhema_core::ToolCall {
+            id: "c1".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({"name": "general-purpose", "prompt": "explore"}),
+            ..rhema_core::ToolCall::default()
+        };
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            start.clone(),
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app
+            .subagent_jobs()
+            .first()
+            .is_none_or(|job| job.phase == "queued")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the job never started"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         // Wide enough that the pinned line never clips: the strip does
         // not wrap, a narrow screen would cut the figures off.
         let screen = {
@@ -3126,27 +3154,60 @@ mod scroll_tests {
                 })
                 .collect::<String>()
         };
-        assert!(screen.contains("general-purpose"), "{screen}");
-        assert!(screen.contains("writing output"), "{screen}");
-        // The gauge reads the current call's context, sized by the
-        // model's window.
-        assert!(screen.contains("45k/1.0M"), "{screen}");
-        // The cost prices the cumulative spend, not the context.
-        assert!(screen.contains("$0.44"), "{screen}");
-        assert!(screen.contains("0s"), "{screen}");
+        assert!(screen.contains("general-purpose (job-1)"), "{screen}");
+        assert!(screen.contains("thinking"), "{screen}");
 
-        // The report landed: the live line goes, nothing pinned.
-        on(
-            &mut app,
-            OwnedEvent::ToolResult {
-                id: "c1".into(),
-                content: "done".into(),
-                is_error: false,
-                code: None,
-            },
-        );
+        // Finished but unfetched: the line stays, stopped, reading its
+        // state.
+        let tools = {
+            let shell = Arc::new(rhema_coding_agent::ShellTools::new(std::env::temp_dir()));
+            let def = SubagentDef {
+                name: "general-purpose".into(),
+                description: "explore".into(),
+                model: None,
+                max_steps: None,
+                body: "Explore.".into(),
+            };
+            Arc::new(SubagentTools::new(Arc::new(Report), vec![def], shell, "m"))
+        };
+        app.subagents = Some(tools.handle());
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            start,
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app
+            .subagent_jobs()
+            .first()
+            .is_none_or(|job| job.phase != "finished")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the job never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         let screen = screen_text(&mut app);
-        assert!(!screen.contains("writing output"), "{screen}");
+        assert!(screen.contains("general-purpose (job-1)"), "{screen}");
+        assert!(screen.contains("finished"), "{screen}");
+
+        // The fetch retires the line: nothing pinned.
+        let fetch = rhema_core::ToolCall {
+            id: "c2".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({"id": "job-1"}),
+            ..rhema_core::ToolCall::default()
+        };
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            fetch,
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        let screen = screen_text(&mut app);
+        assert!(!screen.contains("general-purpose (job-1)"), "{screen}");
     }
 
     /// A subagent call's transcript row reads as delegation: the robot
