@@ -716,18 +716,24 @@ impl ChunkAssembler {
     /// Feeds one chunk, emitting its streaming events. Fails with
     /// [`ProviderError::Api`] when the chunk is OpenRouter's mid-stream
     /// error object.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Api`] (no status) when the chunk is
+    /// the server's mid-stream error.
     pub fn push(
         &mut self,
         chunk: ChatCompletionChunk,
         sink: &mut dyn EventSink,
     ) -> Result<(), ProviderError> {
         if let Some(error) = &chunk.error {
-            return Err(ProviderError::Api(
-                error
+            return Err(ProviderError::Api {
+                message: error
                     .message
                     .clone()
                     .unwrap_or_else(|| "mid-stream error".to_owned()),
-            ));
+                status: None,
+            });
         }
         if let Some(usage) = chunk.usage {
             self.usage = Usage {
@@ -1525,7 +1531,10 @@ mod tests {
             .expect_err("mid-stream error is an error");
         assert_eq!(
             err,
-            ProviderError::Api("Provider disconnected unexpectedly".into())
+            ProviderError::Api {
+                message: "Provider disconnected unexpectedly".into(),
+                status: None,
+            }
         );
         assert!(sink.0.is_empty());
 
@@ -1535,7 +1544,13 @@ mod tests {
         let err = assembler
             .push(chunk("{\"error\":{}}"), &mut sink)
             .expect_err("unshaped error is still an error");
-        assert_eq!(err, ProviderError::Api("mid-stream error".into()));
+        assert_eq!(
+            err,
+            ProviderError::Api {
+                message: "mid-stream error".into(),
+                status: None,
+            }
+        );
     }
 
     #[test]

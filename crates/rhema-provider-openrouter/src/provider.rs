@@ -51,6 +51,7 @@ const DONE_SENTINEL: &str = "[DONE]";
 const MODELS_PAGE_LIMIT: u32 = 1000;
 
 /// OpenRouter backend, speaking its OpenAI-compatible chat-completions API.
+#[derive(Debug)]
 pub struct OpenRouterProvider {
     base_url: String,
     api_key: String,
@@ -112,10 +113,10 @@ impl OpenRouterProvider {
                 let text = response.text().await.unwrap_or_default();
                 return Err(api_error(status, &text));
             }
-            let page: WireModelsPage = response
-                .json()
-                .await
-                .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
+            let page: WireModelsPage = response.json().await.map_err(|err| ProviderError::Api {
+                message: format!("malformed models page: {err}"),
+                status: None,
+            })?;
             // Linked before the models move out of the page.
             let more = page.next_page();
             let fetched = page.data.len();
@@ -137,8 +138,10 @@ impl OpenRouterProvider {
     pub async fn allowance(&self) -> Result<Allowance, ProviderError> {
         let credits: WireCredits = self.get_json("/credits").await?;
         let key: WireKey = self.get_json("/auth/key").await?;
-        crate::wire::allowance(&credits, &key)
-            .ok_or_else(|| ProviderError::Api("credit response carries no total".to_owned()))
+        crate::wire::allowance(&credits, &key).ok_or_else(|| ProviderError::Api {
+            message: "credit response carries no total".to_owned(),
+            status: None,
+        })
     }
 
     /// GETs one authenticated JSON body off the base URL, under the
@@ -157,10 +160,10 @@ impl OpenRouterProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(api_error(status, &text));
         }
-        response
-            .json()
-            .await
-            .map_err(|err| ProviderError::Api(format!("malformed {path} response: {err}")))
+        response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed {path} response: {err}"),
+            status: None,
+        })
     }
 }
 
@@ -184,14 +187,18 @@ impl Attributed for reqwest::RequestBuilder {
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the OpenRouter
-/// error shape's `error.message` when the body has it.
+/// error shape's `error.message` when the body has it, and carrying the
+/// HTTP status structurally for [`ProviderError::is_retryable`].
 fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
-    ProviderError::Api(format!(
-        "openrouter api error (HTTP {}): {}",
-        status.as_u16(),
-        parsed.message(raw)
-    ))
+    ProviderError::Api {
+        message: format!(
+            "openrouter api error (HTTP {}): {}",
+            status.as_u16(),
+            parsed.message(raw)
+        ),
+        status: Some(status.as_u16()),
+    }
 }
 
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
@@ -200,7 +207,7 @@ fn network_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Other(format!("network error: {err}"))
+        ProviderError::Network(err.to_string())
     }
 }
 
@@ -214,13 +221,22 @@ fn feed_chunk(
     if payload.trim().is_empty() {
         return Ok(());
     }
-    let chunk: ChatCompletionChunk = serde_json::from_str(payload)
-        .map_err(|err| ProviderError::Api(format!("malformed SSE chunk: {err}")))?;
+    let chunk: ChatCompletionChunk =
+        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
+            message: format!("malformed SSE chunk: {err}"),
+            status: None,
+        })?;
     assembler.push(chunk, sink)
 }
 
 #[async_trait]
 impl ModelProvider for OpenRouterProvider {
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport fails, [`ProviderError::Api`] with the HTTP
+    /// status on a non-2xx response, and [`ProviderError::Api`] without
+    /// one on a malformed stream chunk or a mid-stream error chunk.
     async fn complete(
         &self,
         req: ModelRequest,
