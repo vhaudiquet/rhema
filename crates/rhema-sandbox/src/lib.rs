@@ -1,12 +1,35 @@
-//! The sandbox seam: the Linux workspace the `bash` tool runs in.
+//! rhema-sandbox — the sandbox seam: the `Sandbox` contract, the
+//! workspace `bash` runs in, and the `ShellSandbox` adapter.
 //!
-//! In the cloud deployment this is a Cloudflare Sandbox — a container
-//! bound to the session's Durable Object, persisted across turns and
-//! idle sleeps. Tests run the same seam against a scripted fake. The
-//! trait is object-safe and async, with `Send` futures like every seam
-//! in this tree, and carries no wasm-bindgen, fetch, or `worker`
-//! dependency: the platform lives in the `worker` module's transport,
-//! not here.
+//! One seam any frontend can aim at any machine — the host, a
+//! container, a VM, a box over SSH, a cloud sandbox — chosen by
+//! configuration, never by which crate a frontend was born in. The
+//! family mirrors the provider family: the contract and the shared
+//! machinery in one crate, one adapter per backend beside it; the
+//! backends (`local`, `client`, `server`) land feature-gated in their
+//! own phases, and the scripted mock rides the `mock` feature so tests
+//! run the same seam against a fake. In the cloud deployment the seam
+//! is a Cloudflare Sandbox — a container bound to the session's
+//! Durable Object, persisted across turns and idle sleeps.
+//!
+//! The trait is object-safe and async, with `Send` futures like every
+//! seam in this tree, and carries no platform dependency — no
+//! wasm-bindgen, no fetch, no `worker`: the platform lives in the
+//! transport that wraps it, not here. [`ShellSandbox`] adapts the seam
+//! onto [`ShellExecutor`](rhema_agent_tools::ShellExecutor), so the
+//! `bash` tool the model sees is unchanged wherever commands run.
+//!
+//! During the transition `rhema-cloud-agent` re-exports these names so
+//! its public surface does not churn; new consumers import them from
+//! here.
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+pub mod adapter;
+#[cfg(feature = "mock")]
+pub mod mock;
+
+pub use adapter::ShellSandbox;
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

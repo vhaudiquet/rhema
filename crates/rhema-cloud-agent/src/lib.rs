@@ -19,6 +19,17 @@
 //! keeps durable bytes (a DO meta table, a Postgres row) and hand it
 //! to the assembly.
 //!
+//! # The sandbox seam
+//!
+//! The [`Sandbox`] contract, its request and outcome types, and
+//! [`ShellSandbox`] live in
+//! [`rhema-sandbox`](../rhema-sandbox), extracted so any frontend can
+//! reach the seam without being born in this crate. This crate
+//! re-exports them so its public surface does not churn while callers
+//! migrate; the re-exports go once every caller imports the seam crate
+//! directly (`ScriptedSandbox`, the seam's offline test double, rides
+//! along under the `mock` feature).
+//!
 //! # Module hygiene
 //!
 //! No platform dependency enters this crate: no wasm-bindgen, no
@@ -42,16 +53,19 @@
 pub mod assembly;
 pub mod config;
 pub mod gate;
-pub mod sandbox;
-pub mod shell;
 pub mod wire;
-
-#[cfg(feature = "mock")]
-pub mod mock;
 
 pub use assembly::{AgentAssembly, ApprovalPolicy, PolicyApproval};
 pub use config::{SessionConfig, SkillSeed};
 pub use gate::{ApprovalChannel, ClientGate};
-pub use sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
-pub use shell::ShellSandbox;
+// The sandbox seam lives in rhema-sandbox; re-exported so this crate's
+// public surface does not churn during the transition.
+pub use rhema_sandbox::{
+    ExecOutcome, ExecRequest, Sandbox, SandboxError, ShellSandbox, WorkspaceSeed,
+};
 pub use wire::{ClientMessage, ServerMessage};
+
+#[cfg(feature = "mock")]
+pub use rhema_sandbox::mock;
+#[cfg(feature = "mock")]
+pub use rhema_sandbox::mock::ScriptedSandbox;

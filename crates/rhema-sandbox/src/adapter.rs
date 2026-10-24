@@ -16,7 +16,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rhema_agent_tools::exec::{Executed, ShellError, ShellExecutor};
 
-use crate::sandbox::{ExecRequest, Sandbox, SandboxError};
+use crate::{ExecRequest, Sandbox, SandboxError};
 
 /// The shell executor that runs every command in a [`Sandbox`].
 pub struct ShellSandbox {

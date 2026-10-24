@@ -1,0 +1,25 @@
+[package]
+name = "rhema-sandbox"
+description = "The sandbox seam: the `Sandbox` contract, the `ShellSandbox` adapter, and the wire protocol's shared machinery"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["mock"]
+# The scripted sandbox for offline tests; mirrors rhema-core's feature.
+mock = ["dep:tokio"]
+
+[dependencies]
+# The seam adapts onto the toolkit's exec-only shell; it arrives
+# without the local shell, which every backend of this family replaces.
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0", default-features = false }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# The scripted sandbox's parked exec (feature `mock`)
+tokio = { workspace = true, optional = true, features = ["sync"] }

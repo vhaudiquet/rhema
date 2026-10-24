@@ -11,7 +11,9 @@ authors.workspace = true
 [features]
 default = []
 # The scripted sandbox for offline tests; mirrors rhema-core's feature.
-mock = ["dep:tokio"]
+# The scripted sandbox itself lives in rhema-sandbox now, so the feature
+# follows it there — the re-export below compiles only when it does.
+mock = ["rhema-sandbox/mock"]
 
 [dependencies]
 # The toolkit and driver run on the seams, not on a filesystem: both
@@ -20,18 +22,23 @@ mock = ["dep:tokio"]
 rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0", default-features = false }
 rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0", default-features = false }
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# The sandbox seam, extracted so any frontend can reach it; the mock
+# default stays off here — this crate drives no scripted sandbox, its
+# e2e test does (see dev-dependencies).
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", default-features = false }
 # Transcript settings in the session config
 rhema-transcript = { path = "../rhema-transcript", version = "0.1.0" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
-# The scripted sandbox's parked exec (feature `mock`)
-tokio = { workspace = true, optional = true, features = ["sync"] }
 
 [dev-dependencies]
 # The scripted provider drives the turn loop offline
 rhema-core = { path = "../rhema-core", features = ["mock"] }
+# The scripted sandbox the e2e drives (rhema-sandbox's `mock` feature,
+# mirroring the rhema-core entry above)
+rhema-sandbox = { path = "../rhema-sandbox", features = ["mock"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 
 [[test]]

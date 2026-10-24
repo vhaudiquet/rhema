@@ -3277,6 +3277,7 @@ dependencies = [
  "rhema-agent-tools",
  "rhema-coding-agent",
  "rhema-core",
+ "rhema-sandbox",
  "rhema-transcript",
  "serde",
  "serde_json",
@@ -3526,6 +3527,18 @@ version = "0.1.0"
 dependencies = [
  "rhema-core",
  "rusqlite",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-sandbox"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "rhema-agent-tools",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

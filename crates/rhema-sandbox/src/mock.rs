@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 
-use crate::sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use crate::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 
 /// What the next `exec` answers, queued by the test.
 type ScriptedOutcome = Result<ExecOutcome, SandboxError>;
