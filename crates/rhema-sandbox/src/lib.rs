@@ -8,7 +8,10 @@
 //! machinery in one crate, one adapter per backend beside it; the
 //! backends (`local`, `client`, `server`) land feature-gated in their
 //! own phases, and the scripted mock rides the `mock` feature so tests
-//! run the same seam against a fake. In the cloud deployment the seam
+//! run the same seam against a fake. The wire protocol — the sandbox
+//! shim's JSON surface, promoted — is pinned in [`protocol`]: the
+//! shapes, the routes, and the auth header every backend speaks. In the
+//! cloud deployment the seam
 //! is a Cloudflare Sandbox — a container bound to the session's
 //! Durable Object, persisted across turns and idle sleeps.
 //!
@@ -28,8 +31,13 @@
 pub mod adapter;
 #[cfg(feature = "mock")]
 pub mod mock;
+pub mod protocol;
 
 pub use adapter::ShellSandbox;
+pub use protocol::{
+    Ack, EXEC, ExecCall, ExecReply, FileReply, GET, PUT, PutFile, SEED, SeedRequest, TOKEN_HEADER,
+    stream_reply,
+};
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
