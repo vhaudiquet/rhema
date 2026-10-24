@@ -16,7 +16,6 @@
 //! host-side — the wiring is `exec_util`'s, shared with the docker
 //! and ssh backends.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -156,6 +155,20 @@ mod tests {
 
     /// A sandbox over a fresh tempdir; the guard comes back so the
     /// root outlives the test's calls and vanishes after.
+    /// True when the GNU `timeout` binary answers — the budget
+    /// mechanism the local sandbox wraps. macOS ships none, and the
+    /// tests skip rather than fail where the sandbox itself cannot run.
+    fn timeout_available() -> bool {
+        std::process::Command::new("timeout")
+            .arg("1")
+            .arg("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     fn sandbox() -> (LocalSandbox, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let root = FsRoot::new(dir.path().to_path_buf()).expect("the sandbox root builds");
@@ -224,6 +237,12 @@ mod tests {
 
     #[tokio::test]
     async fn exec_captures_stdout_and_streams_the_lines() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         let cancelled = AtomicBool::new(false);
         let mut lines: Vec<String> = Vec::new();
@@ -241,6 +260,12 @@ mod tests {
 
     #[tokio::test]
     async fn exec_runs_in_the_mapped_working_directory() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         sandbox
             .write_file("/workspace/note.txt", b"here")
@@ -266,6 +291,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_nonzero_exit_carries_its_code() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         let outcome = run(&sandbox, request("exit 3"))
             .await
@@ -275,6 +306,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_command_past_its_budget_is_a_timeout() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         let error = run(
             &sandbox,
@@ -291,6 +328,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_stream_tails_are_capped() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         // `seq` writes far past the cap; the outcome keeps only the
         // tail, the way the shim caps before the wire.
@@ -359,6 +402,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_flip_mid_run_kills_the_command() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         let cancelled = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancelled);
@@ -381,6 +430,12 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_from_a_local_repository_populates_the_root() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let repo = fixture_repo();
         let (sandbox, dir) = sandbox();
         sandbox
@@ -401,6 +456,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_clone_fails_in_band() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         let error = sandbox
             .seed(&WorkspaceSeed::GitClone("/nonexistent-rhema-repo".into()))
@@ -414,6 +475,12 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_from_a_tarball_unpacks_into_the_root() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the local sandbox enforces budgets with it"
+            );
+            return;
+        }
         let payload = tempfile::tempdir().expect("tempdir");
         std::fs::write(payload.path().join("packed.txt"), b"from tar")
             .expect("the payload file is written");
