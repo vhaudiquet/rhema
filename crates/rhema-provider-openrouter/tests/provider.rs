@@ -82,9 +82,16 @@ async fn streams_sse_into_events_and_an_assembled_output() {
             cached_input_tokens: 2,
         }
     );
-    // The empty delta of the usage chunk emits nothing; keep-alives are
-    // ignored.
-    assert_eq!(sink.0, vec!["TextDelta(\"He\")", "TextDelta(\"llo\")"]);
+    // The usage chunk's empty delta emits nothing but its tally;
+    // keep-alives are ignored.
+    assert_eq!(
+        sink.0,
+        vec![
+            "TextDelta(\"He\")".to_owned(),
+            "TextDelta(\"llo\")".to_owned(),
+            "Usage(Usage { input_tokens: 9, output_tokens: 4, cached_input_tokens: 2 })".to_owned(),
+        ]
+    );
 
     let received = server
         .received_requests()
@@ -162,6 +169,8 @@ async fn tool_call_fragments_stream_into_events_and_a_tool_use_output() {
             "ToolCallStart { id: \"call_abc\", name: \"echo\" }".to_owned(),
             "ToolCallArgsDelta { id: \"call_abc\", delta: \"{\\\"x\\\":\" }".to_owned(),
             "ToolCallArgsDelta { id: \"call_abc\", delta: \"1}\" }".to_owned(),
+            // The usage chunk closes the stream with the final tally.
+            "Usage(Usage { input_tokens: 5, output_tokens: 3, cached_input_tokens: 0 })".to_owned(),
         ]
     );
 }

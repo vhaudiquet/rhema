@@ -738,6 +738,9 @@ impl ChunkAssembler {
                     .and_then(|details| details.cached_tokens)
                     .unwrap_or(0),
             };
+            // Usage rides the stream's last message only, so this fires
+            // once, right before `StepEnd` says the same.
+            sink.emit(Event::Usage(self.usage));
         }
         for choice in chunk.choices {
             if let Some(reason) = choice.finish_reason {
@@ -1174,7 +1177,16 @@ mod tests {
                 cached_input_tokens: 4,
             }
         );
-        assert_eq!(sink.0, vec!["TextDelta(\"Hel\")", "TextDelta(\"lo\")"]);
+        // Usage rides the stream's last message: the tally fires once,
+        // right before `StepEnd`.
+        assert_eq!(
+            sink.0,
+            vec![
+                "TextDelta(\"Hel\")",
+                "TextDelta(\"lo\")",
+                "Usage(Usage { input_tokens: 10, output_tokens: 2, cached_input_tokens: 4 })",
+            ]
+        );
     }
 
     #[test]
