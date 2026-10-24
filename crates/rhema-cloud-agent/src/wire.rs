@@ -102,6 +102,15 @@ pub enum ServerMessage {
         /// Why the model stopped.
         stop_reason: StopReason,
     },
+    /// The running token tally for the in-flight model call, as the
+    /// provider reports it inside the stream. Cumulative per call:
+    /// each frame replaces the previous tally, never adds to it.
+    /// Frontends show it as the live context gauge; clients that keep
+    /// no gauge may drop the frame.
+    Usage {
+        /// The running tally.
+        usage: Usage,
+    },
     /// A gated call waits for the client's decision — answer with
     /// [`ClientMessage::Approve`], or the ask denies at the timeout.
     ApprovalRequest {
@@ -186,6 +195,7 @@ impl ServerMessage {
                 usage,
                 stop_reason: stop_reason.clone(),
             },
+            Event::Usage(usage) => Self::Usage { usage },
         }
     }
 
@@ -261,6 +271,20 @@ mod tests {
             serde_json::json!({
                 "type": "tool_result", "id": "call-1", "content": "ok",
                 "is_error": false, "code": 0,
+            }),
+        );
+        // The running tally rides the wire verbatim; gauge-less clients
+        // drop the frame.
+        assert_eq!(
+            serde_json::to_value(ServerMessage::from_event(Event::Usage(Usage {
+                input_tokens: 9,
+                output_tokens: 2,
+                cached_input_tokens: 1,
+            })))
+            .unwrap(),
+            serde_json::json!({
+                "type": "usage",
+                "usage": { "input_tokens": 9, "output_tokens": 2, "cached_input_tokens": 1 },
             }),
         );
     }
