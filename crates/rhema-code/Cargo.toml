@@ -33,6 +33,11 @@ rhema-subagents = { path = "../rhema-subagents", version = "0.1.0" }
 rhema-transcript = { path = "../rhema-transcript", version = "0.1.0" }
 # The `rhema acp` subcommand: the Agent Client Protocol server
 rhema-acp = { path = "../rhema-acp", version = "0.1.0" }
+# Where bash runs: the sandbox seam and its backends (docker, ssh, http)
+# behind the stored choice
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = [
+    "client",
+] }
 # The shared model card every adapter's catalog normalizes into
 rhema-provider = { path = "../rhema-provider", version = "0.1.0" }
 rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.1.0" }

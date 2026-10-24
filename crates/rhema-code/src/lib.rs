@@ -29,6 +29,8 @@
 //! - [`palette`] — color palettes: named token sets in two appearances;
 //!   [`hct`] and `m3` (private) carry the color math and the scheme
 //!   behind M3 You
+//! - [`sandbox`] — where `bash` runs: the sandbox choice's resolution
+//!   and the assembly behind it
 //! - `run` — terminal setup/teardown and the event loop
 
 #![forbid(unsafe_code)]
@@ -53,6 +55,7 @@ mod m3;
 pub mod markdown;
 pub mod palette;
 pub mod run;
+pub mod sandbox;
 pub mod screens;
 pub mod sessions;
 pub mod status;

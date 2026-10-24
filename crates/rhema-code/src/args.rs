@@ -73,6 +73,51 @@ impl ProviderChoice {
     }
 }
 
+/// Where `bash` runs, by the stored config's sandbox kind names — the
+/// [`ProviderChoice`] pattern applied to machines. The choice is a
+/// stored-profile or `RHEMA_SANDBOX` decision, never a per-invocation
+/// flag; the TUI picker and the availability probing are the next
+/// phase of the sandbox design (`specs/rhema-sandbox.md` §5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum SandboxChoice {
+    /// This host's processes rooted at the workspace — today's path,
+    /// and the fallback for anything unset or unparseable.
+    Local,
+    /// A bind-mounted container, driven through the `docker` CLI.
+    Docker,
+    /// A remote box over ssh, nothing installed on the far end.
+    Ssh,
+    /// A daemon speaking the sandbox protocol over HTTPS
+    /// (`rhema-sandboxd`).
+    Http,
+}
+
+impl SandboxChoice {
+    /// Parses a stored config value; `None` for no value and unknown
+    /// spellings alike — the caller decides whether that means the
+    /// zero-flag fast path or a startup error naming the stored value.
+    pub fn from_stored(value: Option<&str>) -> Option<Self> {
+        match value {
+            Some("local") => Some(Self::Local),
+            Some("docker") => Some(Self::Docker),
+            Some("ssh") => Some(Self::Ssh),
+            Some("http") => Some(Self::Http),
+            _ => None,
+        }
+    }
+
+    /// The config value this choice persists as — the inverse of
+    /// [`Self::from_stored`] for the canonical spellings.
+    pub fn stored_name(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Docker => "docker",
+            Self::Ssh => "ssh",
+            Self::Http => "http",
+        }
+    }
+}
+
 /// `rhema` — the rhema frontend: a full-screen terminal UI when attached
 /// to a terminal, and one-shot or ACP serving through a subcommand.
 #[derive(Debug, Parser)]
@@ -352,6 +397,35 @@ mod tests {
         );
         assert_eq!(ProviderChoice::Copilot.stored_name(), "copilot");
         assert_eq!(ProviderChoice::Zai.stored_name(), "zai");
+    }
+
+    #[test]
+    fn sandbox_spellings_round_trip_through_the_stored_names() {
+        // The sandbox is a stored choice (or RHEMA_SANDBOX), not a
+        // flag: every canonical spelling parses, and every choice
+        // persists back as exactly the spelling that parses to it.
+        for (name, expected) in [
+            ("local", SandboxChoice::Local),
+            ("docker", SandboxChoice::Docker),
+            ("ssh", SandboxChoice::Ssh),
+            ("http", SandboxChoice::Http),
+        ] {
+            assert_eq!(SandboxChoice::from_stored(Some(name)), Some(expected));
+            assert_eq!(expected.stored_name(), name);
+        }
+        // Nothing stored and a spelling no sandbox answers to both read
+        // as unconfigured: the caller falls back to the local fast path,
+        // it never silently stands a container up.
+        assert_eq!(SandboxChoice::from_stored(None), None);
+        assert_eq!(SandboxChoice::from_stored(Some("nonsense")), None);
+    }
+
+    #[test]
+    fn no_sandbox_flag_exists() {
+        // The sandbox is a profile decision like the provider: no
+        // per-invocation flag shadows it.
+        assert!(try_parse(&["--sandbox", "docker"]).is_err());
+        assert!(try_parse(&["run", "--sandbox", "ssh"]).is_err());
     }
 
     #[test]

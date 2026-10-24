@@ -84,6 +84,17 @@ The agent always has one subagent with nothing defined: `general-purpose`, a fre
 
 When the agent delegates, the subagent runs its own conversation with the same workspace tools in the same workspace, its output streams into the tool-call view, and its final report lands in the conversation as the tool's result. Inner commands ask for approval exactly like the main agent's do. A subagent never spawns further subagents.
 
+### Where bash runs
+
+The `bash` tool can run somewhere other than your host. The profile's `sandbox.kind` in `config.yaml` picks where, and `RHEMA_SANDBOX` overrides the stored kind the same way `RHEMA_PROVIDER` does. Four kinds:
+
+- `local` (the default): commands run as your processes in the workspace, exactly as they always have.
+- `docker`: commands run in a container with the workspace bind-mounted at its own path. rhema stands the container up on first use and keeps it between runs.
+- `ssh`: commands run on a remote box named by `sandbox.host`, with nothing installed on the far end.
+- `http`: commands run behind a `rhema-sandboxd` daemon named by `sandbox.url`, with an optional token.
+
+The discovered skills and your `SYSTEM.md` are copied into the sandbox at startup; your keys, profiles, and session history stay on your host in every mode. On safety, plainly: `local` and the mount postures are process hygiene, not security boundaries.
+
 ### Program status (OSC 7501)
 
 Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimoto's program status protocol](https://mitchellh.com/writing/program-status-osc7501): `working` (with step progress and the current tool) while a turn runs, `blocked` (permission or auth) when it needs you, `idle` at the prompt, and `done` or `error` when a `rhema run` one-shot finishes — so supporting terminals (Ghostty, and terminal UIs built on libghostty) can mark tab headers, session pickers, and agentic inboxes without scraping the screen. Terminals without support ignore the sequence; piped output stays byte-exact.

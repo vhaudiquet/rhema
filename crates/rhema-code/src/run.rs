@@ -369,16 +369,43 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)
         .unwrap_or_else(|| effective.thinking_effort());
-    let agent_config = rhema_coding_agent::CodingAgentConfig {
+    let base_system = resolve_base_system(Config::system_prompt_path().ok().as_deref());
+    let mut agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
         transcript: (!args.no_transcript).then(rhema_transcript::TranscriptSettings::default),
         thinking,
-        base_system: resolve_base_system(Config::system_prompt_path().ok().as_deref()),
+        base_system: base_system.clone(),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
     };
+    // Where bash runs: the sandbox choice engages only off `local`, and
+    // before the subagent wire below — their inner shell inherits the
+    // executor installed here (ShellTools::executor()), while their
+    // definition discovery stays host-side, so the sandbox-side
+    // workspace string lands on the config after the wire.
+    let choice = crate::sandbox::resolve_choice(&effective);
+    let sandboxed = match choice {
+        crate::args::SandboxChoice::Local => None,
+        non_local => Some(
+            crate::sandbox::assemble(
+                non_local,
+                &effective,
+                &workspace,
+                Some(&secrets),
+                base_system.as_deref(),
+            )
+            .await?,
+        ),
+    };
+    if let Some(assembled) = &sandboxed {
+        agent_config.tools = Some(assembled.tools.clone());
+        agent_config.skills = Some(assembled.skills.clone());
+    }
     // Subagents ride in as one tool: the built-in general-purpose
     // definition plus whatever the workspace defines.
-    let agent_config = rhema_subagents::wire(backend.provider(), agent_config);
+    let mut agent_config = rhema_subagents::wire(backend.provider(), agent_config);
+    if let Some(assembled) = sandboxed {
+        agent_config.workspace = std::path::PathBuf::from(assembled.workspace);
+    }
     // The workspace remembers the profile that served it, the same
     // memory the next launch here reads back. Best effort: a failed
     // write warns without failing the turn.
@@ -409,6 +436,15 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         model,
         crate::screens::format_tokens(Some(crate::app::context_tokens(&output.usage)))
     );
+    // The workspace remembers the sandbox kind that just served it —
+    // the twin of the profile memory above. Best effort, the same
+    // style: a failed write warns without failing the run.
+    if config.last_sandbox_in(&workspace).as_deref() != Some(choice.stored_name()) {
+        config.note_sandbox_in(&workspace, choice.stored_name());
+        if let Err(err) = config.save() {
+            eprintln!("warning: the sandbox choice was not remembered: {err}");
+        }
+    }
     Ok(())
 }
 
