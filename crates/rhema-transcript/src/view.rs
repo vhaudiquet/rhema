@@ -18,7 +18,9 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use rhema_core::{EventSink, Message, ModelOutput, ModelProvider, ProviderError, Role, Usage};
+use rhema_core::{
+    Content, EventSink, Message, ModelOutput, ModelProvider, ProviderError, Role, ToolSpec, Usage,
+};
 
 use crate::compact::{self, PendingSummary, Section, SectionOrigin, Summarizer};
 use crate::summary;
@@ -56,6 +58,56 @@ impl Default for TranscriptSettings {
             max_section_messages: 128,
             max_block_bytes: 32_000,
         }
+    }
+}
+
+/// The session's token usage, split by what it bought. The five input
+/// categories share each request's reported input tokens in proportion
+/// to their wire bytes (tool *definitions* ride with the calls that
+/// use them); the model's generated output tokens all land on
+/// `model_output_tokens`, which also carries the assistant text the
+/// history re-sends. The compaction block travels as a user message
+/// and counts there.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct UsageBreakdown {
+    /// The system prompt minus its skills section.
+    pub system_prompt_tokens: u64,
+    /// The skills section of the system prompt, when the agent could
+    /// isolate it at render time; zero otherwise.
+    pub skills_tokens: u64,
+    /// Tool definitions plus the tool-call arguments re-sent in
+    /// assistant messages.
+    pub tool_calls_input_tokens: u64,
+    /// Tool results — the tools' output, re-sent as input.
+    pub tool_calls_output_tokens: u64,
+    /// User text, the compaction block included.
+    pub user_messages_tokens: u64,
+    /// The model's words: assistant text in the history plus every
+    /// generated output token.
+    pub model_output_tokens: u64,
+}
+
+impl UsageBreakdown {
+    /// The six categories, labeled as the Usage page spells them.
+    pub fn labeled(&self) -> [(&'static str, u64); 6] {
+        [
+            ("system prompt", self.system_prompt_tokens),
+            ("skills", self.skills_tokens),
+            ("tool calls input", self.tool_calls_input_tokens),
+            ("tool calls output", self.tool_calls_output_tokens),
+            ("user messages", self.user_messages_tokens),
+            ("model output", self.model_output_tokens),
+        ]
+    }
+
+    /// The grand total the percentages read against.
+    pub fn total(&self) -> u64 {
+        self.system_prompt_tokens
+            + self.skills_tokens
+            + self.tool_calls_input_tokens
+            + self.tool_calls_output_tokens
+            + self.user_messages_tokens
+            + self.model_output_tokens
     }
 }
 
@@ -103,6 +155,8 @@ pub struct TranscriptStats {
     pub cached_input_tokens: u64,
     /// Output tokens the providers reported, summed over requests.
     pub output_tokens: u64,
+    /// The session's usage split by category.
+    pub usage: UsageBreakdown,
 }
 
 impl TranscriptStats {
@@ -135,7 +189,39 @@ pub struct Transcript {
     /// The committed block: sections tiling `[0, cut)`, oldest first,
     /// append-only between flushes.
     sections: Vec<Section>,
+    /// The skills section's byte share of the system prompt, measured
+    /// at render time by the agent that assembled it. Zero until set.
+    skills_bytes: usize,
+    /// The wire bytes the pending response's input tokens spread over:
+    /// staged from the request before it goes out, consumed by
+    /// [`Transcript::record_usage`].
+    pending_shares: Shares,
     stats: TranscriptStats,
+}
+
+/// One request's wire bytes by category — the proportions the
+/// reported input tokens are spread over.
+#[derive(Debug, Clone, Copy, Default)]
+struct Shares {
+    system_prompt: usize,
+    skills: usize,
+    tool_defs: usize,
+    tool_calls: usize,
+    tool_results: usize,
+    user_text: usize,
+    assistant_text: usize,
+}
+
+impl Shares {
+    fn total(&self) -> usize {
+        self.system_prompt
+            + self.skills
+            + self.tool_defs
+            + self.tool_calls
+            + self.tool_results
+            + self.user_text
+            + self.assistant_text
+    }
 }
 
 impl Transcript {
@@ -147,6 +233,8 @@ impl Transcript {
             sizes: Vec::new(),
             cut: 0,
             sections: Vec::new(),
+            skills_bytes: 0,
+            pending_shares: Shares::default(),
             stats: TranscriptStats::default(),
         }
     }
@@ -196,13 +284,78 @@ impl Transcript {
         self.stats
     }
 
+    /// Sets the skills section's byte share of the system prompt —
+    /// measured by the agent that rendered it, since the section's
+    /// shape is the template's to decide. Zero (the default) folds the
+    /// whole system prompt into `system_prompt_tokens`.
+    pub fn set_skills_bytes(&mut self, bytes: usize) {
+        self.skills_bytes = bytes;
+    }
+
+    /// Stages the byte shares of the request about to go out: what the
+    /// next [`Transcript::record_usage`] spreads the reported input
+    /// tokens over. The decorator calls it after the view is applied,
+    /// so the shares read what is actually sent.
+    pub fn stage_usage_shares(
+        &mut self,
+        system: Option<&str>,
+        tools: &[ToolSpec],
+        messages: &[Message],
+    ) {
+        let mut shares = Shares::default();
+        if let Some(system) = system {
+            let skills = self.skills_bytes.min(system.len());
+            shares.skills = skills;
+            shares.system_prompt = system.len() - skills;
+        }
+        // The tool definitions ride the request's tools array; they
+        // are input every step, and they share the calls' row.
+        for spec in tools {
+            shares.tool_defs +=
+                spec.name.len() + spec.description.len() + spec.parameters.to_string().len();
+        }
+        for message in messages {
+            for content in &message.content {
+                match content {
+                    Content::Text(text) => match message.role {
+                        Role::User => shares.user_text += text.len(),
+                        Role::Assistant => shares.assistant_text += text.len(),
+                        Role::System | Role::Tool => {}
+                    },
+                    Content::ToolCall(call) => {
+                        shares.tool_calls += call.name.len() + call.args.to_string().len();
+                    }
+                    Content::ToolResult(result) => {
+                        shares.tool_results += result.content.len();
+                    }
+                }
+            }
+        }
+        self.pending_shares = shares;
+    }
+
     /// Records one provider response's usage: the ground truth the
     /// cache-hit rate reports from. The decorator calls this once per
-    /// forwarded request.
+    /// forwarded request; the reported input tokens spread over the
+    /// staged shares by byte proportion.
     pub fn record_usage(&mut self, usage: &Usage) {
         self.stats.input_tokens += u64::from(usage.input_tokens);
         self.stats.cached_input_tokens += u64::from(usage.cached_input_tokens);
         self.stats.output_tokens += u64::from(usage.output_tokens);
+        let shares = std::mem::take(&mut self.pending_shares);
+        let total = shares.total();
+        let input = u64::from(usage.input_tokens);
+        if total > 0 && input > 0 {
+            let spread = |bytes: usize| input * bytes as u64 / total as u64;
+            let breakdown = &mut self.stats.usage;
+            breakdown.system_prompt_tokens += spread(shares.system_prompt);
+            breakdown.skills_tokens += spread(shares.skills);
+            breakdown.tool_calls_input_tokens += spread(shares.tool_defs + shares.tool_calls);
+            breakdown.tool_calls_output_tokens += spread(shares.tool_results);
+            breakdown.user_messages_tokens += spread(shares.user_text);
+            breakdown.model_output_tokens += spread(shares.assistant_text);
+        }
+        self.stats.usage.model_output_tokens += u64::from(usage.output_tokens);
     }
 
     /// Records one summarizer call the decorator issued outside the
@@ -547,6 +700,10 @@ impl ModelProvider for TranscriptView {
         if let Some(messages) = view {
             req.messages = messages;
         }
+        {
+            let mut transcript = self.transcript.lock().expect("transcript lock poisoned");
+            transcript.stage_usage_shares(req.system.as_deref(), &req.tools, &req.messages);
+        }
         let result = self.inner.complete(req, sink).await;
         if let Ok(output) = &result {
             let mut transcript = self.transcript.lock().expect("transcript lock poisoned");
@@ -798,6 +955,82 @@ mod tests {
         transcript.observe(&long_history(2));
         assert_eq!(transcript.cut, 0);
         assert!(transcript.sections.is_empty());
+    }
+
+    #[test]
+    fn the_breakdown_spreads_reported_input_by_wire_share() {
+        let mut transcript = Transcript::new(TranscriptSettings::default());
+        transcript.set_skills_bytes(500);
+        // System: 1500 base bytes + 500 skills bytes. Messages: one
+        // user text, one assistant text with a call, one result.
+        let system = format!("{}{}", "b".repeat(1_500), "s".repeat(500));
+        let call_args = serde_json::json!({ "c": "x".repeat(100) });
+        let messages = vec![
+            Message::text(Role::User, "u".repeat(1_000)),
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    Content::Text("a".repeat(400)),
+                    Content::ToolCall(ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        args: call_args.clone(),
+                        provider_data: serde_json::Value::Null,
+                    }),
+                ],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![Content::ToolResult(ToolResult::success(
+                    "c1",
+                    "r".repeat(1_000),
+                ))],
+            },
+        ];
+        transcript.stage_usage_shares(Some(&system), &[], &messages);
+        transcript.record_usage(&Usage {
+            input_tokens: 10_000,
+            output_tokens: 100,
+            cached_input_tokens: 0,
+        });
+
+        let total = 2_000 + 1_000 + 400 + ("bash".len() + call_args.to_string().len()) + 1_000;
+        let spread = |bytes: usize| 10_000 * bytes as u64 / total as u64;
+        let b = transcript.stats().usage;
+        assert_eq!(b.system_prompt_tokens, spread(1_500));
+        assert_eq!(b.skills_tokens, spread(500));
+        assert_eq!(
+            b.tool_calls_input_tokens,
+            spread("bash".len() + call_args.to_string().len())
+        );
+        assert_eq!(b.tool_calls_output_tokens, spread(1_000));
+        assert_eq!(b.user_messages_tokens, spread(1_000));
+        // The model's words: the history's assistant text plus the
+        // generated output.
+        assert_eq!(b.model_output_tokens, spread(400) + 100);
+        // The shares consumed: a usage record without a staged request
+        // spreads nothing.
+        transcript.record_usage(&Usage {
+            input_tokens: 1_000,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+        });
+        assert_eq!(transcript.stats().usage.user_messages_tokens, spread(1_000));
+    }
+
+    #[test]
+    fn a_skills_share_past_the_system_clamps() {
+        let mut transcript = Transcript::new(TranscriptSettings::default());
+        transcript.set_skills_bytes(9_999);
+        transcript.stage_usage_shares(Some("short"), &[], &[]);
+        transcript.record_usage(&Usage {
+            input_tokens: 100,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+        });
+        let b = transcript.stats().usage;
+        assert_eq!(b.skills_tokens, 100);
+        assert_eq!(b.system_prompt_tokens, 0);
     }
 
     #[test]

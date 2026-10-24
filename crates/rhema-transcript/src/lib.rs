@@ -30,7 +30,7 @@ pub mod view;
 pub mod zoom;
 
 pub use compact::{ModelSummarizer, PendingSummary, Section, SectionOrigin, Summarizer};
-pub use view::{Transcript, TranscriptSettings, TranscriptStats, TranscriptView};
+pub use view::{Transcript, TranscriptSettings, TranscriptStats, TranscriptView, UsageBreakdown};
 pub use zoom::{ZOOM_MAX_BYTES, Zoom};
 
 use std::sync::{Arc, Mutex};
