@@ -24,7 +24,8 @@
 //! Environment variables (`RHEMA_PROVIDER`, `GEMINI_API_KEY`,
 //! `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,
 //! `OPENAI_API_KEY`, `DEEPSEEK_API_KEY`, `ZAI_API_KEY`,
-//! `GITHUB_COPILOT_TOKEN`) always win over the stored value — a stored
+//! `GITHUB_COPILOT_TOKEN`, `RHEMA_SANDBOX`, `RHEMA_SANDBOX_URL`,
+//! `RHEMA_SANDBOX_TOKEN`) always win over the stored value — a stored
 //! entry is the fallback, not the override.
 
 #![forbid(unsafe_code)]
@@ -84,6 +85,37 @@ pub struct ProviderInstance {
     pub base_url: Option<String>,
 }
 
+/// Where `bash` runs when a frontend honors the stored choice: the
+/// [`Profile`] section behind the sandbox kinds `local`, `docker`,
+/// `ssh`, and `http`. Every field is stored as a string and validated
+/// by the consumer — the same stance as `provider`, `icons`, and
+/// `colors`: rhema-config stores, the frontend parses. A profile
+/// without this section and a `kind: local` section are the same
+/// behavior: today's local process executor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "snake_case", deny_unknown_fields)]
+pub struct SandboxSettings {
+    /// The stored choice: `local`, `docker`, `ssh`, or `http`. The
+    /// name is stored as given — unknown spellings are the consumer's
+    /// to resolve or reject.
+    pub kind: Option<String>,
+    /// The `http` sandbox's base URL.
+    pub url: Option<String>,
+    /// A literal bearer token for the `http` sandbox — the fallback
+    /// where no keychain answers, never the first choice.
+    pub token: Option<String>,
+    /// The keychain entry holding the `http` token, resolved through
+    /// the [`secrets`] seam — [`ProviderInstance::secret_ref`]'s
+    /// pattern. A literal `token` and a live `token_ref` never hold
+    /// the same secret at rest.
+    pub token_ref: Option<String>,
+    /// The `ssh` destination: `user@host` or an ssh alias, passed to
+    /// `ssh` as-is.
+    pub host: Option<String>,
+    /// The `docker` container to exec in.
+    pub container: Option<String>,
+}
+
 /// One named set of provider settings. Profiles are isolated: work never
 /// inherits personal's model or keys, and vice versa.
 ///
@@ -113,6 +145,11 @@ pub struct Profile {
     /// always-thinking models left to their defaults spend the whole
     /// output budget on reasoning and answer with nothing.
     pub thinking: Option<String>,
+    /// Where `bash` runs when the frontend honors the choice: the
+    /// kind plus whatever that kind needs. `None` and `kind: local`
+    /// are the same behavior; the choice machinery engages only
+    /// non-local kinds.
+    pub sandbox: Option<SandboxSettings>,
 }
 
 impl Profile {
@@ -372,6 +409,87 @@ impl Profile {
     fn llama_url(&self) -> Option<String> {
         self.instance_url_for("llama-cpp")
     }
+
+    /// The sandbox kind this profile runs `bash` on: `RHEMA_SANDBOX`,
+    /// then the stored `kind`. Whitespace-only values count as unset.
+    /// The name is returned as given — `local`, `docker`, `ssh`, and
+    /// `http` are the spellings the sandbox design names; unknown ones
+    /// are the consumer's to resolve or reject.
+    pub fn sandbox_kind(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["RHEMA_SANDBOX"],
+            self.sandbox.as_ref().and_then(|s| s.kind.clone()),
+        )
+    }
+
+    /// The `http` sandbox's base URL: `RHEMA_SANDBOX_URL`, then the
+    /// stored `url`. Whitespace-only values count as unset.
+    pub fn sandbox_url(&self) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["RHEMA_SANDBOX_URL"],
+            self.sandbox.as_ref().and_then(|s| s.url.clone()),
+        )
+    }
+
+    /// The bearer token the `http` sandbox authenticates with:
+    /// `RHEMA_SANDBOX_TOKEN`, then the keychain entry `token_ref`
+    /// names, then the literal `token`. Whitespace-only values count
+    /// as unset at every tier.
+    pub fn sandbox_token(&self, secrets: Option<&dyn SecretStore>) -> Option<String> {
+        resolve_key(
+            |name| std::env::var(name).ok(),
+            &["RHEMA_SANDBOX_TOKEN"],
+            self.stored_sandbox_token(secrets),
+        )
+    }
+
+    /// The stored sandbox token without the environment tier: the
+    /// keychain entry `token_ref` names first, then the literal
+    /// `token`. A store that cannot be reached reads as "not in the
+    /// store" — the next tier serves, never a lost token. Callers that
+    /// run their own environment precedence read this instead of
+    /// [`Profile::sandbox_token`].
+    pub fn stored_sandbox_token(&self, secrets: Option<&dyn SecretStore>) -> Option<String> {
+        let sandbox = self.sandbox.as_ref()?;
+        if let (Some(store), Some(id)) = (secrets, sandbox.token_ref.as_deref()) {
+            if let Ok(Some(token)) = store.get(id) {
+                let trimmed = token.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_owned());
+                }
+            }
+        }
+        sandbox
+            .token
+            .clone()
+            .map(|token| token.trim().to_owned())
+            .filter(|token| !token.is_empty())
+    }
+
+    /// The `ssh` destination as stored — `user@host` or an ssh alias,
+    /// passed to `ssh` as-is. Stored only, no environment tier: a
+    /// stray variable must not silently move where commands run.
+    /// Whitespace-only values count as unset.
+    pub fn sandbox_host(&self) -> Option<String> {
+        self.sandbox
+            .as_ref()
+            .and_then(|s| s.host.clone())
+            .map(|host| host.trim().to_owned())
+            .filter(|host| !host.is_empty())
+    }
+
+    /// The `docker` container to exec in, as stored. Stored only — no
+    /// environment tier, the same stance as [`Profile::sandbox_host`].
+    /// Whitespace-only values count as unset.
+    pub fn sandbox_container(&self) -> Option<String> {
+        self.sandbox
+            .as_ref()
+            .and_then(|s| s.container.clone())
+            .map(|c| c.trim().to_owned())
+            .filter(|c| !c.is_empty())
+    }
 }
 
 /// Where [`Profile::place_key`] landed a credential.
@@ -574,6 +692,14 @@ pub struct Config {
     /// independent.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_profile_by_workspace: BTreeMap<String, String>,
+    /// The last sandbox kind each workspace ran `bash` under, keyed by
+    /// the workspace's absolute path — the sandbox twin of
+    /// `last_profile_by_workspace`. A directory reopens on the kind it
+    /// last used, never overriding an explicit flag or `RHEMA_SANDBOX`.
+    /// The kind is stored as given; whether this machine still offers
+    /// it is the consumer's question.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub last_sandbox_by_workspace: BTreeMap<String, String>,
 }
 
 /// The profile the flags and stores fall back to: fresh setups seed it,
@@ -601,6 +727,7 @@ impl Default for Config {
             m3_source: None,
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
+            last_sandbox_by_workspace: BTreeMap::new(),
         }
     }
 }
@@ -645,6 +772,26 @@ impl Config {
         if changed {
             self.last_profile_by_workspace
                 .insert(workspace.to_string_lossy().into_owned(), profile.to_owned());
+        }
+    }
+
+    /// The sandbox kind `workspace` last ran `bash` under, when one was
+    /// recorded. The kind is returned as stored — the caller decides
+    /// whether this machine still offers it.
+    pub fn last_sandbox_in(&self, workspace: &Path) -> Option<String> {
+        self.last_sandbox_by_workspace
+            .get(&workspace.to_string_lossy().into_owned())
+            .cloned()
+    }
+
+    /// Records `kind` as the last one `workspace` ran `bash` under. A
+    /// no-op when the map already holds the kind, so a turn per
+    /// keystroke never rewrites the file.
+    pub fn note_sandbox_in(&mut self, workspace: &Path, kind: &str) {
+        let changed = self.last_sandbox_in(workspace).as_deref() != Some(kind);
+        if changed {
+            self.last_sandbox_by_workspace
+                .insert(workspace.to_string_lossy().into_owned(), kind.to_owned());
         }
     }
 
@@ -946,6 +1093,7 @@ mod tests {
                     model: Some("gemini-3.8-flash".into()),
                     color: None,
                     thinking: Some("low".into()),
+                    sandbox: None,
                 },
             )]),
             icons: None,
@@ -954,6 +1102,7 @@ mod tests {
             m3_source: Some("#6750A4".into()),
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
+            last_sandbox_by_workspace: BTreeMap::new(),
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -1298,6 +1447,7 @@ mod tests {
             m3_source: None,
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
+            last_sandbox_by_workspace: BTreeMap::new(),
         };
         let work = config.effective(Some("work"));
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
@@ -1522,6 +1672,7 @@ mod tests {
             m3_source: None,
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
+            last_sandbox_by_workspace: BTreeMap::new(),
         };
         let store = VolatileSecretStore::new();
         assert_eq!(config.migrate_secrets(&store), 2);
@@ -1568,5 +1719,224 @@ mod tests {
             .1;
         assert_eq!(instance.api_key.as_deref(), Some("stays-put"));
         assert_eq!(instance.secret_ref, None);
+    }
+
+    /// A profile carrying one sandbox section, and nothing else.
+    fn sandboxed_profile(sandbox: SandboxSettings) -> Profile {
+        Profile {
+            sandbox: Some(sandbox),
+            ..Profile::default()
+        }
+    }
+
+    #[test]
+    fn a_profile_round_trips_with_a_full_sandbox_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let config = Config {
+            profiles: BTreeMap::from([(
+                "personal".to_owned(),
+                sandboxed_profile(SandboxSettings {
+                    kind: Some("http".into()),
+                    url: Some("https://sandbox.internal:7331".into()),
+                    token: Some("literal-token".into()),
+                    token_ref: Some("ref-sandbox".into()),
+                    host: Some("deploy@box".into()),
+                    container: Some("rhema-dev".into()),
+                }),
+            )]),
+            last_sandbox_by_workspace: BTreeMap::from([(
+                "/home/u/proj".to_owned(),
+                "docker".to_owned(),
+            )]),
+            ..Config::default()
+        };
+        Config::save_to(&path, &config).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "sandbox:",
+            "kind: http",
+            "url:",
+            "token:",
+            "token_ref:",
+            "host:",
+            "container:",
+            "last_sandbox_by_workspace:",
+        ] {
+            assert!(raw.contains(key), "missing `{key}` in yaml on disk: {raw}");
+        }
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, config);
+
+        // A typo'd sandbox key is loud, the file-wide strictness.
+        std::fs::write(
+            &path,
+            "profiles:\n  personal:\n    sandbox:\n      knd: docker\n",
+        )
+        .unwrap();
+        let err =
+            Config::load_from(&path).expect_err("a typo'd sandbox key must not read as unset");
+        assert!(err.to_string().contains("knd"), "names the key: {err}");
+    }
+
+    #[test]
+    fn the_sandbox_env_names_follow_the_same_env_wins_convention() {
+        // The env tier of the sandbox trio, injected the way the
+        // provider keys are: a test setting the real vars would race
+        // the run (and the edition forbids the unsafe write).
+        let env = |name: &str| match name {
+            "RHEMA_SANDBOX" => Some("docker".into()),
+            "RHEMA_SANDBOX_URL" => Some("  ".into()),
+            "RHEMA_SANDBOX_TOKEN" => Some("env-token".into()),
+            _ => None,
+        };
+        assert_eq!(
+            resolve_key(env, &["RHEMA_SANDBOX"], Some("local".into())),
+            Some("docker".into())
+        );
+        // A blank env value counts as unset: the stored value serves.
+        assert_eq!(
+            resolve_key(
+                env,
+                &["RHEMA_SANDBOX_URL"],
+                Some("http://stored:7331".into())
+            ),
+            Some("http://stored:7331".into())
+        );
+        assert_eq!(
+            resolve_key(env, &["RHEMA_SANDBOX_TOKEN"], Some("stored-token".into())),
+            Some("env-token".into())
+        );
+        assert_eq!(resolve_key(|_| None, &["RHEMA_SANDBOX"], None), None);
+    }
+
+    #[test]
+    fn the_sandbox_fields_read_back_through_the_profile() {
+        // The public methods reach the real environment only when the
+        // suite does not export the vars itself; the pure resolver
+        // test above carries the env-wins coverage.
+        if ["RHEMA_SANDBOX", "RHEMA_SANDBOX_URL", "RHEMA_SANDBOX_TOKEN"]
+            .iter()
+            .any(|name| std::env::var_os(name).is_some())
+        {
+            return;
+        }
+        let profile = sandboxed_profile(SandboxSettings {
+            kind: Some(" ssh ".into()),
+            url: Some(" http://box:7331 ".into()),
+            token: Some(" literal ".into()),
+            token_ref: Some("ref-sandbox".into()),
+            host: Some(" deploy@box ".into()),
+            container: Some(" rhema-dev ".into()),
+        });
+        assert_eq!(profile.sandbox_kind().as_deref(), Some("ssh"));
+        assert_eq!(profile.sandbox_url().as_deref(), Some("http://box:7331"));
+        assert_eq!(profile.sandbox_token(None).as_deref(), Some("literal"));
+        assert_eq!(profile.sandbox_host().as_deref(), Some("deploy@box"));
+        assert_eq!(profile.sandbox_container().as_deref(), Some("rhema-dev"));
+
+        // A profile without the section resolves to nothing anywhere.
+        let bare = Profile::default();
+        assert_eq!(bare.sandbox_kind(), None);
+        assert_eq!(bare.sandbox_url(), None);
+        assert_eq!(bare.sandbox_token(None), None);
+        assert_eq!(bare.sandbox_host(), None);
+        assert_eq!(bare.sandbox_container(), None);
+
+        // Blank stored values count as unset — host and container too,
+        // which have no env tier to fall through to.
+        let blank = sandboxed_profile(SandboxSettings {
+            kind: Some("  ".into()),
+            url: Some(" ".into()),
+            host: Some("  ".into()),
+            container: Some("".into()),
+            ..SandboxSettings::default()
+        });
+        assert_eq!(blank.sandbox_kind(), None);
+        assert_eq!(blank.sandbox_url(), None);
+        assert_eq!(blank.sandbox_host(), None);
+        assert_eq!(blank.sandbox_container(), None);
+    }
+
+    #[test]
+    fn the_sandbox_token_tiers_run_keychain_then_literal() {
+        use crate::secrets::VolatileSecretStore;
+        let profile = sandboxed_profile(SandboxSettings {
+            kind: Some("http".into()),
+            url: Some("https://box:7331".into()),
+            token: Some("file-token".into()),
+            token_ref: Some("ref-sandbox".into()),
+            ..SandboxSettings::default()
+        });
+        let store = VolatileSecretStore::new();
+        // No entry yet: the literal serves.
+        assert_eq!(
+            profile.stored_sandbox_token(Some(&store)).as_deref(),
+            Some("file-token")
+        );
+        // The entry lands: the keychain outranks the literal. (The env
+        // tier outranks both — the resolver test above.)
+        store.set("ref-sandbox", "chain-token").unwrap();
+        assert_eq!(
+            profile.stored_sandbox_token(Some(&store)).as_deref(),
+            Some("chain-token")
+        );
+        // An unreachable store reads as "not in the store": the
+        // literal serves, nothing is lost.
+        assert_eq!(
+            profile
+                .stored_sandbox_token(Some(&UnreachableStore))
+                .as_deref(),
+            Some("file-token")
+        );
+        // A blank keychain entry counts as unset: the literal serves.
+        store.set("ref-sandbox", "  ").unwrap();
+        assert_eq!(
+            profile.stored_sandbox_token(Some(&store)).as_deref(),
+            Some("file-token")
+        );
+        // No store at all — the pre-keychain callers — same answer.
+        assert_eq!(
+            profile.stored_sandbox_token(None).as_deref(),
+            Some("file-token")
+        );
+        // No section, no token, whatever the store holds.
+        store.set("ref-sandbox", "chain-token").unwrap();
+        assert_eq!(Profile::default().stored_sandbox_token(Some(&store)), None);
+    }
+
+    #[test]
+    fn workspaces_remember_their_last_sandbox_and_survive_a_round_trip() {
+        let mut config = Config::default();
+        assert_eq!(config.last_sandbox_in(Path::new("/home/u/proj")), None);
+
+        config.note_sandbox_in(Path::new("/home/u/proj"), "docker");
+        assert_eq!(
+            config.last_sandbox_in(Path::new("/home/u/proj")).as_deref(),
+            Some("docker")
+        );
+        // Another directory stays untouched: the memory is per workspace.
+        assert_eq!(config.last_sandbox_in(Path::new("/home/u/other")), None);
+
+        // The unchanged write is a no-op: however many turns re-note
+        // the same kind, the map still holds one row.
+        config.note_sandbox_in(Path::new("/home/u/proj"), "docker");
+        assert_eq!(config.last_sandbox_by_workspace.len(), 1);
+
+        config.note_sandbox_in(Path::new("/home/u/proj"), "http");
+        assert_eq!(
+            config.last_sandbox_in(Path::new("/home/u/proj")).as_deref(),
+            Some("http")
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        Config::save_to(&path, &config).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded, config);
+        assert_eq!(
+            loaded.last_sandbox_in(Path::new("/home/u/proj")).as_deref(),
+            Some("http")
+        );
     }
 }
