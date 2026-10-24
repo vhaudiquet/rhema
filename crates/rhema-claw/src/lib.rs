@@ -100,7 +100,7 @@ pub use bootstrap::{
     BOOTSTRAP_SAVE, Bootstrap, BootstrapError, BootstrapKind, BootstrapStatus, DEFAULT_SYSTEM_MD,
     render_system,
 };
-pub use config::{ClawConfig, ConfigError, ForgeKind};
+pub use config::{ClawConfig, ConfigError};
 pub use daemon::{ClawError, Daemon, TickReport, run_once};
 pub use environment::write_report;
 pub use extension::{ClawExtension, ExtensionDeps, Extensions, Lanes};
@@ -112,6 +112,7 @@ pub use interactive::InteractiveHandler;
 #[cfg(feature = "mock")]
 pub use mock::MockLoop;
 pub use notifications::{NotificationRecord, NotificationStore, NotificationStoreError};
+pub use rhema_forge_integration::{ForgeKind, resolve_token};
 pub use settings::SettingsStore;
 pub use task_source::{TASKS_SOURCE, TaskScheduler};
 pub use task_store::{TaskKind, TaskRecord, TaskStore, TaskStoreError};

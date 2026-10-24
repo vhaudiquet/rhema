@@ -52,6 +52,8 @@ pub mod error;
 pub mod event;
 pub mod forge;
 pub mod gitea;
+pub mod kind;
+pub use kind::{ForgeKind, resolve_token};
 pub mod github;
 pub mod gitlab;
 pub mod triage;

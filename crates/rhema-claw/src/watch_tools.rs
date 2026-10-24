@@ -18,8 +18,8 @@ use rhema_autonomous_agent::{ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::config::ForgeKind;
 use crate::watch_store::{ClawStore, validate_watch};
+use rhema_forge_integration::ForgeKind;
 
 /// The compiled operations behind the manifests, by `run.builtin` id.
 fn builtins(store: Arc<ClawStore>) -> BTreeMap<String, Arc<dyn ToolOp>> {

@@ -30,8 +30,8 @@ use rhema_forge_integration::{
 use rhema_identity::{IdentityStore, SecretKind};
 use rhema_rsd::{Clock, Dispatcher, Event, KeyFn, SystemClock};
 
-use crate::config::{ForgeKind, resolve_token};
 use crate::watch_store::{AccountWatchRecord, ClawStore, WatchRecord};
+use rhema_forge_integration::{ForgeKind, resolve_token};
 
 /// The cache key of a forge client: everything that changes the client
 /// is the forge kind, its host, and the token it authenticates with.

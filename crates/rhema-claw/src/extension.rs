@@ -36,13 +36,13 @@ use rhema_autonomous_agent::{Allowlist, Source, ToolRegistry};
 use rhema_core::ToolResolver;
 use rhema_rsd::{Dispatcher, ResourceKey, SystemClock};
 
-use crate::config::ForgeKind;
 use crate::consents::WaitBridge;
 use crate::daemon::ClawError;
 use crate::forge::ForgeSource;
 use crate::hub::EventHub;
 use rhema_calendar_integration::CalendarSource;
 use rhema_calendar_integration::CalendarStore;
+use rhema_forge_integration::ForgeKind;
 
 /// The store handles the standard set is assembled over. One struct,
 /// so a new extension is a field plus a constructor line, not another

@@ -22,7 +22,7 @@ use rhema_forge_integration::RepoRef;
 use rusqlite::params;
 use serde::Serialize;
 
-use crate::config::{ForgeKind, resolve_token};
+use rhema_forge_integration::{ForgeKind, resolve_token};
 
 /// One watched repository — the row's vocabulary, and the type the
 /// routes parse into. It used to live in the config as the YAML seed's

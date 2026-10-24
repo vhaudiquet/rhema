@@ -738,7 +738,7 @@ pub struct WatchBody {
 }
 
 async fn watches_add(State(state): State<ClawState>, Json(body): Json<WatchBody>) -> Response {
-    let Some(kind) = crate::config::ForgeKind::parse(&body.forge) else {
+    let Some(kind) = rhema_forge_integration::ForgeKind::parse(&body.forge) else {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "forge must be github, gitea, or gitlab"})),
@@ -783,7 +783,7 @@ async fn watches_remove(
     State(state): State<ClawState>,
     Path((forge, repo)): Path<(String, String)>,
 ) -> Response {
-    let removed = match crate::config::ForgeKind::parse(&forge) {
+    let removed = match rhema_forge_integration::ForgeKind::parse(&forge) {
         Some(kind) => state
             .watches
             .remove(kind.name(), repo.trim())
@@ -1242,7 +1242,7 @@ fn is_reserved_source(source: &str) -> bool {
     matches!(
         source,
         crate::interactive::SOURCE | crate::task_source::TASKS_SOURCE
-    ) || crate::config::ForgeKind::parse(source).is_some()
+    ) || rhema_forge_integration::ForgeKind::parse(source).is_some()
 }
 
 /// The external event's dedup id: a hash of the request's coordinates

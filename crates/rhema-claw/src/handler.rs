@@ -23,13 +23,13 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::config::ForgeKind;
 use crate::forge::{record_client, resolve_watch_token};
 use crate::watch_store::ClawStore;
 use rhema_agent_tools::AllowAll;
 use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig};
 use rhema_core::{Content, Event as ModelEvent, EventSink, Message, Session};
+use rhema_forge_integration::ForgeKind;
 use rhema_forge_integration::triage::Role;
 use rhema_forge_integration::{
     EventKind, Forge, ForgeError, ForgeEvent, Notification, RepoRef, Snapshot, ThreadState, decode,

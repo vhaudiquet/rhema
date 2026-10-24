@@ -35,8 +35,8 @@ use rhema_identity::{Account, AccountDraft, IdentityStore, Secret, SecretKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::config::ForgeKind;
 use crate::watch_store::ClawStore;
+use rhema_forge_integration::ForgeKind;
 
 /// `identity_save`: store an account (label, service, url, username, and
 /// the secret — required) and optionally register its forge watch.
