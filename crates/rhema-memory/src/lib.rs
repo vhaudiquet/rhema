@@ -39,10 +39,9 @@
 //! - [`volatile`] — the in-process `VolatileStore`
 //! - [`file`] — the markdown-file `FileMemoryStore`, the durable default
 //! - [`tools`] — the memory tools and `MemoryResolver`
-//! - [`store_contract`] — the replayable behavioral suite
+//! - [`store_contract`] — the replayable behavioral suite (`store-contract` feature)
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod conflict;
 pub mod file;
@@ -50,6 +49,9 @@ pub mod record;
 pub mod review;
 pub mod search;
 pub mod store;
+// The behavioral suite is test machinery: in every test build, and in a
+// normal build only when the `store-contract` feature asks for it.
+#[cfg(any(test, feature = "store-contract"))]
 pub mod store_contract;
 pub mod tools;
 pub mod volatile;
@@ -65,6 +67,6 @@ pub use search::{MemoryQuery, SEARCH_LIMIT};
 pub use store::{MemoryError, MemoryStore};
 pub use tools::{
     MEMORY_DUE, MEMORY_FORGET, MEMORY_RETRACT, MEMORY_SAVE, MEMORY_SEARCH, MEMORY_VERIFY,
-    MemoryResolver,
+    MemoryResolver, MemoryToolError,
 };
 pub use volatile::VolatileStore;

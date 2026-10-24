@@ -39,7 +39,7 @@ use crate::record::{
     normalize_subject, normalize_tags,
 };
 use crate::search::MemoryQuery;
-use crate::store::MemoryStore;
+use crate::store::{MemoryError, MemoryStore};
 
 /// The search tool's name — allowlists reference these.
 pub const MEMORY_SEARCH: &str = "memory_search";
@@ -53,6 +53,43 @@ pub const MEMORY_RETRACT: &str = "memory_retract";
 pub const MEMORY_VERIFY: &str = "memory_verify";
 /// The due-for-review tool's name.
 pub const MEMORY_DUE: &str = "memory_due";
+
+/// Why a memory tool call failed: the message the model reads. Every
+/// failure comes back in-band — a missing argument, an unknown id —
+/// because the model reacts to results; nothing here aborts a turn.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct MemoryToolError(String);
+
+impl MemoryToolError {
+    /// An error whose message the model reads verbatim.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// The message the model reads.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<MemoryError> for MemoryToolError {
+    fn from(err: MemoryError) -> Self {
+        Self(err.to_string())
+    }
+}
+
+impl From<String> for MemoryToolError {
+    fn from(message: String) -> Self {
+        Self(message)
+    }
+}
+
+impl From<&str> for MemoryToolError {
+    fn from(message: &str) -> Self {
+        Self(message.to_owned())
+    }
+}
 
 /// The memory tools over one store, acting in one scope. The scope
 /// is fixed at construction — the coding agent's workspace, the claw's
@@ -91,7 +128,7 @@ impl MemoryResolver {
     /// Runs the named tool's arguments; `Err` is the in-band failure
     /// text. The one entry [`ToolResolver::resolve`] and the resident
     /// tier's registry shims both go through.
-    pub fn execute(&self, name: &str, args: &Value) -> Result<String, String> {
+    pub fn execute(&self, name: &str, args: &Value) -> Result<String, MemoryToolError> {
         match name {
             MEMORY_SEARCH => self.search(args),
             MEMORY_SAVE => self.save(args),
@@ -99,11 +136,11 @@ impl MemoryResolver {
             MEMORY_RETRACT => self.retract(args),
             MEMORY_VERIFY => self.verify(args),
             MEMORY_DUE => self.due(),
-            other => Err(format!("unknown tool: {other}")),
+            other => Err(format!("unknown tool: {other}").into()),
         }
     }
 
-    fn search(&self, args: &Value) -> Result<String, String> {
+    fn search(&self, args: &Value) -> Result<String, MemoryToolError> {
         let mut query = MemoryQuery::new(arg_str(args, "query").unwrap_or_default())
             .with_scopes(self.search_scopes());
         if let Some(tags) = arg_strings(args, "tags") {
@@ -124,7 +161,7 @@ impl MemoryResolver {
         // The instant the annotations are computed at — as_of makes the
         // whole reply a pure function of (query, t).
         let t = query.as_of.unwrap_or_else(now_millis);
-        let found = self.store.search(query).map_err(|e| e.to_string())?;
+        let found = self.store.search(query)?;
         if found.is_empty() {
             return Ok("no records matched".to_owned());
         }
@@ -132,7 +169,7 @@ impl MemoryResolver {
         Ok(rendered.join("\n\n"))
     }
 
-    fn save(&self, args: &Value) -> Result<String, String> {
+    fn save(&self, args: &Value) -> Result<String, MemoryToolError> {
         let body = arg_str(args, "body").ok_or("missing required argument: body")?;
         let tags = arg_strings(args, "tags").unwrap_or_default();
         let supersedes = arg_strings(args, "supersedes").unwrap_or_default();
@@ -143,13 +180,9 @@ impl MemoryResolver {
             Some(id) => {
                 // Preserve the record's scope: correcting a global
                 // memory from a workspace session must not migrate it.
-                let existing =
-                    self.store
-                        .get(&id)
-                        .map_err(|e| e.to_string())?
-                        .ok_or_else(|| {
-                            format!("no record with id {id:?}; save without an id to create one")
-                        })?;
+                let existing = self.store.get(&id)?.ok_or_else(|| {
+                    format!("no record with id {id:?}; save without an id to create one")
+                })?;
                 MemoryDraft::new(existing.scope, body)
                     .with_tags(tags.clone())
                     .with_id(id)
@@ -157,7 +190,7 @@ impl MemoryResolver {
             None => MemoryDraft::new(self.scope.clone(), body).with_tags(tags.clone()),
         };
         if let Some(subject) = arg_str(args, "subject") {
-            draft = draft.with_subject(normalize_subject(&subject).map_err(|e| e.to_string())?);
+            draft = draft.with_subject(normalize_subject(&subject)?);
         }
         if let Some(at) = u64_arg(args, "valid_from")? {
             draft = draft.with_valid_from(at);
@@ -183,8 +216,7 @@ impl MemoryResolver {
             draft.subject.as_deref(),
             &normalize_tags(&tags),
             draft.id.as_deref(),
-        )
-        .map_err(|e| e.to_string())?;
+        )?;
         let declared: Vec<&str> = supersedes
             .iter()
             .chain(&refines)
@@ -196,7 +228,7 @@ impl MemoryResolver {
             .filter(|conflict| !declared.contains(&conflict.record.id.as_str()))
             .collect();
 
-        let record = self.store.put(draft).map_err(|e| e.to_string())?;
+        let record = self.store.put(draft)?;
 
         let mut out = format!("saved {}", record.id);
         for id in &supersedes {
@@ -211,27 +243,27 @@ impl MemoryResolver {
         Ok(out)
     }
 
-    fn forget(&self, args: &Value) -> Result<String, String> {
+    fn forget(&self, args: &Value) -> Result<String, MemoryToolError> {
         let id = arg_str(args, "id").ok_or("missing required argument: id")?;
-        if self.store.forget(&id).map_err(|e| e.to_string())? {
+        if self.store.forget(&id)? {
             Ok(format!("forgot {id}"))
         } else {
-            Err(format!("no record with id {id:?}"))
+            Err(format!("no record with id {id:?}").into())
         }
     }
 
-    fn retract(&self, args: &Value) -> Result<String, String> {
+    fn retract(&self, args: &Value) -> Result<String, MemoryToolError> {
         let id = arg_str(args, "id").ok_or("missing required argument: id")?;
         let why = arg_str(args, "why").unwrap_or_else(|| "no reason given".to_owned());
         self.store
             .retract(&id, &why)
             .map(|_| format!("retracted {id}"))
-            .map_err(|e| e.to_string())
+            .map_err(MemoryToolError::from)
     }
 
-    fn verify(&self, args: &Value) -> Result<String, String> {
+    fn verify(&self, args: &Value) -> Result<String, MemoryToolError> {
         let id = arg_str(args, "id").ok_or("missing required argument: id")?;
-        let record = self.store.verify(&id).map_err(|e| e.to_string())?;
+        let record = self.store.verify(&id)?;
         let at = format_utc(record.verified_at.unwrap_or_else(now_millis));
         match record.stale_at() {
             Some(next) => Ok(format!(
@@ -242,11 +274,8 @@ impl MemoryResolver {
         }
     }
 
-    fn due(&self) -> Result<String, String> {
-        let items = self
-            .store
-            .due_for_review(now_millis())
-            .map_err(|e| e.to_string())?;
+    fn due(&self) -> Result<String, MemoryToolError> {
+        let items = self.store.due_for_review(now_millis())?;
         if items.is_empty() {
             return Ok("nothing is due for review".to_owned());
         }
@@ -681,7 +710,7 @@ impl ToolResolver for MemoryResolver {
         }
         match self.execute(&call.name, &call.args) {
             Ok(text) => ToolResult::success(call.id, text),
-            Err(text) => ToolResult::failure(call.id, text),
+            Err(err) => ToolResult::failure(call.id, err.message()),
         }
     }
 }
@@ -1112,23 +1141,26 @@ mod tests {
     fn missing_arguments_fail_in_band() {
         let resolver = resolver(Scope::Global);
         assert_eq!(
-            resolver.save(&json!({})).unwrap_err(),
+            resolver.save(&json!({})).unwrap_err().to_string(),
             "missing required argument: body"
         );
         assert_eq!(
-            resolver.forget(&json!({})).unwrap_err(),
+            resolver.forget(&json!({})).unwrap_err().to_string(),
             "missing required argument: id"
         );
         assert_eq!(
-            resolver.retract(&json!({})).unwrap_err(),
+            resolver.retract(&json!({})).unwrap_err().to_string(),
             "missing required argument: id"
         );
         assert_eq!(
-            resolver.verify(&json!({})).unwrap_err(),
+            resolver.verify(&json!({})).unwrap_err().to_string(),
             "missing required argument: id"
         );
         assert_eq!(
-            resolver.execute("memory_teleport", &json!({})).unwrap_err(),
+            resolver
+                .execute("memory_teleport", &json!({}))
+                .unwrap_err()
+                .to_string(),
             "unknown tool: memory_teleport"
         );
     }
@@ -1140,30 +1172,35 @@ mod tests {
             resolver
                 .save(&json!({"body": "x", "subject": "Has Spaces"}))
                 .unwrap_err()
+                .to_string()
                 .contains("invalid subject")
         );
         assert!(
             resolver
                 .save(&json!({"body": "x", "decay": "daily"}))
                 .unwrap_err()
+                .to_string()
                 .contains("unknown decay")
         );
         assert!(
             resolver
                 .save(&json!({"body": "x", "source": {"kind": "told"}}))
                 .unwrap_err()
+                .to_string()
                 .contains("needs `by`")
         );
         assert!(
             resolver
                 .save(&json!({"body": "x", "verify_hint": {"kind": "smoke"}}))
                 .unwrap_err()
+                .to_string()
                 .contains("needs a kind")
         );
         assert!(
             resolver
                 .save(&json!({"body": "x", "valid_until": "soon"}))
                 .unwrap_err()
+                .to_string()
                 .contains("integer")
         );
     }
@@ -1172,6 +1209,6 @@ mod tests {
     fn an_invalid_model_supplied_id_is_an_error_not_a_crash() {
         let resolver = resolver(Scope::Global);
         let err = resolver.forget(&json!({"id": "../escape"})).unwrap_err();
-        assert!(err.contains("invalid id"), "{err}");
+        assert!(err.to_string().contains("invalid id"), "{err}");
     }
 }

@@ -11,6 +11,12 @@ authors.workspace = true
 # it until the claw ships.
 publish = false
 
+[features]
+# The reusable Store-contract suite, for replay against secondary store
+# backends; see `store_contract`. The crate's own tests replay it
+# without the feature (cfg test), matching rhema-rsd's gate.
+store-contract = []
+
 [dependencies]
 # Tools implement the resolver seam; the store contract stays
 # step-engine-agnostic (specs/rhema-memory.md §0)
@@ -25,8 +31,15 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+# The integration tests replay the contract suite: this self edge turns
+# `store-contract` on for test builds only (dev-dependencies do not
+# propagate to consumers).
+rhema-memory = { path = ".", features = ["store-contract"] }
 # The falsification test drives the tools through a scripted provider
 rhema-core = { path = "../rhema-core", features = ["mock"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # Scratch roots for the file store
 tempfile = "3"
+
+[lints]
+workspace = true
