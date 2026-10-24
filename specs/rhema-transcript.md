@@ -304,6 +304,12 @@ preview that omitted it would not be what turns send.
   extractive fallback, consolidation, and the benchmark stats
   (`TranscriptStats`: request counts, flushes, block size, the
   providers' own cache hit rate), surfaced in rhema-code's Usage page.
+  The stats carry a per-category usage breakdown
+  (`UsageBreakdown`): each request's reported input tokens spread
+  over system prompt, skills, tool calls in/out, user messages, and
+  assistant text by wire-byte proportion, plus the generated output
+  tokens; the skills share is measured at render time by the agent
+  that assembled the prompt.
 - **Cache breakpoints** in the Anthropic adapter, fed from the view's
   stable prefix.
 - **ACP and claw opt-ins** for the summarizer, and a `rhema-config`
