@@ -724,17 +724,24 @@ fn render_settings(
     }
 }
 
-/// Tokens as the Usage page spells an amount: kilo-scaled once past
-/// a thousand, one decimal, the trailing `.0` trimmed.
+/// Tokens as the Usage page spells an amount: kilo-scaled past a
+/// thousand and mega-scaled past a million, one decimal, the trailing
+/// `.0` trimmed.
 fn usage_k(tokens: u64) -> String {
-    if tokens >= 1_000 {
-        let k = format!("{:.1}k", tokens as f64 / 1_000.0);
-        match k.strip_suffix(".0k") {
-            Some(base) => format!("{base}k"),
-            None => k,
-        }
+    if tokens >= 1_000_000 {
+        trim_tenth(format!("{:.1}M", tokens as f64 / 1_000_000.0), "M")
+    } else if tokens >= 1_000 {
+        trim_tenth(format!("{:.1}k", tokens as f64 / 1_000.0), "k")
     } else {
         tokens.to_string()
+    }
+}
+
+/// Cuts a scaled amount's trailing `.0`: `12.0k` reads `12k`.
+fn trim_tenth(amount: String, suffix: &str) -> String {
+    match amount.strip_suffix(&format!(".0{suffix}")) {
+        Some(base) => format!("{base}{suffix}"),
+        None => amount,
     }
 }
 
@@ -2549,6 +2556,17 @@ mod tests {
         assert!(text.contains("30% (30k)"), "{text}");
         assert!(text.contains("8% (8k)"), "{text}");
         assert!(text.contains("10% (10k)"), "{text}");
+    }
+
+    /// The amounts scale: kilo past a thousand, mega past a million.
+    #[test]
+    fn usage_amounts_scale() {
+        assert_eq!(usage_k(0), "0");
+        assert_eq!(usage_k(999), "999");
+        assert_eq!(usage_k(1_000), "1k");
+        assert_eq!(usage_k(42_400), "42.4k");
+        assert_eq!(usage_k(1_862_600), "1.9M");
+        assert_eq!(usage_k(3_569_100), "3.6M");
     }
 
     /// The settings screen draws the whole sidebar with the selected
