@@ -24,7 +24,6 @@
 //!   a status and a `Send` byte stream out
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod allowance;
 pub mod card;

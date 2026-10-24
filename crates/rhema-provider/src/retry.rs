@@ -43,6 +43,18 @@ pub struct Retrying {
     sleeper: Arc<dyn Sleeper>,
 }
 
+impl std::fmt::Debug for Retrying {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The inner provider and sleeper are dyn seams: they print as
+        // placeholders, the policy prints in full.
+        f.debug_struct("Retrying")
+            .field("attempts", &self.attempts)
+            .field("base_delay", &self.base_delay)
+            .field("max_delay", &self.max_delay)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Retrying {
     /// The default policy: up to three attempts.
     pub fn new(inner: Arc<dyn ModelProvider>) -> Self {
@@ -51,7 +63,8 @@ impl Retrying {
 
     /// An explicit policy, for tests: `attempts` counts the first try;
     /// the pause starts at `base_delay`, doubling per retry up to
-    /// `max_delay`.
+    /// `max_delay`. A zero `attempts` is clamped to one — the exchange
+    /// always runs once — so the policy can never silently do nothing.
     pub fn with_policy(
         inner: Arc<dyn ModelProvider>,
         attempts: u32,
@@ -60,7 +73,7 @@ impl Retrying {
     ) -> Self {
         Self {
             inner,
-            attempts,
+            attempts: attempts.max(1),
             base_delay,
             max_delay,
             sleeper: Arc::new(TokioSleeper),
@@ -69,7 +82,8 @@ impl Retrying {
 
     /// [`with_policy`](Self::with_policy) with the pause supplied — the
     /// constructor for runtimes without tokio's timers. The policy is
-    /// unchanged: the sleeper only waits the ladder out.
+    /// unchanged (a zero `attempts` clamps to one, as there): the
+    /// sleeper only waits the ladder out.
     pub fn policy_with_sleeper(
         inner: Arc<dyn ModelProvider>,
         attempts: u32,
@@ -79,7 +93,7 @@ impl Retrying {
     ) -> Self {
         Self {
             inner,
-            attempts,
+            attempts: attempts.max(1),
             base_delay,
             max_delay,
             sleeper,
@@ -226,12 +240,14 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.steps.lock().unwrap().remove(0) {
                 Attempt::Timeout => Err(ProviderError::Timeout),
-                Attempt::Auth => Err(ProviderError::Api(
-                    "anthropic api error (HTTP 401): bad key".into(),
-                )),
-                Attempt::RateLimit => Err(ProviderError::Api(
-                    "anthropic api error (HTTP 429): rate_limit_error".into(),
-                )),
+                Attempt::Auth => Err(ProviderError::Api {
+                    message: "anthropic api error (HTTP 401): bad key".into(),
+                    status: Some(401),
+                }),
+                Attempt::RateLimit => Err(ProviderError::Api {
+                    message: "anthropic api error (HTTP 429): rate_limit_error".into(),
+                    status: Some(429),
+                }),
                 Attempt::DeltaThenTimeout => {
                     sink.emit(Event::TextDelta("partial "));
                     Err(ProviderError::Timeout)

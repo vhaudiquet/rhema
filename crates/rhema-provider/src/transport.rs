@@ -1,16 +1,17 @@
 //! The HTTP seam under the provider adapters: one request in, a status
 //! and a `Send` byte stream out.
 //!
-//! Every `rhema-provider-*` adapter speaks its backend's HTTP dialect
-//! through this trait, so a backend reaches any runtime the frontends
-//! live in. The contract that matters on the wasm side: JS types never
+//! Today only the Anthropic adapter speaks its backend's HTTP dialect
+//! through this trait, so that backend reaches any runtime the frontends
+//! live in; the other adapters hold a private `reqwest` client instead.
+//! New adapters should prefer the seam. The contract that matters on the wasm side: JS types never
 //! leak through — a host whose fetch stream is backed by JS objects
 //! bridges it into plain `Vec<u8>` chunks (its `!Send` handle stays
 //! inside a local task; the channel's receiver is plain data and
 //! therefore `Send` on single-threaded wasm). Non-2xx responses are not
 //! transport errors: the adapter reads the status and shapes its own
-//! API error, keeping the `"... (HTTP <status>): ..."` message shape
-//! `ProviderError::is_retryable` reads back.
+//! API error, carrying the status structurally on
+//! [`rhema_core::ProviderError::Api`].
 
 use std::time::Duration;
 
@@ -58,6 +59,13 @@ impl HttpRequest {
     /// `serde_json::Value`, whose f64 widening would corrupt f32 wire
     /// fields (a 0.2 temperature would arrive as
     /// 0.20000000298023224).
+    ///
+    /// # Panics
+    ///
+    /// Panics when `body` fails to serialize. An adapter's request body
+    /// is plain serde data — no map keys that are not strings, nothing
+    /// unserializable — so this is a construction-time invariant, not a
+    /// runtime path.
     pub fn with_json_body<T: serde::Serialize>(mut self, body: &T) -> Self {
         self.headers
             .push(("content-type".to_owned(), "application/json".to_owned()));
