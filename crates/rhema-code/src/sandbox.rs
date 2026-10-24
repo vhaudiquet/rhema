@@ -22,9 +22,10 @@ use rhema_agent_tools::{ShellTools, Skill};
 use rhema_coding_agent::CodingAgentConfig;
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
-use rhema_sandbox::SshSandbox;
-use rhema_sandbox::http::HttpSandbox;
-use rhema_sandbox::{DockerSandbox, FsRoot, Sandbox, ShellSandbox, seed_workspace};
+use rhema_sandbox::{FsRoot, Sandbox, ShellSandbox, seed_workspace};
+use rhema_sandbox_docker::DockerSandbox;
+use rhema_sandbox_http::HttpSandbox;
+use rhema_sandbox_ssh::SshSandbox;
 
 use crate::args::SandboxChoice;
 

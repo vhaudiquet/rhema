@@ -10,6 +10,7 @@
 //! timeout. Streams pump live lines through the shared `run_child`
 //! wiring (`exec_util`), caps included.
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -17,9 +18,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 
-use crate::exec_util::{self, STAGING, check_remote_path};
-use crate::fsroot::FsRoot;
-use crate::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use rhema_sandbox::exec_util::{self, STAGING, check_remote_path};
+use rhema_sandbox::fsroot::FsRoot;
+use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 
 /// The docker sandbox a session's commands run in: one running
 /// container whose bind mount is the sandbox filesystem.

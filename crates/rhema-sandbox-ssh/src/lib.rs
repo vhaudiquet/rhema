@@ -13,6 +13,7 @@
 //! no local root to resolve against, so the model-influenced paths are
 //! guarded textually by `check_remote_path` (`exec_util`).
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -20,8 +21,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 
-use crate::exec_util::{check_remote_path, run_child, shquote};
-use crate::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use rhema_sandbox::exec_util::{check_remote_path, run_child, shquote};
+use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 
 /// The seed budget, the shim's — the same one the fs-sharing backends
 /// give their seed commands. A clone or unpack past it is a timeout:

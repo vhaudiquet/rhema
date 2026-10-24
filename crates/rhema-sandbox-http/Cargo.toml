@@ -1,0 +1,43 @@
+[package]
+name = "rhema-sandbox-http"
+description = "The rhema sandbox wire protocol over HTTPS: the `HttpSandbox` client and the `HttpTransport` seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["native"]
+# The reqwest transport behind the default constructor. Off in wasm
+# builds, whose host has no sockets to speak of: they bring their own
+# `HttpTransport` over host fetch — the provider family's `native`
+# precedent.
+native = ["dep:reqwest"]
+
+[dependencies]
+# The seam and the wire protocol's shared machinery
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", default-features = false }
+async-trait = { workspace = true }
+# File contents cross the put/get routes base64
+base64 = "0.22"
+# The request bodies and the decoded replies
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The protocol's native HTTP transport (feature `native`); the version
+# pin mirrors the rest of the workspace's. Native-only: reqwest's own
+# wasm client is `!Send` under the transport's `Send` contract, and
+# workerd gives wasm no sockets anyway.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
+
+[dev-dependencies]
+# Driving the loopback HTTP tests: a raw listener and hand-rolled
+# HTTP/1.1 replies, so the test pins the wire, not a framework's
+# reading of it
+tokio = { workspace = true, features = ["io-util", "net", "sync"] }

@@ -1,0 +1,24 @@
+[package]
+name = "rhema-sandbox-docker"
+description = "Docker sandbox backend for the rhema `Sandbox` seam: a bind-mounted container driven through the `docker` CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The seam and the process family's shared machinery (`spawn`): the
+# stream pump, the fs routes, the textual path guard, `FsRoot`
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = ["spawn"] }
+async-trait = { workspace = true }
+# File contents cross the seed staging base64
+base64 = "0.22"
+# The `docker exec` child, buffered reads, the cancel tick's timer
+tokio = { workspace = true, features = ["process", "io-util", "time", "fs"] }
+
+[dev-dependencies]
+# The tests run on the test runtime, against throwaway host directories
+tokio = { workspace = true }
+tempfile = "3"

@@ -23,11 +23,11 @@ use base64::Engine;
 use worker::{Headers, Method, ObjectNamespace, Request, RequestInit};
 
 use rhema_cloud_agent::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
-use rhema_sandbox::http::HttpSandbox;
 use rhema_sandbox::protocol::{
     Ack, EXEC, ExecCall, ExecReply, FileReply, GET, PUT, PutFile, SEED, SeedRequest, TOKEN_HEADER,
     stream_reply,
 };
+use rhema_sandbox_http::HttpSandbox;
 
 use super::sandbox_http::FetchHttpTransport;
 

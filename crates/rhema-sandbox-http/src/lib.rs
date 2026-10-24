@@ -3,7 +3,7 @@
 //! [`HttpSandbox`] is the same request/reply handling `SandboxDo`
 //! performs over its DO binding, minus the binding: one JSON POST per
 //! route to `{base}/{session}{route}`, the shared secret in
-//! [`protocol::TOKEN_HEADER`](crate::protocol::TOKEN_HEADER). `base` is
+//! [`protocol::TOKEN_HEADER`](rhema_sandbox::protocol::TOKEN_HEADER). `base` is
 //! the daemon's location (`https://box.example:7600`, no trailing
 //! slash); the session name is the one path segment ahead of every
 //! route — the daemon multiplexes one root directory per session name
@@ -14,6 +14,7 @@
 //! `AnthropicProvider` precedent. reqwest is a native-only dependency,
 //! absent from the wasm build even with the feature on.
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -24,11 +25,11 @@ use async_trait::async_trait;
 use base64::Engine;
 
 #[cfg(not(target_arch = "wasm32"))]
-use crate::protocol::TOKEN_HEADER;
-use crate::protocol::{
+use rhema_sandbox::protocol::TOKEN_HEADER;
+use rhema_sandbox::protocol::{
     self, Ack, EXEC, ExecCall, ExecReply, FileReply, GET, PUT, PutFile, SEED, SeedRequest,
 };
-use crate::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 
 /// One JSON POST in, the status and body bytes out: the transport seam
 /// under every route. The worker crate implements this over host fetch

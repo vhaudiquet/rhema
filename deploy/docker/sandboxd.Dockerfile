@@ -5,8 +5,8 @@
 # The builder tag tracks rust-toolchain.toml: the pinned channel is what
 # every commit is tested against. The full image (not -slim) keeps this
 # builder identical to claw.Dockerfile's, though the graph is pure Rust:
-# the bundled SQLite of rhema-identity stays out of `-p rhema-sandbox`'s
-# dependency closure.
+# the bundled SQLite of rhema-identity stays out of the daemon
+# crate's dependency closure.
 FROM rust:1.98.1 AS builder
 WORKDIR /build
 
@@ -32,7 +32,11 @@ COPY crates/rhema-provider-llama-cpp/Cargo.toml crates/rhema-provider-llama-cpp/
 COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-openai-compatible/Cargo.toml
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
-COPY crates/rhema-sandbox/Cargo.toml crates/rhema-sandbox/Cargo.toml
+COPY crates/rhema-sandbox-docker/Cargo.toml crates/rhema-sandbox-docker/Cargo.toml
+COPY crates/rhema-sandbox-http/Cargo.toml crates/rhema-sandbox-http/Cargo.toml
+COPY crates/rhema-sandbox-local/Cargo.toml crates/rhema-sandbox-local/Cargo.toml
+COPY crates/rhema-sandbox-server/Cargo.toml crates/rhema-sandbox-server/Cargo.toml
+COPY crates/rhema-sandbox-ssh/Cargo.toml crates/rhema-sandbox-ssh/Cargo.toml
 COPY crates/rhema-subagents/Cargo.toml crates/rhema-subagents/Cargo.toml
 COPY crates/rhema-transcript/Cargo.toml crates/rhema-transcript/Cargo.toml
 COPY crates/rhema-vercel-agent/Cargo.toml crates/rhema-vercel-agent/Cargo.toml
@@ -55,9 +59,10 @@ COPY vendor/ vendor/
 #
 # No src/main.rs stub: most members have no default binary, the stub
 # would survive `COPY . .`, and the phantom autobin it creates fails
-# E0601 the moment that member is the `-p` package (rhema-sandbox
-# itself). Declared [[bin]] paths are never stubbed either — the awk
-# stubs examples/tests/benches only — and fetch needs no bin to exist.
+# E0601 the moment that member is the `-p` package — which is now
+# rhema-sandbox-server, were the stub not skipped. Declared [[bin]]
+# paths are never stubbed either — the awk stubs examples/tests/benches
+# only — and fetch needs no bin to exist.
 RUN for crate in crates/*/ integrations/*/; do \
            mkdir -p "$crate/src"; \
            touch "$crate/src/lib.rs"; \
@@ -73,10 +78,11 @@ RUN for crate in crates/*/ integrations/*/; do \
 # keeps them out of the context.
 COPY . .
 
-# Feature `server` only: the daemon needs no local/mock/client code
-# (server implies the local backend and tokio's rt/net, per the
-# crate's feature graph).
-RUN cargo build --release --locked -p rhema-sandbox --features server
+# The daemon crate pulls only what it serves from: the seam with the
+# process machinery (`spawn`) and the local backend — no mock, no HTTP
+# client. The stub loop above already wrote its lib.rs; the declared
+# [[bin]] path needs no stub for the fetch.
+RUN cargo build --release --locked -p rhema-sandbox-server
 
 FROM debian:stable-slim
 

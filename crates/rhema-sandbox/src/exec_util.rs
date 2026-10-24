@@ -178,11 +178,7 @@ pub async fn read_through(root: &FsRoot, path: &str) -> Result<Vec<u8>, SandboxE
 /// The fs-sharing family's write route: map through the root, make the
 /// parent directories — the shim's put creates them, and the skills
 /// seeding writes two levels deep — then write the bytes.
-pub async fn write_through(
-    root: &FsRoot,
-    path: &str,
-    contents: &[u8],
-) -> Result<(), SandboxError> {
+pub async fn write_through(root: &FsRoot, path: &str, contents: &[u8]) -> Result<(), SandboxError> {
     let mapped = root.map(path)?;
     if let Some(parent) = mapped.parent() {
         tokio::fs::create_dir_all(parent)

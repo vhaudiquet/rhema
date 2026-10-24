@@ -3381,6 +3381,7 @@ dependencies = [
  "rhema-provider-anthropic",
  "rhema-rsd",
  "rhema-sandbox",
+ "rhema-sandbox-http",
  "rhema-transcript",
  "serde",
  "serde_json",
@@ -3412,6 +3413,9 @@ dependencies = [
  "rhema-provider-openai-compatible",
  "rhema-provider-openrouter",
  "rhema-sandbox",
+ "rhema-sandbox-docker",
+ "rhema-sandbox-http",
+ "rhema-sandbox-ssh",
  "rhema-subagents",
  "rhema-transcript",
  "serde_json",
@@ -3622,15 +3626,74 @@ name = "rhema-sandbox"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "axum",
- "base64 0.22.1",
- "clap",
- "reqwest",
  "rhema-agent-tools",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-sandbox-docker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "rhema-sandbox",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-sandbox-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "reqwest",
+ "rhema-sandbox",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-sandbox-local"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "rhema-sandbox",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-sandbox-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "clap",
+ "reqwest",
+ "rhema-sandbox",
+ "rhema-sandbox-http",
+ "rhema-sandbox-local",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-sandbox-ssh"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "rhema-sandbox",
+ "tempfile",
  "tokio",
 ]
 
@@ -3690,6 +3753,7 @@ dependencies = [
  "rhema-provider-anthropic",
  "rhema-rsd",
  "rhema-sandbox",
+ "rhema-sandbox-http",
  "rhema-transcript",
  "serde",
  "serde_json",

@@ -1,0 +1,26 @@
+[package]
+name = "rhema-sandbox-ssh"
+description = "SSH sandbox backend for the rhema `Sandbox` seam: commands on a remote box over `ssh`, no daemon on the far end"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The seam and the process family's shared machinery (`spawn`): the
+# stream pump, the textual path guard, the shell quoting
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = ["spawn"] }
+async-trait = { workspace = true }
+# The tarball seed is staged base64-side only: the bytes stream raw to
+# the remote `tar` — base64 rides for the file routes
+base64 = "0.22"
+# The `ssh` child, buffered reads, the cancel tick's timer
+tokio = { workspace = true, features = ["process", "io-util", "time"] }
+
+[dev-dependencies]
+# The tests run on the test runtime
+tokio = { workspace = true }
+# The tests stage remote trees in throwaway directories
+tempfile = "3"

@@ -9,6 +9,7 @@
 //! before the reply is built — the spec's "sandbox side caps streams"
 //! clause, inherited rather than restated.
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -25,12 +26,12 @@ use axum::{Json, Router};
 use base64::Engine;
 use clap::Parser;
 
-use crate::fsroot::FsRoot;
-use crate::local::LocalSandbox;
-use crate::protocol::{
+use rhema_sandbox::fsroot::FsRoot;
+use rhema_sandbox::protocol::{
     Ack, EXEC, ExecCall, ExecReply, FileReply, GET, PUT, PutFile, SEED, SeedRequest, TOKEN_HEADER,
 };
-use crate::{ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use rhema_sandbox::{ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use rhema_sandbox_local::LocalSandbox;
 
 /// `rhema-sandboxd`'s arguments: where sessions live, the shared
 /// secret, and the address to serve on.
@@ -124,7 +125,7 @@ fn session_name(session: &str) -> Result<(), SandboxError> {
 }
 
 /// The daemon's routes: `/healthz` and the four protocol routes, one
-/// session segment ahead of each — the paths are [`crate::protocol`]'s
+/// session segment ahead of each — the paths are [`rhema_sandbox::protocol`]'s
 /// constants, the token middleware layered over the lot.
 pub fn router(daemon: Arc<Daemon>) -> Router {
     Router::new()
@@ -376,15 +377,15 @@ mod tests {
     }
 }
 
-#[cfg(all(test, unix, feature = "client", feature = "server"))]
+#[cfg(all(test, unix))]
 mod loopback_tests {
     //! The loopback contract (spec §6): the daemon in-process on an
     //! ephemeral port, driven by the real client — the two sides
     //! exercised together, not asserted at each other.
 
     use super::*;
-    use crate::ExecOutcome;
-    use crate::http::HttpSandbox;
+    use rhema_sandbox::ExecOutcome;
+    use rhema_sandbox_http::HttpSandbox;
 
     /// The daemon's token in these tests.
     const TOKEN: &str = "sekrit";

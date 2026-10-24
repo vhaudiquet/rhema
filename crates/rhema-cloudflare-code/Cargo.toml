@@ -33,12 +33,13 @@ rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.
 # The revision-guarded record the DO checkpoints sessions through
 rhema-rsd = { path = "../rhema-rsd", version = "0.1.0", default-features = false }
 # The sandbox seam the DO's bash runs through: `SandboxDo` speaks the
-# shared protocol types, and the `http` backend selects the shared
-# HttpSandbox over this crate's fetch transport. Feature `client` is
-# wasm-compilable — its reqwest stays native-only inside rhema-sandbox.
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", default-features = false, features = [
-    "client",
-] }
+# shared protocol types
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", default-features = false }
+# The protocol's HTTPS client: the `HttpTransport` seam this worker
+# implements over host fetch, plus the `HttpSandbox` the `http` backend
+# drives — reqwest behind its `native` feature, off here, workerd has
+# no sockets
+rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.1.0", default-features = false }
 rhema-transcript = { path = "../rhema-transcript", version = "0.1.0" }
 async-trait = { workspace = true }
 serde = { workspace = true }

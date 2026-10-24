@@ -7,8 +7,8 @@ use async_trait::async_trait;
 use worker::{Fetch, Headers, Method, Request, RequestInit};
 
 use rhema_sandbox::SandboxError;
-use rhema_sandbox::http::HttpTransport;
 use rhema_sandbox::protocol::TOKEN_HEADER;
+use rhema_sandbox_http::HttpTransport;
 
 /// [`HttpTransport`] over workerd's host fetch. Stateless: workerd owns
 /// the socket and the connection pool. The exchange runs inside one

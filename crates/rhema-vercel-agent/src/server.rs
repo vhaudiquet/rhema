@@ -30,7 +30,7 @@ use rhema_core::{EventSink, ModelProvider, Session};
 use rhema_provider::Retrying;
 use rhema_provider_anthropic::{AnthropicProvider, ReqwestTransport};
 use rhema_rsd::{ResourceKey, Store};
-use rhema_sandbox::http::HttpSandbox;
+use rhema_sandbox_http::HttpSandbox;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::backend::SandboxBackend;
