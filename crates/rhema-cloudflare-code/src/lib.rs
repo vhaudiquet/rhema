@@ -17,7 +17,10 @@
 //! - `bash` runs in a Cloudflare Sandbox container bound to the same
 //!   session name, reached through the shared
 //!   [`Sandbox`](rhema_cloud_agent::Sandbox) seam
-//!   ([`worker::SandboxDo`] implements it);
+//!   ([`worker::SandboxDo`] implements it) — or, when the deployment
+//!   sets `SANDBOX_BACKEND=http`, on any machine speaking the sandbox
+//!   protocol, through the shared HTTP sandbox client over host fetch
+//!   (the selection lives in [`backend`]);
 //! - the session checkpoints into the DO's SQLite storage — at the
 //!   commit hook, before every side effect, and after each turn —
 //!   revision-guarded, through a
@@ -49,6 +52,8 @@
 //! alarm-driven step queue is a v2 refinement of turn driving.
 
 #![deny(missing_docs)]
+
+pub mod backend;
 
 pub use rhema_cloud_agent::{
     AgentAssembly, ApprovalChannel, ApprovalPolicy, ClientGate, ExecOutcome, ExecRequest,

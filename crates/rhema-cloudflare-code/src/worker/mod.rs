@@ -5,10 +5,11 @@
 //! answers, stop; streaming events out), its HTTP surface serves the
 //! checkpoint introspection, and every turn is the ordinary coding
 //! agent over the ordinary engine: the Anthropic adapter on
-//! [`FetchTransport`], `bash` in the session's sandbox
-//! ([`SandboxDo`]), checkpoints through [`DoStore`]. Approval asks and
-//! their answers cross between the pump and the turn task only through
-//! channels — workerd runs everything on one thread.
+//! [`FetchTransport`], `bash` in the session's sandbox — the shim DO
+//! ([`SandboxDo`]) or the `http` daemon the deployment selects —
+//! checkpoints through [`DoStore`]. Approval asks and their answers
+//! cross between the pump and the turn task only through channels —
+//! workerd runs everything on one thread.
 //!
 //! Turn driving (v1): a turn runs inside the client's live connection.
 //! Checkpoints land at the commit hook — before every side effect —
@@ -25,6 +26,7 @@
 
 mod approval;
 mod sandbox;
+mod sandbox_http;
 mod sleeper;
 mod storage;
 mod transport;
@@ -49,10 +51,12 @@ use rhema_provider::Retrying;
 use rhema_provider_anthropic::AnthropicProvider;
 use rhema_rsd::{ResourceKey, Store};
 
+use crate::backend::{BACKEND_VAR, SandboxBackend, SandboxEnv, URL_VAR, select_backend};
 use rhema_cloud_agent::{
     AgentAssembly, ClientMessage, Sandbox, ServerMessage, SessionConfig, ShellSandbox,
     WorkspaceSeed,
 };
+use sandbox::SandboxSource;
 use storage::session_key;
 
 /// How long an approval ask waits for its client before the gate
@@ -174,6 +178,12 @@ fn load_config(env: &Env, store: &DoStore) -> Result<SessionConfig> {
     }
 }
 
+/// One plain var of the deployment env, absent when unset — the
+/// `RHEMA_MODEL` pattern; secrets go through `env.secret`.
+fn env_var(env: &Env, name: &str) -> Option<String> {
+    env.var(name).ok().map(|value| value.to_string())
+}
+
 /// GET /ws: accept the socket and hand it to the pump. The pump and
 /// the turns it spawns run for the life of the connection — the
 /// client's live request.
@@ -193,7 +203,20 @@ async fn chat_socket(state: &State, env: &Env) -> Result<Response> {
         .secret("SANDBOX_TOKEN")
         .map(|secret| secret.to_string())
         .unwrap_or_default();
-    let namespace = env.durable_object("SANDBOX")?;
+    // The sandbox backend rides the deployment env (spec: backend
+    // selection rides deployment env), read once per connection here
+    // where every other piece of env is. Under `http` the shim's DO
+    // binding is never resolved — no namespace call happens — so the
+    // binding is absent from deployments that do not need it.
+    let sandbox = match select_backend(&SandboxEnv {
+        backend: env_var(env, BACKEND_VAR),
+        url: env_var(env, URL_VAR),
+    })
+    .map_err(Error::from)?
+    {
+        SandboxBackend::Cloudflare => SandboxSource::Cloudflare(env.durable_object("SANDBOX")?),
+        SandboxBackend::Http(base) => SandboxSource::Http(base),
+    };
 
     let live = Arc::new(Live {
         socket: pair.server.clone(),
@@ -210,7 +233,7 @@ async fn chat_socket(state: &State, env: &Env) -> Result<Response> {
         store,
         config,
         api_key,
-        namespace,
+        sandbox,
         sandbox_token,
         session_id,
     ));
@@ -226,7 +249,7 @@ async fn pump(
     store: DoStore,
     config: SessionConfig,
     api_key: String,
-    namespace: worker::ObjectNamespace,
+    sandbox: SandboxSource,
     sandbox_token: String,
     session_id: String,
 ) {
@@ -256,7 +279,7 @@ async fn pump(
                             store.clone(),
                             config.clone(),
                             api_key.clone(),
-                            namespace.clone(),
+                            sandbox.clone(),
                             sandbox_token.clone(),
                             session_id.clone(),
                             text,
@@ -296,7 +319,7 @@ async fn run_turn(
     store: DoStore,
     config: SessionConfig,
     api_key: String,
-    namespace: worker::ObjectNamespace,
+    sandbox: SandboxSource,
     sandbox_token: String,
     session_id: String,
     input: String,
@@ -336,8 +359,10 @@ async fn run_turn(
         Arc::new(DelaySleeper),
     ));
 
-    // 3. The sandbox of the same session name, seeded on first use.
-    let sandbox = Arc::new(SandboxDo::new(namespace, session_id.clone(), sandbox_token));
+    // 3. The sandbox of the same session name, seeded on first use —
+    //    the shim DO wrapper or the shared HTTP client, per the
+    //    backend the deployment selected.
+    let sandbox = sandbox.for_session(&session_id, &sandbox_token);
     if let Err(message) = ensure_seeded(&store, sandbox.as_ref(), &config).await {
         live.busy.store(false, Ordering::SeqCst);
         live.send(&ServerMessage::Error { message });
@@ -421,7 +446,7 @@ async fn run_turn(
 /// session re-seeds by clearing the marker (SPEC.md).
 async fn ensure_seeded(
     store: &DoStore,
-    sandbox: &SandboxDo,
+    sandbox: &dyn Sandbox,
     config: &SessionConfig,
 ) -> Result<(), String> {
     match store.meta("workspace:seeded") {

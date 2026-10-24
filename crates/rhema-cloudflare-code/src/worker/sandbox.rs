@@ -1,14 +1,21 @@
-//! The sandbox client: the [`Sandbox`] seam over the session's
-//! SandboxShim Durable Object.
+//! The sandbox clients of one session and the deployment's choice
+//! between them: [`SandboxDo`] over the session's SandboxShim Durable
+//! Object, and — under `SANDBOX_BACKEND=http` — the shared
+//! [`HttpSandbox`] over host fetch.
 //!
 //! The shim (a small JS DO, `deploy/cloudflare/sandbox-shim.mjs`) owns
 //! the container binding — the container runtime is a JS-only API — and
 //! speaks plain JSON over its DO fetch: exec, seed, get, put. The two
 //! DOs of one session share a name, so binding by the session's id
 //! reaches the container whose lifetime matches the session's
-//! checkpoints. A shared secret guards the shim's HTTP surface.
+//! checkpoints. A shared secret guards the shim's HTTP surface. Those
+//! routes and shapes are the sandbox wire protocol, pinned in
+//! `rhema-sandbox::protocol`; the `http` backend speaks the same
+//! protocol to a `rhema-sandboxd` on any machine, where the DO binding
+//! is never touched at all.
 #![forbid(unsafe_code)]
 
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use async_trait::async_trait;
@@ -16,6 +23,46 @@ use base64::Engine;
 use worker::{Headers, Method, ObjectNamespace, Request, RequestInit};
 
 use rhema_cloud_agent::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+use rhema_sandbox::http::HttpSandbox;
+use rhema_sandbox::protocol::{
+    Ack, EXEC, ExecCall, ExecReply, FileReply, GET, PUT, PutFile, SEED, SeedRequest, TOKEN_HEADER,
+    stream_reply,
+};
+
+use super::sandbox_http::FetchHttpTransport;
+
+/// The sandbox a turn's `bash` runs in: the deployment's backend choice
+/// ([`crate::backend::select_backend`]), resolved once per connection
+/// from its env and threaded to every turn. Under
+/// [`SandboxSource::Cloudflare`] the shim's DO binding is the only
+/// sandbox thing touched; under [`SandboxSource::Http`] no namespace
+/// call happens at all — that is the point of the backend.
+#[derive(Clone)]
+pub(crate) enum SandboxSource {
+    /// The session's SandboxShim DO binding.
+    Cloudflare(ObjectNamespace),
+    /// The protocol daemon's base URL; the session name rides the path.
+    Http(String),
+}
+
+impl SandboxSource {
+    /// The session's sandbox client: the DO wrapper, or the shared HTTP
+    /// client over host fetch — the one seam either way, so the turn's
+    /// shell and seeding cannot tell the backends apart.
+    pub(crate) fn for_session(&self, name: &str, token: &str) -> Arc<dyn Sandbox> {
+        match self {
+            SandboxSource::Cloudflare(namespace) => {
+                Arc::new(SandboxDo::new(namespace.clone(), name, token))
+            }
+            SandboxSource::Http(base) => Arc::new(HttpSandbox::new_with_transport(
+                base.clone(),
+                name,
+                token,
+                Arc::new(FetchHttpTransport),
+            )),
+        }
+    }
+}
 
 /// The sandbox of one session, over its DO binding.
 pub struct SandboxDo {
@@ -46,7 +93,7 @@ impl SandboxDo {
     async fn post<T: serde::de::DeserializeOwned>(
         &self,
         route: &str,
-        body: &serde_json::Value,
+        body: &impl serde::Serialize,
     ) -> Result<T, SandboxError> {
         let id = self
             .namespace
@@ -57,7 +104,7 @@ impl SandboxDo {
         init.method = Method::Post;
         init.headers = Headers::new();
         init.headers
-            .set("x-rhema-token", &self.token)
+            .set(TOKEN_HEADER, &self.token)
             .map_err(shim_error)?;
         init.headers
             .set("content-type", "application/json")
@@ -115,26 +162,12 @@ fn shim_error(err: worker::Error) -> SandboxError {
     SandboxError::Unavailable(err.to_string())
 }
 
-/// The shim's exec reply.
-#[derive(serde::Deserialize)]
-struct ShimExec {
-    exit_code: Option<i32>,
-    stdout: String,
-    stderr: String,
-    /// Whether the shim's `timeout` killed the command.
-    timed_out: bool,
-}
-
-/// Streams the shim's (already tail-capped) output through `progress`:
-/// stdout's lines first, then stderr's. The v1 shim buffers the whole
-/// output, so this is one burst, not live lines — the callback shape is
-/// the contract a streaming shim fills in.
-fn stream_outcome(outcome: &ShimExec, progress: &mut (dyn for<'a> FnMut(&'a str) + Send)) {
-    for line in outcome.stdout.lines() {
-        progress(&format!("{line}\n"));
-    }
-    for line in outcome.stderr.lines() {
-        progress(&format!("{line}\n"));
+/// The ack's `error` string as a sandbox result: absent and null both
+/// mean success.
+fn ack_result(ack: Ack) -> Result<(), SandboxError> {
+    match ack.error {
+        Some(message) => Err(SandboxError::Failed(message)),
+        None => Ok(()),
     }
 }
 
@@ -149,23 +182,19 @@ impl Sandbox for SandboxDo {
         if cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             return Err(SandboxError::Failed("cancelled".into()));
         }
-        let reply: ShimExec = self
-            .post(
-                "/exec",
-                &serde_json::json!({
-                    "command": request.command,
-                    "cwd": request.cwd,
-                    "timeout_secs": request.timeout.as_secs(),
-                }),
-            )
-            .await?;
+        let call = ExecCall {
+            command: request.command,
+            cwd: Some(request.cwd),
+            timeout_secs: request.timeout.as_secs(),
+        };
+        let reply: ExecReply = self.post(EXEC, &call).await?;
         // No cancel check here: the command completed remotely and its
         // result is real — the model sees the truth, whatever the turn
         // decided meanwhile.
         if reply.timed_out {
             return Err(SandboxError::Timeout(request.timeout.as_secs()));
         }
-        stream_outcome(&reply, progress);
+        stream_reply(&reply, progress);
         Ok(ExecOutcome {
             stdout: reply.stdout.into_bytes(),
             stderr: reply.stderr.into_bytes(),
@@ -175,22 +204,20 @@ impl Sandbox for SandboxDo {
 
     async fn seed(&self, seed: &WorkspaceSeed) -> Result<(), SandboxError> {
         let body = match seed {
-            WorkspaceSeed::GitClone(url) => serde_json::json!({ "git": url }),
+            WorkspaceSeed::GitClone(url) => SeedRequest::Git { git: url.clone() },
             WorkspaceSeed::Tarball {
                 name,
                 tar_gz_base64,
-            } => {
-                serde_json::json!({ "tarball_name": name, "tarball_base64": tar_gz_base64 })
-            }
+            } => SeedRequest::Tarball {
+                tarball_base64: tar_gz_base64.clone(),
+                tarball_name: Some(name.clone()),
+            },
         };
-        let reply: ShimAck = self.post("/seed", &body).await?;
-        reply.into_result()
+        ack_result(self.post(SEED, &body).await?)
     }
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        let reply: ShimFile = self
-            .post("/get", &serde_json::json!({ "path": path }))
-            .await?;
+        let reply: FileReply = self.post(GET, &serde_json::json!({ "path": path })).await?;
         if let Some(error) = reply.error {
             return Err(SandboxError::Failed(error));
         }
@@ -200,40 +227,10 @@ impl Sandbox for SandboxDo {
     }
 
     async fn write_file(&self, path: &str, contents: &[u8]) -> Result<(), SandboxError> {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(contents);
-        let reply: ShimAck = self
-            .post(
-                "/put",
-                &serde_json::json!({ "path": path, "content_base64": encoded }),
-            )
-            .await?;
-        reply.into_result()
+        let put = PutFile {
+            path: path.to_owned(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(contents),
+        };
+        ack_result(self.post(PUT, &put).await?)
     }
-}
-
-/// The shim's ack: `error` null on success, the failure message
-/// otherwise.
-#[derive(serde::Deserialize)]
-struct ShimAck {
-    #[serde(default)]
-    error: Option<String>,
-}
-
-impl ShimAck {
-    /// The ack as a sandbox result.
-    fn into_result(self) -> Result<(), SandboxError> {
-        match self.error {
-            Some(message) => Err(SandboxError::Failed(message)),
-            None => Ok(()),
-        }
-    }
-}
-
-/// The shim's file reply.
-#[derive(serde::Deserialize)]
-struct ShimFile {
-    #[serde(default)]
-    content_base64: Option<String>,
-    #[serde(default)]
-    error: Option<String>,
 }

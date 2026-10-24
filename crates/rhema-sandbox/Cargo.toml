@@ -42,17 +42,22 @@ thiserror = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["sync"] }
 # File contents cross the put/get routes base64
 base64 = "0.22"
-# The protocol's native HTTP transport (feature `client`); the version
-# pin mirrors the rest of the workspace's
-reqwest = { version = "0.12", default-features = false, features = [
-    "json",
-    "rustls-tls",
-], optional = true }
 # The daemon's HTTP surface (feature `server`), the workspace's pin
 axum = { workspace = true, optional = true }
 # The daemon binary's args (feature `server`); the version pin mirrors
 # the rest of the workspace's
 clap = { version = "4.5", features = ["derive"], optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The protocol's native HTTP transport (feature `client`); the version
+# pin mirrors the rest of the workspace's. Native-only: reqwest's own
+# wasm client is `!Send` under the transport's `Send` contract, and
+# workerd gives wasm no sockets anyway — a wasm build brings its own
+# `HttpTransport` over host fetch, and reqwest stays out of its build.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+], optional = true }
 
 [dev-dependencies]
 # Driving the loopback HTTP tests: a raw listener and hand-rolled
