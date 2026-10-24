@@ -404,7 +404,9 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     }
     // Subagents ride in as one tool: the built-in general-purpose
     // definition plus whatever the workspace defines.
-    let mut agent_config = rhema_subagents::wire(backend.provider(), agent_config);
+    // The handle rides to the UI in the wire-up piece; the registry
+    // is live either way.
+    let (mut agent_config, _subagents) = rhema_subagents::wire(backend.provider(), agent_config);
     if let Some(assembled) = sandboxed {
         assembled.apply_workspace(&mut agent_config);
     }

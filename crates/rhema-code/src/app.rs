@@ -2999,7 +2999,9 @@ fn session_agent_config(
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_tools(&mut config);
     }
-    let mut config = rhema_subagents::wire(provider, config);
+    // The handle rides to the UI in the wire-up piece; the registry
+    // is live either way.
+    let (mut config, _subagents) = rhema_subagents::wire(provider, config);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_workspace(&mut config);
     }

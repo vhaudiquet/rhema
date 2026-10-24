@@ -1,28 +1,42 @@
-//! The `subagent` tool: one resolver, one tool, one inner turn per call.
+//! The `subagent` tool: one resolver, one tool, two shapes.
 //!
-//! [`SubagentTools`] advertises `subagent(name, prompt)`. A call builds a
-//! fresh [`Agent`](rhema_core::Agent) over the named
-//! [`SubagentDef`]'s body as system prompt, runs a bounded step loop on a
+//! `subagent(name, prompt)` **starts** a job: [`SubagentTools`] mints a
+//! job id in its [`Registry`], spawns the inner turn as a tokio task,
+//! and returns in-band at once — the result names the id and the
+//! notification that will follow. `subagent(id)` **fetches**: a
+//! finished job's cached report (a double-fetch returns the cache,
+//! never a re-run), a failed job's reason as an `is_error`, a running
+//! job's "still running", an unknown id's "gone". Both shapes share one
+//! honest [`ReplaySafety::Unsafe`](rhema_core::ReplaySafety) — a fetch
+//! must not launder the start's classification.
+//!
+//! The spawned task runs the same inner path a synchronous call always
+//! ran: a fresh [`Agent`](rhema_core::Agent) over the named
+//! [`SubagentDef`]'s body as system prompt, a bounded step loop on a
 //! fresh [`Session`](rhema_core::Session) whose first message is the
-//! `prompt`, and returns the final assistant text as the result. The
-//! inner turn inherits four things from the parent turn and nothing
-//! else: the provider, the approval hook (read off the parent's
-//! [`ShellTools`] per call, so the policy travels with the turn), the
-//! cancel flag, and the thinking effort (a subagent reasons the way the
-//! agent that delegated it reasons — a provider default can think the
-//! whole reply budget away). Its history lives and dies with the call,
-//! and its requests read that history through the bounded transcript
-//! view (`rhema_transcript::attach`), the same bound the main session
-//! runs under — below the transcript's budget a history passes through
-//! unchanged, past it the old tail folds into the compaction block.
+//! `prompt`, reading its history through the bounded transcript view.
+//! The inner turn inherits four things and nothing else: the provider,
+//! the approval hook (captured at spawn off the parent's
+//! [`ShellTools`], held for the job's lifetime — a gate firing after
+//! the parent turn's end still consults the turn's policy), the job's
+//! own cancel flag (escape stops the main session, never the job), and
+//! the thinking effort. Its inner lifecycle streams into the registry
+//! as the job's status — the UI's pinned line — and never into the
+//! call's result.
+//!
+//! A background job's own `subagent` tool keeps the synchronous shape:
+//! the notification path has exactly one steering consumer — the
+//! parent driver's turn loop — and a nested job would have none. A
+//! nested call runs to its report inside the job's step loop.
 
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use serde_json::json;
 
-use rhema_agent_tools::{Overlay, ShellTools, render_template};
+use rhema_agent_tools::{Approval, Overlay, ShellTools, render_template};
 use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     Agent, ChatParams, Content, Event, EventSink, Message, ModelProvider, Role, Session, ToolCall,
@@ -30,27 +44,25 @@ use rhema_core::{
 };
 
 use crate::def::SubagentDef;
+use crate::registry::{Fetched, Registry};
 
 /// The report is cut at this size — in bytes and in char boundaries,
 /// whichever is hit first — keeping the tail: the conclusion of a report
 /// sits at its end, as an error sits at the end of a command's output.
 const REPORT_LIMIT: usize = 50 * 1024;
 
-/// Runs subagents behind the `subagent` tool.
-pub struct SubagentTools {
+/// The machinery one inner run needs, shared by the background start
+/// path and the synchronous nested path.
+#[derive(Clone)]
+struct Inner {
     /// The provider the inner agents run on; the parent's.
     provider: Arc<dyn ModelProvider>,
     /// The discovered definitions; the tool's catalog.
     defs: Vec<SubagentDef>,
-    /// The parent's shell. Two jobs: the workspace the subagent's tools
-    /// run in, and the current turn's approval hook the inner shell
-    /// inherits.
-    shell: Arc<ShellTools>,
     /// The model identifier a definition without its own `model` runs
     /// on: the parent's.
     default_model: String,
-    /// The thinking effort the inner requests carry: the parent turn's,
-    /// set by [`Self::with_thinking`]. The default,
+    /// The thinking effort the inner requests carry. The default,
     /// [`ThinkingEffort::Default`], lets the provider decide — and on a
     /// thinking-by-default backend with a bounded reply budget, that
     /// decision can spend the whole budget on reasoning and leave the
@@ -61,103 +73,44 @@ pub struct SubagentTools {
     max_depth: u32,
 }
 
-impl SubagentTools {
-    /// A resolver over `defs`, running on the parent's `provider` and
-    /// `shell`, defaulting to one level of nesting (none).
-    pub fn new(
-        provider: Arc<dyn ModelProvider>,
-        defs: Vec<SubagentDef>,
-        shell: Arc<ShellTools>,
-        default_model: impl Into<String>,
-    ) -> Self {
-        Self {
-            provider,
-            defs,
-            shell,
-            default_model: default_model.into(),
-            thinking: ThinkingEffort::Default,
-            max_depth: 1,
-        }
-    }
-
-    /// Sets the thinking effort the inner requests carry; the caller
-    /// passes the parent turn's, so a subagent samples the way the
-    /// agent that delegated it samples.
-    pub fn with_thinking(mut self, thinking: ThinkingEffort) -> Self {
-        self.thinking = thinking;
-        self
-    }
-
-    /// Sets the remaining nesting budget; each nested level gets one
-    /// less, and a subagent at zero is advertised no `subagent` tool.
-    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
-        self.max_depth = max_depth;
-        self
-    }
-
-    /// The `subagent` tool spec over `defs`: the catalog rides the
-    /// description, so the prompt's tool list teaches the model when to
-    /// delegate with no renderer change.
-    pub fn spec(defs: &[SubagentDef]) -> ToolSpec {
-        let mut description = String::from(
-            "Run a named subagent: an independent agent with its own \
-             conversation, system prompt, and workspace tools, which works \
-             the task and returns its final report as the tool result. The \
-             subagent does not see this conversation and its report is all \
-             you get back, so the prompt must carry everything it needs. \
-             Available subagents:",
-        );
-        for def in defs {
-            description.push_str(&format!("\n- {}: {}", def.name, def.description));
-        }
-        ToolSpec::new(
-            "subagent",
-            description,
-            json!({
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "The subagent to run, from the catalog in this tool's description."
-                    },
-                    "prompt": {
-                        "type": "string",
-                        "description": "The full task for the subagent: what to do, and what to report back."
-                    }
-                },
-                "required": ["name", "prompt"]
-            }),
-        )
-    }
-
-    /// The inner shell for one call: fresh, with the parent turn's
-    /// approval hook installed. No hook installed means the inner tools
-    /// reject — the fail-safe default, never the case mid-turn.
-    fn inner_shell(&self) -> Arc<ShellTools> {
+impl Inner {
+    /// The inner shell for one run: fresh, with `hook` — captured off
+    /// the parent shell at spawn — installed. `None` means the inner
+    /// tools reject: the fail-safe default, never the case mid-turn.
+    fn inner_shell(
+        &self,
+        parent: &Arc<ShellTools>,
+        hook: Option<Arc<dyn Approval>>,
+    ) -> Arc<ShellTools> {
         let shell = Arc::new(ShellTools::with_executor(
-            self.shell.workspace().to_path_buf(),
-            self.shell.executor(),
+            parent.workspace().to_path_buf(),
+            parent.executor(),
         ));
-        if let Some(hook) = self.shell.current_approval() {
+        if let Some(hook) = hook {
             shell.install_approval(hook);
         }
         shell
     }
 
     /// The inner resolver over the fresh shell: the shell alone, plus a
-    /// nested `SubagentTools` when the nesting budget allows one.
+    /// nested synchronous `SubagentTools` when the nesting budget
+    /// allows one.
     fn inner_resolver(&self, inner_shell: &Arc<ShellTools>) -> Arc<dyn ToolResolver> {
         if self.max_depth <= 1 {
             return inner_shell.clone();
         }
-        let nested = Self::new(
-            self.provider.clone(),
-            self.defs.clone(),
+        let nested = SubagentTools::synchronous(
+            self.clone_with_depth(self.max_depth - 1),
             inner_shell.clone(),
-            self.default_model.clone(),
-        )
-        .with_max_depth(self.max_depth - 1);
+        );
         Arc::new(Overlay::new(inner_shell.clone(), Arc::new(nested)))
+    }
+
+    fn clone_with_depth(&self, max_depth: u32) -> Self {
+        Self {
+            max_depth,
+            ..self.clone()
+        }
     }
 
     /// Runs one definition to its report, or to the reason it failed.
@@ -178,8 +131,8 @@ impl SubagentTools {
         )
         .map_err(|err| format!("its system prompt template failed: {err}"))?;
         let resolver = self.inner_resolver(inner_shell);
-        // Each call wraps the provider in its own fresh transcript: the
-        // inner history lives and dies with the call, so there is no
+        // Each run wraps the provider in its own fresh transcript: the
+        // inner history lives and dies with the run, so there is no
         // mirror to share and no per-definition settings to plumb. The
         // `zoom` half of `attach` is dropped on purpose — the
         // subagent's tool surface stays the shell alone.
@@ -209,12 +162,13 @@ impl SubagentTools {
             run_id: format!("{}/subagent:{}", ctx.run_id, def.name),
             cancelled: ctx.cancelled.clone(),
         };
+        let model = def
+            .model
+            .clone()
+            .unwrap_or_else(|| self.default_model.clone());
         let mut sink = Forwarder {
             progress,
-            model: def
-                .model
-                .clone()
-                .unwrap_or_else(|| self.default_model.clone()),
+            model: model.clone(),
             phase: None,
             context: None,
             spent: rhema_core::Usage::default(),
@@ -247,58 +201,343 @@ impl SubagentTools {
         }
         Err(format!("hit its step budget of {}", def.max_steps()))
     }
+}
 
-    /// Validates the call's arguments into the definition and prompt to
-    /// run, or the failure result to return instead.
-    fn parse_call<'a>(
-        &'a self,
-        call: &'a ToolCall,
-    ) -> Result<(&'a SubagentDef, &'a str), ToolResult> {
-        let invalid = |why: String| ToolResult::failure(&call.id, why);
-        let name = call
-            .args
-            .get("name")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| invalid("the subagent tool needs a string `name`".to_owned()))?;
-        let prompt = call
-            .args
-            .get("prompt")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| invalid("the subagent tool needs a string `prompt`".to_owned()))?;
-        let def = self
-            .defs
-            .iter()
-            .find(|def| def.name == name)
-            .ok_or_else(|| {
-                invalid(format!(
-                    "no subagent named {name}; available: {}",
-                    self.defs
-                        .iter()
-                        .map(|def| def.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ))
-            })?;
-        if prompt.trim().is_empty() {
-            return Err(invalid("the `prompt` argument is empty".to_owned()));
+/// Runs subagents behind the `subagent` tool.
+pub struct SubagentTools {
+    inner: Inner,
+    /// The parent's shell. Two jobs: the workspace the subagent's tools
+    /// run in, and the current turn's approval hook the inner shell
+    /// inherits at spawn.
+    shell: Arc<ShellTools>,
+    /// The job registry, when this instance starts background jobs.
+    /// `None` on the nested synchronous instances: their calls run to
+    /// their report inside the caller's step loop and register
+    /// nowhere.
+    registry: Option<Arc<Registry>>,
+}
+
+impl SubagentTools {
+    /// A resolver over `defs`, running on the parent's `provider` and
+    /// `shell`, defaulting to one level of nesting (none) and a
+    /// registry capped at [`crate::registry::DEFAULT_MAX_RUNNING`]
+    /// concurrent jobs. Calls start background jobs and return job ids.
+    pub fn new(
+        provider: Arc<dyn ModelProvider>,
+        defs: Vec<SubagentDef>,
+        shell: Arc<ShellTools>,
+        default_model: impl Into<String>,
+    ) -> Self {
+        Self {
+            inner: Inner {
+                provider,
+                defs,
+                default_model: default_model.into(),
+                thinking: ThinkingEffort::Default,
+                max_depth: 1,
+            },
+            shell,
+            registry: Some(Arc::new(Registry::new(
+                crate::registry::DEFAULT_MAX_RUNNING,
+            ))),
         }
-        Ok((def, prompt))
     }
+
+    /// The synchronous variant: a call runs the subagent to its report
+    /// inside the resolving step, exactly as the tool behaved before
+    /// the registry. Reserved for the nested level inside a background
+    /// job — the notification path has one steering consumer, and a
+    /// nested job would have none.
+    fn synchronous(inner: Inner, shell: Arc<ShellTools>) -> Self {
+        Self {
+            inner,
+            shell,
+            registry: None,
+        }
+    }
+
+    /// Sets the thinking effort the inner requests carry; the caller
+    /// passes the parent turn's, so a subagent samples the way the
+    /// agent that delegated it samples.
+    pub fn with_thinking(mut self, thinking: ThinkingEffort) -> Self {
+        self.inner.thinking = thinking;
+        self
+    }
+
+    /// Sets the remaining nesting budget; each nested level gets one
+    /// less, and a subagent at zero is advertised no `subagent` tool.
+    pub fn with_max_depth(mut self, max_depth: u32) -> Self {
+        self.inner.max_depth = max_depth;
+        self
+    }
+
+    /// Caps the concurrent top-level jobs; starts past the cap queue
+    /// (id minted and returned at once) until a slot frees. Call before
+    /// the first job starts.
+    pub fn with_max_jobs(mut self, max_running: usize) -> Self {
+        self.registry = Some(Arc::new(Registry::new(max_running)));
+        self
+    }
+
+    /// The status handle backed by this tool's registry: the UI's
+    /// subscription, and — through [`Registry`]'s [`Steering`]
+    /// implementation — the driver's notification source. The same
+    /// instance the tool resolver starts jobs into.
+    pub fn handle(&self) -> crate::wire::SubagentHandle {
+        crate::wire::SubagentHandle::from_registry(
+            self.registry
+                .clone()
+                .unwrap_or_else(|| Arc::new(Registry::new(1))),
+        )
+    }
+
+    /// The `subagent` tool spec over `defs`: the catalog and the
+    /// protocol ride the description, so the prompt's tool list teaches
+    /// the model when to delegate and how to fetch with no renderer
+    /// change.
+    pub fn spec(defs: &[SubagentDef]) -> ToolSpec {
+        Self::spec_for(defs, true)
+    }
+
+    /// [`Self::spec`] per shape: the background spec carries the
+    /// start/notification/fetch protocol; the synchronous (nested) one
+    /// the report-as-result contract.
+    fn spec_for(defs: &[SubagentDef], background: bool) -> ToolSpec {
+        let mut description = if background {
+            String::from(
+                "Run a named subagent in the background: an independent \
+                 agent with its own conversation, system prompt, and \
+                 workspace tools, which works the task and produces a \
+                 final report. The subagent does not see this \
+                 conversation and its report is all you get back, so the \
+                 prompt must carry everything it needs.\n\
+                 \n\
+                 How it works: call with `name` and `prompt` to start a \
+                 subagent — the call returns a job id at once and the \
+                 subagent keeps working in the background. When a job \
+                 finishes you will receive a notification naming it; \
+                 fetch its report by calling this tool with only `id` \
+                 set to that job id (for example \"job-3\"). A fetch of \
+                 a job that is still running is an error: wait for the \
+                 notification. A finished job's report is cached — \
+                 fetching again returns the same report, never a re-run. \
+                 Jobs keep running across turns, and stopping this \
+                 session never stops one.",
+            )
+        } else {
+            String::from(
+                "Run a named subagent: an independent agent with its own \
+                 conversation, system prompt, and workspace tools, which \
+                 works the task and returns its final report as the tool \
+                 result. The subagent does not see this conversation and \
+                 its report is all you get back, so the prompt must \
+                 carry everything it needs.",
+            )
+        };
+        for def in defs {
+            description.push_str(&format!("\n- {}: {}", def.name, def.description));
+        }
+        if background {
+            ToolSpec::new(
+                "subagent",
+                description,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The subagent to start, from the catalog in this tool's description."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "The full task for the subagent: what to do, and what to report back."
+                        },
+                        "id": {
+                            "type": "string",
+                            "description": "A job id to fetch the report of, instead of starting a new subagent."
+                        }
+                    }
+                }),
+            )
+        } else {
+            ToolSpec::new(
+                "subagent",
+                description,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The subagent to run, from the catalog in this tool's description."
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "The full task for the subagent: what to do, and what to report back."
+                        }
+                    },
+                    "required": ["name", "prompt"]
+                }),
+            )
+        }
+    }
+
+    /// Validates the call's arguments into the start it names or the
+    /// fetch it asks for, or the failure result to return instead.
+    fn parse_call<'a>(&'a self, call: &'a ToolCall) -> Result<Parsed<'a>, ToolResult> {
+        let invalid = |why: String| ToolResult::failure(&call.id, why);
+        let id = call.args.get("id").and_then(|value| value.as_str());
+        let name = call.args.get("name").and_then(|value| value.as_str());
+        let prompt = call.args.get("prompt").and_then(|value| value.as_str());
+        match (id, name, prompt) {
+            (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(invalid(
+                "pass `name` and `prompt` to start a subagent, or `id` to \
+                 fetch a started one — not both"
+                    .to_owned(),
+            )),
+            (Some(id), None, None) => {
+                if id.trim().is_empty() {
+                    return Err(invalid("the `id` argument is empty".to_owned()));
+                }
+                Ok(Parsed::Fetch { id })
+            }
+            (None, _, _) => {
+                let name = name.ok_or_else(|| {
+                    invalid(
+                        "the subagent tool needs a string `name` to start a \
+                         subagent, or a string `id` to fetch a started one"
+                            .to_owned(),
+                    )
+                })?;
+                let prompt = prompt.ok_or_else(|| {
+                    invalid("the subagent tool needs a string `prompt`".to_owned())
+                })?;
+                let def = self
+                    .inner
+                    .defs
+                    .iter()
+                    .find(|def| def.name == name)
+                    .ok_or_else(|| {
+                        invalid(format!(
+                            "no subagent named {name}; available: {}",
+                            self.inner
+                                .defs
+                                .iter()
+                                .map(|def| def.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ))
+                    })?;
+                if prompt.trim().is_empty() {
+                    return Err(invalid("the `prompt` argument is empty".to_owned()));
+                }
+                Ok(Parsed::Start { def, prompt })
+            }
+        }
+    }
+
+    /// Starts one job: the id is minted and returned at once, the run
+    /// rides a tokio task holding its own cancel flag and the approval
+    /// hook captured at spawn.
+    fn start(
+        &self,
+        call_id: &str,
+        def: &SubagentDef,
+        prompt: &str,
+        ctx: &ToolContext,
+    ) -> ToolResult {
+        let registry = self
+            .registry
+            .clone()
+            .expect("the background path starts into a registry");
+        let minted = registry.mint(&def.name);
+        // The hook is read at spawn and held for the job's lifetime: a
+        // gate firing after the parent turn's end still consults the
+        // turn's policy, never the fail-safe reject. No hook installed
+        // means the inner tools reject — the fail-safe default.
+        let hook = self.shell.current_approval();
+        let inner_shell = self.inner.inner_shell(&self.shell, hook);
+        let model = def
+            .model
+            .clone()
+            .unwrap_or_else(|| self.inner.default_model.clone());
+        let inner = self.inner.clone();
+        let task_def = def.clone();
+        let prompt = prompt.to_owned();
+        let parent_run = ctx.run_id.clone();
+        let cancel = minted.cancel.clone();
+        let id = minted.id.clone();
+        let task_id = id.clone();
+        let task_name = def.name.clone();
+        let weak_registry = Arc::downgrade(&registry);
+        let progress = StatusPump {
+            registry: Arc::downgrade(&registry),
+            id: task_id.clone(),
+        };
+        tokio::spawn(async move {
+            // Queue, not reject: past the cap the id was already
+            // returned; the run begins when a slot frees. A dropped
+            // registry ends the wait with None — the agent is gone.
+            let Some(permit) = crate::registry::acquire_slot(&weak_registry).await else {
+                return;
+            };
+            // Touch the registry only in short critical sections: the
+            // task holds the Weak, never a strong ref across the run —
+            // a dropped registry must actually drop, and its flag stops
+            // the job at the next step boundary.
+            if let Some(registry) = weak_registry.upgrade() {
+                registry.mark_running(&task_id, Some(model.clone()));
+            }
+            let ctx = ToolContext {
+                cwd: inner_shell.workspace().to_path_buf(),
+                run_id: format!("{parent_run}/{task_id}/subagent:{task_name}"),
+                cancelled: cancel,
+            };
+            let mut progress = progress;
+            let outcome = inner
+                .run(&task_def, &prompt, &ctx, &inner_shell, &mut progress)
+                .await;
+            if let Some(registry) = weak_registry.upgrade() {
+                registry.finish(&task_id, outcome);
+            }
+            drop(permit);
+        });
+        ToolResult::success(
+            call_id.to_owned(),
+            format!(
+                "started subagent {} as {id} in the background. When its \
+                 report is announced in a notification, fetch it by \
+                 calling this tool with id \"{id}\".",
+                def.name
+            ),
+        )
+    }
+}
+
+/// The validated shape of one `subagent` call.
+enum Parsed<'a> {
+    /// `name` + `prompt`: start a job over this definition.
+    Start {
+        def: &'a SubagentDef,
+        prompt: &'a str,
+    },
+    /// `id` alone: fetch a started job's report.
+    Fetch { id: &'a str },
 }
 
 #[async_trait]
 impl ToolResolver for SubagentTools {
     fn specs(&self) -> Vec<ToolSpec> {
-        if self.max_depth == 0 || self.defs.is_empty() {
+        if self.inner.max_depth == 0 || self.inner.defs.is_empty() {
             return Vec::new();
         }
-        vec![Self::spec(&self.defs)]
+        vec![Self::spec_for(&self.inner.defs, self.registry.is_some())]
     }
 
     fn replay_safety(&self, name: &str) -> rhema_core::ReplaySafety {
         let _ = name;
-        // A subagent can side-effect through its shell: never re-run one
-        // that lost its result to a crash.
+        // A subagent can side-effect through its shell, and the fetch
+        // is the start's own shape: never re-run either that lost its
+        // result to a crash.
         rhema_core::ReplaySafety::Unsafe
     }
 
@@ -314,16 +553,78 @@ impl ToolResolver for SubagentTools {
         progress: &mut dyn ToolProgress,
     ) -> ToolResult {
         let id = call.id.clone();
-        let (def, prompt) = match self.parse_call(&call) {
-            Ok(parsed) => parsed,
+        match self.parse_call(&call) {
             Err(result) => return result,
-        };
-        let inner_shell = self.inner_shell();
-        let outcome = self.run(def, prompt, ctx, &inner_shell, progress).await;
-        inner_shell.clear_approval();
-        match outcome {
-            Ok(report) => ToolResult::success(id, report),
-            Err(why) => ToolResult::failure(id, format!("subagent {}: {why}", def.name)),
+            Ok(Parsed::Fetch { id: job }) => {
+                let Some(registry) = &self.registry else {
+                    return ToolResult::failure(
+                        id,
+                        "this subagent tool runs synchronously; pass `name` \
+                         and `prompt` to run one"
+                            .to_owned(),
+                    );
+                };
+                match registry.fetch(job) {
+                    Fetched::Report { report, .. } => ToolResult::success(id, report),
+                    Fetched::Failed { name, reason } => {
+                        ToolResult::failure(id, format!("subagent {name}: {reason}"))
+                    }
+                    Fetched::Busy { name } => ToolResult::failure(
+                        id,
+                        format!(
+                            "subagent {name} ({job}) is still running; wait \
+                             for the notification announcing its report, \
+                             then fetch again"
+                        ),
+                    ),
+                    Fetched::Unknown => ToolResult::failure(
+                        id,
+                        format!(
+                            "no such job: {job} is gone — jobs live in this \
+                             agent's memory and are lost on restart; start \
+                             a new subagent"
+                        ),
+                    ),
+                }
+            }
+            Ok(Parsed::Start { def, prompt }) if self.registry.is_some() => {
+                self.start(&id, def, prompt, ctx)
+            }
+            Ok(Parsed::Start { def, prompt }) => {
+                // The synchronous (nested) shape: run to the report
+                // inside the resolving step, the hook captured here as
+                // anywhere.
+                let hook = self.shell.current_approval();
+                let inner_shell = self.inner.inner_shell(&self.shell, hook);
+                let outcome = self
+                    .inner
+                    .run(def, prompt, ctx, &inner_shell, progress)
+                    .await;
+                inner_shell.clear_approval();
+                match outcome {
+                    Ok(report) => ToolResult::success(id, report),
+                    Err(why) => ToolResult::failure(id, format!("subagent {}: {why}", def.name)),
+                }
+            }
+        }
+    }
+}
+
+/// Pumps a background job's inner lifecycle into the registry: the
+/// statuses the forwarder reports become the job's status, the line the
+/// UI renders. The inner output rides no channel — the job is its own
+/// line, and its report is the fetch.
+struct StatusPump {
+    registry: Weak<Registry>,
+    id: String,
+}
+
+impl ToolProgress for StatusPump {
+    fn output(&mut self, _chunk: &str) {}
+
+    fn status(&mut self, status: rhema_core::ToolStatus) {
+        if let Some(registry) = self.registry.upgrade() {
+            registry.report(&self.id, &status);
         }
     }
 }
@@ -460,7 +761,7 @@ mod tests {
     }
 
     #[test]
-    fn the_spec_carries_the_catalog() {
+    fn the_spec_carries_the_catalog_and_the_protocol() {
         let defs = vec![
             SubagentDef {
                 name: "reviewer".into(),
@@ -481,6 +782,20 @@ mod tests {
         assert_eq!(spec.name, "subagent");
         assert!(spec.description.contains("reviewer: reviews diffs"));
         assert!(spec.description.contains("scout: explores the tree"));
+        // The protocol: start, notification, fetch, cache.
+        assert!(
+            spec.description.contains("background"),
+            "{}",
+            spec.description
+        );
+        assert!(spec.description.contains("notification"));
+        assert!(spec.description.contains("job id"));
+        assert!(spec.description.contains("never a re-run"));
+        // The schema carries the optional id beside name and prompt.
+        let properties = spec.parameters["properties"].as_object().unwrap();
+        assert!(properties.contains_key("name"));
+        assert!(properties.contains_key("prompt"));
+        assert!(properties.contains_key("id"));
     }
 
     /// A progress channel that keeps everything it is handed.
@@ -679,5 +994,25 @@ mod tests {
                 cached_input_tokens: 0,
             })
         );
+    }
+
+    /// A background job's statuses land in the registry through the
+    /// status pump: the job's record moves with its inner turn.
+    #[test]
+    fn the_status_pump_reports_into_the_registry() {
+        let registry = Arc::new(Registry::new(1));
+        let minted = registry.mint("scout");
+        registry.mark_running(&minted.id, Some("m".into()));
+        let mut pump = StatusPump {
+            registry: Arc::downgrade(&registry),
+            id: minted.id.clone(),
+        };
+        pump.status(rhema_core::ToolStatus {
+            phase: RUNNING.to_owned(),
+            context: Some(rhema_core::Usage::default()),
+            spent: Some(rhema_core::Usage::default()),
+            model: Some("m".into()),
+        });
+        assert_eq!(registry.status()[0].phase, RUNNING);
     }
 }

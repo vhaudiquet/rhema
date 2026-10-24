@@ -2,12 +2,16 @@
 //! discovers subagents on its own.
 //!
 //! [`wire`] discovers definitions and attaches a [`SubagentTools`] to
-//! a `CodingAgentConfig` — the shared shell and the extra resolver the
-//! driver merges through its `Overlay`. The catalog is never empty: the
-//! built-in `general-purpose` definition is always in it, discovered
-//! ones beside or shadowing it. [`extra_specs`] feeds the same
-//! discovery to a prompt preview, so what is previewed is what turns
-//! send.
+//! a `CodingAgentConfig` — the shared shell, the extra resolver the
+//! driver merges through its `Overlay`, and the steering: the tool's
+//! registry is the driver's notification source, so a finished job is
+//! announced to the model by the very instance that started it. The
+//! same call hands back a [`SubagentHandle`], the registry-backed
+//! status subscription a frontend's redraw tick renders one live line
+//! per job from. The catalog is never empty: the built-in
+//! `general-purpose` definition is always in it, discovered ones
+//! beside or shadowing it. [`extra_specs`] feeds the same discovery to
+//! a prompt preview, so what is previewed is what turns send.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -17,25 +21,67 @@ use rhema_coding_agent::CodingAgentConfig;
 use rhema_core::{ModelProvider, ToolSpec};
 
 use crate::def::discover;
+use crate::registry::Registry;
 use crate::tools::SubagentTools;
+
+/// The registry-backed handle `wire` returns beside the config: the
+/// UI's status subscription and the driver's steering, both reading the
+/// one registry the `subagent` tool starts jobs into. Cloneable; a
+/// clone reads the same jobs.
+#[derive(Clone)]
+pub struct SubagentHandle {
+    registry: Arc<Registry>,
+}
+
+impl SubagentHandle {
+    /// The tool's handle constructor: one registry, one source.
+    pub(crate) fn from_registry(registry: Arc<Registry>) -> Self {
+        Self { registry }
+    }
+
+    /// The jobs' screen-facing state: one entry per queued, running, or
+    /// finished-but-unfetched job, oldest first. Empty when the session
+    /// wired no subagents.
+    pub fn status(&self) -> Vec<crate::registry::JobStatus> {
+        self.registry.status()
+    }
+
+    /// The registry as the driver's steering source: one notification
+    /// line per finished-but-unfetched job, per drain. Set this on
+    /// `CodingAgentConfig::steering` — it is already set by [`wire`];
+    /// a frontend rebuilding configs by hand carries it over.
+    pub fn steering(&self) -> Arc<dyn rhema_coding_agent::Steering> {
+        Arc::clone(&self.registry) as Arc<dyn rhema_coding_agent::Steering>
+    }
+}
 
 /// Wires discovered subagents into `config`, reading the global
 /// definitions directory off the config dir. See [`wire_at`].
-pub fn wire(provider: Arc<dyn ModelProvider>, mut config: CodingAgentConfig) -> CodingAgentConfig {
+pub fn wire(
+    provider: Arc<dyn ModelProvider>,
+    mut config: CodingAgentConfig,
+) -> (CodingAgentConfig, SubagentHandle) {
     let global = rhema_config::Config::dir().ok();
-    wire_at(global.as_deref(), provider, &mut config);
-    config
+    let handle = wire_at(global.as_deref(), provider, &mut config);
+    (config, handle)
 }
 
 /// [`wire`] over an explicit global directory: the testable form.
+/// Attaches the tool, the steering, and returns the status handle —
+/// all backed by the one registry.
 pub fn wire_at(
     global: Option<&Path>,
     provider: Arc<dyn ModelProvider>,
     config: &mut CodingAgentConfig,
-) {
+) -> SubagentHandle {
     let defs = discover(global, &config.workspace);
     if defs.is_empty() {
-        return;
+        // Unreachable today (the built-in definition is always
+        // discovered), but the config stays untouched rather than
+        // advertising an empty catalog.
+        return SubagentHandle {
+            registry: Arc::new(Registry::new(crate::registry::DEFAULT_MAX_RUNNING)),
+        };
     }
     let shell = config
         .tools
@@ -43,8 +89,11 @@ pub fn wire_at(
         .unwrap_or_else(|| Arc::new(ShellTools::new(config.workspace.clone())));
     let tools = SubagentTools::new(provider, defs, shell.clone(), config.model.clone())
         .with_thinking(config.thinking);
+    let handle = tools.handle();
     config.tools = Some(shell);
     config.extra_resolver = Some(Arc::new(tools));
+    config.steering = Some(handle.steering());
+    handle
 }
 
 /// The specs discovered for `workspace` — empty when none are. A prompt
@@ -118,7 +167,7 @@ mod tests {
         // canonical form of the same directory.
         let root = std::fs::canonicalize(workspace.path()).unwrap();
         let mut config = CodingAgentConfig::new("m", &root);
-        wire_at(Some(empty.path()), Arc::new(Never), &mut config);
+        let handle = wire_at(Some(empty.path()), Arc::new(Never), &mut config);
 
         // The catalog is never empty: the built-in general-purpose
         // definition is the tool even with nothing on disk.
@@ -137,6 +186,7 @@ mod tests {
             1,
             "the preview sees the same built-in"
         );
+        assert!(handle.status().is_empty(), "no jobs yet");
     }
 
     #[test]
@@ -156,7 +206,7 @@ mod tests {
     fn definitions_attach_the_tool_and_reach_the_prompt() {
         let (global, workspace) = workspace_with_defs();
         let mut config = CodingAgentConfig::new("parent-model", &workspace);
-        wire_at(Some(global.path()), Arc::new(Never), &mut config);
+        let handle = wire_at(Some(global.path()), Arc::new(Never), &mut config);
 
         // The shell is shared with the tool: that is the approval
         // inheritance path.
@@ -166,11 +216,20 @@ mod tests {
         assert_eq!(names, vec!["subagent".to_owned()]);
         assert_eq!(shell.workspace(), workspace);
 
+        // The steering is the registry's: the driver announces what the
+        // tool starts, from the one instance.
+        let steering = config.steering.clone().expect("the steering");
+        assert!(steering.drain().is_empty(), "no jobs, no notifications");
+
         // The same discovery feeds the prompt preview.
         let specs = extra_specs_at(Some(global.path()), &workspace);
         assert_eq!(specs.len(), 1);
         let prompt = stamped_system(None, &workspace, &specs).unwrap();
         assert!(prompt.contains("subagent"), "{prompt}");
         assert!(prompt.contains("reviews diffs"), "{prompt}");
+
+        // The handle reads the same registry the config steers with.
+        assert!(handle.status().is_empty());
+        let _ = handle.steering().drain();
     }
 }

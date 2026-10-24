@@ -29,6 +29,9 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 # ToolResolver is an async seam
 async-trait = { workspace = true }
+# Jobs are tokio tasks: the spawn, the concurrency cap, and the poll
+# loop that starts a queued job when a slot frees
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 
 [dev-dependencies]
 # The scripted provider drives inner agents offline; the local shell
