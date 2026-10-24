@@ -24,6 +24,13 @@ rhema-provider = { path = "../rhema-provider", version = "0.1.0" }
 rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.1.0", features = ["native"] }
 # The revision-guarded record the server checkpoints sessions through
 rhema-rsd = { path = "../rhema-rsd", version = "0.1.0", default-features = false }
+# The sandbox seam: SANDBOX_BACKEND=http runs bash on any machine
+# speaking the sandbox protocol, through the shared HttpSandbox (the
+# `client` feature carries reqwest, native-only — this crate is a
+# server, a wasm build is not a target)
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", default-features = false, features = [
+    "client",
+] }
 rhema-transcript = { path = "../rhema-transcript", version = "0.1.0" }
 async-trait = { workspace = true }
 serde = { workspace = true }

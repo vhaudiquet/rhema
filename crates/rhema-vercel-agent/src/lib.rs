@@ -13,6 +13,9 @@
 //! - [`sandbox`] — the [`Sandbox`](rhema_cloud_agent::Sandbox) seam
 //!   over it: a named, persistent sandbox per session, commands
 //!   polled to completion, files moved through the fs endpoints;
+//! - [`backend`] — the deployment's sandbox backend choice: `bash` in
+//!   a Vercel Sandbox (the default) or on any machine speaking the
+//!   sandbox protocol, through the shared HTTP sandbox client;
 //! - [`pg`] — the [`rhema_rsd::Store`] contract in Postgres, plus the
 //!   meta table the per-session config and the seed marker live in;
 //! - [`server`] — the routes and the turn loop: the DO's shape with
@@ -34,6 +37,7 @@
 #![deny(missing_docs)]
 
 pub mod api;
+pub mod backend;
 pub mod pg;
 pub mod sandbox;
 pub mod server;
@@ -41,7 +45,7 @@ pub mod server;
 pub use api::{ApiError, ReqwestSandboxApi, SandboxApi};
 pub use pg::PgStore;
 pub use sandbox::VercelSandbox;
-pub use server::{AppState, router};
+pub use server::{AppState, SandboxSource, router};
 
 // The binary lives in main.rs; the library exposes everything it
 // wires together.

@@ -9,7 +9,9 @@
 //! differences where they must be: real tasks instead of `spawn_local`
 //! (`Send` futures, a tokio one-shot for approvals), tokio timers, and
 //! one connection per session: a second socket for a live session is
-//! refused, because approvals route to one client.
+//! refused, because approvals route to one client. The sandbox a turn
+//! runs in is the deployment's choice
+//! ([`SandboxSource`], selected once at startup).
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
@@ -28,8 +30,10 @@ use rhema_core::{EventSink, ModelProvider, Session};
 use rhema_provider::Retrying;
 use rhema_provider_anthropic::{AnthropicProvider, ReqwestTransport};
 use rhema_rsd::{ResourceKey, Store};
+use rhema_sandbox::http::HttpSandbox;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::backend::SandboxBackend;
 use crate::pg::PgStore;
 use crate::sandbox::VercelSandbox;
 
@@ -41,8 +45,9 @@ const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 pub struct AppState {
     /// The checkpoint store.
     pub store: PgStore,
-    /// The sandbox API client, built once.
-    pub sandbox_api: Arc<dyn crate::api::SandboxApi>,
+    /// The sandbox a turn's `bash` runs in: the deployment's backend
+    /// choice, resolved once at startup.
+    pub sandbox: SandboxSource,
     /// The provider key: a wrangler-equivalent secret, from the env.
     pub anthropic_key: String,
     /// The sessions with a live socket. One connection per session:
@@ -52,18 +57,63 @@ pub struct AppState {
 }
 
 impl AppState {
-    /// The shared state for `store`, the sandbox credentials, and the
-    /// provider key.
-    pub fn new(
-        store: PgStore,
-        sandbox_api: Arc<dyn crate::api::SandboxApi>,
-        anthropic_key: String,
-    ) -> Self {
+    /// The shared state for `store`, the selected sandbox backend, and
+    /// the provider key.
+    pub fn new(store: PgStore, sandbox: SandboxSource, anthropic_key: String) -> Self {
         Self {
             store,
-            sandbox_api,
+            sandbox,
             anthropic_key,
             connected: Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+}
+
+/// The sandbox clients of one session, and the deployment's choice
+/// between them: the Vercel REST sandbox, and — under
+/// `SANDBOX_BACKEND=http` — the shared [`HttpSandbox`] to a daemon
+/// speaking the sandbox protocol.
+///
+/// Built once at startup, where the choice is made; every turn asks it
+/// for its session's client, so the turn's shell and seeding cannot
+/// tell the backends apart — one [`Sandbox`] seam either way.
+pub enum SandboxSource {
+    /// The Vercel Sandbox REST client: one named sandbox per session.
+    Vercel(Arc<dyn crate::api::SandboxApi>),
+    /// The protocol daemon's base URL and shared secret; the session
+    /// name rides the path.
+    Http {
+        /// The daemon's base URL, no trailing slash.
+        url: String,
+        /// The shared secret the daemon checks on every route.
+        token: String,
+    },
+}
+
+impl SandboxSource {
+    /// Applies the startup selection: under [`SandboxBackend::Http`]
+    /// `vercel_api` never runs, so the REST client is never built and
+    /// its token is never demanded — the Vercel API is never called.
+    pub fn select(
+        backend: SandboxBackend,
+        vercel_api: impl FnOnce() -> Arc<dyn crate::api::SandboxApi>,
+    ) -> Self {
+        match backend {
+            SandboxBackend::Vercel => Self::Vercel(vercel_api()),
+            SandboxBackend::Http { url, token } => Self::Http { url, token },
+        }
+    }
+
+    /// The session's sandbox client: the session name is the same id
+    /// the checkpoints live under, whichever backend carries it.
+    fn for_session(&self, name: &str, workspace: &str) -> Arc<dyn Sandbox> {
+        match self {
+            Self::Vercel(api) => Arc::new(VercelSandbox::new(
+                api.clone(),
+                name.to_owned(),
+                workspace.to_owned(),
+            )),
+            Self::Http { url, token } => Arc::new(HttpSandbox::new(url.clone(), name, token)),
         }
     }
 }
@@ -379,11 +429,9 @@ async fn run_turn(
     ));
 
     // 3. The sandbox of the same session name, seeded on first use.
-    let sandbox = Arc::new(VercelSandbox::new(
-        state.sandbox_api.clone(),
-        session_id.clone(),
-        config.workspace.clone(),
-    ));
+    //    The backend is the deployment's choice, resolved once at
+    //    startup; the session name and workspace are this turn's.
+    let sandbox = state.sandbox.for_session(&session_id, &config.workspace);
     if let Err(message) = ensure_seeded(&state.store, sandbox.as_ref(), &config).await {
         live.busy.store(false, Ordering::SeqCst);
         live.send(ServerMessage::Error { message });
@@ -460,12 +508,14 @@ async fn run_turn(
 }
 
 /// Seeds the workspace the first time it is used — a git clone when
-/// the session carries one — and records that in the meta table, so a
-/// resumed server does not re-clone over a workspace the client has
-/// since changed.
+/// the session carries one, then the skill bodies — and records that
+/// in the meta table, so a resumed server does not re-clone over a
+/// workspace the client has since changed. The git+skills half is the
+/// shared `seed_workspace`; the marker is this server's alone, because
+/// it lives in Postgres.
 async fn ensure_seeded(
     store: &PgStore,
-    sandbox: &VercelSandbox,
+    sandbox: &dyn Sandbox,
     config: &SessionConfig,
 ) -> Result<(), String> {
     match store.meta("workspace:seeded") {
@@ -473,19 +523,19 @@ async fn ensure_seeded(
         Ok(None) => {}
         Err(err) => return Err(err.to_string()),
     }
-    if let Some(url) = &config.seed_git {
-        sandbox
-            .seed(&rhema_cloud_agent::WorkspaceSeed::GitClone(url.clone()))
-            .await
-            .map_err(|err| err.to_string())?;
-    }
-    for skill in &config.skills {
-        let path = format!("{}/.rhema/skills/{}/SKILL.md", config.workspace, skill.name);
-        sandbox
-            .write_file(&path, skill.body.as_bytes())
-            .await
-            .map_err(|err| format!("seeding skill {}: {err}", skill.name))?;
-    }
+    let skills: Vec<(&str, &str)> = config
+        .skills
+        .iter()
+        .map(|skill| (skill.name.as_str(), skill.body.as_str()))
+        .collect();
+    rhema_sandbox::seed::seed_workspace(
+        sandbox,
+        config.seed_git.as_deref(),
+        &config.workspace,
+        &skills,
+    )
+    .await
+    .map_err(|err| err.to_string())?;
     store
         .set_meta("workspace:seeded", "1")
         .map_err(|err| err.to_string())

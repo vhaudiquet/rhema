@@ -3676,6 +3676,7 @@ dependencies = [
  "rhema-provider",
  "rhema-provider-anthropic",
  "rhema-rsd",
+ "rhema-sandbox",
  "rhema-transcript",
  "serde",
  "serde_json",
