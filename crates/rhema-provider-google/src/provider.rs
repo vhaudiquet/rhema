@@ -6,10 +6,10 @@
 //! (`:streamGenerateContent?alt=sse`) is spoken; every call streams and
 //! assembles. Transport failures map onto
 //! [`ProviderError`]: timeouts to [`ProviderError::Timeout`], other network
-//! failures to [`ProviderError::Other`], non-2xx responses (with the
-//! body's `error.message` when present) to [`ProviderError::Api`], and
-//! unparseable stream chunks to [`ProviderError::Api`] as a protocol
-//! violation.
+//! failures to [`ProviderError::Network`], non-2xx responses (with the
+//! body's `error.message` when present) to [`ProviderError::Api`] with
+//! the HTTP status, and unparseable stream chunks to [`ProviderError::Api`]
+//! without one, as a protocol violation.
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -27,6 +27,7 @@ use crate::wire::{
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
 /// Google Gemini model backend, speaking the Generative Language REST API.
+#[derive(Debug)]
 pub struct GoogleProvider {
     api_key: String,
     base_url: String,
@@ -77,16 +78,19 @@ impl GoogleProvider {
             if !status.is_success() {
                 let text = response.text().await.unwrap_or_default();
                 let parsed: WireErrorBody = serde_json::from_str(&text).unwrap_or_default();
-                return Err(ProviderError::Api(format!(
-                    "gemini api error (HTTP {}): {}",
-                    status.as_u16(),
-                    parsed.message(&text)
-                )));
+                return Err(ProviderError::Api {
+                    message: format!(
+                        "gemini api error (HTTP {}): {}",
+                        status.as_u16(),
+                        parsed.message(&text)
+                    ),
+                    status: Some(status.as_u16()),
+                });
             }
-            let page: WireModelsPage = response
-                .json()
-                .await
-                .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
+            let page: WireModelsPage = response.json().await.map_err(|err| ProviderError::Api {
+                message: format!("malformed models page: {err}"),
+                status: None,
+            })?;
             models.extend(
                 page.models
                     .into_iter()
@@ -107,13 +111,13 @@ impl GoogleProvider {
     }
 }
 
-/// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
-/// carried in [`ProviderError`] directly (it is `Clone + Eq`).
+/// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot
+/// be carried in [`ProviderError`] directly (it is `Clone + Eq`).
 fn network_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Other(format!("network error: {err}"))
+        ProviderError::Network(err.to_string())
     }
 }
 
@@ -127,14 +131,24 @@ fn feed_chunk(
     if payload.trim().is_empty() {
         return Ok(());
     }
-    let chunk: GenerateContentResponse = serde_json::from_str(payload)
-        .map_err(|err| ProviderError::Api(format!("malformed SSE chunk: {err}")))?;
+    let chunk: GenerateContentResponse =
+        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
+            message: format!("malformed SSE chunk: {err}"),
+            status: None,
+        })?;
     assembler.push(chunk, sink);
     Ok(())
 }
 
 #[async_trait]
 impl ModelProvider for GoogleProvider {
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::InvalidRequest`] when the request
+    /// cannot map onto the wire, [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport fails, [`ProviderError::Api`] with the HTTP
+    /// status on a non-2xx response, and [`ProviderError::Api`] without
+    /// one on a malformed stream chunk.
     async fn complete(
         &self,
         req: ModelRequest,
@@ -162,11 +176,14 @@ impl ModelProvider for GoogleProvider {
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
             let parsed: WireErrorBody = serde_json::from_str(&text).unwrap_or_default();
-            return Err(ProviderError::Api(format!(
-                "gemini api error (HTTP {}): {}",
-                status.as_u16(),
-                parsed.message(&text)
-            )));
+            return Err(ProviderError::Api {
+                message: format!(
+                    "gemini api error (HTTP {}): {}",
+                    status.as_u16(),
+                    parsed.message(&text)
+                ),
+                status: Some(status.as_u16()),
+            });
         }
 
         let mut stream = response.bytes_stream();

@@ -19,7 +19,7 @@
 //! }
 //!
 //! # async fn demo() -> Result<(), rhema_core::ProviderError> {
-//! let provider = GoogleProvider::new(std::env::var("GEMINI_API_KEY").unwrap());
+//! let provider = GoogleProvider::new(std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY is set"));
 //! let request = rhema_core::ModelRequest {
 //!     system: Some("be terse".into()),
 //!     messages: vec![Message::text(Role::User, "reply with exactly: ok")],
@@ -41,7 +41,6 @@
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod pricing;
 pub mod provider;

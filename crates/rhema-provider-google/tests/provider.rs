@@ -141,7 +141,8 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
         .expect_err("non-2xx is an error");
 
     match err {
-        ProviderError::Api(message) => {
+        ProviderError::Api { message, status } => {
+            assert_eq!(status, Some(400));
             assert!(message.contains("400"), "got: {message}");
             assert!(
                 message.contains("Contents are not specified"),
