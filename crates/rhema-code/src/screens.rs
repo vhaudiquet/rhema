@@ -174,6 +174,96 @@ impl ProfileScreen {
     }
 }
 
+// --- Sandbox ---
+
+/// One row of the sandbox picker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SandboxRow {
+    /// The kind this row offers.
+    pub kind: crate::args::SandboxChoice,
+    /// Whether this workspace last ran `bash` under this kind.
+    pub remembered: bool,
+    /// Whether this session's `bash` currently runs under this kind.
+    pub active: bool,
+}
+
+/// What one sandbox-picker keypress means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxAction {
+    /// Nothing to do.
+    None,
+    /// Run `bash` under the chosen kind.
+    Choose(crate::args::SandboxChoice),
+    /// Return to the chat.
+    BackToChat,
+}
+
+/// The sandbox picker: one highlighted row over the machine's offered
+/// kinds, arrows to move, enter to choose, esc back to the chat. Four
+/// kinds at most, so there is no filter. Only the kind is picked here —
+/// the url, host, and token stay the config's to edit.
+#[derive(Debug)]
+pub struct SandboxScreen {
+    /// The rows, in the probe's canonical order (`local` first).
+    pub entries: Vec<SandboxRow>,
+    /// Index of the highlighted row.
+    pub selected: usize,
+}
+
+impl SandboxScreen {
+    /// A picker over the offered kinds: `remembered` marks the kind
+    /// this workspace last ran, `active` the one the session runs on.
+    pub fn new(
+        offered: &crate::sandbox::SandboxAvailability,
+        remembered: Option<crate::args::SandboxChoice>,
+        active: crate::args::SandboxChoice,
+    ) -> Self {
+        let entries = offered
+            .offered()
+            .into_iter()
+            .map(|kind| SandboxRow {
+                kind,
+                remembered: remembered == Some(kind),
+                active: active == kind,
+            })
+            .collect();
+        Self {
+            entries,
+            selected: 0,
+        }
+    }
+
+    /// Handles one keypress.
+    pub fn handle_key(&mut self, key: KeyEvent) -> SandboxAction {
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return SandboxAction::None;
+        }
+        match key.code {
+            KeyCode::Down => {
+                if !self.entries.is_empty() {
+                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
+                }
+                SandboxAction::None
+            }
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                SandboxAction::None
+            }
+            KeyCode::Enter => self.choose(),
+            KeyCode::Esc => SandboxAction::BackToChat,
+            _ => SandboxAction::None,
+        }
+    }
+
+    /// Enter: run `bash` under the highlighted kind.
+    fn choose(&mut self) -> SandboxAction {
+        match self.entries.get(self.selected) {
+            Some(row) => SandboxAction::Choose(row.kind),
+            None => SandboxAction::None,
+        }
+    }
+}
+
 // --- Resume ---
 
 /// One row of the resume picker.
@@ -1983,7 +2073,101 @@ impl ChatState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::args::SandboxChoice;
+    use crate::sandbox::SandboxAvailability;
     use rhema_provider::ModelCard;
+
+    /// What this machine offers, spelled per test.
+    fn offered(docker: bool, ssh: bool, http: bool) -> SandboxAvailability {
+        SandboxAvailability { docker, ssh, http }
+    }
+
+    #[test]
+    fn the_rows_list_the_offered_kinds_in_the_canonical_order() {
+        let screen = SandboxScreen::new(&offered(false, true, true), None, SandboxChoice::Local);
+        assert_eq!(
+            screen
+                .entries
+                .iter()
+                .map(|row| row.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                SandboxChoice::Local,
+                SandboxChoice::Ssh,
+                SandboxChoice::Http
+            ]
+        );
+    }
+
+    #[test]
+    fn the_remembered_and_active_kinds_mark_their_rows() {
+        let screen = SandboxScreen::new(
+            &offered(true, true, false),
+            Some(SandboxChoice::Ssh),
+            SandboxChoice::Docker,
+        );
+        let marked = |kind| {
+            let row = screen
+                .entries
+                .iter()
+                .find(|row| row.kind == kind)
+                .expect("row present");
+            (row.remembered, row.active)
+        };
+        assert_eq!(marked(SandboxChoice::Local), (false, false));
+        assert_eq!(marked(SandboxChoice::Docker), (false, true));
+        assert_eq!(marked(SandboxChoice::Ssh), (true, false));
+    }
+
+    #[test]
+    fn a_kind_that_is_both_remembered_and_active_carries_both_marks() {
+        let screen = SandboxScreen::new(
+            &offered(false, true, false),
+            Some(SandboxChoice::Ssh),
+            SandboxChoice::Ssh,
+        );
+        let row = &screen.entries[1];
+        assert_eq!(row.kind, SandboxChoice::Ssh);
+        assert!(row.remembered && row.active);
+    }
+
+    #[test]
+    fn sandbox_picker_arrows_stay_in_bounds_and_enter_chooses() {
+        let mut screen = SandboxScreen::new(&offered(true, true, true), None, SandboxChoice::Local);
+        for _ in 0..6 {
+            screen.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(screen.selected, 3, "down stops at the last row");
+        screen.handle_key(key(KeyCode::Up));
+        assert_eq!(screen.selected, 2);
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Enter)),
+            SandboxAction::Choose(SandboxChoice::Ssh)
+        );
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Esc)),
+            SandboxAction::BackToChat
+        );
+        // A plain key is nothing; ctrl combos never reach the rows.
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Char('x'))),
+            SandboxAction::None
+        );
+        assert_eq!(
+            screen.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL)),
+            SandboxAction::None
+        );
+    }
+
+    #[test]
+    fn zero_config_offers_local_alone_and_it_starts_selected() {
+        let screen =
+            SandboxScreen::new(&SandboxAvailability::default(), None, SandboxChoice::Local);
+        assert_eq!(screen.entries.len(), 1);
+        assert_eq!(screen.entries[0].kind, SandboxChoice::Local);
+        assert!(screen.entries[0].active, "local is what the session runs");
+        assert_eq!(screen.selected, 0);
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())

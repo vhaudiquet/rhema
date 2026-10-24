@@ -51,6 +51,28 @@ const THINKING_LEVELS: &[Choice] = &[
     },
 ];
 
+/// The kinds `/sandbox` takes, in the spec's canonical order. The
+/// picker shows only what this machine offered; the command's words
+/// are the whole v1 set, and an unoffered one is declined in-band.
+const SANDBOX_KINDS: &[Choice] = &[
+    Choice {
+        name: "local",
+        description: "this host — the default",
+    },
+    Choice {
+        name: "docker",
+        description: "a container, when the docker CLI answers",
+    },
+    Choice {
+        name: "ssh",
+        description: "a remote box, when a host is configured",
+    },
+    Choice {
+        name: "http",
+        description: "a rhema-sandboxd URL",
+    },
+];
+
 /// One row of the command table.
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {
@@ -84,6 +106,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "switch profile (work, personal)",
         argument: Argument::Optional,
         handler: profile,
+    },
+    CommandSpec {
+        name: "/sandbox",
+        description: "where bash runs (local, docker, ssh, http)",
+        argument: Argument::Choice(SANDBOX_KINDS),
+        handler: sandbox,
     },
     CommandSpec {
         name: "/thinking",
@@ -284,6 +312,13 @@ fn profile(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
             Vec::new()
         }
         None => app.open_profile_picker(),
+    }
+}
+
+fn sandbox(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
+    match argument {
+        Some(kind) => app.choose_sandbox_by_name(kind),
+        None => app.open_sandbox_picker(),
     }
 }
 

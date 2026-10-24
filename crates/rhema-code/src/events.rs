@@ -189,4 +189,14 @@ pub enum UiEvent {
         /// The agent, with the partial turn's committed messages.
         agent: Box<CodingAgent>,
     },
+    /// The sandbox assembly the picker's choice spawned finished: the
+    /// assembled tool set, or the failure text. The session's current
+    /// tools keep running either way until the app swaps them.
+    SandboxAssembled {
+        /// The choice the assembly stood up.
+        choice: crate::args::SandboxChoice,
+        /// The assembled tool set and its sandbox-side workspace, or
+        /// why the choice could not be stood up.
+        result: Result<crate::sandbox::Sandboxed, String>,
+    },
 }

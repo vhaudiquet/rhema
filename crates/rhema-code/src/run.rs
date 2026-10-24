@@ -28,7 +28,7 @@ use rhema_core::{Event as ModelEvent, EventSink, Session};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use crate::app::Backend;
-use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile};
+use crate::app::{App, AppSetup, Effect, RunOptions, startup_profile, startup_sandbox};
 use crate::args::{Args, ProviderChoice, RunArgs, SystemCommand};
 use crate::sessions;
 use crate::status::{self, Status, Tracker, first_line};
@@ -397,14 +397,13 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         ),
     };
     if let Some(assembled) = &sandboxed {
-        agent_config.tools = Some(assembled.tools.clone());
-        agent_config.skills = Some(assembled.skills.clone());
+        assembled.apply_tools(&mut agent_config);
     }
     // Subagents ride in as one tool: the built-in general-purpose
     // definition plus whatever the workspace defines.
     let mut agent_config = rhema_subagents::wire(backend.provider(), agent_config);
     if let Some(assembled) = sandboxed {
-        agent_config.workspace = std::path::PathBuf::from(assembled.workspace);
+        assembled.apply_workspace(&mut agent_config);
     }
     // The workspace remembers the profile that served it, the same
     // memory the next launch here reads back. Best effort: a failed
@@ -536,6 +535,37 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)
         .unwrap_or_else(|| config.effective(Some(&profile)).thinking_effort());
+    // Where bash runs: the offered list is this machine's and this
+    // profile's, the choice the same tiered resolution the picker
+    // offers (`RHEMA_SANDBOX`/stored, else the workspace's remembered
+    // kind, else local), and a non-local choice assembles — through the
+    // headless path's shared `assemble` — before the first paint. A
+    // failed assembly degrades to the host with a warning: a
+    // remembered daemon that is down must not keep the UI from opening.
+    let sandbox_offered = crate::sandbox::SandboxAvailability::probe(&effective);
+    let sandboxed = match startup_sandbox(&config, &effective, &workspace, &sandbox_offered) {
+        crate::args::SandboxChoice::Local => None,
+        non_local => {
+            match crate::sandbox::assemble(
+                non_local,
+                &effective,
+                &workspace,
+                Some(&*secrets),
+                agent_base.as_deref(),
+            )
+            .await
+            {
+                Ok(assembled) => Some(assembled),
+                Err(err) => {
+                    eprintln!(
+                        "warning: the {} sandbox is unavailable ({err}); bash runs on this host",
+                        non_local.stored_name()
+                    );
+                    None
+                }
+            }
+        }
+    };
     // The look and feel is a machine choice, not a per-invocation one:
     // the stored palette, theme, and icon flavor decide, unparseable
     // values read as the defaults.
@@ -576,6 +606,8 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             session,
             options,
             secrets: Some(Arc::clone(&secrets)),
+            sandboxed,
+            sandbox_offered,
         })?;
         let effects = app.initial_effects();
         (app, effects)
@@ -806,6 +838,23 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, status: &mut Tracker, 
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             app.login_cancel = Some(cancel);
             crate::turn::spawn_login_flow(flow, cancelled, tx.clone());
+        }
+        Effect::AssembleSandbox(choice) => {
+            // The assembly reads the profile, the workspace, and the
+            // base system as they stood at the pick; the keychain Arc
+            // crosses because the task outlives the borrow.
+            let profile = app.effective();
+            let workspace = app.options.workspace.clone();
+            let secrets = app.secrets.clone();
+            let base_system = app.options.base_system.clone();
+            crate::turn::spawn_sandbox_assemble(
+                choice,
+                profile,
+                workspace,
+                secrets,
+                base_system,
+                tx.clone(),
+            );
         }
     }
 }

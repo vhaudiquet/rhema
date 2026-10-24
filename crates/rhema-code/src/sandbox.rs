@@ -13,10 +13,13 @@
 //! subagent definition discovery, the skills' discovery itself.
 
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rhema_agent_tools::{ShellTools, Skill};
+use rhema_coding_agent::CodingAgentConfig;
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_sandbox::SshSandbox;
@@ -24,6 +27,12 @@ use rhema_sandbox::http::HttpSandbox;
 use rhema_sandbox::{DockerSandbox, FsRoot, Sandbox, ShellSandbox, seed_workspace};
 
 use crate::args::SandboxChoice;
+
+/// The wall-clock bound on one `docker info` probe: the CLI answers in
+/// well under a second when the daemon is up, and hangs or retries on
+/// its own when it is not — a few seconds is the whole patience the
+/// startup path can afford.
+const DOCKER_PROBE_BUDGET: Duration = Duration::from_secs(3);
 
 /// The name the seeding marker file carries, under the workspace's
 /// `.rhema` directory — the sandbox-side twin of the cloud frontends'
@@ -52,6 +61,9 @@ fn choice_from_kind(kind: Option<&str>) -> SandboxChoice {
 /// the skill list rendered into the prompt with paths inside that
 /// workspace.
 pub struct Sandboxed {
+    /// The choice this assembly stands for: the session's active kind
+    /// once the result lands on the app.
+    pub choice: SandboxChoice,
     /// The shell whose commands run in the sandbox; the subagents'
     /// inner shell inherits its executor.
     pub tools: Arc<ShellTools>,
@@ -142,10 +154,131 @@ pub async fn assemble(
         Arc::new(ShellSandbox::new(sandbox)),
     ));
     Ok(Sandboxed {
+        choice,
         tools,
         workspace: workspace_string,
         skills,
     })
+}
+
+impl Sandboxed {
+    /// Puts the assembled tool set and the seeded skill list on a
+    /// coding-agent config. Runs BEFORE the subagent wire: their inner
+    /// shell inherits the executor installed here
+    /// (`ShellTools::executor()`), while their definition discovery
+    /// stays host-side.
+    pub fn apply_tools(&self, config: &mut CodingAgentConfig) {
+        config.tools = Some(self.tools.clone());
+        config.skills = Some(self.skills.clone());
+    }
+
+    /// Puts the sandbox-side workspace path on a coding-agent config.
+    /// Runs AFTER the subagent wire, so the path lands on the config
+    /// the agent is finally built from.
+    pub fn apply_workspace(&self, config: &mut CodingAgentConfig) {
+        config.workspace = PathBuf::from(&self.workspace);
+    }
+}
+
+/// The sandbox kinds this machine and this profile can run `bash`
+/// under right now: the picker's rows, and the gates the startup
+/// resolution filters every tier through. `local` needs no probing and
+/// is always offered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SandboxAvailability {
+    /// `docker info` answered within the budget.
+    pub docker: bool,
+    /// The `ssh` binary exists and the profile names a host.
+    pub ssh: bool,
+    /// The profile names a sandbox URL. Never network-probed: a daemon
+    /// that is down must still be selectable, and the turn reports the
+    /// failure in-band.
+    pub http: bool,
+}
+
+impl SandboxAvailability {
+    /// Probes this machine and profile: one `docker info` run, one
+    /// `PATH` scan for `ssh`, and the profile's own `sandbox` section.
+    /// Bounded work — the docker probe at most [`DOCKER_PROBE_BUDGET`]
+    /// — so startup waits seconds, never minutes.
+    pub fn probe(profile: &Profile) -> Self {
+        Self::from_parts(docker_info_answers(), binary_on_path("ssh"), profile)
+    }
+
+    /// The offered set from injected machine facts: the testable seam
+    /// of [`Self::probe`]. `ssh` is offered only when the binary
+    /// exists AND the profile names a host; `http` only when a URL is
+    /// set (`RHEMA_SANDBOX_URL` included).
+    fn from_parts(docker_answers: bool, ssh_present: bool, profile: &Profile) -> Self {
+        Self {
+            docker: docker_answers,
+            ssh: ssh_present && profile.sandbox_host().is_some(),
+            http: profile.sandbox_url().is_some(),
+        }
+    }
+
+    /// Whether `choice` can run here: `local` always, the rest only
+    /// when their probe answered.
+    pub fn offers(self, choice: SandboxChoice) -> bool {
+        match choice {
+            SandboxChoice::Local => true,
+            SandboxChoice::Docker => self.docker,
+            SandboxChoice::Ssh => self.ssh,
+            SandboxChoice::Http => self.http,
+        }
+    }
+
+    /// The offered kinds, in the spec's canonical order — the picker's
+    /// row order.
+    pub fn offered(self) -> Vec<SandboxChoice> {
+        [
+            SandboxChoice::Local,
+            SandboxChoice::Docker,
+            SandboxChoice::Ssh,
+            SandboxChoice::Http,
+        ]
+        .into_iter()
+        .filter(|choice| self.offers(*choice))
+        .collect()
+    }
+}
+
+/// Whether `docker` answers at all: `docker info` exiting zero within
+/// the budget. A missing binary is the common "no" — treated exactly
+/// like a refusing daemon.
+fn docker_info_answers() -> bool {
+    let Ok(mut child) = std::process::Command::new("docker")
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + DOCKER_PROBE_BUDGET;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            // Timed out or the wait failed: kill and read as "no".
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+/// Whether a binary of this name sits on `PATH` — the ssh probe, which
+/// must not spawn a process to learn the spawn would work. Both
+/// spellings Windows installs answer.
+fn binary_on_path(name: &str) -> bool {
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path)
+        .any(|dir| dir.join(name).is_file() || dir.join(format!("{name}.exe")).is_file())
 }
 
 /// Seeds a fresh sandbox workspace once: the skills (no git seed —
@@ -442,5 +575,107 @@ mod tests {
         // Pinned so the derived names outlive toolchain changes: a
         // value drift here would orphan every standing container.
         assert_eq!(path_hash("/home/me/proj"), "2d872b17b24e117e");
+    }
+
+    /// A profile whose `sandbox` section carries exactly these fields.
+    fn sandbox_profile(host: Option<&str>, url: Option<&str>) -> Profile {
+        Profile {
+            sandbox: Some(rhema_config::SandboxSettings {
+                host: host.map(str::to_owned),
+                url: url.map(str::to_owned),
+                ..rhema_config::SandboxSettings::default()
+            }),
+            ..Profile::default()
+        }
+    }
+
+    #[test]
+    fn local_is_offered_on_a_machine_that_offers_nothing_else() {
+        let none = SandboxAvailability::default();
+        assert!(none.offers(SandboxChoice::Local));
+        assert!(!none.offers(SandboxChoice::Docker));
+        assert!(!none.offers(SandboxChoice::Ssh));
+        assert!(!none.offers(SandboxChoice::Http));
+        assert_eq!(none.offered(), vec![SandboxChoice::Local]);
+    }
+
+    #[test]
+    fn the_offered_list_keeps_the_canonical_order() {
+        let all = SandboxAvailability {
+            docker: true,
+            ssh: true,
+            http: true,
+        };
+        assert_eq!(
+            all.offered(),
+            vec![
+                SandboxChoice::Local,
+                SandboxChoice::Docker,
+                SandboxChoice::Ssh,
+                SandboxChoice::Http,
+            ]
+        );
+    }
+
+    #[test]
+    fn ssh_needs_both_the_binary_and_a_host() {
+        let host = sandbox_profile(Some("deploy@box"), None);
+        assert!(SandboxAvailability::from_parts(true, true, &host).offers(SandboxChoice::Ssh));
+        // A configured host with no ssh binary is not offered.
+        assert!(!SandboxAvailability::from_parts(true, false, &host).offers(SandboxChoice::Ssh));
+        // A binary with nothing configured is not either.
+        let bare = sandbox_profile(None, None);
+        assert!(!SandboxAvailability::from_parts(true, true, &bare).offers(SandboxChoice::Ssh));
+    }
+
+    #[test]
+    fn http_is_offered_on_a_stored_url_alone() {
+        // No probe runs: a daemon that is down must still be
+        // selectable, and the turn reports the failure in-band.
+        let url = sandbox_profile(None, Some("http://box:7331"));
+        assert!(SandboxAvailability::from_parts(false, false, &url).offers(SandboxChoice::Http));
+        let bare = sandbox_profile(None, None);
+        assert!(!SandboxAvailability::from_parts(false, false, &bare).offers(SandboxChoice::Http));
+    }
+
+    #[test]
+    fn docker_passes_its_machine_fact_through_untouched() {
+        let bare = sandbox_profile(None, None);
+        assert!(SandboxAvailability::from_parts(true, false, &bare).offers(SandboxChoice::Docker));
+        assert!(
+            !SandboxAvailability::from_parts(false, false, &bare).offers(SandboxChoice::Docker)
+        );
+    }
+
+    #[test]
+    fn the_assembly_applies_tools_before_and_workspace_after_the_wire_order() {
+        // Nothing here executes: the apply step only clones Arcs and
+        // copies strings onto the config, so the plain local shell
+        // stands in for an assembled one.
+        let assembled = Sandboxed {
+            choice: SandboxChoice::Http,
+            tools: Arc::new(ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: vec![Skill {
+                name: "review".into(),
+                description: "trigger".into(),
+                path: PathBuf::from("/workspace/.rhema/skills/review/SKILL.md"),
+            }],
+        };
+        let mut config = CodingAgentConfig::new("m", Path::new("/host/ws"));
+        assert!(config.tools.is_none());
+        assembled.apply_tools(&mut config);
+        assert_eq!(
+            config.tools.as_ref().map(|t| t.workspace()),
+            Some(Path::new("/workspace"))
+        );
+        assert_eq!(config.skills.as_ref().map(Vec::len), Some(1));
+        assert_eq!(
+            config.workspace,
+            Path::new("/host/ws"),
+            "workspace waits for the wire"
+        );
+        assembled.apply_workspace(&mut config);
+        assert_eq!(config.workspace, Path::new("/workspace"));
     }
 }

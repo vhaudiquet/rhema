@@ -147,6 +147,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     match &app.screen {
         Screen::Picker(picker) => render_picker(frame, picker, &theme),
         Screen::Profile(profile) => render_profile_picker(frame, profile, &theme),
+        Screen::Sandbox(sandbox) => render_sandbox_picker(frame, sandbox, &theme),
         Screen::Resume(resume) => render_resume_picker(frame, resume, &theme),
         Screen::Settings(settings) => render_settings(frame, settings, &theme, icons, &mut hits),
         Screen::Chat => {
@@ -489,6 +490,74 @@ fn render_profile_picker(frame: &mut Frame, screen: &crate::screens::ProfileScre
     );
 
     let footer = Line::from(Span::raw("enter switch · esc back").fg(theme.text3));
+    frame.render_widget(
+        Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
+        Rect {
+            x: inner.x,
+            y: inner.y + inner.height.saturating_sub(1),
+            width: inner.width,
+            height: 1,
+        },
+    );
+}
+
+/// The sandbox picker: the profile picker's frame and keys over the
+/// offered kinds — rounded border, `❯ ` highlight, one footer line.
+fn render_sandbox_picker(frame: &mut Frame, screen: &crate::screens::SandboxScreen, theme: &Theme) {
+    let area = frame.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken).fg(theme.text))
+        .title(" where bash runs ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let rows: Vec<ListItem> = screen
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let selected = index == screen.selected;
+            let name_style = if selected {
+                Style::default().fg(theme.text).bold()
+            } else {
+                Style::default().fg(theme.text)
+            };
+            let mut spans = vec![Span::styled(row.kind.stored_name().to_owned(), name_style)];
+            let mut detail = String::new();
+            detail.push_str(match row.kind {
+                crate::args::SandboxChoice::Local => "this host",
+                crate::args::SandboxChoice::Docker => "a container over the docker CLI",
+                crate::args::SandboxChoice::Ssh => "a remote box over ssh",
+                crate::args::SandboxChoice::Http => "a rhema-sandboxd daemon",
+            });
+            if row.remembered {
+                detail.push_str(" · remembered here");
+            }
+            if row.active {
+                detail.push_str(" · active");
+            }
+            spans.push(Span::raw("  ").fg(theme.text3));
+            spans.push(Span::styled(detail, Style::default().fg(theme.text3)));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut state = ListState::default();
+    state.select(Some(screen.selected));
+    frame.render_stateful_widget(
+        List::new(rows)
+            .highlight_symbol("❯ ")
+            .highlight_style(Style::default().bg(theme.elevated)),
+        inner,
+        &mut state,
+    );
+
+    let footer = Line::from(Span::raw(
+        "enter switch · esc back · edit config.yaml for url/host/token",
+    ))
+    .fg(theme.text3);
     frame.render_widget(
         Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
         Rect {
@@ -2540,6 +2609,8 @@ mod scroll_tests {
             }),
             session: rhema_core::Session::default(),
             secrets: None,
+            sandboxed: None,
+            sandbox_offered: crate::sandbox::SandboxAvailability::default(),
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: ThemeKind::Dark,
@@ -3205,13 +3276,13 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // Thirteen commands, six visible rows: eight downs put the
-        // selection on /resume (the /settings row sits mid-table now),
-        // and the window must have followed it.
-        for _ in 0..8 {
+        // Fourteen commands, six visible rows: nine downs put the
+        // selection on /resume (the /sandbox row sits beside /profile
+        // now), and the window must have followed it.
+        for _ in 0..9 {
             app.chat.handle_key(key(KeyCode::Down), &[], &[]);
         }
-        assert_eq!(app.chat.palette_index, 8);
+        assert_eq!(app.chat.palette_index, 9);
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();

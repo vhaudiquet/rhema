@@ -115,6 +115,33 @@ pub fn spawn_turn(
     })
 }
 
+/// Spawns the sandbox assembly a picker choice asked for on a tokio
+/// task: the shared `assemble` — container stand-up or connection,
+/// workspace seeding included — runs off the UI thread and reports as
+/// [`UiEvent::SandboxAssembled`]. A failure lands as the error text;
+/// the session's current tools keep running either way.
+pub fn spawn_sandbox_assemble(
+    choice: crate::args::SandboxChoice,
+    profile: rhema_config::Profile,
+    workspace: PathBuf,
+    secrets: Option<Arc<dyn rhema_config::secrets::SecretStore>>,
+    base_system: Option<String>,
+    events: UnboundedSender<UiEvent>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let result = crate::sandbox::assemble(
+            choice,
+            &profile,
+            &workspace,
+            secrets.as_deref(),
+            base_system.as_deref(),
+        )
+        .await
+        .map_err(|err| err.to_string());
+        let _ = events.send(UiEvent::SandboxAssembled { choice, result });
+    })
+}
+
 /// Spawns the model-list fetch for `why` on a tokio task. The fetch doubles
 /// as login validation: a wrong key or a dead server yields the provider's
 /// error text.
@@ -218,6 +245,7 @@ pub async fn drive_turn_for_test(
             | UiEvent::ModelsLoaded { .. }
             | UiEvent::UsageLoaded { .. }
             | UiEvent::ApprovalRequested { .. }
+            | UiEvent::SandboxAssembled { .. }
             | UiEvent::LoginUpdate(_) => {}
         }
     }
