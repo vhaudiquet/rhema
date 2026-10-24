@@ -6,9 +6,10 @@
 //! a query parameter, so it never lands in URLs or access logs. Transport
 //! failures map onto [`ProviderError`]: timeouts to
 //! [`ProviderError::Timeout`], other network failures to
-//! [`ProviderError::Other`], non-2xx responses (with the body's
-//! `error.message` when present) to [`ProviderError::Api`], unparseable
-//! stream chunks and mid-stream error chunks to [`ProviderError::Api`] too.
+//! [`ProviderError::Network`], non-2xx responses (with the body's
+//! `error.message` when present) to [`ProviderError::Api`] with the HTTP
+//! status, and unparseable stream chunks and mid-stream error chunks to
+//! [`ProviderError::Api`] without one.
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -17,9 +18,9 @@ use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 
-use rhema_provider::SseDecoder;
+use rhema_provider::{ModelCard, SseDecoder};
 
-use crate::wire::{ChatCompletionChunk, ChunkAssembler, LlamaModel, WireErrorBody};
+use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody};
 
 /// The `llama-server` default listen address.
 pub const DEFAULT_BASE_URL: &str = "http://localhost:8080";
@@ -29,6 +30,7 @@ const DONE_SENTINEL: &str = "[DONE]";
 
 /// llama.cpp `llama-server` backend, speaking its OpenAI-compatible
 /// chat-completions API.
+#[derive(Debug)]
 pub struct LlamaCppProvider {
     base_url: String,
     api_key: Option<String>,
@@ -50,7 +52,7 @@ impl LlamaCppProvider {
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .read_timeout(std::time::Duration::from_secs(90))
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
+                .expect("a client builder with only timeouts cannot fail"),
         }
     }
 
@@ -61,14 +63,21 @@ impl LlamaCppProvider {
         self
     }
 
-    /// The models the server can serve (`GET /v1/models` → `data[].id`;
-    /// llama.cpp lists the one loaded model).
-    /// The models the server offers, with the context windows it reports.
-    /// A single-model server also gets its context from `/props`; in router
-    /// mode, models that are loaded and still silent about their context
-    /// are asked per model (bounded — never for unloaded entries, which
-    /// some servers would autoload just to answer).
-    pub async fn list_models(&self) -> Result<Vec<LlamaModel>, ProviderError> {
+    /// The models the server can serve, normalized into the shared
+    /// [`ModelCard`] rows (`GET /v1/models`; llama.cpp lists the one
+    /// loaded model). A single-model server also gets its context from
+    /// `/props`; in router mode, models that are loaded and still silent
+    /// about their context are asked per model (bounded — never for
+    /// unloaded entries, which some servers would autoload just to
+    /// answer).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport fails, [`ProviderError::Api`] with the HTTP
+    /// status on a non-2xx listing, and [`ProviderError::Api`] without
+    /// one on a malformed listing or props body.
+    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         let response = self
             .http
             .get(format!("{}/v1/models", self.base_url))
@@ -82,10 +91,10 @@ impl LlamaCppProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(api_error(status, &text));
         }
-        let page: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
+        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed models page: {err}"),
+            status: None,
+        })?;
         let mut models = crate::wire::normalize_models(&page);
 
         if models.len() == 1 && models[0].context_length.is_none() {
@@ -107,7 +116,7 @@ impl LlamaCppProvider {
                 }
             }
         }
-        Ok(models)
+        Ok(models.into_iter().map(ModelCard::from).collect())
     }
 
     /// The server's runtime properties, optionally for one model. `n_ctx`
@@ -130,10 +139,10 @@ impl LlamaCppProvider {
         if !status.is_success() {
             return Ok(None);
         }
-        let props: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| ProviderError::Api(format!("malformed props: {err}")))?;
+        let props: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed props: {err}"),
+            status: None,
+        })?;
         Ok(crate::wire::context_from_props(&props))
     }
 }
@@ -168,14 +177,18 @@ impl Authorized for reqwest::RequestBuilder {
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the OpenAI
-/// error shape's `error.message` when the body has it.
+/// error shape's `error.message` when the body has it, and carrying the
+/// HTTP status structurally for [`ProviderError::is_retryable`].
 fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
-    ProviderError::Api(format!(
-        "llama.cpp api error (HTTP {}): {}",
-        status.as_u16(),
-        parsed.message(raw)
-    ))
+    ProviderError::Api {
+        message: format!(
+            "llama.cpp api error (HTTP {}): {}",
+            status.as_u16(),
+            parsed.message(raw)
+        ),
+        status: Some(status.as_u16()),
+    }
 }
 
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
@@ -184,7 +197,7 @@ fn network_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Other(format!("network error: {err}"))
+        ProviderError::Network(err.to_string())
     }
 }
 
@@ -198,13 +211,22 @@ fn feed_chunk(
     if payload.trim().is_empty() {
         return Ok(());
     }
-    let chunk: ChatCompletionChunk = serde_json::from_str(payload)
-        .map_err(|err| ProviderError::Api(format!("malformed SSE chunk: {err}")))?;
+    let chunk: ChatCompletionChunk =
+        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
+            message: format!("malformed SSE chunk: {err}"),
+            status: None,
+        })?;
     assembler.push(chunk, sink)
 }
 
 #[async_trait]
 impl ModelProvider for LlamaCppProvider {
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport fails, [`ProviderError::Api`] with the HTTP
+    /// status on a non-2xx response, and [`ProviderError::Api`] without
+    /// one on a malformed stream chunk or a mid-stream error chunk.
     async fn complete(
         &self,
         req: ModelRequest,

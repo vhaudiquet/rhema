@@ -67,6 +67,7 @@ use rhema_core::output::{ModelOutput, StopReason, Usage};
 use rhema_core::provider::ProviderError;
 use rhema_core::request::ModelRequest;
 use rhema_core::tool::ToolCall;
+use rhema_provider::ModelCard;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -317,6 +318,23 @@ pub struct WireModel {
     /// Model identifier, usable as the request's `model` value.
     #[serde(default)]
     pub id: String,
+}
+
+impl From<LlamaModel> for ModelCard {
+    fn from(model: LlamaModel) -> Self {
+        Self {
+            display_name: model.id.clone(),
+            id: model.id,
+            description: String::new(),
+            input_token_limit: model.context_length,
+            // The listing reports one shared context window and no
+            // per-direction output ceiling.
+            output_token_limit: None,
+            // Every listed model is offered through chat completions.
+            generation_methods: vec!["generateContent".to_owned()],
+            pricing: None,
+        }
+    }
 }
 
 /// One model from the list, normalized: id plus whatever context length
@@ -579,18 +597,24 @@ impl ChunkAssembler {
     /// Feeds one chunk, emitting its streaming events. Fails with
     /// [`ProviderError::Api`] when the chunk is the server's mid-stream
     /// error object.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Api`] (no status) when the chunk is
+    /// the server's mid-stream error.
     pub fn push(
         &mut self,
         chunk: ChatCompletionChunk,
         sink: &mut dyn EventSink,
     ) -> Result<(), ProviderError> {
         if let Some(error) = &chunk.error {
-            return Err(ProviderError::Api(
-                error
+            return Err(ProviderError::Api {
+                message: error
                     .message
                     .clone()
                     .unwrap_or_else(|| "mid-stream error".to_owned()),
-            ));
+                status: None,
+            });
         }
         if let Some(usage) = chunk.usage {
             self.usage = Usage {
@@ -1256,7 +1280,13 @@ mod tests {
                 &mut sink,
             )
             .expect_err("mid-stream error is an error");
-        assert_eq!(err, ProviderError::Api("inference failed".into()));
+        assert_eq!(
+            err,
+            ProviderError::Api {
+                message: "inference failed".into(),
+                status: None,
+            }
+        );
         assert!(sink.0.is_empty());
 
         // An unshaped error body falls back to the fixed raw text.
@@ -1265,7 +1295,13 @@ mod tests {
         let err = assembler
             .push(chunk("{\"error\":{}}"), &mut sink)
             .expect_err("unshaped error is still an error");
-        assert_eq!(err, ProviderError::Api("mid-stream error".into()));
+        assert_eq!(
+            err,
+            ProviderError::Api {
+                message: "mid-stream error".into(),
+                status: None,
+            }
+        );
     }
 
     #[test]

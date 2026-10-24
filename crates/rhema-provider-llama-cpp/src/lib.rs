@@ -36,12 +36,12 @@
 //! Layout:
 //! - [`wire`] — serde wire types plus the pure mapping between
 //!   [`rhema_core::ModelRequest`] / SSE chunks and
-//!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s
+//!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
+//!   mapping onto [`ModelCard`]
 //! - [`provider`] — the HTTP transport and the
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod provider;
 pub mod wire;

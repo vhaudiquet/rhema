@@ -5,7 +5,8 @@ use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, ToolSpec, Usage,
 };
-use rhema_provider_llama_cpp::{LlamaCppProvider, LlamaModel};
+use rhema_provider::ModelCard;
+use rhema_provider_llama_cpp::LlamaCppProvider;
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -304,7 +305,8 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
         .expect_err("non-2xx is an error");
 
     match err {
-        ProviderError::Api(message) => {
+        ProviderError::Api { message, status } => {
+            assert_eq!(status, Some(400));
             assert!(message.contains("400"), "got: {message}");
             assert!(message.contains("tools must be an array"), "got: {message}");
         }
@@ -336,7 +338,27 @@ async fn a_mid_stream_error_chunk_maps_to_an_api_error() {
         )
         .await
         .expect_err("a mid-stream error is an error");
-    assert_eq!(err, ProviderError::Api("inference failed".into()));
+    assert_eq!(
+        err,
+        ProviderError::Api {
+            message: "inference failed".into(),
+            status: None,
+        }
+    );
+}
+
+/// The normalized row `list_models` hands out for a model id with the
+/// given context window.
+fn card(id: &str, context_length: Option<u64>) -> ModelCard {
+    ModelCard {
+        display_name: id.to_owned(),
+        id: id.to_owned(),
+        description: String::new(),
+        input_token_limit: context_length,
+        output_token_limit: None,
+        generation_methods: vec!["generateContent".to_owned()],
+        pricing: None,
+    }
 }
 
 #[tokio::test]
@@ -361,14 +383,7 @@ async fn list_models_parses_the_data_ids() {
     let provider = LlamaCppProvider::new(server.uri());
     let models = provider.list_models().await.expect("models parse");
     // The meta context comes through the listing; no /props call is needed.
-    assert_eq!(
-        models,
-        vec![LlamaModel {
-            id: "qwen2.5-coder-7b".into(),
-            context_length: Some(32768),
-            loaded: None,
-        }]
-    );
+    assert_eq!(models, vec![card("qwen2.5-coder-7b", Some(32768))]);
 }
 
 #[tokio::test]
@@ -393,14 +408,7 @@ async fn a_single_model_server_gets_its_context_from_props() {
 
     let provider = LlamaCppProvider::new(server.uri());
     let models = provider.list_models().await.expect("models parse");
-    assert_eq!(
-        models,
-        vec![LlamaModel {
-            id: "m".into(),
-            context_length: Some(8192),
-            loaded: None,
-        }]
-    );
+    assert_eq!(models, vec![card("m", Some(8192))]);
 }
 
 #[tokio::test]
@@ -429,7 +437,7 @@ async fn router_mode_queries_props_only_for_loaded_models() {
     let models = provider.list_models().await.expect("models parse");
     let by_id: std::collections::HashMap<_, _> = models
         .iter()
-        .map(|model| (model.id.as_str(), model.context_length))
+        .map(|model| (model.id.as_str(), model.input_token_limit))
         .collect();
     assert_eq!(by_id["loaded-model"], Some(16384));
     // Unloaded entries are never asked: asking could trigger an autoload.
@@ -450,12 +458,5 @@ async fn trailing_slashes_in_the_base_url_are_trimmed() {
 
     let provider = LlamaCppProvider::new(format!("{}/", server.uri()));
     let models = provider.list_models().await.expect("models parse");
-    assert_eq!(
-        models,
-        vec![LlamaModel {
-            id: "m".into(),
-            context_length: None,
-            loaded: None,
-        }]
-    );
+    assert_eq!(models, vec![card("m", None)]);
 }
