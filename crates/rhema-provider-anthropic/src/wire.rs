@@ -825,15 +825,23 @@ impl ChunkAssembler {
         }
         // `message_start` nests its usage under the message header,
         // `message_delta` carries it top-level.
+        let mut usage_frame = false;
         if let Some(usage) = event
             .message
             .as_ref()
             .and_then(|message| message.usage.as_ref())
         {
             merge_usage(&mut self.usage, usage);
+            usage_frame = true;
         }
         if let Some(usage) = &event.usage {
             merge_usage(&mut self.usage, usage);
+            usage_frame = true;
+        }
+        // The tally streams live: the prompt lands with `message_start`,
+        // cumulative completions ride any interim `message_delta`.
+        if usage_frame {
+            sink.emit(Event::Usage(self.usage));
         }
         match event.kind.as_str() {
             "content_block_start" => {
@@ -1523,8 +1531,18 @@ mod tests {
                 cached_input_tokens: 3,
             }
         );
+        // The tally streams live: one Usage with the prompt from
+        // message_start, one with the completion from message_delta.
         // Pings and block/message stops emit nothing.
-        assert_eq!(sink.0, vec!["TextDelta(\"Hel\")", "TextDelta(\"lo\")"]);
+        assert_eq!(
+            sink.0,
+            vec![
+                "Usage(Usage { input_tokens: 13, output_tokens: 1, cached_input_tokens: 3 })",
+                "TextDelta(\"Hel\")",
+                "TextDelta(\"lo\")",
+                "Usage(Usage { input_tokens: 13, output_tokens: 2, cached_input_tokens: 3 })",
+            ]
+        );
     }
 
     #[test]
@@ -1592,9 +1610,13 @@ mod tests {
         assert_eq!(
             sink.0,
             vec![
+                "Usage(Usage { input_tokens: 5, output_tokens: 0, cached_input_tokens: 0 })"
+                    .to_owned(),
                 "ToolCallStart { id: \"toolu_01A\", name: \"echo\" }".to_owned(),
                 "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"{\\\"x\\\":\" }".to_owned(),
                 "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"1}\" }".to_owned(),
+                "Usage(Usage { input_tokens: 5, output_tokens: 3, cached_input_tokens: 0 })"
+                    .to_owned(),
             ]
         );
     }

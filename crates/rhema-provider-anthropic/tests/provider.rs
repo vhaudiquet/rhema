@@ -99,8 +99,18 @@ async fn streams_sse_into_events_and_an_assembled_output() {
             cached_input_tokens: 0,
         }
     );
-    // Stops and the closing frame emit nothing.
-    assert_eq!(sink.0, vec!["TextDelta(\"He\")", "TextDelta(\"llo\")"]);
+    // The tally streams live — the prompt from message_start, the
+    // completion from message_delta; stops and the closing frame emit
+    // nothing.
+    assert_eq!(
+        sink.0,
+        vec![
+            "Usage(Usage { input_tokens: 9, output_tokens: 1, cached_input_tokens: 0 })",
+            "TextDelta(\"He\")",
+            "TextDelta(\"llo\")",
+            "Usage(Usage { input_tokens: 9, output_tokens: 4, cached_input_tokens: 0 })",
+        ]
+    );
 
     let received = server
         .received_requests()
@@ -232,10 +242,12 @@ async fn a_tool_use_reply_streams_call_events_and_multi_chunk_args() {
     assert_eq!(
         sink.0,
         vec![
+            "Usage(Usage { input_tokens: 5, output_tokens: 1, cached_input_tokens: 0 })".to_owned(),
             "TextDelta(\"running\")".to_owned(),
             "ToolCallStart { id: \"toolu_01A\", name: \"echo\" }".to_owned(),
             "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"{\\\"x\\\":\" }".to_owned(),
             "ToolCallArgsDelta { id: \"toolu_01A\", delta: \"1}\" }".to_owned(),
+            "Usage(Usage { input_tokens: 5, output_tokens: 3, cached_input_tokens: 0 })".to_owned(),
         ]
     );
 }
@@ -389,7 +401,13 @@ async fn pings_in_the_stream_are_ignored() {
 
     assert_eq!(out.message.content, vec![Content::Text("ok".into())]);
     assert_eq!(out.stop_reason, StopReason::EndTurn);
-    assert_eq!(sink.0, vec!["TextDelta(\"ok\")".to_owned()]);
+    assert_eq!(
+        sink.0,
+        vec![
+            "Usage(Usage { input_tokens: 1, output_tokens: 0, cached_input_tokens: 0 })".to_owned(),
+            "TextDelta(\"ok\")".to_owned(),
+        ]
+    );
 }
 
 #[tokio::test]
