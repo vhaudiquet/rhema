@@ -42,14 +42,15 @@ fn tool_use(id: &str, name: &str, args: serde_json::Value) -> ModelOutput {
 }
 
 /// Serves `replies` in order; the last one repeats. Records every
-/// request's tool names and every `Tool`-role result that reached the
-/// model, for the assertions below.
+/// request's tool names, message count, and every `Tool`-role result
+/// that reached the model, for the assertions below.
 struct Scripted {
     replies: Vec<ModelOutput>,
     served: AtomicUsize,
     tool_names: Mutex<Vec<Vec<String>>>,
     tool_results: Mutex<Vec<String>>,
     thinking: Mutex<Vec<ThinkingEffort>>,
+    message_counts: Mutex<Vec<usize>>,
 }
 
 impl Scripted {
@@ -60,6 +61,7 @@ impl Scripted {
             tool_names: Mutex::new(Vec::new()),
             tool_results: Mutex::new(Vec::new()),
             thinking: Mutex::new(Vec::new()),
+            message_counts: Mutex::new(Vec::new()),
         })
     }
 
@@ -84,6 +86,14 @@ impl Scripted {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
     }
+
+    /// The history length every request carried, in order.
+    fn message_counts(&self) -> Vec<usize> {
+        self.message_counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
 }
 
 #[async_trait]
@@ -98,6 +108,10 @@ impl ModelProvider for Scripted {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(req.params.thinking);
+        self.message_counts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(req.messages.len());
         self.tool_names
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -476,6 +490,38 @@ fn engine_errors_surface_in_band() {
         assert!(result.is_error);
         assert!(result.content.contains("template"), "{}", result.content);
     });
+}
+
+/// The inner requests ride the transcript view (`rhema_transcript::
+/// attach` in `SubagentTools::run`): a short run proves the decorator
+/// is wired and pass-through — below the transcript's budget the whole
+/// inner history still reaches the provider, prompt and tool rounds
+/// alike.
+#[tokio::test]
+async fn a_short_run_reads_through_the_transcript_whole() {
+    let provider = Scripted::new(vec![
+        tool_use("i1", "bash", serde_json::json!({"command": "echo through"})),
+        end_turn("the report"),
+    ]);
+    let (shell, tools) = worker_tools(provider.clone());
+    shell.install_approval(Arc::new(AllowAll));
+
+    let result = tools
+        .resolve(call("worker", "do it"), &ToolContext::default())
+        .await;
+    assert!(!result.is_error, "{}", result.content);
+    // Request 1: the prompt alone. Request 2: the prompt, the
+    // assistant's tool call, the tool's result — nothing dropped or
+    // rewritten on the way through the bounded view.
+    assert_eq!(provider.message_counts(), vec![1, 3]);
+    assert!(
+        provider
+            .results_seen()
+            .iter()
+            .any(|content| content.contains("through")),
+        "{:?}",
+        provider.results_seen()
+    );
 }
 
 #[test]

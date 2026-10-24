@@ -10,7 +10,11 @@
 //! [`ShellTools`] per call, so the policy travels with the turn), the
 //! cancel flag, and the thinking effort (a subagent reasons the way the
 //! agent that delegated it reasons — a provider default can think the
-//! whole reply budget away). Its history lives and dies with the call.
+//! whole reply budget away). Its history lives and dies with the call,
+//! and its requests read that history through the bounded transcript
+//! view (`rhema_transcript::attach`), the same bound the main session
+//! runs under — below the transcript's budget a history passes through
+//! unchanged, past it the old tail folds into the compaction block.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -174,8 +178,17 @@ impl SubagentTools {
         )
         .map_err(|err| format!("its system prompt template failed: {err}"))?;
         let resolver = self.inner_resolver(inner_shell);
+        // Each call wraps the provider in its own fresh transcript: the
+        // inner history lives and dies with the call, so there is no
+        // mirror to share and no per-definition settings to plumb. The
+        // `zoom` half of `attach` is dropped on purpose — the
+        // subagent's tool surface stays the shell alone.
+        let (provider, _zoom) = rhema_transcript::attach(
+            self.provider.clone(),
+            rhema_transcript::TranscriptSettings::default(),
+        );
         let mut agent = Agent::builder()
-            .provider(self.provider.clone())
+            .provider(provider)
             .resolver(resolver)
             .system(system)
             .params(ChatParams {

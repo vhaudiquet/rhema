@@ -3706,6 +3706,7 @@ dependencies = [
  "rhema-coding-agent",
  "rhema-config",
  "rhema-core",
+ "rhema-transcript",
  "serde",
  "serde_json",
  "serde_yaml",
