@@ -1,3 +1,4 @@
+//! Integration tests for rhema-coding-agent.
 #![cfg(feature = "mock")]
 
 //! Turn semantics through the scripted provider: history shape, session

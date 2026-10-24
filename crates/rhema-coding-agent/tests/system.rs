@@ -241,7 +241,7 @@ fn the_agent_exposes_its_rendered_system_prompt() {
         ..CodingAgentConfig::new("mock-model", root.path())
     };
     let agent = CodingAgent::new(provider, config).unwrap();
-    assert_eq!(agent.system(), "custom prompt");
+    assert_eq!(agent.system(), Some("custom prompt"));
 }
 
 #[tokio::test]

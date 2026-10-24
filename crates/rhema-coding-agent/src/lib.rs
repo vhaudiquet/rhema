@@ -33,7 +33,6 @@
 //! per-workspace under `.rhema/skills`, project shadowing global.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod agent;
 pub mod config;

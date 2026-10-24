@@ -252,8 +252,9 @@ impl CodingAgent {
         &self.session
     }
 
-    /// The rendered system prompt this agent stamps into every request.
-    pub fn system(&self) -> &str {
+    /// The rendered system prompt this agent stamps into every request,
+    /// or `None` when the caller supplied none.
+    pub fn system(&self) -> Option<&str> {
         self.agent.system()
     }
 
@@ -590,11 +591,13 @@ mod extra_tools_tests {
         );
         // The prompt names the extension tool too: prompt and tools
         // array cannot drift.
-        assert!(agent.system().contains("echo"), "{}", agent.system());
+        let prompt = agent
+            .system()
+            .expect("the agent was built with a system prompt");
+        assert!(prompt.contains("echo"), "{prompt}");
         assert!(
-            agent.system().contains("canary"),
-            "the extension's description is in the prompt: {}",
-            agent.system()
+            prompt.contains("canary"),
+            "the extension's description is in the prompt: {prompt}"
         );
     }
 
@@ -615,8 +618,15 @@ mod extra_tools_tests {
             let rounds = scripted.0.lock().unwrap();
             assert_eq!(rounds[0], vec!["bash".to_owned(), "zoom".to_owned()]);
         }
-        assert!(agent.system().contains("zoom"), "{}", agent.system());
-        assert!(!agent.system().contains("canary"));
+        let prompt = agent
+            .system()
+            .expect("the agent was built with a system prompt");
+        assert!(prompt.contains("zoom"), "{prompt}");
+        assert!(
+            !agent
+                .system()
+                .is_some_and(|prompt| prompt.contains("canary"))
+        );
 
         // `transcript: None` is the off switch: the built-ins alone.
         let scripted = Arc::new(Scripted(Mutex::new(Vec::new())));
@@ -631,8 +641,15 @@ mod extra_tools_tests {
             .unwrap();
         let rounds = scripted.0.lock().unwrap();
         assert_eq!(rounds[0], vec!["bash".to_owned()]);
-        assert!(!agent.system().contains("zoom"), "{}", agent.system());
-        assert!(!agent.system().contains("canary"));
+        let prompt = agent
+            .system()
+            .expect("the agent was built with a system prompt");
+        assert!(!prompt.contains("zoom"), "{prompt}");
+        assert!(
+            !agent
+                .system()
+                .is_some_and(|prompt| prompt.contains("canary"))
+        );
     }
 
     #[test]
@@ -764,7 +781,10 @@ mod transcript_tests {
         let mut agent =
             CodingAgent::from_session(recording.clone(), config, big_history(5)).unwrap();
         // The prompt advertises zoom: the tool and the prompt cannot drift.
-        assert!(agent.system().contains("zoom"), "{}", agent.system());
+        let prompt = agent
+            .system()
+            .expect("the agent was built with a system prompt");
+        assert!(prompt.contains("zoom"), "{prompt}");
         agent
             .turn("next", &mut NoopSink, Arc::new(AllowAll))
             .await
