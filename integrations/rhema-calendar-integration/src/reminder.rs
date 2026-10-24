@@ -35,7 +35,9 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::{CaldavCalendar, Calendar, CalendarEvent, GoogleCalendar, IcsCalendar, Window};
+use crate::{
+    CaldavCalendar, Calendar, CalendarError, CalendarEvent, GoogleCalendar, IcsCalendar, Window,
+};
 
 /// The source name the calendar reminders ingest under; registered on
 /// the consumer's dispatcher, so allowlists and ingest doors can name
@@ -85,7 +87,7 @@ pub(crate) struct Feed {
 /// before construction: the api key wins for Google, else the token
 /// (config first, then [`TOKEN_ENV`]), and a feed takes its token or
 /// polls anonymous, which is how most published feed URLs work.
-fn client_for(calendar: &CalendarWatch) -> Result<Arc<dyn Calendar>, String> {
+fn client_for(calendar: &CalendarWatch) -> Result<Arc<dyn Calendar>, CalendarError> {
     match calendar.kind {
         CalendarKind::Google => {
             let id = calendar
@@ -93,13 +95,13 @@ fn client_for(calendar: &CalendarWatch) -> Result<Arc<dyn Calendar>, String> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|id| !id.is_empty())
-                .ok_or_else(|| "google needs calendar_id".to_owned())?;
+                .ok_or_else(|| CalendarError::Config("google needs calendar_id".to_owned()))?;
             if let Some(key) = calendar.resolved_api_key() {
                 return Ok(Arc::new(GoogleCalendar::with_api_key(key, id)));
             }
             let token = calendar
                 .resolved_token()
-                .ok_or_else(|| "google needs api_key or token".to_owned())?;
+                .ok_or_else(|| CalendarError::Config("google needs api_key or token".to_owned()))?;
             Ok(Arc::new(GoogleCalendar::new(token, id)))
         }
         CalendarKind::Ics => {
@@ -108,7 +110,7 @@ fn client_for(calendar: &CalendarWatch) -> Result<Arc<dyn Calendar>, String> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|url| !url.is_empty())
-                .ok_or_else(|| "ics needs url".to_owned())?;
+                .ok_or_else(|| CalendarError::Config("ics needs url".to_owned()))?;
             let mut feed = IcsCalendar::new(url);
             if let Some(token) = calendar.resolved_token() {
                 feed = feed.with_token(token);
@@ -121,7 +123,7 @@ fn client_for(calendar: &CalendarWatch) -> Result<Arc<dyn Calendar>, String> {
                 .as_deref()
                 .map(str::trim)
                 .filter(|url| !url.is_empty())
-                .ok_or_else(|| "caldav needs url".to_owned())?;
+                .ok_or_else(|| CalendarError::Config("caldav needs url".to_owned()))?;
             let mut dav = CaldavCalendar::new(url);
             // A username means Basic auth, the self-hosted norm, and
             // the password must have resolved at validation; a token
@@ -134,7 +136,9 @@ fn client_for(calendar: &CalendarWatch) -> Result<Arc<dyn Calendar>, String> {
                 .filter(|user| !user.is_empty())
             {
                 let password = calendar.resolved_password().ok_or_else(|| {
-                    "caldav needs a password: set password or CALDAV_PASSWORD".to_owned()
+                    CalendarError::Config(
+                        "caldav needs a password: set password or CALDAV_PASSWORD".to_owned(),
+                    )
                 })?;
                 dav = dav.with_basic(user, password);
             } else if let Some(token) = calendar.resolved_token() {
@@ -257,7 +261,7 @@ impl CalendarSource {
         dispatcher: &Arc<Dispatcher>,
         clock: Arc<dyn Clock>,
         calendars: &[CalendarWatch],
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CalendarError> {
         let mut feeds = Vec::with_capacity(calendars.len());
         for calendar in calendars {
             feeds.push(Feed {
@@ -330,7 +334,10 @@ fn store_feeds(store: &crate::store::CalendarStore) -> Result<Vec<Feed>, String>
     for calendar in &calendars {
         feeds.push(Feed {
             name: calendar.name.trim().to_owned(),
-            client: client_for(calendar)?,
+            // The Source seam reports through `SourceError`, whose text
+            // carries the refusal; the typed config error stringifies
+            // at that boundary.
+            client: client_for(calendar).map_err(|err| err.to_string())?,
             leads: calendar.leads(),
             horizon_hours: calendar.horizon(),
         });

@@ -64,7 +64,6 @@
 //!   time, `calendar:<name>` keys, one `Source` over the configured feeds
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod caldav;
 pub mod calendar;

@@ -31,6 +31,13 @@ pub enum CalendarError {
     /// The request never got an answer (DNS, connect, timeout).
     #[error("network error: {0}")]
     Network(String),
+    /// A calendar's configuration does not resolve into a client: a
+    /// kind-specific piece is missing (a `url`, a `calendar_id`, a
+    /// credential). Config validation runs at load, so this surfaces
+    /// where the feed is built, and the daemon refuses to start rather
+    /// than poll an under-specified feed.
+    #[error("calendar config: {0}")]
+    Config(String),
 }
 
 /// The longest body snippet an [`CalendarError::Api`] keeps: enough for
