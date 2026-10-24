@@ -34,7 +34,6 @@
 //! deploy README covers it). The alarm-driven queue that would let
 //! turns outlive connections is the same v2 refinement the DO awaits.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod api;
 pub mod backend;

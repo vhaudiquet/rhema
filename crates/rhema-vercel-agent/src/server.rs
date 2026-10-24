@@ -26,7 +26,7 @@ use axum::{Json, Router};
 use rhema_agent_tools::DenyAll;
 use rhema_cloud_agent::wire::{ClientMessage, ServerMessage};
 use rhema_cloud_agent::{AgentAssembly, Sandbox, SessionConfig};
-use rhema_core::{EventSink, ModelProvider, Session};
+use rhema_core::{CommitError, EventSink, ModelProvider, Session};
 use rhema_provider::Retrying;
 use rhema_provider_anthropic::{AnthropicProvider, ReqwestTransport};
 use rhema_rsd::{ResourceKey, Store};
@@ -236,7 +236,18 @@ async fn set_config(
     Path(id): Path<String>,
     Json(config): Json<SessionConfig>,
 ) -> impl IntoResponse {
-    let value = serde_json::to_string(&config).unwrap_or_default();
+    let value = match serde_json::to_string(&config) {
+        Ok(value) => value,
+        Err(err) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("the config does not serialize: {err}")
+                })),
+            )
+                .into_response();
+        }
+    };
     match state.store.set_meta(&format!("config:{id}"), &value) {
         Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(err) => (
@@ -247,15 +258,18 @@ async fn set_config(
     }
 }
 
-/// The session's stored config, defaults filling what was never set.
-fn load_config(state: &AppState, id: &str) -> SessionConfig {
-    state
-        .store
-        .meta(&format!("config:{id}"))
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_default()
+/// The session's stored config, defaults filling what was never set. A
+/// store failure or a row that no longer parses is an error, not a
+/// silent default: a turn must not run against a sandbox backend,
+/// model, or skill set the client never chose.
+fn load_config(state: &AppState, id: &str) -> Result<SessionConfig, String> {
+    let key = format!("config:{id}");
+    match state.store.meta(&key) {
+        Ok(Some(value)) => serde_json::from_str(&value)
+            .map_err(|err| format!("the stored config {key:?} no longer parses: {err}")),
+        Ok(None) => Ok(SessionConfig::default()),
+        Err(err) => Err(format!("the stored config {key:?} is unreadable: {err}")),
+    }
 }
 
 /// `GET /ws/:id`: accept the socket and hand it to the pump.
@@ -301,7 +315,6 @@ async fn pump(state: Arc<AppState>, session_id: String, mut socket: axum::extrac
         live: live.clone(),
         timeout: APPROVAL_TIMEOUT,
     });
-    let config = load_config(&state, &session_id);
 
     let (mut sink, mut stream) = socket.split();
     // The writer: protocol messages out, one task owning the sink.
@@ -321,6 +334,17 @@ async fn pump(state: Arc<AppState>, session_id: String, mut socket: axum::extrac
     });
 
     use futures_util::StreamExt;
+    // The config loads only after the writer task exists, so a failure
+    // reaches the client through it: a stored config that cannot be
+    // read or parsed refuses the socket instead of running a turn on
+    // defaults the client never chose.
+    let config = match load_config(&state, &session_id) {
+        Ok(config) => config,
+        Err(message) => {
+            live.send(ServerMessage::Error { message });
+            return;
+        }
+    };
     while let Some(Ok(frame)) = stream.next().await {
         let axum::extract::ws::Message::Text(text) = frame else {
             continue;
@@ -470,7 +494,7 @@ async fn run_turn(
         let key = key.clone();
         let revision = revision.clone();
         Box::new(move |session: &Session| {
-            checkpoint(&store, &key, &revision, session).map_err(|err| err.to_string())
+            checkpoint(&store, &key, &revision, session).map_err(CommitError)
         }) as rhema_core::CommitHook
     };
     agent.set_commit_hook(Some(hook));
