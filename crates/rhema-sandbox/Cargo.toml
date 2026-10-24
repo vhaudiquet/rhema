@@ -13,8 +13,9 @@ authors.workspace = true
 autobins = false
 
 [features]
-default = ["mock"]
+default = []
 # The scripted sandbox for offline tests; mirrors rhema-core's feature.
+# Opt-in, not default: test machinery does not ship in a plain build.
 mock = ["dep:tokio", "tokio/sync"]
 # The process-spawning backend family's shared machinery (`exec_util.rs`,
 # `fsroot.rs`), which the sibling backend crates — rhema-sandbox-local,
@@ -38,8 +39,15 @@ thiserror = { workspace = true }
 tokio = { workspace = true, optional = true, features = ["sync"] }
 
 [dev-dependencies]
+# The seed tests drive the scripted sandbox: this self edge turns the
+# `mock` feature on for test builds only (dev-dependencies do not
+# propagate to consumers).
+rhema-sandbox = { path = ".", features = ["mock"] }
 # exec_util's pump tests hand their lines through an unbounded channel;
 # `macros` and `rt` come with the workspace pin
 tokio = { workspace = true, features = ["sync"] }
 # The fsroot tests run against throwaway host directories
 tempfile = "3"
+
+[lints]
+workspace = true

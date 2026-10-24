@@ -31,7 +31,6 @@
 //! its public surface does not churn; new consumers import them from
 //! here.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod adapter;
 #[cfg(feature = "spawn")]
