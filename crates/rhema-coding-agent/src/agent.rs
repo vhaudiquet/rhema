@@ -1,5 +1,7 @@
 //! The coding-agent driver: a provider, the built-in workspace tools, and
-//! the per-turn loop over `rhema_core::run_turn`.
+//! the per-turn loop — the provided `rhema_core::run_turn`, or, with a
+//! steering source configured, the driver's own loop with the two drain
+//! points that append finished-work notifications at step boundaries.
 //!
 //! The agent owns one [`ShellTools`] resolver for its lifetime. Approval
 //! arrives per turn; it is installed into the resolver before stepping and
@@ -21,10 +23,10 @@ use rhema_agent_tools::{
 };
 use rhema_core::{
     Agent, AgentError, ChatParams, CommitHook, EventSink, Message, ModelOutput, Role, Session,
-    ToolContext, ToolResolver, ToolSpec, run_turn,
+    StopReason, ToolContext, ToolResolver, ToolSpec, run_turn,
 };
 
-use crate::config::CodingAgentConfig;
+use crate::config::{CodingAgentConfig, Steering};
 
 /// Why a turn or a session operation failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -307,17 +309,81 @@ impl CodingAgent {
         };
         revive_dangling_calls(&mut self.session, self.tools.as_ref(), &ctx).await;
         self.tools.install_approval(approval);
-        let result = run_turn(
-            &mut self.agent,
-            &mut self.session,
-            Message::text(Role::User, input),
-            sink,
-            &ctx,
-            self.config.max_turn_steps,
-        )
-        .await;
+        // With a steering source the loop is this driver's own — the
+        // same shape as the provided `run_turn` plus the two drain
+        // points; without one, the provided convenience runs unchanged.
+        let result = match self.config.steering.clone() {
+            Some(steering) => {
+                self.steered_turn(
+                    Message::text(Role::User, input),
+                    sink,
+                    &ctx,
+                    steering.as_ref(),
+                )
+                .await
+            }
+            None => {
+                run_turn(
+                    &mut self.agent,
+                    &mut self.session,
+                    Message::text(Role::User, input),
+                    sink,
+                    &ctx,
+                    self.config.max_turn_steps,
+                )
+                .await
+            }
+        };
         self.tools.clear_approval();
         Ok(result?)
+    }
+
+    /// The steered turn loop: the provided [`run_turn`]'s shape plus the
+    /// two drain points. Anything finished while no turn ran is
+    /// announced at turn start, before the user's input (consecutive
+    /// User messages are valid); between steps, what finished during the
+    /// last one is announced before the next. The append lands at a step
+    /// boundary, so the next commit hook persists it like any history.
+    async fn steered_turn(
+        &mut self,
+        input: Message,
+        sink: &mut dyn EventSink,
+        ctx: &ToolContext,
+        steering: &dyn Steering,
+    ) -> Result<ModelOutput, AgentError> {
+        // Fresh per turn: a finish announced in an earlier turn is
+        // announced again here while its report stays unfetched.
+        let mut announced: Vec<String> = Vec::new();
+        self.append_notifications(steering, &mut announced);
+        self.session.history.push(input);
+        for _ in 0..self.config.max_turn_steps {
+            let step = self.agent.step(&mut self.session, sink, ctx).await?;
+            if step.output.stop_reason != StopReason::ToolUse {
+                return Ok(step.output);
+            }
+            self.append_notifications(steering, &mut announced);
+        }
+        Err(AgentError::MaxIterations(self.config.max_turn_steps))
+    }
+
+    /// Drains the steering source and appends what is new as one
+    /// User-role message, one line per notification. The drain is a pure
+    /// query, so the same line can come back on the next drain — within
+    /// a turn each finish is announced once, and `announced` carries the
+    /// lines already appended to this turn's history.
+    fn append_notifications(&mut self, steering: &dyn Steering, announced: &mut Vec<String>) {
+        let lines: Vec<String> = steering
+            .drain()
+            .into_iter()
+            .filter(|line| !announced.contains(line))
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+        announced.extend(lines.iter().cloned());
+        self.session
+            .history
+            .push(Message::text(Role::User, lines.join("\n")));
     }
 
     /// Writes the session as pretty JSON to `path`.

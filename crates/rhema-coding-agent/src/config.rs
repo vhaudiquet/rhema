@@ -7,6 +7,21 @@ use rhema_agent_tools::{ShellTools, Skill};
 use rhema_core::ToolResolver;
 use rhema_core::request::ThinkingEffort;
 
+/// Finished-work notifications a turn loop injects into the history.
+///
+/// The contract is deliberately text-shaped: the driver knows nothing
+/// about what the lines announce — a registry of background jobs, an
+/// inbox, anything — and the source knows nothing about turns or
+/// history. `drain` is a query, never a mutation of record: the same
+/// lines may come back again (a crash between the append and the
+/// checkpoint only re-delivers), and the driver deduplicates within a
+/// turn.
+pub trait Steering: Send + Sync {
+    /// The lines to append to the history now, one notification per
+    /// line, in announcement order. Empty means nothing to announce.
+    fn drain(&self) -> Vec<String>;
+}
+
 /// Everything a [`CodingAgent`](crate::CodingAgent) needs besides the
 /// provider.
 #[derive(Clone)]
@@ -70,6 +85,12 @@ pub struct CodingAgentConfig {
     /// client tools (a daemon URL, a scoped token, a PATH addition)
     /// without touching the process environment.
     pub shell_env: std::collections::BTreeMap<String, String>,
+    /// A steering source the turn loop drains: one User-role message per
+    /// drain lands in the history at a step boundary, so work that
+    /// finished outside the turn (a background subagent) is announced to
+    /// the model. `None` — the default — runs the turn exactly as
+    /// before: the loop is the provided `run_turn` with no injection.
+    pub steering: Option<Arc<dyn Steering>>,
 }
 
 impl std::fmt::Debug for CodingAgentConfig {
@@ -88,6 +109,7 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("extra_resolver", &self.extra_resolver.is_some())
             .field("transcript", &self.transcript.is_some())
             .field("summary_worker", &self.summary_worker.is_some())
+            .field("steering", &self.steering.is_some())
             .field("shell_env", &self.shell_env.len())
             .finish()
     }
@@ -115,6 +137,7 @@ impl CodingAgentConfig {
             extra_resolver: None,
             transcript: Some(rhema_transcript::TranscriptSettings::default()),
             summary_worker: None,
+            steering: None,
             shell_env: std::collections::BTreeMap::new(),
         }
     }

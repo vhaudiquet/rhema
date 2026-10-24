@@ -170,6 +170,7 @@ impl AgentAssembly {
             // No summary worker yet: the cloud harness has one model
             // handle, and a cheap second one is a later decision.
             summary_worker: None,
+            steering: None,
         };
         (config, shell)
     }

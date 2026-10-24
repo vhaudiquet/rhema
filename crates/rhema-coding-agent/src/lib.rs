@@ -14,7 +14,7 @@
 //!
 //! Layout:
 //! - [`agent`] — `CodingAgent`, `CodingAgentError`, `stamped_system`
-//! - [`config`] — `CodingAgentConfig`
+//! - [`config`] — `CodingAgentConfig` and the `Steering` seam
 //! - [`prompt`] — the SYSTEM.md template and its default render
 //!
 //! The toolkit itself — the `Approval` seam, `ShellTools`, skills, paste
@@ -40,7 +40,7 @@ pub mod config;
 pub mod prompt;
 
 pub use agent::{CodingAgent, CodingAgentError, stamped_system, stamped_system_with_skills};
-pub use config::CodingAgentConfig;
+pub use config::{CodingAgentConfig, Steering};
 pub use prompt::{DEFAULT_SYSTEM_MD, default_system};
 // The toolkit the driver is built on, under this crate's name: every
 // downstream driver (TUI, ACP, the claw) keeps its import paths.
