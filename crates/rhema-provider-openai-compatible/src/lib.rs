@@ -26,7 +26,7 @@
 //! }
 //!
 //! # async fn demo() -> Result<(), rhema_core::ProviderError> {
-//! let provider = OpenAiCompatibleProvider::new(std::env::var("OPENAI_API_KEY").unwrap());
+//! let provider = OpenAiCompatibleProvider::new(std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY is set"));
 //! let request = rhema_core::ModelRequest {
 //!     system: Some("be terse".into()),
 //!     messages: vec![Message::text(Role::User, "reply with exactly: ok")],
@@ -49,7 +49,6 @@
 //!   [`ModelProvider`](rhema_core::ModelProvider) implementation
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod provider;
 pub mod wire;

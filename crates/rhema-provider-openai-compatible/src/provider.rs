@@ -55,6 +55,7 @@ fn http_client() -> reqwest::Client {
 
 /// Any server speaking the OpenAI chat-completions dialect, addressed by
 /// its full versioned base URL.
+#[derive(Debug)]
 pub struct OpenAiCompatibleProvider {
     base_url: String,
     api_key: String,
@@ -105,10 +106,10 @@ impl OpenAiCompatibleProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(api_error(status, &text));
         }
-        let page: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
+        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed models page: {err}"),
+            status: None,
+        })?;
         let mut models = crate::wire::normalize_models(&page);
         models.retain(is_text);
         if self.base_url.contains(DEEPSEEK_HOST) {
@@ -137,12 +138,14 @@ impl OpenAiCompatibleProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(api_error(status, &text));
         }
-        let balance: WireBalance = response
-            .json()
-            .await
-            .map_err(|err| ProviderError::Api(format!("malformed balance response: {err}")))?;
-        crate::wire::allowance(&balance)
-            .ok_or_else(|| ProviderError::Api("balance response carries no balance".into()))
+        let balance: WireBalance = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed balance response: {err}"),
+            status: None,
+        })?;
+        crate::wire::allowance(&balance).ok_or_else(|| ProviderError::Api {
+            message: "balance response carries no balance".into(),
+            status: None,
+        })
     }
 }
 
@@ -217,14 +220,18 @@ impl Authorized for reqwest::RequestBuilder {
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the OpenAI
-/// error shape's `error.message` when the body has it.
+/// error shape's `error.message` when the body has it, and carrying the
+/// HTTP status structurally for [`ProviderError::is_retryable`].
 fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
-    ProviderError::Api(format!(
-        "openai-compatible api error (HTTP {}): {}",
-        status.as_u16(),
-        parsed.message(raw)
-    ))
+    ProviderError::Api {
+        message: format!(
+            "openai-compatible api error (HTTP {}): {}",
+            status.as_u16(),
+            parsed.message(raw)
+        ),
+        status: Some(status.as_u16()),
+    }
 }
 
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
@@ -233,7 +240,7 @@ fn network_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Other(format!("network error: {err}"))
+        ProviderError::Network(err.to_string())
     }
 }
 
@@ -247,13 +254,22 @@ fn feed_chunk(
     if payload.trim().is_empty() {
         return Ok(());
     }
-    let chunk: ChatCompletionChunk = serde_json::from_str(payload)
-        .map_err(|err| ProviderError::Api(format!("malformed SSE chunk: {err}")))?;
+    let chunk: ChatCompletionChunk =
+        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
+            message: format!("malformed SSE chunk: {err}"),
+            status: None,
+        })?;
     assembler.push(chunk, sink)
 }
 
 #[async_trait]
 impl ModelProvider for OpenAiCompatibleProvider {
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport fails, [`ProviderError::Api`] with the HTTP
+    /// status on a non-2xx response, and [`ProviderError::Api`] without
+    /// one on a malformed stream chunk or a mid-stream error chunk.
     async fn complete(
         &self,
         req: ModelRequest,

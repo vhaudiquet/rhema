@@ -418,7 +418,8 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
         .expect_err("non-2xx is an error");
 
     match err {
-        ProviderError::Api(message) => {
+        ProviderError::Api { message, status } => {
+            assert_eq!(status, Some(400));
             assert!(message.contains("400"), "got: {message}");
             assert!(
                 message.contains("you must provide a model parameter"),
@@ -453,11 +454,17 @@ async fn a_mid_stream_error_chunk_maps_to_an_api_error() {
         )
         .await
         .expect_err("a mid-stream error is an error");
-    assert_eq!(err, ProviderError::Api("inference failed".into()));
+    assert_eq!(
+        err,
+        ProviderError::Api {
+            message: "inference failed".into(),
+            status: None,
+        }
+    );
 }
 
 #[tokio::test]
-async fn a_transport_failure_maps_to_other() {
+async fn a_transport_failure_maps_to_a_network_error() {
     // An unroutable address: nothing is listening, so the connect fails.
     let provider = OpenAiCompatibleProvider::new("k").with_base_url("http://127.0.0.1:1");
     let mut sink = Collector(vec![]);
@@ -468,7 +475,7 @@ async fn a_transport_failure_maps_to_other() {
         )
         .await
         .expect_err("connection refused is an error");
-    assert!(matches!(err, ProviderError::Other(_)), "got: {err:?}");
+    assert!(matches!(err, ProviderError::Network(_)), "got: {err:?}");
 }
 
 #[tokio::test]
