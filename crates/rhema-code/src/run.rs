@@ -15,9 +15,12 @@ use std::time::Duration;
 use anyhow::Context;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
-    KeyEventKind, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    KeyEventKind, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
-use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode};
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rhema_acp::AcpOptions;
@@ -810,7 +813,7 @@ async fn event_loop(
 ) -> anyhow::Result<()> {
     let mut status = Tracker::default();
     for effect in std::mem::take(effects) {
-        dispatch(app, tx, &mut status, effect);
+        dispatch(terminal, app, tx, &mut status, effect);
     }
     loop {
         status.sync(app);
@@ -819,7 +822,7 @@ async fn event_loop(
         while let Ok(event) = rx.try_recv() {
             status.observe(&event);
             for effect in app.on_event(event) {
-                dispatch(app, tx, &mut status, effect);
+                dispatch(terminal, app, tx, &mut status, effect);
             }
             if app.should_quit {
                 return Ok(());
@@ -833,7 +836,7 @@ async fn event_loop(
             match crossterm::event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     for effect in app.on_key(key) {
-                        dispatch(app, tx, &mut status, effect);
+                        dispatch(terminal, app, tx, &mut status, effect);
                     }
                 }
                 Event::Mouse(mouse) => match mouse.kind {
@@ -843,7 +846,7 @@ async fn event_loop(
                     // lands once, on the row the user let go over.
                     crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
                         for effect in app.on_click(mouse.column, mouse.row) {
-                            dispatch(app, tx, &mut status, effect);
+                            dispatch(terminal, app, tx, &mut status, effect);
                         }
                     }
                     _ => {}
@@ -857,7 +860,13 @@ async fn event_loop(
 
 /// Performs one effect: spawn a fetch task or a turn task. The turn takes
 /// the agent off the UI thread until its `TurnFinished` event.
-fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, status: &mut Tracker, effect: Effect) {
+fn dispatch(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    tx: &UnboundedSender<UiEvent>,
+    status: &mut Tracker,
+    effect: Effect,
+) {
     match effect {
         Effect::FetchModels(why) => {
             // A login validates one provider; the catalogs otherwise span
@@ -941,7 +950,60 @@ fn dispatch(app: &mut App, tx: &UnboundedSender<UiEvent>, status: &mut Tracker, 
                 tx.clone(),
             );
         }
+        Effect::EditSubagent(path) => {
+            // Blocking here is the point: the editor owns the terminal,
+            // so nothing of the app — draw, input, tasks — can run
+            // until it is back. The app is on the settings screen, not
+            // mid-turn; the runtime's background work stalls with it.
+            if let Err(err) = edit_in_editor(terminal, &path) {
+                app.transcript.push_notice(&format!("editor: {err}"));
+            }
+            app.refresh_subagents();
+        }
     }
+}
+
+/// Suspends the TUI, runs `$EDITOR` on `path`, and re-enters: the
+/// alternate screen and the input modes the editor cannot share are
+/// dropped first and re-established after, mirroring `run_tui`'s
+/// setup and `restore_terminal`'s teardown. The draw cache is
+/// invalidated — the re-entered alternate screen is fresh, and a diff
+/// against the old one would repaint half a screen. The editor's
+/// error, if any, is the return.
+fn edit_in_editor(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    // The kitty flags pop before the screen they were pushed on is
+    // left, and each step runs on its own so one failure cannot skip
+    // the rest (the same order restore_terminal tears down in).
+    let _ = crossterm::execute!(
+        stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableBracketedPaste,
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    );
+    let _ = disable_raw_mode();
+    let _ = stdout().flush();
+    let result = run_editor(path, None);
+    let _ = enable_raw_mode();
+    let _ = crossterm::execute!(
+        stdout(),
+        EnterAlternateScreen,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ASSOCIATED_TEXT
+        ),
+        EnableMouseCapture,
+        EnableBracketedPaste
+    );
+    let _ = stdout().flush();
+    let _ = terminal.clear();
+    result
 }
 
 #[cfg(test)]

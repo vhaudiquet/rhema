@@ -363,6 +363,8 @@ pub enum SettingsSection {
     Memory,
     /// The discovered skills.
     Skills,
+    /// The discovered subagent definitions, editable in `$EDITOR`.
+    Subagents,
     /// The allowance, the session's cost, the last turn's tokens.
     Usage,
     /// Version, repository, paths.
@@ -376,6 +378,7 @@ impl SettingsSection {
         SettingsSection::Appearance,
         SettingsSection::Memory,
         SettingsSection::Skills,
+        SettingsSection::Subagents,
         SettingsSection::Usage,
         SettingsSection::About,
     ];
@@ -387,6 +390,7 @@ impl SettingsSection {
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Memory => "Memory",
             SettingsSection::Skills => "Skills",
+            SettingsSection::Subagents => "Subagents",
             SettingsSection::Usage => "Usage",
             SettingsSection::About => "About",
         }
@@ -431,6 +435,10 @@ pub enum SettingsAction {
     ToggleTheme,
     /// Toggle the icon flavor.
     ToggleIcons,
+    /// Enter or `e` on a subagent row: open the definition in `$EDITOR`.
+    /// The built-in has no file — the app copies it into the global
+    /// directory first, where it shadows the built-in from then on.
+    EditSubagent,
 }
 
 /// One row of the Providers page's instance list: a stored instance, or
@@ -454,6 +462,49 @@ pub struct SkillRow {
     pub name: String,
     /// The frontmatter description the model triggers on.
     pub description: String,
+}
+
+/// Where a subagent definition lives. The same discovery rules as the
+/// skills': the global directory, the workspace, project shadowing
+/// global — and one definition that is not on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubagentSource {
+    /// The built-in `general-purpose`, present without any file.
+    Builtin,
+    /// A folder under the config directory.
+    Global,
+    /// A folder under the workspace's `.rhema/subagents`.
+    Workspace,
+}
+
+impl SubagentSource {
+    /// The tag the page draws after the name.
+    pub fn label(self) -> &'static str {
+        match self {
+            SubagentSource::Builtin => "built-in",
+            SubagentSource::Global => "global",
+            SubagentSource::Workspace => "workspace",
+        }
+    }
+}
+
+/// One discovered subagent row of the Subagents page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubagentRow {
+    /// The definition's folder name.
+    pub name: String,
+    /// The frontmatter description the parent triggers on.
+    pub description: String,
+    /// The model the subagent's requests carry; `None` inherits the
+    /// parent's.
+    pub model: Option<String>,
+    /// The step budget; `None` uses the discovery default.
+    pub max_steps: Option<u32>,
+    /// Where the definition lives.
+    pub source: SubagentSource,
+    /// The `SUBAGENT.md` to edit; `None` only for the built-in, whose
+    /// first edit copies it into the global directory.
+    pub path: Option<PathBuf>,
 }
 
 /// What one add-dialog keypress means.
@@ -911,6 +962,14 @@ pub struct SettingsScreen {
     pub skills_global_dir: Option<String>,
     /// The workspace's own skills directory.
     pub skills_workspace_dir: String,
+    // The Subagents page's snapshot.
+    /// The discovered subagent definitions, built-in and discovered
+    /// merged.
+    pub subagents: Vec<SubagentRow>,
+    /// The global subagents directory, when one resolves.
+    pub subagents_global_dir: Option<String>,
+    /// The workspace's own subagents directory.
+    pub subagents_workspace_dir: String,
     // The Usage page's snapshot.
     /// The active backend's subscription allowance, tagged with the
     /// backend's config name.
@@ -949,6 +1008,9 @@ impl SettingsScreen {
             skills: Vec::new(),
             skills_global_dir: None,
             skills_workspace_dir: String::new(),
+            subagents: Vec::new(),
+            subagents_global_dir: None,
+            subagents_workspace_dir: String::new(),
             allowance: None,
             last_turn: None,
             transcript: None,
@@ -1008,12 +1070,22 @@ impl SettingsScreen {
             .and_then(|row| (!row.add).then_some(row.name))
     }
 
+    /// The highlighted subagent row; `None` anywhere but the Subagents
+    /// page, with the dialog up, or past the list's end.
+    pub fn selected_subagent(&self) -> Option<&SubagentRow> {
+        if self.section != SettingsSection::Subagents || self.dialog.is_some() {
+            return None;
+        }
+        self.subagents.get(self.row)
+    }
+
     /// How many interactive rows the page holds; zero means the arrows
     /// have nothing to move through.
     fn row_count(&self) -> usize {
         match self.section {
             SettingsSection::Providers => self.instance_rows().len(),
             SettingsSection::Appearance => 3,
+            SettingsSection::Subagents => self.subagents.len(),
             _ => 0,
         }
     }
@@ -1041,6 +1113,10 @@ impl SettingsScreen {
                 1 => SettingsAction::ToggleTheme,
                 _ => SettingsAction::ToggleIcons,
             },
+            SettingsSection::Subagents => match self.selected_subagent() {
+                Some(_) => SettingsAction::EditSubagent,
+                None => SettingsAction::None,
+            },
             _ => SettingsAction::None,
         }
     }
@@ -1048,8 +1124,9 @@ impl SettingsScreen {
     /// Handles one keypress. The left/right arrows and tabs move the
     /// sidebar, the vertical arrows move the page's rows, esc or `q`
     /// backs out (dialog first, then the screen), enter acts on the
-    /// selected row, `d` forgets an instance, and the Appearance page
-    /// carries `c`/`t`/`i` as shortcuts for its toggles.
+    /// selected row, `d` forgets an instance, `e` edits the selected
+    /// subagent, and the Appearance page carries `c`/`t`/`i` as
+    /// shortcuts for its toggles.
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         if let Some(action) = self.dialog.as_mut().map(|dialog| dialog.handle_key(key)) {
             // Esc closes the dialog from any stage; the app drops the
@@ -1088,6 +1165,9 @@ impl SettingsScreen {
             KeyCode::Enter => self.enter_action(),
             KeyCode::Char('d') if self.selected_instance().is_some() => {
                 SettingsAction::RemoveInstance
+            }
+            KeyCode::Char('e') if self.selected_subagent().is_some() => {
+                SettingsAction::EditSubagent
             }
             KeyCode::Char('c') if self.section == SettingsSection::Appearance => {
                 SettingsAction::CyclePalette
@@ -2368,6 +2448,67 @@ mod tests {
             settings.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL)),
             SettingsAction::None
         );
+    }
+
+    /// A Subagents page with the built-in and one workspace definition.
+    fn subagents_screen() -> SettingsScreen {
+        let mut settings = settings_screen();
+        settings.section = SettingsSection::Subagents;
+        settings.subagents = vec![
+            SubagentRow {
+                name: "general-purpose".into(),
+                description: "the built-in delegation".into(),
+                model: None,
+                max_steps: None,
+                source: SubagentSource::Builtin,
+                path: None,
+            },
+            SubagentRow {
+                name: "reviewer".into(),
+                description: "reviews diffs".into(),
+                model: Some("zai/glm".into()),
+                max_steps: Some(12),
+                source: SubagentSource::Workspace,
+                path: Some(PathBuf::from("/w/.rhema/subagents/reviewer/SUBAGENT.md")),
+            },
+        ];
+        settings
+    }
+
+    #[test]
+    fn settings_subagent_rows_move_and_enter_edits() {
+        let mut settings = subagents_screen();
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(settings.row, 1);
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(settings.row, 0, "down wraps past the last row");
+        // Enter and `e` both edit the selected row.
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::EditSubagent
+        );
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('e'))),
+            SettingsAction::EditSubagent
+        );
+    }
+
+    #[test]
+    fn the_empty_subagents_page_has_nothing_to_act_on() {
+        let mut settings = settings_screen();
+        settings.section = SettingsSection::Subagents;
+        assert_eq!(settings.selected_subagent(), None);
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::None
+        );
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('e'))),
+            SettingsAction::None
+        );
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(settings.row, 0, "the arrows have nothing to move through");
     }
 
     #[test]

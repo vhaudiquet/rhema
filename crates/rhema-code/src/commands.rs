@@ -127,7 +127,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/settings",
-        description: "providers, colors, skills, usage, about",
+        description: "providers, colors, skills, subagents, usage, about",
         argument: Argument::None,
         handler: settings,
     },
@@ -154,6 +154,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "list discovered skills",
         argument: Argument::None,
         handler: skills,
+    },
+    CommandSpec {
+        name: "/subagents",
+        description: "configure the subagent definitions",
+        argument: Argument::None,
+        handler: subagents,
     },
     CommandSpec {
         name: "/system",
@@ -355,6 +361,14 @@ fn login(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
 fn settings(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     app.open_settings_at(
         crate::screens::SettingsSection::Providers,
+        crate::screens::SettingsPurpose::FromChat,
+    );
+    Vec::new()
+}
+
+fn subagents(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    app.open_settings_at(
+        crate::screens::SettingsSection::Subagents,
         crate::screens::SettingsPurpose::FromChat,
     );
     Vec::new()

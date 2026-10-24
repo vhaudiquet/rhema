@@ -930,6 +930,69 @@ fn settings_page(
             }
             (lines, footer(""), Vec::new())
         }
+        SettingsSection::Subagents => {
+            lines.extend(settings_field(
+                "Global",
+                Span::raw(
+                    settings
+                        .subagents_global_dir
+                        .clone()
+                        .unwrap_or_else(|| "None".into()),
+                )
+                .fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.extend(settings_field(
+                "Workspace",
+                Span::raw(settings.subagents_workspace_dir.clone()).fg(theme.text),
+                theme,
+                width,
+            ));
+            lines.push(Line::default());
+            if settings.subagents.is_empty() {
+                lines.extend(settings_hint("No subagents discovered", theme, width));
+            }
+            let mut row_hits = Vec::new();
+            for (index, subagent) in settings.subagents.iter().enumerate() {
+                let selected = index == settings.row;
+                // The hit rect lands on the name line; the detail lines
+                // under it are description, not a second target.
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                let marker = Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text);
+                let line = Line::from(vec![
+                    marker,
+                    Span::raw(subagent.name.clone()).fg(theme.text),
+                    Span::raw(format!(" · {}", subagent.source.label())).fg(theme.text3),
+                ]);
+                lines.push(settings_row(line, selected, theme));
+                let model = match &subagent.model {
+                    Some(model) => model.clone(),
+                    None => "the parent's".to_owned(),
+                };
+                lines.extend(wrap_line(
+                    &Line::from(
+                        Span::raw(format!(
+                            "    {model} · {} steps",
+                            subagent
+                                .max_steps
+                                .unwrap_or(rhema_subagents::def::DEFAULT_MAX_STEPS),
+                        ))
+                        .fg(theme.text3),
+                    ),
+                    width,
+                ));
+                lines.extend(wrap_line(
+                    &Line::from(Span::raw(format!("    {}", subagent.description))).fg(theme.text3),
+                    width,
+                ));
+            }
+            (
+                lines,
+                footer("enter/e - edit in $EDITOR; the built-in is copied to the global dir first"),
+                row_hits,
+            )
+        }
         SettingsSection::Usage => {
             let allowance_value: Vec<Span<'static>> = match &settings.allowance {
                 Some((backend, Some(allowance))) => {
@@ -2552,6 +2615,69 @@ mod tests {
             "the footer hints: {text}"
         );
         // Every sidebar row plus the instance and add rows are clickable.
+        assert_eq!(
+            hits.len(),
+            SettingsSection::ALL.len() + 2,
+            "sidebar rows and the two page rows register: {hits:?}"
+        );
+    }
+
+    /// The Subagents page lists every definition with its provenance and
+    /// registers one click target per row.
+    #[test]
+    fn the_subagents_page_lists_the_definitions_and_their_targets() {
+        let mut settings =
+            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        settings.section = SettingsSection::Subagents;
+        settings.subagents_global_dir = Some("/cfg".into());
+        settings.subagents_workspace_dir = "/w/.rhema/subagents".into();
+        settings.subagents = vec![
+            crate::screens::SubagentRow {
+                name: "general-purpose".into(),
+                description: "Runs one self-contained task in a fresh agent".into(),
+                model: None,
+                max_steps: None,
+                source: crate::screens::SubagentSource::Builtin,
+                path: None,
+            },
+            crate::screens::SubagentRow {
+                name: "reviewer".into(),
+                description: "reviews diffs".into(),
+                model: Some("zai/glm".into()),
+                max_steps: Some(12),
+                source: crate::screens::SubagentSource::Workspace,
+                path: Some("/w/.rhema/subagents/reviewer/SUBAGENT.md".into()),
+            },
+        ];
+
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        let text = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("general-purpose · built-in"), "{text}");
+        assert!(text.contains("reviewer · workspace"), "{text}");
+        assert!(
+            text.contains("the parent's"),
+            "the built-in inherits the model: {text}"
+        );
+        assert!(text.contains("zai/glm · 12 steps"), "{text}");
+        assert!(text.contains("reviews diffs"), "{text}");
+        assert!(
+            text.contains("enter/e - edit in $EDITOR"),
+            "the footer hints: {text}"
+        );
+        // Every sidebar row plus the two definition rows are clickable.
         assert_eq!(
             hits.len(),
             SettingsSection::ALL.len() + 2,

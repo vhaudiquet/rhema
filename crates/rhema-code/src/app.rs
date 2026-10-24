@@ -20,7 +20,7 @@ use crate::events::{FetchWhy, OwnedEvent, UiEvent};
 use crate::screens::{
     AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerPurpose, PickerScreen,
     PickerStatus, ProfileAction, ProfileScreen, SandboxAction, SandboxScreen, SettingsAction,
-    SettingsPurpose, SettingsScreen, SettingsSection, SkillRow,
+    SettingsPurpose, SettingsScreen, SettingsSection, SkillRow, SubagentRow, SubagentSource,
 };
 use crate::store::ConfigStore;
 use crate::transcript::Transcript;
@@ -626,6 +626,71 @@ pub enum Effect {
     /// `UiEvent::SandboxAssembled`; the session keeps its current tools
     /// until then.
     AssembleSandbox(SandboxChoice),
+    /// Open this `SUBAGENT.md` in `$EDITOR`: the runner suspends the
+    /// TUI around the blocking editor and re-enters after, and the
+    /// Subagents page's rows refresh then — the edit happened behind
+    /// the app's back.
+    EditSubagent(PathBuf),
+}
+
+/// The Subagents page's rows: every discovered definition with its
+/// provenance and the file an edit opens. The source is the file check
+/// discovery shadows by — a workspace definition outranks a global one
+/// of the same name, and a definition of the built-in's name replaces
+/// the built-in wholesale.
+fn subagent_rows(global: Option<&Path>, workspace: &Path) -> Vec<SubagentRow> {
+    rhema_subagents::discover(global, workspace)
+        .into_iter()
+        .map(|def| {
+            let workspace_file = workspace
+                .join(".rhema")
+                .join("subagents")
+                .join(&def.name)
+                .join(rhema_subagents::def::FILE);
+            let (source, path) = if workspace_file.is_file() {
+                (SubagentSource::Workspace, Some(workspace_file))
+            } else {
+                match global.map(|dir| dir.join(&def.name).join(rhema_subagents::def::FILE)) {
+                    Some(file) if file.is_file() => (SubagentSource::Global, Some(file)),
+                    _ => (SubagentSource::Builtin, None),
+                }
+            };
+            SubagentRow {
+                name: def.name,
+                description: def.description,
+                model: def.model,
+                max_steps: def.max_steps,
+                source,
+                path,
+            }
+        })
+        .collect()
+}
+
+/// Writes the built-in definition into the global directory, producing
+/// the file an edit of the built-in row opens. An existing file is
+/// left alone: it is a shadow that discovery already prefers.
+fn shadow_builtin(global: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let builtin = rhema_subagents::builtin();
+    let folder = global.join(name);
+    std::fs::create_dir_all(&folder)?;
+    let file = folder.join(rhema_subagents::def::FILE);
+    if !file.exists() {
+        // The description is a YAML scalar: double-quoted, with the
+        // escapes a double-quoted scalar honors.
+        let description = builtin
+            .description
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        std::fs::write(
+            &file,
+            format!(
+                "---\ndescription: \"{description}\"\n---\n\n{}\n",
+                builtin.body
+            ),
+        )?;
+    }
+    Ok(file)
 }
 
 /// The whole application state.
@@ -1195,6 +1260,9 @@ impl App {
                 description: skill.description,
             })
             .collect();
+        // The same discovery the agent's wiring runs, so the page shows
+        // what the next session will delegate to.
+        let global_subagents = rhema_config::Config::dir().ok();
         let mut settings = SettingsScreen::new(purpose);
         settings.colors = options.colors;
         settings.theme_dark = options.theme == crate::palette::ThemeKind::Dark;
@@ -1210,12 +1278,77 @@ impl App {
             .join("skills")
             .to_string_lossy()
             .into_owned();
+        settings.subagents = subagent_rows(global_subagents.as_deref(), &workspace);
+        settings.subagents_global_dir =
+            global_subagents.map(|dir| dir.to_string_lossy().into_owned());
+        settings.subagents_workspace_dir = workspace
+            .join(".rhema")
+            .join("subagents")
+            .to_string_lossy()
+            .into_owned();
         settings.config_path = rhema_config::Config::path()
             .ok()
             .map(|path| path.to_string_lossy().into_owned());
         settings.workspace = workspace.to_string_lossy().into_owned();
         settings.profile_count = config.profiles.len();
         settings
+    }
+
+    /// Re-reads the Subagents page's snapshot: an edit happened in
+    /// `$EDITOR` behind the app's back, and the rows must show it when
+    /// the TUI re-enters. A no-op when the settings screen is not open.
+    pub fn refresh_subagents(&mut self) {
+        let Screen::Settings(settings) = &mut self.screen else {
+            return;
+        };
+        let workspace = std::fs::canonicalize(&self.options.workspace)
+            .unwrap_or_else(|_| self.options.workspace.clone());
+        let global = rhema_config::Config::dir().ok();
+        settings.subagents = subagent_rows(global.as_deref(), &workspace);
+        settings.subagents_global_dir = global.map(|dir| dir.to_string_lossy().into_owned());
+        settings.subagents_workspace_dir = workspace
+            .join(".rhema")
+            .join("subagents")
+            .to_string_lossy()
+            .into_owned();
+        if settings.row >= settings.subagents.len() {
+            settings.row = 0;
+        }
+    }
+
+    /// Opens the selected subagent definition in `$EDITOR`. The built-in
+    /// has no file: the first edit copies it into the global directory,
+    /// where a definition of the same name shadows the built-in from
+    /// then on. The editor itself runs in the runner — the TUI must be
+    /// suspended around it — and the rows refresh when it returns.
+    fn edit_subagent(&mut self) -> Vec<Effect> {
+        let Screen::Settings(settings) = &self.screen else {
+            return Vec::new();
+        };
+        let Some(row) = settings.selected_subagent() else {
+            return Vec::new();
+        };
+        if let Some(path) = &row.path {
+            return vec![Effect::EditSubagent(path.clone())];
+        }
+        // Only the built-in row reaches here; its shadow lands in the
+        // global directory discovery reads first.
+        match rhema_config::Config::dir() {
+            Ok(dir) => match shadow_builtin(&dir, &row.name) {
+                Ok(path) => vec![Effect::EditSubagent(path)],
+                Err(err) => {
+                    self.transcript
+                        .push_notice(&format!("cannot copy the built-in definition: {err}"));
+                    Vec::new()
+                }
+            },
+            Err(err) => {
+                self.transcript.push_notice(&format!(
+                    "no config directory to copy the built-in into: {err}"
+                ));
+                Vec::new()
+            }
+        }
     }
 
     /// Flips the appearance and persists the choice: the swap is live
@@ -1724,6 +1857,7 @@ impl App {
                 self.toggle_icons();
                 Vec::new()
             }
+            SettingsAction::EditSubagent => self.edit_subagent(),
         }
     }
 
@@ -5755,6 +5889,170 @@ mod tests {
         assert!(rows[0].active, "the only instance is the serving one");
         assert!(rows[1].add);
         assert!(!settings.workspace.is_empty(), "the About page names it");
+    }
+
+    #[test]
+    fn slash_subagents_opens_the_definitions_page() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/subagents");
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.section, SettingsSection::Subagents);
+        // The catalog is never empty: the built-in is always a row, with
+        // no file to open until the first edit copies it out.
+        let builtin = settings
+            .subagents
+            .iter()
+            .find(|row| row.name == "general-purpose")
+            .expect("the built-in row");
+        assert_eq!(builtin.source, SubagentSource::Builtin);
+        assert_eq!(builtin.path, None);
+        assert!(
+            !settings.subagents_workspace_dir.is_empty(),
+            "the page names the workspace directory"
+        );
+    }
+
+    #[test]
+    fn subagent_enter_on_a_definition_emits_the_edit_effect() {
+        let workspace = tempfile::tempdir().unwrap();
+        let folder = workspace
+            .path()
+            .join(".rhema")
+            .join("subagents")
+            .join("reviewer");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SUBAGENT.md"),
+            "---\ndescription: reviews diffs\n---\n\nReview the diff.\n",
+        )
+        .unwrap();
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.options.workspace = workspace.path().to_path_buf();
+        crate::commands::dispatch(&mut h.app, "/subagents");
+        // The rows sort by name: the built-in first, the definition
+        // second. The path is discovery's own — the canonicalized
+        // workspace, since the opener canonicalizes.
+        let file = std::fs::canonicalize(workspace.path())
+            .unwrap()
+            .join(".rhema")
+            .join("subagents")
+            .join("reviewer")
+            .join("SUBAGENT.md");
+        h.app.on_key(key(KeyCode::Down));
+        assert_eq!(
+            h.app.on_key(key(KeyCode::Enter)),
+            vec![Effect::EditSubagent(file)]
+        );
+    }
+
+    #[test]
+    fn a_refresh_after_the_editor_picks_up_what_it_changed() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.options.workspace = workspace.path().to_path_buf();
+        crate::commands::dispatch(&mut h.app, "/subagents");
+        // The edit happens in $EDITOR, behind the app's back...
+        let folder = workspace
+            .path()
+            .join(".rhema")
+            .join("subagents")
+            .join("reviewer");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SUBAGENT.md"),
+            "---\ndescription: reviews diffs\n---\n\nReview the diff.\n",
+        )
+        .unwrap();
+        // ...and the runner asks for the rows back once the TUI
+        // re-enters.
+        h.app.refresh_subagents();
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        let reviewer = settings
+            .subagents
+            .iter()
+            .find(|row| row.name == "reviewer")
+            .expect("the definition written behind the app's back");
+        assert_eq!(reviewer.source, SubagentSource::Workspace);
+        assert!(reviewer.path.is_some(), "the row names the file to edit");
+    }
+
+    #[test]
+    fn subagent_rows_carry_the_provenance_discovery_shadows_by() {
+        let global = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let global_folder = global.path().join("reviewer");
+        std::fs::create_dir_all(&global_folder).unwrap();
+        std::fs::write(
+            global_folder.join("SUBAGENT.md"),
+            "---\ndescription: global trigger\n---\n\nBody.\n",
+        )
+        .unwrap();
+        let workspace_folder = workspace
+            .path()
+            .join(".rhema")
+            .join("subagents")
+            .join("reviewer");
+        std::fs::create_dir_all(&workspace_folder).unwrap();
+        std::fs::write(
+            workspace_folder.join("SUBAGENT.md"),
+            "---\ndescription: workspace trigger\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let rows = subagent_rows(Some(global.path()), workspace.path());
+        let reviewer = rows
+            .iter()
+            .find(|row| row.name == "reviewer")
+            .expect("the shadowed definition");
+        assert_eq!(
+            reviewer.source,
+            SubagentSource::Workspace,
+            "the workspace shadows the global one"
+        );
+        assert_eq!(reviewer.description, "workspace trigger");
+        assert_eq!(
+            reviewer.path.as_deref(),
+            Some(workspace_folder.join("SUBAGENT.md").as_path())
+        );
+
+        // Without the workspace file the same name reads as global.
+        std::fs::remove_dir_all(&workspace_folder).unwrap();
+        let rows = subagent_rows(Some(global.path()), workspace.path());
+        let reviewer = rows.iter().find(|row| row.name == "reviewer").unwrap();
+        assert_eq!(reviewer.source, SubagentSource::Global);
+        assert_eq!(
+            reviewer.path.as_deref(),
+            Some(global_folder.join("SUBAGENT.md").as_path())
+        );
+    }
+
+    #[test]
+    fn shadowing_the_builtin_writes_a_discoverable_definition() {
+        let global = tempfile::tempdir().unwrap();
+        let file = shadow_builtin(global.path(), "general-purpose").unwrap();
+        assert_eq!(
+            file,
+            global.path().join("general-purpose").join("SUBAGENT.md")
+        );
+        // What the copy wrote is a definition discovery accepts — the
+        // shadow replaces the built-in wholesale, description and body.
+        let workspace = tempfile::tempdir().unwrap();
+        let defs = rhema_subagents::discover(Some(global.path()), workspace.path());
+        assert_eq!(defs.len(), 1, "the shadow leaves nothing of the built-in");
+        assert_eq!(defs[0].description, rhema_subagents::builtin().description);
+        assert_eq!(defs[0].body, rhema_subagents::builtin().body);
+        // An existing file is left alone: it is a shadow already.
+        std::fs::write(&file, "---\ndescription: mine\n---\n\nMine.\n").unwrap();
+        assert_eq!(
+            shadow_builtin(global.path(), "general-purpose").unwrap(),
+            file
+        );
+        let defs = rhema_subagents::discover(Some(global.path()), workspace.path());
+        assert_eq!(defs[0].description, "mine");
     }
 
     #[test]
