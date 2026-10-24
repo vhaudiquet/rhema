@@ -16,6 +16,38 @@ use serde_json::Value;
 
 use crate::Allowlist;
 
+/// Why a tool invocation failed: the message the model reads. The
+/// registry turns `Err` into an in-band failure result — a failing tool
+/// is a result the model reacts to, never a crashed run — so the
+/// message is the error's whole content.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct ToolError(String);
+
+impl ToolError {
+    /// An error whose message the model reads verbatim.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+
+    /// The message the model reads.
+    pub fn message(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ToolError {
+    fn from(message: String) -> Self {
+        Self(message)
+    }
+}
+
+impl From<&str> for ToolError {
+    fn from(message: &str) -> Self {
+        Self(message.to_owned())
+    }
+}
+
 /// One named tool: the spec the model sees, and the invocation the
 /// registry dispatches to. Errors surface in-band — a failing tool is a
 /// result the model can react to, never a crashed run.
@@ -34,8 +66,9 @@ pub trait Tool: Send + Sync {
     }
 
     /// Runs the tool. The registry turns `Err` into an in-band failure
-    /// result; `Ok` text is the tool's answer.
-    async fn invoke(&self, args: Value) -> Result<String, String>;
+    /// result carrying the error's message; `Ok` text is the tool's
+    /// answer.
+    async fn invoke(&self, args: Value) -> Result<String, ToolError>;
 }
 
 /// The named tool set, from which per-run [`ToolResolver`]s are cut.
@@ -105,7 +138,7 @@ impl ToolResolver for FilteredResolver {
         };
         match tool.invoke(call.args.clone()).await {
             Ok(text) => ToolResult::success(&call.id, text),
-            Err(text) => ToolResult::failure(&call.id, text),
+            Err(err) => ToolResult::failure(&call.id, err.message()),
         }
     }
 }
@@ -120,7 +153,7 @@ mod tests {
         fn spec(&self) -> ToolSpec {
             ToolSpec::new("echo", "Echo the input back", serde_json::json!({}))
         }
-        async fn invoke(&self, args: Value) -> Result<String, String> {
+        async fn invoke(&self, args: Value) -> Result<String, ToolError> {
             Ok(args.to_string())
         }
     }
@@ -131,8 +164,8 @@ mod tests {
         fn spec(&self) -> ToolSpec {
             ToolSpec::new("boom", "Always fails", serde_json::json!({}))
         }
-        async fn invoke(&self, _args: Value) -> Result<String, String> {
-            Err("exploded".to_owned())
+        async fn invoke(&self, _args: Value) -> Result<String, ToolError> {
+            Err(ToolError::new("exploded"))
         }
     }
 
@@ -207,7 +240,7 @@ mod tests {
             fn spec(&self) -> ToolSpec {
                 ToolSpec::new("echo", "Echo, but louder", serde_json::json!({}))
             }
-            async fn invoke(&self, args: Value) -> Result<String, String> {
+            async fn invoke(&self, args: Value) -> Result<String, ToolError> {
                 Ok(format!("LOUD {args}"))
             }
         }

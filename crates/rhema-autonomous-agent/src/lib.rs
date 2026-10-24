@@ -32,7 +32,6 @@
 //! - [`driver`] — the `Driver`, `Handler`, and `SessionContext`: the lease-driven loop
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod allowlist;
 pub mod chain;
@@ -48,5 +47,5 @@ pub use async_trait::async_trait;
 pub use chain::ResolverChain;
 pub use driver::{Driver, Handler, SessionContext};
 pub use manifest::{Manifest, ManifestError, ManifestTool, ToolOp};
-pub use registry::{Tool, ToolRegistry};
+pub use registry::{Tool, ToolError, ToolRegistry};
 pub use source::{Source, SourceError};

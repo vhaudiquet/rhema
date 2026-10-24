@@ -21,7 +21,7 @@
 
 use std::sync::Arc;
 
-use rhema_core::CommitHook;
+use rhema_core::{CommitError, CommitHook};
 use rhema_rsd::{DispatchError, Dispatcher, InboxItem, Lease, Outcome, ResourceKey, Session};
 use tokio::task::JoinSet;
 
@@ -87,7 +87,7 @@ impl SessionContext {
             session.core = core.clone();
             dispatcher
                 .checkpoint(&lease, session)
-                .map_err(|err| err.to_string())
+                .map_err(|err| CommitError(err.to_string()))
         })
     }
 }

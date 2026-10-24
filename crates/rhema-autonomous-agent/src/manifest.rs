@@ -23,7 +23,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use thiserror::Error;
 
-use crate::registry::Tool;
+use crate::registry::{Tool, ToolError};
 
 /// The static half of a tool, parsed from a `TOOL.yaml`.
 #[derive(Debug, Clone, PartialEq)]
@@ -97,7 +97,7 @@ pub fn parse(raw: &str) -> Result<Manifest, ManifestError> {
 pub trait ToolOp: Send + Sync {
     /// Runs the tool. The registry turns `Err` into an in-band failure
     /// result; `Ok` text is the tool's answer.
-    async fn invoke(&self, args: Value) -> Result<String, String>;
+    async fn invoke(&self, args: Value) -> Result<String, ToolError>;
 }
 
 /// A [`Tool`] cut from a [`Manifest`] plus its registered operation:
@@ -129,7 +129,7 @@ impl Tool for ManifestTool {
         self.manifest.replay_safety
     }
 
-    async fn invoke(&self, args: Value) -> Result<String, String> {
+    async fn invoke(&self, args: Value) -> Result<String, ToolError> {
         self.op.invoke(args).await
     }
 }
@@ -210,7 +210,7 @@ mod tests {
 
     #[async_trait]
     impl ToolOp for Echo {
-        async fn invoke(&self, args: Value) -> Result<String, String> {
+        async fn invoke(&self, args: Value) -> Result<String, ToolError> {
             Ok(args.to_string())
         }
     }
@@ -219,8 +219,8 @@ mod tests {
 
     #[async_trait]
     impl ToolOp for Boom {
-        async fn invoke(&self, _args: Value) -> Result<String, String> {
-            Err("exploded".to_owned())
+        async fn invoke(&self, _args: Value) -> Result<String, ToolError> {
+            Err(ToolError::new("exploded"))
         }
     }
 
@@ -302,11 +302,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_operation_error_stays_a_result_string() {
+    async fn an_operation_error_stays_an_in_band_tool_error() {
         let manifest = parse("name: probe\ndescription: Probe.\nrun:\n  builtin: test.boom\n")
             .expect("parses");
         let tool = ManifestTool::new(manifest, Arc::new(Boom));
-        assert_eq!(tool.invoke(Value::Null).await, Err("exploded".to_owned()));
+        assert_eq!(
+            tool.invoke(Value::Null).await,
+            Err(ToolError::new("exploded"))
+        );
     }
 
     #[test]
