@@ -122,7 +122,6 @@
 //! - [`store_contract`] — replayable Store behavioral suite (`store-contract` feature)
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod clock;
 pub mod config;

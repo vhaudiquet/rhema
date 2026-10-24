@@ -71,7 +71,7 @@ impl Lease {
     /// The deadline in milliseconds since the Unix epoch: the first
     /// millisecond at which the lease no longer authorizes its holder.
     pub fn expires_at(&self) -> u64 {
-        self.acquired_at + self.ttl_millis
+        self.acquired_at.saturating_add(self.ttl_millis)
     }
 }
 

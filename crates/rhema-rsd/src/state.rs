@@ -103,7 +103,9 @@ impl KeyStatus {
             id: lease.id.clone(),
             revision: record.revision,
             acquired_at: lease.acquired_at,
-            ttl_millis: lease.expires_at - lease.acquired_at,
+            // Saturating: a hand-corrupted row with expires_at below
+            // acquired_at must not panic the status read.
+            ttl_millis: lease.expires_at.saturating_sub(lease.acquired_at),
             holder: lease.holder.clone(),
         });
         Self {
