@@ -82,7 +82,7 @@ You are a code reviewer. ...
 
 The agent always has one subagent with nothing defined: `general-purpose`, a fresh agent for one self-contained task, on the parent's model and step budget. A definition folder named `general-purpose` shadows it — project over global, like any other name.
 
-When the agent delegates, the subagent runs its own conversation with the same workspace tools in the same workspace, its output streams into the tool-call view, and its final report lands in the conversation as the tool's result. Inner commands ask for approval exactly like the main agent's do. A subagent never spawns further subagents.
+When the agent delegates, the subagent runs its own conversation with the same workspace tools in the same workspace, its report lands in the conversation as the tool's result, and the status strip pins one live line for it while it works. Inner commands ask for approval exactly like the main agent's do. A subagent never spawns further subagents.
 
 While a subagent works, the status strip pins a live line under the spinner — the robot badge, the subagent's name, its phase (`thinking`, `running`, `writing output`), the context its model calls have spent against its model's window, the cost of that spend, and its age. Its transcript row reads as delegation too: the robot badge, then the subagent and the task's first line. With the Nerd Font icon flavor the badge is the robot glyph; the plain flavor marks it with `@`.
 

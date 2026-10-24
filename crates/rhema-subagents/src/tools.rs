@@ -197,7 +197,6 @@ impl SubagentTools {
             cancelled: ctx.cancelled.clone(),
         };
         let mut sink = Forwarder {
-            buf: String::new(),
             progress,
             model: def
                 .model
@@ -317,17 +316,14 @@ impl ToolResolver for SubagentTools {
     }
 }
 
-/// Forwards the inner turn's text and tool output to the parent's
-/// progress channel, whole lines at a time — the same shape the shell
-/// streams in — and renders the inner turn's lifecycle into the call's
-/// own status: the phase the subagent is in and what its model calls
-/// have spent so far. The lifecycle events themselves stay private —
-/// the parent's sink renders only its own call's lifecycle — the status
-/// is screen-facing, never history. A nested subagent's status is
-/// dropped: to this call the nested subagent is just one running tool.
+/// Renders the inner turn's lifecycle into the call's own status: the
+/// phase the subagent is in and what its model calls have spent so far.
+/// The inner turn's text and tool output go nowhere — the subagent is
+/// its own line on the parent's screen, and its report is the result;
+/// the lifecycle events themselves stay private, the status is
+/// screen-facing, never history. A nested subagent's status is dropped:
+/// to this call the nested subagent is just one running tool.
 struct Forwarder<'a> {
-    /// Fragments accumulated since the last newline.
-    buf: String,
     progress: &'a mut dyn ToolProgress,
     /// The model id the inner turn runs on, stamped into every status.
     model: String,
@@ -371,17 +367,7 @@ impl Forwarder<'_> {
 }
 
 impl ToolProgress for Forwarder<'_> {
-    fn output(&mut self, chunk: &str) {
-        self.buf.push_str(chunk);
-        while let Some(end) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=end).collect();
-            let line = line.trim_end_matches('\n');
-            if line.is_empty() {
-                continue;
-            }
-            self.progress.output(&format!("{line}\n"));
-        }
-    }
+    fn output(&mut self, _chunk: &str) {}
 
     fn status(&mut self, _status: rhema_core::ToolStatus) {}
 }
@@ -393,8 +379,7 @@ impl EventSink for Forwarder<'_> {
             // report being written.
             Event::StepStart { .. } | Event::ThinkingDelta(_) => self.report(THINKING),
             Event::TextDelta(_) => self.report(WRITING),
-            // A tool of the subagent's is executing, its lines forwarded
-            // whole below.
+            // A tool of the subagent's is executing.
             Event::ToolCallStart { .. } => self.report(RUNNING),
             Event::ToolResult { .. } => self.report(THINKING),
             Event::StepEnd { usage, .. } => {
@@ -405,12 +390,12 @@ impl EventSink for Forwarder<'_> {
                     .saturating_add(usage.cached_input_tokens);
                 self.send();
             }
-            Event::ToolOutputDelta { chunk, .. } => ToolProgress::output(self, chunk),
-            // A nested subagent's status stays private to it, and
-            // argument streaming is not a phase of its own. The running
-            // usage tally is gauge material; the final accounting still
-            // rides `StepEnd`.
-            Event::Usage(_) | Event::ToolStatus { .. } | Event::ToolCallArgsDelta { .. } => {}
+            // A nested subagent's status stays private to it, argument
+            // streaming is not a phase of its own, and the inner
+            // output's lines ride no channel.
+            Event::ToolStatus { .. }
+            | Event::ToolCallArgsDelta { .. }
+            | Event::ToolOutputDelta { .. } => {}
         }
     }
 }
@@ -492,7 +477,6 @@ mod tests {
             statuses: Vec::new(),
         };
         let mut sink = Forwarder {
-            buf: String::new(),
             progress: &mut collected,
             model: "parent-model".into(),
             phase: None,
@@ -506,10 +490,6 @@ mod tests {
         sink.emit(Event::ToolCallStart {
             id: "c1",
             name: "bash",
-        });
-        sink.emit(Event::ToolOutputDelta {
-            id: "c1",
-            chunk: "one\ntwo\n",
         });
         sink.emit(Event::StepEnd {
             usage: rhema_core::Usage {
@@ -539,9 +519,9 @@ mod tests {
         assert_eq!(usage.output_tokens, 20);
         assert_eq!(usage.cached_input_tokens, 80);
 
-        // The inner tool's output still rides whole-line, blank lines
-        // dropped, the same shape the shell streams in.
-        assert_eq!(collected.lines, vec!["one\n", "two\n"]);
+        // The inner output rides no channel: the subagent is its own
+        // line, its report the result.
+        assert!(collected.lines.is_empty());
     }
 
     #[test]
@@ -551,7 +531,6 @@ mod tests {
             statuses: Vec::new(),
         };
         let mut sink = Forwarder {
-            buf: String::new(),
             progress: &mut collected,
             model: "m".into(),
             phase: None,

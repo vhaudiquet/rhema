@@ -4,25 +4,21 @@
 //! One seam any frontend can aim at any machine — the host, a
 //! container, a VM, a box over SSH, a cloud sandbox — chosen by
 //! configuration, never by which crate a frontend was born in. The
-//! family mirrors the provider family: the contract and the shared
-//! machinery in one crate, one adapter per backend beside it; the
-//! backends (`local`, `client`, `server`) are feature-gated, and the
-//! scripted mock rides the `mock` feature so tests run the same seam
-//! against a fake. With the `local` feature the family gains three
-//! process-spawning backends beside [`LocalSandbox`] — which runs the
-//! commands as processes rooted at one host directory mapped by
-//! [`FsRoot`] — namely [`DockerSandbox`], the bind-mounted container
-//! driven through the `docker` CLI (the same `FsRoot`, a `docker exec`
-//! prefix), and [`SshSandbox`], the daemonless remote over `ssh`; and
-//! [`seed_workspace`] is the shared half of the seeding the cloud
-//! frontends each repeat. The wire protocol — the sandbox
-//! shim's JSON surface, promoted — is pinned in [`protocol`]: the
-//! shapes, the routes, and the auth header every backend speaks; with
-//! the `server` feature the daemon half exists — [`server`], the
-//! `rhema-sandboxd` binary, one root directory per session name under
-//! its base, the token checked on every route. In the cloud deployment
-//! the seam is a Cloudflare Sandbox — a container bound to the session's
-//! Durable Object, persisted across turns and idle sleeps.
+//! family mirrors the provider family: this crate is its base — the
+//! contract ([`Sandbox`]), the [`ShellSandbox`] adapter, the wire
+//! protocol ([`protocol`]), the seeding helper ([`seed_workspace`]),
+//! the scripted mock ([`mock`], the `mock` feature), and, behind the
+//! `spawn` feature, the process-spawning family's shared machinery
+//! ([`exec_util`], [`fsroot`]). The backends are sibling crates: the
+//! process family — `rhema-sandbox-local`, the commands as host
+//! processes rooted at one host directory; `rhema-sandbox-docker`, the
+//! bind-mounted container driven through the `docker` CLI;
+//! `rhema-sandbox-ssh`, the daemonless remote over `ssh` — plus
+//! `rhema-sandbox-http`, the protocol's HTTPS client, and
+//! `rhema-sandbox-server`, the `rhema-sandboxd` daemon. In the cloud
+//! deployment the seam is a Cloudflare Sandbox — a container bound to
+//! the session's Durable Object, persisted across turns and idle
+//! sleeps.
 //!
 //! The trait is object-safe and async, with `Send` futures like every
 //! seam in this tree, and carries no platform dependency — no
@@ -38,39 +34,23 @@
 #![deny(missing_docs)]
 
 pub mod adapter;
-#[cfg(feature = "local")]
-pub mod docker;
-#[cfg(feature = "local")]
-mod exec_util;
-#[cfg(feature = "local")]
+#[cfg(feature = "spawn")]
+pub mod exec_util;
+#[cfg(feature = "spawn")]
 pub mod fsroot;
-#[cfg(feature = "client")]
-pub mod http;
-#[cfg(feature = "local")]
-pub mod local;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod protocol;
 pub mod seed;
-#[cfg(feature = "server")]
-pub mod server;
-#[cfg(feature = "local")]
-pub mod ssh;
 
 pub use adapter::ShellSandbox;
-#[cfg(feature = "local")]
-pub use docker::DockerSandbox;
-#[cfg(feature = "local")]
+#[cfg(feature = "spawn")]
 pub use fsroot::FsRoot;
-#[cfg(feature = "local")]
-pub use local::LocalSandbox;
 pub use protocol::{
     Ack, EXEC, ExecCall, ExecReply, FileReply, GET, PUT, PutFile, SEED, SeedRequest, TOKEN_HEADER,
     stream_reply,
 };
 pub use seed::seed_workspace;
-#[cfg(feature = "local")]
-pub use ssh::SshSandbox;
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;

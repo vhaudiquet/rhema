@@ -1,12 +1,13 @@
 //! The machinery the process-spawning backends share.
 //!
-//! [`LocalSandbox`](crate::LocalSandbox), [`DockerSandbox`](crate::DockerSandbox),
-//! and [`SshSandbox`](crate::SshSandbox) each spawn one child and read
-//! two pipes; this module is the half they have in common — the stream
-//! pump with its capped tails, the cancel loop that kills the local
-//! child, the `timeout` exit codes, the fs routes of the fs-sharing
-//! family, and the textual path guard for the backends whose paths
-//! another machine interprets. Private to the crate: the seam is the
+//! `rhema-sandbox-local`, `rhema-sandbox-docker`, and
+//! `rhema-sandbox-ssh` each spawn one child and read two pipes; this
+//! module is the half they have in common — the stream pump with its
+//! capped tails, the cancel loop that kills the local child, the
+//! `timeout` exit codes, the fs routes of the fs-sharing family, and
+//! the textual path guard for the backends whose paths another machine
+//! interprets. Not private to this crate: it is what the sibling
+//! backend crates build on. The seam itself stays the
 //! [`Sandbox`](crate::Sandbox) trait, not this wiring.
 #![forbid(unsafe_code)]
 
@@ -22,7 +23,7 @@ use crate::{ExecOutcome, ExecRequest, SandboxError};
 /// `MAX_STREAM_BYTES`: a runaway command cannot flood memory, and the
 /// tool applies its display caps again on top (spec §3 — caps are
 /// per-implementation policy; this implementation keeps the shim's).
-pub(crate) const MAX_STREAM_BYTES: usize = 50 * 1024;
+pub const MAX_STREAM_BYTES: usize = 50 * 1024;
 
 /// How often the cancelled flag is sampled while output is quiet. An
 /// `AtomicBool` carries no wakeup, so a silent command would otherwise
@@ -33,7 +34,7 @@ const CANCEL_TICK: Duration = Duration::from_millis(100);
 /// The file the tarball seed is staged under before `tar` unpacks it.
 /// The name on the wire is diagnostics only, so the staging file has
 /// one fixed name nothing in the seed can steer.
-pub(crate) const STAGING: &str = ".rhema-seed.tar.gz";
+pub const STAGING: &str = ".rhema-seed.tar.gz";
 
 /// Runs one spawned child to completion: both pipes pumped (complete
 /// lines live through `progress`, a capped tail kept for each), a
@@ -42,7 +43,7 @@ pub(crate) const STAGING: &str = ".rhema-seed.tar.gz";
 /// codes — 124 at the budget, 137 after `--kill-after` escalates — as
 /// [`SandboxError::Timeout`]. Any other exit, nonzero included, is the
 /// command's own result and rides to the caller.
-pub(crate) async fn run_child(
+pub async fn run_child(
     mut child: tokio::process::Child,
     request: &ExecRequest,
     cancelled: &AtomicBool,
@@ -143,7 +144,7 @@ async fn kill(child: &mut tokio::process::Child) {
 /// is textual: the path must be absolute and may carry no `..`
 /// component (the empty path is refused too — there is no root here
 /// for it to mean). The paths are model-influenced; this is the guard.
-pub(crate) fn check_remote_path(path: &str) -> Result<(), SandboxError> {
+pub fn check_remote_path(path: &str) -> Result<(), SandboxError> {
     if !path.starts_with('/') {
         return Err(SandboxError::Failed(format!(
             "sandbox path must be absolute: {path:?}"
@@ -161,13 +162,13 @@ pub(crate) fn check_remote_path(path: &str) -> Result<(), SandboxError> {
 /// `shquote`, restated wherever an argument crosses a shell: the seed
 /// command lines, and every remote operand `ssh` hands its far-end
 /// shell to reparse.
-pub(crate) fn shquote(value: &str) -> String {
+pub fn shquote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// The fs-sharing family's read route: map through the root, read the
 /// bytes. A miss is an in-band failure naming the sandbox path.
-pub(crate) async fn read_through(root: &FsRoot, path: &str) -> Result<Vec<u8>, SandboxError> {
+pub async fn read_through(root: &FsRoot, path: &str) -> Result<Vec<u8>, SandboxError> {
     let mapped = root.map(path)?;
     tokio::fs::read(&mapped)
         .await
@@ -177,7 +178,7 @@ pub(crate) async fn read_through(root: &FsRoot, path: &str) -> Result<Vec<u8>, S
 /// The fs-sharing family's write route: map through the root, make the
 /// parent directories — the shim's put creates them, and the skills
 /// seeding writes two levels deep — then write the bytes.
-pub(crate) async fn write_through(
+pub async fn write_through(
     root: &FsRoot,
     path: &str,
     contents: &[u8],

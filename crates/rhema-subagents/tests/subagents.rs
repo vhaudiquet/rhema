@@ -239,11 +239,9 @@ async fn a_call_runs_the_inner_agent_and_returns_its_report() {
     // The inner shell inherited the turn's hook: it saw and approved the
     // inner command.
     assert_eq!(spy.taken(), vec!["bash".to_owned()]);
-    // The inner command's output rode the progress channel as lines.
-    assert!(
-        lines.iter().any(|line| line.trim() == "subagent-output"),
-        "{lines:?}"
-    );
+    // The inner turn rides no output channel: the subagent is its own
+    // line on the parent's screen, its report the result.
+    assert!(lines.is_empty(), "{lines:?}");
     // The inner turn saw both tools; the inner agent ended after the
     // report, and the parent model saw the inner command's output.
     assert_eq!(
