@@ -91,6 +91,9 @@ async fn streams_sse_into_events_and_an_assembled_output() {
             "TextDelta(\"He\")".to_owned(),
             "ToolCallStart { id: \"call_0\", name: \"echo\" }".to_owned(),
             "ToolCallArgsDelta { id: \"call_0\", delta: \"{\\\"x\\\":1}\" }".to_owned(),
+            // The final chunk carries the usage: the live tally closes
+            // the stream.
+            "Usage(Usage { input_tokens: 9, output_tokens: 4, cached_input_tokens: 2 })".to_owned(),
         ]
     );
 

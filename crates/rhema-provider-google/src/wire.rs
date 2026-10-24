@@ -605,6 +605,9 @@ impl ChunkAssembler {
                 output_tokens: usage.candidates_token_count.unwrap_or(0),
                 cached_input_tokens: usage.cached_content_token_count.unwrap_or(0),
             };
+            // Gemini reports cumulative usage on every chunk: the live
+            // tally is exact here, not an estimate.
+            sink.emit(Event::Usage(self.usage));
         }
         if let Some(blocked) = chunk.prompt_feedback.and_then(|f| f.block_reason) {
             self.blocked = Some(blocked);
@@ -1102,7 +1105,16 @@ mod tests {
                 cached_input_tokens: 0,
             }
         );
-        assert_eq!(sink.0, vec!["TextDelta(\"Hel\")", "TextDelta(\"lo\")"]);
+        // The usage frame rides the chunk: the live tally precedes the
+        // text it accounts for.
+        assert_eq!(
+            sink.0,
+            vec![
+                "Usage(Usage { input_tokens: 10, output_tokens: 2, cached_input_tokens: 0 })",
+                "TextDelta(\"Hel\")",
+                "TextDelta(\"lo\")",
+            ]
+        );
     }
 
     #[test]
@@ -1134,6 +1146,8 @@ mod tests {
         assert_eq!(
             sink.0,
             vec![
+                "Usage(Usage { input_tokens: 5, output_tokens: 1, cached_input_tokens: 0 })"
+                    .to_owned(),
                 "ToolCallStart { id: \"call_0\", name: \"echo\" }".to_owned(),
                 "ToolCallArgsDelta { id: \"call_0\", delta: \"{\\\"x\\\":1}\" }".to_owned(),
             ]
