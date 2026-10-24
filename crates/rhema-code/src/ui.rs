@@ -1632,19 +1632,17 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     } else {
         Vec::new()
     };
-    // The live preview rides under the spinner — the main model's
-    // reasoning trace's tail, or a running command's earned output — at
-    // most three dim rows. The reasoning half is gone the moment real
-    // output starts, because the buffer clears then.
-    if app.turn.running && app.error.is_none() {
-        lines.extend(thinking_preview(app, width, theme));
-    }
-    // A working subagent pins its own line below the main model's
-    // preview: the robot badge, the animated delegate, its phase,
-    // spend, and age. The subagent streams nothing else — its line is
-    // the whole story, its report the result.
+    // A working subagent pins its own line right below the spinner: the
+    // robot badge, the animated delegate, its phase, spend, and age.
     if let Some(subagent) = &app.turn.subagent {
         lines.push(subagent_line(app, subagent, theme));
+    }
+    // The live preview rides under the spinner — the reasoning trace's
+    // tail, or a running command's earned output — at most three dim
+    // rows. The reasoning half is gone the moment real output starts,
+    // because the buffer clears then.
+    if app.turn.running && app.error.is_none() {
+        lines.extend(thinking_preview(app, width, theme));
     }
     // Content sits one cell in, on the transcript's left inset, and a
     // blank row above the strip keeps it off the transcript's tail.
