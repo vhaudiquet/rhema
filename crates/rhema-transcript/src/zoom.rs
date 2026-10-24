@@ -6,7 +6,7 @@
 //! shown an id for. Read-only: a `Safe` replay, per the resolver
 //! contract.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use rhema_core::{ReplaySafety, ToolCall, ToolContext, ToolResult, ToolSpec};
@@ -71,6 +71,10 @@ impl Zoom {
     /// Resolves one zoom call; the in-band form of
     /// [`rhema_core::ToolResolver::resolve`], public for tests and
     /// embedders.
+    ///
+    /// `id`, `n`, and `at` arrive from the model and are trusted for
+    /// nothing: an out-of-range value is an in-band failure, and `at` is
+    /// snapped down to a char boundary before any slice.
     pub fn zoom(&self, call: &ToolCall) -> ToolResult {
         let Some(id) = call.args.get("id").and_then(|v| v.as_u64()) else {
             return ToolResult::failure(&call.id, "zoom needs an integer `id`");
@@ -83,7 +87,10 @@ impl Zoom {
             .max(1) as usize;
         let at = call.args.get("at").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-        let transcript = self.transcript.lock().expect("transcript lock poisoned");
+        let transcript = self
+            .transcript
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let len = transcript.len();
         let range = Range { id: id as usize, n };
         if range.id >= len {
@@ -92,7 +99,9 @@ impl Zoom {
                 format!("zoom: message {id} is past the log ({len} messages)"),
             );
         }
-        if range.id + range.n > len {
+        // Saturating: `n` is model-supplied and unbounded; the wrapped
+        // sum of a plain add could land inside the log.
+        if range.id.saturating_add(range.n) > len {
             return ToolResult::failure(
                 &call.id,
                 format!(
@@ -133,11 +142,11 @@ impl Zoom {
                 ),
             );
         }
+        let start = snapped_back(&text, at);
         if text.len() <= ZOOM_MAX_BYTES {
-            return ToolResult::success(&call.id, &text[at.min(text.len())..]);
+            return ToolResult::success(&call.id, &text[start..]);
         }
-        let start = at.min(text.len());
-        let mut end = (start + ZOOM_MAX_BYTES).min(text.len());
+        let mut end = start.saturating_add(ZOOM_MAX_BYTES).min(text.len());
         while end < text.len() && !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -153,6 +162,16 @@ impl Zoom {
         };
         ToolResult::success(&call.id, format!("{}{}", &text[start..end], note))
     }
+}
+
+/// The largest char boundary at or below `at` — the model supplies raw
+/// byte offsets, and UTF-8 cannot be cut mid-character.
+fn snapped_back(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
 }
 
 #[async_trait]
@@ -279,5 +298,28 @@ mod tests {
         let zoom = Zoom::new(transcript_with(history()));
         let out = zoom.zoom(&call(serde_json::json!({ "id": 2 })));
         assert_eq!(out.content, "the session one, not the api key");
+    }
+
+    #[test]
+    fn an_absurd_n_is_an_in_band_error_not_an_overflow() {
+        // id=1 with n=u64::MAX wrapped to `id + n == 0` under a plain
+        // add, walking past the bounds check into the expects.
+        let zoom = Zoom::new(transcript_with(history()));
+        let out = zoom.zoom(&call(serde_json::json!({ "id": 1, "n": u64::MAX })));
+        assert!(out.is_error);
+        assert!(out.content.contains("past the log"), "{}", out.content);
+    }
+
+    #[test]
+    fn an_at_inside_a_character_snaps_back_instead_of_panic() {
+        // Byte 1 sits inside the two-byte leading `é`: the raw slice
+        // used to panic here.
+        let zoom = Zoom::new(transcript_with(vec![Message::text(
+            Role::User,
+            "éa long enough message to hold a paging cut",
+        )]));
+        let out = zoom.zoom(&call(serde_json::json!({ "id": 0, "at": 1 })));
+        assert!(!out.is_error, "{out:?}");
+        assert!(out.content.starts_with('é'), "{}", out.content);
     }
 }

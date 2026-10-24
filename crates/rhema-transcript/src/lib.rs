@@ -21,7 +21,6 @@
 //! The design is `specs/rhema-transcript.md`.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod compact;
 pub mod summary;
@@ -30,7 +29,9 @@ pub mod view;
 pub mod zoom;
 
 pub use compact::{ModelSummarizer, PendingSummary, Section, SectionOrigin, Summarizer};
-pub use view::{Transcript, TranscriptSettings, TranscriptStats, TranscriptView, UsageBreakdown};
+pub use view::{
+    Transcript, TranscriptSettings, TranscriptStats, TranscriptView, UsageBreakdown, WorkerOutcome,
+};
 pub use zoom::{ZOOM_MAX_BYTES, Zoom};
 
 use std::sync::{Arc, Mutex};

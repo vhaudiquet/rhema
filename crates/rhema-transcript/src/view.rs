@@ -15,7 +15,7 @@
 //! summarizer seam and the section writers live in
 //! [`crate::compact`].
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use rhema_core::{
@@ -174,6 +174,16 @@ impl TranscriptStats {
             Some(self.cached_input_tokens as f64 / self.input_tokens as f64)
         }
     }
+}
+
+/// How one summarizer call ended, as [`Transcript::record_worker_call`]
+/// counts it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerOutcome {
+    /// The worker answered; the section's stand-in was upgraded.
+    Upgraded,
+    /// The worker failed; the extractive stand-in stays in place.
+    Failed,
 }
 
 /// The mirror: the log as the last request carried it, the stepped
@@ -363,10 +373,11 @@ impl Transcript {
     }
 
     /// Records one summarizer call the decorator issued outside the
-    /// mirror's lock; `failed` counts it against the worker.
-    pub fn record_worker_call(&mut self, failed: bool) {
+    /// mirror's lock; a [`WorkerOutcome::Failed`] counts it against the
+    /// worker.
+    pub fn record_worker_call(&mut self, outcome: WorkerOutcome) {
         self.stats.summarizer_calls += 1;
-        if failed {
+        if outcome == WorkerOutcome::Failed {
             self.stats.summarizer_failures += 1;
         }
     }
@@ -677,7 +688,10 @@ impl ModelProvider for TranscriptView {
         // Plan under the lock: move the cut, commit stand-ins. Never
         // a model call, never an await here.
         let pending = {
-            let mut transcript = self.transcript.lock().expect("transcript lock poisoned");
+            let mut transcript = self
+                .transcript
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             transcript.observe(&req.messages);
             transcript.plan_flush()
         };
@@ -687,30 +701,42 @@ impl ModelProvider for TranscriptView {
         if let Some(worker) = &self.summarizer {
             for pending in &pending {
                 let outcome = worker.summarize(&pending.messages).await;
-                let mut transcript = self.transcript.lock().expect("transcript lock poisoned");
+                let mut transcript = self
+                    .transcript
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
                 match outcome {
                     Ok(text) => {
                         transcript.commit_summary(pending, text);
-                        transcript.record_worker_call(false);
+                        transcript.record_worker_call(WorkerOutcome::Upgraded);
                     }
-                    Err(_) => transcript.record_worker_call(true),
+                    Err(_) => transcript.record_worker_call(WorkerOutcome::Failed),
                 }
             }
         }
         let view = {
-            let mut transcript = self.transcript.lock().expect("transcript lock poisoned");
+            let mut transcript = self
+                .transcript
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             transcript.render()
         };
         if let Some(messages) = view {
             req.messages = messages;
         }
         {
-            let mut transcript = self.transcript.lock().expect("transcript lock poisoned");
+            let mut transcript = self
+                .transcript
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             transcript.stage_usage_shares(req.system.as_deref(), &req.tools, &req.messages);
         }
         let result = self.inner.complete(req, sink).await;
         if let Ok(output) = &result {
-            let mut transcript = self.transcript.lock().expect("transcript lock poisoned");
+            let mut transcript = self
+                .transcript
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
             transcript.record_usage(&output.usage);
         }
         result
