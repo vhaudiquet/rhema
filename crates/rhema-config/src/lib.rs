@@ -795,6 +795,15 @@ impl Config {
         }
     }
 
+    /// The config directory under an explicit home — the seam for a
+    /// caller that resolves machine-global paths under a root of its
+    /// own (a test isolating itself from the machine, a frontend with
+    /// a relocated home). Unlike [`Self::dir`], no environment
+    /// variable redirects it.
+    pub fn dir_under(home: &Path) -> PathBuf {
+        home.join(".config").join("rhema")
+    }
+
     /// The config directory (`<config-base>/rhema`).
     pub fn dir() -> Result<PathBuf, ConfigError> {
         match std::env::var("XDG_CONFIG_HOME") {
