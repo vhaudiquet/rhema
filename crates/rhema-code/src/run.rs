@@ -696,6 +696,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             secrets: Some(Arc::clone(&secrets)),
             sandboxed,
             sandbox_offered,
+            home: None,
         })?;
         let effects = app.initial_effects();
         (app, effects)

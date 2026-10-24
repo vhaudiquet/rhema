@@ -49,6 +49,12 @@ pub struct AppSetup {
     /// What this machine offered at startup, probed once: the sandbox
     /// picker's rows and the select path's availability gate.
     pub sandbox_offered: crate::sandbox::SandboxAvailability,
+    /// The home the app resolves machine-global paths under — the
+    /// isolation seam a test points at a scratch directory so the
+    /// machine's own global definitions and skills never leak into a
+    /// page. `None` reads the environment (`XDG_CONFIG_HOME`, then
+    /// `HOME`).
+    pub home: Option<PathBuf>,
 }
 
 /// The model backend a session runs on: which provider, and whatever
@@ -710,6 +716,10 @@ pub struct App {
     /// The home directory, when the environment names one: the footer
     /// trims it (and its `Documents`) off the workspace path it shows.
     pub home: Option<PathBuf>,
+    /// The machine-global config root the settings pages discover
+    /// under: the setup's home when one is given, else the
+    /// environment's own resolution.
+    config_root: Option<PathBuf>,
     /// The active backend's subscription allowance, when one was
     /// fetched: the backend's config name rides along, so a report of a
     /// backend the session has since left never shows. A failed fetch
@@ -1007,6 +1017,7 @@ impl App {
                     &setup.options,
                     setup.options.profile.as_deref(),
                     SettingsPurpose::Initial,
+                    setup.home.as_deref(),
                 );
                 settings.startup_reason =
                     Backend::from_profile_or_help(&effective, setup.secrets.as_deref()).err();
@@ -1033,7 +1044,14 @@ impl App {
                     .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned()),
             ),
             options: setup.options,
-            home: std::env::var("HOME").ok().map(PathBuf::from),
+            home: setup
+                .home
+                .clone()
+                .or_else(|| std::env::var("HOME").ok().map(PathBuf::from)),
+            config_root: match setup.home.clone() {
+                Some(home) => Some(rhema_config::Config::dir_under(&home)),
+                None => rhema_config::Config::dir().ok(),
+            },
             subscription: None,
             session,
             screen,
@@ -1234,6 +1252,7 @@ impl App {
             &self.options,
             self.session_profile.as_deref(),
             purpose,
+            self.config_root.as_deref(),
         );
         settings.section = section;
         settings.allowance = self.subscription.clone();
@@ -1254,11 +1273,12 @@ impl App {
         options: &RunOptions,
         session_profile: Option<&str>,
         purpose: SettingsPurpose,
+        config_root: Option<&Path>,
     ) -> SettingsScreen {
         let effective = config.effective(session_profile);
         let workspace =
             std::fs::canonicalize(&options.workspace).unwrap_or_else(|_| options.workspace.clone());
-        let global_skills = rhema_config::Config::skills_dir().ok();
+        let global_skills = config_root.map(|root| root.join("skills"));
         let skills = rhema_agent_tools::skills::discover(global_skills.as_deref(), &workspace)
             .into_iter()
             .map(|skill| SkillRow {
@@ -1268,7 +1288,7 @@ impl App {
             .collect();
         // The same discovery the agent's wiring runs, so the page shows
         // what the next session will delegate to.
-        let global_subagents = rhema_config::Config::dir().ok();
+        let global_subagents = config_root.map(|root| root.to_path_buf());
         let mut settings = SettingsScreen::new(purpose);
         settings.colors = options.colors;
         settings.theme_dark = options.theme == crate::palette::ThemeKind::Dark;
@@ -1309,7 +1329,7 @@ impl App {
         };
         let workspace = std::fs::canonicalize(&self.options.workspace)
             .unwrap_or_else(|_| self.options.workspace.clone());
-        let global = rhema_config::Config::dir().ok();
+        let global = self.config_root.clone();
         settings.subagents = subagent_rows(global.as_deref(), &workspace);
         settings.subagents_global_dir = global.map(|dir| dir.to_string_lossy().into_owned());
         settings.subagents_workspace_dir = workspace
@@ -3263,6 +3283,7 @@ mod tests {
                 .map(|store| store as Arc<dyn rhema_config::secrets::SecretStore>),
             sandboxed: None,
             sandbox_offered: crate::sandbox::SandboxAvailability::default(),
+            home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,
@@ -5858,6 +5879,7 @@ mod tests {
             secrets: None,
             sandboxed: None,
             sandbox_offered: crate::sandbox::SandboxAvailability::default(),
+            home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,

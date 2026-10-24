@@ -2989,6 +2989,7 @@ mod scroll_tests {
             secrets: None,
             sandboxed: None,
             sandbox_offered: crate::sandbox::SandboxAvailability::default(),
+            home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: ThemeKind::Dark,
