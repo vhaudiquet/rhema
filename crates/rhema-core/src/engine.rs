@@ -32,8 +32,8 @@ pub enum AgentError {
     /// assistant message is in the history, but no tool ran. The step
     /// fails so the driver surfaces the persistence problem before a side
     /// effect starts.
-    #[error("commit before tool execution failed: {0}")]
-    Commit(String),
+    #[error(transparent)]
+    Commit(#[from] CommitError),
     /// The turn was still requesting tools after `max_iterations` steps.
     #[error(
         "stopped after {0} steps without finishing; send a follow-up \
@@ -41,6 +41,16 @@ pub enum AgentError {
     )]
     MaxIterations(u32),
 }
+
+/// Why a [`CommitHook`] rejected the intent: the text a driver's
+/// persistence layer reported, carried as a typed error so the hook's
+/// failure keeps its own type through [`AgentError::Commit`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("commit failed: {0}")]
+pub struct CommitError(
+    /// What went wrong, worded for the driver's user.
+    pub String,
+);
 
 /// Forwards every event to the caller's sink while recording which tool
 /// calls the provider already announced, so the engine does not echo a
@@ -93,7 +103,7 @@ impl ToolProgress for CallProgress<'_, '_> {
 /// fails the step before any tool runs — the engine never starts a side
 /// effect whose intent it could not commit. Post-round checkpointing (after
 /// the results) remains the driver's job.
-pub type CommitHook = Box<dyn Fn(&Session) -> Result<(), String> + Send + Sync>;
+pub type CommitHook = Box<dyn Fn(&Session) -> Result<(), CommitError> + Send + Sync>;
 
 /// The step engine: a provider, an optional tool resolver, and the fixed
 /// prompt/params it stamps into every request.
@@ -104,6 +114,24 @@ pub struct Agent {
     params: ChatParams,
     commit: Option<CommitHook>,
     steps: u32,
+}
+
+impl std::fmt::Debug for Agent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The seams hold dyn traits: they print as placeholders, the
+        // plain data prints in full.
+        f.debug_struct("Agent")
+            .field("provider", &"<dyn ModelProvider>")
+            .field(
+                "resolver",
+                &self.resolver.as_ref().map(|_| "<dyn ToolResolver>"),
+            )
+            .field("system", &self.system)
+            .field("params", &self.params)
+            .field("commit", &self.commit.as_ref().map(|_| "<commit hook>"))
+            .field("steps", &self.steps)
+            .finish()
+    }
 }
 
 impl Agent {
@@ -208,9 +236,9 @@ impl Agent {
     }
 
     /// The system prompt stamped into every request, as set by
-    /// [`AgentBuilder::system`]; empty when none was set.
-    pub fn system(&self) -> &str {
-        self.system.as_deref().unwrap_or_default()
+    /// [`AgentBuilder::system`]; `None` when none was set.
+    pub fn system(&self) -> Option<&str> {
+        self.system.as_deref()
     }
 
     /// Replaces the commit hook after building; `None` disables it. See
@@ -229,6 +257,26 @@ pub struct AgentBuilder {
     system: Option<String>,
     params: Option<ChatParams>,
     commit: Option<CommitHook>,
+}
+
+impl std::fmt::Debug for AgentBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The seams hold dyn traits: they print as placeholders, the
+        // plain data prints in full.
+        f.debug_struct("AgentBuilder")
+            .field(
+                "provider",
+                &self.provider.as_ref().map(|_| "<dyn ModelProvider>"),
+            )
+            .field(
+                "resolver",
+                &self.resolver.as_ref().map(|_| "<dyn ToolResolver>"),
+            )
+            .field("system", &self.system)
+            .field("params", &self.params)
+            .field("commit", &self.commit.as_ref().map(|_| "<commit hook>"))
+            .finish()
+    }
 }
 
 impl AgentBuilder {

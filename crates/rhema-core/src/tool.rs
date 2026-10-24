@@ -203,6 +203,13 @@ pub struct OutputOnly<F: FnMut(&str) + Send>(
     pub F,
 );
 
+impl<F: FnMut(&str) + Send> std::fmt::Debug for OutputOnly<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The receiver is a closure: it prints as a placeholder.
+        f.debug_tuple("OutputOnly").field(&"<closure>").finish()
+    }
+}
+
 impl<F: FnMut(&str) + Send> ToolProgress for OutputOnly<F> {
     fn output(&mut self, chunk: &str) {
         (self.0)(chunk);

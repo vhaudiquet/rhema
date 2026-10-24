@@ -49,9 +49,7 @@ impl ModelProvider for MockProvider {
             .replies
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let out = replies
-            .pop_front()
-            .ok_or_else(|| ProviderError::Api("mock provider script exhausted".into()))?;
+        let out = replies.pop_front().ok_or(ProviderError::Exhausted)?;
         drop(replies);
 
         for content in &out.message.content {

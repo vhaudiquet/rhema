@@ -252,9 +252,9 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   `rhema-provider` (`retry.rs`), wrapped around every turn provider the frontends assemble —
   the TUI's `Backend::provider()`, claw's backend `construct()`, and ACP's `provider_for()` —
   never inside `rhema-core`, whose concern list this stays off. A request that failed with a
-  retryable error (`ProviderError::is_retryable`: transport timeout, network failure, HTTP
-  408/429/5xx as the adapters report them) is re-issued with exponential backoff, three
-  attempts at most. Two guards keep a retry honest: a stream that already emitted an event
+  retryable error (`ProviderError::is_retryable`: transport timeout, network failure, or an
+  HTTP 408/5xx carried structurally on `ProviderError::Api`; a 429 quota window deliberately
+  does not retry) is re-issued with exponential backoff, three attempts at most. Two guards keep a retry honest: a stream that already emitted an event
   never retries (the caller saw the deltas; a second attempt would repeat them), and an
   exchange that "succeeds" empty — a provider that closed the stream before its first chunk —
   retries like any dead response and, if every attempt comes back empty, fails naming that

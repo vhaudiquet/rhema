@@ -1,10 +1,12 @@
+//! Integration tests for rhema-core.
 #![cfg(feature = "mock")]
 
 use std::sync::Arc;
 
 use rhema_core::{
-    Agent, AgentError, ChatParams, Content, Event, EventSink, Message, MockProvider, ModelOutput,
-    Role, Session, StopReason, ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec, Usage,
+    Agent, AgentError, ChatParams, CommitError, Content, Event, EventSink, Message, MockProvider,
+    ModelOutput, Role, Session, StopReason, ToolCall, ToolContext, ToolResolver, ToolResult,
+    ToolSpec, Usage,
 };
 use serde_json::{Value, json};
 use std::sync::Mutex;
@@ -470,7 +472,9 @@ async fn a_failing_commit_fails_the_step_before_any_tool_runs() {
             json!({}),
         ))])))
         .resolver(Arc::new(LoggingResolver { log: log.clone() }))
-        .commit_hook(Box::new(|_session: &Session| Err("disk full".into())))
+        .commit_hook(Box::new(|_session: &Session| {
+            Err(CommitError("disk full".into()))
+        }))
         .build()
         .unwrap();
     let mut session = Session::default();
@@ -479,7 +483,7 @@ async fn a_failing_commit_fails_the_step_before_any_tool_runs() {
 
     let err = agent.step(&mut session, &mut sink, &ctx).await.unwrap_err();
 
-    assert_eq!(err, AgentError::Commit("disk full".into()));
+    assert_eq!(err, AgentError::Commit(CommitError("disk full".into())));
     // The intent stays in the history; no result followed it, and the
     // resolver never ran.
     assert_eq!(session.history.len(), 1);

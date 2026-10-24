@@ -1,3 +1,4 @@
+//! Integration tests for rhema-core.
 #![cfg(feature = "mock")]
 
 use std::sync::Arc;
