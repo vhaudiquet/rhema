@@ -240,7 +240,10 @@ impl EventSink for AcpSink {
                     self.send(SessionUpdate::UsageUpdate(update));
                 }
             }
-            // The step's start is the prompt request's concern.
+            // The step's start is the prompt request's concern. The
+            // running usage tally stays unreported: the ACP UsageUpdate
+            // rides the step's close, where the tally is final.
+            Event::Usage(_) => {}
             Event::StepStart { .. } => {}
         }
     }
