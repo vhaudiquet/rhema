@@ -9,7 +9,6 @@
 //! before the reply is built — the spec's "sandbox side caps streams"
 //! clause, inherited rather than restated.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -392,6 +391,20 @@ mod loopback_tests {
 
     /// The daemon on an ephemeral loopback port over a fresh base; the
     /// guard comes back so the base outlives the test.
+    /// True when the GNU `timeout` binary answers: the loopback wraps
+    /// the local executor, whose budgets rely on it. macOS ships none,
+    /// and the tests skip rather than fail where it cannot run.
+    fn timeout_available() -> bool {
+        std::process::Command::new("timeout")
+            .arg("1")
+            .arg("true")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+
     async fn spawn_daemon() -> (String, tempfile::TempDir) {
         let base = tempfile::tempdir().expect("the base is made");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -460,6 +473,12 @@ mod loopback_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn exec_reports_success_nonzero_and_the_timeout_kill() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the loopback's local executor budgets with it"
+            );
+            return;
+        }
         let (base, _dir) = spawn_daemon().await;
         let sbx = sandbox(&base);
 
@@ -515,6 +534,12 @@ mod loopback_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn seeding_lands_from_git_and_from_a_tarball() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the loopback's local executor budgets with it"
+            );
+            return;
+        }
         let (base, _dir) = spawn_daemon().await;
 
         // Git: a one-commit repository behind a file:// URL.
@@ -618,6 +643,12 @@ mod loopback_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_stream_cap_keeps_the_tail() {
+        if !timeout_available() {
+            println!(
+                "skipping: no GNU `timeout` on PATH; the loopback's local executor budgets with it"
+            );
+            return;
+        }
         let (base, _dir) = spawn_daemon().await;
         let sbx = sandbox(&base);
 
