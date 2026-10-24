@@ -407,8 +407,10 @@ impl EventSink for Forwarder<'_> {
             }
             Event::ToolOutputDelta { chunk, .. } => ToolProgress::output(self, chunk),
             // A nested subagent's status stays private to it, and
-            // argument streaming is not a phase of its own.
-            Event::ToolStatus { .. } | Event::ToolCallArgsDelta { .. } => {}
+            // argument streaming is not a phase of its own. The running
+            // usage tally is gauge material; the final accounting still
+            // rides `StepEnd`.
+            Event::Usage(_) | Event::ToolStatus { .. } | Event::ToolCallArgsDelta { .. } => {}
         }
     }
 }
