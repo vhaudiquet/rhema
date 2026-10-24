@@ -86,7 +86,15 @@ pub enum IdentityError {
         /// The absent id.
         id: String,
     },
-    /// The SQLite backend failed.
+    /// The SQLite backend failed. The engine's error rides boxed behind
+    /// the `Error + Send + Sync` shape, so the public enum names no
+    /// backend while `source()` still chains to the engine's own error.
     #[error("identity store backend: {0}")]
-    Backend(#[from] rusqlite::Error),
+    Backend(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
+}
+
+impl From<rusqlite::Error> for IdentityError {
+    fn from(err: rusqlite::Error) -> Self {
+        Self::Backend(Box::new(err))
+    }
 }

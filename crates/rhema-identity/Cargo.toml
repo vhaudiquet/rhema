@@ -11,6 +11,12 @@ authors.workspace = true
 # it until the claw ships.
 publish = false
 
+[features]
+# The reusable Store-contract suite, for replay against secondary store
+# backends; see `store_contract`. The crate's own tests replay it
+# without the feature (cfg test), matching rhema-rsd's gate.
+store-contract = []
+
 [dependencies]
 # Event payloads cross nothing here: the store is plain data. Secrets are
 # never serialized by this crate — `Account` is redacted by construction.
@@ -23,3 +29,6 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

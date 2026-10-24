@@ -30,14 +30,16 @@
 //! - [`store`] — the `IdentityStore` contract and `IdentityError`
 //! - [`volatile`] — the in-process `VolatileIdentityStore`
 //! - [`sqlite`] — the durable `SqliteIdentityStore`
-//! - [`store_contract`] — the replayable behavioral suite
+//! - [`store_contract`] — the replayable behavioral suite (`store-contract` feature)
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod record;
 pub mod sqlite;
 pub mod store;
+// The behavioral suite is test machinery: in every test build, and in a
+// normal build only when the `store-contract` feature asks for it.
+#[cfg(any(test, feature = "store-contract"))]
 pub mod store_contract;
 pub mod volatile;
 
