@@ -46,4 +46,7 @@ pub use output::{ModelOutput, Step, StopReason, Usage};
 pub use provider::{ModelProvider, ProviderError};
 pub use request::{ChatParams, ModelRequest, ToolSpec};
 pub use session::Session;
-pub use tool::{ReplaySafety, ToolCall, ToolContext, ToolResolver, ToolResult};
+pub use tool::{
+    OutputOnly, ReplaySafety, ToolCall, ToolContext, ToolProgress, ToolResolver, ToolResult,
+    ToolStatus,
+};

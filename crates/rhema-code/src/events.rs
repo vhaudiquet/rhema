@@ -85,6 +85,13 @@ pub enum OwnedEvent {
         /// included.
         chunk: String,
     },
+    /// See [`Event::ToolStatus`].
+    ToolStatus {
+        /// The running call's correlation id.
+        id: String,
+        /// The tool's status, replacing any earlier one for the call.
+        status: rhema_core::ToolStatus,
+    },
     /// See [`Event::ToolResult`].
     ToolResult {
         /// The answered call's id.
@@ -124,6 +131,10 @@ impl From<&Event<'_>> for OwnedEvent {
             Event::ToolOutputDelta { id, chunk } => Self::ToolOutputDelta {
                 id: (*id).to_owned(),
                 chunk: (*chunk).to_owned(),
+            },
+            Event::ToolStatus { id, status } => Self::ToolStatus {
+                id: (*id).to_owned(),
+                status: (*status).clone(),
             },
             Event::ToolResult {
                 id,

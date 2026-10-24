@@ -374,7 +374,7 @@ impl IdentityExec {
     async fn exec(
         &self,
         call: ToolCall,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
         let id = match call.args.get("id").and_then(Value::as_str) {
             Some(id) => id.trim().to_owned(),
@@ -477,7 +477,7 @@ impl IdentityExec {
                         let sink = if is_stderr { &mut stderr } else { &mut stdout };
                         sink.extend_from_slice(line.as_bytes());
                         sink.push(b'\n');
-                        progress(&format!("{line}\n"));
+                        progress.output(&format!("{line}\n"));
                     }
                     None => break,
                 }
@@ -565,14 +565,14 @@ impl ToolResolver for IdentityExec {
     }
 
     async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
-        self.exec(call, &mut |_| {}).await
+        self.exec(call, &mut rhema_core::OutputOnly(|_| {})).await
     }
 
     async fn resolve_streaming(
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
         if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             return ToolResult::failure(call.id, "cancelled");

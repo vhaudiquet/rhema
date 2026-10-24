@@ -75,7 +75,7 @@ impl ToolResolver for Overlay {
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
         self.side(&call.name)
             .resolve_streaming(call, ctx, progress)
@@ -184,7 +184,7 @@ mod tests {
         let overlay = Overlay::new(primary.clone(), extra.clone());
         let ctx = ToolContext::default();
         let result = overlay
-            .resolve_streaming(call("subagent"), &ctx, &mut |_| {})
+            .resolve_streaming(call("subagent"), &ctx, &mut rhema_core::OutputOnly(|_| {}))
             .await;
         assert!(!result.is_error);
         assert!(primary.taken().is_empty());

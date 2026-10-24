@@ -9,7 +9,7 @@
 //! the socket.
 #![forbid(unsafe_code)]
 
-use rhema_core::{Event, StopReason, ToolCall, Usage};
+use rhema_core::{Event, StopReason, ToolCall, ToolStatus, Usage};
 
 /// What a connected client sends.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -72,6 +72,16 @@ pub enum ServerMessage {
         id: String,
         /// The chunk, in stream order.
         chunk: String,
+    },
+    /// A streaming tool reported its own live status — its phase and,
+    /// when it tracks them, its token spend. A later status for the same
+    /// call replaces the earlier one; a client without a place for it
+    /// can drop it.
+    ToolStatus {
+        /// The running call's correlation id.
+        id: String,
+        /// The tool's status, replacing any earlier one.
+        status: ToolStatus,
     },
     /// A tool result was appended to the session history.
     ToolResult {
@@ -156,6 +166,10 @@ impl ServerMessage {
             Event::ToolOutputDelta { id, chunk } => Self::ToolOutputDelta {
                 id: id.to_owned(),
                 chunk: chunk.to_owned(),
+            },
+            Event::ToolStatus { id, status } => Self::ToolStatus {
+                id: id.to_owned(),
+                status: status.clone(),
             },
             Event::ToolResult {
                 id,

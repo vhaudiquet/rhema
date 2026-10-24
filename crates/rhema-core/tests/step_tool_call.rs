@@ -51,6 +51,9 @@ enum Recorded {
         id: String,
         chunk: String,
     },
+    ToolStatus {
+        id: String,
+    },
     ToolResult {
         id: String,
         content: String,
@@ -77,6 +80,7 @@ impl From<Event<'_>> for Recorded {
                 id: id.to_owned(),
                 delta: delta.to_owned(),
             },
+            Event::ToolStatus { id, .. } => Self::ToolStatus { id: id.to_owned() },
             Event::ToolOutputDelta { id, chunk } => Self::ToolOutputDelta {
                 id: id.to_owned(),
                 chunk: chunk.to_owned(),
@@ -297,10 +301,10 @@ async fn a_streaming_tool_rides_the_sink_as_deltas_before_its_result() {
             &self,
             call: ToolCall,
             _ctx: &ToolContext,
-            progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+            progress: &mut dyn rhema_core::ToolProgress,
         ) -> ToolResult {
-            progress("working\n");
-            progress("still working\n");
+            progress.output("working\n");
+            progress.output("still working\n");
             ToolResult::success(call.id, "done")
         }
     }

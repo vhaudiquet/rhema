@@ -230,7 +230,7 @@ async fn a_call_runs_the_inner_agent_and_returns_its_report() {
         .resolve_streaming(
             call("worker", "do it"),
             &ToolContext::default(),
-            &mut |line| lines.push(line.to_owned()),
+            &mut rhema_core::OutputOnly(|line: &str| lines.push(line.to_owned())),
         )
         .await;
 

@@ -56,7 +56,7 @@ impl ToolResolver for ResolverChain {
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
         for resolver in &self.resolvers {
             if resolver.specs().iter().any(|spec| spec.name == call.name) {

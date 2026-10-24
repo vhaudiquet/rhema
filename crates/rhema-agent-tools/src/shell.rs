@@ -25,7 +25,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use rhema_core::{ToolCall, ToolContext, ToolResolver, ToolResult, ToolSpec};
+use rhema_core::{
+    OutputOnly, ToolCall, ToolContext, ToolProgress, ToolResolver, ToolResult, ToolSpec,
+};
 
 use crate::approval::Approval;
 use crate::exec::{Executed, ShellError, ShellExecutor};
@@ -162,7 +164,7 @@ impl ShellTools {
         &self,
         call: ToolCall,
         cancelled: &AtomicBool,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn ToolProgress,
     ) -> ToolResult {
         if let Some(rejection) = self.approval_gate(&call) {
             return rejection;
@@ -170,9 +172,17 @@ impl ShellTools {
         let Some(command) = arg_str(&call.args, "command") else {
             return ToolResult::failure(call.id, "missing required argument: command");
         };
+        // The executor's seam speaks raw output chunks; the status half of
+        // the progress channel has no command-side counterpart.
         match self
             .exec
-            .run(&command, &self.workspace, BASH_TIMEOUT, cancelled, progress)
+            .run(
+                &command,
+                &self.workspace,
+                BASH_TIMEOUT,
+                cancelled,
+                &mut |chunk: &str| progress.output(chunk),
+            )
             .await
         {
             Ok(executed) => finished(call.id, executed),
@@ -210,14 +220,15 @@ impl ToolResolver for ShellTools {
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
         // A fn item, not a closure: its lifetime-generic signature is
         // what the higher-ranked progress bound needs.
-        self.resolve_streaming(call, ctx, &mut silent).await
+        self.resolve_streaming(call, ctx, &mut OutputOnly(silent))
+            .await
     }
 
     async fn resolve_streaming(
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn ToolProgress,
     ) -> ToolResult {
         if ctx.cancelled.load(Ordering::Relaxed) {
             return ToolResult::failure(call.id, "cancelled");
@@ -404,7 +415,7 @@ mod executor_tests {
         let executor = Arc::new(Scripted::ok("out\n"));
         let tools = ShellTools::with_executor("/tmp", executor.clone());
         tools.install_approval(Arc::new(AllowAll));
-        let mut progress = silent;
+        let mut progress = OutputOnly(silent);
         let result = tools
             .resolve_streaming(call("echo hi"), &ToolContext::default(), &mut progress)
             .await;
@@ -500,12 +511,12 @@ mod local_process_tests {
         tools.install_approval(Arc::new(AllowAll));
         let streamed = Arc::new(Mutex::new(Vec::new()));
         let collector = streamed.clone();
-        let mut progress = move |chunk: &str| {
+        let mut progress = OutputOnly(move |chunk: &str| {
             collector
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(chunk.to_owned());
-        };
+        });
         let result = tools
             .resolve_streaming(
                 call("printf 'one\\ntwo\\n'; echo three"),
@@ -533,12 +544,12 @@ mod local_process_tests {
         tools.install_approval(Arc::new(AllowAll));
         let streamed = Arc::new(Mutex::new(Vec::new()));
         let collector = streamed.clone();
-        let mut progress = move |chunk: &str| {
+        let mut progress = OutputOnly(move |chunk: &str| {
             collector
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(chunk.to_owned());
-        };
+        });
         let result = tools
             .resolve_streaming(
                 call("echo oops >&2; exit 3"),

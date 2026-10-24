@@ -17,7 +17,7 @@ use crate::output::{ModelOutput, Step, StopReason};
 use crate::provider::{ModelProvider, ProviderError};
 use crate::request::{ChatParams, ModelRequest};
 use crate::session::Session;
-use crate::tool::{ToolContext, ToolResolver, ToolResult};
+use crate::tool::{ToolContext, ToolProgress, ToolResolver, ToolResult, ToolStatus};
 
 /// Why a step or a turn failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -56,6 +56,30 @@ impl EventSink for ForwardingSink<'_> {
             self.announced.insert(id.to_owned());
         }
         self.inner.emit(event);
+    }
+}
+
+/// Stamps a running call's id onto a resolver's live reports: output
+/// chunks as ephemeral `ToolOutputDelta`s, status as ephemeral
+/// `ToolStatus`es. The resolver knows neither the id nor the sink.
+struct CallProgress<'sink, 'a> {
+    id: String,
+    events: &'sink mut ForwardingSink<'a>,
+}
+
+impl ToolProgress for CallProgress<'_, '_> {
+    fn output(&mut self, chunk: &str) {
+        self.events.emit(Event::ToolOutputDelta {
+            id: &self.id,
+            chunk,
+        });
+    }
+
+    fn status(&mut self, status: ToolStatus) {
+        self.events.emit(Event::ToolStatus {
+            id: &self.id,
+            status: &status,
+        });
     }
 }
 
@@ -146,18 +170,22 @@ impl Agent {
                 }
                 // The call's live output rides the sink as ephemeral
                 // deltas, the call's id stamped on by the engine — the
-                // resolver knows only its own progress lines.
-                let id = call.id.clone();
-                let mut progress = |chunk: &str| {
-                    events.emit(Event::ToolOutputDelta { id: &id, chunk });
-                };
-                let result = match &self.resolver {
-                    Some(resolver) => {
-                        resolver
-                            .resolve_streaming(call.clone(), ctx, &mut progress)
-                            .await
+                // resolver knows only its own progress lines; its status
+                // rides the same stamp. The stamp's borrow ends with the
+                // call, before the result event.
+                let result = {
+                    let mut progress = CallProgress {
+                        id: call.id.clone(),
+                        events: &mut events,
+                    };
+                    match &self.resolver {
+                        Some(resolver) => {
+                            resolver
+                                .resolve_streaming(call.clone(), ctx, &mut progress)
+                                .await
+                        }
+                        None => ToolResult::failure(&call.id, "no tool resolver is configured"),
                     }
-                    None => ToolResult::failure(&call.id, "no tool resolver is configured"),
                 };
                 events.emit(Event::ToolResult {
                     id: &result.id,

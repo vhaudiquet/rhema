@@ -140,18 +140,63 @@ pub trait ToolResolver: Send + Sync {
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult;
 
     /// Resolve with progress: an implementation running something long —
-    /// a shell command — calls `progress` with human-facing output
-    /// chunks (complete lines) as they land, so a sink can render them
-    /// live; the full text still arrives in the returned result. The
-    /// default ignores progress and resolves as usual.
+    /// a shell command — reports human-facing output chunks (complete
+    /// lines) as they land, so a sink can render them live; the full
+    /// text still arrives in the returned result. The default ignores
+    /// progress and resolves as usual.
     async fn resolve_streaming(
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn ToolProgress,
     ) -> ToolResult {
         let _ = progress;
         self.resolve(call, ctx).await
+    }
+}
+
+/// The live status of a streaming tool call's inner work: what that work
+/// is doing now and what it has spent, when the tool knows. Status, not
+/// output — a sink shows it beside the call, and it never lands in the
+/// call's output or the session history.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolStatus {
+    /// The phase the work is in, in the few words a status line reads
+    /// ("thinking", "running").
+    pub phase: String,
+    /// The tokens the work's model calls have spent so far, cumulative
+    /// over the call, when the tool runs model calls of its own.
+    pub usage: Option<crate::output::Usage>,
+    /// The model the work runs on — the catalog id a UI prices and sizes
+    /// it by — when the tool knows it. It may differ from the caller's
+    /// model.
+    pub model: Option<String>,
+}
+
+/// The live channel a streaming resolver reports through. Output is
+/// human-facing text owned by the call; status is the resolver's own
+/// state, for a sink that has a place to show it.
+pub trait ToolProgress: Send {
+    /// A human-facing output chunk (a complete line), rendered live; the
+    /// full text still arrives in the returned result.
+    fn output(&mut self, chunk: &str);
+    /// The work's current status, replacing any earlier one. The default
+    /// drops it: a sink with nowhere to show status loses nothing.
+    fn status(&mut self, status: ToolStatus) {
+        let _ = status;
+    }
+}
+
+/// A [`ToolProgress`] that keeps only the output chunks: the adapter for
+/// callers — drivers, tests — that have no status surface.
+pub struct OutputOnly<F: FnMut(&str) + Send>(
+    /// The receiver of the output chunks.
+    pub F,
+);
+
+impl<F: FnMut(&str) + Send> ToolProgress for OutputOnly<F> {
+    fn output(&mut self, chunk: &str) {
+        (self.0)(chunk);
     }
 }
 

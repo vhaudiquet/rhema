@@ -52,6 +52,16 @@ pub enum Event<'a> {
         /// included.
         chunk: &'a str,
     },
+    /// A streaming tool reported its own live status — what its inner
+    /// work is doing and what it has spent. Ephemeral like
+    /// [`Event::ToolOutputDelta`]: sinks render it live, never into the
+    /// session history, and a later status for the same call replaces it.
+    ToolStatus {
+        /// The running call's correlation id.
+        id: &'a str,
+        /// The tool's status.
+        status: &'a crate::tool::ToolStatus,
+    },
     /// A tool result was appended to the session history.
     ToolResult {
         /// The answered call's id.

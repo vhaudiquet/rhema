@@ -179,6 +179,9 @@ impl EventSink for AcpSink {
                         .content(vec![ToolCallContent::from(text_block(chunk))]),
                 )));
             }
+            // The protocol has no free-form status slot on a tool call;
+            // the phase a streaming tool reports has nowhere to land.
+            Event::ToolStatus { .. } => {}
             Event::ToolResult {
                 id,
                 content,

@@ -22,7 +22,7 @@ use rhema_agent_tools::{Overlay, ShellTools, render_template};
 use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     Agent, ChatParams, Content, Event, EventSink, Message, ModelProvider, Role, Session, ToolCall,
-    ToolContext, ToolResolver, ToolResult, ToolSpec,
+    ToolContext, ToolProgress, ToolResolver, ToolResult, ToolSpec,
 };
 
 use crate::def::SubagentDef;
@@ -163,7 +163,7 @@ impl SubagentTools {
         prompt: &str,
         ctx: &ToolContext,
         inner_shell: &Arc<ShellTools>,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn ToolProgress,
     ) -> Result<String, String> {
         let system = render_template(
             &def.body,
@@ -196,9 +196,17 @@ impl SubagentTools {
             run_id: format!("{}/subagent:{}", ctx.run_id, def.name),
             cancelled: ctx.cancelled.clone(),
         };
-        let mut sink = LineForwarder {
+        let mut sink = Forwarder {
             buf: String::new(),
             progress,
+            model: def
+                .model
+                .clone()
+                .unwrap_or_else(|| self.default_model.clone()),
+            phase: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
         };
 
         for _ in 0..def.max_steps() {
@@ -284,14 +292,15 @@ impl ToolResolver for SubagentTools {
     }
 
     async fn resolve(&self, call: ToolCall, ctx: &ToolContext) -> ToolResult {
-        self.resolve_streaming(call, ctx, &mut |_| {}).await
+        self.resolve_streaming(call, ctx, &mut rhema_core::OutputOnly(|_| {}))
+            .await
     }
 
     async fn resolve_streaming(
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn ToolProgress,
     ) -> ToolResult {
         let id = call.id.clone();
         let (def, prompt) = match self.parse_call(&call) {
@@ -309,21 +318,60 @@ impl ToolResolver for SubagentTools {
 }
 
 /// Forwards the inner turn's text and tool output to the parent's
-/// progress callback, whole lines at a time — the same shape the shell
-/// streams in. Lifecycle events are dropped: the parent's sink already
-/// renders its own call's lifecycle, and the subagent's is private.
-struct LineForwarder<'a> {
+/// progress channel, whole lines at a time — the same shape the shell
+/// streams in — and renders the inner turn's lifecycle into the call's
+/// own status: the phase the subagent is in and what its model calls
+/// have spent so far. The lifecycle events themselves stay private —
+/// the parent's sink renders only its own call's lifecycle — the status
+/// is screen-facing, never history. A nested subagent's status is
+/// dropped: to this call the nested subagent is just one running tool.
+struct Forwarder<'a> {
     /// Fragments accumulated since the last newline.
     buf: String,
-    progress: &'a mut (dyn for<'b> FnMut(&'b str) + Send),
+    progress: &'a mut dyn ToolProgress,
+    /// The model id the inner turn runs on, stamped into every status.
+    model: String,
+    /// The phase last reported; only transitions are sent.
+    phase: Option<&'static str>,
+    /// The inner model calls' cumulative token spend.
+    input_tokens: u32,
+    output_tokens: u32,
+    cached_input_tokens: u32,
 }
 
-impl EventSink for LineForwarder<'_> {
-    fn emit(&mut self, event: Event<'_>) {
-        let chunk = match event {
-            Event::TextDelta(text) | Event::ToolOutputDelta { chunk: text, .. } => text,
-            _ => return,
-        };
+/// The phase words a status line reads, in the order the inner turn
+/// moves through them.
+const THINKING: &str = "thinking";
+const RUNNING: &str = "running";
+const WRITING: &str = "writing output";
+
+impl Forwarder<'_> {
+    /// Reports a phase transition with the spend so far; a repeated
+    /// phase sends nothing.
+    fn report(&mut self, phase: &'static str) {
+        if self.phase == Some(phase) {
+            return;
+        }
+        self.phase = Some(phase);
+        self.send();
+    }
+
+    /// Sends the current phase and spend.
+    fn send(&mut self) {
+        self.progress.status(rhema_core::ToolStatus {
+            phase: self.phase.unwrap_or(THINKING).to_owned(),
+            usage: Some(rhema_core::Usage {
+                input_tokens: self.input_tokens,
+                output_tokens: self.output_tokens,
+                cached_input_tokens: self.cached_input_tokens,
+            }),
+            model: Some(self.model.clone()),
+        });
+    }
+}
+
+impl ToolProgress for Forwarder<'_> {
+    fn output(&mut self, chunk: &str) {
         self.buf.push_str(chunk);
         while let Some(end) = self.buf.find('\n') {
             let line: String = self.buf.drain(..=end).collect();
@@ -331,7 +379,36 @@ impl EventSink for LineForwarder<'_> {
             if line.is_empty() {
                 continue;
             }
-            (self.progress)(&format!("{line}\n"));
+            self.progress.output(&format!("{line}\n"));
+        }
+    }
+
+    fn status(&mut self, _status: rhema_core::ToolStatus) {}
+}
+
+impl EventSink for Forwarder<'_> {
+    fn emit(&mut self, event: Event<'_>) {
+        match event {
+            // The model is streaming: reasoning is thinking, text is the
+            // report being written.
+            Event::StepStart { .. } | Event::ThinkingDelta(_) => self.report(THINKING),
+            Event::TextDelta(_) => self.report(WRITING),
+            // A tool of the subagent's is executing, its lines forwarded
+            // whole below.
+            Event::ToolCallStart { .. } => self.report(RUNNING),
+            Event::ToolResult { .. } => self.report(THINKING),
+            Event::StepEnd { usage, .. } => {
+                self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
+                self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
+                self.cached_input_tokens = self
+                    .cached_input_tokens
+                    .saturating_add(usage.cached_input_tokens);
+                self.send();
+            }
+            Event::ToolOutputDelta { chunk, .. } => ToolProgress::output(self, chunk),
+            // A nested subagent's status stays private to it, and
+            // argument streaming is not a phase of its own.
+            Event::ToolStatus { .. } | Event::ToolCallArgsDelta { .. } => {}
         }
     }
 }
@@ -389,5 +466,99 @@ mod tests {
         assert_eq!(spec.name, "subagent");
         assert!(spec.description.contains("reviewer: reviews diffs"));
         assert!(spec.description.contains("scout: explores the tree"));
+    }
+
+    /// A progress channel that keeps everything it is handed.
+    struct Collector {
+        lines: Vec<String>,
+        statuses: Vec<rhema_core::ToolStatus>,
+    }
+
+    impl ToolProgress for Collector {
+        fn output(&mut self, chunk: &str) {
+            self.lines.push(chunk.to_owned());
+        }
+        fn status(&mut self, status: rhema_core::ToolStatus) {
+            self.statuses.push(status);
+        }
+    }
+
+    #[test]
+    fn the_inner_lifecycle_becomes_phase_transitions_and_a_spend() {
+        let mut collected = Collector {
+            lines: Vec::new(),
+            statuses: Vec::new(),
+        };
+        let mut sink = Forwarder {
+            buf: String::new(),
+            progress: &mut collected,
+            model: "parent-model".into(),
+            phase: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+        };
+        // Reasoning first, then a tool, its output, the step's spend,
+        // then the report being written.
+        sink.emit(Event::ThinkingDelta("hmm"));
+        sink.emit(Event::ToolCallStart {
+            id: "c1",
+            name: "bash",
+        });
+        sink.emit(Event::ToolOutputDelta {
+            id: "c1",
+            chunk: "one\ntwo\n",
+        });
+        sink.emit(Event::StepEnd {
+            usage: rhema_core::Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+                cached_input_tokens: 80,
+            },
+            stop_reason: &rhema_core::StopReason::ToolUse,
+        });
+        sink.emit(Event::TextDelta("the report"));
+        drop(sink);
+
+        // The phases arrived as transitions; the step's spend re-sent
+        // the running phase with the figures: thinking → running (the
+        // tool) → running again (the spend) → writing output (the
+        // report).
+        let phases: Vec<&str> = collected
+            .statuses
+            .iter()
+            .map(|status| status.phase.as_str())
+            .collect();
+        assert_eq!(phases, vec![THINKING, RUNNING, RUNNING, WRITING]);
+        let last = collected.statuses.last().unwrap();
+        assert_eq!(last.model.as_deref(), Some("parent-model"));
+        let usage = last.usage.unwrap();
+        assert_eq!(usage.input_tokens, 100);
+        assert_eq!(usage.output_tokens, 20);
+        assert_eq!(usage.cached_input_tokens, 80);
+
+        // The inner tool's output still rides whole-line, blank lines
+        // dropped, the same shape the shell streams in.
+        assert_eq!(collected.lines, vec!["one\n", "two\n"]);
+    }
+
+    #[test]
+    fn repeated_phases_send_nothing() {
+        let mut collected = Collector {
+            lines: Vec::new(),
+            statuses: Vec::new(),
+        };
+        let mut sink = Forwarder {
+            buf: String::new(),
+            progress: &mut collected,
+            model: "m".into(),
+            phase: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+        };
+        sink.emit(Event::ThinkingDelta("a"));
+        sink.emit(Event::ThinkingDelta("b"));
+        assert_eq!(collected.statuses.len(), 1);
     }
 }

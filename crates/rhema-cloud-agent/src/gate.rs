@@ -77,7 +77,7 @@ impl ClientGate {
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
         self.inner.install_approval(Arc::new(AllowAll));
         let result = self.inner.resolve_streaming(call, ctx, progress).await;
@@ -104,14 +104,15 @@ impl ToolResolver for ClientGate {
         // A fn item, not a closure: its lifetime-generic signature is
         // what the higher-ranked progress bound needs.
         fn silent(_: &str) {}
-        self.resolve_decided(call, ctx, &mut silent).await
+        self.resolve_decided(call, ctx, &mut rhema_core::OutputOnly(silent))
+            .await
     }
 
     async fn resolve_streaming(
         &self,
         call: ToolCall,
         ctx: &ToolContext,
-        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        progress: &mut dyn rhema_core::ToolProgress,
     ) -> ToolResult {
         if ctx.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
             return ToolResult::failure(call.id, "cancelled");
