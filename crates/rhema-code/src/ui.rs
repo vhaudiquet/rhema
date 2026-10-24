@@ -109,6 +109,8 @@ pub(crate) struct WrapCache {
     /// The theme the rows were styled with; the whole cache dies on a
     /// change, including a generated palette switching seeds.
     theme: Option<Theme>,
+    /// The icon flavor the rows were drawn with; a flip redraws.
+    icons: Option<crate::icons::Flavor>,
     /// One entry per cached block, in order.
     blocks: Vec<CachedBlock>,
 }
@@ -161,7 +163,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                     wrap_line(&Line::from(error.clone()), frame.area().width as usize).len() as u16
                         + 1
                 }
-                None if app.turn.running => 2 + thinking_rows(app, frame.area().width as usize),
+                None if app.turn.running => {
+                    2 + u16::from(app.turn.subagent.is_some())
+                        + thinking_rows(app, frame.area().width as usize)
+                }
                 None => 1,
             };
             let input_rows = input_rows(
@@ -1096,7 +1101,10 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
     // transcript (every block dirty), answers for none.
     let reusable = {
         let cache = &app.transcript_cache;
-        if cache.width == width && cache.theme == Some(*theme) {
+        if cache.width == width
+            && cache.theme == Some(*theme)
+            && cache.icons == Some(app.options.icons)
+        {
             blocks
                 .iter()
                 .zip(cache.blocks.iter())
@@ -1115,6 +1123,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
         let cache = &mut app.transcript_cache;
         cache.width = width;
         cache.theme = Some(*theme);
+        cache.icons = Some(app.options.icons);
         cache.blocks.truncate(reusable);
     }
 
@@ -1150,7 +1159,7 @@ fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme
         if index < reusable {
             rows.extend(app.transcript_cache.blocks[index].rows.iter().cloned());
         } else {
-            let rendered = render_block(lines, block, theme, width);
+            let rendered = render_block(lines, block, theme, width, app.icons.robot);
             let cached = CachedBlock {
                 start: block.start,
                 end: block.end,
@@ -1193,6 +1202,7 @@ fn render_block(
     block: &TranscriptBlock,
     theme: &Theme,
     width: usize,
+    robot: &'static str,
 ) -> Vec<Line<'static>> {
     let range = &lines[block.start..block.end];
     let raw: Vec<Line<'static>> = match block.kind {
@@ -1235,11 +1245,14 @@ fn render_block(
                 transcript::Line::ToolCall { args, ok, code, .. } if name_is_bash(line) => {
                     Some(tool_row(args, *ok, *code, width, theme))
                 }
-                transcript::Line::ToolCall { .. } => Some(render_line(line, theme)),
+                transcript::Line::ToolCall { .. } => Some(render_line(line, theme, robot)),
                 _ => None,
             })
             .collect(),
-        Kind::Notice => range.iter().map(|line| render_line(line, theme)).collect(),
+        Kind::Notice => range
+            .iter()
+            .map(|line| render_line(line, theme, robot))
+            .collect(),
         Kind::Markdown => range
             .iter()
             .filter_map(|line| match line {
@@ -1454,7 +1467,7 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     rows.into_iter().map(Line::from).collect()
 }
 
-fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
+fn render_line(line: &transcript::Line, theme: &Theme, robot: &'static str) -> Line<'static> {
     match line {
         transcript::Line::User(text) => {
             // Embedded pastes collapse to their chips here too — this
@@ -1496,6 +1509,19 @@ fn render_line(line: &transcript::Line, theme: &Theme) -> Line<'static> {
                     None if *ok == Some(false) => spans.push(Span::raw(" ✗").fg(theme.error)),
                     None => {}
                 }
+                return Line::from(spans);
+            }
+            // A subagent call reads as delegation: the robot badge, the
+            // mark, the subagent and what it was asked.
+            if name == "subagent" {
+                let mut spans = vec![Span::raw(format!("{robot} ")).fg(theme.text3)];
+                match ok {
+                    Some(true) => spans.push(Span::raw("✓ ").fg(theme.ok)),
+                    Some(false) => spans.push(Span::raw("✗ ").fg(theme.error)),
+                    // Still running: keep the mark column aligned.
+                    None => spans.push(Span::raw("  ")),
+                }
+                spans.push(Span::raw(transcript::describe(name, args)));
                 return Line::from(spans);
             }
             let mut spans = vec![Span::raw("⌁ ").fg(theme.text3)];
@@ -1571,17 +1597,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     } else if app.turn.running {
         // Braille dots cycling through the classic spinner, animated off
         // the running turn's clock — no timer machinery of its own.
-        const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-        let spinner = app
-            .turn
-            .started_at
-            .map(|started| (started.elapsed().as_millis() / 80) as usize % SPINNER.len())
-            .unwrap_or(0);
-        let elapsed = app
-            .turn
-            .started_at
-            .map(|started| format!(" · {}s", started.elapsed().as_secs()))
-            .unwrap_or_default();
+        let spinner = spinner_frame(
+            app.turn
+                .started_at
+                .map(|started| started.elapsed())
+                .unwrap_or_default(),
+        );
         // Two phases, two colors: the model streaming is thinking; a
         // command executing is running.
         let phase = if app.turn.processing {
@@ -1602,12 +1623,20 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             ])
         };
         let mut line = phase;
-        line.spans.push(Span::raw(elapsed).fg(theme.text3));
+        if let Some(started) = app.turn.started_at {
+            line.spans
+                .push(Span::raw(format!(" · {}", elapsed_text(started.elapsed()))).fg(theme.text3));
+        }
         line.spans.push(Span::raw(" · esc cancels").fg(theme.text3));
         vec![line]
     } else {
         Vec::new()
     };
+    // A working subagent pins its own line right below the spinner: the
+    // robot badge, the animated delegate, its phase, spend, and age.
+    if let Some(subagent) = &app.turn.subagent {
+        lines.push(subagent_line(app, subagent, theme));
+    }
     // The live preview rides under the spinner — the reasoning trace's
     // tail, or a running command's earned output — at most three dim
     // rows. The reasoning half is gone the moment real output starts,
@@ -1633,6 +1662,95 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .push(Span::raw("  ·  viewing history · pgdn: latest").fg(theme.text3));
     }
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The classic braille spinner; frames step at 80ms off whichever clock
+/// animates it.
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// The spinner frame for an elapsed time.
+fn spinner_frame(elapsed: std::time::Duration) -> usize {
+    (elapsed.as_millis() / 80) as usize % SPINNER.len()
+}
+
+/// An elapsed time as a clock reads it: seconds under the minute,
+/// minutes and seconds under the hour, hours and minutes beyond —
+/// `2055s` is unreadable where `34min 15s` reads at a glance.
+fn elapsed_text(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}min {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}min", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// A cost as the footer prints it: cents at a glance, four decimals
+/// while the figure is still small enough for the fourth to matter.
+fn cost_text(cost: f64) -> String {
+    if cost >= 0.01 || cost == 0.0 {
+        format!("${cost:.2}")
+    } else {
+        format!("${cost:.4}")
+    }
+}
+
+/// The pinned live line of a working subagent: the robot badge and its
+/// spinner, the delegate's name, the phase it last reported, the
+/// context its model calls have spent against its model's window, the
+/// cost that spend prices to, and its age. A figure the catalog cannot
+/// price or size degrades to what is known — tokens alone, no cost.
+fn subagent_line(app: &App, subagent: &crate::app::SubagentLive, theme: &Theme) -> Line<'static> {
+    let spinner = spinner_frame(subagent.started_at.elapsed());
+    let mut spans = vec![
+        Span::raw(format!("{} ", app.icons.robot)).fg(theme.text3),
+        Span::styled(
+            SPINNER[spinner].to_string(),
+            Style::default().fg(theme.info),
+        ),
+        Span::raw(" "),
+        Span::raw(
+            subagent
+                .name
+                .clone()
+                .unwrap_or_else(|| "subagent".to_owned()),
+        )
+        .fg(theme.info),
+        Span::raw(format!(" · {}", subagent.phase)).fg(theme.running),
+    ];
+    if let Some(usage) = subagent.usage {
+        let mut figure = format_tokens(Some(crate::app::context_tokens(&usage)));
+        let window = subagent
+            .model
+            .as_deref()
+            .and_then(|model| app.model_window(model));
+        if let Some(window) = window {
+            figure.push_str(&format!("/{}", format_tokens(Some(window))));
+        }
+        spans.push(Span::raw(format!(" · {figure}")).fg(theme.text3));
+        if let Some(pricing) = subagent
+            .model
+            .as_deref()
+            .and_then(|model| app.model_pricing(model))
+        {
+            let cost = pricing.cost(
+                u64::from(usage.input_tokens),
+                u64::from(usage.output_tokens),
+                u64::from(usage.cached_input_tokens),
+            );
+            spans.push(Span::raw(format!(" · {}", cost_text(cost))).fg(theme.text3));
+        }
+    }
+    spans.push(
+        Span::raw(format!(
+            " · {}",
+            elapsed_text(subagent.started_at.elapsed())
+        ))
+        .fg(theme.text3),
+    );
+    Line::from(spans)
 }
 
 /// Rows the live preview may show.
@@ -1890,12 +2008,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
     parts
         .push(Span::raw(format!(" · {} {context}", (app.icons.context)(fraction))).fg(theme.text3));
-    let cost = if app.session_cost >= 0.01 || app.session_cost == 0.0 {
-        format!("${:.2}", app.session_cost)
-    } else {
-        format!("${:.4}", app.session_cost)
-    };
-    parts.push(Span::raw(format!(" · {cost}")).fg(theme.text3));
+    parts.push(Span::raw(format!(" · {}", cost_text(app.session_cost))).fg(theme.text3));
     // The plan's remaining allowance, when the active backend reports
     // one: the adapter owns the figures, the footer only prints them.
     // A kind names the unit where the amount alone would read as
@@ -2697,7 +2810,9 @@ mod tests {
 
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
-    use super::{cursor_at_rows, footer_folder, input_layout, input_rows, render, wrap_line};
+    use super::{
+        cursor_at_rows, elapsed_text, footer_folder, input_layout, input_rows, render, wrap_line,
+    };
     use crate::app::{App, AppSetup, RunOptions};
     use crate::events::OwnedEvent;
     use crate::palette::DARK;
@@ -2767,6 +2882,114 @@ mod scroll_tests {
         (0..buffer.area.height)
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect()
+    }
+
+    #[test]
+    fn elapsed_time_reads_as_a_clock() {
+        assert_eq!(elapsed_text(std::time::Duration::from_secs(42)), "42s");
+        assert_eq!(
+            elapsed_text(std::time::Duration::from_secs(2055)),
+            "34min 15s"
+        );
+        assert_eq!(
+            elapsed_text(std::time::Duration::from_secs(3900)),
+            "1h 5min"
+        );
+    }
+
+    /// A working subagent pins its live line under the spinner: the
+    /// delegate's name, its phase, its spend; the result takes it off.
+    #[test]
+    fn a_working_subagent_pins_its_line_under_the_spinner() {
+        let mut app = chat_app();
+        app.turn.running = true;
+        app.turn.processing = true;
+        let on = |app: &mut App, event| {
+            app.on_event(crate::events::UiEvent::Engine(event));
+        };
+        on(
+            &mut app,
+            OwnedEvent::ToolCallStart {
+                id: "c1".into(),
+                name: "subagent".into(),
+            },
+        );
+        on(
+            &mut app,
+            OwnedEvent::ToolCallArgsDelta {
+                id: "c1".into(),
+                delta: r#"{"name": "general-purpose", "prompt": "explore"}"#.into(),
+            },
+        );
+        on(
+            &mut app,
+            OwnedEvent::ToolStatus {
+                id: "c1".into(),
+                status: rhema_core::ToolStatus {
+                    phase: "writing output".into(),
+                    usage: Some(rhema_core::Usage {
+                        input_tokens: 45_000,
+                        output_tokens: 500,
+                        cached_input_tokens: 0,
+                    }),
+                    model: Some("m".into()),
+                },
+            },
+        );
+        // Wide enough that the pinned line never clips: the strip does
+        // not wrap, a narrow screen would cut the figures off.
+        let screen = {
+            let backend = TestBackend::new(100, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(&mut app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+        assert!(screen.contains("general-purpose"), "{screen}");
+        assert!(screen.contains("writing output"), "{screen}");
+        assert!(screen.contains("45k"), "{screen}");
+        assert!(screen.contains("0s"), "{screen}");
+
+        // The report landed: the live line goes, nothing pinned.
+        on(
+            &mut app,
+            OwnedEvent::ToolResult {
+                id: "c1".into(),
+                content: "done".into(),
+                is_error: false,
+                code: None,
+            },
+        );
+        let screen = screen_text(&mut app);
+        assert!(!screen.contains("writing output"), "{screen}");
+    }
+
+    /// A subagent call's transcript row reads as delegation: the robot
+    /// badge, the mark, the subagent and its task's head.
+    #[test]
+    fn a_subagent_call_renders_as_delegation() {
+        let mut app = chat_app();
+        app.transcript.apply(&OwnedEvent::ToolCallStart {
+            id: "c1".into(),
+            name: "subagent".into(),
+        });
+        app.transcript.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c1".into(),
+            delta: r#"{"name": "general-purpose", "prompt": "explore"}"#.into(),
+        });
+        app.transcript.apply(&OwnedEvent::ToolResult {
+            id: "c1".into(),
+            content: "done".into(),
+            is_error: false,
+            code: None,
+        });
+        let screen = screen_text(&mut app);
+        assert!(screen.contains("general-purpose — explore"), "{screen}");
+        assert!(screen.contains("✓"), "{screen}");
     }
 
     /// The providers page reports the stored key state: one row per

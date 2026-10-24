@@ -752,6 +752,31 @@ pub struct TurnState {
     /// preview stays hidden until the command has earned it — a second
     /// of runtime or a second line.
     pub tool_output_at: Option<std::time::Instant>,
+    /// The running `subagent` call's live line, when one works: its
+    /// phase and spend as the call reports them. Screen-facing only —
+    /// the transcript's tool rows and the session history never read it.
+    pub subagent: Option<SubagentLive>,
+}
+
+/// The live line for one running `subagent` call: opened by the call's
+/// first `ToolStatus`, replaced by its later ones, closed by its result.
+#[derive(Debug)]
+pub struct SubagentLive {
+    /// The call's correlation id.
+    pub id: String,
+    /// The subagent's name, read off the call's streamed arguments;
+    /// `None` while they have not reached the `name` field yet.
+    pub name: Option<String>,
+    /// The phase the subagent last reported ("thinking", "running").
+    pub phase: String,
+    /// The subagent's cumulative token spend, when it reports one.
+    pub usage: Option<Usage>,
+    /// The model the subagent runs on, when it reports one — the
+    /// catalog id its window and pricing are looked up by.
+    pub model: Option<String>,
+    /// When the subagent started working: the clock its elapsed time
+    /// reads.
+    pub started_at: std::time::Instant,
 }
 
 impl TurnState {
@@ -768,6 +793,7 @@ impl TurnState {
             thinking: String::new(),
             tool_output: String::new(),
             tool_output_at: None,
+            subagent: None,
         }
     }
 
@@ -798,6 +824,7 @@ impl TurnState {
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
+        self.subagent = None;
     }
 
     /// Answers the pending approval and clears the modal; without a
@@ -2541,9 +2568,56 @@ impl App {
                 self.turn.clear_tool_output();
             }
             OwnedEvent::ToolOutputDelta { chunk, .. } => self.turn.push_tool_output(chunk),
-            OwnedEvent::ToolResult { .. } => self.turn.clear_tool_output(),
+            OwnedEvent::ToolStatus { id, status } => self.track_subagent(id, status),
+            OwnedEvent::ToolResult { id, .. } => {
+                if self
+                    .turn
+                    .subagent
+                    .as_ref()
+                    .is_some_and(|subagent| subagent.id == *id)
+                {
+                    // The report landed: the live line goes, the
+                    // transcript's tool row carries the outcome now.
+                    self.turn.subagent = None;
+                }
+                self.turn.clear_tool_output();
+            }
             _ => {}
         }
+    }
+
+    /// Folds one streaming tool's status into the live subagent line:
+    /// the first status from a call opens it — the subagent is working,
+    /// its clock starts — and a status from another call replaces it,
+    /// the engine resolving calls one at a time. The subagent's name is
+    /// read off the transcript's streamed arguments; until they reach
+    /// the `name` field, the line reads the tool's name.
+    fn track_subagent(&mut self, id: &str, status: &rhema_core::ToolStatus) {
+        let fresh = self
+            .turn
+            .subagent
+            .as_ref()
+            .is_none_or(|subagent| subagent.id != id);
+        if fresh {
+            self.turn.subagent = Some(SubagentLive {
+                id: id.to_owned(),
+                name: self.transcript.call_name(id),
+                phase: status.phase.clone(),
+                usage: status.usage,
+                model: status.model.clone(),
+                started_at: std::time::Instant::now(),
+            });
+            return;
+        }
+        let Some(subagent) = self.turn.subagent.as_mut() else {
+            return;
+        };
+        if subagent.name.is_none() {
+            subagent.name = self.transcript.call_name(id);
+        }
+        subagent.phase = status.phase.clone();
+        subagent.usage = status.usage;
+        subagent.model = status.model.clone();
     }
 
     /// Cancels the running turn from the keyboard. The approval bridge
@@ -2672,6 +2746,26 @@ impl App {
             .iter()
             .find(|entry| entry.model.id == model && Some(entry.provider) == active)
             .and_then(|entry| entry.model.pricing)
+    }
+
+    /// The pricing of any catalog model by id — the running subagent's
+    /// model may differ from the session's, and its cost prices by its
+    /// own card. An unknown id (the catalog never fetched it) prices to
+    /// nothing.
+    pub(crate) fn model_pricing(&self, model: &str) -> Option<rhema_provider::Pricing> {
+        self.models
+            .iter()
+            .find(|entry| entry.model.id == model)
+            .and_then(|entry| entry.model.pricing)
+    }
+
+    /// The context window of any catalog model by id — the running
+    /// subagent's gauge is sized by its own card. `None` when unknown.
+    pub(crate) fn model_window(&self, model: &str) -> Option<u64> {
+        self.models
+            .iter()
+            .find(|entry| entry.model.id == model)
+            .and_then(|entry| entry.model.input_token_limit)
     }
 
     /// The context window of the current model, when known.

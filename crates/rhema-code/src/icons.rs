@@ -16,32 +16,39 @@ pub struct Icons {
     pub allowance: &'static str,
     /// The settings badge.
     pub settings: &'static str,
+    /// The subagent badge — a delegated worker's line.
+    pub robot: &'static str,
 }
 
 /// The plain set: every glyph renders in any terminal font. The thinking
-/// badge is the typographic asterism — a break for reflection; the
-/// folder badge is an open tray; the allowance badge the generic
-/// currency mark; the settings badge a gear pinned to its text
-/// presentation so it never arrives as color emoji.
+/// badge is the typographic asterism — a break for reflection; the folder
+/// badge is an open tray; the allowance badge the generic currency mark;
+/// the settings badge a gear pinned to its text presentation so it never
+/// arrives as color emoji. No plain font carries a robot, so the
+/// subagent badge is the delegation sign: `@` — work handed to another.
 pub const UNICODE: Icons = Icons {
     thinking: "⁂",
     context: unicode_gauge,
     folder: "❐",
     allowance: "¤",
     settings: "\u{2699}\u{fe0e}",
+    robot: "@",
 };
 
 /// The Nerd Font set: FontAwesome lightbulb, database, folder, and
 /// credit card — needs a patched font installed, or the badges read as
 /// tofu. Every glyph sits in the FA core range (F000–F2E0) the oldest
 /// patches carry; the brain this set once used sits where Nerd Fonts
-/// v3 dropped Material Design, and v3 fonts render nothing there.
+/// v3 dropped Material Design, and v3 fonts render nothing there. The
+/// robot is the one exception: the FA5 block (F544) the common v3
+/// patched fonts still carry, because the FA core range has no robot.
 pub const NERD: Icons = Icons {
     thinking: "\u{f0eb}",
     context: nerd_gauge,
     folder: "\u{f07b}",
     allowance: "\u{f09d}",
     settings: "\u{f013}",
+    robot: "\u{f544}",
 };
 
 /// Which flavor the footer draws with.

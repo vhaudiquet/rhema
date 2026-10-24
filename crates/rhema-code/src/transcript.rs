@@ -174,6 +174,23 @@ impl Transcript {
         self.lines.push(Line::Markdown(text));
     }
 
+    /// The `name` argument of the tool call `id`, parsed off its
+    /// streamed arguments — the subagent live line reads the delegate's
+    /// name here. `None` while the arguments have not reached the field.
+    pub fn call_name(&self, id: &str) -> Option<String> {
+        let args = self.lines.iter().rev().find_map(|line| match line {
+            Line::ToolCall {
+                id: line_id, args, ..
+            } if line_id == id => Some(args.as_str()),
+            _ => None,
+        })?;
+        serde_json::from_str::<serde_json::Value>(args)
+            .ok()?
+            .get("name")?
+            .as_str()
+            .map(str::to_owned)
+    }
+
     /// Folds one streaming event into the lines.
     pub fn apply(&mut self, event: &OwnedEvent) {
         match event {
@@ -185,6 +202,9 @@ impl Transcript {
             // strip previews it, and the whole text lands with the
             // result.
             OwnedEvent::ToolOutputDelta { .. } => {}
+            // A streaming tool's status feeds the live line, not the
+            // transcript.
+            OwnedEvent::ToolStatus { .. } => {}
             OwnedEvent::TextDelta(delta) => self.append_assistant(delta),
             OwnedEvent::ToolCallStart { id, name } => {
                 self.lines.push(Line::ToolCall {
@@ -296,6 +316,13 @@ pub fn describe(name: &str, args: &str) -> String {
         "bash" | "run_command" => match arg("command") {
             Some(command) => command.to_owned(),
             None => "(no command)".to_owned(),
+        },
+        // A subagent call reads as delegation: who was asked, then the
+        // task's first line — a whole prompt would drown the row.
+        "subagent" => match (arg("name"), arg("prompt").and_then(|p| p.lines().next())) {
+            (Some(name), Some(head)) => format!("{name} — {head}"),
+            (Some(name), None) => name.to_owned(),
+            _ => "(no subagent)".to_owned(),
         },
         other => other.to_owned(),
     }
@@ -597,6 +624,48 @@ mod tests {
     #[test]
     fn describe_falls_back_for_unknown_tools() {
         assert_eq!(describe("mystery", "{}"), "mystery");
+    }
+
+    #[test]
+    fn a_subagent_call_reads_as_delegation() {
+        assert_eq!(
+            describe(
+                "subagent",
+                r#"{"name": "general-purpose", "prompt": "fix the flaky test\nthen run the suite"}"#
+            ),
+            "general-purpose — fix the flaky test",
+            "the prompt rides as its first line only"
+        );
+        assert_eq!(
+            describe("subagent", r#"{"name": "scout"}"#),
+            "scout",
+            "no prompt yet reads as the name alone"
+        );
+        assert_eq!(describe("subagent", "{}"), "(no subagent)");
+    }
+
+    #[test]
+    fn a_call_name_parses_off_the_streamed_args() {
+        let mut transcript = Transcript::new();
+        transcript.apply(&OwnedEvent::ToolCallStart {
+            id: "c1".into(),
+            name: "subagent".into(),
+        });
+        assert_eq!(transcript.call_name("c1"), None, "no args yet");
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c1".into(),
+            delta: r#"{"name": "general-purpose""#.into(),
+        });
+        assert_eq!(transcript.call_name("c1"), None, "still open JSON");
+        transcript.apply(&OwnedEvent::ToolCallArgsDelta {
+            id: "c1".into(),
+            delta: r#", "prompt": "go" }"#.into(),
+        });
+        assert_eq!(
+            transcript.call_name("c1"),
+            Some("general-purpose".to_owned())
+        );
+        assert_eq!(transcript.call_name("c2"), None, "another call's id");
     }
 
     #[test]
