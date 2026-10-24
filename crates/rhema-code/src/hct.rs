@@ -15,7 +15,6 @@ pub(crate) const XYZ_TO_CAM16RGB: [[f64; 3]; 3] = [
     [-0.002079, 0.048952, 0.953127],
 ];
 
-#[allow(clippy::excessive_precision)]
 const SCALED_DISCOUNT_FROM_LINRGB: [[f64; 3]; 3] = [
     [
         0.001200833568784504,
@@ -34,7 +33,6 @@ const SCALED_DISCOUNT_FROM_LINRGB: [[f64; 3]; 3] = [
     ],
 ];
 
-#[allow(clippy::excessive_precision)]
 const LINRGB_FROM_SCALED_DISCOUNT: [[f64; 3]; 3] = [
     [1373.2198709594231, -1100.4251190754821, -7.278681089101213],
     [-271.815969077903, 559.6580465940733, -32.46047482791194],
@@ -46,7 +44,6 @@ const Y_FROM_LINRGB: [f64; 3] = [0.2126, 0.7152, 0.0722];
 /// Lints of the sRGB cube, one entry per critical plane: delinearized
 /// values the boundary bisection interpolates between. Digits exactly
 /// as the reference publishes them.
-#[allow(clippy::excessive_precision)]
 const CRITICAL_PLANES: [f64; 255] = [
     0.015176349177441876,
     0.045529047532325624,

@@ -498,24 +498,7 @@ impl Backend {
                 if let Some(key) = api_key {
                     provider = provider.with_api_key(key.clone());
                 }
-                let models = provider
-                    .list_models()
-                    .await
-                    .map_err(|err| err.to_string())?;
-                Ok(models
-                    .into_iter()
-                    .map(|model| ModelCard {
-                        display_name: model.id.clone(),
-                        // The server's own context report, so picker rows
-                        // and the footer carry a real window.
-                        id: model.id,
-                        description: String::new(),
-                        input_token_limit: model.context_length,
-                        output_token_limit: None,
-                        generation_methods: vec!["generateContent".to_owned()],
-                        pricing: None,
-                    })
-                    .collect())
+                provider.list_models().await.map_err(|err| err.to_string())
             }
         }
     }
@@ -2135,7 +2118,14 @@ impl App {
         }
         if let Some(id) = removed.and_then(|old| old.secret_ref) {
             if let Some(store) = self.secret_store() {
-                let _ = store.delete(&id);
+                // The login leaves the config either way; a keychain
+                // that refuses the delete leaves the secret behind, and
+                // that must not pass silently.
+                if let Err(err) = store.delete(&id) {
+                    self.error = Some(format!(
+                        "the login is removed, but its keychain entry could not be deleted: {err}"
+                    ));
+                }
             }
         }
         if let Err(err) = self.store.save(&self.config) {
@@ -2354,13 +2344,19 @@ impl App {
                         // it — the instance keeps only the entry's ref —
                         // and the file when it does not.
                         let secrets = self.secrets.as_deref();
+                        let mut keychain_delete_failure: Option<String> = None;
                         self.config.set_for_profile(Some(&tab), |settings| {
                             // A re-login replaces the instance wholesale;
-                            // its old keychain entry must not linger.
+                            // its old keychain entry must not linger — but
+                            // a store that refuses the delete must not
+                            // pass silently either, or the secret
+                            // outlives the login that named it.
                             if let Some(old) = settings.instances.get(&instance) {
                                 if let Some(id) = old.secret_ref.as_deref() {
                                     if let Some(store) = secrets {
-                                        let _ = store.delete(id);
+                                        if let Err(err) = store.delete(id) {
+                                            keychain_delete_failure = Some(err.to_string());
+                                        }
                                     }
                                 }
                             }
@@ -2379,6 +2375,11 @@ impl App {
                                 settings.place_key(&instance, key, secrets);
                             }
                         });
+                        if let Some(err) = keychain_delete_failure {
+                            self.error = Some(format!(
+                                "re-logged in, but the previous keychain entry could not be deleted: {err}"
+                            ));
+                        }
                         if let Err(err) = self.store.save(&self.config) {
                             if let Screen::Settings(settings) = &mut self.screen {
                                 if let Some(dialog) = &mut settings.dialog {
@@ -5650,7 +5651,7 @@ mod tests {
                 .as_ref()
                 .expect("the agent is rebuilt")
                 .system()
-                .contains("/host/ws"),
+                .is_some_and(|prompt| prompt.contains("/host/ws")),
             "the prompt names the sandbox-side workspace"
         );
     }

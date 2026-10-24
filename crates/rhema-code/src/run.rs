@@ -442,7 +442,8 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     if let Some(path) = &save {
         let hook_path = path.clone();
         agent.set_commit_hook(Some(Box::new(move |session: &Session| {
-            crate::sessions::write_session(&hook_path, session).map_err(|err| err.to_string())
+            crate::sessions::write_session(&hook_path, session)
+                .map_err(|err| rhema_core::CommitError(err.to_string()))
         })));
     }
 
@@ -1018,7 +1019,10 @@ mod exit_tests {
     #[test]
     fn a_provider_failure_is_exit_code_2() {
         let err = anyhow::Error::new(CodingAgentError::Agent(rhema_core::AgentError::Provider(
-            ProviderError::Api("anthropic api error (HTTP 429): rate_limit_error".into()),
+            ProviderError::Api {
+                message: "anthropic api error (HTTP 429): rate_limit_error".into(),
+                status: Some(429),
+            },
         )));
         assert_eq!(exit_code(&err), 2);
     }

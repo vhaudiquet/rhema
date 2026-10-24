@@ -303,7 +303,10 @@ fn skills(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
 
 fn system(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     // The owned copy ends the borrow before the transcript grows.
-    let prompt = app.agent.as_ref().map(|agent| agent.system().to_owned());
+    let prompt: Option<String> = app
+        .agent
+        .as_ref()
+        .and_then(|agent| agent.system().map(str::to_owned));
     match prompt {
         Some(prompt) => app.show_system_prompt(&prompt),
         None => app.push_notice("no agent yet; /system shows the prompt once one exists"),

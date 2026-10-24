@@ -70,7 +70,8 @@ pub fn spawn_turn(
     // (the next turn's revive closes it) instead of no record at all.
     if let Some(path) = save.clone() {
         agent.set_commit_hook(Some(Box::new(move |session: &Session| {
-            crate::sessions::write_session(&path, session).map_err(|err| err.to_string())
+            crate::sessions::write_session(&path, session)
+                .map_err(|err| rhema_core::CommitError(err.to_string()))
         })));
     }
     tokio::spawn(async move {

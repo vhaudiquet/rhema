@@ -34,7 +34,6 @@
 //! - `run` — terminal setup/teardown and the event loop
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 /// The transcript banner's version label, baked by `build.rs` from the
 /// tree the binary was built from: `v0.1.0` for a clean checkout at the
