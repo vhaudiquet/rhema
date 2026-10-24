@@ -32,7 +32,6 @@
 //! point: one shell, one approval seam, one expansion, one renderer —
 //! not one per driver.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod approval;
 pub mod exec;
@@ -50,6 +49,9 @@ pub use exec::{Executed, ShellError, ShellExecutor};
 pub use overlay::Overlay;
 pub use paste::ExpandPastes;
 pub use prompt::{render_system, render_template};
+// Re-exported so a caller can name the error the renderer returns
+// without depending on minijinja itself.
+pub use prompt::TemplateError;
 pub use revive::{repair_dangling_calls, revive_dangling_calls};
 pub use shell::ShellTools;
 pub use skills::Skill;

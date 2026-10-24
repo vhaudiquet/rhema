@@ -70,6 +70,12 @@ pub trait ShellExecutor: Send + Sync {
     ) -> Result<Executed, ShellError>;
 }
 
+/// How often the cancelled flag is sampled while a command's output is
+/// quiet — an `AtomicBool` carries no wakeup, so a silent command would
+/// otherwise never observe a flip until its deadline.
+#[cfg(feature = "local-shell")]
+const CANCEL_TICK: Duration = Duration::from_millis(100);
+
 /// The local executor: commands run as `bash -c` child processes on this
 /// host, streamed line by line, killed past their timeout (`kill_on_drop`
 /// so the dropped child handle kills a still-running process).
@@ -150,6 +156,17 @@ impl ShellExecutor for LocalShell {
                     }
                     // Both streams closed: only the exit status is left.
                     None => break,
+                },
+                // The cancelled flag carries no wakeup: without this tick
+                // a command that streams nothing would not observe a flip
+                // until its deadline. The tick is the cancellation check,
+                // not a timer kill — the budget belongs to the deadline.
+                _ = tokio::time::sleep(CANCEL_TICK) => {
+                    if cancelled.load(Ordering::Relaxed) {
+                        let _ = child.start_kill();
+                        let _ = child.wait().await;
+                        return Err(ShellError::Cancelled);
+                    }
                 }
             }
             if cancelled.load(Ordering::Relaxed) {

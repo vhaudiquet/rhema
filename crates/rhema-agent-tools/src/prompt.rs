@@ -18,6 +18,11 @@ use rhema_core::ToolSpec;
 
 use crate::skills::Skill;
 
+/// The template engine's error, re-exported under a crate-local name:
+/// [`render_system`] and [`render_template`] return it, and a caller
+/// should not need a minijinja dependency to name it.
+pub use minijinja::Error as TemplateError;
+
 /// Renders a SYSTEM.md template: `{{ workspace }}` becomes the
 /// workspace path, `skills` holds the discovered skills as `name`,
 /// `description`, and `path` fields, and `tools` holds the advertised
@@ -30,7 +35,7 @@ pub fn render_system(
     workspace: &Path,
     skills: &[Skill],
     tools: &[ToolSpec],
-) -> Result<String, minijinja::Error> {
+) -> Result<String, TemplateError> {
     let context = serde_json::json!({
         "workspace": workspace.display().to_string(),
         "skills": skills,
@@ -46,7 +51,7 @@ pub fn render_system(
 pub fn render_template(
     template: &str,
     context: &serde_json::Value,
-) -> Result<String, minijinja::Error> {
+) -> Result<String, TemplateError> {
     let mut env = Environment::new();
     // Block tags may sit on their own lines in a markdown template
     // without blank-line runoff.
