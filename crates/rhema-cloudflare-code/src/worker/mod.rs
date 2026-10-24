@@ -49,12 +49,12 @@ use rhema_agent_tools::DenyAll;
 use rhema_core::{Event, EventSink, ModelProvider, Session};
 use rhema_provider::Retrying;
 use rhema_provider_anthropic::AnthropicProvider;
-use rhema_rsd::{ResourceKey, Store};
+use rhema_rsd::{ResourceKey, Store, StoreError};
 
 use crate::backend::{BACKEND_VAR, SandboxBackend, SandboxEnv, URL_VAR, select_backend};
 use rhema_cloud_agent::{
-    AgentAssembly, ClientMessage, Sandbox, ServerMessage, SessionConfig, ShellSandbox,
-    WorkspaceSeed,
+    AgentAssembly, ClientMessage, Sandbox, SandboxError, ServerMessage, SessionConfig,
+    ShellSandbox, WorkspaceSeed,
 };
 use sandbox::SandboxSource;
 use storage::session_key;
@@ -98,12 +98,16 @@ async fn route(state: &State, env: &Env, req: Request) -> Result<Response> {
 }
 
 /// The class the `#[durable_object]` macro turns into a JS
-/// constructor. `missing_docs` is off here and only here: the macro
-/// generates the wasm-bindgen constructor and fetch wrapper, which no
-/// doc comment can reach, and this module holds nothing else. The
-/// sanctioned `unsafe` exception (the macro emits some) is scoped to
-/// this module too.
-#[allow(missing_docs)]
+/// constructor. `missing_docs` is expected to fire here and only here:
+/// the macro generates the wasm-bindgen constructor and fetch wrapper,
+/// which no doc comment can reach, and this module holds nothing else.
+/// The sanctioned `unsafe` exception (the macro emits some) is scoped
+/// to this module too.
+#[expect(
+    missing_docs,
+    reason = "the durable_object macro generates the \
+    wasm-bindgen constructor and fetch wrapper, which no doc comment can reach"
+)]
 mod do_class {
     use super::route;
     use worker::wasm_bindgen;
@@ -212,7 +216,7 @@ async fn chat_socket(state: &State, env: &Env) -> Result<Response> {
         backend: env_var(env, BACKEND_VAR),
         url: env_var(env, URL_VAR),
     })
-    .map_err(Error::from)?
+    .map_err(|err| Error::from(err.to_string()))?
     {
         SandboxBackend::Cloudflare => SandboxSource::Cloudflare(env.durable_object("SANDBOX")?),
         SandboxBackend::Http(base) => SandboxSource::Http(base),
@@ -312,7 +316,11 @@ async fn pump(
 /// One turn: assemble the agent from durable state, run it, checkpoint
 /// around it. Every piece comes from the DO's storage or its bindings;
 /// nothing reads a filesystem.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the turn's inputs are the DO's \
+    durable pieces, each from a different source; a struct would only move the list"
+)]
 async fn run_turn(
     live: Arc<Live>,
     channel: Arc<WsChannel>,
@@ -363,9 +371,11 @@ async fn run_turn(
     //    the shim DO wrapper or the shared HTTP client, per the
     //    backend the deployment selected.
     let sandbox = sandbox.for_session(&session_id, &sandbox_token);
-    if let Err(message) = ensure_seeded(&store, sandbox.as_ref(), &config).await {
+    if let Err(err) = ensure_seeded(&store, sandbox.as_ref(), &config).await {
         live.busy.store(false, Ordering::SeqCst);
-        live.send(&ServerMessage::Error { message });
+        live.send(&ServerMessage::Error {
+            message: err.to_string(),
+        });
         return;
     }
 
@@ -415,12 +425,15 @@ async fn run_turn(
         .turn_with_cancel(input, &mut sink, Arc::new(DenyAll), live.cancelled.clone())
         .await;
 
-    // 7. The post-turn checkpoint and the close.
+    // 7. The post-turn checkpoint and the close. A failed checkpoint is
+    //    reported to the client AND logged: the reply still leaves, but
+    //    the history only survives an eviction if the write did.
     match result {
         Ok(output) => {
-            if let Err(message) = checkpoint(&store, &key, &revision, agent.session()) {
+            if let Err(err) = checkpoint(&store, &key, &revision, agent.session()) {
+                worker::console_error!("checkpoint after a completed turn failed for {key}: {err}");
                 live.send(&ServerMessage::Error {
-                    message: format!("post-turn checkpoint failed: {message}"),
+                    message: format!("post-turn checkpoint failed: {err}"),
                 });
             }
             live.send(&ServerMessage::turn_complete(
@@ -431,12 +444,38 @@ async fn run_turn(
         }
         Err(err) => {
             // The history is whole; checkpoint so a follow-up continues
-            // instead of replaying.
-            let _ = checkpoint(&store, &key, &revision, agent.session());
+            // instead of replaying. Losing this write to a failed save
+            // is logged loudly: the next session would start from an
+            // older revision with no other signal.
+            if let Err(state) = checkpoint(&store, &key, &revision, agent.session()) {
+                worker::console_error!("checkpoint on a failed turn lost for {key}: {state}");
+            }
             live.send(&ServerMessage::turn_failed(err.to_string()));
         }
     }
     live.busy.store(false, Ordering::SeqCst);
+}
+
+/// Why making a turn's durable pieces failed: the DO's storage refused
+/// a checkpoint or meta write, or the sandbox refused the workspace
+/// seed. One type so every turn-loop failure reports the same way.
+#[derive(Debug, thiserror::Error)]
+pub enum TurnStateError {
+    /// The DO's SQLite storage layer refused a read or write.
+    #[error("session store: {0}")]
+    Store(#[from] StoreError),
+    /// The sandbox refused the workspace seed (a git clone that would
+    /// not clone, a sandbox that is not up).
+    #[error("workspace seed: {0}")]
+    Seed(#[from] SandboxError),
+    /// One skill's `SKILL.md` write failed; the name says which.
+    #[error("seeding skill {name}: {source}")]
+    Skill {
+        /// The skill whose body could not be written.
+        name: String,
+        /// The sandbox's refusal.
+        source: SandboxError,
+    },
 }
 
 /// Seeds the workspace the first time it is used — a git clone when the
@@ -448,28 +487,31 @@ async fn ensure_seeded(
     store: &DoStore,
     sandbox: &dyn Sandbox,
     config: &SessionConfig,
-) -> Result<(), String> {
+) -> Result<(), TurnStateError> {
     match store.meta("workspace:seeded") {
         Ok(Some(_)) => return Ok(()),
         Ok(None) => {}
-        Err(err) => return Err(err.to_string()),
+        Err(err) => return Err(err.into()),
     }
     if let Some(url) = &config.seed_git {
         sandbox
             .seed(&WorkspaceSeed::GitClone(url.clone()))
             .await
-            .map_err(|err| err.to_string())?;
+            .map_err(TurnStateError::from)?;
     }
     for skill in &config.skills {
         let path = format!("{}/.rhema/skills/{}/SKILL.md", config.workspace, skill.name);
         sandbox
             .write_file(&path, skill.body.as_bytes())
             .await
-            .map_err(|err| format!("seeding skill {}: {err}", skill.name))?;
+            .map_err(|err| TurnStateError::Skill {
+                name: skill.name.clone(),
+                source: err,
+            })?;
     }
     store
         .set_meta("workspace:seeded", "1")
-        .map_err(|err| err.to_string())
+        .map_err(TurnStateError::from)
 }
 
 /// Persists `session` under the key at `current + 1`. Called from the
@@ -481,7 +523,7 @@ fn checkpoint(
     key: &ResourceKey,
     current: &Mutex<u64>,
     session: &Session,
-) -> Result<(), String> {
+) -> Result<(), TurnStateError> {
     let mut current = current
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -490,9 +532,7 @@ fn checkpoint(
     let mut wrapped = rhema_rsd::Session::fresh(key.clone(), storage::now_millis());
     wrapped.core = session.clone();
     record.session = Some(wrapped);
-    store
-        .save(record, Some(*current))
-        .map_err(|err| err.to_string())?;
+    store.save(record, Some(*current))?;
     *current += 1;
     Ok(())
 }

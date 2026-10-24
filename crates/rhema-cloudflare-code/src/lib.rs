@@ -51,8 +51,6 @@
 //! and the subagents extension wait for storage-backed discovery; the
 //! alarm-driven step queue is a v2 refinement of turn driving.
 
-#![deny(missing_docs)]
-
 pub mod backend;
 
 pub use rhema_cloud_agent::{

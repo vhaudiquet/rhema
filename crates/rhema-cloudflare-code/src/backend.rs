@@ -37,23 +37,34 @@ pub struct SandboxEnv {
     pub url: Option<String>,
 }
 
+/// Why sandbox-backend selection failed: a deployment config mistake —
+/// a misspelled kind, a URL left unset — never a runtime fault.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BackendError {
+    /// `http` was selected but [`URL_VAR`] is absent or blank, so no
+    /// daemon address exists to run `bash` against.
+    #[error(
+        "{URL_VAR} is not set: {BACKEND_VAR}=http runs bash on the sandbox \
+         daemon at that URL (e.g. https://box.example:7600)"
+    )]
+    MissingUrl,
+    /// [`BACKEND_VAR`] named a kind this crate does not implement.
+    #[error("unknown {BACKEND_VAR} `{0}` (want `cloudflare` or `http`)")]
+    UnknownKind(String),
+}
+
 /// Decodes the deployment's backend choice. Unknown kinds and a
 /// missing URL under `http` are config errors, not silent fallbacks —
 /// a deployment that misspells `http` must not quietly get the DO
 /// shim.
-pub fn select_backend(env: &SandboxEnv) -> Result<SandboxBackend, String> {
+pub fn select_backend(env: &SandboxEnv) -> Result<SandboxBackend, BackendError> {
     match env.backend.as_deref().unwrap_or("cloudflare") {
         "cloudflare" => Ok(SandboxBackend::Cloudflare),
         "http" => match env.url.as_deref().filter(|url| !url.trim().is_empty()) {
             Some(url) => Ok(SandboxBackend::Http(url.to_owned())),
-            None => Err(format!(
-                "{URL_VAR} is not set: {BACKEND_VAR}=http runs bash on the sandbox \
-                 daemon at that URL (e.g. https://box.example:7600)"
-            )),
+            None => Err(BackendError::MissingUrl),
         },
-        other => Err(format!(
-            "unknown {BACKEND_VAR} `{other}` (want `cloudflare` or `http`)"
-        )),
+        other => Err(BackendError::UnknownKind(other.to_owned())),
     }
 }
 
@@ -101,7 +112,8 @@ mod tests {
             url: Some(String::new()),
         };
         for env in [missing, empty] {
-            let message = select_backend(&env).expect_err("the missing URL surfaces");
+            let err = select_backend(&env).expect_err("the missing URL surfaces");
+            let message = err.to_string();
             assert!(message.contains(URL_VAR), "names the var: {message}");
         }
     }
@@ -112,7 +124,8 @@ mod tests {
             backend: Some("vercel".into()),
             url: None,
         };
-        let message = select_backend(&env).expect_err("the unknown kind surfaces");
+        let err = select_backend(&env).expect_err("the unknown kind surfaces");
+        let message = err.to_string();
         assert!(
             message.contains(BACKEND_VAR) && message.contains("vercel"),
             "names the var and the value: {message}"

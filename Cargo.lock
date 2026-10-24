@@ -3385,6 +3385,7 @@ dependencies = [
  "rhema-transcript",
  "serde",
  "serde_json",
+ "thiserror 2.0.21",
  "wasm-bindgen-futures",
  "worker",
 ]
@@ -3492,6 +3493,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rhema-core",
+ "rhema-memory",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3627,6 +3629,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "rhema-agent-tools",
+ "rhema-sandbox",
  "serde",
  "serde_json",
  "tempfile",
