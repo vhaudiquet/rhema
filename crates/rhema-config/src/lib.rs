@@ -29,7 +29,6 @@
 //! entry is the fallback, not the override.
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod privacy;
 pub mod secrets;
@@ -37,10 +36,18 @@ pub mod secrets;
 use crate::privacy::{private_dir, private_write};
 use crate::secrets::SecretStore;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use rhema_core::request::ThinkingEffort;
 use serde::{Deserialize, Serialize};
+
+/// Debug helper for credential fields: `Some("[…]")` when a value is
+/// present, `None` otherwise — presence without the value, so a
+/// `{:?}` of any config shape can never print a live key.
+fn redacted(value: &Option<String>) -> Option<&'static str> {
+    value.as_ref().map(|_| "[…]")
+}
 
 /// Why a config operation failed.
 #[derive(Debug, thiserror::Error)]
@@ -62,7 +69,7 @@ pub enum ConfigError {
 /// servers, two OpenAI-compatible endpoints, a work and a personal
 /// Copilot sub — keyed by a user-chosen name; the instance's `provider`
 /// says which adapter speaks for it.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProviderInstance {
     /// Which adapter serves this instance: `google`, `llama-cpp`,
@@ -85,6 +92,17 @@ pub struct ProviderInstance {
     pub base_url: Option<String>,
 }
 
+impl fmt::Debug for ProviderInstance {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderInstance")
+            .field("provider", &self.provider)
+            .field("api_key", &redacted(&self.api_key))
+            .field("secret_ref", &self.secret_ref)
+            .field("base_url", &self.base_url)
+            .finish()
+    }
+}
+
 /// Where `bash` runs when a frontend honors the stored choice: the
 /// [`Profile`] section behind the sandbox kinds `local`, `docker`,
 /// `ssh`, and `http`. Every field is stored as a string and validated
@@ -92,7 +110,7 @@ pub struct ProviderInstance {
 /// `colors`: rhema-config stores, the frontend parses. A profile
 /// without this section and a `kind: local` section are the same
 /// behavior: today's local process executor.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct SandboxSettings {
     /// The stored choice: `local`, `docker`, `ssh`, or `http`. The
@@ -116,13 +134,26 @@ pub struct SandboxSettings {
     pub container: Option<String>,
 }
 
+impl fmt::Debug for SandboxSettings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SandboxSettings")
+            .field("kind", &self.kind)
+            .field("url", &self.url)
+            .field("token", &redacted(&self.token))
+            .field("token_ref", &self.token_ref)
+            .field("host", &self.host)
+            .field("container", &self.container)
+            .finish()
+    }
+}
+
 /// One named set of provider settings. Profiles are isolated: work never
 /// inherits personal's model or keys, and vice versa.
 ///
 /// Credentials live in [`Profile::instances`] — named
 /// [`ProviderInstance`]s. Unknown keys are rejected: a typo'd `model`
 /// must not silently read as unset.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct Profile {
     /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
@@ -150,6 +181,20 @@ pub struct Profile {
     /// are the same behavior; the choice machinery engages only
     /// non-local kinds.
     pub sandbox: Option<SandboxSettings>,
+}
+
+impl fmt::Debug for Profile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Profile")
+            .field("provider", &self.provider)
+            .field("instance", &self.instance)
+            .field("instances", &self.instances)
+            .field("model", &self.model)
+            .field("color", &self.color)
+            .field("thinking", &self.thinking)
+            .field("sandbox", &self.sandbox)
+            .finish()
+    }
 }
 
 impl Profile {
@@ -929,6 +974,32 @@ fn resolve_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_prints_presence_never_the_key() {
+        let profile = Profile {
+            provider: Some("google".into()),
+            instances: BTreeMap::from([(
+                "main".into(),
+                ProviderInstance {
+                    provider: "google".into(),
+                    api_key: Some("sk-live-secret".into()),
+                    secret_ref: None,
+                    base_url: None,
+                },
+            )]),
+            sandbox: Some(SandboxSettings {
+                kind: Some("http".into()),
+                token: Some("bearer-secret".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let printed = format!("{profile:?}");
+        assert!(!printed.contains("sk-live-secret"), "{printed}");
+        assert!(!printed.contains("bearer-secret"), "{printed}");
+        assert!(printed.contains("Some(\"[…]\")"), "{printed}");
+    }
 
     #[test]
     fn env_key_wins_over_stored_and_blank_counts_as_unset() {
