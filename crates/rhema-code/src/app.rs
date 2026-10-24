@@ -667,7 +667,9 @@ pub struct App {
     pub turn: TurnState,
     /// The chat transcript.
     pub transcript: Transcript,
-    /// Token accounting of the last finished turn.
+    /// Token accounting of the last finished turn, kept current during
+    /// one by the provider's live tally: the gauge moves as the turn
+    /// streams, not only when it ends.
     pub usage: Option<Usage>,
     /// The compaction benchmark from the last turn that ran with an
     /// agent present: request counts, flushes, and the prompt-cache
@@ -2551,7 +2553,10 @@ impl App {
     /// deltas fill the preview buffer; real output or a tool call clears
     /// it — the thinking block vanishes once the answer starts. A
     /// running command's lines fill the tool preview; its result or the
-    /// next call clears that.
+    /// next call clears that. The provider's running usage tally lands
+    /// in `usage` as it arrives: its prompt count already covers the
+    /// whole conversation, so the footer's gauge moves with the stream
+    /// instead of waiting for `StepEnd`.
     fn track_phase(&mut self, owned: &OwnedEvent) {
         match owned {
             OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => {
@@ -2582,6 +2587,7 @@ impl App {
                 }
                 self.turn.clear_tool_output();
             }
+            OwnedEvent::Usage(usage) => self.usage = Some(*usage),
             _ => {}
         }
     }
@@ -2779,12 +2785,12 @@ impl App {
             .and_then(|entry| entry.model.input_token_limit)
     }
 
-    /// The context footprint the footer shows: the last turn's reported
-    /// prompt plus its reply — the reply rides into the next request, so
-    /// both count toward the window — otherwise an estimate over the
-    /// loaded history, which already includes every message. A resumed
-    /// session has spent context before its first turn here, and an
-    /// empty one estimates to zero.
+    /// The context footprint the footer shows: the latest reported
+    /// tally — the last turn's final usage, or while a turn streams the
+    /// provider's running count, whose prompt already includes its reply
+    /// — otherwise an estimate over the loaded history, which already
+    /// includes every message. A resumed session has spent context
+    /// before its first turn here, and an empty one estimates to zero.
     pub fn context_used(&self) -> u64 {
         match &self.usage {
             Some(usage) => context_tokens(usage),
@@ -4743,6 +4749,32 @@ mod tests {
             cached_input_tokens: 0,
         });
         assert_eq!(h.app.context_used(), 503);
+    }
+
+    #[test]
+    fn the_live_usage_tally_moves_the_gauge_mid_turn() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.turn.running = true;
+        let (cancel, _cancelled) = tokio::sync::watch::channel(false);
+        h.app.begin_turn(cancel, None);
+
+        // The provider's running tally lands as an engine event: its
+        // prompt count already covers the whole conversation, so the
+        // gauge reads prompt plus the completion streamed so far.
+        h.app.on_event(UiEvent::Engine(OwnedEvent::Usage(Usage {
+            input_tokens: 400,
+            output_tokens: 7,
+            cached_input_tokens: 0,
+        })));
+        assert_eq!(h.app.context_used(), 407);
+
+        // A later frame replaces the tally — never adds to it.
+        h.app.on_event(UiEvent::Engine(OwnedEvent::Usage(Usage {
+            input_tokens: 400,
+            output_tokens: 19,
+            cached_input_tokens: 0,
+        })));
+        assert_eq!(h.app.context_used(), 419);
     }
 
     #[test]

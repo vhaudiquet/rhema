@@ -145,6 +145,7 @@ pub enum Event<'a> {
     ToolCallStart { id: &'a str, name: &'a str },
     ToolCallArgsDelta(&'a str),
     ToolResult { id: &'a str, content: &'a str, is_error: bool },
+    Usage(Usage),                  // provider-emitted running tally, cumulative per call
     StepEnd { usage: Usage, stop_reason: &'a StopReason },
 }
 pub trait EventSink { fn emit(&mut self, event: Event<'_>); }

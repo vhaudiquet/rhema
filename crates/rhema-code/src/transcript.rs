@@ -205,6 +205,9 @@ impl Transcript {
             // A streaming tool's status feeds the live line, not the
             // transcript.
             OwnedEvent::ToolStatus { .. } => {}
+            // The running usage tally feeds the footer gauge, not the
+            // transcript; the step's final usage rides `StepEnd`.
+            OwnedEvent::Usage(_) => {}
             OwnedEvent::TextDelta(delta) => self.append_assistant(delta),
             OwnedEvent::ToolCallStart { id, name } => {
                 self.lines.push(Line::ToolCall {

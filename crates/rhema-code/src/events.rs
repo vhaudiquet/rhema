@@ -103,6 +103,11 @@ pub enum OwnedEvent {
         /// The process exit code of command tools; `None` otherwise.
         code: Option<i32>,
     },
+    /// See [`Event::Usage`].
+    Usage(
+        /// The running cumulative tally for the in-flight call.
+        Usage,
+    ),
     /// See [`Event::StepEnd`].
     StepEnd {
         /// Token accounting for the model call.
@@ -147,6 +152,7 @@ impl From<&Event<'_>> for OwnedEvent {
                 is_error: *is_error,
                 code: *code,
             },
+            Event::Usage(usage) => Self::Usage(*usage),
             Event::StepEnd { usage, stop_reason } => Self::StepEnd {
                 usage: *usage,
                 stop_reason: (*stop_reason).clone(),
