@@ -176,6 +176,34 @@ impl CodingAgent {
                 None => stamped_system(config.base_system.as_deref(), tools.workspace(), &extra)?,
             },
         };
+        // The skills section's byte share of the system prompt: the
+        // same render without the skills list, subtracted. The
+        // transcript's usage breakdown splits the prompt on it; a
+        // verbatim replacement keeps zero (the split is unknowable).
+        let skills_bytes = match config.system {
+            Some(_) => 0,
+            None => {
+                let mut bare = ShellTools::builtin_specs();
+                bare.extend_from_slice(&extra);
+                rhema_agent_tools::render_system(
+                    config
+                        .base_system
+                        .as_deref()
+                        .unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD),
+                    tools.workspace(),
+                    &[],
+                    &bare,
+                )
+                .map(|without| system.len().saturating_sub(without.len()))
+                .unwrap_or(0)
+            }
+        };
+        if let Some(mirror) = &transcript {
+            mirror
+                .lock()
+                .expect("transcript lock poisoned")
+                .set_skills_bytes(skills_bytes);
+        }
         let agent = Agent::builder()
             .provider(provider)
             .resolver(resolver)
