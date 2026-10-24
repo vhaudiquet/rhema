@@ -222,7 +222,10 @@ async fn a_second_401_is_the_servers_answer() {
         .expect_err("both attempts fail");
     assert_eq!(
         err,
-        ProviderError::Api("copilot api error (HTTP 401): expired".into())
+        ProviderError::Api {
+            message: "copilot api error (HTTP 401): expired".into(),
+            status: Some(401),
+        }
     );
 }
 
@@ -251,7 +254,7 @@ async fn a_failed_exchange_names_the_error() {
         .complete(request, &mut sink)
         .await
         .expect_err("the exchange fails");
-    assert!(matches!(err, ProviderError::Api(_)), "{err:?}");
+    assert!(matches!(err, ProviderError::Api { .. }), "{err:?}");
 }
 
 #[tokio::test]

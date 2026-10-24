@@ -115,6 +115,7 @@ struct WireEndpoints {
 
 /// The GitHub Copilot chat models, driven by a GitHub OAuth token the
 /// provider exchanges for short-lived Copilot tokens as needed.
+#[derive(Debug)]
 pub struct CopilotProvider {
     github_url: String,
     api_base: String,
@@ -193,10 +194,16 @@ impl CopilotProvider {
         if !status.is_success() {
             return Err(api_error(status, &text));
         }
-        let parsed: TokenResponse = serde_json::from_str(&text)
-            .map_err(|err| ProviderError::Api(format!("malformed token response: {err}")))?;
+        let parsed: TokenResponse =
+            serde_json::from_str(&text).map_err(|err| ProviderError::Api {
+                message: format!("malformed token response: {err}"),
+                status: None,
+            })?;
         if parsed.token.is_empty() {
-            return Err(ProviderError::Api("token response carries no token".into()));
+            return Err(ProviderError::Api {
+                message: "token response carries no token".into(),
+                status: None,
+            });
         }
         let api_base = api_base_from_token(&parsed.token)
             .or_else(|| {
@@ -234,10 +241,10 @@ impl CopilotProvider {
             let text = response.text().await.unwrap_or_default();
             return Err(api_error(status, &text));
         }
-        let page: serde_json::Value = response
-            .json()
-            .await
-            .map_err(|err| ProviderError::Api(format!("malformed models page: {err}")))?;
+        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed models page: {err}"),
+            status: None,
+        })?;
         Ok(crate::wire::normalize_models(&page))
     }
 
@@ -266,10 +273,15 @@ impl CopilotProvider {
         if !status.is_success() {
             return Err(api_error(status, &text));
         }
-        let user: WireCopilotUser = serde_json::from_str(&text)
-            .map_err(|err| ProviderError::Api(format!("malformed user response: {err}")))?;
-        crate::wire::allowance(&user)
-            .ok_or_else(|| ProviderError::Api("user response carries no premium quota".into()))
+        let user: WireCopilotUser =
+            serde_json::from_str(&text).map_err(|err| ProviderError::Api {
+                message: format!("malformed user response: {err}"),
+                status: None,
+            })?;
+        crate::wire::allowance(&user).ok_or_else(|| ProviderError::Api {
+            message: "user response carries no premium quota".into(),
+            status: None,
+        })
     }
 }
 
@@ -313,14 +325,18 @@ fn api_base_from_token(token: &str) -> Option<String> {
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the OpenAI
-/// error shape's `error.message` when the body has it.
+/// error shape's `error.message` when the body has it, and carrying the
+/// HTTP status structurally for [`ProviderError::is_retryable`].
 fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
-    ProviderError::Api(format!(
-        "copilot api error (HTTP {}): {}",
-        status.as_u16(),
-        parsed.message(raw)
-    ))
+    ProviderError::Api {
+        message: format!(
+            "copilot api error (HTTP {}): {}",
+            status.as_u16(),
+            parsed.message(raw)
+        ),
+        status: Some(status.as_u16()),
+    }
 }
 
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot
@@ -329,7 +345,7 @@ fn network_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Other(format!("network error: {err}"))
+        ProviderError::Network(err.to_string())
     }
 }
 
@@ -343,8 +359,11 @@ fn feed_chunk(
     if payload.trim().is_empty() {
         return Ok(());
     }
-    let chunk: ChatCompletionChunk = serde_json::from_str(payload)
-        .map_err(|err| ProviderError::Api(format!("malformed SSE chunk: {err}")))?;
+    let chunk: ChatCompletionChunk =
+        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
+            message: format!("malformed SSE chunk: {err}"),
+            status: None,
+        })?;
     assembler.push(chunk, sink)
 }
 
@@ -358,6 +377,13 @@ fn now_epoch() -> u64 {
 
 #[async_trait]
 impl ModelProvider for CopilotProvider {
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport or the token exchange fails, [`ProviderError::Api`]
+    /// with the HTTP status on a non-2xx response (one 401-driven token
+    /// refresh and retry included), and [`ProviderError::Api`] without
+    /// one on a malformed stream chunk or a mid-stream error chunk.
     async fn complete(
         &self,
         req: ModelRequest,

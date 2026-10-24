@@ -30,6 +30,7 @@ const SLOW_DOWN: Duration = Duration::from_secs(5);
 
 /// The OAuth device grant against GitHub, producing the long-lived
 /// GitHub token a [`crate::CopilotProvider`] runs on.
+#[derive(Debug)]
 pub struct CopilotLogin {
     github_url: String,
     client_id: String,
@@ -105,17 +106,22 @@ impl CopilotLogin {
             .timeout(Duration::from_secs(20))
             .send()
             .await
-            .map_err(|err| ProviderError::Other(format!("network error: {err}")))?;
+            .map_err(|err| ProviderError::Network(err.to_string()))?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(ProviderError::Api(format!(
-                "copilot device registration failed (HTTP {}): {text}",
-                status.as_u16()
-            )));
+            return Err(ProviderError::Api {
+                message: format!(
+                    "copilot device registration failed (HTTP {}): {text}",
+                    status.as_u16()
+                ),
+                status: Some(status.as_u16()),
+            });
         }
-        serde_json::from_str(&text)
-            .map_err(|err| ProviderError::Api(format!("malformed device registration: {err}")))
+        serde_json::from_str(&text).map_err(|err| ProviderError::Api {
+            message: format!("malformed device registration: {err}"),
+            status: None,
+        })
     }
 
     /// One token poll: the granted token, or the reason it is not yet.
@@ -132,17 +138,23 @@ impl CopilotLogin {
             .timeout(Duration::from_secs(20))
             .send()
             .await
-            .map_err(|err| ProviderError::Other(format!("network error: {err}")))?;
+            .map_err(|err| ProviderError::Network(err.to_string()))?;
         let status = response.status();
         let text = response.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(ProviderError::Api(format!(
-                "copilot token poll failed (HTTP {}): {text}",
-                status.as_u16()
-            )));
+            return Err(ProviderError::Api {
+                message: format!(
+                    "copilot token poll failed (HTTP {}): {text}",
+                    status.as_u16()
+                ),
+                status: Some(status.as_u16()),
+            });
         }
-        let parsed: AccessTokenResponse = serde_json::from_str(&text)
-            .map_err(|err| ProviderError::Api(format!("malformed token poll: {err}")))?;
+        let parsed: AccessTokenResponse =
+            serde_json::from_str(&text).map_err(|err| ProviderError::Api {
+                message: format!("malformed token poll: {err}"),
+                status: None,
+            })?;
         if !parsed.access_token.is_empty() {
             return Ok(Ok(parsed.access_token));
         }

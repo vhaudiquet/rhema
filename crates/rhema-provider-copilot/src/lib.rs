@@ -23,7 +23,8 @@
 //! }
 //!
 //! # async fn demo() -> Result<(), rhema_core::ProviderError> {
-//! let provider = CopilotProvider::new(std::env::var("GITHUB_COPILOT_TOKEN").unwrap());
+//! let provider =
+//!     CopilotProvider::new(std::env::var("GITHUB_COPILOT_TOKEN").expect("GITHUB_COPILOT_TOKEN is set"));
 //! let request = rhema_core::ModelRequest {
 //!     system: Some("be terse".into()),
 //!     messages: vec![Message::text(Role::User, "reply with exactly: ok")],
@@ -49,7 +50,6 @@
 //!   shared `InteractiveLogin` seam
 
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 pub mod login;
 pub mod provider;
