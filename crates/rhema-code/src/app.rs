@@ -820,8 +820,9 @@ pub struct TurnState {
     /// of runtime or a second line.
     pub tool_output_at: Option<std::time::Instant>,
     /// The running `subagent` call's live line, when one works: its
-    /// phase and spend as the call reports them. Screen-facing only —
-    /// the transcript's tool rows and the session history never read it.
+    /// phase, context, and spend as the call reports them.
+    /// Screen-facing only — the transcript's tool rows and the session
+    /// history never read it.
     pub subagent: Option<SubagentLive>,
 }
 
@@ -836,8 +837,13 @@ pub struct SubagentLive {
     pub name: Option<String>,
     /// The phase the subagent last reported ("thinking", "running").
     pub phase: String,
-    /// The subagent's cumulative token spend, when it reports one.
-    pub usage: Option<Usage>,
+    /// The subagent's current model call's usage — the figure its
+    /// context gauge sizes against its model's window — when it reports
+    /// one.
+    pub context: Option<Usage>,
+    /// The subagent's cumulative token spend across its model calls —
+    /// the figure its cost prices — when it reports one.
+    pub spent: Option<Usage>,
     /// The model the subagent runs on, when it reports one — the
     /// catalog id its window and pricing are looked up by.
     pub model: Option<String>,
@@ -2743,7 +2749,8 @@ impl App {
                 id: id.to_owned(),
                 name: self.transcript.call_name(id),
                 phase: status.phase.clone(),
-                usage: status.usage,
+                context: status.context,
+                spent: status.spent,
                 model: status.model.clone(),
                 started_at: std::time::Instant::now(),
             });
@@ -2756,7 +2763,8 @@ impl App {
             subagent.name = self.transcript.call_name(id);
         }
         subagent.phase = status.phase.clone();
-        subagent.usage = status.usage;
+        subagent.context = status.context;
+        subagent.spent = status.spent;
         subagent.model = status.model.clone();
     }
 

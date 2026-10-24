@@ -84,7 +84,7 @@ The agent always has one subagent with nothing defined: `general-purpose`, a fre
 
 When the agent delegates, the subagent runs its own conversation with the same workspace tools in the same workspace, its report lands in the conversation as the tool's result, and the status strip pins one live line for it while it works. Inner commands ask for approval exactly like the main agent's do. A subagent never spawns further subagents.
 
-While a subagent works, the status strip pins a live line under the spinner — the robot badge, the subagent's name, its phase (`thinking`, `running`, `writing output`), the context its model calls have spent against its model's window, the cost of that spend, and its age. Its transcript row reads as delegation too: the robot badge, then the subagent and the task's first line. With the Nerd Font icon flavor the badge is the robot glyph; the plain flavor marks it with `@`.
+While a subagent works, the status strip pins a live line under the spinner — the robot badge, the subagent's name, its phase (`thinking`, `running`, `writing output`), the context its current model call carries against its model's window, the cost of everything its calls have spent so far, and its age. Its transcript row reads as delegation too: the robot badge, then the subagent and the task's first line. With the Nerd Font icon flavor the badge is the robot glyph; the plain flavor marks it with `@`.
 
 ### Where bash runs
 

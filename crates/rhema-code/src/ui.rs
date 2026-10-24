@@ -1762,9 +1762,10 @@ fn cost_text(cost: f64) -> String {
 
 /// The pinned live line of a working subagent: the robot badge and its
 /// spinner, the delegate's name, the phase it last reported, the
-/// context its model calls have spent against its model's window, the
-/// cost that spend prices to, and its age. A figure the catalog cannot
-/// price or size degrades to what is known — tokens alone, no cost.
+/// context its current model call carries against its model's window,
+/// the cost its cumulative spend prices to, and its age. A figure the
+/// catalog cannot price or size degrades to what is known — tokens
+/// alone, no cost.
 fn subagent_line(app: &App, subagent: &crate::app::SubagentLive, theme: &Theme) -> Line<'static> {
     let spinner = spinner_frame(subagent.started_at.elapsed());
     let mut spans = vec![
@@ -1783,8 +1784,10 @@ fn subagent_line(app: &App, subagent: &crate::app::SubagentLive, theme: &Theme) 
         .fg(theme.info),
         Span::raw(format!(" · {}", subagent.phase)).fg(theme.running),
     ];
-    if let Some(usage) = subagent.usage {
-        let mut figure = format_tokens(Some(crate::app::context_tokens(&usage)));
+    // The gauge reads the current call only: summed across steps, the
+    // re-sent prompts would show a context many times its real size.
+    if let Some(context) = subagent.context {
+        let mut figure = format_tokens(Some(crate::app::context_tokens(&context)));
         let window = subagent
             .model
             .as_deref()
@@ -1793,15 +1796,19 @@ fn subagent_line(app: &App, subagent: &crate::app::SubagentLive, theme: &Theme) 
             figure.push_str(&format!("/{}", format_tokens(Some(window))));
         }
         spans.push(Span::raw(format!(" · {figure}")).fg(theme.text3));
-        if let Some(pricing) = subagent
-            .model
-            .as_deref()
-            .and_then(|model| app.model_pricing(model))
-        {
+    }
+    // The cost reads the cumulative spend: every re-sent prompt bills
+    // again, so the spend legitimately outgrows the window.
+    if let Some(pricing) = subagent
+        .model
+        .as_deref()
+        .and_then(|model| app.model_pricing(model))
+    {
+        if let Some(spent) = subagent.spent {
             let cost = pricing.cost(
-                u64::from(usage.input_tokens),
-                u64::from(usage.output_tokens),
-                u64::from(usage.cached_input_tokens),
+                u64::from(spent.input_tokens),
+                u64::from(spent.output_tokens),
+                u64::from(spent.cached_input_tokens),
             );
             spans.push(Span::raw(format!(" · {}", cost_text(cost))).fg(theme.text3));
         }
@@ -3024,12 +3031,32 @@ mod scroll_tests {
     }
 
     /// A working subagent pins its live line under the spinner: the
-    /// delegate's name, its phase, its spend; the result takes it off.
+    /// delegate's name, its phase, its current context against the
+    /// model's window, its spend priced to cost; the result takes it
+    /// off.
     #[test]
     fn a_working_subagent_pins_its_line_under_the_spinner() {
         let mut app = chat_app();
         app.turn.running = true;
         app.turn.processing = true;
+        // The catalog card the gauge sizes and the cost prices by.
+        app.models.push(CatalogModel {
+            provider: "google",
+            instance: None,
+            model: rhema_provider::ModelCard {
+                id: "m".into(),
+                display_name: "m".into(),
+                description: String::new(),
+                input_token_limit: Some(1_000_000),
+                output_token_limit: None,
+                generation_methods: vec!["generateContent".to_owned()],
+                pricing: Some(rhema_provider::Pricing {
+                    input_per_mtok: 1.0,
+                    output_per_mtok: 5.0,
+                    cached_input_per_mtok: None,
+                }),
+            },
+        });
         let on = |app: &mut App, event| {
             app.on_event(crate::events::UiEvent::Engine(event));
         };
@@ -3053,9 +3080,14 @@ mod scroll_tests {
                 id: "c1".into(),
                 status: rhema_core::ToolStatus {
                     phase: "writing output".into(),
-                    usage: Some(rhema_core::Usage {
+                    context: Some(rhema_core::Usage {
                         input_tokens: 45_000,
                         output_tokens: 500,
+                        cached_input_tokens: 0,
+                    }),
+                    spent: Some(rhema_core::Usage {
+                        input_tokens: 410_000,
+                        output_tokens: 6_000,
                         cached_input_tokens: 0,
                     }),
                     model: Some("m".into()),
@@ -3077,7 +3109,11 @@ mod scroll_tests {
         };
         assert!(screen.contains("general-purpose"), "{screen}");
         assert!(screen.contains("writing output"), "{screen}");
-        assert!(screen.contains("45k"), "{screen}");
+        // The gauge reads the current call's context, sized by the
+        // model's window.
+        assert!(screen.contains("45k/1.0M"), "{screen}");
+        // The cost prices the cumulative spend, not the context.
+        assert!(screen.contains("$0.44"), "{screen}");
         assert!(screen.contains("0s"), "{screen}");
 
         // The report landed: the live line goes, nothing pinned.

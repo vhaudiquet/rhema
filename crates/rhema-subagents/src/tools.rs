@@ -203,9 +203,8 @@ impl SubagentTools {
                 .clone()
                 .unwrap_or_else(|| self.default_model.clone()),
             phase: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
+            context: None,
+            spent: rhema_core::Usage::default(),
         };
 
         for _ in 0..def.max_steps() {
@@ -317,8 +316,9 @@ impl ToolResolver for SubagentTools {
 }
 
 /// Renders the inner turn's lifecycle into the call's own status: the
-/// phase the subagent is in and what its model calls have spent so far.
-/// The inner turn's text and tool output go nowhere — the subagent is
+/// phase the subagent is in, the context its current model call
+/// carries, and what its model calls have spent so far. The inner
+/// turn's text and tool output go nowhere — the subagent is
 /// its own line on the parent's screen, and its report is the result;
 /// the lifecycle events themselves stay private, the status is
 /// screen-facing, never history. A nested subagent's status is dropped:
@@ -329,10 +329,16 @@ struct Forwarder<'a> {
     model: String,
     /// The phase last reported; only transitions are sent.
     phase: Option<&'static str>,
-    /// The inner model calls' cumulative token spend.
-    input_tokens: u32,
-    output_tokens: u32,
-    cached_input_tokens: u32,
+    /// The current model call's usage: the latest running tally, held
+    /// past [`Event::StepEnd`](rhema_core::Event::StepEnd) until the
+    /// next call's first frame replaces it — the reply rides into the
+    /// next request, so input + output stays the right current-context
+    /// figure between steps.
+    context: Option<rhema_core::Usage>,
+    /// Cumulative spend across the call's steps. Only a `StepEnd` adds
+    /// into it: the running frames already cover their step's final
+    /// tally, and summing them would double-count.
+    spent: rhema_core::Usage,
 }
 
 /// The phase words a status line reads, in the order the inner turn
@@ -352,15 +358,12 @@ impl Forwarder<'_> {
         self.send();
     }
 
-    /// Sends the current phase and spend.
+    /// Sends the current phase, context, and spend.
     fn send(&mut self) {
         self.progress.status(rhema_core::ToolStatus {
             phase: self.phase.unwrap_or(THINKING).to_owned(),
-            usage: Some(rhema_core::Usage {
-                input_tokens: self.input_tokens,
-                output_tokens: self.output_tokens,
-                cached_input_tokens: self.cached_input_tokens,
-            }),
+            context: self.context,
+            spent: Some(self.spent),
             model: Some(self.model.clone()),
         });
     }
@@ -383,22 +386,31 @@ impl EventSink for Forwarder<'_> {
             Event::ToolCallStart { .. } => self.report(RUNNING),
             Event::ToolResult { .. } => self.report(THINKING),
             Event::StepEnd { usage, .. } => {
-                self.input_tokens = self.input_tokens.saturating_add(usage.input_tokens);
-                self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
-                self.cached_input_tokens = self
+                self.spent.input_tokens =
+                    self.spent.input_tokens.saturating_add(usage.input_tokens);
+                self.spent.output_tokens =
+                    self.spent.output_tokens.saturating_add(usage.output_tokens);
+                self.spent.cached_input_tokens = self
+                    .spent
                     .cached_input_tokens
                     .saturating_add(usage.cached_input_tokens);
+                self.context = Some(usage);
                 self.send();
             }
             // A nested subagent's status stays private to it, argument
             // streaming is not a phase of its own, and the inner
-            // output's lines ride no channel. The running usage tally
-            // is gauge material; the final accounting still rides
-            // `StepEnd`.
-            Event::Usage(_)
-            | Event::ToolStatus { .. }
+            // output's lines ride no channel. A running tally replaces
+            // the context — it is the current call's figure, never a
+            // spend to accumulate; the accounting still rides `StepEnd`.
+            Event::ToolStatus { .. }
             | Event::ToolCallArgsDelta { .. }
             | Event::ToolOutputDelta { .. } => {}
+            Event::Usage(usage) => {
+                if self.context.as_ref() != Some(&usage) {
+                    self.context = Some(usage);
+                    self.send();
+                }
+            }
         }
     }
 }
@@ -483,9 +495,8 @@ mod tests {
             progress: &mut collected,
             model: "parent-model".into(),
             phase: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
+            context: None,
+            spent: rhema_core::Usage::default(),
         };
         // Reasoning first, then a tool, its output, the step's spend,
         // then the report being written.
@@ -517,10 +528,16 @@ mod tests {
         assert_eq!(phases, vec![THINKING, RUNNING, RUNNING, WRITING]);
         let last = collected.statuses.last().unwrap();
         assert_eq!(last.model.as_deref(), Some("parent-model"));
-        let usage = last.usage.unwrap();
-        assert_eq!(usage.input_tokens, 100);
-        assert_eq!(usage.output_tokens, 20);
-        assert_eq!(usage.cached_input_tokens, 80);
+        // The step's call is the current context...
+        let context = last.context.unwrap();
+        assert_eq!(context.input_tokens, 100);
+        assert_eq!(context.output_tokens, 20);
+        assert_eq!(context.cached_input_tokens, 80);
+        // ...and the only spend so far.
+        let spent = last.spent.unwrap();
+        assert_eq!(spent.input_tokens, 100);
+        assert_eq!(spent.output_tokens, 20);
+        assert_eq!(spent.cached_input_tokens, 80);
 
         // The inner output rides no channel: the subagent is its own
         // line, its report the result.
@@ -537,12 +554,117 @@ mod tests {
             progress: &mut collected,
             model: "m".into(),
             phase: None,
-            input_tokens: 0,
-            output_tokens: 0,
-            cached_input_tokens: 0,
+            context: None,
+            spent: rhema_core::Usage::default(),
         };
         sink.emit(Event::ThinkingDelta("a"));
         sink.emit(Event::ThinkingDelta("b"));
         assert_eq!(collected.statuses.len(), 1);
+    }
+
+    /// A running tally is the current call's context, never a spend: a
+    /// mid-call frame replaces the context without touching the spend,
+    /// and only the step's end bills into the spend. The context holds
+    /// past a `StepEnd` — the reply rides into the next request — until
+    /// the next call's first frame replaces it.
+    #[test]
+    fn a_running_tally_is_context_and_only_a_step_end_is_spend() {
+        let mut collected = Collector {
+            lines: Vec::new(),
+            statuses: Vec::new(),
+        };
+        let mut sink = Forwarder {
+            progress: &mut collected,
+            model: "m".into(),
+            phase: None,
+            context: None,
+            spent: rhema_core::Usage::default(),
+        };
+        sink.emit(Event::ThinkingDelta("hmm"));
+        sink.emit(Event::Usage(rhema_core::Usage {
+            input_tokens: 40_000,
+            output_tokens: 10,
+            cached_input_tokens: 0,
+        }));
+        sink.emit(Event::StepEnd {
+            usage: rhema_core::Usage {
+                input_tokens: 40_000,
+                output_tokens: 500,
+                cached_input_tokens: 0,
+            },
+            stop_reason: &rhema_core::StopReason::ToolUse,
+        });
+        sink.emit(Event::ToolCallStart {
+            id: "c2",
+            name: "bash",
+        });
+        sink.emit(Event::Usage(rhema_core::Usage {
+            input_tokens: 41_000,
+            output_tokens: 20,
+            cached_input_tokens: 40_000,
+        }));
+        drop(sink);
+
+        // The thinking status carried the running frame as its context
+        // and nothing billed yet.
+        let thinking = &collected.statuses[1];
+        assert_eq!(thinking.phase, THINKING);
+        assert_eq!(
+            thinking.context,
+            Some(rhema_core::Usage {
+                input_tokens: 40_000,
+                output_tokens: 10,
+                cached_input_tokens: 0,
+            })
+        );
+        assert_eq!(
+            thinking.spent,
+            Some(rhema_core::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cached_input_tokens: 0,
+            })
+        );
+
+        // The step's end billed the spend and held the context; the
+        // running status kept both...
+        let running = &collected.statuses[3];
+        assert_eq!(running.phase, RUNNING);
+        assert_eq!(
+            running.context,
+            Some(rhema_core::Usage {
+                input_tokens: 40_000,
+                output_tokens: 500,
+                cached_input_tokens: 0,
+            })
+        );
+        assert_eq!(
+            running.spent,
+            Some(rhema_core::Usage {
+                input_tokens: 40_000,
+                output_tokens: 500,
+                cached_input_tokens: 0,
+            })
+        );
+
+        // ...and the next call's frame replaced the context, the spend
+        // still counting every step.
+        let next = collected.statuses.last().unwrap();
+        assert_eq!(
+            next.context,
+            Some(rhema_core::Usage {
+                input_tokens: 41_000,
+                output_tokens: 20,
+                cached_input_tokens: 40_000,
+            })
+        );
+        assert_eq!(
+            next.spent,
+            Some(rhema_core::Usage {
+                input_tokens: 40_000,
+                output_tokens: 500,
+                cached_input_tokens: 0,
+            })
+        );
     }
 }

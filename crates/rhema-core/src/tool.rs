@@ -156,7 +156,8 @@ pub trait ToolResolver: Send + Sync {
 }
 
 /// The live status of a streaming tool call's inner work: what that work
-/// is doing now and what it has spent, when the tool knows. Status, not
+/// is doing now, the context its current model call carries, and what
+/// its model calls have spent, when the tool knows. Status, not
 /// output — a sink shows it beside the call, and it never lands in the
 /// call's output or the session history.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,9 +165,17 @@ pub struct ToolStatus {
     /// The phase the work is in, in the few words a status line reads
     /// ("thinking", "running").
     pub phase: String,
-    /// The tokens the work's model calls have spent so far, cumulative
-    /// over the call, when the tool runs model calls of its own.
-    pub usage: Option<crate::output::Usage>,
+    /// The work's current model call's usage — prompt plus reply in
+    /// flight — when the tool runs model calls of its own. The figure a
+    /// context-window gauge sizes against [`ToolStatus::model`]'s
+    /// window: each step re-sends the whole prompt, so this is the only
+    /// input count that reads as "how full is the context now".
+    pub context: Option<crate::output::Usage>,
+    /// The work's cumulative token spend across every model call so
+    /// far, when the tool runs model calls of its own. The figure cost
+    /// prices — every re-sent prompt is billed again, so the spend
+    /// legitimately grows past the context window.
+    pub spent: Option<crate::output::Usage>,
     /// The model the work runs on — the catalog id a UI prices and sizes
     /// it by — when the tool knows it. It may differ from the caller's
     /// model.
