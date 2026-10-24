@@ -146,21 +146,7 @@ fn catalog_fetch(
             if let Some(api_key) = profile.api_key("llama-cpp", secrets) {
                 llama = llama.with_api_key(api_key);
             }
-            tokio::spawn(async move {
-                let models = llama.list_models().await?;
-                Ok(models
-                    .into_iter()
-                    .map(|m| ModelCard {
-                        id: m.id.clone(),
-                        display_name: m.id.clone(),
-                        description: String::new(),
-                        input_token_limit: m.context_length,
-                        output_token_limit: None,
-                        generation_methods: vec!["generateContent".to_owned()],
-                        pricing: None,
-                    })
-                    .collect())
-            })
+            tokio::spawn(async move { llama.list_models().await })
         }
         "openrouter" => {
             let key = profile.api_key("openrouter", secrets)?;
