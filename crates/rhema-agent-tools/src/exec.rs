@@ -11,6 +11,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+#[cfg(feature = "local-shell")]
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -82,6 +83,7 @@ pub struct LocalShell {
     env: Arc<[(String, String)]>,
 }
 
+#[cfg(feature = "local-shell")]
 impl Default for LocalShell {
     fn default() -> Self {
         Self { env: Arc::from([]) }
