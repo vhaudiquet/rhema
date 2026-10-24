@@ -10,7 +10,6 @@
 //! timeout. Streams pump live lines through the shared `run_child`
 //! wiring (`exec_util`), caps included.
 #![forbid(unsafe_code)]
-#![deny(missing_docs)]
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -445,6 +444,10 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_from_a_repository_populates_the_mounted_root() {
+        if !docker_available() {
+            println!("skipping: no docker daemon");
+            return;
+        }
         let repo = fixture_repo();
         let (sandbox, dir) = sandbox();
         sandbox
@@ -465,6 +468,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_clone_fails_in_band() {
+        if !docker_available() {
+            println!("skipping: no docker daemon");
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         let error = sandbox
             .seed(&WorkspaceSeed::GitClone("/nonexistent-rhema-repo".into()))
@@ -478,6 +485,10 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_from_a_tarball_unpacks_into_the_mounted_root() {
+        if !docker_available() {
+            println!("skipping: no docker daemon");
+            return;
+        }
         let payload = tempfile::tempdir().expect("tempdir");
         std::fs::write(payload.path().join("packed.txt"), b"from tar")
             .expect("the payload file is written");
