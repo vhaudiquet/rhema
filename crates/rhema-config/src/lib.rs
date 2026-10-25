@@ -35,7 +35,7 @@ pub mod secrets;
 
 use crate::privacy::{private_dir, private_write};
 use crate::secrets::SecretStore;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -745,6 +745,18 @@ pub struct Config {
     /// it is the consumer's question.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_sandbox_by_workspace: BTreeMap<String, String>,
+    /// Where the first-run onboarding stands. `Some(false)` — the
+    /// wizard opened but did not finish — reopens it on the next
+    /// start; `Some(true)` never shows it again. `None`, the default,
+    /// is a config that predates the wizard and reads as onboarded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub onboarded: Option<bool>,
+    /// Skill folder names whose triggers must not reach the system
+    /// prompt: the off switch behind the settings Skills page and the
+    /// onboarding step. Discovered-but-disabled skills still list
+    /// (greyed) everywhere; only the prompt filters them out.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub skills_disabled: BTreeSet<String>,
 }
 
 /// The profile the flags and stores fall back to: fresh setups seed it,
@@ -773,6 +785,8 @@ impl Default for Config {
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
             last_sandbox_by_workspace: BTreeMap::new(),
+            onboarded: None,
+            skills_disabled: BTreeSet::new(),
         }
     }
 }
@@ -1002,6 +1016,36 @@ mod tests {
     }
 
     #[test]
+    fn onboarding_and_disabled_skills_round_trip_and_default_to_quiet() {
+        // The defaults are the pre-wizard quiet state: an old config
+        // reads as onboarded, and no skill is off.
+        let fresh = Config::default();
+        assert_eq!(fresh.onboarded, None);
+        assert!(fresh.skills_disabled.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let config = Config {
+            onboarded: Some(false),
+            skills_disabled: BTreeSet::from(["commit".to_owned(), "review".to_owned()]),
+            ..Config::default()
+        };
+        Config::save_to(&path, &config).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.onboarded, Some(false));
+        assert_eq!(
+            loaded.skills_disabled,
+            BTreeSet::from(["commit".to_owned(), "review".to_owned()])
+        );
+        // A file written before either field existed keeps reading as
+        // the quiet state, not as an unfinished wizard.
+        std::fs::write(&path, "profiles: {}\n").unwrap();
+        let old = Config::load_from(&path).unwrap();
+        assert_eq!(old.onboarded, None);
+        assert!(old.skills_disabled.is_empty());
+    }
+
+    #[test]
     fn env_key_wins_over_stored_and_blank_counts_as_unset() {
         let env = |name: &str| match name {
             "GEMINI_API_KEY" => Some("  ".into()),
@@ -1183,6 +1227,8 @@ mod tests {
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
             last_sandbox_by_workspace: BTreeMap::new(),
+            onboarded: None,
+            skills_disabled: BTreeSet::new(),
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -1528,6 +1574,8 @@ mod tests {
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
             last_sandbox_by_workspace: BTreeMap::new(),
+            onboarded: None,
+            skills_disabled: BTreeSet::new(),
         };
         let work = config.effective(Some("work"));
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
@@ -1753,6 +1801,8 @@ mod tests {
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
             last_sandbox_by_workspace: BTreeMap::new(),
+            onboarded: None,
+            skills_disabled: BTreeSet::new(),
         };
         let store = VolatileSecretStore::new();
         assert_eq!(config.migrate_secrets(&store), 2);
