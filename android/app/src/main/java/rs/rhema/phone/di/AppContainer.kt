@@ -2,6 +2,7 @@ package rs.rhema.phone.di
 
 import android.content.Context
 import rs.rhema.phone.data.AgentIdentityRepository
+import rs.rhema.phone.diagnostics.DiagLog
 import rs.rhema.phone.data.SessionCache
 import rs.rhema.phone.data.SettingsRepository
 import rs.rhema.phone.data.StatusRepository
@@ -37,6 +38,10 @@ class AppContainer(context: Context) {
     val identity = AgentIdentityRepository(appContext.rhemaStore, api, json)
 
     val notifier = Notifier(appContext)
+
+    // The workers' flight recorder: every run logs its outcome here, and
+    // the diagnostics screen reads it back.
+    val diag = DiagLog()
 
     fun schedulePeriodicWork() = schedulePeriodicWork(appContext)
 }

@@ -9,10 +9,10 @@ manages the device fleet the claw keeps.
 ## What it does
 
 - **Settings**: a nav of submenus mirroring the web UI's settings
-  sidebar — the "Phone" group (Status reporting, Devices) and the "Claw"
-  group (Model providers, Connection), one page per entry behind a back
-  arrow. First launch is the exception: it lands straight on the
-  connection page until a base URL is saved and validated with
+  sidebar — the "Phone" group (Status reporting, Devices, Diagnostics)
+  and the "Claw" group (Model providers, Connection), one page per entry
+  behind a back arrow. First launch is the exception: it lands straight
+  on the connection page until a base URL is saved and validated with
   `GET /healthz`. Stores the claw base URL and bearer token
   (plus a generated, persistent device ID) in app-private DataStore. The
   **Devices** page is the **Phones** card, **Status reporting** and
@@ -20,6 +20,17 @@ manages the device fleet the claw keeps.
   backend instances (`GET /v1/providers`), each one's live model
   listing, and the active pair staged as a draft behind an explicit save
   (`PUT /v1/providers/active`; it applies from the claw's next turn).
+  The **Diagnostics** page answers "why is the fleet row stale" from the
+  phone's side: the three WorkManager jobs' live state (an empty info
+  list — a cancelled schedule — is the loud answer), the two clocks
+  (when this phone last landed a full report vs. when the claw last
+  stamped the device; the claw-behind-phone callout is "reporting but
+  not landing", the network-error one is "claw unreachable"),
+  auto-detected system checks (battery optimization, background
+  restriction, notifications) each with a jump into the exact settings
+  page when the setting is wrong, a "report now" kick of the status
+  worker, and the workers' in-memory flight recorder (a 200-line ring,
+  newest first, copyable) where every run logs its outcome.
   Trade-off: the token is stored in plain DataStore rather than
   EncryptedSharedPreferences; `androidx.security:security-crypto` is an
   alpha-quality, unmaintained artifact, and the OS app sandbox already covers

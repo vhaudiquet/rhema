@@ -11,6 +11,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import rs.rhema.phone.RhemaApp
 import rs.rhema.phone.data.PhoneSnapshot
+import rs.rhema.phone.diagnostics.diagText
 import rs.rhema.phone.net.ClawResult
 import rs.rhema.phone.sensors.LocationFix
 import rs.rhema.phone.sensors.ForegroundApp
@@ -150,15 +151,28 @@ class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineW
             }
         }
 
+        // The start line is the liveness beacon: the diagnostics screen
+        // distinguishes "worker ran and failed" (this line, then a failure
+        // line) from "worker never ran" (neither).
+        container.diag.log(
+            "status: run battery=${snapshot.batteryLevel ?: "?"} " +
+                "charging=${snapshot.charging ?: "?"} network=${snapshot.network ?: "?"} " +
+                "transitions=${transitions.size}",
+        )
+
         for ((topic, payload) in transitions) {
             val result = container.api.ingest(SOURCE, "phone:$deviceId:$topic", payload)
             // The snapshot stays unsaved, so the next scheduled run re-derives
             // this whole transition set and posts it again. Retrying here
             // instead would push that run out on WorkManager's backoff, and a
             // phone in a pocket would go quiet for hours.
-            if (result !is ClawResult.Ok) return Result.success()
+            if (result !is ClawResult.Ok) {
+                container.diag.log("status: $topic failed: ${result.diagText()}")
+                return Result.success()
+            }
         }
         container.status.setSnapshot(snapshot)
+        container.diag.log("status: posted ${transitions.joinToString { it.first }}")
         return Result.success()
     }
 

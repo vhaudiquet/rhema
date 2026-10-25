@@ -72,6 +72,10 @@ fun SettingsScreen(container: AppContainer, onConnected: () -> Unit = {}) {
                 title = stringResource(R.string.settings_entry_devices),
                 onBack = { section = null },
             ) { PhonesCard(container) }
+            SECTION_DIAGNOSTICS -> SettingsPage(
+                title = stringResource(R.string.settings_entry_diagnostics),
+                onBack = { section = null },
+            ) { DiagnosticsContent(container) }
             SECTION_PROVIDERS -> SettingsPage(
                 title = stringResource(R.string.settings_entry_providers),
                 onBack = { section = null },
@@ -85,6 +89,7 @@ fun SettingsScreen(container: AppContainer, onConnected: () -> Unit = {}) {
 // rotation through them).
 private const val SECTION_REPORTING = "reporting"
 private const val SECTION_DEVICES = "devices"
+private const val SECTION_DIAGNOSTICS = "diagnostics"
 private const val SECTION_PROVIDERS = "providers"
 private const val SECTION_CONNECTION = "connection"
 
@@ -104,6 +109,11 @@ private val SECTIONS = listOf(
                 SECTION_DEVICES,
                 R.string.settings_entry_devices,
                 R.string.settings_entry_devices_desc,
+            ),
+            SettingsEntry(
+                SECTION_DIAGNOSTICS,
+                R.string.settings_entry_diagnostics,
+                R.string.settings_entry_diagnostics_desc,
             ),
         ),
     ),

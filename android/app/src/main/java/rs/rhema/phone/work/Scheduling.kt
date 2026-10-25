@@ -10,9 +10,11 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import java.time.Duration
 
-private const val PHONE_STATUS = "phone_status"
-private const val NOTIFICATIONS = "notifications"
-private const val PHONE_COMMANDS = "phone_commands"
+// The unique names double as the diagnostics screen's work rows: it reads
+// the live WorkInfo for each, so the spellings live here and nowhere else.
+internal const val PHONE_STATUS = "phone_status"
+internal const val NOTIFICATIONS = "notifications"
+internal const val PHONE_COMMANDS = "phone_commands"
 private const val PHONE_STATUS_KICK = "phone_status_kick"
 private const val PHONE_COMMANDS_KICK = "phone_commands_kick"
 

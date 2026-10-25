@@ -6,6 +6,7 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import rs.rhema.phone.RhemaApp
 import rs.rhema.phone.di.AppContainer
+import rs.rhema.phone.diagnostics.diagText
 import rs.rhema.phone.net.ClawResult
 import rs.rhema.phone.net.PhoneCommand
 import kotlinx.serialization.json.JsonObject
@@ -23,16 +24,32 @@ class PhoneCommandWorker(context: Context, params: WorkerParameters) : Coroutine
         val deviceId = container.settings.deviceId()
 
         val commands = when (val result = container.api.phoneCommands(deviceId)) {
-            is ClawResult.Ok -> result.value
-            is ClawResult.HttpError -> return if (result.code >= 500) Result.retry() else Result.failure()
-            is ClawResult.Network -> return Result.retry()
+            is ClawResult.Ok -> {
+                container.diag.log(
+                    if (result.value.isEmpty()) "commands: idle" else "commands: ${result.value.size} queued",
+                )
+                result.value
+            }
+            is ClawResult.HttpError -> {
+                container.diag.log("commands: ${result.diagText()}")
+                return if (result.code >= 500) Result.retry() else Result.failure()
+            }
+            is ClawResult.Network -> {
+                container.diag.log("commands: ${result.diagText()}")
+                return Result.retry()
+            }
         }
 
         for (command in commands) {
             val (ok, detail) = execute(container, command)
+            container.diag.log(
+                "commands: ${command.action} -> " +
+                    (if (ok) "ok" else "failed: ${detail ?: "no detail"}"),
+            )
             // Stop at the first failed ack: the queue is ordered, later
             // commands must not jump ahead of an un-acked one.
             if (container.api.postPhoneCommandResult(command.id, ok, detail) !is ClawResult.Ok) {
+                container.diag.log("commands: ack failed: ${command.id}, retry next run")
                 return Result.retry()
             }
         }
