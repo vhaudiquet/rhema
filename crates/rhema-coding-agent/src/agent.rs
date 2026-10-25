@@ -185,6 +185,10 @@ impl CodingAgent {
         let skills_bytes = match config.system {
             Some(_) => 0,
             None => {
+                // The subtraction measures the skills section exactly:
+                // rendering is deterministic for fixed inputs (skills
+                // arrive from BTreeMap-sorted discovery), so the bare
+                // re-render differs from `system` by that section alone.
                 let mut bare = ShellTools::builtin_specs();
                 bare.extend_from_slice(&extra);
                 rhema_agent_tools::render_system(
