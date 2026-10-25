@@ -3131,7 +3131,13 @@ fn apply_prompt_sections(
     sandboxed: Option<&crate::sandbox::Sandboxed>,
 ) {
     let kind = sandboxed.map(|sandboxed| sandboxed.choice.stored_name());
-    let (environment, user) = crate::run::prompt_sections(&options.workspace, kind);
+    let (environment, user) = crate::run::prompt_sections(
+        &options.workspace,
+        &config.workspace.display().to_string(),
+        kind,
+        &config.model,
+        crate::run::HARNESS,
+    );
     config.environment = environment;
     config.user_preferences = user;
 }

@@ -4,56 +4,84 @@
 //! (`ENVIRONMENT.md`); here the report renders straight into the
 //! prompt's environment section.
 //!
-//! The inventory is data, not code: `environment.yaml` beside this
-//! module names what the probe looks for and the advice a present tool
-//! earns — the TOOL.yaml shape, applied to probes. The file is baked in
-//! (`include_str!`), not read at runtime: the report must not turn
-//! machine-dependent, and the cloud frontends have no filesystem to
-//! read it from anyway.
+//! Every text the report carries is data: [`environment.yaml`] at the
+//! crate root — beside SYSTEM.md — holds the OS name mapping, the probe
+//! inventory, and the report, notice, and unavailable texts as Jinja
+//! templates over the facts this module gathers. The Rust here is
+//! mechanics alone: run the probe, shape the facts, render the
+//! template. The file is baked in (`include_str!`), not read at
+//! runtime: the report must not turn machine-dependent, and the cloud
+//! frontends have no filesystem to read it from anyway.
 //!
 //! The probe is synchronous on purpose — agent construction is sync —
 //! and best-effort: one `bash -c` under a short budget on a fixed
-//! script, a failure degrading to the line that says so, never a failed
-//! startup. It describes the host, which is where commands run unless a
-//! sandbox re-points them; a sandboxed session takes
+//! script, a failure degrading to the `unavailable` text, never a
+//! failed startup. It describes the host, which is where commands run
+//! unless a sandbox re-points them; a sandboxed session takes
 //! [`remote_notice`] instead, because host facts would be lies about a
-//! container. The report carries no timestamp: it rides the system
-//! prompt, which must stay byte-stable for a session's life.
+//! container. The report's date is stamped once at construction: it
+//! rides the system prompt, which stays byte-stable for a session's
+//! life.
+//!
+//! [`environment.yaml`]: crate::environment::manifest
 
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use rhema_agent_tools::render_template;
+use serde_json::json;
 
 /// One inventoried tool.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
 pub struct Probe {
-    /// The executable the probe runs and the report names — the command
-    /// the model would type, not the project's name for it.
+    /// The executable the probe looks for and the report names — the
+    /// command the model would type, not the project's name for it.
     pub executable: String,
-    /// Guidance rendered into the report only when `executable`
+    /// Guidance that joins the report's notes only when `executable`
     /// answered. Advice about a missing tool would be the stale kind.
     #[serde(default)]
     pub advice: Option<String>,
 }
 
-/// The report's inventory: what to probe, in report order.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+/// The report's data: the inventory, the OS name mapping, and the
+/// texts (Jinja templates) the report renders.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub struct Manifest {
+    /// The friendly name for each `uname -s` system value; a system
+    /// without a row keeps its raw uname spelling.
+    #[serde(default)]
+    pub os_names: BTreeMap<String, String>,
     /// The probed executables, in report order.
     pub probe: Vec<Probe>,
+    /// The session facts every shape places by reference — written
+    /// once, never duplicated in the texts.
+    pub facts: String,
+    /// The report a local session renders.
+    pub report: String,
+    /// The message a sandboxed session shows instead.
+    pub notice: String,
+    /// The message a failed probe degrades to.
+    pub unavailable: String,
 }
 
-/// The baked-in manifest (`environment.yaml`), parsed once. A manifest
-/// that does not parse, or names an executable the shell-safety filter
-/// refuses, loses that entry — reported by the drift test, never a
-/// failed startup.
+/// The baked-in manifest (`environment.yaml` at the crate root), parsed
+/// once. A manifest that does not parse falls to [`fallback_report`]:
+/// the drift test is where that break belongs, never a startup.
 pub fn manifest() -> &'static Manifest {
     static MANIFEST: OnceLock<Manifest> = OnceLock::new();
     MANIFEST.get_or_init(|| {
-        serde_yaml::from_str(include_str!("environment.yaml"))
-            .unwrap_or_else(|_| Manifest { probe: Vec::new() })
+        serde_yaml::from_str(include_str!("../environment.yaml")).unwrap_or_else(|_| Manifest {
+            os_names: BTreeMap::new(),
+            probe: Vec::new(),
+            facts: String::new(),
+            report: String::new(),
+            notice: String::new(),
+            unavailable: String::new(),
+        })
     })
 }
 
@@ -75,13 +103,14 @@ const PROBE_BUDGET: Duration = Duration::from_secs(5);
 const POLL_STEP: Duration = Duration::from_millis(10);
 
 /// The report-side bound on the probe's stdout: the inventory is
-/// fixed-size, so this is a guard against a pathological `--version`,
-/// not an expectation.
+/// fixed-size, so this is a guard against a pathological shell, not an
+/// expectation.
 const OUTPUT_CAP: usize = 4 * 1024;
 
-/// The probe script: OS, shell, one line per manifest entry, and the
-/// workspace's git branch when it is a checkout. POSIX sh throughout —
-/// every executor in the tree runs `bash -c`.
+/// The probe script: OS, shell, one presence line per manifest entry —
+/// versions stay out; presence is the fact that changes how the model
+/// should work — and the workspace's git branch when it is a checkout.
+/// POSIX sh throughout — every executor in the tree runs `bash -c`.
 fn probe_script(manifest: &Manifest) -> String {
     let tools: Vec<&str> = manifest
         .probe
@@ -94,9 +123,8 @@ fn probe_script(manifest: &Manifest) -> String {
 uname -sm
 printf 'shell: %s\n' "${{SHELL:-unset}}"
 for t in {tools}; do
-  if p=$(command -v "$t" 2>/dev/null); then
-    v=$("$t" --version 2>&1 | head -n 1)
-    printf '%s: %s — %s\n' "$t" "$p" "$v"
+  if command -v "$t" >/dev/null 2>&1; then
+    printf '%s: present\n' "$t"
   else
     printf '%s: absent\n' "$t"
   fi
@@ -110,81 +138,177 @@ fi
 }
 
 /// The host report: what `bash` on this machine, rooted at `workspace`,
-/// would answer at startup. Never fails — a probe that cannot run
-/// renders as the line that says so.
-pub fn host_report(workspace: &Path) -> String {
+/// would answer at startup — carrying `model`, the model the session
+/// runs, and `harness`, the frontend assembling it. Never fails: a
+/// probe that cannot run renders the unavailable text.
+pub fn host_report(workspace: &Path, model: &str, harness: &str) -> String {
+    let facts = facts(model, harness);
     match run_probe(manifest(), workspace) {
-        Ok(output) => render_report(manifest(), &output),
-        Err(reason) => format!(
-            "## Environment\n\n\
-             The startup probe did not answer ({reason}); ask the shell\n\
-             directly (`uname -sm`, `command -v <tool>`) when a fact\n\
-             matters.\n"
-        ),
+        Ok(output) => render_report(manifest(), workspace, &facts, &output),
+        Err(reason) => unavailable(&facts, &reason),
     }
 }
 
 /// The section a sandboxed session renders instead of host facts: the
 /// report's honesty rule — commands run somewhere a host probe cannot
-/// see, so it claims nothing and names the kind.
-pub fn remote_notice(kind: &str) -> String {
+/// see, so it claims none and names the kind. The sandbox-side
+/// `workspace` is carried — where the model's commands run is not a
+/// host fact.
+pub fn remote_notice(kind: &str, workspace: &str, model: &str, harness: &str) -> String {
+    let manifest = manifest();
+    let facts = facts(model, harness);
+    let rendered = render_text(
+        &manifest.notice,
+        &facts.context(manifest, json!({ "kind": kind, "workspace": workspace })),
+    );
+    if rendered.is_empty() {
+        fallback_report(&facts)
+    } else {
+        rendered
+    }
+}
+
+/// The facts every report shape carries, however the probe went.
+struct Facts {
+    /// The construction-time UTC stamp, to the minute.
+    date: String,
+    /// The model the session runs.
+    model: String,
+    /// The frontend assembling the agent.
+    harness: String,
+}
+
+impl Facts {
+    /// The template context every text extends, carrying the composed
+    /// `facts` block — the yaml's one copy of the session facts,
+    /// placed by reference, never re-typed in a text.
+    fn context(&self, manifest: &Manifest, extra: serde_json::Value) -> serde_json::Value {
+        let serde_json::Value::Object(mut map) = extra else {
+            return serde_json::Value::Null;
+        };
+        map.insert("date".into(), json!(self.date));
+        map.insert("model".into(), json!(self.model));
+        map.insert("harness".into(), json!(self.harness));
+        let facts = render_template(
+            &manifest.facts,
+            &json!({ "date": self.date, "model": self.model, "harness": self.harness }),
+        )
+        .unwrap_or_default();
+        map.insert("facts".into(), json!(facts));
+        serde_json::Value::Object(map)
+    }
+}
+
+fn facts(model: &str, harness: &str) -> Facts {
+    Facts {
+        date: utc_now(),
+        model: model.to_owned(),
+        harness: harness.to_owned(),
+    }
+}
+
+/// Renders one manifest text over its context; an empty text (the
+/// unparsed-manifest case) falls to [`fallback_report`].
+fn render_text(text: &str, context: &serde_json::Value) -> String {
+    if text.is_empty() {
+        return String::new();
+    }
+    render_template(text, context).unwrap_or_default()
+}
+
+/// Shapes the probe's bounded stdout into the report over the manifest:
+/// the first two lines are the OS and the shell, the presence lines
+/// follow, and every answered executable with advice earns its note.
+fn render_report(manifest: &Manifest, workspace: &Path, facts: &Facts, output: &str) -> String {
+    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
+    let os = os_label(manifest, lines.next().unwrap_or("unknown"));
+    let shell = lines
+        .next()
+        .and_then(|line| line.strip_prefix("shell: "))
+        .unwrap_or("unknown")
+        .to_owned();
+    let rest: Vec<&str> = lines.collect();
+    let branch = rest
+        .iter()
+        .find_map(|l| l.strip_prefix("git branch: "))
+        .map(str::to_owned);
+    let tools: Vec<serde_json::Value> = manifest
+        .probe
+        .iter()
+        .map(|entry| {
+            let present = rest
+                .iter()
+                .any(|l| *l == format!("{}: present", entry.executable));
+            json!({ "name": entry.executable, "state": if present { "present" } else { "absent" } })
+        })
+        .collect();
+    let notes: Vec<String> = manifest
+        .probe
+        .iter()
+        .filter(|entry| {
+            entry.advice.is_some()
+                && rest
+                    .iter()
+                    .any(|l| *l == format!("{}: present", entry.executable))
+        })
+        .filter_map(|entry| entry.advice.clone())
+        .collect();
+    let context = facts.context(
+        manifest,
+        json!({
+            "os": os,
+            "shell": shell,
+            "workspace": workspace.display().to_string(),
+            "branch": branch,
+            "tools": tools,
+            "notes": notes,
+        }),
+    );
+    let rendered = render_text(&manifest.report, &context);
+    if rendered.is_empty() {
+        fallback_report(facts)
+    } else {
+        rendered
+    }
+}
+
+/// The unavailable text over the failure reason.
+fn unavailable(facts: &Facts, reason: &str) -> String {
+    let manifest = manifest();
+    let rendered = render_text(
+        &manifest.unavailable,
+        &facts.context(manifest, json!({ "reason": reason })),
+    );
+    if rendered.is_empty() {
+        fallback_report(facts)
+    } else {
+        rendered
+    }
+}
+
+/// The mechanism's last resort, when the manifest itself did not parse:
+/// the facts the shell-independent clock still names, no template.
+fn fallback_report(facts: &Facts) -> String {
     format!(
         "## Environment\n\n\
-         Commands run in the {kind} sandbox, not on the host that\n\
-         launched rhema, so no host facts are claimed here. Probe the\n\
-         sandbox itself (`uname -sm`, `command -v <tool>`) when a fact\n\
-         matters.\n"
+         The report's data did not parse; ask the shell (`uname -sm`,\n\
+         `command -v <tool>`) when a fact matters.\n\n\
+         - Date: {}\n- Model: {}\n- Harness: {}\n",
+        facts.date, facts.model, facts.harness
     )
 }
 
-/// Shapes the probe's bounded stdout into the report's markdown over
-/// the manifest: the first two lines are the OS and the shell, the
-/// tool lines follow verbatim, and every present executable with
-/// advice earns its line — environment-conditional guidance rendered
-/// exactly where it is true.
-fn render_report(manifest: &Manifest, output: &str) -> String {
-    let mut lines = output.lines().filter(|line| !line.trim().is_empty());
-    let os = lines.next().unwrap_or("unknown");
-    let shell = lines.next().unwrap_or("shell: unknown");
-    let mut out = String::from(
-        "## Environment\n\n\
-         - OS: ",
-    );
-    out.push_str(os);
-    out.push_str("\n- ");
-    out.push_str(shell);
-    out.push('\n');
-    let rest: Vec<&str> = lines.collect();
-    if let Some(branch) = rest.iter().find(|l| l.starts_with("git branch: ")) {
-        out.push_str("- ");
-        out.push_str(branch);
-        out.push('\n');
+/// The OS line: the mapping's friendly name with the raw uname spelling
+/// beside it — `macOS (Darwin arm64)` — or the raw spelling alone when
+/// the manifest maps no friendly name.
+fn os_label(manifest: &Manifest, raw: &str) -> String {
+    let Some((system, _rest)) = raw.split_once(' ') else {
+        return raw.to_owned();
+    };
+    match manifest.os_names.get(&system.to_lowercase()) {
+        Some(friendly) => format!("{friendly} ({raw})"),
+        None => raw.to_owned(),
     }
-    out.push_str("\nTools:\n");
-    for line in rest.iter().filter(|l| !l.starts_with("git branch: ")) {
-        out.push_str("- ");
-        out.push_str(line);
-        out.push('\n');
-    }
-    let mut notes = String::new();
-    for entry in &manifest.probe {
-        let present = rest.iter().any(|l| {
-            l.starts_with(&format!("{}: ", entry.executable))
-                && !l.starts_with(&format!("{}: absent", entry.executable))
-        });
-        if present {
-            if let Some(advice) = &entry.advice {
-                notes.push_str("- ");
-                notes.push_str(advice);
-                notes.push('\n');
-            }
-        }
-    }
-    if !notes.is_empty() {
-        out.push_str("\nNotes:\n");
-        out.push_str(&notes);
-    }
-    out
 }
 
 /// Runs the probe script with `workspace` as working directory and
@@ -213,7 +337,7 @@ fn run_probe(manifest: &Manifest, workspace: &Path) -> Result<String, String> {
     let Some(status) = status else {
         let _ = child.kill();
         let _ = child.wait();
-        return Err(format!("no exit within {:?}", PROBE_BUDGET));
+        return Err(format!("no exit within {PROBE_BUDGET:?}"));
     };
     if !status.success() {
         return Err(format!("probe exited: {status}"));
@@ -227,44 +351,96 @@ fn run_probe(manifest: &Manifest, workspace: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// The wall-clock UTC stamp, to the minute — the one timestamp shape
+/// the reports carry, stamped once at construction.
+fn utc_now() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let (year, month, day) = civil_from_days((secs / 86_400) as i64);
+    let secs_of_day = secs % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02} UTC",
+        secs_of_day / 3_600,
+        secs_of_day % 3_600 / 60
+    )
+}
+
+/// Days since the Unix epoch to (year, month, day), UTC — the civil
+/// calendar without a clock dependency.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The baked manifest parses, and every executable is shell-safe
-    /// and unique — the drift test a hand edit fails, in the
-    /// TOOL.yaml spirit: a manifest that stops parsing inventories
-    /// nothing at runtime, so the break belongs in a test, not a
-    /// startup.
+    /// The baked manifest parses and every text renders over sample
+    /// facts — the drift test a hand edit fails: a manifest that stops
+    /// parsing falls to the fallback at runtime, so the break belongs
+    /// in a test, not a startup.
     #[test]
-    fn the_baked_manifest_parses_and_names_safe_unique_executables() {
+    fn the_baked_manifest_parses_and_every_text_renders() {
         let manifest = manifest();
-        assert!(!manifest.probe.is_empty(), "an empty manifest is a bug");
-        let mut seen = std::collections::BTreeSet::new();
-        for entry in &manifest.probe {
-            assert!(
-                shell_safe(&entry.executable),
-                "not shell-safe: {}",
-                entry.executable
+        assert!(!manifest.probe.is_empty(), "an empty inventory is a bug");
+        assert!(!manifest.report.is_empty());
+        assert!(
+            !manifest.facts.is_empty(),
+            "the facts block is written once"
+        );
+        let facts = facts("m", "h");
+        for text in [
+            &manifest.facts,
+            &manifest.report,
+            &manifest.notice,
+            &manifest.unavailable,
+        ] {
+            let context = facts.context(
+                manifest,
+                json!({
+                    "os": "macOS (Darwin arm64)", "shell": "/bin/zsh",
+                    "workspace": "/ws", "branch": "main",
+                    "tools": [{"name": "rg", "state": "present"}], "notes": ["n"],
+                    "kind": "k", "reason": "r",
+                }),
             );
-            assert!(
-                seen.insert(entry.executable.as_str()),
-                "duplicate: {entry:?}"
-            );
+            let rendered = render_template(text, &context).expect("the text renders");
+            assert!(!rendered.trim().is_empty());
         }
     }
 
-    /// The host report carries its sections and one line per manifest
-    /// entry — whatever is or is not installed here — and the OS line
-    /// leads. Runs real bash, like the claw's environment tests.
+    /// The host report carries its facts — date, model, harness, the OS
+    /// line, one presence line per manifest entry, and the branch on a
+    /// checkout — with no versions anywhere. Runs real bash, like the
+    /// claw's environment tests.
     #[test]
-    fn the_host_report_lists_every_manifest_entry_and_leads_with_the_os() {
+    fn the_host_report_carries_facts_and_presence_without_versions() {
         let manifest = manifest();
-        let report = host_report(Path::new("."));
+        let report = host_report(Path::new("."), "glm-5.3", "rhema test");
         assert!(report.starts_with("## Environment\n"), "{report}");
-        assert!(report.contains("- OS: "), "{report}");
-        assert!(report.contains("- shell: "), "{report}");
-        assert!(report.contains("\nTools:\n"), "{report}");
+        for fact in [
+            "- Date: ",
+            "- Model: glm-5.3",
+            "- Harness: rhema test",
+            "### Machine",
+            "- OS: ",
+            "### Workspace",
+            "- CWD: ",
+            "### Command-line tools",
+        ] {
+            assert!(report.contains(fact), "missing {fact}: {report}");
+        }
         for entry in &manifest.probe {
             assert!(
                 report.contains(&format!("- {}: ", entry.executable)),
@@ -272,79 +448,84 @@ mod tests {
                 entry.executable
             );
         }
-    }
-
-    /// A git checkout names its branch; the branch line rides with the
-    /// host facts, not the tool inventory.
-    #[test]
-    fn a_git_workspace_names_its_branch_among_the_facts() {
-        // The crate's own tree is a checkout; the probe runs from it.
-        let report = host_report(Path::new("."));
         assert!(report.contains("- git branch: "), "{report}");
-        assert_eq!(
-            report.matches("- git branch: ").count(),
-            1,
-            "the branch is a fact, not a tool line: {report}"
+        assert!(
+            !report.contains("version"),
+            "presence, not versions: {report}"
         );
     }
 
-    /// Advice renders only for a tool that answered, whatever the
-    /// advice says — the ripgrep note is data like any other entry's.
+    /// The OS line maps the friendly name beside the raw spelling and
+    /// keeps unmapped systems raw.
+    #[test]
+    fn the_os_line_maps_friendly_names_beside_the_raw() {
+        let manifest = manifest();
+        assert_eq!(os_label(manifest, "Darwin arm64"), "macOS (Darwin arm64)");
+        assert_eq!(os_label(manifest, "SunOS sun4u"), "SunOS sun4u");
+    }
+
+    /// Advice joins the notes only when its executable answered — the
+    /// ripgrep note is data like any other entry's.
     #[test]
     fn advice_follows_presence_not_the_tool_name() {
-        let manifest = Manifest {
-            probe: vec![Probe {
-                executable: "rg".into(),
-                advice: Some("search with rg".into()),
-            }],
-        };
-        let present = render_report(
-            &manifest,
-            "Linux x86_64\nshell: /bin/bash\nrg: /usr/bin/rg — ripgrep 14\n",
+        let manifest = manifest();
+        let facts = facts("m", "h");
+        let with = render_report(
+            manifest,
+            Path::new("/ws"),
+            &facts,
+            "Darwin arm64\nshell: /bin/zsh\nrg: present\nfd: absent\ngit branch: main\n",
         );
-        assert!(present.contains("- search with rg"), "{present}");
-        let absent = render_report(&manifest, "Linux x86_64\nshell: /bin/bash\nrg: absent\n");
-        assert!(!absent.contains("search with rg"), "{absent}");
-        assert!(!absent.contains("Notes:"), "{absent}");
+        assert!(with.contains("Notes:"), "{with}");
+        assert!(with.contains("Use `rg`"), "{with}");
+        let without = render_report(
+            manifest,
+            Path::new("/ws"),
+            &facts,
+            "Darwin arm64\nshell: /bin/zsh\nrg: absent\nfd: absent\n",
+        );
+        assert!(!without.contains("Notes:"), "{without}");
+        assert!(without.contains("- rg: absent"), "{without}");
+    }
+
+    /// The notice names the kind, the model, and the harness, and
+    /// claims no host facts.
+    #[test]
+    fn the_notice_names_the_kind_workspace_and_no_host_facts() {
+        let notice = remote_notice("docker", "/sandbox/ws", "glm-5.3", "rhema test");
+        assert!(notice.contains("docker sandbox"), "{notice}");
+        assert!(notice.contains("- Workspace: /sandbox/ws"), "{notice}");
+        assert!(notice.contains("- Model: glm-5.3"), "{notice}");
+        assert!(notice.contains("- Harness: rhema test"), "{notice}");
+        assert!(!notice.contains("- OS: "), "{notice}");
     }
 
     /// A manifest entry the shell-safety filter refuses never reaches
     /// the script: quoting in a probe is not executable data.
     #[test]
     fn unsafe_executables_never_reach_the_script() {
-        let manifest = Manifest {
-            probe: vec![
-                Probe {
-                    executable: "git".into(),
-                    advice: None,
-                },
-                Probe {
-                    executable: "x; rm -rf /".into(),
-                    advice: None,
-                },
-            ],
-        };
+        let mut manifest = manifest().clone();
+        manifest.probe.push(Probe {
+            executable: "x; rm -rf /".into(),
+            advice: None,
+        });
         let script = probe_script(&manifest);
-        assert!(script.contains(" git "), "{script}");
         assert!(!script.contains("rm -rf"), "{script}");
     }
 
-    /// The remote notice names the kind and claims no host facts.
+    /// A probe that cannot run degrades to the unavailable text, facts
+    /// and all.
     #[test]
-    fn the_remote_notice_names_the_kind_and_claims_nothing() {
-        let notice = remote_notice("docker");
-        assert!(notice.contains("docker sandbox"), "{notice}");
-        assert!(!notice.contains("- OS: "), "{notice}");
+    fn a_missing_workspace_renders_the_unavailable_text() {
+        let report = host_report(Path::new("/definitely/not/here"), "m", "h");
+        assert!(report.contains("did not answer"), "{report}");
+        assert!(report.contains("- Model: m"), "{report}");
     }
 
-    /// A probe that cannot run degrades to the line that says so.
+    /// The stamp is the civil UTC calendar: two anchors pin the shape.
     #[test]
-    fn a_missing_workspace_still_renders_a_report() {
-        let report = host_report(Path::new("/definitely/not/here"));
-        assert!(report.starts_with("## Environment\n"), "{report}");
-        assert!(
-            report.contains("did not answer") || report.contains("Tools:"),
-            "either shape is honest: {report}"
-        );
+    fn the_stamp_is_civil_utc() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
     }
 }

@@ -68,7 +68,10 @@ mod tests {
     fn the_default_prompt_resolves_every_marker_and_ends_with_one_newline() {
         let out = default_system(Path::new("/ws"));
         assert!(!out.contains("{{") && !out.contains("{%"), "{out}");
-        assert!(out.contains("/ws"), "the workspace named: {out}");
+        // The bare prompt names no workspace: the fact rides the
+        // environment section (the report's CWD, the notice's
+        // Workspace), which a section-less render carries empty.
+        assert!(!out.contains("/ws"), "{out}");
         assert!(out.ends_with('\n') && !out.ends_with("\n\n"), "{out}");
     }
 

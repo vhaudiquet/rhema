@@ -50,7 +50,7 @@ The above command allows you to edit the system prompt in your `$EDITOR`. It use
 
 ### Environment report & USER.md
 
-Every session's system prompt carries an environment report, probed once at startup: the OS and shell `bash` runs on, a version inventory of the tools a coding turn reaches for (defined in `crates/rhema-coding-agent/src/environment.yaml` — `git`, `rg`, `fd`, `cargo`, `node`, `docker`, `gh`, …), and the workspace's git branch. When ripgrep answers, the report says so — search with `rg` (it respects `.gitignore`; `-uu` also searches ignored files). In a sandbox session (`docker`, `ssh`, `http`) the report claims no host facts; it names the sandbox kind and tells the agent to probe the machine itself.
+Every session's system prompt carries an environment report: the OS, date, model, harness, shell, the workspace's git branch, and which of the coding tools are installed (defined in `crates/rhema-coding-agent/environment.yaml` — the file holds every text the report renders, as templates). When ripgrep answers, the report says so — search with `rg` (it respects `.gitignore`; `-uu` also searches ignored files). In a sandbox session (`docker`, `ssh`, `http`) the report claims no host facts; it names the sandbox kind and its workspace, and tells the agent to probe the machine itself.
 
 Your own preferences ride the same prompt: create `USER.md` in the config directory (`~/.config/rhema/USER.md`) and its contents render verbatim into every session's system prompt — tone, conventions, anything you want the agent to always know about you. A missing or blank file renders nothing.
 

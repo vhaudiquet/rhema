@@ -174,7 +174,12 @@ impl AgentAssembly {
             // Commands run in the deployment's remote sandbox, so the
             // environment section claims no host facts — the notice
             // names where bash runs and defers to the sandbox itself.
-            environment: Some(rhema_coding_agent::remote_notice("cloud")),
+            environment: Some(rhema_coding_agent::remote_notice(
+                "cloud",
+                &self.workspace,
+                &self.model,
+                concat!("rhema-cloud-agent ", env!("CARGO_PKG_VERSION")),
+            )),
             // No filesystem to read a USER.md from; a per-session
             // preference file is a later SessionConfig decision.
             user_preferences: None,

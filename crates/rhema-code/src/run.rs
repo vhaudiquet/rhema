@@ -230,6 +230,10 @@ fn system_command(
     }
 }
 
+/// The harness name the environment report carries: the frontend the
+/// session runs in, with its version.
+pub(crate) const HARNESS: &str = concat!("rhema ", env!("CARGO_PKG_VERSION"));
+
 /// The stored look's theme — the same resolution the TUI makes, for the
 /// one off-TUI surface that prints styled markdown.
 fn theme_from_config(config: &Config) -> crate::palette::Theme {
@@ -250,25 +254,28 @@ fn theme_from_config(config: &Config) -> crate::palette::Theme {
     )
 }
 
-/// The prompt's two optional sections for a workspace and the session's
-/// sandbox kind: the user's global `USER.md` verbatim when present, and
-/// the environment report — host facts for a local session, the honest
-/// notice for a sandboxed one, because host facts would be lies about a
-/// container. `None` and `local` are the local case; any other stored
-/// kind names the sandbox the notice carries. The one gate: the agent's
-/// assembly and the `system show` preview both read here, so what is
-/// previewed is what turns send.
+/// The prompt's two optional sections for a workspace, the session's
+/// sandbox kind, and the model it runs: the user's global `USER.md`
+/// verbatim when present, and the environment report — host facts for a
+/// local session, the honest notice for a sandboxed one, because host
+/// facts would be lies about a container. `None` and `local` are the
+/// local case; any other stored kind names the sandbox the notice
+/// carries. The one gate: the agent's assembly and the `system show`
+/// preview both read here, so what is previewed is what turns send.
 pub(crate) fn prompt_sections(
     workspace: &std::path::Path,
+    sandbox_workspace: &str,
     sandbox_kind: Option<&str>,
+    model: &str,
+    harness: &str,
 ) -> (Option<String>, Option<String>) {
     let user = Config::dir()
         .ok()
         .and_then(|dir| std::fs::read_to_string(dir.join("USER.md")).ok())
         .filter(|text| !text.trim().is_empty());
     let environment = match sandbox_kind {
-        None | Some("local") => rhema_coding_agent::host_report(workspace),
-        Some(kind) => rhema_coding_agent::remote_notice(kind),
+        None | Some("local") => rhema_coding_agent::host_report(workspace, model, harness),
+        Some(kind) => rhema_coding_agent::remote_notice(kind, sandbox_workspace, model, harness),
     };
     (Some(environment), user)
 }
@@ -379,11 +386,24 @@ fn system_show_at(
     extra.push(rhema_transcript::Zoom::spec());
     let global = Config::skills_dir().ok();
     let skills = rhema_agent_tools::skills::discover(global.as_deref(), &workspace);
-    let kind = Config::load()
-        .ok()
-        .map(|config| config.effective(profile))
+    let effective = Config::load().ok().map(|config| config.effective(profile));
+    let kind = effective
+        .as_ref()
         .and_then(|effective| effective.sandbox_kind());
-    let (environment, user) = prompt_sections(&workspace, kind.as_deref());
+    let model = effective
+        .as_ref()
+        .map(|effective| effective.model.clone())
+        .unwrap_or_default();
+    // The preview has no assembly to name the sandbox-side path, so
+    // the host path stands in — the mount postures share it, and the
+    // http kind differs only in its constant prefix.
+    let (environment, user) = prompt_sections(
+        &workspace,
+        &workspace.display().to_string(),
+        kind.as_deref(),
+        model.as_deref().unwrap_or(""),
+        HARNESS,
+    );
     Ok(rhema_coding_agent::stamped_system_with_sections(
         resolve_base_system(path).as_deref(),
         &workspace,
@@ -1327,9 +1347,19 @@ mod system_tests {
         // The local case probes the host — either honest answer; the
         // user section rides the machine's own USER.md, so its presence
         // is not asserted.
-        let (host, _) = prompt_sections(std::env::temp_dir().as_path(), None);
-        assert!(host.unwrap().contains("## Environment"));
-        let (notice, _) = prompt_sections(std::env::temp_dir().as_path(), Some("docker"));
-        assert!(notice.unwrap().contains("docker sandbox"));
+        let (host, _) = prompt_sections(std::env::temp_dir().as_path(), "/ws", None, "m", "h");
+        let host = host.unwrap();
+        assert!(host.contains("## Environment"));
+        assert!(host.contains("- Model: m"));
+        let (notice, _) = prompt_sections(
+            std::env::temp_dir().as_path(),
+            "/ws",
+            Some("docker"),
+            "m",
+            "h",
+        );
+        let notice = notice.unwrap();
+        assert!(notice.contains("docker sandbox"));
+        assert!(notice.contains("- Workspace: /ws"));
     }
 }

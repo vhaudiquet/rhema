@@ -1,0 +1,77 @@
+# The environment report, data end to end: what the probe looks for,
+# the OS name mapping, and every text the report renders — Jinja
+# templates over the facts the module gathers (os, date, model,
+# harness, workspace, shell, branch, tools, notes, kind, reason). The
+# same renderer and whitespace rules as SYSTEM.md apply.
+
+# The friendly name for each `uname -s` system value; a system without
+# a row keeps its raw uname spelling.
+os_names:
+  darwin: macOS
+
+# What the probe looks for, in report order. `advice` joins the report's
+# notes only when the executable answered: guidance about a missing tool
+# would be the stale kind.
+probe:
+  - executable: rg
+    advice: >-
+      Use `rg` rather than recursive grep: it respects .gitignore by
+      default. `rg -uu` also searches ignored files.
+  - executable: fd
+
+# The session facts every shape carries — written once here and placed
+# by reference (`{{ facts }}`), never duplicated in the texts below.
+facts: |
+  - Date: {{ date }}
+  - Model: {{ model }}
+  - Harness: {{ harness }}
+
+# The report a local session renders: host facts, probed once.
+report: |
+  ## Environment
+
+  {{ facts }}
+  ### Machine
+
+  - OS: {{ os }}
+
+  ### Workspace
+
+  - CWD: {{ workspace }}
+  {% if branch %}- git branch: {{ branch }}{% endif %}
+
+  ### Command-line tools
+
+  {% for tool in tools %}
+  - {{ tool.name }}: {{ tool.state }}
+  {% endfor %}
+  {% if notes %}
+
+  Notes:
+  {% for note in notes %}- {{ note }}
+  {% endfor %}
+  {% endif %}
+
+# The message a sandboxed session shows instead of host facts: host
+# facts would be lies about a container, so none are claimed and the
+# kind is named. The sandbox-side workspace is named — it is where the
+# model's commands run, not a host fact.
+notice: |
+  ## Environment
+
+  Commands run in the {{ kind }} sandbox, not on the machine {{ harness }}
+  launched from, so no host facts are claimed here. Probe the sandbox
+  itself (`uname -sm`, `command -v <tool>`) when a fact matters.
+
+  - Workspace: {{ workspace }}
+
+  {{ facts }}
+
+# The message a failed probe degrades to: the reason rides the line.
+unavailable: |
+  ## Environment
+
+  The startup probe did not answer ({{ reason }}); ask the shell
+  directly (`uname -sm`, `command -v <tool>`) when a fact matters.
+
+  {{ facts }}

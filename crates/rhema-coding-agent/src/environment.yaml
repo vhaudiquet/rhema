@@ -1,6 +1,0 @@
-probe:
-  - executable: rg
-    advice: >-
-      Use `rg` rather than recursive grep: it respects
-      .gitignore by default. `rg -uu` also searches ignored files.
-  - executable: fd
