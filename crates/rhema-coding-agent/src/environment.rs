@@ -4,6 +4,13 @@
 //! (`ENVIRONMENT.md`); here the report renders straight into the
 //! prompt's environment section.
 //!
+//! The inventory is data, not code: `environment.yaml` beside this
+//! module names what the probe looks for and the advice a present tool
+//! earns — the TOOL.yaml shape, applied to probes. The file is baked in
+//! (`include_str!`), not read at runtime: the report must not turn
+//! machine-dependent, and the cloud frontends have no filesystem to
+//! read it from anyway.
+//!
 //! The probe is synchronous on purpose — agent construction is sync —
 //! and best-effort: one `bash -c` under a short budget on a fixed
 //! script, a failure degrading to the line that says so, never a failed
@@ -16,13 +23,49 @@
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-/// The tools the report inventories, in report order: what a coding
-/// turn reaches for. Absence of any entry is ordinary.
-const TOOLS: &[&str] = &[
-    "git", "rg", "fd", "cargo", "rustc", "node", "npm", "python3", "docker", "gh",
-];
+/// One inventoried tool.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Probe {
+    /// The executable the probe runs and the report names — the command
+    /// the model would type, not the project's name for it.
+    pub executable: String,
+    /// Guidance rendered into the report only when `executable`
+    /// answered. Advice about a missing tool would be the stale kind.
+    #[serde(default)]
+    pub advice: Option<String>,
+}
+
+/// The report's inventory: what to probe, in report order.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub struct Manifest {
+    /// The probed executables, in report order.
+    pub probe: Vec<Probe>,
+}
+
+/// The baked-in manifest (`environment.yaml`), parsed once. A manifest
+/// that does not parse, or names an executable the shell-safety filter
+/// refuses, loses that entry — reported by the drift test, never a
+/// failed startup.
+pub fn manifest() -> &'static Manifest {
+    static MANIFEST: OnceLock<Manifest> = OnceLock::new();
+    MANIFEST.get_or_init(|| {
+        serde_yaml::from_str(include_str!("environment.yaml"))
+            .unwrap_or_else(|_| Manifest { probe: Vec::new() })
+    })
+}
+
+/// An executable name the probe script can carry verbatim: letters,
+/// digits, dots, dashes, underscores — nothing that could close the
+/// `"$t"` quoting and become shell of its own.
+fn shell_safe(executable: &str) -> bool {
+    !executable.is_empty()
+        && executable
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+}
 
 /// The probe's whole budget: long enough for a cold tool list, short
 /// enough that a hung shell cannot stall a startup past it.
@@ -36,11 +79,16 @@ const POLL_STEP: Duration = Duration::from_millis(10);
 /// not an expectation.
 const OUTPUT_CAP: usize = 4 * 1024;
 
-/// The probe script: OS, shell, one line per inventoried tool
-/// ([`TOOLS`], interpolated so the list cannot drift), and the
+/// The probe script: OS, shell, one line per manifest entry, and the
 /// workspace's git branch when it is a checkout. POSIX sh throughout —
 /// every executor in the tree runs `bash -c`.
-fn probe_script() -> String {
+fn probe_script(manifest: &Manifest) -> String {
+    let tools: Vec<&str> = manifest
+        .probe
+        .iter()
+        .filter(|entry| shell_safe(&entry.executable))
+        .map(|entry| entry.executable.as_str())
+        .collect();
     format!(
         r#"
 uname -sm
@@ -57,7 +105,7 @@ if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   printf 'git branch: %s\n' "$(git branch --show-current 2>/dev/null || printf detached)"
 fi
 "#,
-        tools = TOOLS.join(" ")
+        tools = tools.join(" ")
     )
 }
 
@@ -65,8 +113,8 @@ fi
 /// would answer at startup. Never fails — a probe that cannot run
 /// renders as the line that says so.
 pub fn host_report(workspace: &Path) -> String {
-    match run_probe(workspace) {
-        Ok(output) => render_report(&output),
+    match run_probe(manifest(), workspace) {
+        Ok(output) => render_report(manifest(), &output),
         Err(reason) => format!(
             "## Environment\n\n\
              The startup probe did not answer ({reason}); ask the shell\n\
@@ -89,12 +137,12 @@ pub fn remote_notice(kind: &str) -> String {
     )
 }
 
-/// Shapes the probe's bounded stdout into the report's markdown: the
-/// first two lines are the OS and the shell, the rest is the tool
-/// inventory verbatim, and a present ripgrep earns the one search
-/// note — environment-conditional advice lives exactly where it is
-/// true.
-fn render_report(output: &str) -> String {
+/// Shapes the probe's bounded stdout into the report's markdown over
+/// the manifest: the first two lines are the OS and the shell, the
+/// tool lines follow verbatim, and every present executable with
+/// advice earns its line — environment-conditional guidance rendered
+/// exactly where it is true.
+fn render_report(manifest: &Manifest, output: &str) -> String {
     let mut lines = output.lines().filter(|line| !line.trim().is_empty());
     let os = lines.next().unwrap_or("unknown");
     let shell = lines.next().unwrap_or("shell: unknown");
@@ -114,24 +162,28 @@ fn render_report(output: &str) -> String {
         out.push('\n');
     }
     out.push_str("\nTools:\n");
-    let tools: Vec<&str> = rest
-        .iter()
-        .filter(|l| !l.starts_with("git branch: "))
-        .copied()
-        .collect();
-    for line in &tools {
+    for line in rest.iter().filter(|l| !l.starts_with("git branch: ")) {
         out.push_str("- ");
         out.push_str(line);
         out.push('\n');
     }
-    if tools
-        .iter()
-        .any(|l| l.starts_with("rg: ") && !l.starts_with("rg: absent"))
-    {
-        out.push_str(
-            "\nSearch with `rg` (it respects .gitignore; `-uu` also\n\
-             searches ignored files) rather than recursive grep.\n",
-        );
+    let mut notes = String::new();
+    for entry in &manifest.probe {
+        let present = rest.iter().any(|l| {
+            l.starts_with(&format!("{}: ", entry.executable))
+                && !l.starts_with(&format!("{}: absent", entry.executable))
+        });
+        if present {
+            if let Some(advice) = &entry.advice {
+                notes.push_str("- ");
+                notes.push_str(advice);
+                notes.push('\n');
+            }
+        }
+    }
+    if !notes.is_empty() {
+        out.push_str("\nNotes:\n");
+        out.push_str(&notes);
     }
     out
 }
@@ -140,10 +192,10 @@ fn render_report(output: &str) -> String {
 /// returns its bounded stdout. Stdin is null so a shell that wrongly
 /// reads it sees EOF; anything still running at the deadline is killed
 /// and reaped.
-fn run_probe(workspace: &Path) -> Result<String, String> {
+fn run_probe(manifest: &Manifest, workspace: &Path) -> Result<String, String> {
     let mut child = Command::new("bash")
         .arg("-c")
-        .arg(probe_script())
+        .arg(probe_script(manifest))
         .current_dir(workspace)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -180,20 +232,45 @@ fn run_probe(workspace: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    /// The host report carries its sections and one line per inventoried
-    /// tool — whatever is or is not installed here — and the OS line
+    /// The baked manifest parses, and every executable is shell-safe
+    /// and unique — the drift test a hand edit fails, in the
+    /// TOOL.yaml spirit: a manifest that stops parsing inventories
+    /// nothing at runtime, so the break belongs in a test, not a
+    /// startup.
+    #[test]
+    fn the_baked_manifest_parses_and_names_safe_unique_executables() {
+        let manifest = manifest();
+        assert!(!manifest.probe.is_empty(), "an empty manifest is a bug");
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in &manifest.probe {
+            assert!(
+                shell_safe(&entry.executable),
+                "not shell-safe: {}",
+                entry.executable
+            );
+            assert!(
+                seen.insert(entry.executable.as_str()),
+                "duplicate: {entry:?}"
+            );
+        }
+    }
+
+    /// The host report carries its sections and one line per manifest
+    /// entry — whatever is or is not installed here — and the OS line
     /// leads. Runs real bash, like the claw's environment tests.
     #[test]
-    fn the_host_report_lists_every_tool_and_leads_with_the_os() {
+    fn the_host_report_lists_every_manifest_entry_and_leads_with_the_os() {
+        let manifest = manifest();
         let report = host_report(Path::new("."));
         assert!(report.starts_with("## Environment\n"), "{report}");
         assert!(report.contains("- OS: "), "{report}");
         assert!(report.contains("- shell: "), "{report}");
         assert!(report.contains("\nTools:\n"), "{report}");
-        for tool in TOOLS {
+        for entry in &manifest.probe {
             assert!(
-                report.contains(&format!("- {tool}: ")),
-                "no line for {tool}: {report}"
+                report.contains(&format!("- {}: ", entry.executable)),
+                "no line for {}: {report}",
+                entry.executable
             );
         }
     }
@@ -212,14 +289,45 @@ mod tests {
         );
     }
 
-    /// The ripgrep note rides only when rg answered: absent rg must not
-    /// advise rg.
+    /// Advice renders only for a tool that answered, whatever the
+    /// advice says — the ripgrep note is data like any other entry's.
     #[test]
-    fn the_search_note_follows_ripgreps_presence() {
-        let with = render_report("Linux x86_64\nshell: /bin/bash\nrg: /usr/bin/rg — ripgrep 14\n");
-        assert!(with.contains("Search with `rg`"), "{with}");
-        let without = render_report("Linux x86_64\nshell: /bin/bash\nrg: absent\n");
-        assert!(!without.contains("Search with `rg`"), "{without}");
+    fn advice_follows_presence_not_the_tool_name() {
+        let manifest = Manifest {
+            probe: vec![Probe {
+                executable: "rg".into(),
+                advice: Some("search with rg".into()),
+            }],
+        };
+        let present = render_report(
+            &manifest,
+            "Linux x86_64\nshell: /bin/bash\nrg: /usr/bin/rg — ripgrep 14\n",
+        );
+        assert!(present.contains("- search with rg"), "{present}");
+        let absent = render_report(&manifest, "Linux x86_64\nshell: /bin/bash\nrg: absent\n");
+        assert!(!absent.contains("search with rg"), "{absent}");
+        assert!(!absent.contains("Notes:"), "{absent}");
+    }
+
+    /// A manifest entry the shell-safety filter refuses never reaches
+    /// the script: quoting in a probe is not executable data.
+    #[test]
+    fn unsafe_executables_never_reach_the_script() {
+        let manifest = Manifest {
+            probe: vec![
+                Probe {
+                    executable: "git".into(),
+                    advice: None,
+                },
+                Probe {
+                    executable: "x; rm -rf /".into(),
+                    advice: None,
+                },
+            ],
+        };
+        let script = probe_script(&manifest);
+        assert!(script.contains(" git "), "{script}");
+        assert!(!script.contains("rm -rf"), "{script}");
     }
 
     /// The remote notice names the kind and claims no host facts.
@@ -232,10 +340,7 @@ mod tests {
 
     /// A probe that cannot run degrades to the line that says so.
     #[test]
-    fn a_directory_workspace_still_renders_a_report() {
-        // `/` is readable but not writable and not a probe target; a
-        // missing directory makes spawn's cwd fail — the shape under
-        // test — while a present one answers normally.
+    fn a_missing_workspace_still_renders_a_report() {
         let report = host_report(Path::new("/definitely/not/here"));
         assert!(report.starts_with("## Environment\n"), "{report}");
         assert!(
