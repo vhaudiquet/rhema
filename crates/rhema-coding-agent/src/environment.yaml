@@ -1,21 +1,6 @@
-# The startup environment report's inventory: what the probe looks
-# for, one entry per tool, in report order. `executable` is what the
-# probe runs and what the report names — the command the model would
-# type, not the project's name for it. `advice` renders into the
-# report only when the executable answered: guidance about a missing
-# tool would be the stale kind.
 probe:
-  - executable: git
   - executable: rg
     advice: >-
-      Search with `rg` rather than recursive grep: it respects
-      .gitignore, so build and vendored trees do not flood the context
-      with matches — `rg -uu` also searches ignored files.
+      Use `rg` rather than recursive grep: it respects
+      .gitignore by default. `rg -uu` also searches ignored files.
   - executable: fd
-  - executable: cargo
-  - executable: rustc
-  - executable: node
-  - executable: npm
-  - executable: python3
-  - executable: docker
-  - executable: gh

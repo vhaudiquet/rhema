@@ -148,7 +148,6 @@ fn render_report(manifest: &Manifest, output: &str) -> String {
     let shell = lines.next().unwrap_or("shell: unknown");
     let mut out = String::from(
         "## Environment\n\n\
-         The machine `bash` runs on, probed at startup.\n\n\
          - OS: ",
     );
     out.push_str(os);

@@ -4,15 +4,14 @@ Prefer small diffs over rewrites: change files with targeted edits (sed,
 a short python one-liner) and write a whole file only when creating it.
 Tool errors are recoverable.
 Report what failed and adapt. Commands start in the workspace root.
-
-{% if user %}
-{{ user }}
-{% endif %}
 {% if environment %}
+
 {{ environment }}
 {% endif %}
-
 {% if tools %}
+
+## Tools
+
 You have the following tools (name | description | arguments). The
 arguments are the JSON schema a call must satisfy.
 
@@ -48,6 +47,12 @@ Before you answer, check the skills list below in this priority order.
   you are doing.
 
 {% for skill in skills %}
-- {% if 'Always apply' in skill.description or 'always apply' in skill.description %}[MUST LOAD NOW]{% endif %}{{ skill.name }} | trigger: {{ skill.description }} | file: {{ skill.path }}
+- {% if 'Always apply' in skill.description or 'always apply' in skill.description %}[MUST LOAD NOW] {% endif %}{{ skill.name }} | trigger: {{ skill.description }} | file: {{ skill.path }}
 {% endfor %}
+{% endif %}
+{% if user %}
+
+## User-specific settings
+
+{{ user }}
 {% endif %}
