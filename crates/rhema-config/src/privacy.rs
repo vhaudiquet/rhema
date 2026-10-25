@@ -27,7 +27,7 @@ pub fn private_dir(path: &Path) -> io::Result<()> {
 pub fn private_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     let mut file = private_open(path)?;
     #[cfg(unix)]
-    tighten(&_file);
+    tighten(&file);
     use std::io::Write;
     file.write_all(contents.as_ref())
 }
@@ -37,9 +37,9 @@ pub fn private_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> 
 /// umask left wide. Silent by contract; see the module docs.
 pub fn tighten_file(path: &Path) {
     let opened = std::fs::OpenOptions::new().write(true).open(path);
-    if let Ok(_file) = opened {
+    if let Ok(file) = opened {
         #[cfg(unix)]
-        tighten(&_file);
+        tighten(&file);
     }
 }
 
