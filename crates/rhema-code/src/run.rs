@@ -170,6 +170,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         Some(crate::args::Command::System { action }) => {
             return system_command(action, &args.workspace, args.profile.as_deref());
         }
+        // The wizard is the terminal UI with a flag flipped; the
+        // terminal check below still applies.
+        Some(crate::args::Command::Onboard) => {}
         None => {}
     }
     // Headless is explicit now: a piped stdout alone is not an
@@ -385,7 +388,14 @@ fn system_show_at(
     // zoom, exactly as the agent's prompt does.
     extra.push(rhema_transcript::Zoom::spec());
     let global = Config::skills_dir().ok();
-    let skills = rhema_agent_tools::skills::discover(global.as_deref(), &workspace);
+    let disabled = Config::load()
+        .ok()
+        .map(|c| c.skills_disabled)
+        .unwrap_or_default();
+    let mut skills = rhema_agent_tools::skills::discover(global.as_deref(), &workspace);
+    // The preview shows what turns send: a disabled skill is not in the
+    // prompt, so it is not in the preview either.
+    skills.retain(|skill| !disabled.contains(&skill.name));
     let effective = Config::load().ok().map(|config| config.effective(profile));
     let kind = effective
         .as_ref()
@@ -542,6 +552,7 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         transcript: (!args.no_transcript).then(rhema_transcript::TranscriptSettings::default),
         thinking,
         base_system: base_system.clone(),
+        disabled_skills: config.skills_disabled.clone(),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
     };
     // Where bash runs: the sandbox choice engages only off `local`, and
@@ -709,11 +720,42 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // Credential and session resolution happens BEFORE the terminal setup,
     // so early failures print as plain errors on a normal terminal.
     let store: Arc<dyn ConfigStore> = Arc::new(DiskStore);
+    // The wizard runs when no config existed or the last wizard never
+    // finished (`onboarded: Some(false)`), and when `rhema onboard` said
+    // so. An existing config from before the wizard has no marker and
+    // reads as onboarded — upgrading never replays it. The marker is
+    // written up front so a wizard abandoned halfway (a key added, then
+    // a ctrl-c) reopens here next start instead of reading as complete.
+    let config_existed = Config::path().map(|path| path.exists()).unwrap_or(true);
     let mut config = store.load().unwrap_or_else(|err| {
         eprintln!("warning: ignoring unreadable rhema config: {err}");
         Config::default()
     });
+    let onboard = !config_existed
+        || config.onboarded == Some(false)
+        || matches!(args.command, Some(crate::args::Command::Onboard));
+    if onboard && config.onboarded != Some(false) {
+        config.onboarded = Some(false);
+        // A bundled skill that ships off starts in the disabled set —
+        // the set is the only switch, so its default state must be
+        // recorded, or seeding would read it as on.
+        for skill in crate::bundled::BUNDLED_SKILLS {
+            if !skill.default_on {
+                config.skills_disabled.insert(skill.name.to_owned());
+            }
+        }
+        let _ = config.save();
+    }
     migrate_stored_keys(&mut config);
+    // The bundled skills seed into the global directory before anything
+    // discovers them — the wizard's skills step and the agent's prompt
+    // both read the same folders. Best effort: a read-only config
+    // directory only means fewer skills.
+    if let Ok(dir) = Config::skills_dir() {
+        if let Err(err) = crate::bundled::seed(&dir, &config.skills_disabled) {
+            eprintln!("warning: the bundled skills were not seeded: {err}");
+        }
+    }
     // The session's keychain: startup resolution reads it, and the app
     // places fresh logins in it and cleans up after removals.
     let secrets: Arc<dyn rhema_config::secrets::SecretStore> = Arc::new(KeyringSecretStore::new());
@@ -864,6 +906,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             sandboxed,
             sandbox_offered,
             home: None,
+            onboard,
         })?;
         let effects = app.initial_effects();
         (app, effects)
@@ -932,6 +975,9 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
 /// ignored so a restore attempt never panics (it runs in the panic hook).
 fn restore_terminal() {
     let _ = crossterm::terminal::disable_raw_mode();
+    // The onboarding logo goes before the screens swap: a terminal that
+    // keeps alternate-screen images must not show one over the shell.
+    crate::term_image::clear();
     // Each step writes on its own so one failure cannot skip the rest.
     // The pops are the canonical bare `CSI < u` (crossterm's command
     // emits the numbered `CSI <1u`, which a terminal may ignore), and
@@ -980,12 +1026,23 @@ async fn event_loop(
     effects: &mut Vec<Effect>,
 ) -> anyhow::Result<()> {
     let mut status = Tracker::default();
+    // The last logo rect the terminal graphics layer holds; the frame
+    // below re-states its want every draw, and a change re-places the
+    // image (a resize) or clears it (the wizard's screen went away).
+    let mut logo_placed: Option<ratatui::layout::Rect> = None;
     for effect in std::mem::take(effects) {
         dispatch(terminal, app, tx, &mut status, effect);
     }
     loop {
         status.sync(app);
         terminal.draw(|frame| ui::render(app, frame))?;
+        if app.logo_rect != logo_placed {
+            match app.logo_rect {
+                Some(rect) => crate::term_image::place(rect.x, rect.y, rect.width, rect.height),
+                None => crate::term_image::clear(),
+            }
+            logo_placed = app.logo_rect;
+        }
 
         while let Ok(event) = rx.try_recv() {
             status.observe(&event);
@@ -1091,6 +1148,10 @@ fn dispatch(
         Effect::StartLoginFlow => {
             let provider = match &app.screen {
                 crate::app::Screen::Settings(settings) => settings
+                    .dialog
+                    .as_ref()
+                    .map(|dialog| dialog.selected_provider()),
+                crate::app::Screen::Onboarding(wizard) => wizard
                     .dialog
                     .as_ref()
                     .map(|dialog| dialog.selected_provider()),

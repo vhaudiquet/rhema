@@ -21,11 +21,16 @@
 //! - [`approval`] — the synchronous approval bridge
 //! - [`transcript`] — chat transcript lines from history and events
 //! - [`screens`] — login, model picker, chat input: pure state
+//! - [`onboarding`] — the first-run wizard's steps and keys
+//! - [`bundled`] — the skills rhema ships with, seeded on start
 //! - [`sessions`] — saved conversations for /resume, grouped by workspace
 //! - [`status`] — program status over OSC 7501, for the terminal's tabs
 //! - [`app`] — the state machine routing keys and events
 //! - [`turn`] — the tokio tasks (turn, model fetch)
 //! - [`ui`] — ratatui rendering
+//! - [`chrome`] — the shared panel/marker vocabulary of the menus
+//! - [`term_image`] — the onboarding logo through the kitty graphics
+//!   protocol (kitty and Ghostty)
 //! - [`palette`] — color palettes: named token sets in two appearances;
 //!   [`hct`] and `m3` (private) carry the color math and the scheme
 //!   behind M3 You
@@ -45,6 +50,8 @@ pub const VERSION_LABEL: &str = env!("RHEMA_VERSION_LABEL");
 pub mod app;
 pub mod approval;
 pub mod args;
+pub mod bundled;
+pub mod chrome;
 pub mod clipboard;
 pub mod commands;
 pub mod events;
@@ -52,6 +59,7 @@ mod hct;
 pub mod icons;
 mod m3;
 pub mod markdown;
+pub mod onboarding;
 pub mod palette;
 pub mod run;
 pub mod sandbox;
@@ -59,6 +67,7 @@ pub mod screens;
 pub mod sessions;
 pub mod status;
 pub mod store;
+pub mod term_image;
 pub mod transcript;
 pub mod turn;
 pub mod ui;
@@ -67,11 +76,12 @@ pub use app::{App, AppSetup, Effect, RunOptions, Screen};
 pub use approval::{ApprovalAnswerer, TuiApproval};
 pub use args::Args;
 pub use events::{FetchWhy, OwnedEvent, UiEvent};
+pub use onboarding::{OnboardingAction, OnboardingScreen, OnboardingStep};
 pub use palette::{DARK, LIGHT, Palette, Theme, ThemeKind, parse_hex_color};
 pub use run::{exit_code, run};
 pub use screens::{
     AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, ResumeAction,
-    ResumeScreen, SettingsAction, SettingsPurpose, SettingsScreen, SettingsSection,
+    ResumeScreen, SettingsAction, SettingsScreen, SettingsSection,
 };
 pub use store::{ConfigStore, DiskStore, MemoryStore};
 pub use transcript::{Line, Transcript};

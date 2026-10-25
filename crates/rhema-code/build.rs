@@ -58,7 +58,12 @@ fn main() {
     // packed-refs covers repositories whose refs have been packed.
     println!("cargo:rerun-if-changed=../../.git/refs");
     println!("cargo:rerun-if-changed=../../.git/packed-refs");
+    // The logo asset bakes into the binary; a changed image is a build
+    // event the same way a changed source is. Absent in packaged
+    // builds, where the path simply never fires.
+    println!("cargo:rerun-if-changed=../../.github/img/a1-breath-dark.png");
 
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo");
     let pkg = std::env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is set by cargo");
     let label = match git(&["rev-parse", "--short=8", "HEAD"]) {
         Some(sha) => {
@@ -84,4 +89,20 @@ fn main() {
         None => pkg,
     };
     println!("cargo:rustc-env=RHEMA_VERSION_LABEL=v{label}");
+
+    // The onboarding logo, copied into OUT_DIR as one canonical asset:
+    // the source lives with the repository's other images, and the
+    // include stays inside the crate either way. The file is always
+    // written (empty when the asset is absent — a packaged crate
+    // without the docs images) because an include in a dead arm still
+    // names a path that must exist; `RHEMA_LOGO_EMBED` says which case
+    // landed, and the runtime falls back to the text wordmark on None.
+    let logo = std::path::Path::new(&manifest).join("../../.github/img/a1-breath-dark.png");
+    let bytes = std::fs::read(&logo).unwrap_or_default();
+    let out = std::env::var("OUT_DIR").expect("OUT_DIR is set by cargo");
+    let dest = std::path::Path::new(&out).join("rhema-logo.png");
+    let embedded = !bytes.is_empty() && std::fs::write(&dest, bytes).is_ok();
+    if embedded {
+        println!("cargo:rustc-env=RHEMA_LOGO_EMBED=1");
+    }
 }

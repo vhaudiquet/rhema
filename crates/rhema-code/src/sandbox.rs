@@ -337,6 +337,7 @@ fn discovered_skills(
         skills.push(Skill {
             name: skill.name.clone(),
             description: skill.description,
+            license: skill.license,
             path: PathBuf::from(format!(
                 "{sandbox_workspace}/.rhema/skills/{}/SKILL.md",
                 skill.name
@@ -660,6 +661,7 @@ mod tests {
             skills: vec![Skill {
                 name: "review".into(),
                 description: "trigger".into(),
+                license: None,
                 path: PathBuf::from("/workspace/.rhema/skills/review/SKILL.md"),
             }],
         };

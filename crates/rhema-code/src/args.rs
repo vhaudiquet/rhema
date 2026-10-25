@@ -187,6 +187,10 @@ pub enum Command {
         #[command(subcommand)]
         action: SystemCommand,
     },
+    /// Run the first-run onboarding wizard again: provider, model,
+    /// profile, colors, skills. The terminal UI with the wizard forced
+    /// on, whatever the config's marker says.
+    Onboard,
 }
 
 /// What `rhema system` does with the prompt. The edited file is the
@@ -577,5 +581,13 @@ mod tests {
         // An action is required: bare `rhema system` is a usage error,
         // not a default.
         assert!(try_parse(&["system"]).is_err());
+    }
+
+    #[test]
+    fn the_onboard_subcommand_parses_and_takes_nothing() {
+        let args = parse(&["onboard"]);
+        assert_eq!(args.command, Some(Command::Onboard));
+        // No stray flags: the wizard reuses the TUI's own.
+        assert!(try_parse(&["onboard", "--profile", "work"]).is_err());
     }
 }

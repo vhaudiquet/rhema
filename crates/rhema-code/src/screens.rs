@@ -397,24 +397,12 @@ impl SettingsSection {
     }
 }
 
-/// What Esc and `q` mean on the settings screen: opened at startup
-/// with no usable backend there is no chat behind it, so leaving
-/// leaves the app; opened from the chat, they go back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettingsPurpose {
-    /// Startup without a usable backend: Esc quits.
-    Initial,
-    /// Opened from the chat: Esc returns there.
-    FromChat,
-}
-
 /// What one settings keypress means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsAction {
     /// Nothing to do.
     None,
-    /// Esc or `q` (outside the add dialog): back to the chat — or
-    /// quit, when the settings are the startup screen.
+    /// Esc or `q` (outside the add dialog): back to the chat.
     Back,
     /// Enter on a logged-in instance: it becomes the active one.
     ActivateInstance,
@@ -439,6 +427,8 @@ pub enum SettingsAction {
     /// The built-in has no file — the app copies it into the global
     /// directory first, where it shadows the built-in from then on.
     EditSubagent,
+    /// Enter or Space on a skills row: flip the skill's on/off state.
+    ToggleSkill,
 }
 
 /// One row of the Providers page's instance list: a stored instance, or
@@ -455,13 +445,46 @@ pub struct InstanceRow<'a> {
     pub add: bool,
 }
 
-/// One discovered skill row of the Skills page.
+/// One discovered skill row of the Skills page and the onboarding
+/// wizard's skills step.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillRow {
     /// The skill's folder name.
     pub name: String,
     /// The frontmatter description the model triggers on.
     pub description: String,
+    /// The frontmatter license, when the skill declares one — shown
+    /// under the description, dimmer than it.
+    pub license: Option<String>,
+    /// Where the skill lives.
+    pub source: SkillSource,
+    /// Whether the skill's trigger reaches the system prompt — the
+    /// config's `skills_disabled` set, inverted. Off rows still list,
+    /// dimmed; only the prompt filters them out.
+    pub enabled: bool,
+}
+
+/// Where a skill lives: shipped with rhema, in the config directory, or
+/// in the workspace — the same shadowing order discovery reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkillSource {
+    /// Seeded by rhema from the binary's bundled set.
+    Bundled,
+    /// A folder under the config directory.
+    Global,
+    /// A folder under the workspace's `.rhema/skills`.
+    Workspace,
+}
+
+impl SkillSource {
+    /// The tag the page draws after the name.
+    pub fn label(self) -> &'static str {
+        match self {
+            SkillSource::Bundled => "bundled",
+            SkillSource::Global => "global",
+            SkillSource::Workspace => "workspace",
+        }
+    }
 }
 
 /// Where a subagent definition lives. The same discovery rules as the
@@ -930,12 +953,6 @@ impl AddInstanceDialog {
 /// the app state and this screen so the page keeps telling the truth.
 #[derive(Debug)]
 pub struct SettingsScreen {
-    /// What Esc and `q` do here.
-    pub purpose: SettingsPurpose,
-    /// Why no backend resolved, when the settings are the startup
-    /// screen — the credential resolution's own error, shown over
-    /// every page. `None` when the settings opened from the chat.
-    pub startup_reason: Option<String>,
     /// The section whose page is showing.
     pub section: SettingsSection,
     /// The selected row within the page's interactive rows (the
@@ -990,13 +1007,19 @@ pub struct SettingsScreen {
     pub profile_count: usize,
 }
 
+impl Default for SettingsScreen {
+    /// A settings screen on the Providers page: dark theme, plain
+    /// icons, empty snapshots — the opener fills the rest.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SettingsScreen {
     /// A settings screen on the Providers page: dark theme, plain
     /// icons, empty snapshots — the opener fills the rest.
-    pub fn new(purpose: SettingsPurpose) -> Self {
+    pub fn new() -> Self {
         Self {
-            purpose,
-            startup_reason: None,
             section: SettingsSection::Providers,
             row: 0,
             colors: crate::palette::Palette::Rhema,
@@ -1079,12 +1102,22 @@ impl SettingsScreen {
         self.subagents.get(self.row)
     }
 
+    /// The highlighted skills row; `None` anywhere but the Skills page,
+    /// with the dialog up, or past the list's end.
+    pub fn selected_skill(&self) -> Option<&SkillRow> {
+        if self.section != SettingsSection::Skills || self.dialog.is_some() {
+            return None;
+        }
+        self.skills.get(self.row)
+    }
+
     /// How many interactive rows the page holds; zero means the arrows
     /// have nothing to move through.
     fn row_count(&self) -> usize {
         match self.section {
             SettingsSection::Providers => self.instance_rows().len(),
             SettingsSection::Appearance => 3,
+            SettingsSection::Skills => self.skills.len(),
             SettingsSection::Subagents => self.subagents.len(),
             _ => 0,
         }
@@ -1115,6 +1148,10 @@ impl SettingsScreen {
             },
             SettingsSection::Subagents => match self.selected_subagent() {
                 Some(_) => SettingsAction::EditSubagent,
+                None => SettingsAction::None,
+            },
+            SettingsSection::Skills => match self.selected_skill() {
+                Some(_) => SettingsAction::ToggleSkill,
                 None => SettingsAction::None,
             },
             _ => SettingsAction::None,
@@ -1168,6 +1205,9 @@ impl SettingsScreen {
             }
             KeyCode::Char('e') if self.selected_subagent().is_some() => {
                 SettingsAction::EditSubagent
+            }
+            KeyCode::Char(' ' | 't') if self.selected_skill().is_some() => {
+                SettingsAction::ToggleSkill
             }
             KeyCode::Char('c') if self.section == SettingsSection::Appearance => {
                 SettingsAction::CyclePalette
@@ -1545,15 +1585,6 @@ pub enum PickerStatus {
     Error(String),
 }
 
-/// What the picker returns to when dismissed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PickerPurpose {
-    /// No model is chosen yet; Esc quits the app.
-    Initial,
-    /// Opened mid-session with Ctrl-P; Esc returns to the chat.
-    FromChat,
-}
-
 /// What one picker keypress means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerAction {
@@ -1570,8 +1601,6 @@ pub enum PickerAction {
         /// The model's id.
         id: String,
     },
-    /// Leave the app.
-    Quit,
     /// Return to the chat.
     BackToChat,
     /// Retry the failed model fetch.
@@ -1608,14 +1637,12 @@ pub struct PickerScreen {
     pub selected: usize,
     /// Current status.
     pub status: PickerStatus,
-    /// What Esc does here.
-    pub purpose: PickerPurpose,
 }
 
 impl PickerScreen {
     /// A picker over `models` (text chat models only, sorted by provider
     /// then id), initially unfiltered.
-    pub fn new(mut models: Vec<CatalogModel>, purpose: PickerPurpose) -> Self {
+    pub fn new(mut models: Vec<CatalogModel>) -> Self {
         models.retain(|entry| Self::usable(&entry.model));
         models.sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
         Self {
@@ -1624,7 +1651,6 @@ impl PickerScreen {
             filter: String::new(),
             selected: 0,
             status: PickerStatus::Ready,
-            purpose,
         }
     }
 
@@ -1678,10 +1704,9 @@ impl PickerScreen {
 
     /// Handles one keypress. Typing filters by default: printable keys
     /// extend the filter, arrows navigate, enter picks. Esc always
-    /// leaves — the filter is transient, nothing to clear first —
-    /// quitting at the startup gate and returning to the chat
-    /// otherwise. `q` stays a filter character on purpose: models are
-    /// named (qwen).
+    /// leaves — the filter is transient, nothing to clear first — and
+    /// returns to the chat. `q` stays a filter character on purpose:
+    /// models are named (qwen).
     pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return PickerAction::None;
@@ -1708,12 +1733,7 @@ impl PickerScreen {
                     return PickerAction::None;
                 }
                 KeyCode::Enter => return self.choose(),
-                KeyCode::Esc => {
-                    return match self.purpose {
-                        PickerPurpose::Initial => PickerAction::Quit,
-                        PickerPurpose::FromChat => PickerAction::BackToChat,
-                    };
-                }
+                KeyCode::Esc => return PickerAction::BackToChat,
                 _ => return PickerAction::None,
             }
         }
@@ -1723,10 +1743,7 @@ impl PickerScreen {
                 self.status = PickerStatus::Loading;
                 PickerAction::Retry
             }
-            KeyCode::Esc => match self.purpose {
-                PickerPurpose::Initial => PickerAction::Quit,
-                PickerPurpose::FromChat => PickerAction::BackToChat,
-            },
+            KeyCode::Esc => PickerAction::BackToChat,
             _ => PickerAction::None,
         }
     }
@@ -2295,7 +2312,7 @@ mod tests {
     // --- Settings ---
 
     fn settings_screen() -> SettingsScreen {
-        let mut settings = SettingsScreen::new(SettingsPurpose::FromChat);
+        let mut settings = SettingsScreen::new();
         settings.profile = "personal".into();
         settings
     }
@@ -2761,21 +2778,18 @@ mod tests {
     }
 
     fn picker() -> PickerScreen {
-        PickerScreen::new(
-            catalog(
-                "google",
-                vec![
-                    model("gemini-3.8-pro", "Gemini 3.8 Pro", true),
-                    model("gemini-3.8-flash", "Gemini 3.8 Flash", true),
-                    // Rows without the chat marker are dropped by the
-                    // picker itself; the adapters never deliver text-wise
-                    // non-chat models in the first place.
-                    model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", false),
-                    model("text-embedding-1", "Text Embedding 1", false),
-                ],
-            ),
-            PickerPurpose::Initial,
-        )
+        PickerScreen::new(catalog(
+            "google",
+            vec![
+                model("gemini-3.8-pro", "Gemini 3.8 Pro", true),
+                model("gemini-3.8-flash", "Gemini 3.8 Flash", true),
+                // Rows without the chat marker are dropped by the
+                // picker itself; the adapters never deliver text-wise
+                // non-chat models in the first place.
+                model("gemini-3.8-flash-tts", "Gemini 3.8 Flash TTS", false),
+                model("text-embedding-1", "Text Embedding 1", false),
+            ],
+        ))
     }
 
     #[test]
@@ -2836,7 +2850,6 @@ mod tests {
                 vec![model("gemini-3.8-pro", "Gemini 3.8 Pro", true)],
             ))
             .collect(),
-            PickerPurpose::Initial,
         );
 
         picker.filter = "openrouter/".into();
@@ -2912,7 +2925,6 @@ mod tests {
                 vec![model("gemini-3.8-flash", "Gemini 3.8 Flash", true)],
             ))
             .collect(),
-            PickerPurpose::Initial,
         );
 
         // Unfiltered, the catalog groups by provider: google's rows first,
@@ -2977,7 +2989,10 @@ mod tests {
     fn esc_leaves_directly_even_with_a_filter() {
         let mut picker = picker();
         picker.handle_key(key(KeyCode::Char('t')));
-        assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::Quit);
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Esc)),
+            PickerAction::BackToChat
+        );
         // The filter is transient; leaving does not bother with it.
         assert_eq!(picker.filter, "t");
     }
@@ -2990,12 +3005,17 @@ mod tests {
     }
 
     #[test]
-    fn picker_esc_quits_initially_and_returns_to_chat_mid_session() {
+    fn picker_esc_returns_to_the_chat() {
+        // There is no startup gate anymore: a session without a model
+        // opens on the chat, so the picker's Esc always goes back.
         let mut picker = picker();
-        assert_eq!(picker.handle_key(key(KeyCode::Esc)), PickerAction::Quit);
-        let mut picker = PickerScreen::new(Vec::new(), PickerPurpose::FromChat);
         assert_eq!(
             picker.handle_key(key(KeyCode::Esc)),
+            PickerAction::BackToChat
+        );
+        let mut empty = PickerScreen::new(Vec::new());
+        assert_eq!(
+            empty.handle_key(key(KeyCode::Esc)),
             PickerAction::BackToChat
         );
     }

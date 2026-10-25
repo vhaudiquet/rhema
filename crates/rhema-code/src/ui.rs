@@ -146,7 +146,19 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         frame.area(),
     );
     let mut hits = Vec::new();
+    // The logo rect is re-stated every frame: the wizard's rail sets it,
+    // every other screen clears it, and the runner diffs it against
+    // what the terminal graphics layer holds.
+    app.logo_rect = None;
+    let mut onboarding_hits = Vec::new();
     match &app.screen {
+        Screen::Onboarding(wizard) => render_onboarding(
+            frame,
+            wizard,
+            &theme,
+            &mut app.logo_rect,
+            &mut onboarding_hits,
+        ),
         Screen::Picker(picker) => render_picker(frame, picker, &theme),
         Screen::Profile(profile) => render_profile_picker(frame, profile, &theme),
         Screen::Sandbox(sandbox) => render_sandbox_picker(frame, sandbox, &theme),
@@ -198,6 +210,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
     // The hit rects land after the match: `settings` borrows the screen.
     app.settings_hits = hits;
+    app.onboarding_hits = onboarding_hits;
 }
 
 /// A centered box clipped to `area`.
@@ -365,12 +378,7 @@ fn render_add_dialog(
 }
 fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
     let area = frame.area();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.surface).fg(theme.text))
-        .title(" select a model ");
+    let block = crate::chrome::panel(Some("select a model"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -440,12 +448,7 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
 /// marked.
 fn render_profile_picker(frame: &mut Frame, screen: &crate::screens::ProfileScreen, theme: &Theme) {
     let area = frame.area();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.sunken).fg(theme.text))
-        .title(" select a profile ");
+    let block = crate::chrome::panel(Some("select a profile"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -512,12 +515,7 @@ fn render_profile_picker(frame: &mut Frame, screen: &crate::screens::ProfileScre
 /// offered kinds — rounded border, `❯ ` highlight, one footer line.
 fn render_sandbox_picker(frame: &mut Frame, screen: &crate::screens::SandboxScreen, theme: &Theme) {
     let area = frame.area();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.sunken).fg(theme.text))
-        .title(" where bash runs ");
+    let block = crate::chrome::panel(Some("where bash runs"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -578,12 +576,7 @@ fn render_sandbox_picker(frame: &mut Frame, screen: &crate::screens::SandboxScre
 
 fn render_resume_picker(frame: &mut Frame, screen: &crate::screens::ResumeScreen, theme: &Theme) {
     let area = frame.area();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.sunken).fg(theme.text))
-        .title(" resume a session ");
+    let block = crate::chrome::panel(Some("resume a session"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -626,6 +619,429 @@ fn render_resume_picker(frame: &mut Frame, screen: &crate::screens::ResumeScreen
     );
 }
 
+/// The wizard's rail width: wide enough for the logo and the step
+/// labels, narrow enough to leave the body its room.
+const ONBOARDING_RAIL: u16 = 26;
+/// The logo's height in cell rows; the width doubles it because cells
+/// are roughly twice as tall as wide — the image stays square.
+const ONBOARDING_LOGO_ROWS: u16 = 10;
+
+/// The onboarding wizard: the logo rail on the left (the terminal
+/// graphics image on kitty and Ghostty, the wordmark elsewhere), the
+/// step's body on the right, one footer of hints. The same chrome the
+/// settings screen wears.
+fn render_onboarding(
+    frame: &mut Frame,
+    wizard: &crate::onboarding::OnboardingScreen,
+    theme: &Theme,
+    logo_rect: &mut Option<Rect>,
+    hits: &mut Vec<(Rect, crate::app::OnboardingHit)>,
+) {
+    let area = frame.area();
+    let block = crate::chrome::panel(Some(" welcome to rhema "), theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [rail_area, page_area] =
+        Layout::horizontal([Constraint::Length(ONBOARDING_RAIL), Constraint::Min(24)]).areas(inner);
+    let [content_area, footer_area] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(page_area);
+    let text_width = content_area.width.saturating_sub(4) as usize;
+
+    // The rail: the logo, the wordmark, a rule, then the steps — the
+    // current one marked, the rest dim.
+    let mut rail = Vec::new();
+    if crate::term_image::supported() {
+        // The image composites over these reserved rows after the
+        // frame; the rect is what the runner places against.
+        *logo_rect = Some(Rect {
+            x: rail_area.x + 1,
+            y: rail_area.y + 1,
+            width: ONBOARDING_LOGO_ROWS * 2,
+            height: ONBOARDING_LOGO_ROWS,
+        });
+        for _ in 0..ONBOARDING_LOGO_ROWS {
+            rail.push(Line::default());
+        }
+    } else {
+        // The wordmark fallback: the banner's mark, larger in spirit if
+        // not in cells.
+        rail.push(Line::from(vec![
+            Span::raw("ῥ").fg(theme.accent_text).bold(),
+        ]));
+        rail.push(Line::default());
+    }
+    rail.push(Line::from(Span::raw("Rhema Code").bold()));
+    rail.push(Line::from(Span::raw(crate::VERSION_LABEL).fg(theme.text3)));
+    rail.push(Line::default());
+    rail.push(Line::from(crate::chrome::rule(
+        rail_area.width.saturating_sub(2) as usize,
+        theme,
+    )));
+    for step in crate::onboarding::OnboardingStep::ALL {
+        // The rail line this row will render at — the hit rect's y
+        // counts the top padding in, the way the settings sidebar's
+        // rects do.
+        let rail_line = rail.len();
+        let current = *step == wizard.step;
+        let style = if current {
+            Style::default().fg(theme.accent_text).bold()
+        } else {
+            Style::default().fg(theme.text2)
+        };
+        rail.push(Line::from(vec![
+            crate::chrome::marker(current, theme),
+            Span::styled(step.label().to_owned(), style),
+        ]));
+        hits.push((
+            Rect {
+                x: rail_area.x + 1,
+                y: rail_area.y + 1 + rail_line as u16,
+                width: rail_area.width.saturating_sub(2),
+                height: 1,
+            },
+            crate::app::OnboardingHit::RailStep(*step),
+        ));
+    }
+    frame.render_widget(
+        Paragraph::new(rail).block(Block::default().padding(Padding::new(1, 1, 1, 0))),
+        rail_area,
+    );
+
+    let (body, footer) = onboarding_body(wizard, theme, text_width);
+    frame.render_widget(
+        Paragraph::new(body).block(Block::default().padding(Padding::new(2, 2, 1, 0))),
+        content_area,
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(footer)).block(Block::default().padding(Padding::horizontal(2))),
+        footer_area,
+    );
+}
+
+/// The "currently configured" block the wizard shows on the Welcome
+/// and Login steps when a config already exists — a `rhema onboard`
+/// rerun must show what is connected, not start from a blank slate.
+fn connected_lines(
+    stored: &rhema_config::Profile,
+    profile_name: &str,
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    let provider = stored.provider_name().map(|name| match &stored.instance {
+        Some(instance) => format!("{name} ({instance})"),
+        None => name.to_owned(),
+    });
+    if provider.is_none() && stored.model.is_none() {
+        return lines;
+    }
+    lines.push(Line::from(Span::raw("currently configured").bold()));
+    lines.push(Line::from(crate::chrome::rule(width, theme)));
+    let value = |text: String| Span::raw(text).fg(theme.text);
+    if let Some(provider) = provider {
+        lines.push(Line::from(vec![
+            Span::raw("provider  ").fg(theme.text3),
+            value(provider),
+        ]));
+    }
+    if let Some(model) = &stored.model {
+        lines.push(Line::from(vec![
+            Span::raw("model     ").fg(theme.text3),
+            value(model.clone()),
+        ]));
+    }
+    lines.push(Line::from(vec![
+        Span::raw("profile   ").fg(theme.text3),
+        value(profile_name.to_owned()),
+    ]));
+    lines.push(Line::default());
+    lines
+}
+
+/// The step's body lines and the footer hints. The dialog, while the
+/// login step runs one, renders inline — the same stages the settings'
+/// modal shows, in the wizard's own pane.
+fn onboarding_body(
+    wizard: &crate::onboarding::OnboardingScreen,
+    theme: &Theme,
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<Span<'static>>) {
+    use crate::onboarding::OnboardingStep as Step;
+    let footer = |hints: &str| vec![Span::raw(hints.to_owned()).fg(theme.text3)];
+    let title = |text: &str, lines: &mut Vec<Line<'static>>| {
+        lines.push(Line::from(Span::raw(text.to_owned()).bold()));
+        lines.push(Line::from(crate::chrome::rule(width, theme)));
+        lines.push(Line::default());
+    };
+    let mut lines = Vec::new();
+    let hints = match wizard.step {
+        Step::Welcome => {
+            title("Rhema Code", &mut lines);
+            lines.extend(connected_lines(
+                &wizard.stored,
+                &wizard.profile_start,
+                theme,
+                width,
+            ));
+            lines.extend(wrap_line(
+                &Line::from(
+                    Span::raw(
+                        "A coding agent for the terminal: it reads and edits the tree, \
+                         runs the commands, and keeps the conversation.",
+                    )
+                    .fg(theme.text),
+                ),
+                width,
+            ));
+            for text in [
+                "A few choices set it up — a provider login, a model, a profile,",
+                "the colors, and the skills rhema ships with. Everything is",
+                "revisitable later in /settings.",
+            ] {
+                lines.push(Line::from(Span::raw(text).fg(theme.text2)));
+            }
+            footer("enter start · esc quit")
+        }
+        Step::Login => {
+            if let Some(dialog) = &wizard.dialog {
+                title("Add a login", &mut lines);
+                match dialog.stage {
+                    crate::screens::DialogStage::SelectProvider => {
+                        for (index, entry) in PROVIDERS.iter().enumerate() {
+                            let selected = index == dialog.selected;
+                            let style = if selected {
+                                Style::default().fg(theme.text).bold()
+                            } else {
+                                Style::default().fg(theme.text2)
+                            };
+                            lines.push(Line::from(vec![
+                                crate::chrome::marker(selected, theme),
+                                Span::styled(entry.name.to_owned(), style),
+                            ]));
+                        }
+                    }
+                    crate::screens::DialogStage::NameInstance
+                    | crate::screens::DialogStage::EnterCredential => {
+                        lines.push(Line::from(vec![
+                            Span::raw(dialog.input_label()).fg(theme.text3),
+                            Span::raw(dialog.masked_input()).bold(),
+                        ]));
+                    }
+                    crate::screens::DialogStage::Flow => {
+                        lines.extend(dialog_flow_lines(dialog, theme, width));
+                    }
+                }
+                let status = match &dialog.status {
+                    crate::screens::DialogStatus::Idle => {
+                        Line::from(dialog.input_hint()).fg(theme.text3)
+                    }
+                    crate::screens::DialogStatus::Validating => {
+                        Line::from("validating…").fg(theme.text3)
+                    }
+                    crate::screens::DialogStatus::Error(message) => {
+                        Line::from(message.clone()).fg(theme.error)
+                    }
+                };
+                lines.push(Line::default());
+                lines.push(status);
+                footer("esc back")
+            } else {
+                title("A provider to serve the turns", &mut lines);
+                // The logins this profile already holds — a rerun
+                // shows what is connected before offering another.
+                // Owned copies: the rows must not borrow the snapshot
+                // the loop reads.
+                let entries: Vec<(String, String)> = wizard
+                    .stored
+                    .instance_entries()
+                    .into_iter()
+                    .map(|(name, instance)| (name.to_owned(), instance.provider.clone()))
+                    .collect();
+                let active = wizard
+                    .stored
+                    .active_instance()
+                    .map(|(name, _)| name.to_owned());
+                for (name, provider) in entries {
+                    let dot = if Some(name.as_str()) == active.as_deref() {
+                        theme.ok
+                    } else {
+                        theme.text3
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("● ").fg(dot),
+                        Span::raw(name).fg(theme.text2),
+                        Span::raw(format!(" ({provider})")).fg(theme.text3),
+                    ]));
+                }
+                if !wizard.stored.instances.is_empty() {
+                    lines.push(Line::default());
+                }
+                let rows = ["+ add a login", "skip for now"];
+                for (index, row) in rows.iter().enumerate() {
+                    let selected = index == wizard.row;
+                    lines.push(Line::from(vec![
+                        crate::chrome::marker(selected, theme),
+                        Span::raw((*row).to_owned()).fg(if selected {
+                            theme.text
+                        } else {
+                            theme.text2
+                        }),
+                    ]));
+                }
+                lines.push(Line::default());
+                let note = if wizard.backend_ready || !wizard.stored.instances.is_empty() {
+                    "a provider is already configured — adding another is optional"
+                } else {
+                    "the login validates by fetching the provider's model list"
+                };
+                lines.push(Line::from(Span::raw(note).fg(theme.text3)));
+                footer("enter select · esc back")
+            }
+        }
+        Step::Model => {
+            title("Pick a model", &mut lines);
+            let mut index = 0;
+            if let Some((_, _, id)) = wizard.keep_current_model() {
+                let selected = index == wizard.row;
+                lines.push(Line::from(vec![
+                    crate::chrome::marker(selected, theme),
+                    Span::raw(id.clone()).fg(if selected { theme.text } else { theme.text2 }),
+                    Span::raw("  · keep current").fg(theme.text3),
+                ]));
+                index += 1;
+            }
+            if wizard.models.is_empty() && index == 0 {
+                lines.push(Line::from(Span::raw("no models").fg(theme.text3)));
+            }
+            for entry in &wizard.models {
+                let selected = index == wizard.row;
+                let mut line = Line::from(vec![crate::chrome::marker(selected, theme)]);
+                line.spans
+                    .extend(model_row(entry.provider, &entry.model, theme).spans);
+                if selected {
+                    line = line.style(Style::default().bg(theme.elevated));
+                }
+                lines.push(line);
+                index += 1;
+            }
+            footer("enter choose · esc back")
+        }
+        Step::Profile => {
+            title("The default profile", &mut lines);
+            lines.push(Line::from(vec![
+                Span::raw("name: ").fg(theme.text3),
+                Span::raw(wizard.profile_name.clone()).bold(),
+                Span::raw("▌").fg(theme.accent_text),
+            ]));
+            lines.push(Line::default());
+            lines.push(Line::from(
+                Span::raw("profiles keep settings apart — work and personal side by side")
+                    .fg(theme.text3),
+            ));
+            footer("type to edit · enter continue · esc back")
+        }
+        Step::Appearance => {
+            title("Colors", &mut lines);
+            for (index, palette) in crate::palette::Palette::ALL.iter().enumerate() {
+                let selected = index == wizard.row;
+                lines.push(Line::from(vec![
+                    crate::chrome::marker(selected, theme),
+                    Span::raw(palette.label().to_owned()).fg(if selected {
+                        theme.text
+                    } else {
+                        theme.text2
+                    }),
+                ]));
+            }
+            lines.push(Line::default());
+            lines.push(Line::from(
+                Span::raw("moving previews the palette live; enter keeps it").fg(theme.text3),
+            ));
+            footer("↑↓ preview · enter continue · esc back")
+        }
+        Step::Skills => {
+            title("Bundled skills", &mut lines);
+            if wizard.skills.is_empty() {
+                lines.push(Line::from(
+                    Span::raw("no skills discovered").fg(theme.text3),
+                ));
+            }
+            for (index, skill) in wizard.skills.iter().enumerate() {
+                let selected = index == wizard.row;
+                let dot = if skill.enabled { "●" } else { "○" };
+                let dot_color = if skill.enabled { theme.ok } else { theme.text3 };
+                let line = Line::from(vec![
+                    crate::chrome::marker(selected, theme),
+                    Span::raw(dot).fg(dot_color),
+                    Span::raw(" ").fg(theme.text3),
+                    Span::raw(skill.name.clone()).fg(if skill.enabled {
+                        theme.text
+                    } else {
+                        theme.text3
+                    }),
+                    Span::raw(format!(" · {}", skill.source.label())).fg(theme.text3),
+                ]);
+                lines.push(if selected {
+                    line.style(Style::default().bg(theme.elevated))
+                } else {
+                    line
+                });
+                lines.push(Line::from(
+                    Span::raw(format!("    {}", skill.description)).fg(theme.text3),
+                ));
+                // The license, a step dimmer than the description — the
+                // same treatment the settings Skills page gives it.
+                if let Some(license) = &skill.license {
+                    lines.push(Line::from(
+                        Span::raw(format!("    {}", license)).fg(theme.text3).dim(),
+                    ));
+                }
+            }
+            footer("space/t toggle · enter continue · esc back")
+        }
+        Step::Finish => {
+            title("Ready", &mut lines);
+            let provider = wizard
+                .chosen_provider
+                .clone()
+                .unwrap_or_else(|| "none yet — /login later".to_owned());
+            let model = wizard
+                .chosen_model
+                .clone()
+                .unwrap_or_else(|| "none yet — /model later".to_owned());
+            lines.push(Line::from(vec![
+                Span::raw("provider  ").fg(theme.text3),
+                Span::raw(provider).fg(theme.text),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("model     ").fg(theme.text3),
+                Span::raw(model).fg(theme.text),
+            ]));
+            lines.push(Line::from(vec![
+                Span::raw("profile   ").fg(theme.text3),
+                Span::raw(wizard.profile_start.clone()).fg(theme.text),
+            ]));
+            lines.push(Line::default());
+            lines.push(Line::from(
+                Span::raw("Everything lives in /settings; rhema onboard runs this wizard again.")
+                    .fg(theme.text2),
+            ));
+            footer("enter finish")
+        }
+    };
+    if let Some(error) = &wizard.error {
+        lines.push(Line::default());
+        lines.extend(wrap_line(
+            &Line::from(Span::raw(error.clone())).fg(theme.error),
+            width,
+        ));
+    }
+    let hints: Vec<Span<'static>> = hints;
+    let lines: Vec<Line<'static>> = lines;
+    (lines, hints)
+}
+
 /// The settings screen: the sidebar of sections on the left, the selected
 /// section's page on the right, its key hints pinned to the bottom row.
 /// The settings screen: the sidebar of sections on the left, the
@@ -642,11 +1058,7 @@ fn render_settings(
     hits: &mut Vec<(Rect, SettingsHit)>,
 ) {
     let area = frame.area();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
-        .style(Style::default().bg(theme.sunken).fg(theme.text));
+    let block = crate::chrome::panel(None, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -800,19 +1212,9 @@ fn settings_page(
     // interactive row indices count these header lines in.
     let mut lines = vec![
         Line::from(Span::raw(settings.section.label()).bold()),
-        Line::from(Span::raw("─".repeat(width)).fg(theme.border_strong)),
+        Line::from(crate::chrome::rule(width, theme)),
         Line::default(),
     ];
-    // The startup gate's explanation rides over every page: the
-    // settings opened because no backend resolved, and the reason
-    // must not vanish when the section changes.
-    if let Some(reason) = &settings.startup_reason {
-        lines.extend(wrap_line(
-            &Line::from(Span::raw(reason.clone()).fg(theme.warn)),
-            width,
-        ));
-        lines.push(Line::default());
-    }
     match settings.section {
         SettingsSection::Providers => {
             let provider_value = match settings.stored.provider_name() {
@@ -925,19 +1327,45 @@ fn settings_page(
                 width,
             ));
             lines.push(Line::default());
+            let mut row_hits = Vec::new();
             if settings.skills.is_empty() {
                 lines.extend(settings_hint("No skills discovered", theme, width));
             }
-            for skill in &settings.skills {
+            for (index, skill) in settings.skills.iter().enumerate() {
+                let selected = index == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                // The dot is the on/off state: filled and ok-green on,
+                // hollow and dim off — the same pair the skills step of
+                // the onboarding wizard draws.
+                let dot = if skill.enabled { "●" } else { "○" };
+                let dot_color = if skill.enabled { theme.ok } else { theme.text3 };
+                let line = Line::from(vec![
+                    crate::chrome::marker(selected, theme),
+                    Span::raw(dot).fg(dot_color),
+                    Span::raw(" ").fg(theme.text3),
+                    Span::raw(skill.name.clone()).fg(if skill.enabled {
+                        theme.text
+                    } else {
+                        theme.text3
+                    }),
+                    Span::raw(format!(" · {}", skill.source.label())).fg(theme.text3),
+                ]);
+                lines.push(settings_row(line, selected, theme));
                 lines.extend(wrap_line(
-                    &Line::from(vec![
-                        Span::raw(format!("{} - ", skill.name)).fg(theme.text),
-                        Span::raw(skill.description.clone()).fg(theme.text3),
-                    ]),
+                    &Line::from(Span::raw(format!("    {}", skill.description)).fg(theme.text3)),
                     width,
                 ));
+                // The license sits a step dimmer than the description:
+                // same tone, dim modifier — attribution that reads only
+                // when looked for.
+                if let Some(license) = &skill.license {
+                    lines.extend(wrap_line(
+                        &Line::from(Span::raw(format!("    {}", license)).fg(theme.text3).dim()),
+                        width,
+                    ));
+                }
             }
-            (lines, footer(""), Vec::new())
+            (lines, footer("enter/space - toggle on and off"), row_hits)
         }
         SettingsSection::Subagents => {
             lines.extend(settings_field(
@@ -2060,8 +2488,11 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     }
     parts.push(Span::raw(folder).fg(theme.text2).bold());
     match (&effective.provider, &effective.model) {
-        (None, _) => parts.push(Span::raw(" · no provider; use /login").fg(theme.text3)),
-        (_, None) => parts.push(Span::raw(" · no model; use /model").fg(theme.text3)),
+        // The missing pieces read as failures, not hints: red, the way
+        // a broken build reads, so the fix is the first thing the eye
+        // finds.
+        (None, _) => parts.push(Span::raw(" · no provider; use /login").fg(theme.error)),
+        (_, None) => parts.push(Span::raw(" · no model; use /model").fg(theme.error)),
         // The id's vendor prefix is picker detail: a footer reads the
         // bare model name.
         (_, Some(model)) => {
@@ -2505,7 +2936,7 @@ fn render_confirm_quit(frame: &mut Frame, theme: &Theme) {
 mod tests {
     use super::*;
     use crate::palette::DARK;
-    use crate::screens::{CatalogModel, PickerPurpose, PickerScreen};
+    use crate::screens::{CatalogModel, PickerScreen};
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_provider::ModelCard;
 
@@ -2525,8 +2956,7 @@ mod tests {
     /// percentages of the total with their kilo-scaled amounts.
     #[test]
     fn the_usage_page_shows_the_detailed_split() {
-        let mut settings =
-            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        let mut settings = crate::screens::SettingsScreen::new();
         settings.section = SettingsSection::Usage;
         settings.transcript = Some(rhema_transcript::TranscriptStats {
             requests: 10,
@@ -2584,8 +3014,7 @@ mod tests {
     /// list with its add row.
     #[test]
     fn the_settings_screen_draws_the_sidebar_and_the_page() {
-        let mut settings =
-            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        let mut settings = crate::screens::SettingsScreen::new();
         settings.profile = "personal".into();
         settings.stored.upsert_instance(
             "google",
@@ -2661,8 +3090,7 @@ mod tests {
     /// registers one click target per row.
     #[test]
     fn the_subagents_page_lists_the_definitions_and_their_targets() {
-        let mut settings =
-            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        let mut settings = crate::screens::SettingsScreen::new();
         settings.section = SettingsSection::Subagents;
         settings.subagents_global_dir = Some("/cfg".into());
         settings.subagents_workspace_dir = "/w/.rhema/subagents".into();
@@ -2720,17 +3148,97 @@ mod tests {
         );
     }
 
-    /// The startup gate's explanation renders over the page the
-    /// settings open on, wrapped, and survives a section change.
+    /// The wizard renders its rail and the welcome body; off a
+    /// graphics terminal (as under TestBackend) the logo rect stays
+    /// clear and the wordmark stands in.
     #[test]
-    fn the_startup_reason_rides_over_the_page() {
-        let mut settings =
-            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::Initial);
-        settings.startup_reason = Some(
-            "missing API key: set GEMINI_API_KEY — the system keychain is \
-             locked or unreachable, so the stored keys were unreadable"
-                .to_owned(),
+    fn the_wizard_renders_its_rail_and_welcome() {
+        let wizard = crate::onboarding::OnboardingScreen::new(
+            vec![crate::screens::SkillRow {
+                name: "unslop".into(),
+                description: "Remove AI patterns.".into(),
+                license: Some("MIT License, Copyright (c) 2026 Lauren Tan".into()),
+                source: crate::screens::SkillSource::Bundled,
+                enabled: true,
+            }],
+            "personal".into(),
+            false,
+            rhema_config::Profile::default(),
         );
+        let mut logo_rect = None;
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_onboarding(frame, &wizard, &DARK, &mut logo_rect, &mut Vec::new()))
+            .unwrap();
+        let text: String = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Rhema Code"), "the wordmark: {text}");
+        assert!(text.contains("welcome to rhema"), "the panel title: {text}");
+        for step in crate::onboarding::OnboardingStep::ALL {
+            assert!(
+                text.contains(step.label()),
+                "{} in the rail: {text}",
+                step.label()
+            );
+        }
+        assert!(text.contains("revisitable later in /settings"));
+        assert!(
+            !logo_rect.is_some(),
+            "no graphics protocol under TestBackend: {logo_rect:?}"
+        );
+        // The skills step carries the license line, dimmer than the
+        // description (same tone, dim modifier).
+        let mut wizard = crate::onboarding::OnboardingScreen::new(
+            vec![crate::screens::SkillRow {
+                name: "unslop".into(),
+                description: "Remove AI patterns.".into(),
+                license: Some("MIT License, Copyright (c) 2026 Lauren Tan".into()),
+                source: crate::screens::SkillSource::Bundled,
+                enabled: true,
+            }],
+            "personal".into(),
+            false,
+            rhema_config::Profile::default(),
+        );
+        wizard.go(crate::onboarding::OnboardingStep::Skills);
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| render_onboarding(frame, &wizard, &DARK, &mut logo_rect, &mut Vec::new()))
+            .unwrap();
+        let text: String = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("Lauren Tan"),
+            "the license shows on the skills step: {text}"
+        );
+        let dim = (0..30).any(|y| {
+            (0..100).any(|x| {
+                terminal.backend().buffer()[(x, y)]
+                    .style()
+                    .add_modifier
+                    .contains(ratatui::style::Modifier::DIM)
+            })
+        });
+        assert!(dim, "the license renders dimmed: {text}");
+    }
+
+    /// A page's rows render inside the pane the sidebar leaves: the
+    /// title, the rule, and the wrapped content.
+    #[test]
+    fn the_page_renders_its_title_and_rule() {
+        let settings = crate::screens::SettingsScreen::new();
 
         let draw = |settings: &crate::screens::SettingsScreen| {
             let mut hits = Vec::new();
@@ -2752,19 +3260,17 @@ mod tests {
 
         let text = draw(&settings);
         assert!(
-            text.contains("GEMINI_API_KEY"),
-            "the reason shows on the opening page: {text}"
+            text.contains("Providers"),
+            "the opening page carries its title: {text}"
         );
-        assert!(
-            text.contains("locked or unreachable"),
-            "the reason wraps to the pane: {text}"
-        );
+        assert!(text.contains('─'), "the title sits over a rule: {text}");
 
+        let mut settings = settings;
         settings.section = SettingsSection::About;
         let text = draw(&settings);
         assert!(
-            text.contains("GEMINI_API_KEY"),
-            "the reason rides over the other pages too: {text}"
+            text.contains("About"),
+            "the section switch repaints the title: {text}"
         );
     }
 
@@ -2772,8 +3278,7 @@ mod tests {
     /// and its rows register as click targets while it shows.
     #[test]
     fn the_add_dialog_draws_its_provider_list() {
-        let mut settings =
-            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        let mut settings = crate::screens::SettingsScreen::new();
         settings.dialog = Some(crate::screens::AddInstanceDialog::new(&settings.stored));
 
         let mut hits = Vec::new();
@@ -2816,7 +3321,6 @@ mod tests {
                     model,
                 })
                 .collect(),
-            PickerPurpose::Initial,
         );
         assert_eq!(picker.selected, 0);
 
@@ -2852,7 +3356,6 @@ mod tests {
                     model,
                 })
                 .collect(),
-            PickerPurpose::Initial,
         );
         picker.failed = vec!["openrouter"];
 
@@ -2878,7 +3381,7 @@ mod tests {
                 model,
             })
             .collect();
-        let mut picker = PickerScreen::new(models, PickerPurpose::Initial);
+        let mut picker = PickerScreen::new(models);
         picker.selected = 19;
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
@@ -3018,6 +3521,7 @@ mod scroll_tests {
             sandboxed: None,
             sandbox_offered: crate::sandbox::SandboxAvailability::default(),
             home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
+            onboard: false,
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: ThemeKind::Dark,
@@ -3234,8 +3738,7 @@ mod scroll_tests {
     /// closing the list.
     #[test]
     fn the_providers_page_reports_the_stored_key_state() {
-        let mut settings =
-            crate::screens::SettingsScreen::new(crate::screens::SettingsPurpose::FromChat);
+        let mut settings = crate::screens::SettingsScreen::new();
         settings.stored.instances.insert(
             "home".to_owned(),
             rhema_config::ProviderInstance {

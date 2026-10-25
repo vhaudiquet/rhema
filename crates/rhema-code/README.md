@@ -12,6 +12,12 @@ Rhema Code is a terminal-based coding agent, built on the Rhema agent framework.
 
 ## Features
 
+### Onboarding
+
+The first start (no config yet, or a wizard left unfinished) runs a setup wizard: the rhema logo on a rail beside the steps — a provider login, a model pick from that login's catalog, the default profile's name, the color palette (previewed live as the rows move), and the bundled skills' on/off switches. `rhema onboard` runs it again any time. Nothing else gates the session: a config without a model or a login still opens the chat — the footer names what is missing in red, and `/model` or `/login` is one keystroke away.
+
+On terminals that speak the kitty graphics protocol (kitty, Ghostty) the wizard draws the logo as an image; everywhere else it falls back to the wordmark. Set `RHEMA_NO_IMAGES` to keep it text.
+
 ### Rich settings
 
 <!-- TODO Screenshot -->
@@ -72,6 +78,10 @@ Login keys are stored in your system keychain (macOS Keychain, Windows Credentia
 
 ### Skills, sessions, etc.
 
+Skills are folders holding a `SKILL.md` whose frontmatter `description` is the trigger the agent sees; an optional `license` line is shown (dimmed, under the description) in the Skills page of `/settings` and in the onboarding wizard. Drop one into `.rhema/skills/` in your workspace or `~/.config/rhema/skills/` for every workspace; project shadows global.
+
+Rhema bundles two skills — `commit-message` and `unslop` — and seeds them into the global skills directory on start. A bundled skill you have edited is left alone, and a folder of the same name shadows it like any other. Toggle skills on and off from the Skills page (`enter`/`space`) or at onboarding; a switched-off skill's trigger leaves the system prompt but keeps its row, greyed, in the lists.
+
 Regular coding agent features are supported, while maintaining a simplicity balance. Right now, no MCPs.
 
 ### Subagents
@@ -110,6 +120,9 @@ The discovered skills and your `SYSTEM.md` are copied into the sandbox at startu
 Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimoto's program status protocol](https://mitchellh.com/writing/program-status-osc7501): `working` (with step progress and the current tool) while a turn runs, `blocked` (permission or auth) when it needs you, `idle` at the prompt, and `done` or `error` when a `rhema run` one-shot finishes — so supporting terminals (Ghostty, and terminal UIs built on libghostty) can mark tab headers, session pickers, and agentic inboxes without scraping the screen. Terminals without support ignore the sequence; piped output stays byte-exact.
 
 ## Documentation
+
+- `rhema onboard` — re-run the first-run wizard (provider, model, profile, colors, skills).
+- `/settings` — everything the wizard sets, plus appearance, subagents, usage, and about; the Skills page toggles skills on and off and shows each one's license.
 
 ## About
 

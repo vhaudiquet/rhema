@@ -17,10 +17,11 @@ use rhema_provider::{Allowance, ModelCard};
 use crate::approval::ApprovalAnswerer;
 use crate::args::SandboxChoice;
 use crate::events::{FetchWhy, OwnedEvent, UiEvent};
+use crate::onboarding::{OnboardingAction, OnboardingScreen};
 use crate::screens::{
-    AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerPurpose, PickerScreen,
-    PickerStatus, ProfileAction, ProfileScreen, SandboxAction, SandboxScreen, SettingsAction,
-    SettingsPurpose, SettingsScreen, SettingsSection, SkillRow, SubagentRow, SubagentSource,
+    AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, PickerStatus,
+    ProfileAction, ProfileScreen, SandboxAction, SandboxScreen, SettingsAction, SettingsScreen,
+    SettingsSection, SkillRow, SkillSource, SubagentRow, SubagentSource,
 };
 use crate::store::ConfigStore;
 use crate::transcript::Transcript;
@@ -55,6 +56,10 @@ pub struct AppSetup {
     /// page. `None` reads the environment (`XDG_CONFIG_HOME`, then
     /// `HOME`).
     pub home: Option<PathBuf>,
+    /// Run the first-run onboarding wizard: no config existed, or the
+    /// last wizard opened but never finished. `rhema onboard` sets it
+    /// too, whatever the config says.
+    pub onboard: bool,
 }
 
 /// The model backend a session runs on: which provider, and whatever
@@ -565,8 +570,13 @@ impl RunOptions {
 
 /// The current screen. The settings screen is boxed: its live providers
 /// page plus its snapshots outweigh the hot keypath's taste for a small
-/// `Screen` (the same reason the login it absorbed was boxed once).
+/// `Screen` (the same reason the login it absorbed was boxed once). The
+/// onboarding wizard is boxed for the same reason — its dialog, model
+/// rows, and skills snapshot together.
 pub enum Screen {
+    /// The first-run wizard: logo rail, steps, and the finish that
+    /// marks the config onboarded.
+    Onboarding(Box<OnboardingScreen>),
     /// Choose a model.
     Picker(PickerScreen),
     /// Switch the profile the session runs under.
@@ -594,6 +604,15 @@ pub enum SettingsHit {
     PageRow(usize),
     /// A provider row of the add-instance dialog.
     DialogProvider(usize),
+}
+
+/// What a left click on the onboarding wizard landed on. The renderer
+/// registers the rects every frame; the app matches the position of
+/// the click against them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnboardingHit {
+    /// A rail row: jump to this step.
+    RailStep(crate::onboarding::OnboardingStep),
 }
 
 /// A side effect the runner must perform (network or task spawn).
@@ -654,6 +673,39 @@ fn subagent_rows(global: Option<&Path>, workspace: &Path) -> Vec<SubagentRow> {
                 max_steps: def.max_steps,
                 source,
                 path,
+            }
+        })
+        .collect()
+}
+
+/// The skills page's rows (and the wizard's skills step's): every
+/// discovered skill with its source — bundled skills seeded into the
+/// global directory read as bundled, a workspace folder as workspace,
+/// everything else global — and its on/off state from the config's
+/// disabled set.
+fn skill_rows(
+    global: Option<&Path>,
+    workspace: &Path,
+    disabled: &std::collections::BTreeSet<String>,
+) -> Vec<SkillRow> {
+    let workspace_dir = workspace.join(".rhema").join("skills");
+    rhema_agent_tools::skills::discover(global, workspace)
+        .into_iter()
+        .map(|skill| {
+            let source = if skill.path.starts_with(&workspace_dir) {
+                SkillSource::Workspace
+            } else if crate::bundled::is_bundled(&skill.name) {
+                SkillSource::Bundled
+            } else {
+                SkillSource::Global
+            };
+            let enabled = !disabled.contains(&skill.name);
+            SkillRow {
+                name: skill.name,
+                description: skill.description,
+                license: skill.license,
+                source,
+                enabled,
             }
         })
         .collect()
@@ -767,6 +819,8 @@ pub struct App {
     /// The clickable rects of the settings screen, re-registered by
     /// every frame's render and matched against click positions.
     pub settings_hits: Vec<(ratatui::layout::Rect, SettingsHit)>,
+    /// The same for the onboarding wizard's rail.
+    pub onboarding_hits: Vec<(ratatui::layout::Rect, OnboardingHit)>,
     /// The transcript render's row cache: wrapped rows per block,
     /// invalided by width, theme, and the transcript's watermark.
     pub(crate) transcript_cache: crate::ui::WrapCache,
@@ -782,6 +836,11 @@ pub struct App {
     /// being stood up off the UI thread. Turns and further switches
     /// wait for it; the answer arrives as `UiEvent::SandboxAssembled`.
     pub assembling: Option<SandboxChoice>,
+    /// Where the onboarding welcome step drew its logo, when it did:
+    /// the runner places the terminal-graphics image there after the
+    /// frame, and clears it when the rect goes away. `None` on every
+    /// other screen.
+    pub logo_rect: Option<ratatui::layout::Rect>,
 }
 
 /// The lifecycle state of the turn the UI thread handed to a task. The
@@ -930,6 +989,7 @@ impl TurnState {
 
 /// One keypress routed to the active screen.
 enum Routed {
+    Onboarding(OnboardingAction),
     Picker(PickerAction),
     Profile(ProfileAction),
     Sandbox(SandboxAction),
@@ -941,6 +1001,13 @@ enum Routed {
 impl App {
     /// Builds the app and its initial screen. Errors only when a stored
     /// model should open the chat but the agent cannot be built.
+    ///
+    /// The first screen is the onboarding wizard when the runner says
+    /// this is a first run (`setup.onboard`) — and the chat in every
+    /// other case, including a config with no usable backend or no
+    /// stored model: the footer names what is missing in red, the
+    /// commands to fix it are one keystroke away, and nothing gates the
+    /// session behind a login screen.
     pub fn new(setup: AppSetup) -> Result<Self, CodingAgentError> {
         let session = setup.session;
         let transcript = Transcript::from_history(&session.history);
@@ -951,47 +1018,58 @@ impl App {
         // Startup reads straight off the config: App::effective exists on
         // the struct, which does not exist yet.
         let effective = setup.config.effective(setup.options.profile.as_deref());
-        let screen = match (&setup.backend, &effective.model) {
-            (Some(_), Some(_)) => {
-                let provider = setup
-                    .backend
-                    .as_ref()
-                    .map(Backend::provider)
-                    .ok_or(AgentError::MissingProvider)?;
-                let (agent_config, subagents) = session_agent_config(
-                    &setup.options,
-                    setup.sandboxed.as_ref(),
-                    effective.model.clone(),
-                    provider.clone(),
-                );
-                agent = Some(CodingAgent::from_session(
-                    provider,
-                    agent_config,
-                    session.clone(),
-                )?);
-                subagents_handle = Some(subagents);
-                Screen::Chat
-            }
-            (Some(_), None) => Screen::Picker(PickerScreen {
-                status: PickerStatus::Loading,
-                ..PickerScreen::new(Vec::new(), PickerPurpose::Initial)
-            }),
-            // No usable backend: the settings' providers page is the
-            // front door now. Esc there quits — there is no chat behind
-            // it to return to. The failed resolution explains itself on
-            // the page: a locked keychain must not read as a bare
-            // login screen.
-            (None, _) => {
-                let mut settings = Self::build_settings_screen(
-                    &setup.config,
-                    &setup.options,
-                    setup.options.profile.as_deref(),
-                    SettingsPurpose::Initial,
-                    setup.home.as_deref(),
-                );
-                settings.startup_reason =
-                    Backend::from_profile_or_help(&effective, setup.secrets.as_deref()).err();
-                Screen::Settings(Box::new(settings))
+        let config_root = match setup.home.clone() {
+            Some(home) => Some(rhema_config::Config::dir_under(&home)),
+            None => rhema_config::Config::dir().ok(),
+        };
+        let screen = if setup.onboard {
+            let workspace = std::fs::canonicalize(&setup.options.workspace)
+                .unwrap_or_else(|_| setup.options.workspace.clone());
+            let skills = skill_rows(
+                config_root
+                    .as_deref()
+                    .map(|root| root.join("skills"))
+                    .as_deref(),
+                &workspace,
+                &setup.config.skills_disabled,
+            );
+            Screen::Onboarding(Box::new(OnboardingScreen::new(
+                skills,
+                setup
+                    .options
+                    .profile
+                    .clone()
+                    .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned()),
+                setup.backend.is_some(),
+                effective.clone(),
+            )))
+        } else {
+            match (&setup.backend, &effective.model) {
+                (Some(_), Some(_)) => {
+                    let provider = setup
+                        .backend
+                        .as_ref()
+                        .map(Backend::provider)
+                        .ok_or(AgentError::MissingProvider)?;
+                    let (agent_config, subagents) = session_agent_config(
+                        &setup.options,
+                        setup.sandboxed.as_ref(),
+                        effective.model.clone(),
+                        provider.clone(),
+                        &setup.config.skills_disabled,
+                    );
+                    agent = Some(CodingAgent::from_session(
+                        provider,
+                        agent_config,
+                        session.clone(),
+                    )?);
+                    subagents_handle = Some(subagents);
+                    Screen::Chat
+                }
+                // No model yet — or no usable backend at all — still
+                // opens the chat: the footer says "no model" in red and
+                // the submit box names the fix, /model or /login.
+                _ => Screen::Chat,
             }
         };
         Ok(Self {
@@ -1018,10 +1096,7 @@ impl App {
                 .home
                 .clone()
                 .or_else(|| std::env::var("HOME").ok().map(PathBuf::from)),
-            config_root: match setup.home.clone() {
-                Some(home) => Some(rhema_config::Config::dir_under(&home)),
-                None => rhema_config::Config::dir().ok(),
-            },
+            config_root,
             subscription: None,
             session,
             screen,
@@ -1040,10 +1115,12 @@ impl App {
             should_quit: false,
             chat: ChatState::new(),
             settings_hits: Vec::new(),
+            onboarding_hits: Vec::new(),
             transcript_cache: crate::ui::WrapCache::new(),
             sandboxed: setup.sandboxed,
             sandbox_offered: setup.sandbox_offered,
             assembling: None,
+            logo_rect: None,
         })
     }
 
@@ -1228,12 +1305,11 @@ impl App {
     /// Providers page edits the session's profile live; the other pages
     /// read snapshots of this moment. Openable mid-turn: only the
     /// instance actions wait for an idle session.
-    pub fn open_settings_at(&mut self, section: SettingsSection, purpose: SettingsPurpose) {
+    pub fn open_settings_at(&mut self, section: SettingsSection) {
         let mut settings = Self::build_settings_screen(
             &self.config,
             &self.options,
             self.session_profile.as_deref(),
-            purpose,
             self.config_root.as_deref(),
         );
         settings.section = section;
@@ -1254,24 +1330,21 @@ impl App {
         config: &Config,
         options: &RunOptions,
         session_profile: Option<&str>,
-        purpose: SettingsPurpose,
         config_root: Option<&Path>,
     ) -> SettingsScreen {
         let effective = config.effective(session_profile);
         let workspace =
             std::fs::canonicalize(&options.workspace).unwrap_or_else(|_| options.workspace.clone());
         let global_skills = config_root.map(|root| root.join("skills"));
-        let skills = rhema_agent_tools::skills::discover(global_skills.as_deref(), &workspace)
-            .into_iter()
-            .map(|skill| SkillRow {
-                name: skill.name,
-                description: skill.description,
-            })
-            .collect();
+        let skills = skill_rows(
+            global_skills.as_deref(),
+            &workspace,
+            &config.skills_disabled,
+        );
         // The same discovery the agent's wiring runs, so the page shows
         // what the next session will delegate to.
         let global_subagents = config_root.map(|root| root.to_path_buf());
-        let mut settings = SettingsScreen::new(purpose);
+        let mut settings = SettingsScreen::new();
         settings.colors = options.colors;
         settings.theme_dark = options.theme == crate::palette::ThemeKind::Dark;
         settings.icons_nerd = options.icons == crate::icons::Flavor::Nerd;
@@ -1392,12 +1465,19 @@ impl App {
             .iter()
             .position(|palette| *palette == self.options.colors)
             .unwrap_or(0);
-        let next = all[(current + 1) % all.len()];
-        self.options.colors = next;
-        self.theme = next.theme(self.options.theme, self.options.palette_inputs());
-        self.config.colors = Some(next.stored_name().to_owned());
+        self.set_palette(all[(current + 1) % all.len()]);
+    }
+
+    /// Applies one palette live — the frame this call renders already
+    /// wears it — and persists the choice. The wizard's Colors step and
+    /// the settings' Appearance page both land here; the open screen
+    /// follows, so the rows keep telling the truth.
+    fn set_palette(&mut self, palette: crate::palette::Palette) {
+        self.options.colors = palette;
+        self.theme = palette.theme(self.options.theme, self.options.palette_inputs());
+        self.config.colors = Some(palette.stored_name().to_owned());
         if let Screen::Settings(settings) = &mut self.screen {
-            settings.colors = next;
+            settings.colors = palette;
         }
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
@@ -1419,6 +1499,89 @@ impl App {
         if let Screen::Settings(settings) = &mut self.screen {
             settings.icons_nerd = nerd;
         }
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+        }
+    }
+
+    /// Flips a skill's on/off state: the disabled set in the config
+    /// flips, a bundled skill being switched back on is re-seeded when
+    /// its folder is gone, and the running agent rebuilds carrying the
+    /// conversation over — the system prompt carries the skills list,
+    /// so the very next turn sees the change. The open screen's row
+    /// follows (settings page or wizard step); a running turn defers
+    /// the rebuild to its end, the toggle itself lands immediately.
+    fn toggle_skill(&mut self, name: &str) {
+        let turning_on = self.config.skills_disabled.contains(name);
+        if turning_on {
+            self.config.skills_disabled.remove(name);
+        } else {
+            self.config.skills_disabled.insert(name.to_owned());
+        }
+        // A bundled skill switched back on must exist on disk again —
+        // seeding skips disabled names, so its folder may be gone.
+        if turning_on {
+            if let Some(root) = self.config_root.clone() {
+                let _ = crate::bundled::seed_one(&root.join("skills"), name);
+            }
+        }
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return;
+        }
+        // The open screen's row follows: the settings page or the
+        // wizard step, whichever is showing.
+        match &mut self.screen {
+            Screen::Settings(settings) => {
+                for row in &mut settings.skills {
+                    if row.name == name {
+                        row.enabled = !row.enabled;
+                    }
+                }
+            }
+            Screen::Onboarding(wizard) => {
+                for row in &mut wizard.skills {
+                    if row.name == name {
+                        row.enabled = !row.enabled;
+                    }
+                }
+            }
+            _ => {}
+        }
+        // The prompt change rides the next agent build; mid-turn the
+        // rebuild would race the running one, so it waits.
+        if !self.turn.running {
+            if let Some(agent) = self.agent.take() {
+                let stats = agent.transcript_stats();
+                let session = agent.session().clone();
+                if let Ok((mut rebuilt, subagents)) = self.build_agent(session) {
+                    if let Some(stats) = stats {
+                        rebuilt.carry_transcript_stats(&stats);
+                    }
+                    self.agent = Some(rebuilt);
+                    self.subagents = Some(subagents);
+                }
+            }
+        }
+    }
+
+    /// The profile step's accepted rename: the config's profile entry
+    /// moves to the new name (its settings ride along), the session
+    /// follows, and the workspace's profile memory forgets the old
+    /// name. A blank or unchanged name never reaches here.
+    fn rename_session_profile(&mut self, new_name: &str) {
+        let Some(old) = self.session_profile.clone() else {
+            return;
+        };
+        if new_name == old || self.config.profiles.contains_key(new_name) {
+            return;
+        }
+        let entry = self.config.profiles.remove(&old).unwrap_or_default();
+        self.config.profiles.insert(new_name.to_owned(), entry);
+        self.session_profile = Some(new_name.to_owned());
+        self.config
+            .last_profile_by_workspace
+            .retain(|_, remembered| remembered != &old);
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
         }
@@ -1523,6 +1686,7 @@ impl App {
             self.sandboxed.as_ref(),
             effective.model.clone(),
             backend.provider(),
+            &self.config.skills_disabled.clone(),
         );
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
             Ok(mut agent) => {
@@ -1605,26 +1769,6 @@ impl App {
         }
         self.transcript
             .push_notice(&format!("thinking effort set to {}", effort.as_str()));
-    }
-
-    /// Lists the discovered skills in the transcript: what the model's
-    /// system prompt carries, for the human who wrote them.
-    pub fn show_skills(&mut self, global: Option<&Path>, workspace: &Path) {
-        let skills = rhema_agent_tools::skills::discover(global, workspace);
-        if skills.is_empty() {
-            self.transcript.push_notice(
-                "no skills. a skill is <dir>/SKILL.md with a `description` \
-                 frontmatter, under the config directory or .rhema/skills",
-            );
-            return;
-        }
-        let mut table = String::from("name | trigger\n--- | ---\n");
-        for skill in &skills {
-            // A raw pipe would forge table columns.
-            let trigger = skill.description.replace('|', "\\|");
-            table.push_str(&format!("{} | {}\n", skill.name, trigger));
-        }
-        self.transcript.push_markdown(table);
     }
 
     /// The system prompt in the transcript, fenced so it reads verbatim.
@@ -1731,6 +1875,11 @@ impl App {
                     dialog.paste(text);
                 }
             }
+            Screen::Onboarding(wizard) => {
+                if let Some(dialog) = &mut wizard.dialog {
+                    dialog.paste(text);
+                }
+            }
             _ => {}
         }
     }
@@ -1750,6 +1899,23 @@ impl App {
     /// rects are re-registered by every frame's render, so a click can
     /// only land on what was last drawn.
     pub fn on_click(&mut self, x: u16, y: u16) -> Vec<Effect> {
+        if matches!(self.screen, Screen::Onboarding(_)) {
+            let hit = self
+                .onboarding_hits
+                .iter()
+                .find(|(area, _)| area.contains(ratatui::layout::Position::new(x, y)))
+                .map(|(_, hit)| *hit);
+            if let Some(OnboardingHit::RailStep(step)) = hit {
+                if let Screen::Onboarding(wizard) = &mut self.screen {
+                    // The dialog is modal, like the settings': clicks
+                    // behind it do nothing.
+                    if wizard.dialog.is_none() {
+                        wizard.go(step);
+                    }
+                }
+            }
+            return Vec::new();
+        }
         if !matches!(self.screen, Screen::Settings(_)) {
             return Vec::new();
         }
@@ -1813,6 +1979,7 @@ impl App {
             return Vec::new();
         }
         let routed = match &mut self.screen {
+            Screen::Onboarding(wizard) => Routed::Onboarding(wizard.handle_key(key)),
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
             Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
             Screen::Sandbox(sandbox) => Routed::Sandbox(sandbox.handle_key(key)),
@@ -1824,16 +1991,13 @@ impl App {
             }
         };
         match routed {
+            Routed::Onboarding(action) => self.perform_onboarding(action),
             Routed::Settings(action) => self.perform_settings(action),
             Routed::Picker(PickerAction::Choose {
                 provider,
                 instance,
                 id,
             }) => self.choose_model(provider, instance.as_deref(), &id),
-            Routed::Picker(PickerAction::Quit) => {
-                self.should_quit = true;
-                Vec::new()
-            }
             Routed::Picker(PickerAction::BackToChat) => {
                 self.screen = Screen::Chat;
                 Vec::new()
@@ -1870,16 +2034,9 @@ impl App {
         match action {
             SettingsAction::None => Vec::new(),
             SettingsAction::Back => {
-                // With a session behind the settings, Esc means "back";
-                // at the startup gate it quits.
-                if matches!(
-                    &self.screen,
-                    Screen::Settings(settings) if settings.purpose == SettingsPurpose::FromChat
-                ) {
-                    self.screen = Screen::Chat;
-                } else {
-                    self.should_quit = true;
-                }
+                // The settings only ever open over a session: Esc means
+                // "back to it".
+                self.screen = Screen::Chat;
                 Vec::new()
             }
             SettingsAction::ActivateInstance => self.activate_instance(),
@@ -1913,6 +2070,89 @@ impl App {
                 Vec::new()
             }
             SettingsAction::EditSubagent => self.edit_subagent(),
+            SettingsAction::ToggleSkill => {
+                let name = match &self.screen {
+                    Screen::Settings(settings) => {
+                        settings.selected_skill().map(|skill| skill.name.clone())
+                    }
+                    _ => None,
+                };
+                match name {
+                    Some(name) => {
+                        self.toggle_skill(&name);
+                        Vec::new()
+                    }
+                    None => Vec::new(),
+                }
+            }
+        }
+    }
+
+    /// Performs one onboarding action: the wizard's side effects, all
+    /// of which touch the store, the session, or the network.
+    fn perform_onboarding(&mut self, action: OnboardingAction) -> Vec<Effect> {
+        match action {
+            OnboardingAction::None => Vec::new(),
+            OnboardingAction::Validate => self.validate_login(),
+            OnboardingAction::StartFlow => vec![Effect::StartLoginFlow],
+            OnboardingAction::CancelFlow => {
+                // The dialog is already gone from the screen; dropping
+                // the handle ends the flow task.
+                self.login_cancel = None;
+                Vec::new()
+            }
+            OnboardingAction::ChooseModel {
+                provider,
+                instance,
+                id,
+            } => match self.apply_model_choice(&provider, instance.as_deref(), &id) {
+                Ok(effects) => {
+                    if let Screen::Onboarding(wizard) = &mut self.screen {
+                        wizard.chosen_model = Some(id);
+                        wizard.chosen_provider = Some(provider.to_owned());
+                        wizard.go(crate::onboarding::OnboardingStep::Profile);
+                    }
+                    effects
+                }
+                Err(err) => {
+                    if let Screen::Onboarding(wizard) = &mut self.screen {
+                        wizard.error = Some(err);
+                    }
+                    Vec::new()
+                }
+            },
+            OnboardingAction::ToggleSkill(name) => {
+                self.toggle_skill(&name);
+                Vec::new()
+            }
+            OnboardingAction::SetPalette(palette) => {
+                self.set_palette(palette);
+                Vec::new()
+            }
+            OnboardingAction::RenameProfile(name) => {
+                self.rename_session_profile(&name);
+                if let Screen::Onboarding(wizard) = &mut self.screen {
+                    wizard.profile_start = name.clone();
+                    wizard.profile_name = name;
+                    wizard.go(crate::onboarding::OnboardingStep::Appearance);
+                }
+                Vec::new()
+            }
+            OnboardingAction::Complete => {
+                self.config.onboarded = Some(true);
+                if let Err(err) = self.store.save(&self.config) {
+                    self.error = Some(format!("cannot save config: {err}"));
+                }
+                self.screen = Screen::Chat;
+                self.transcript.push_notice(
+                    "setup complete — /settings any time; rhema onboard runs it again",
+                );
+                Vec::new()
+            }
+            OnboardingAction::Quit => {
+                self.should_quit = true;
+                Vec::new()
+            }
         }
     }
 
@@ -2002,6 +2242,13 @@ impl App {
                     self.transcript
                         .push_notice("this profile has no API key; /login to add one");
                     Vec::new()
+                } else if self.effective().model.is_none() {
+                    // Same shape as the keyless case: the text stays for
+                    // the model pick. The footer says "no model" in red
+                    // all the while.
+                    self.transcript
+                        .push_notice("no model on this profile; /model to pick one");
+                    Vec::new()
                 } else if self.assembling.is_some() {
                     // The agent's tools are mid-rebuild: the text stays
                     // for the prompt to run once the assembly lands.
@@ -2043,25 +2290,23 @@ impl App {
 
     /// The add-instance dialog validated a new instance's input: fetch
     /// the models; the fetch is the validation (a wrong key or a dead
-    /// server both surface as the fetch's error).
+    /// server both surface as the fetch's error). The dialog lives on
+    /// the settings screen or the onboarding wizard — both run the same
+    /// login flow.
     fn validate_login(&mut self) -> Vec<Effect> {
-        let pending = match &self.screen {
+        let pending_input = match &self.screen {
             Screen::Settings(settings) => settings
                 .dialog
                 .as_ref()
-                .and_then(|dialog| dialog.pending.clone()),
+                .map(|dialog| (dialog.pending.clone(), dialog.input.trim().to_owned())),
+            Screen::Onboarding(wizard) => wizard
+                .dialog
+                .as_ref()
+                .map(|dialog| (dialog.pending.clone(), dialog.input.trim().to_owned())),
             _ => None,
         };
-        let Some(pending) = pending else {
+        let Some((Some(pending), input)) = pending_input else {
             return Vec::new();
-        };
-        let input = match &self.screen {
-            Screen::Settings(settings) => settings
-                .dialog
-                .as_ref()
-                .map(|dialog| dialog.input.trim().to_owned())
-                .unwrap_or_default(),
-            _ => String::new(),
         };
         let base_url = pending
             .base_url
@@ -2185,7 +2430,7 @@ impl App {
                 } else {
                     self.screen = Screen::Picker(PickerScreen {
                         status: PickerStatus::Loading,
-                        ..PickerScreen::new(self.models.clone(), PickerPurpose::Initial)
+                        ..PickerScreen::new(self.models.clone())
                     });
                     vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
                 }
@@ -2274,16 +2519,21 @@ impl App {
     }
 
     /// A step of the running login flow: render it on the add-instance
-    /// dialog, and on completion validate the credential it produced
-    /// through the same fetch path a typed key takes.
+    /// dialog — the settings' modal or the wizard's inline copy — and
+    /// on completion validate the credential it produced through the
+    /// same fetch path a typed key takes.
     fn on_login_update(&mut self, update: rhema_provider::LoginUpdate) -> Vec<Effect> {
-        let Screen::Settings(settings) = &mut self.screen else {
+        let dialog = match &mut self.screen {
+            Screen::Settings(settings) => settings.dialog.as_mut(),
+            Screen::Onboarding(wizard) => wizard.dialog.as_mut(),
             // The flow was left behind (Esc raced a completed update):
             // drop the credential with the screen it belonged to.
-            self.login_cancel = None;
-            return Vec::new();
+            _ => {
+                self.login_cancel = None;
+                return Vec::new();
+            }
         };
-        let Some(dialog) = &mut settings.dialog else {
+        let Some(dialog) = dialog else {
             self.login_cancel = None;
             return Vec::new();
         };
@@ -2316,15 +2566,10 @@ impl App {
         }
     }
 
-    /// Retry a failed model fetch, per the picker's purpose.
+    /// Retry a failed model fetch.
     fn retry_fetch(&mut self) -> Vec<Effect> {
         match &self.screen {
-            Screen::Picker(picker) => match picker.purpose {
-                PickerPurpose::Initial => {
-                    vec![Effect::FetchModels(FetchWhy::Bootstrap)]
-                }
-                PickerPurpose::FromChat => vec![Effect::FetchModels(FetchWhy::Refresh)],
-            },
+            Screen::Picker(_) => vec![Effect::FetchModels(FetchWhy::Refresh)],
             _ => Vec::new(),
         }
     }
@@ -2347,7 +2592,7 @@ impl App {
         }
         self.screen = Screen::Picker(PickerScreen {
             status,
-            ..PickerScreen::new(self.models.clone(), PickerPurpose::FromChat)
+            ..PickerScreen::new(self.models.clone())
         });
         effects
     }
@@ -2415,6 +2660,95 @@ impl App {
         }
     }
 
+    /// Persists a validated login: the instance lands in `tab`'s profile
+    /// (its key in the keychain when the store takes it, the file when
+    /// it does not; a re-login's old keychain entry goes first), the
+    /// session rides the validated backend, and the catalog's slice for
+    /// the instance replaces itself. The error, if any, is for the
+    /// dialog to render inline.
+    fn install_login(
+        &mut self,
+        tab: &str,
+        instance: &str,
+        backend: &Backend,
+        models: &[ModelCard],
+    ) -> Result<(), String> {
+        let provider = backend.config_name();
+        let (api_key, base_url) = match backend {
+            Backend::LlamaCpp { url, api_key } => (api_key.clone(), Some(url.clone())),
+            Backend::OpenAi { api_key, base_url } | Backend::Zai { api_key, base_url } => {
+                (Some(api_key.clone()), base_url.clone())
+            }
+            Backend::Google { api_key }
+            | Backend::OpenRouter { api_key }
+            | Backend::Anthropic { api_key }
+            | Backend::DeepSeek { api_key }
+            | Backend::Copilot { api_key } => (Some(api_key.clone()), None),
+        };
+        let secrets = self.secrets.as_deref();
+        let mut keychain_delete_failure: Option<String> = None;
+        self.config.set_for_profile(Some(tab), |settings| {
+            // A re-login replaces the instance wholesale; its old
+            // keychain entry must not linger — but a store that refuses
+            // the delete must not pass silently either, or the secret
+            // outlives the login that named it.
+            if let Some(old) = settings.instances.get(instance) {
+                if let Some(id) = old.secret_ref.as_deref() {
+                    if let Some(store) = secrets {
+                        if let Err(err) = store.delete(id) {
+                            keychain_delete_failure = Some(err.to_string());
+                        }
+                    }
+                }
+            }
+            settings.provider = Some(provider.to_owned());
+            settings.instance = Some(instance.to_owned());
+            settings.upsert_instance(
+                instance,
+                rhema_config::ProviderInstance {
+                    provider: provider.to_owned(),
+                    api_key: None,
+                    secret_ref: None,
+                    base_url,
+                },
+            );
+            if let Some(key) = api_key.as_deref() {
+                settings.place_key(instance, key, secrets);
+            }
+        });
+        if let Some(err) = keychain_delete_failure {
+            self.error = Some(format!(
+                "re-logged in, but the previous keychain entry could not be deleted: {err}"
+            ));
+        }
+        self.store
+            .save(&self.config)
+            .map_err(|err| format!("cannot save config: {err}"))?;
+        self.session_profile = Some(tab.to_owned());
+        self.backend = Some(backend.clone());
+        self.provider = Some(backend.provider());
+        // The other logins' catalogs stay: a fresh login must not blank
+        // the picker down to one provider. The instance's own slice
+        // replaces itself, so a stale copy cannot linger — a provider
+        // may hold several.
+        self.models.retain(|entry| {
+            entry.provider != provider || entry.instance.as_deref() != Some(instance)
+        });
+        self.models
+            .extend(models.iter().map(|model| crate::screens::CatalogModel {
+                provider,
+                instance: Some(instance.to_owned()),
+                model: model.clone(),
+            }));
+        self.models.sort_by(|a, b| {
+            a.provider
+                .cmp(b.provider)
+                .then(a.instance.cmp(&b.instance))
+                .then(a.model.id.cmp(&b.model.id))
+        });
+        Ok(())
+    }
+
     /// Routes a model-list result to the login screen, the open picker,
     /// or the cache.
     fn on_models_loaded(
@@ -2424,15 +2758,6 @@ impl App {
     ) -> Vec<Effect> {
         match why {
             FetchWhy::Login { backend, instance } => {
-                let (from_chat, tab) = match &self.screen {
-                    Screen::Settings(settings) => (
-                        settings.purpose == SettingsPurpose::FromChat,
-                        settings.profile.clone(),
-                    ),
-                    // The dialog was left behind (Esc raced a completed
-                    // fetch): the login has nowhere to land.
-                    _ => return Vec::new(),
-                };
                 // Every login writes a named instance; a lost name (a
                 // flow that outlived its screen) falls back to the
                 // provider's own.
@@ -2442,95 +2767,93 @@ impl App {
                 match result.into_iter().next().map(|entry| entry.result) {
                     Some(Ok(models)) => {
                         let provider = backend.config_name();
-                        let (api_key, base_url) = match &backend {
-                            Backend::LlamaCpp { url, api_key } => {
-                                (api_key.clone(), Some(url.clone()))
-                            }
-                            Backend::OpenAi { api_key, base_url }
-                            | Backend::Zai { api_key, base_url } => {
-                                (Some(api_key.clone()), base_url.clone())
-                            }
-                            Backend::Google { api_key }
-                            | Backend::OpenRouter { api_key }
-                            | Backend::Anthropic { api_key }
-                            | Backend::DeepSeek { api_key }
-                            | Backend::Copilot { api_key } => (Some(api_key.clone()), None),
+                        // Both login hosts edit the session's profile:
+                        // the settings' Providers page and the wizard's
+                        // step are only different faces of it.
+                        let tab = match &self.screen {
+                            Screen::Settings(settings) => settings.profile.clone(),
+                            Screen::Onboarding(_) => self
+                                .session_profile
+                                .clone()
+                                .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned()),
+                            // The dialog was left behind (Esc raced a
+                            // completed fetch): the login has nowhere
+                            // to land.
+                            _ => return Vec::new(),
                         };
-                        // The key rides the keychain when the store takes
-                        // it — the instance keeps only the entry's ref —
-                        // and the file when it does not.
-                        let secrets = self.secrets.as_deref();
-                        let mut keychain_delete_failure: Option<String> = None;
-                        self.config.set_for_profile(Some(&tab), |settings| {
-                            // A re-login replaces the instance wholesale;
-                            // its old keychain entry must not linger — but
-                            // a store that refuses the delete must not
-                            // pass silently either, or the secret
-                            // outlives the login that named it.
-                            if let Some(old) = settings.instances.get(&instance) {
-                                if let Some(id) = old.secret_ref.as_deref() {
-                                    if let Some(store) = secrets {
-                                        if let Err(err) = store.delete(id) {
-                                            keychain_delete_failure = Some(err.to_string());
-                                        }
+                        if let Err(err) = self.install_login(&tab, &instance, &backend, &models) {
+                            match &mut self.screen {
+                                Screen::Settings(settings) => {
+                                    if let Some(dialog) = &mut settings.dialog {
+                                        dialog.status =
+                                            crate::screens::DialogStatus::Error(err.clone());
                                     }
                                 }
-                            }
-                            settings.provider = Some(provider.to_owned());
-                            settings.instance = Some(instance.clone());
-                            settings.upsert_instance(
-                                &instance,
-                                rhema_config::ProviderInstance {
-                                    provider: provider.to_owned(),
-                                    api_key: None,
-                                    secret_ref: None,
-                                    base_url,
-                                },
-                            );
-                            if let Some(key) = api_key.as_deref() {
-                                settings.place_key(&instance, key, secrets);
-                            }
-                        });
-                        if let Some(err) = keychain_delete_failure {
-                            self.error = Some(format!(
-                                "re-logged in, but the previous keychain entry could not be deleted: {err}"
-                            ));
-                        }
-                        if let Err(err) = self.store.save(&self.config) {
-                            if let Screen::Settings(settings) = &mut self.screen {
-                                if let Some(dialog) = &mut settings.dialog {
-                                    dialog.status = crate::screens::DialogStatus::Error(format!(
-                                        "cannot save config: {err}"
-                                    ));
+                                Screen::Onboarding(wizard) => {
+                                    if let Some(dialog) = &mut wizard.dialog {
+                                        dialog.status =
+                                            crate::screens::DialogStatus::Error(err.clone());
+                                    }
                                 }
+                                _ => {}
                             }
                             return Vec::new();
                         }
-                        self.session_profile = Some(tab);
-                        self.backend = Some(backend.clone());
-                        self.provider = Some(backend.provider());
-                        // The other logins' catalogs stay: a fresh login
-                        // must not blank the picker down to one provider.
-                        // The instance's own slice replaces itself, so a
-                        // stale copy cannot linger — a provider may hold
-                        // several.
-                        self.models.retain(|entry| {
-                            entry.provider != provider
-                                || entry.instance.as_deref() != Some(instance.as_str())
-                        });
-                        self.models.extend(models.iter().map(|model| {
-                            crate::screens::CatalogModel {
-                                provider,
-                                instance: Some(instance.clone()),
-                                model: model.clone(),
+                        // The dialog served its purpose; the wizard's
+                        // copy goes too (the model step renders from its
+                        // own rows).
+                        if let Screen::Settings(settings) = &mut self.screen {
+                            settings.dialog = None;
+                        }
+                        // Where the login lands depends on the screen it
+                        // came from: the settings flow opens the picker
+                        // (skipping straight to the chat on a
+                        // single-model server), the wizard advances to
+                        // its own model step (or takes the single model
+                        // straight to the profile step).
+                        if let Screen::Onboarding(wizard) = &mut self.screen {
+                            wizard.backend_ready = true;
+                            wizard.stored = self.config.effective(Some(&tab));
+                            // The dialog served its purpose; its keys
+                            // must not eat the model step's.
+                            wizard.dialog = None;
+                        }
+                        if matches!(self.screen, Screen::Onboarding(_)) {
+                            if models.len() == 1 {
+                                let id = models[0].id.clone();
+                                return match self.apply_model_choice(provider, Some(&instance), &id)
+                                {
+                                    Ok(effects) => {
+                                        if let Screen::Onboarding(wizard) = &mut self.screen {
+                                            wizard.chosen_model = Some(id);
+                                            wizard.chosen_provider = Some(provider.to_owned());
+                                            wizard.go(crate::onboarding::OnboardingStep::Profile);
+                                        }
+                                        effects
+                                    }
+                                    Err(err) => {
+                                        if let Screen::Onboarding(wizard) = &mut self.screen {
+                                            wizard.error = Some(err);
+                                        }
+                                        Vec::new()
+                                    }
+                                };
                             }
-                        }));
-                        self.models.sort_by(|a, b| {
-                            a.provider
-                                .cmp(b.provider)
-                                .then(a.instance.cmp(&b.instance))
-                                .then(a.model.id.cmp(&b.model.id))
-                        });
+                            let rows: Vec<crate::screens::CatalogModel> = self
+                                .models
+                                .iter()
+                                .filter(|entry| {
+                                    entry.provider == provider
+                                        && entry.instance.as_deref() == Some(instance.as_str())
+                                })
+                                .cloned()
+                                .collect();
+                            if let Screen::Onboarding(wizard) = &mut self.screen {
+                                wizard.models = rows;
+                                wizard.go(crate::onboarding::OnboardingStep::Model);
+                            }
+                            return vec![Effect::FetchUsage];
+                        }
                         // A single-model server (plain llama-server rather
                         // than a router) has nothing to pick: take it and
                         // go straight to chat.
@@ -2538,32 +2861,43 @@ impl App {
                             let id = models[0].id.clone();
                             return self.choose_model(provider, Some(&instance), &id);
                         }
-                        let purpose = if from_chat {
-                            PickerPurpose::FromChat
-                        } else {
-                            PickerPurpose::Initial
-                        };
-                        self.screen =
-                            Screen::Picker(PickerScreen::new(self.models.clone(), purpose));
+                        self.screen = Screen::Picker(PickerScreen::new(self.models.clone()));
                         // A login installs the backend it validated: that
                         // plan is the session's numbers now.
                         vec![Effect::FetchUsage]
                     }
                     Some(Err(message)) => {
-                        if let Screen::Settings(settings) = &mut self.screen {
-                            if let Some(dialog) = &mut settings.dialog {
-                                dialog.on_validated(&Err(message));
+                        match &mut self.screen {
+                            Screen::Settings(settings) => {
+                                if let Some(dialog) = &mut settings.dialog {
+                                    dialog.on_validated(&Err(message));
+                                }
                             }
+                            Screen::Onboarding(wizard) => {
+                                if let Some(dialog) = &mut wizard.dialog {
+                                    dialog.on_validated(&Err(message));
+                                }
+                            }
+                            _ => {}
                         }
                         Vec::new()
                     }
                     // The dispatch always spawns one backend per login;
                     // an empty result cannot arrive.
                     None => {
-                        if let Screen::Settings(settings) = &mut self.screen {
-                            if let Some(dialog) = &mut settings.dialog {
-                                dialog.on_validated(&Err("no provider answered".to_owned()));
+                        let message = "no provider answered".to_owned();
+                        match &mut self.screen {
+                            Screen::Settings(settings) => {
+                                if let Some(dialog) = &mut settings.dialog {
+                                    dialog.on_validated(&Err(message));
+                                }
                             }
+                            Screen::Onboarding(wizard) => {
+                                if let Some(dialog) = &mut wizard.dialog {
+                                    dialog.on_validated(&Err(message));
+                                }
+                            }
+                            _ => {}
                         }
                         Vec::new()
                     }
@@ -2612,20 +2946,6 @@ impl App {
                         picker.set_models(self.models.clone());
                         picker.failed = failed.into_iter().map(|entry| entry.provider).collect();
                         picker.status = PickerStatus::Ready;
-                        // The single-model failover applies at startup
-                        // too: a server with one offering has nothing
-                        // to pick. Refresh (ctrl-p) always shows the
-                        // list instead.
-                        if picker.purpose == PickerPurpose::Initial && picker.models.len() == 1 {
-                            // Nothing follows in this arm: the chat
-                            // screen choose_model installed stands.
-                            let entry = picker.models[0].clone();
-                            return self.choose_model(
-                                entry.provider,
-                                entry.instance.as_deref(),
-                                &entry.model.id,
-                            );
-                        }
                     }
                 }
                 Vec::new()
@@ -2698,15 +3018,47 @@ impl App {
     }
 
     /// A model was chosen in the picker: persist it and (re)build the
-    /// agent, carrying the current session over. The old agent is only
-    /// dropped once the new one built, so a rebuild failure cannot strand
-    /// the chat.
+    /// agent, carrying the current session over, and land in the chat.
+    /// The old agent is only dropped once the new one built, so a
+    /// rebuild failure cannot strand the chat.
     fn choose_model(
         &mut self,
         provider: &'static str,
         instance: Option<&str>,
         id: &str,
     ) -> Vec<Effect> {
+        let from_chat =
+            matches!(&self.screen, Screen::Picker(_)) || matches!(&self.screen, Screen::Chat);
+        match self.apply_model_choice(provider, instance, id) {
+            Ok(effects) => {
+                // An interactive switch — the picker opened from the
+                // chat, or a `/model <needle>` typed there — says where
+                // it landed; the login auto-selects stay quiet.
+                if from_chat {
+                    self.transcript
+                        .push_notice(&format!("model switched to {provider}/{id}"));
+                }
+                self.screen = Screen::Chat;
+                effects
+            }
+            Err(err) => {
+                self.error = Some(err);
+                Vec::new()
+            }
+        }
+    }
+
+    /// The model choice without the screen move: the pick persists into
+    /// the session's profile, the backend re-resolves, and the agent
+    /// rebuilds carrying the conversation over. The chat's picker path
+    /// and the onboarding wizard's step share it; each lands where it
+    /// needs to afterwards.
+    fn apply_model_choice(
+        &mut self,
+        provider: &str,
+        instance: Option<&str>,
+        id: &str,
+    ) -> Result<Vec<Effect>, String> {
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -2724,16 +3076,14 @@ impl App {
             settings.model = Some(id.to_owned());
         });
         if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
-            return Vec::new();
+            return Err(format!("cannot save config: {err}"));
         }
         let backend = match Backend::from_profile(&self.effective(), self.secret_store()) {
             Some(backend) => backend,
             None => {
-                self.error = Some(format!(
+                return Err(format!(
                     "no usable credentials for {provider}; /login first"
                 ));
-                return Vec::new();
             }
         };
         self.backend = Some(backend.clone());
@@ -2747,33 +3097,16 @@ impl App {
         // regardless: the report re-states its facts.
         let mut session = session;
         rhema_coding_agent::clear_environment_stamp(&mut session);
-        match self.build_agent(session) {
-            Ok((mut agent, subagents)) => {
-                // The counters survive the swap: same conversation,
-                // new model.
-                if let Some(saved) = saved {
-                    agent.carry_transcript_stats(&saved);
-                }
-                // An interactive switch — the picker opened from the chat,
-                // or a `/model <needle>` typed there — says where it
-                // landed; the login and startup auto-selects stay quiet.
-                let from_chat = matches!(&self.screen, Screen::Picker(picker) if picker.purpose == PickerPurpose::FromChat);
-                if from_chat || matches!(&self.screen, Screen::Chat) {
-                    self.transcript
-                        .push_notice(&format!("model switched to {provider}/{id}"));
-                }
-                self.agent = Some(agent);
-                self.subagents = Some(subagents);
-                self.screen = Screen::Chat;
-                // A new backend counts a new plan: the allowance badge
-                // fetches now, not at the first turn's end.
-                vec![Effect::FetchUsage]
-            }
-            Err(err) => {
-                self.error = Some(err.to_string());
-                Vec::new()
-            }
+        let (mut agent, subagents) = self.build_agent(session).map_err(|err| err.to_string())?;
+        // The counters survive the swap: same conversation, new model.
+        if let Some(saved) = saved {
+            agent.carry_transcript_stats(&saved);
         }
+        self.agent = Some(agent);
+        self.subagents = Some(subagents);
+        // A new backend counts a new plan: the allowance badge fetches
+        // now, not at the first turn's end.
+        Ok(vec![Effect::FetchUsage])
     }
 
     /// Builds an agent over `session` with the current model and flags.
@@ -2792,6 +3125,7 @@ impl App {
             self.sandboxed.as_ref(),
             self.effective().model.clone(),
             provider.clone(),
+            &self.config.skills_disabled.clone(),
         );
         Ok((
             CodingAgent::from_session(provider, agent_config, session)?,
@@ -3092,13 +3426,19 @@ impl App {
 }
 
 /// The coding-agent config implied by the startup flags and the chosen
-/// model.
-fn agent_config(options: &RunOptions, model: Option<String>) -> CodingAgentConfig {
+/// model. `disabled` carries the config's skill off-switch through to
+/// the prompt's skills list.
+fn agent_config(
+    options: &RunOptions,
+    model: Option<String>,
+    disabled: &std::collections::BTreeSet<String>,
+) -> CodingAgentConfig {
     CodingAgentConfig {
         max_turn_steps: options.max_steps,
         transcript: (!options.no_transcript).then(rhema_transcript::TranscriptSettings::default),
         thinking: options.thinking,
         base_system: options.base_system.clone(),
+        disabled_skills: disabled.clone(),
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
     }
 }
@@ -3118,8 +3458,9 @@ fn session_agent_config(
     sandboxed: Option<&crate::sandbox::Sandboxed>,
     model: Option<String>,
     provider: Arc<dyn ModelProvider>,
+    disabled_skills: &std::collections::BTreeSet<String>,
 ) -> (CodingAgentConfig, rhema_subagents::SubagentHandle) {
-    let mut config = agent_config(options, model);
+    let mut config = agent_config(options, model, disabled_skills);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_tools(&mut config);
     }
@@ -3430,6 +3771,7 @@ mod tests {
             sandboxed: None,
             sandbox_offered: crate::sandbox::SandboxAvailability::default(),
             home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
+            onboard: false,
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,
@@ -3488,8 +3830,10 @@ mod tests {
 
     #[test]
     fn a_paste_on_the_add_dialog_fills_the_credential() {
+        // The chat is the opening screen now; /login opens the page
+        // the add dialog lives on.
         let mut h = harness(None, None, Session::default());
-        assert!(matches!(h.app.screen, Screen::Settings(_)));
+        assert!(matches!(h.app.screen, Screen::Chat));
         // Descend into the credential stage first.
         descend_to_credential(&mut h, 0);
         h.app.on_paste("sk-123");
@@ -3500,13 +3844,12 @@ mod tests {
     }
 
     #[test]
-    fn no_resolvable_key_opens_the_settings_gate() {
+    fn no_resolvable_key_opens_the_chat() {
+        // Nothing gates the session anymore: a keyless config is a
+        // chat whose footer says "no provider" in red; the wizard is
+        // for the first run only.
         let h = harness(None, None, Session::default());
-        let Screen::Settings(settings) = &h.app.screen else {
-            panic!("expected the settings screen");
-        };
-        assert_eq!(settings.section, crate::screens::SettingsSection::Providers);
-        assert_eq!(settings.purpose, SettingsPurpose::Initial);
+        assert!(matches!(h.app.screen, Screen::Chat));
         assert!(h.app.initial_effects().is_empty());
     }
 
@@ -3533,32 +3876,6 @@ mod tests {
     }
 
     #[test]
-    fn the_startup_settings_say_why_they_opened() {
-        let h = harness(None, None, Session::default());
-        let Screen::Settings(settings) = &h.app.screen else {
-            panic!("expected the settings screen");
-        };
-        let reason = settings
-            .startup_reason
-            .as_deref()
-            .expect("the gate names why no backend resolved");
-        assert!(reason.contains("GEMINI_API_KEY"), "{reason}");
-    }
-
-    #[test]
-    fn settings_opened_from_the_chat_carry_no_reason() {
-        let mut h = harness(Some("k"), None, Session::default());
-        h.app.open_settings_at(
-            crate::screens::SettingsSection::Providers,
-            SettingsPurpose::FromChat,
-        );
-        let Screen::Settings(settings) = &h.app.screen else {
-            panic!("expected the settings screen");
-        };
-        assert_eq!(settings.startup_reason, None);
-    }
-
-    #[test]
     fn a_locked_keychain_is_named_by_the_missing_key_help() {
         let profile = rhema_config::Profile {
             provider: Some("google".into()),
@@ -3581,24 +3898,19 @@ mod tests {
     }
 
     #[test]
-    fn a_key_without_a_stored_model_opens_a_loading_picker() {
-        let mut h = harness(Some("k"), None, Session::default());
-        assert!(matches!(h.app.screen, Screen::Picker(_)));
+    fn a_key_without_a_stored_model_opens_the_chat_quietly() {
+        // No model stored is a red footer and /model one keystroke
+        // away, not a gate: no fetch runs at startup and nothing but
+        // the wizard stands between the user and the input box.
+        let h = harness(Some("k"), None, Session::default());
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(h.app.agent.is_none());
+        // The catalog still warms: ctrl-p answers from the cache the
+        // moment the user asks for a model.
         assert_eq!(
             h.app.initial_effects(),
             vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
         );
-        h.app.on_event(UiEvent::ModelsLoaded {
-            why: FetchWhy::Bootstrap,
-            result: loaded("google", models()),
-        });
-        match &h.app.screen {
-            Screen::Picker(picker) => {
-                assert_eq!(picker.status, PickerStatus::Ready);
-                assert_eq!(picker.models.len(), 2);
-            }
-            _ => panic!("expected the picker"),
-        }
     }
 
     #[test]
@@ -4534,8 +4846,7 @@ mod tests {
             Some(saved_stats)
         );
         // And /settings's Usage page reads the whole thing.
-        h.app
-            .open_settings_at(SettingsSection::Usage, SettingsPurpose::FromChat);
+        h.app.open_settings_at(SettingsSection::Usage);
         let Screen::Settings(settings) = &h.app.screen else {
             panic!("settings should be open");
         };
@@ -4747,14 +5058,9 @@ mod tests {
 
     #[test]
     fn turn_costs_accumulate_from_the_model_pricing() {
-        let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.on_event(UiEvent::ModelsLoaded {
-            why: FetchWhy::Bootstrap,
-            result: loaded("google", models()),
-        });
-        // models() carries a 1M-token limit; give the fixture a price
-        // directly, the way google's catalog bakes one in. The session
-        // carries a message so the export has something to save.
+        // No stored model: the chat opens bare and the test names the
+        // priced model through /model — the move the red footer
+        // invites — before the turn runs.
         let mut h = harness(
             Some("k"),
             None,
@@ -4781,6 +5087,8 @@ mod tests {
                 )],
             ),
         });
+        crate::commands::dispatch(&mut h.app, "/model gemini-3.8-flash");
+        assert!(h.app.agent.is_some(), "the pick built the agent");
         h.app.on_key(key(KeyCode::Char('a')));
         let effects = h.app.on_key(key(KeyCode::Enter));
         match effects.as_slice() {
@@ -5046,6 +5354,7 @@ mod tests {
         // Walk down to the GitHub Copilot row (the last), name the
         // instance, and enter: the effect starts the flow, not a
         // credential input.
+        crate::commands::dispatch(&mut h.app, "/login");
         h.app.on_key(key(KeyCode::Enter));
         for _ in 0..crate::screens::PROVIDERS.len() - 1 {
             h.app.on_key(key(KeyCode::Down));
@@ -5130,6 +5439,7 @@ mod tests {
     #[test]
     fn a_failed_flow_renders_its_error_and_persists_nothing() {
         let mut h = harness(None, None, Session::default());
+        crate::commands::dispatch(&mut h.app, "/login");
         for _ in 0..crate::screens::PROVIDERS.len() - 1 {
             h.app.on_key(key(KeyCode::Down));
         }
@@ -5163,10 +5473,12 @@ mod tests {
     #[test]
     fn choosing_a_model_persists_it_and_builds_the_agent() {
         let mut h = harness(Some("k"), None, Session::default());
+        assert!(matches!(h.app.screen, Screen::Chat));
         h.app.on_event(UiEvent::ModelsLoaded {
             why: FetchWhy::Bootstrap,
             result: loaded("google", models()),
         });
+        h.app.on_key(ctrl('p'));
         let effects = h.app.on_key(key(KeyCode::Enter));
         assert_eq!(effects, vec![Effect::FetchUsage]);
         assert!(matches!(h.app.screen, Screen::Chat));
@@ -5192,10 +5504,7 @@ mod tests {
         });
         // Warm cache: no refetch effect.
         assert!(h.app.on_key(ctrl('p')).is_empty());
-        match &h.app.screen {
-            Screen::Picker(picker) => assert_eq!(picker.purpose, PickerPurpose::FromChat),
-            _ => panic!("expected the picker"),
-        }
+        assert!(matches!(&h.app.screen, Screen::Picker(_)));
         h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Enter));
 
@@ -6262,6 +6571,7 @@ mod tests {
             sandboxed: None,
             sandbox_offered: crate::sandbox::SandboxAvailability::default(),
             home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
+            onboard: false,
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: crate::palette::ThemeKind::Dark,
@@ -6719,33 +7029,16 @@ mod tests {
     }
 
     #[test]
-    fn slash_skills_lists_what_discovery_finds() {
+    fn slash_skills_opens_the_skills_page() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        let global = tempfile::tempdir().unwrap();
-        let folder = global.path().join("commit-message");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(
-            folder.join("SKILL.md"),
-            "---\ndescription: apply when writing a commit\n---\nbody",
-        )
-        .unwrap();
-
-        h.app
-            .show_skills(Some(global.path()), Path::new("/nowhere"));
-        assert!(matches!(
-            h.app.transcript.lines().last(),
-            Some(Line::Markdown(table))
-                if table.contains("name | trigger")
-                    && table.contains("commit-message | apply when writing a commit")
-        ));
-
-        // No skills anywhere: the notice names the fix instead.
-        let empty = tempfile::tempdir().unwrap();
-        h.app.show_skills(Some(empty.path()), Path::new("/nowhere"));
-        assert!(matches!(
-            h.app.transcript.lines().last(),
-            Some(Line::Notice(text)) if text.contains("no skills")
-        ));
+        crate::commands::dispatch(&mut h.app, "/skills");
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.section, SettingsSection::Skills);
+        // Esc returns to the chat like every other settings page.
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(matches!(h.app.screen, Screen::Chat));
     }
 
     #[test]
@@ -6857,12 +7150,7 @@ mod tests {
     fn slash_model_opens_the_picker_and_esc_returns_to_the_chat() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/model");
-        match &h.app.screen {
-            Screen::Picker(picker) => {
-                assert_eq!(picker.purpose, PickerPurpose::FromChat);
-            }
-            _ => panic!("expected the picker"),
-        }
+        assert!(matches!(&h.app.screen, Screen::Picker(_)));
         h.app.on_key(key(KeyCode::Esc));
         assert!(matches!(h.app.screen, Screen::Chat));
     }
@@ -6874,7 +7162,6 @@ mod tests {
         let Screen::Settings(settings) = &h.app.screen else {
             panic!("expected the settings screen");
         };
-        assert_eq!(settings.purpose, SettingsPurpose::FromChat);
         assert_eq!(settings.section, SettingsSection::Providers);
         h.app.on_key(key(KeyCode::Esc));
         assert!(matches!(h.app.screen, Screen::Chat));
@@ -6882,11 +7169,287 @@ mod tests {
     }
 
     #[test]
-    fn esc_on_the_startup_settings_gate_quits() {
+    fn esc_on_the_wizard_s_welcome_quits() {
         let mut h = harness(None, None, Session::default());
-        assert!(matches!(h.app.screen, Screen::Settings(_)));
+        h.app.screen = Screen::Onboarding(Box::new(crate::onboarding::OnboardingScreen::new(
+            Vec::new(),
+            "personal".into(),
+            false,
+            rhema_config::Profile::default(),
+        )));
         h.app.on_key(key(KeyCode::Esc));
-        assert!(h.app.should_quit, "no chat behind the gate: esc quits");
+        assert!(h.app.should_quit, "no config behind the wizard: esc quits");
+        // Mid-wizard, Esc walks back instead: the finish step is the
+        // only one whose back-move cannot pass the welcome step.
+        let mut h = harness(None, None, Session::default());
+        h.app.screen = Screen::Onboarding(Box::new(crate::onboarding::OnboardingScreen::new(
+            Vec::new(),
+            "personal".into(),
+            false,
+            rhema_config::Profile::default(),
+        )));
+        h.app.on_key(key(KeyCode::Enter)); // welcome -> login
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(
+            !h.app.should_quit,
+            "an abandoned wizard only ever marks itself unfinished"
+        );
+        assert!(h.app.config.onboarded != Some(true));
+    }
+
+    /// A wizard fresh from `onboard: true` in the setup.
+    fn wizard_harness() -> Harness {
+        let mut h = harness(None, None, Session::default());
+        h.app.screen = Screen::Onboarding(Box::new(crate::onboarding::OnboardingScreen::new(
+            Vec::new(),
+            "personal".into(),
+            false,
+            h.app.effective(),
+        )));
+        h
+    }
+
+    #[test]
+    fn the_wizard_walks_skip_to_finish_and_marks_the_config_onboarded() {
+        let mut h = wizard_harness();
+        let Screen::Onboarding(wizard) = &h.app.screen else {
+            panic!("expected the wizard");
+        };
+        assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Welcome);
+
+        // Welcome -> Login; skip the login (row 1), landing on Profile.
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Enter));
+        let Screen::Onboarding(wizard) = &h.app.screen else {
+            panic!("expected the wizard");
+        };
+        assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Profile);
+
+        // Profile (name kept) -> Colors -> Skills -> Finish -> chat.
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert_eq!(h.app.config.onboarded, Some(true));
+        let stored = h.store.load().unwrap();
+        assert_eq!(stored.onboarded, Some(true));
+    }
+
+    #[test]
+    fn the_wizard_s_login_advances_to_its_own_model_step() {
+        let mut h = wizard_harness();
+        h.app.on_key(key(KeyCode::Enter)); // welcome -> login
+        h.app.on_key(key(KeyCode::Enter)); // add a login -> the dialog
+        // The first provider row, the suggested name, a key.
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Char('k')));
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(
+            effects,
+            vec![Effect::FetchModels(FetchWhy::Login {
+                backend: Backend::Google {
+                    api_key: "k".into(),
+                },
+                instance: Some("google".into()),
+            })],
+            "the wizard validates exactly like the settings dialog"
+        );
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Login {
+                backend: Backend::Google {
+                    api_key: "k".into(),
+                },
+                instance: Some("google".into()),
+            },
+            result: loaded("google", models()),
+        });
+        let Screen::Onboarding(wizard) = &h.app.screen else {
+            panic!("expected the wizard");
+        };
+        assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Model);
+        assert_eq!(wizard.models.len(), 2);
+        // Pick the highlighted model: the agent builds and the step
+        // lands on Profile.
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(effects, vec![Effect::FetchUsage]);
+        assert!(h.app.agent.is_some());
+        assert_eq!(
+            h.store.load().unwrap().effective(None).model.as_deref(),
+            Some("m-a")
+        );
+        let Screen::Onboarding(wizard) = &h.app.screen else {
+            panic!("expected the wizard");
+        };
+        assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Profile);
+        assert_eq!(wizard.chosen_model.as_deref(), Some("m-a"));
+    }
+
+    #[test]
+    fn the_wizard_s_colors_step_previews_and_the_settings_skills_page_toggles() {
+        let mut h = wizard_harness();
+        // Walk to Colors and step one palette down: the live apply is
+        // the app's business, and the config is its record.
+        h.app.on_key(key(KeyCode::Enter)); // welcome -> login
+        h.app.on_key(key(KeyCode::Down)); // the skip row
+        h.app.on_key(key(KeyCode::Enter)); // -> profile
+        h.app.on_key(key(KeyCode::Enter)); // -> colors
+        h.app.on_key(key(KeyCode::Down));
+        let expected = crate::palette::Palette::ALL[1];
+        assert_eq!(h.app.options.colors, expected, "applied live");
+        assert_eq!(
+            h.app.config.colors.as_deref(),
+            Some(expected.stored_name()),
+            "and persisted"
+        );
+        assert_eq!(
+            h.store.load().unwrap().colors,
+            h.app.config.colors,
+            "and persisted"
+        );
+
+        // A skills toggle from the settings page lands in the disabled
+        // set and flips the row on screen.
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.config.skills_disabled.clear();
+        h.app
+            .open_settings_at(crate::screens::SettingsSection::Skills);
+        if let Screen::Settings(settings) = &mut h.app.screen {
+            settings.skills = vec![crate::screens::SkillRow {
+                name: "unslop".into(),
+                description: "trigger".into(),
+                license: Some("MIT".into()),
+                source: crate::screens::SkillSource::Bundled,
+                enabled: true,
+            }];
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(
+            h.app.config.skills_disabled.contains("unslop"),
+            "the toggle lands in the disabled set"
+        );
+        assert_eq!(
+            h.store.load().unwrap().skills_disabled,
+            h.app.config.skills_disabled
+        );
+        if let Screen::Settings(settings) = &h.app.screen {
+            assert!(!settings.skills[0].enabled, "the row follows");
+        }
+        // Toggle back on: the set clears (and a bundled skill would
+        // re-seed from the re-enable path).
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(!h.app.config.skills_disabled.contains("unslop"));
+    }
+
+    #[test]
+    fn a_click_on_the_wizard_s_rail_jumps_to_the_step() {
+        let mut h = wizard_harness();
+        // Draw one frame so the renderer registers the rail rects,
+        // then click the Finish row (the rail's last step).
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(&mut h.app, frame))
+            .unwrap();
+        let (row_x, row_y) = h
+            .app
+            .onboarding_hits
+            .iter()
+            .find_map(|(area, hit)| {
+                matches!(
+                    hit,
+                    crate::app::OnboardingHit::RailStep(crate::onboarding::OnboardingStep::Finish)
+                )
+                .then_some((area.x, area.y))
+            })
+            .expect("the finish row is clickable");
+        h.app.on_click(row_x, row_y);
+        let Screen::Onboarding(wizard) = &h.app.screen else {
+            panic!("expected the wizard");
+        };
+        assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Finish);
+        // A click lands on the row's cell, not beside it: one off the
+        // rect changes nothing.
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(&mut h.app, frame))
+            .unwrap();
+        h.app.on_click(row_x + 40, row_y);
+        if let Screen::Onboarding(wizard) = &h.app.screen {
+            assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Finish);
+        }
+    }
+
+    #[test]
+    fn a_rerun_shows_the_existing_configuration() {
+        // A configured profile walks in: the welcome rail says what is
+        // connected instead of starting from a blank slate.
+        let mut h = wizard_harness();
+        if let Screen::Onboarding(wizard) = &mut h.app.screen {
+            let mut stored = rhema_config::Profile {
+                provider: Some("google".into()),
+                instance: Some("google".into()),
+                model: Some("gemini-x".into()),
+                ..rhema_config::Profile::default()
+            };
+            stored.upsert_instance(
+                "google",
+                rhema_config::ProviderInstance {
+                    provider: "google".into(),
+                    api_key: None,
+                    secret_ref: None,
+                    base_url: None,
+                },
+            );
+            wizard.stored = stored;
+        }
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(&mut h.app, frame))
+            .unwrap();
+        let text: String = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| {
+                        let cell = &terminal.backend().buffer()[(x, y)];
+                        cell.symbol().to_owned()
+                    })
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("currently configured"),
+            "the welcome step names the config: {text}"
+        );
+        assert!(text.contains("google (google)"), "{text}");
+        assert!(text.contains("gemini-x"), "{text}");
+
+        // The login step lists the held instance; the model step keeps
+        // the stored model.
+        h.app.on_click(0, 0); // no-op; walk with keys instead
+        if let Screen::Onboarding(wizard) = &mut h.app.screen {
+            wizard.go(crate::onboarding::OnboardingStep::Login);
+        }
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+        terminal
+            .draw(|frame| crate::ui::render(&mut h.app, frame))
+            .unwrap();
+        let text: String = (0..30)
+            .map(|y| {
+                (0..100)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_owned())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("google (google)"), "login lists it: {text}");
+        assert!(text.contains("+ add a login"), "{text}");
     }
 
     #[test]
@@ -6985,12 +7548,7 @@ mod tests {
             },
             result: loaded("google", models()),
         });
-        match &h.app.screen {
-            Screen::Picker(picker) => {
-                assert_eq!(picker.purpose, PickerPurpose::FromChat);
-            }
-            _ => panic!("expected the picker"),
-        }
+        assert!(matches!(&h.app.screen, Screen::Picker(_)));
         h.app.on_key(key(KeyCode::Esc));
         assert!(matches!(h.app.screen, Screen::Chat));
     }

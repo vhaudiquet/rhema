@@ -151,7 +151,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/skills",
-        description: "list discovered skills",
+        description: "skills on and off (the Skills page)",
         argument: Argument::None,
         handler: skills,
     },
@@ -294,10 +294,9 @@ fn resume(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
 }
 
 fn skills(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
-    let global = rhema_config::Config::skills_dir().ok();
-    let workspace = std::fs::canonicalize(&app.options.workspace)
-        .unwrap_or_else(|_| app.options.workspace.clone());
-    app.show_skills(global.as_deref(), &workspace);
+    // The interactive page, not a transcript listing: skills are
+    // toggled, not read.
+    app.open_settings_at(crate::screens::SettingsSection::Skills);
     Vec::new()
 }
 
@@ -354,26 +353,17 @@ fn thinking(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
 
 fn login(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     // The login flow lives on the settings' Providers page now.
-    app.open_settings_at(
-        crate::screens::SettingsSection::Providers,
-        crate::screens::SettingsPurpose::FromChat,
-    );
+    app.open_settings_at(crate::screens::SettingsSection::Providers);
     Vec::new()
 }
 
 fn settings(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
-    app.open_settings_at(
-        crate::screens::SettingsSection::Providers,
-        crate::screens::SettingsPurpose::FromChat,
-    );
+    app.open_settings_at(crate::screens::SettingsSection::Providers);
     Vec::new()
 }
 
 fn subagents(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
-    app.open_settings_at(
-        crate::screens::SettingsSection::Subagents,
-        crate::screens::SettingsPurpose::FromChat,
-    );
+    app.open_settings_at(crate::screens::SettingsSection::Subagents);
     Vec::new()
 }
 
