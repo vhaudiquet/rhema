@@ -120,7 +120,10 @@ async fn streams_sse_into_events_and_an_assembled_output() {
     let body: Value = serde_json::from_slice(&received[0].body).expect("json body");
     assert_eq!(body["model"], "claude-sonnet-4-5");
     // The API-required ceiling defaults when ChatParams leaves it unset.
-    assert_eq!(body["max_tokens"], json!(4096));
+    assert_eq!(
+        body["max_tokens"],
+        json!(rhema_provider_anthropic::DEFAULT_MAX_TOKENS)
+    );
     assert_eq!(body["stream"], json!(true));
     assert!(body.get("system").is_none());
     assert_eq!(

@@ -30,6 +30,13 @@
 //!   `input_schema` is required and must be an object schema, so a
 //!   non-object spec degrades to the empty schema rather than dropping the
 //!   tool.
+//! - Cache breakpoints (the prompt cache's only lookup positions) mark
+//!   four positions, the API's maximum: the system block, the last
+//!   `tools[]` entry, and the last blocks of the last two user turns.
+//!   The message pair rolls forward one turn per request, so each
+//!   request marks where the previous one ended and the conversation
+//!   prefix reads from the cache instead of re-billing at the write
+//!   rate.
 //! - Empty text blocks are dropped: the API rejects them.
 //! - Every call streams (`stream: true`). The SSE event sequence folds in
 //!   arrival order: `content_block_start` announces text and `tool_use`
@@ -85,9 +92,12 @@ const WRAPPED_ARGS_KEY: &str = "_rhema_args";
 const WRAPPED_ARGS_TEXT_KEY: &str = "_anthropic_args_text";
 
 /// The `max_tokens` sent when [`rhema_core::ChatParams::max_tokens`] is
-/// unset: the field is required by the API, and this ceiling is accepted by
-/// every current model.
-pub const DEFAULT_MAX_TOKENS: u32 = 4096;
+/// unset: the field is required by the API, and this ceiling is accepted
+/// by every current model — Anthropic's own and the Z.ai plan route —
+/// while sitting high enough that a long reply or a large generated file
+/// is not cut off mid-stream (a `max_tokens` stop ends the turn with the
+/// answer truncated).
+pub const DEFAULT_MAX_TOKENS: u32 = 32_768;
 
 // --- Request wire types (serialize) ---
 
@@ -640,10 +650,24 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
         ));
     }
 
-    // The last block of the last turn ends the cached conversation
-    // prefix: each step's request extends the previous step's cached
-    // prefix by exactly this turn's delta, and the marker rides forward
-    // with it.
+    // The last two user turns each end a cached prefix. A cache lookup
+    // happens only at a marked position, so this request's last-turn
+    // marker is read back only if the next request still marks where
+    // this one ends — the second-to-last user turn's marker is that
+    // position, and the rolling pair turns each step's conversation
+    // delta into a cache read instead of a full cache-write re-bill.
+    // With the system and tools markers that is four breakpoints, the
+    // API's maximum.
+    let user_turns = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| message.role == "user")
+        .map(|(index, _)| index);
+    if let Some(previous) = user_turns.rev().nth(1) {
+        if let Some(block) = messages[previous].content.last_mut() {
+            block.mark_ephemeral();
+        }
+    }
     if let Some(last_message) = messages.last_mut() {
         if let Some(last_block) = last_message.content.last_mut() {
             last_block.mark_ephemeral();
@@ -1286,10 +1310,12 @@ mod tests {
         let messages = json["messages"].as_array().expect("messages array");
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["role"], "user");
-        // History rows carry no breakpoint; only the final block does.
+        // The second-to-last user turn ends a cached prefix too: the
+        // rolling pair is what the next request's lookup reads.
         assert_eq!(
             messages[0]["content"],
-            json!([{ "type": "text", "text": "list files" }])
+            json!([{ "type": "text", "text": "list files",
+                     "cache_control": { "type": "ephemeral" } }])
         );
         assert_eq!(messages[1]["role"], "assistant");
         assert_eq!(
@@ -1308,6 +1334,75 @@ mod tests {
                   "cache_control": { "type": "ephemeral" } }
             ]),
             "the final block ends the cached prefix"
+        );
+    }
+
+    #[test]
+    fn the_last_two_user_turns_each_end_a_cached_prefix() {
+        // Two tool rounds: the wire carries user, assistant, user,
+        // assistant, user — the marked pair is the second and the last
+        // user turn, and the turns outside the pair carry no breakpoint.
+        let round = |id: &str| {
+            vec![
+                Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolCall(ToolCall {
+                        id: id.into(),
+                        name: "list_dir".into(),
+                        args: json!({ "path": "." }),
+                        provider_data: Value::Null,
+                    })],
+                },
+                Message {
+                    role: Role::Tool,
+                    content: vec![Content::ToolResult(ToolResult::success(id, "rows"))],
+                },
+            ]
+        };
+        let mut history = vec![Message::text(Role::User, "list files")];
+        history.extend(round("c0"));
+        history.extend(round("c1"));
+        let req = ModelRequest {
+            system: Some("be terse".into()),
+            messages: history,
+            tools: vec![ToolSpec::new(
+                "list_dir",
+                "lists a directory",
+                json!({ "type": "object" }),
+            )],
+            params: ChatParams::new("claude-sonnet-4-5"),
+        };
+        let json = serde_json::to_value(request_body(&req).unwrap()).unwrap();
+        let messages = json["messages"].as_array().expect("messages array");
+        assert_eq!(messages.len(), 5);
+        let marked: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| {
+                message["content"].as_array().is_some_and(|blocks| {
+                    blocks
+                        .iter()
+                        .any(|block| block.get("cache_control").is_some())
+                })
+            })
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(marked, vec![2, 4], "the last two user turns alone");
+    }
+
+    #[test]
+    fn a_single_user_turn_carries_one_message_breakpoint() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hi")],
+            tools: vec![],
+            params: ChatParams::new("claude-sonnet-4-5"),
+        };
+        let json = serde_json::to_value(request_body(&req).unwrap()).unwrap();
+        assert_eq!(
+            json["messages"][0]["content"],
+            json!([{ "type": "text", "text": "hi",
+                     "cache_control": { "type": "ephemeral" } }])
         );
     }
 
