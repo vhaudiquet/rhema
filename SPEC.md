@@ -634,9 +634,23 @@ coalesce into one message; the append lands at a step boundary, so
 the next commit hook and the driver's post-round checkpoint persist
 it like any history. Notifications consume no step budget; the fetch
 is an ordinary step. Within a turn each finish is announced once; at
-each turn start every finished-but-unfetched job is announced again.
+each turn start every finished, unfetched, untaken job is announced
+again — a line the frontend took for its idle prompt is retired and
+never re-announced.
 The drain is a query over registry state, never a mutation of
 record: a crash between append and checkpoint only re-delivers.
+
+Delivery when nothing runs — the frontend's half. A driver drains
+only while a turn runs, so an interactive frontend owns the other
+case: the registry hands out the pending lines again as a consuming
+take, and the frontend runs them as the next turn's prompt. The take
+marks the lines taken — announced, not fetched — so the driver's
+turn-start drain cannot repeat what the prompt already said; the
+report stays unfetched, so the fetch protocol works unchanged.
+rhema-code does this on its redraw tick: idle, it joins the pending
+lines into one prompt and starts the turn; mid-turn it takes only
+the finish events (the transcript's notices) and leaves the lines to
+the driver.
 
 **Lifecycle.** `queued → running → finished(ok, report) |
 finished(error, reason)`. A fetch marks the job fetched — its UI
@@ -653,8 +667,9 @@ registry, not an execution.
   returns `is_error` "still running". An unknown id is an error
   naming it.
 - A job the model never fetches keeps its report until the agent is
-  dropped, and is re-announced at every turn start while unfetched.
-  There is no forced delivery at turn end.
+  dropped, and is re-announced at every turn start while unfetched
+  and untaken — an interactive frontend's idle prompt also counts as
+  an announcement. There is no forced delivery at turn end.
 
 **Cancellation.** A job's `ToolContext.cancelled` is its own flag,
 minted at spawn — never the parent turn's. Escape flips only the
@@ -694,14 +709,16 @@ allow would be a new unattended-execution path — exactly what the
 hook exists to prevent. Denial answers in-band to the job, as to a
 foreground one.
 
-**UI surface.** One pinned live line per running job. The registry
+**UI surface.** One pinned live line per working job. The registry
 publishes each job's status — the same `ToolStatus` vocabulary the
 forwarder reports today (phase, spend, model) — on a subscription
 `wire` hands back beside the config; the TUI pumps it beside the
-engine events and keys a line by job id. A finished-but-unfetched
-job's line stops spinning and reads "finished"; it leaves when the
-fetch lands or the agent goes away. The notification message
-renders as a muted system line, not a user bubble.
+engine events and keys a line by job id. A finished job's line
+leaves at once — the strip pins working work only — and the
+registry's finish feed hands the frontend one event per job, whose
+line lands in the transcript as a muted notice, not a user bubble.
+An idle session's prompt path reads as a user line instead: it is
+the turn input the model received.
 
 **Resume and replay.** Jobs are in-memory, so a crash mid-turn with
 jobs running loses them. The committed history shows the start calls
