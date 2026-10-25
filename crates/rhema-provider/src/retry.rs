@@ -9,10 +9,11 @@
 //!
 //! Two guards keep a retry honest:
 //!
-//! - A request whose stream already emitted an event never retries. The
+//! - A request whose stream already emitted content never retries. The
 //!   deltas reached the caller's sink, and a second attempt would stream
-//!   them again next to the first. Only a failure before the first byte
-//!   is invisible enough to redo.
+//!   them again next to the first. A usage tally alone is not content —
+//!   the adapters report the prompt ahead of the first delta, and a
+//!   stream that dies between them is invisible enough to redo.
 //! - A request that "succeeds" without producing anything — a provider
 //!   that closed the stream before its first chunk — counts as dead like
 //!   any error and retries. If every attempt comes back empty, the
@@ -137,16 +138,20 @@ impl Sleeper for TokioSleeper {
     }
 }
 
-/// Counts the events reaching the real sink; the retry guards read the
-/// count to know whether an attempt was seen.
+/// Counts the content events reaching the real sink; the retry guards
+/// read the count to know whether an attempt was seen. Content is every
+/// event but the usage tally — the adapters emit `Usage` ahead of the
+/// first delta, and a caller that watched only a tally watched nothing.
 struct CountingSink<'a> {
     inner: &'a mut dyn EventSink,
-    events: usize,
+    content: usize,
 }
 
 impl EventSink for CountingSink<'_> {
     fn emit(&mut self, event: Event<'_>) {
-        self.events += 1;
+        if !matches!(event, Event::Usage(_)) {
+            self.content += 1;
+        }
         self.inner.emit(event);
     }
 }
@@ -164,18 +169,19 @@ impl ModelProvider for Retrying {
             }
             let mut counted = CountingSink {
                 inner: &mut *sink,
-                events: 0,
+                content: 0,
             };
             match self.inner.complete(req.clone(), &mut counted).await {
-                // A response with content answers; an empty one before
-                // the first event is a dead exchange, retried below.
-                Ok(output) if counted.events > 0 || !output.message.content.is_empty() => {
+                // A response with content answers; an empty one the
+                // caller never saw content from is a dead exchange,
+                // retried below.
+                Ok(output) if counted.content > 0 || !output.message.content.is_empty() => {
                     return Ok(output);
                 }
                 Ok(_) => {}
                 Err(err) => {
                     let last_attempt = attempt + 1 == self.attempts;
-                    if !last_attempt && counted.events == 0 && err.is_retryable() {
+                    if !last_attempt && counted.content == 0 && err.is_retryable() {
                         continue;
                     }
                     return Err(err);
@@ -213,6 +219,8 @@ mod tests {
         RateLimit,
         /// One text delta, then a timeout mid-stream.
         DeltaThenTimeout,
+        /// The prompt's usage tally, then a timeout before any content.
+        UsageThenTimeout,
         /// Success; the string is the whole reply ("" = empty).
         Succeed(&'static str),
     }
@@ -250,6 +258,17 @@ mod tests {
                 }),
                 Attempt::DeltaThenTimeout => {
                     sink.emit(Event::TextDelta("partial "));
+                    Err(ProviderError::Timeout)
+                }
+                Attempt::UsageThenTimeout => {
+                    // The adapters report the prompt this early; a
+                    // caller that watched only the tally watched no
+                    // content.
+                    sink.emit(Event::Usage(Usage {
+                        input_tokens: 10,
+                        output_tokens: 1,
+                        cached_input_tokens: 0,
+                    }));
                     Err(ProviderError::Timeout)
                 }
                 Attempt::Succeed(text) => Ok(ModelOutput {
@@ -326,6 +345,25 @@ mod tests {
         assert_eq!(err, ProviderError::Timeout);
         assert_eq!(scripted.calls(), 1, "one attempt only");
         assert_eq!(sink.0, vec!["partial "], "the caller keeps what it saw");
+    }
+
+    #[tokio::test]
+    async fn a_usage_tally_alone_does_not_block_the_retry() {
+        // The tally the footer gauge reads is not content: a stream
+        // that dies right after message_start is redone, because the
+        // caller saw no generation from it.
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::UsageThenTimeout,
+            Attempt::Succeed("recovered"),
+        ]));
+        let mut sink = Deltas::default();
+        let out = retried(scripted.clone())
+            .complete(request(), &mut sink)
+            .await
+            .expect("the second attempt answers");
+        assert_eq!(out.message.content, vec![Content::Text("recovered".into())]);
+        assert_eq!(scripted.calls(), 2, "one retry spent");
+        assert!(sink.0.is_empty(), "no text was ever streamed");
     }
 
     #[tokio::test]
