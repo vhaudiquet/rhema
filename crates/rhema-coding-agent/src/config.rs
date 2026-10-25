@@ -49,6 +49,12 @@ pub struct CodingAgentConfig {
     /// files itself and passes the list; the model reads bodies through
     /// the shell, so each path must resolve inside the workspace.
     pub skills: Option<Vec<Skill>>,
+    /// Skill folder names to drop from whichever list the prompt carries
+    /// — the persisted off switch a frontend reads out of its config.
+    /// The filter runs after collection and after discovery alike, so
+    /// both supply paths honor it; an empty set (the default) changes
+    /// nothing.
+    pub disabled_skills: std::collections::BTreeSet<String>,
     /// Cap on steps per turn; a turn still requesting tools past it fails
     /// with `AgentError::MaxIterations`.
     pub max_turn_steps: u32,
@@ -144,6 +150,7 @@ impl CodingAgentConfig {
             base_system: None,
             workspace: workspace.into(),
             skills: None,
+            disabled_skills: std::collections::BTreeSet::new(),
             max_turn_steps: Self::DEFAULT_MAX_TURN_STEPS,
             thinking: ThinkingEffort::Default,
             tools: None,

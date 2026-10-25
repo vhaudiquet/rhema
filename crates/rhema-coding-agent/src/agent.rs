@@ -208,29 +208,27 @@ impl CodingAgent {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
             Some(system) => system,
-            None => match &config.skills {
-                Some(skills) => stamped_system_with_sections(
+            None => {
+                // The disabled names drop from whichever list the prompt
+                // carries: the off switch applies to collected and
+                // discovered skills alike, before the template sees them.
+                let mut skills = match &config.skills {
+                    Some(skills) => skills.clone(),
+                    None => {
+                        let global = rhema_config::Config::skills_dir().ok();
+                        rhema_agent_tools::skills::discover(global.as_deref(), tools.workspace())
+                    }
+                };
+                skills.retain(|skill| !config.disabled_skills.contains(&skill.name));
+                stamped_system_with_sections(
                     config.base_system.as_deref(),
                     tools.workspace(),
                     &extra,
-                    skills,
+                    &skills,
                     config.environment.as_deref(),
                     config.user_preferences.as_deref(),
-                )?,
-                None => {
-                    let global = rhema_config::Config::skills_dir().ok();
-                    let skills =
-                        rhema_agent_tools::skills::discover(global.as_deref(), tools.workspace());
-                    stamped_system_with_sections(
-                        config.base_system.as_deref(),
-                        tools.workspace(),
-                        &extra,
-                        &skills,
-                        config.environment.as_deref(),
-                        config.user_preferences.as_deref(),
-                    )?
-                }
-            },
+                )?
+            }
         };
         // The skills section's byte share of the system prompt: the
         // same render without the skills list, subtracted. The
@@ -804,6 +802,7 @@ mod extra_tools_tests {
         let skill = Skill {
             name: "deploy".into(),
             description: "Triggers on deploy tasks.".into(),
+            license: None,
             path: workspace.join(".rhema/skills/deploy/SKILL.md"),
         };
         let prompt = stamped_system_with_skills(None, &workspace, &[], &[skill]).unwrap();
