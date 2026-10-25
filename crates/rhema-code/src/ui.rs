@@ -2134,8 +2134,9 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     };
     // Every live subagent job pins its own line right below the
     // spinner: the robot badge, its phase, spend, and age. The registry
-    // is the single source — a job's line lives while it works (or its
-    // report waits unfetched), whatever turn is running.
+    // is the single source — a job's line lives while it works; when it
+    // finishes the line leaves and the transcript carries the outcome
+    // as the finish notice.
     for subagent in subagent_lines(app, theme) {
         lines.push(subagent);
     }
@@ -2199,10 +2200,10 @@ fn cost_text(cost: f64) -> String {
     }
 }
 
-/// The pinned live lines, oldest job first: one per queued, running,
-/// or finished-but-unfetched job on the wire's registry, read fresh
-/// every redraw — the strip's layout counts them and its drawing renders
-/// them, so the reserve matches what is on screen.
+/// The pinned live lines, oldest job first: one per working job —
+/// queued or running — on the wire's registry, read fresh every redraw
+/// — the strip's layout counts them and its drawing renders them, so
+/// the reserve matches what is on screen.
 fn subagent_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
     app.subagent_jobs()
         .iter()
@@ -2210,26 +2211,19 @@ fn subagent_lines(app: &App, theme: &Theme) -> Vec<Line<'static>> {
         .collect()
 }
 
-/// The pinned live line of one subagent job: the robot badge and its
-/// spinner, the delegate's name and job id, the phase it last reported,
-/// the context its current model call carries against its model's
-/// window, the cost its cumulative spend prices to, and its age. A
-/// figure the catalog cannot price or size degrades to what is known —
-/// tokens alone, no cost.
+/// The pinned live line of one working subagent job: the robot badge
+/// and its spinner, the delegate's name and job id, the phase it last
+/// reported, the context its current model call carries against its
+/// model's window, the cost its cumulative spend prices to, and its
+/// age. A figure the catalog cannot price or size degrades to what is
+/// known — tokens alone, no cost.
 fn subagent_line(app: &App, subagent: &rhema_subagents::JobStatus, theme: &Theme) -> Line<'static> {
     let mut spans = vec![
         Span::raw(format!("{} ", app.icons.robot)).fg(theme.text3),
-        // A running job animates its spinner; a finished-but-unfetched
-        // one stops spinning and reads its state — the line leaves when
-        // the fetch lands.
-        if subagent.phase == "finished" {
-            Span::raw("✓".to_owned()).fg(theme.ok)
-        } else {
-            Span::styled(
-                SPINNER[spinner_frame(subagent.started_at.elapsed())].to_string(),
-                Style::default().fg(theme.info),
-            )
-        },
+        Span::styled(
+            SPINNER[spinner_frame(subagent.started_at.elapsed())].to_string(),
+            Style::default().fg(theme.info),
+        ),
         Span::raw(" "),
         Span::raw(format!("{} ({})", subagent.name, subagent.id)).fg(theme.info),
         Span::raw(format!(" · {}", subagent.phase)).fg(theme.running),
@@ -3564,10 +3558,10 @@ mod scroll_tests {
     }
 
     /// A background subagent job pins its live line under the spinner,
-    /// read off the wire's registry at every redraw: running, it spins
-    /// with the delegate's name and job id and phase; finished but
-    /// unfetched, it stops spinning and reads `finished`; fetched, the
-    /// line leaves.
+    /// read off the wire's registry at every redraw: working, it spins
+    /// with the delegate's name and job id and phase; finished, the
+    /// line leaves at once — the transcript's finish notice carries the
+    /// outcome now, and the strip pins working jobs only.
     #[tokio::test]
     async fn a_working_subagent_pins_its_line_under_the_spinner() {
         use rhema_core::{EventSink, ProviderError};
@@ -3656,8 +3650,8 @@ mod scroll_tests {
         assert!(screen.contains("general-purpose (job-1)"), "{screen}");
         assert!(screen.contains("thinking"), "{screen}");
 
-        // Finished but unfetched: the line stays, stopped, reading its
-        // state.
+        // Finished: the line leaves at once; the finish event names the
+        // outcome the transcript notice will carry.
         let tools = {
             let shell = Arc::new(rhema_coding_agent::ShellTools::new(std::env::temp_dir()));
             let def = SubagentDef {
@@ -3677,22 +3671,29 @@ mod scroll_tests {
         )
         .await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while app
-            .subagent_jobs()
-            .first()
-            .is_none_or(|job| job.phase != "finished")
-        {
+        let finished = loop {
+            let events = app.subagents.as_ref().unwrap().take_finished();
+            if !events.is_empty() {
+                break events;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "the job never finished"
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        };
+        assert_eq!(
+            finished[0].line,
+            "Subagent general-purpose (job-1) has finished."
+        );
         let screen = screen_text(&mut app);
-        assert!(screen.contains("general-purpose (job-1)"), "{screen}");
-        assert!(screen.contains("finished"), "{screen}");
+        assert!(
+            !screen.contains("general-purpose (job-1)"),
+            "a finished job is not pinned: {screen}"
+        );
 
-        // The fetch retires the line: nothing pinned.
+        // The fetch still serves the cached report; the strip stays
+        // empty either way.
         let fetch = rhema_core::ToolCall {
             id: "c2".into(),
             name: "subagent".into(),

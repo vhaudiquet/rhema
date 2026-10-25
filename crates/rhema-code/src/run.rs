@@ -1015,7 +1015,8 @@ fn install_panic_hook() {
     }));
 }
 
-/// The UI thread's loop: draw, drain the event channel, poll crossterm.
+/// The UI thread's loop: draw, drain the event channel, run the app's
+/// tick (subagent finishes and their notifications), poll crossterm.
 /// Nothing here ever blocks on a task — that is the approval bridge's
 /// deadlock-safety invariant (see `crate::approval`).
 async fn event_loop(
@@ -1052,6 +1053,12 @@ async fn event_loop(
             if app.should_quit {
                 return Ok(());
             }
+        }
+        // The tick runs after the drain: a turn that just finished
+        // handed the agent back, so a notification that waited for the
+        // idle state prompts now, not a redraw later.
+        for effect in app.on_tick() {
+            dispatch(terminal, app, tx, &mut status, effect);
         }
         if app.should_quit {
             return Ok(());

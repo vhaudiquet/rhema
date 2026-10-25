@@ -2660,6 +2660,47 @@ impl App {
         }
     }
 
+    /// The redraw loop's per-tick work: subagent finishes reach the
+    /// transcript, and a finished job's notification reaches the model.
+    /// Both deliveries split on the turn state — the steering path and
+    /// the regular-prompt path:
+    ///
+    /// - a finish lands as a transcript notice right away, whatever
+    ///   the turn state — the job's pinned line left the strip at the
+    ///   same moment, so the notice is the record;
+    /// - while a turn runs, the driver steers: it appends the pending
+    ///   notification lines at the next step boundary, and the tick
+    ///   touches nothing but the notice;
+    /// - with no turn running, the tick takes the pending lines and
+    ///   runs them as the next turn's prompt — the same delivery a
+    ///   user submit would give them. The take retires the lines, so
+    ///   the driver's turn-start drain does not repeat what the prompt
+    ///   already said, and the prompt's user line is the transcript's
+    ///   record (no separate notice for the same text).
+    pub fn on_tick(&mut self) -> Vec<Effect> {
+        let Some(handle) = self.subagents.as_ref() else {
+            return Vec::new();
+        };
+        let finishes = handle.take_finished();
+        let promptable = !self.turn.running
+            && !self.confirm_quit
+            && self.agent.is_some()
+            && self.assembling.is_none();
+        if !promptable {
+            for job in finishes {
+                self.transcript.push_notice(&job.line);
+            }
+            return Vec::new();
+        }
+        let lines = handle.take_notifications();
+        if lines.is_empty() {
+            return Vec::new();
+        }
+        let prompt = lines.join("\n");
+        self.transcript.push_user(&prompt);
+        vec![Effect::StartTurn(prompt)]
+    }
+
     /// Persists a validated login: the instance lands in `tab`'s profile
     /// (its key in the keychain when the store takes it, the file when
     /// it does not; a re-login's old keychain entry goes first), the
@@ -3362,8 +3403,9 @@ impl App {
     }
 
     /// The background subagent jobs' live state, read off the wire's
-    /// registry handle: one entry per queued, running, or finished-but-
-    /// unfetched job. Empty without an agent or a wire.
+    /// registry handle: one entry per working job — queued or running.
+    /// A finished job left already; its outcome arrived as a finish
+    /// event. Empty without an agent or a wire.
     pub(crate) fn subagent_jobs(&self) -> Vec<rhema_subagents::JobStatus> {
         self.subagents
             .as_ref()
@@ -7718,10 +7760,11 @@ mod tests {
         ));
     }
     /// A background subagent job pins its live line off the wire's
-    /// registry: running, it spins with its name, job id, and phase;
-    /// finished-but-unfetched, it stops spinning and reads `finished`;
-    /// fetched, the line leaves. The render reads the snapshot fresh,
-    /// so the strip's reserve matches what is on screen.
+    /// registry: working, it spins with its name, job id, and phase;
+    /// finished, the line leaves at once and the finish event names
+    /// the outcome; the fetch still serves the cached report. The
+    /// render reads the snapshot fresh, so the strip's reserve matches
+    /// what is on screen.
     #[tokio::test]
     async fn a_background_subagent_job_pins_its_live_line() {
         use rhema_core::{EventSink, ProviderError};
@@ -7832,8 +7875,8 @@ mod tests {
         assert!(text.contains("scout (job-1)"), "{text}");
         assert!(text.contains("thinking"), "{text}");
 
-        // Finished but unfetched: the line stops spinning and reads its
-        // state until the fetch lands.
+        // Finished: the line leaves the strip at once; the finish
+        // event names the outcome.
         let tools = scout_tools(Arc::new(Report));
         harness.app.subagents = Some(tools.handle());
         let _ = rhema_core::ToolResolver::resolve(
@@ -7843,23 +7886,27 @@ mod tests {
         )
         .await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while harness
-            .app
-            .subagent_jobs()
-            .first()
-            .is_none_or(|job| job.phase != "finished")
-        {
+        let finished = loop {
+            let events = harness.app.subagents.as_ref().unwrap().take_finished();
+            if !events.is_empty() {
+                break events;
+            }
             assert!(
                 std::time::Instant::now() < deadline,
                 "the job never finished"
             );
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        };
+        assert_eq!(finished[0].line, "Subagent scout (job-1) has finished.");
         let text = frame_text(&mut harness.app);
-        assert!(text.contains("scout (job-1)"), "{text}");
-        assert!(text.contains("finished"), "{text}");
+        assert!(
+            !text.contains("scout (job-1)"),
+            "a finished job is not pinned: {text}"
+        );
+        assert!(harness.app.subagent_jobs().is_empty());
 
-        // The fetch retires the line.
+        // The fetch still serves the cached report; the strip stays
+        // empty.
         let _ = rhema_core::ToolResolver::resolve(
             tools.as_ref(),
             fetch_call(),
@@ -7868,6 +7915,187 @@ mod tests {
         .await;
         let text = frame_text(&mut harness.app);
         assert!(!text.contains("scout (job-1)"), "{text}");
-        assert!(harness.app.subagent_jobs().is_empty());
+    }
+
+    /// A job finishing with no turn running runs its notification as
+    /// the next turn's prompt — the regular-prompt path. The tick
+    /// emits `StartTurn` with the notification line, the transcript
+    /// records it as the user line it is, and the take retires the
+    /// announcement: the driver's drain has nothing left to repeat,
+    /// and a second tick starts nothing.
+    #[tokio::test]
+    async fn an_idle_session_runs_a_finished_jobs_notification_as_the_next_prompt() {
+        use rhema_core::{EventSink, ProviderError};
+        use rhema_subagents::{SubagentDef, SubagentTools};
+
+        /// Answers one report and ends.
+        struct Report;
+
+        #[async_trait::async_trait]
+        impl ModelProvider for Report {
+            async fn complete(
+                &self,
+                _req: rhema_core::ModelRequest,
+                _sink: &mut dyn EventSink,
+            ) -> Result<rhema_core::ModelOutput, ProviderError> {
+                Ok(rhema_core::ModelOutput {
+                    message: Message::text(Role::Assistant, "the report"),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        let mut h = harness(Some("key"), Some("m"), Session::default());
+        let tools = {
+            let shell = Arc::new(rhema_coding_agent::ShellTools::new(std::env::temp_dir()));
+            let def = SubagentDef {
+                name: "scout".into(),
+                description: "looks around".into(),
+                model: None,
+                max_steps: None,
+                body: "Look.".into(),
+            };
+            Arc::new(SubagentTools::new(Arc::new(Report), vec![def], shell, "m"))
+        };
+        h.app.subagents = Some(tools.handle());
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            ToolCall {
+                id: "c1".into(),
+                name: "subagent".into(),
+                args: serde_json::json!({"name": "scout", "prompt": "look"}),
+                ..ToolCall::default()
+            },
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        // A finished job left the snapshot; its finish event stays
+        // pending for the tick.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while h
+            .app
+            .subagents
+            .as_ref()
+            .unwrap()
+            .status()
+            .iter()
+            .any(|job| job.id == "job-1")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the job never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The idle tick: the notification becomes the prompt.
+        let effects = h.app.on_tick();
+        assert_eq!(effects.len(), 1);
+        let Effect::StartTurn(prompt) = &effects[0] else {
+            panic!("the idle tick starts a turn, got {:?}", effects[0]);
+        };
+        assert_eq!(prompt, "Subagent scout (job-1) has finished.");
+        let last = h.app.transcript.lines().last();
+        assert!(
+            matches!(last, Some(Line::User(text)) if text == prompt.as_str()),
+            "the prompt's user line is the record, got {last:?}"
+        );
+
+        // A second tick starts nothing: the take retired the line.
+        assert!(h.app.on_tick().is_empty());
+        // The driver's drain is empty too — the prompt already said it.
+        let steering = h.app.subagents.as_ref().unwrap().steering();
+        assert!(steering.drain().is_empty(), "a taken line stops announcing");
+    }
+
+    /// A job finishing while a turn runs shows the notice and leaves
+    /// the delivery to the driver's steering: the tick starts nothing
+    /// and takes no notification line, so the drain still names the
+    /// job.
+    #[tokio::test]
+    async fn a_running_turn_shows_the_finish_notice_and_leaves_steering_to_the_driver() {
+        use rhema_core::{EventSink, ProviderError};
+        use rhema_subagents::{SubagentDef, SubagentTools};
+
+        /// Answers one report and ends.
+        struct Report;
+
+        #[async_trait::async_trait]
+        impl ModelProvider for Report {
+            async fn complete(
+                &self,
+                _req: rhema_core::ModelRequest,
+                _sink: &mut dyn EventSink,
+            ) -> Result<rhema_core::ModelOutput, ProviderError> {
+                Ok(rhema_core::ModelOutput {
+                    message: Message::text(Role::Assistant, "the report"),
+                    stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                })
+            }
+        }
+
+        let mut h = harness(Some("key"), Some("m"), Session::default());
+        let tools = {
+            let shell = Arc::new(rhema_coding_agent::ShellTools::new(std::env::temp_dir()));
+            let def = SubagentDef {
+                name: "reviewer".into(),
+                description: "reviews".into(),
+                model: None,
+                max_steps: None,
+                body: "Review.".into(),
+            };
+            Arc::new(SubagentTools::new(Arc::new(Report), vec![def], shell, "m"))
+        };
+        h.app.subagents = Some(tools.handle());
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            ToolCall {
+                id: "c1".into(),
+                name: "subagent".into(),
+                args: serde_json::json!({"name": "reviewer", "prompt": "review"}),
+                ..ToolCall::default()
+            },
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        h.app.turn.running = true;
+        // A finished job left the snapshot; its finish event stays
+        // pending for the tick.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while h
+            .app
+            .subagents
+            .as_ref()
+            .unwrap()
+            .status()
+            .iter()
+            .any(|job| job.id == "job-1")
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the job never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let effects = h.app.on_tick();
+        assert!(
+            effects.is_empty(),
+            "a running turn takes no prompt: {effects:?}"
+        );
+        let last = h.app.transcript.lines().last();
+        assert!(
+            matches!(last, Some(Line::Notice(text))
+                if text == "Subagent reviewer (job-1) has finished."),
+            "the finish lands as a notice, got {last:?}"
+        );
+        // The driver still steers: the announcement line is pending.
+        let steering = h.app.subagents.as_ref().unwrap().steering();
+        assert_eq!(
+            steering.drain(),
+            vec!["Subagent reviewer (job-1) has finished.".to_owned()]
+        );
     }
 }
