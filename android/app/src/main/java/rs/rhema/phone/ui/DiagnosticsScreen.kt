@@ -46,6 +46,7 @@ import rs.rhema.phone.di.AppContainer
 import rs.rhema.phone.net.ClawResult
 import rs.rhema.phone.work.PHONE_COMMANDS
 import rs.rhema.phone.work.PHONE_STATUS
+import rs.rhema.phone.work.PHONE_STATUS_KICK
 import rs.rhema.phone.work.NOTIFICATIONS
 import rs.rhema.phone.work.enqueuePhoneStatusNow
 
@@ -98,18 +99,29 @@ private fun WorkCard(container: AppContainer) {
     val context = LocalContext.current
     val wm = remember { WorkManager.getInstance(context) }
     val statusInfos by wm.getWorkInfosForUniqueWorkFlow(PHONE_STATUS).collectAsState(initial = null)
+    val kickInfos by wm.getWorkInfosForUniqueWorkFlow(PHONE_STATUS_KICK).collectAsState(initial = null)
     val notifyInfos by wm.getWorkInfosForUniqueWorkFlow(NOTIFICATIONS).collectAsState(initial = null)
     val commandInfos by wm.getWorkInfosForUniqueWorkFlow(PHONE_COMMANDS).collectAsState(initial = null)
 
     RhemaCard(title = stringResource(R.string.card_diag_work), meta = stringResource(R.string.diag_work_hint)) {
         WorkRow(stringResource(R.string.diag_work_status), statusInfos, first = true)
+        WorkRow(
+            stringResource(R.string.diag_work_kick),
+            kickInfos,
+            // A one-time kick is absent until first used: "not scheduled"
+            // would read as an error when it is just the initial state.
+            absentLabel = stringResource(R.string.diag_state_never),
+        )
         WorkRow(stringResource(R.string.diag_work_notify), notifyInfos)
         WorkRow(stringResource(R.string.diag_work_commands), commandInfos)
         CardRow(
             title = stringResource(R.string.diag_report_now_title),
             description = stringResource(R.string.diag_report_now_desc),
         ) {
-            Button(onClick = { enqueuePhoneStatusNow(context) }) {
+            Button(onClick = {
+                container.diag.log("diag: report now tapped")
+                enqueuePhoneStatusNow(context)
+            }) {
                 Text(stringResource(R.string.diag_report_now))
             }
         }
@@ -117,13 +129,19 @@ private fun WorkCard(container: AppContainer) {
 }
 
 @Composable
-private fun WorkRow(label: String, infos: List<WorkInfo>?, first: Boolean = false) {
+private fun WorkRow(
+    label: String,
+    infos: List<WorkInfo>?,
+    first: Boolean = false,
+    absentLabel: String? = null,
+) {
     // Periodic work holds one info; take the first for both the state and
-    // the next window. An empty list means the schedule itself is gone.
+    // the next window. An empty list means the schedule itself is gone —
+    // or, for a one-time row, simply that it has never been enqueued.
     val info = infos?.firstOrNull()
     val stateLabel = when {
         infos == null -> stringResource(R.string.diag_state_checking)
-        info == null -> stringResource(R.string.diag_state_not_scheduled)
+        info == null -> absentLabel ?: stringResource(R.string.diag_state_not_scheduled)
         else -> when (info.state) {
             WorkInfo.State.ENQUEUED -> stringResource(R.string.diag_state_enqueued)
             WorkInfo.State.RUNNING -> stringResource(R.string.diag_state_running)
@@ -133,12 +151,15 @@ private fun WorkRow(label: String, infos: List<WorkInfo>?, first: Boolean = fals
             WorkInfo.State.CANCELLED -> stringResource(R.string.diag_state_cancelled)
         }
     }
-    val tint = when (info?.state) {
-        WorkInfo.State.RUNNING -> JadeiteOk
-        WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> JadeiteError
-        WorkInfo.State.BLOCKED -> JadeiteWarn
-        null -> JadeiteWarn
-        else -> JadeiteText3
+    val tint = when {
+        infos == null -> JadeiteWarn
+        info == null && absentLabel == null -> JadeiteError
+        else -> when (info?.state) {
+            WorkInfo.State.RUNNING -> JadeiteOk
+            WorkInfo.State.FAILED, WorkInfo.State.CANCELLED -> JadeiteError
+            WorkInfo.State.BLOCKED -> JadeiteWarn
+            else -> JadeiteText3
+        }
     }
     val detail = when {
         infos == null -> null

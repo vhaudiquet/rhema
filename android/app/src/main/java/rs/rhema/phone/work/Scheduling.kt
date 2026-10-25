@@ -15,7 +15,7 @@ import java.time.Duration
 internal const val PHONE_STATUS = "phone_status"
 internal const val NOTIFICATIONS = "notifications"
 internal const val PHONE_COMMANDS = "phone_commands"
-private const val PHONE_STATUS_KICK = "phone_status_kick"
+internal const val PHONE_STATUS_KICK = "phone_status_kick"
 private const val PHONE_COMMANDS_KICK = "phone_commands_kick"
 
 private fun networked() = Constraints.Builder()

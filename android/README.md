@@ -29,8 +29,10 @@ manages the device fleet the claw keeps.
   auto-detected system checks (battery optimization, background
   restriction, notifications) each with a jump into the exact settings
   page when the setting is wrong, a "report now" kick of the status
-  worker, and the workers' in-memory flight recorder (a 200-line ring,
-  newest first, copyable) where every run logs its outcome.
+  worker (its one-time job has a row of its own, and every worker
+  crash-lands in the log instead of dying silently), and the workers'
+  in-memory flight recorder (a 200-line ring, newest first, copyable)
+  where every run logs its outcome.
   Trade-off: the token is stored in plain DataStore rather than
   EncryptedSharedPreferences; `androidx.security:security-crypto` is an
   alpha-quality, unmaintained artifact, and the OS app sandbox already covers

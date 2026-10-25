@@ -9,6 +9,7 @@ import android.os.BatteryManager
 import android.os.Build
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
 import rs.rhema.phone.RhemaApp
 import rs.rhema.phone.data.PhoneSnapshot
 import rs.rhema.phone.diagnostics.diagText
@@ -36,7 +37,22 @@ import kotlinx.serialization.json.put
 // only bound write traffic, not model traffic.
 class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = try {
+        reportOnce()
+    } catch (cancelled: CancellationException) {
+        (applicationContext as RhemaApp).container.diag.log("status: cancelled")
+        throw cancelled
+    } catch (t: Throwable) {
+        // A crash before the first log line used to be invisible: the row
+        // just sat "waiting" while every attempt died silently.
+        (applicationContext as RhemaApp).container.diag.log(
+            "status: crashed: ${t.javaClass.simpleName}: ${t.message ?: "no message"}" +
+                t.stackTrace.firstOrNull()?.let { " at ${it.className}.${it.methodName}" }.orEmpty(),
+        )
+        Result.failure()
+    }
+
+    private suspend fun reportOnce(): Result {
         val container = (applicationContext as RhemaApp).container
         val deviceId = container.settings.deviceId()
         // Suspend: the location read may wait out a fresh fix.

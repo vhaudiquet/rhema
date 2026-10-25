@@ -104,6 +104,8 @@
     <string name="diag_work_status">Status reporting</string>
     <string name="diag_work_notify">Notification poll</string>
     <string name="diag_work_commands">Command queue</string>
+    <string name="diag_work_kick">Report-now run</string>
+    <string name="diag_state_never">never run</string>
     <string name="diag_work_next_fmt">next run in %1$s</string>
     <string name="diag_work_attempts_fmt">%1$d attempts</string>
     <string name="diag_state_checking">checking</string>

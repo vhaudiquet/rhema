@@ -6,6 +6,7 @@ import androidx.work.WorkerParameters
 import rs.rhema.phone.RhemaApp
 import rs.rhema.phone.diagnostics.diagText
 import rs.rhema.phone.net.ClawResult
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 
 // Periodic notification poll. Latency is bounded by the WorkManager interval
@@ -13,7 +14,20 @@ import kotlinx.coroutines.flow.first
 // The chat screen is always live via SSE regardless.
 class NotificationsWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = try {
+        pollOnce()
+    } catch (cancelled: CancellationException) {
+        (applicationContext as RhemaApp).container.diag.log("notify: cancelled")
+        throw cancelled
+    } catch (t: Throwable) {
+        (applicationContext as RhemaApp).container.diag.log(
+            "notify: crashed: ${t.javaClass.simpleName}: ${t.message ?: "no message"}" +
+                t.stackTrace.firstOrNull()?.let { " at ${it.className}.${it.methodName}" }.orEmpty(),
+        )
+        Result.failure()
+    }
+
+    private suspend fun pollOnce(): Result {
         val container = (applicationContext as RhemaApp).container
         val deviceId = container.settings.deviceId()
         val since = container.status.notificationCursor.first()

@@ -12,6 +12,7 @@ import rs.rhema.phone.net.PhoneCommand
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.coroutines.CancellationException
 
 // Periodic control-plane poll: the claw queues commands for this device
 // once their phone consent is granted; each is executed in order, then
@@ -19,7 +20,20 @@ import kotlinx.serialization.json.contentOrNull
 // command queued and the next run repeats it — at-least-once delivery.
 class PhoneCommandWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
-    override suspend fun doWork(): Result {
+    override suspend fun doWork(): Result = try {
+        drainOnce()
+    } catch (cancelled: CancellationException) {
+        (applicationContext as RhemaApp).container.diag.log("commands: cancelled")
+        throw cancelled
+    } catch (t: Throwable) {
+        (applicationContext as RhemaApp).container.diag.log(
+            "commands: crashed: ${t.javaClass.simpleName}: ${t.message ?: "no message"}" +
+                t.stackTrace.firstOrNull()?.let { " at ${it.className}.${it.methodName}" }.orEmpty(),
+        )
+        Result.failure()
+    }
+
+    private suspend fun drainOnce(): Result {
         val container = (applicationContext as RhemaApp).container
         val deviceId = container.settings.deviceId()
 
