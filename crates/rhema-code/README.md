@@ -46,6 +46,8 @@ rhema system edit
 
 The above command allows you to edit the system prompt in your `$EDITOR`. It uses a Jinja template (`minijinja`), so you can customize the skills part, the tool part, etc.
 
+`rhema system show` prints the exact prompt the next turn in this workspace would send — sections included (the environment report, your `USER.md`), resolved against the stored profile's sandbox kind — rendered as styled markdown on a terminal, byte-exact when piped.
+
 ### Environment report & USER.md
 
 Every session's system prompt carries an environment report, probed once at startup: the OS and shell `bash` runs on, a version inventory of the tools a coding turn reaches for (defined in `crates/rhema-coding-agent/src/environment.yaml` — `git`, `rg`, `fd`, `cargo`, `node`, `docker`, `gh`, …), and the workspace's git branch. When ripgrep answers, the report says so — search with `rg` (it respects `.gitignore`; `-uu` also searches ignored files). In a sandbox session (`docker`, `ssh`, `http`) the report claims no host facts; it names the sandbox kind and tells the agent to probe the machine itself.

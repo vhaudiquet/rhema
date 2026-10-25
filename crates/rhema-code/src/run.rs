@@ -168,7 +168,7 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         Some(crate::args::Command::Acp(acp)) => return run_acp(acp),
         Some(crate::args::Command::Run(run)) => return run_headless(run).await,
         Some(crate::args::Command::System { action }) => {
-            return system_command(action, &args.workspace);
+            return system_command(action, &args.workspace, args.profile.as_deref());
         }
         None => {}
     }
@@ -199,15 +199,146 @@ fn run_acp(args: crate::args::AcpArgs) -> anyhow::Result<()> {
 
 /// The `rhema system` utilities: they shape what turns would send and
 /// run no model — no provider, profile, or credential is touched.
-fn system_command(action: SystemCommand, workspace: &std::path::Path) -> anyhow::Result<()> {
+fn system_command(
+    action: SystemCommand,
+    workspace: &std::path::Path,
+    profile: Option<&str>,
+) -> anyhow::Result<()> {
     match action {
         SystemCommand::Edit => system_edit_at(&Config::system_prompt_path()?, None),
         SystemCommand::Restore => system_restore_at(&Config::system_prompt_path()?),
         SystemCommand::Show => {
-            let prompt = system_show_at(Config::system_prompt_path().ok().as_deref(), workspace)?;
-            print!("{prompt}");
+            let prompt = system_show_at(
+                Config::system_prompt_path().ok().as_deref(),
+                workspace,
+                profile,
+            )?;
+            // Styled markdown on a terminal; the byte-exact prompt when
+            // piped, the same contract the one-shot keeps.
+            if stdout().is_terminal() {
+                let config = Config::load().unwrap_or_default();
+                let theme = theme_from_config(&config);
+                let width = crossterm::terminal::size()
+                    .map(|(columns, _)| columns as usize)
+                    .unwrap_or(80);
+                print!("{}", markdown_ansi(&prompt, &theme, width));
+            } else {
+                print!("{prompt}");
+            }
             Ok(())
         }
+    }
+}
+
+/// The stored look's theme — the same resolution the TUI makes, for the
+/// one off-TUI surface that prints styled markdown.
+fn theme_from_config(config: &Config) -> crate::palette::Theme {
+    let colors = crate::palette::Palette::from_stored(config.colors.as_deref()).unwrap_or_default();
+    let kind = match config.theme.as_deref() {
+        Some("light") => crate::palette::ThemeKind::Light,
+        _ => crate::palette::ThemeKind::Dark,
+    };
+    colors.theme(
+        kind,
+        crate::palette::PaletteInputs {
+            m3_source: config
+                .m3_source
+                .as_deref()
+                .and_then(crate::palette::parse_hex_u32),
+            custom: config.custom.as_ref(),
+        },
+    )
+}
+
+/// The prompt's two optional sections for a workspace and the session's
+/// sandbox kind: the user's global `USER.md` verbatim when present, and
+/// the environment report — host facts for a local session, the honest
+/// notice for a sandboxed one, because host facts would be lies about a
+/// container. `None` and `local` are the local case; any other stored
+/// kind names the sandbox the notice carries. The one gate: the agent's
+/// assembly and the `system show` preview both read here, so what is
+/// previewed is what turns send.
+pub(crate) fn prompt_sections(
+    workspace: &std::path::Path,
+    sandbox_kind: Option<&str>,
+) -> (Option<String>, Option<String>) {
+    let user = Config::dir()
+        .ok()
+        .and_then(|dir| std::fs::read_to_string(dir.join("USER.md")).ok())
+        .filter(|text| !text.trim().is_empty());
+    let environment = match sandbox_kind {
+        None | Some("local") => rhema_coding_agent::host_report(workspace),
+        Some(kind) => rhema_coding_agent::remote_notice(kind),
+    };
+    (Some(environment), user)
+}
+
+/// Renders markdown to styled ANSI text through the TUI's own renderer,
+/// so `system show` on a terminal reads like the transcript it previews.
+/// One reset per span keeps a stray style from bleeding past its line.
+fn markdown_ansi(source: &str, theme: &crate::palette::Theme, width: usize) -> String {
+    use ratatui::style::Modifier;
+    let mut out = String::new();
+    for line in crate::markdown::render_markdown(source, theme, width) {
+        for span in line.spans {
+            let style = span.style;
+            if let Some(color) = style.fg {
+                out.push_str(
+                    &crossterm::style::SetForegroundColor(crossterm_color(color)).to_string(),
+                );
+            }
+            for modifier in [
+                (Modifier::BOLD, crossterm::style::Attribute::Bold),
+                (Modifier::ITALIC, crossterm::style::Attribute::Italic),
+                (
+                    Modifier::CROSSED_OUT,
+                    crossterm::style::Attribute::CrossedOut,
+                ),
+                (
+                    Modifier::UNDERLINED,
+                    crossterm::style::Attribute::Underlined,
+                ),
+            ] {
+                if style.add_modifier.contains(modifier.0) {
+                    out.push_str(&crossterm::style::SetAttribute(modifier.1).to_string());
+                }
+            }
+            out.push_str(span.content.as_ref());
+            if style.fg.is_some() || !style.add_modifier.is_empty() {
+                out.push_str(&crossterm::style::ResetColor.to_string());
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Maps a ratatui color onto the crossterm one of the same terminal
+/// slot — the two crates disagree on which half of each pair is the
+/// plain name, so the mapping is spelled out.
+fn crossterm_color(color: ratatui::style::Color) -> crossterm::style::Color {
+    use crossterm::style::Color as Ansi;
+    use ratatui::style::Color as Ui;
+    match color {
+        Ui::Reset => Ansi::Reset,
+        Ui::Black => Ansi::Black,
+        Ui::Red => Ansi::DarkRed,
+        Ui::Green => Ansi::DarkGreen,
+        Ui::Yellow => Ansi::DarkYellow,
+        Ui::Blue => Ansi::DarkBlue,
+        Ui::Magenta => Ansi::DarkMagenta,
+        Ui::Cyan => Ansi::DarkCyan,
+        Ui::Gray => Ansi::Grey,
+        Ui::DarkGray => Ansi::DarkGrey,
+        Ui::LightRed => Ansi::Red,
+        Ui::LightGreen => Ansi::Green,
+        Ui::LightYellow => Ansi::Yellow,
+        Ui::LightBlue => Ansi::Blue,
+        Ui::LightMagenta => Ansi::Magenta,
+        Ui::LightCyan => Ansi::Cyan,
+        Ui::White => Ansi::White,
+        Ui::Rgb(r, g, b) => Ansi::Rgb { r, g, b },
+        Ui::Indexed(i) => Ansi::AnsiValue(i),
     }
 }
 
@@ -233,20 +364,33 @@ fn system_restore_at(path: &std::path::Path) -> anyhow::Result<()> {
 /// The prompt the next turn in `workspace` would send: the config's
 /// SYSTEM.md when present, the built-in default otherwise, through the
 /// same assembly the agent stamps — rendered over the workspace, its
-/// skills, and the tools.
+/// skills, the tools, and the two optional sections. The sandbox kind
+/// resolves from the stored profile the way startup does, so the
+/// preview and the first turn agree on host facts versus the notice.
 fn system_show_at(
     path: Option<&std::path::Path>,
     workspace: &std::path::Path,
+    profile: Option<&str>,
 ) -> anyhow::Result<String> {
     let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let mut extra = rhema_subagents::extra_specs(&workspace);
     // The transcript is on by default, so the default preview names
     // zoom, exactly as the agent's prompt does.
     extra.push(rhema_transcript::Zoom::spec());
-    Ok(rhema_coding_agent::stamped_system(
+    let global = Config::skills_dir().ok();
+    let skills = rhema_agent_tools::skills::discover(global.as_deref(), &workspace);
+    let kind = Config::load()
+        .ok()
+        .map(|config| config.effective(profile))
+        .and_then(|effective| effective.sandbox_kind());
+    let (environment, user) = prompt_sections(&workspace, kind.as_deref());
+    Ok(rhema_coding_agent::stamped_system_with_sections(
         resolve_base_system(path).as_deref(),
         &workspace,
         &extra,
+        &skills,
+        environment.as_deref(),
+        user.as_deref(),
     )?)
 }
 
@@ -1132,7 +1276,7 @@ mod system_tests {
         )
         .unwrap();
 
-        let prompt = system_show_at(Some(&base), workspace.path()).unwrap();
+        let prompt = system_show_at(Some(&base), workspace.path(), None).unwrap();
 
         let canonical = std::fs::canonicalize(workspace.path()).unwrap();
         assert!(
@@ -1141,15 +1285,51 @@ mod system_tests {
         );
         assert!(prompt.contains("skill local"), "{prompt}");
         assert!(prompt.contains("tool bash"), "{prompt}");
+        // The section renders only where the template places it: this
+        // test's own base never references it, so it stays empty — the
+        // built-in template's preview below carries it instead.
+        assert!(!prompt.contains("## Environment"), "{prompt}");
     }
 
     #[test]
     fn show_falls_back_to_the_built_in_default_without_a_file() {
         let workspace = tempfile::tempdir().unwrap();
 
-        let prompt = system_show_at(None, workspace.path()).unwrap();
+        let prompt = system_show_at(None, workspace.path(), None).unwrap();
 
         assert!(prompt.contains("bash"), "{prompt}");
         assert!(!prompt.contains("{{"), "the default is rendered: {prompt}");
+        assert!(prompt.contains("## Environment"), "{prompt}");
+    }
+
+    #[test]
+    fn markdown_ansi_styles_and_resets_per_span() {
+        let theme = crate::palette::Palette::Rhema.theme(
+            crate::palette::ThemeKind::Dark,
+            crate::palette::PaletteInputs {
+                m3_source: None,
+                custom: None,
+            },
+        );
+        let styled = markdown_ansi("# Title\n\nplain text", &theme, 80);
+        // Style codes open, the reset closes, and no style bleeds past
+        // its span into the next line.
+        assert!(styled.contains('\u{1b}'), "styled at all: {styled:?}");
+        assert!(styled.contains("\u{1b}[0m"), "a reset per span: {styled:?}");
+        assert!(styled.ends_with('\n'));
+        // Plain text alone carries no styling of its own.
+        let plain = markdown_ansi("just words", &theme, 80);
+        assert!(!plain.contains('\u{1b}'), "{plain:?}");
+    }
+
+    #[test]
+    fn the_sections_gate_routes_kinds_to_host_or_notice() {
+        // The local case probes the host — either honest answer; the
+        // user section rides the machine's own USER.md, so its presence
+        // is not asserted.
+        let (host, _) = prompt_sections(std::env::temp_dir().as_path(), None);
+        assert!(host.unwrap().contains("## Environment"));
+        let (notice, _) = prompt_sections(std::env::temp_dir().as_path(), Some("docker"));
+        assert!(notice.unwrap().contains("docker sandbox"));
     }
 }
