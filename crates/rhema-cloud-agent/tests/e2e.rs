@@ -357,6 +357,7 @@ async fn seeded_skills_reach_the_prompt_without_a_filesystem() {
     let skills = vec![Skill {
         name: "deploy".into(),
         description: "Triggers on deploy tasks.".into(),
+        license: None,
         path: "/workspace/.rhema/skills/deploy/SKILL.md".parse().unwrap(),
     }];
     let assembly = AgentAssembly {

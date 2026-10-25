@@ -33,6 +33,9 @@ pub struct SkillSeed {
     pub name: String,
     /// The frontmatter description — the trigger.
     pub description: String,
+    /// The frontmatter license, when the skill declares one.
+    #[serde(default)]
+    pub license: Option<String>,
     /// The whole `SKILL.md`, frontmatter included.
     pub body: String,
 }
@@ -87,6 +90,7 @@ impl SessionConfig {
             .map(|seed| Skill {
                 name: seed.name.clone(),
                 description: seed.description.clone(),
+                license: seed.license.clone(),
                 path: format!("{}/.rhema/skills/{}/SKILL.md", self.workspace, seed.name).into(),
             })
             .collect()

@@ -159,6 +159,9 @@ impl AgentAssembly {
             base_system: self.base_system.clone(),
             workspace: self.workspace.clone().into(),
             skills: Some(self.skills.clone()),
+            // Skill selection is the client's: the seeds it sends are
+            // the whole list, nothing filtered here.
+            disabled_skills: Default::default(),
             max_turn_steps: self.max_turn_steps,
             thinking: self.thinking,
             tools: Some(shell.clone()),
