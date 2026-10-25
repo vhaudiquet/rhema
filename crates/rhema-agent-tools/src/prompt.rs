@@ -30,16 +30,39 @@ pub use minijinja::Error as TemplateError;
 /// schema, renderable with `tojson`) — all there for
 /// `{% for %}`/`{% if %}`. Undefined variables render empty; syntax and
 /// filter errors return with template positions.
+///
+/// The environment and user sections ([`render_system_with_sections`])
+/// are absent here: a template that references them renders those parts
+/// empty, exactly as a caller that passes `None` for both.
 pub fn render_system(
     template: &str,
     workspace: &Path,
     skills: &[Skill],
     tools: &[ToolSpec],
 ) -> Result<String, TemplateError> {
+    render_system_with_sections(template, workspace, skills, tools, None, None)
+}
+
+/// [`render_system`] with the two optional prompt sections: `environment`
+/// — machine facts the frontend probed where commands run — and `user` —
+/// the user's own preferences file, verbatim. Both ride the template as
+/// plain string variables (`{{ environment }}`, `{% if user %}`), so the
+/// template decides whether and where they appear; `None` renders the
+/// referencing parts empty, the same as an undefined variable.
+pub fn render_system_with_sections(
+    template: &str,
+    workspace: &Path,
+    skills: &[Skill],
+    tools: &[ToolSpec],
+    environment: Option<&str>,
+    user: Option<&str>,
+) -> Result<String, TemplateError> {
     let context = serde_json::json!({
         "workspace": workspace.display().to_string(),
         "skills": skills,
         "tools": tools,
+        "environment": environment,
+        "user": user,
     });
     render_template(template, &context)
 }
@@ -178,6 +201,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(out, "base in /ws\n");
+    }
+
+    #[test]
+    fn the_sections_render_where_the_template_places_them() {
+        let template = "open\n{% if user %}{{ user }}\n{% endif %}{% if environment %}{{ environment }}\n{% endif %}close";
+        let out = render_system_with_sections(
+            template,
+            Path::new("/ws"),
+            &[],
+            &[],
+            Some("- OS: linux"),
+            Some("prefer short answers"),
+        )
+        .unwrap();
+        assert_eq!(out, "open\nprefer short answers\n- OS: linux\nclose\n");
+    }
+
+    #[test]
+    fn absent_sections_render_nothing_like_undefined_variables() {
+        // A `None` section serializes to minijinja's undefined: the
+        // guarding `{% if %}` stays false and the template's own lines
+        // survive alone — the same render a template that never named
+        // the sections produces.
+        let template = "open\n{% if user %}{{ user }}\n{% endif %}close";
+        let without =
+            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None).unwrap();
+        assert_eq!(without, "open\nclose\n");
+        assert_eq!(
+            render_system(template, Path::new("/ws"), &[], &[]).unwrap(),
+            without,
+            "render_system is the sections-less form of the same render"
+        );
     }
 
     #[test]

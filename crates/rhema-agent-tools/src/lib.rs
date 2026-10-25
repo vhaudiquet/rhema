@@ -48,7 +48,7 @@ pub use exec::LocalShell;
 pub use exec::{Executed, ShellError, ShellExecutor};
 pub use overlay::Overlay;
 pub use paste::ExpandPastes;
-pub use prompt::{render_system, render_template};
+pub use prompt::{render_system, render_system_with_sections, render_template};
 // Re-exported so a caller can name the error the renderer returns
 // without depending on minijinja itself.
 pub use prompt::TemplateError;
