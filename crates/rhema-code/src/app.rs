@@ -2732,7 +2732,9 @@ impl App {
             // stream: the start call answers with its job id at once.
             OwnedEvent::ToolStatus { .. } => {}
             OwnedEvent::ToolResult { .. } => self.turn.clear_tool_output(),
-            OwnedEvent::Usage(usage) => self.usage = Some(*usage),
+            // A zero tally is a placeholder frame, not a measurement:
+            // keeping the stale figure beats dropping the gauge to 0.
+            OwnedEvent::Usage(usage) if context_tokens(usage) > 0 => self.usage = Some(*usage),
             _ => {}
         }
     }
@@ -4897,6 +4899,15 @@ mod tests {
         h.app.on_event(UiEvent::Engine(OwnedEvent::Usage(Usage {
             input_tokens: 400,
             output_tokens: 19,
+            cached_input_tokens: 0,
+        })));
+        assert_eq!(h.app.context_used(), 419);
+
+        // A zero tally is a placeholder, not a measurement: the gauge
+        // keeps the last real figure instead of collapsing to 0.
+        h.app.on_event(UiEvent::Engine(OwnedEvent::Usage(Usage {
+            input_tokens: 0,
+            output_tokens: 0,
             cached_input_tokens: 0,
         })));
         assert_eq!(h.app.context_used(), 419);
