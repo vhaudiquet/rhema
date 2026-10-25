@@ -32,6 +32,7 @@ COPY crates/rhema-provider-llama-cpp/Cargo.toml crates/rhema-provider-llama-cpp/
 COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-openai-compatible/Cargo.toml
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
+COPY crates/rhema-sandbox/Cargo.toml crates/rhema-sandbox/Cargo.toml
 COPY crates/rhema-sandbox-docker/Cargo.toml crates/rhema-sandbox-docker/Cargo.toml
 COPY crates/rhema-sandbox-http/Cargo.toml crates/rhema-sandbox-http/Cargo.toml
 COPY crates/rhema-sandbox-local/Cargo.toml crates/rhema-sandbox-local/Cargo.toml
@@ -42,6 +43,14 @@ COPY crates/rhema-transcript/Cargo.toml crates/rhema-transcript/Cargo.toml
 COPY crates/rhema-vercel-agent/Cargo.toml crates/rhema-vercel-agent/Cargo.toml
 COPY integrations/rhema-calendar-integration/Cargo.toml integrations/rhema-calendar-integration/Cargo.toml
 COPY integrations/rhema-forge-integration/Cargo.toml integrations/rhema-forge-integration/Cargo.toml
+# rhema-claw path-depends on the tools contract, which lives in its own
+# workspace: the member manifests inherit from that root, so the root
+# rides along with them.
+COPY tools/Cargo.toml tools/Cargo.toml
+COPY tools/contract/Cargo.toml tools/contract/Cargo.toml
+COPY tools/common/Cargo.toml tools/common/Cargo.toml
+COPY tools/notify/Cargo.toml tools/notify/Cargo.toml
+
 
 # Resolution reads the vendored crossterm (the root manifest path-patches
 # to it) even though the image builds the daemon, which does not link it.
@@ -63,7 +72,7 @@ COPY vendor/ vendor/
 # rhema-sandbox-server, were the stub not skipped. Declared [[bin]]
 # paths are never stubbed either — the awk stubs examples/tests/benches
 # only — and fetch needs no bin to exist.
-RUN for crate in crates/*/ integrations/*/; do \
+RUN for crate in crates/*/ integrations/*/ tools/*/; do \
            mkdir -p "$crate/src"; \
            touch "$crate/src/lib.rs"; \
            awk -F'"' '/^\[/ { d = ""; p = 0; if ($0 == "[[example]]") { d = "examples" } else if ($0 == "[[test]]") { d = "tests" } else if ($0 == "[[bench]]") { d = "benches" }; next } d == "" { next } /^name = / && p == 0 { print d "/" $2 ".rs" } /^path = / { p = 1; print $2 }' "$crate/Cargo.toml" \
