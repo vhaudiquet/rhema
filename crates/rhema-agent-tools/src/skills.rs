@@ -20,6 +20,10 @@ pub struct Skill {
     pub name: String,
     /// The frontmatter description — the trigger shown to the model.
     pub description: String,
+    /// The frontmatter license, when the skill declares one — a short
+    /// SPDX name or a name-and-copyright line the UIs show under the
+    /// description. Absent on skills authored into their repository.
+    pub license: Option<String>,
     /// Absolute path of the `SKILL.md` the model reads.
     pub path: PathBuf,
 }
@@ -29,6 +33,7 @@ pub struct Skill {
 #[derive(Debug, Deserialize)]
 struct Frontmatter {
     description: String,
+    license: Option<String>,
 }
 
 /// Discovers skills: the global directory first, then the workspace's
@@ -57,7 +62,7 @@ fn collect_into(dir: &Path, by_name: &mut BTreeMap<String, Skill>) {
         let Ok(raw) = std::fs::read_to_string(&file) else {
             continue;
         };
-        let Some(description) = parse_description(&raw) else {
+        let Some((description, license)) = parse_description(&raw) else {
             continue;
         };
         let name = path
@@ -69,20 +74,30 @@ fn collect_into(dir: &Path, by_name: &mut BTreeMap<String, Skill>) {
             Skill {
                 name,
                 description,
+                license,
                 path: file,
             },
         );
     }
 }
 
-/// The `description` out of a leading `---` frontmatter block; `None`
-/// when there is no block or no field.
-fn parse_description(raw: &str) -> Option<String> {
+/// The `description` out of a leading `---` frontmatter block — and the
+/// optional `license`; `None` for the description when there is no
+/// block or no field, which makes the folder not a skill at all.
+fn parse_description(raw: &str) -> Option<(String, Option<String>)> {
     let rest = raw.strip_prefix("---\n")?;
     let block = rest.split_once("\n---")?.0;
     let front: Frontmatter = serde_yaml::from_str(block).ok()?;
     let description = front.description.trim();
-    (!description.is_empty()).then(|| description.to_owned())
+    (!description.is_empty()).then(|| {
+        (
+            description.to_owned(),
+            front
+                .license
+                .map(|license| license.trim().to_owned())
+                .filter(|license| !license.is_empty()),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -119,15 +134,33 @@ mod tests {
                 Skill {
                     name: "askill".into(),
                     description: "the a trigger".into(),
+                    license: None,
                     path: workspace.path().join(".rhema/skills/askill/SKILL.md"),
                 },
                 Skill {
                     name: "zskill".into(),
                     description: "the z trigger".into(),
+                    license: None,
                     path: global.path().join("zskill/SKILL.md"),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn the_license_field_rides_the_frontmatter_when_present() {
+        let global = tempfile::tempdir().unwrap();
+        let folder = global.path().join("borrowed");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            "---\ndescription: a trigger\nlicense: MIT (c) someone\n---\nbody",
+        )
+        .unwrap();
+
+        let skills = discover(Some(global.path()), Path::new("/nowhere"));
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].license.as_deref(), Some("MIT (c) someone"));
     }
 
     #[test]

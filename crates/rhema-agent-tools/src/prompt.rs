@@ -102,6 +102,7 @@ mod tests {
         Skill {
             name: name.into(),
             description: description.into(),
+            license: None,
             path: format!("/cfg/skills/{name}/SKILL.md").into(),
         }
     }
