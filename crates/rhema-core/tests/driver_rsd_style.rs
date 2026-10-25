@@ -152,6 +152,7 @@ async fn an_rsd_style_driver_runs_across_checkpoints_and_inbox_items() {
             history: Vec::new(),
             driver_state: json!({ "key": "src/main.rs", "revision": 7 }),
             cost_usd: 0.0,
+            usage_stats: serde_json::Value::Null,
         },
         inbox: VecDeque::from([Message::text(Role::User, "inbox: the build turned red")]),
     };

@@ -267,6 +267,32 @@ impl CodingAgent {
             .map(|mirror| mirror.lock().expect("transcript lock poisoned").stats())
     }
 
+    /// Folds a saved session's benchmark counters into the transcript
+    /// mirror, when the transcript is on: a resumed session's stats
+    /// keep reading as one run, pre-resume requests included. No-op
+    /// with the transcript off — there is nothing to continue.
+    pub fn carry_transcript_stats(&mut self, saved: &rhema_transcript::TranscriptStats) {
+        if let Some(mirror) = &self.transcript {
+            mirror
+                .lock()
+                .expect("transcript lock poisoned")
+                .carry(saved);
+        }
+    }
+
+    /// Zeroes the transcript's benchmark counters, when the transcript
+    /// is on: a conversation cleared mid-agent starts its accounting
+    /// over, and the stats describe one conversation, not the agent's
+    /// lifetime.
+    pub fn reset_transcript_stats(&mut self) {
+        if let Some(mirror) = &self.transcript {
+            mirror
+                .lock()
+                .expect("transcript lock poisoned")
+                .reset_stats();
+        }
+    }
+
     /// Mutable access between turns; the engine owns the history only
     /// inside a turn.
     pub fn session_mut(&mut self) -> &mut Session {

@@ -179,10 +179,18 @@ block is at half the cap. A consolidation rewrites the block and so
 breaks the cache in full; the cap gates it to stay rare, and the stats
 count every one.
 
-**Resume.** Nothing derived is persisted. A resumed session's first
-request replaces the mirror wholesale and the compaction state rebuilds
-from nothing; the block's cache is cold after a restart regardless of
-what was saved.
+**Resume.** The compaction state is not persisted: a resumed session's
+first request replaces the mirror wholesale and rebuilds it from
+nothing, and the block's cache is cold after a restart regardless of
+what was saved. The benchmark counters are the exception. They measure
+what was spent, they are not view state, and they survive: rhema-code
+stamps them into the saved session's `usage_stats` blob at save time
+and folds them into the fresh mirror when it builds the resumed agent
+(`CodingAgent::carry_transcript_stats`, `TranscriptStats::carry`), so
+one conversation's stats stay one run across resumes. Agent rebuilds
+inside a conversation (profile, model, sandbox) carry the counters the
+same way; /clear zeroes them. A session saved before the blob existed
+resumes with none.
 
 ## 4. The `zoom` tool
 

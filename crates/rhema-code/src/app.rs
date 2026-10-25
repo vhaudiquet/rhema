@@ -1189,9 +1189,15 @@ impl App {
     /// effect on the tool's executor at once, then notices.
     fn rebuild_for_sandbox(&mut self, notice: &str) {
         if let Some(agent) = self.agent.take() {
+            let stats = agent.transcript_stats();
             let session = agent.session().clone();
             match self.build_agent(session) {
-                Ok((rebuilt, subagents)) => {
+                Ok((mut rebuilt, subagents)) => {
+                    // The counters survive the rebuild: same
+                    // conversation, new executor.
+                    if let Some(stats) = stats {
+                        rebuilt.carry_transcript_stats(&stats);
+                    }
                     self.agent = Some(rebuilt);
                     self.subagents = Some(subagents);
                 }
@@ -1428,6 +1434,12 @@ impl App {
         self.session_cost = 0.0;
         self.error = None;
         self.resumed_from = None;
+        // The benchmark describes one conversation: cleared with it,
+        // in the fallback snapshot and in the agent's mirror alike.
+        self.transcript_stats = None;
+        if let Some(agent) = self.agent.as_mut() {
+            agent.reset_transcript_stats();
+        }
         self.transcript.push_notice("conversation cleared");
     }
 
@@ -1440,9 +1452,19 @@ impl App {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
-        // The accumulated cost rides with the save: a resumed session's
-        // footer continues where this one ended.
+        // The accounting rides with the save: a resumed session's
+        // footer continues where this one ended, and its Usage page
+        // keeps this run's numbers.
         session.cost_usd = self.session_cost;
+        crate::sessions::UsageStats {
+            transcript: self
+                .agent
+                .as_ref()
+                .and_then(CodingAgent::transcript_stats)
+                .or(self.transcript_stats),
+            last_turn: self.usage,
+        }
+        .write_into(&mut session);
         if session.history.is_empty() {
             None
         } else {
@@ -1501,7 +1523,18 @@ impl App {
             backend.provider(),
         );
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
-            Ok(agent) => {
+            Ok(mut agent) => {
+                // The benchmark moves with the conversation, the way
+                // the cost does: the old agent's counters fold into
+                // the fresh mirror.
+                let saved = self
+                    .agent
+                    .as_ref()
+                    .and_then(CodingAgent::transcript_stats)
+                    .or(self.transcript_stats);
+                if let Some(saved) = saved {
+                    agent.carry_transcript_stats(&saved);
+                }
                 self.session_profile = Some(name.to_owned());
                 self.backend = Some(backend.clone());
                 self.provider = Some(backend.provider());
@@ -1550,9 +1583,15 @@ impl App {
             return;
         }
         if let Some(agent) = self.agent.take() {
+            let stats = agent.transcript_stats();
             let session = agent.session().clone();
             match self.build_agent(session) {
-                Ok((rebuilt, subagents)) => {
+                Ok((mut rebuilt, subagents)) => {
+                    // The counters survive the rebuild: same
+                    // conversation, new params.
+                    if let Some(stats) = stats {
+                        rebuilt.carry_transcript_stats(&stats);
+                    }
                     self.agent = Some(rebuilt);
                     self.subagents = Some(subagents);
                 }
@@ -1647,7 +1686,7 @@ impl App {
                 return;
             }
         };
-        let (agent, subagents) = match self.build_agent(session.clone()) {
+        let (mut agent, subagents) = match self.build_agent(session.clone()) {
             Ok(built) => built,
             Err(err) => {
                 self.error = Some(err.to_string());
@@ -1656,11 +1695,20 @@ impl App {
         };
         let messages = session.history.len();
         self.session = session;
+        // The saved usage accounting comes with it: the last turn's
+        // tokens go straight to the gauge, and the transcript's
+        // counters fold into the fresh mirror, so /settings's Usage
+        // page keeps reading as one run.
+        let stats = crate::sessions::UsageStats::from_session(&self.session);
+        self.usage = stats.as_ref().and_then(|stats| stats.last_turn);
+        if let Some(saved) = stats.as_ref().and_then(|stats| stats.transcript.as_ref()) {
+            agent.carry_transcript_stats(saved);
+        }
+        self.transcript_stats = None;
         self.agent = Some(agent);
         self.subagents = Some(subagents);
         self.resumed_from = Some(path.to_path_buf());
         self.transcript = Transcript::from_history(&self.session.history);
-        self.usage = None;
         // The saved session carries what it spent; the footer continues
         // the story instead of quoting a fresh zero.
         self.session_cost = self.session.cost_usd;
@@ -2106,8 +2154,18 @@ impl App {
         // The agent builds on the new provider, so it installs first.
         self.provider = Some(backend.provider());
         self.backend = Some(backend);
+        let saved = self
+            .agent
+            .as_ref()
+            .and_then(CodingAgent::transcript_stats)
+            .or(self.transcript_stats);
         match self.build_agent(session) {
-            Ok((agent, subagents)) => {
+            Ok((mut agent, subagents)) => {
+                // The counters survive the swap: same conversation,
+                // new backend.
+                if let Some(saved) = saved {
+                    agent.carry_transcript_stats(&saved);
+                }
                 self.session_profile = Some(tab);
                 self.agent = Some(agent);
                 self.subagents = Some(subagents);
@@ -2674,8 +2732,18 @@ impl App {
         };
         self.backend = Some(backend.clone());
         self.provider = Some(backend.provider());
+        let saved = self
+            .agent
+            .as_ref()
+            .and_then(CodingAgent::transcript_stats)
+            .or(self.transcript_stats);
         match self.build_agent(session) {
-            Ok((agent, subagents)) => {
+            Ok((mut agent, subagents)) => {
+                // The counters survive the swap: same conversation,
+                // new model.
+                if let Some(saved) = saved {
+                    agent.carry_transcript_stats(&saved);
+                }
                 // An interactive switch — the picker opened from the chat,
                 // or a `/model <needle>` typed there — says where it
                 // landed; the login and startup auto-selects stay quiet.
@@ -4395,6 +4463,201 @@ mod tests {
     }
 
     #[test]
+    fn a_resumed_session_shows_its_saved_usage() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let mut session = Session::default();
+        session
+            .history
+            .push(Message::text(Role::User, "earlier work"));
+        let saved_stats = rhema_transcript::TranscriptStats {
+            requests: 7,
+            input_tokens: 90_000,
+            cached_input_tokens: 70_000,
+            output_tokens: 1_000,
+            usage: rhema_transcript::UsageBreakdown {
+                system_prompt_tokens: 20_000,
+                ..rhema_transcript::UsageBreakdown::default()
+            },
+            ..rhema_transcript::TranscriptStats::default()
+        };
+        let last_turn = Usage {
+            input_tokens: 3_000,
+            output_tokens: 300,
+            cached_input_tokens: 2_000,
+        };
+        crate::sessions::UsageStats {
+            transcript: Some(saved_stats),
+            last_turn: Some(last_turn),
+        }
+        .write_into(&mut session);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        crate::sessions::write_session(&path, &session).unwrap();
+
+        h.app.resume_session(&path);
+        // The gauge picks up the last turn, the mirror the counters.
+        assert_eq!(h.app.usage, Some(last_turn));
+        assert_eq!(
+            h.app.agent.as_ref().unwrap().transcript_stats(),
+            Some(saved_stats)
+        );
+        // And /settings's Usage page reads the whole thing.
+        h.app
+            .open_settings_at(SettingsSection::Usage, SettingsPurpose::FromChat);
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("settings should be open");
+        };
+        assert_eq!(settings.last_turn, Some(last_turn));
+        assert_eq!(settings.transcript, Some(saved_stats));
+        assert_eq!(settings.session_cost, 0.0);
+    }
+
+    #[test]
+    fn the_saved_usage_survives_a_save_and_resume_round_trip() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let mut session = Session::default();
+        session
+            .history
+            .push(Message::text(Role::User, "earlier work"));
+        let saved_stats = rhema_transcript::TranscriptStats {
+            requests: 7,
+            input_tokens: 90_000,
+            output_tokens: 1_000,
+            ..rhema_transcript::TranscriptStats::default()
+        };
+        crate::sessions::UsageStats {
+            transcript: Some(saved_stats),
+            last_turn: None,
+        }
+        .write_into(&mut session);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        crate::sessions::write_session(&path, &session).unwrap();
+
+        // Resume, then save: the exit save re-stamps what the run
+        // measured — the carried counters, nothing lost to the fresh
+        // mirror starting at zero.
+        h.app.resume_session(&path);
+        let (exported, _) = h.app.export_session().unwrap();
+        assert_eq!(
+            crate::sessions::UsageStats::from_session(&exported)
+                .unwrap()
+                .transcript,
+            Some(saved_stats)
+        );
+
+        // And what was saved, a second resume shows.
+        crate::sessions::write_session(&path, &exported).unwrap();
+        let mut second = harness(Some("k"), Some("m-a"), Session::default());
+        second.app.resume_session(&path);
+        assert_eq!(
+            second.app.agent.unwrap().transcript_stats(),
+            Some(saved_stats)
+        );
+    }
+
+    #[test]
+    fn a_turn_on_a_resumed_session_extends_the_saved_counters() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let mut session = Session::default();
+        session
+            .history
+            .push(Message::text(Role::User, "earlier work"));
+        let baseline = rhema_transcript::TranscriptStats {
+            requests: 7,
+            input_tokens: 90_000,
+            output_tokens: 1_000,
+            ..rhema_transcript::TranscriptStats::default()
+        };
+        crate::sessions::UsageStats {
+            transcript: Some(baseline),
+            last_turn: None,
+        }
+        .write_into(&mut session);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        crate::sessions::write_session(&path, &session).unwrap();
+        h.app.resume_session(&path);
+
+        // A turn ran elsewhere; its own mirror counted one request.
+        // Folding it at capture keeps the run's totals.
+        let mut agent = h.app.agent.take().unwrap();
+        agent.carry_transcript_stats(&rhema_transcript::TranscriptStats {
+            requests: 2,
+            input_tokens: 5_000,
+            output_tokens: 400,
+            ..rhema_transcript::TranscriptStats::default()
+        });
+        h.app.on_event(UiEvent::TurnFinished {
+            agent: Box::new(agent),
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
+        });
+        let stats = h.app.transcript_stats.unwrap();
+        assert_eq!(stats.requests, 9, "the run's requests, not the turn's");
+        assert_eq!(stats.input_tokens, 95_000);
+        assert_eq!(stats.output_tokens, 1_400);
+    }
+
+    #[test]
+    fn slash_clear_drops_the_usage_accounting() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let baseline = rhema_transcript::TranscriptStats {
+            requests: 7,
+            input_tokens: 90_000,
+            ..rhema_transcript::TranscriptStats::default()
+        };
+        h.app
+            .agent
+            .as_mut()
+            .unwrap()
+            .carry_transcript_stats(&baseline);
+        h.app.usage = Some(Usage::default());
+        crate::commands::dispatch(&mut h.app, "/clear");
+        assert_eq!(h.app.usage, None);
+        assert_eq!(h.app.transcript_stats, None);
+        // The mirror starts over too: the page cannot quote the
+        // cleared conversation.
+        assert_eq!(
+            h.app.agent.unwrap().transcript_stats(),
+            Some(rhema_transcript::TranscriptStats::default())
+        );
+    }
+
+    #[test]
+    fn a_profile_switch_keeps_the_usage_counters() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.config.set_for_profile(Some("personal"), |settings| {
+            store_key(settings, "openrouter", "o");
+        });
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), keyed_profile("openrouter", "o"));
+        let baseline = rhema_transcript::TranscriptStats {
+            requests: 7,
+            input_tokens: 90_000,
+            ..rhema_transcript::TranscriptStats::default()
+        };
+        h.app
+            .agent
+            .as_mut()
+            .unwrap()
+            .carry_transcript_stats(&baseline);
+        for c in "/profile work".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(h.app.screen, Screen::Chat));
+        let stats = h.app.agent.unwrap().transcript_stats().unwrap();
+        assert_eq!(stats.requests, 7, "the counters moved with the chat");
+    }
+
+    #[test]
     fn slash_profile_switches_to_a_named_profile() {
         let mut h = harness(Some("g"), Some("m-a"), Session::default());
         h.app.config.set_for_profile(Some("personal"), |settings| {
@@ -4467,6 +4730,7 @@ mod tests {
                 history: vec![Message::text(Role::User, "earlier work")],
                 driver_state: serde_json::Value::Null,
                 cost_usd: 0.0,
+                usage_stats: serde_json::Value::Null,
             },
         );
         h.app.on_event(UiEvent::ModelsLoaded {
@@ -4887,6 +5151,7 @@ mod tests {
             history: vec![Message::text(Role::User, "earlier work")],
             driver_state: serde_json::Value::Null,
             cost_usd: 0.0,
+            usage_stats: serde_json::Value::Null,
         };
         let mut h = harness(Some("k"), Some("m-a"), session);
         h.app.on_event(UiEvent::ModelsLoaded {
@@ -6742,6 +7007,7 @@ mod tests {
             history: vec![Message::text(Role::User, "earlier")],
             driver_state: serde_json::Value::Null,
             cost_usd: 0.0,
+            usage_stats: serde_json::Value::Null,
         };
         let mut h = harness(Some("k"), Some("m-a"), session);
         crate::commands::dispatch(&mut h.app, "/clear");

@@ -50,6 +50,9 @@ rhema-provider-google = { path = "../rhema-provider-google", version = "0.1.0" }
 rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp", version = "0.1.0" }
 rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.1.0" }
 rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.1.0" }
+# Derives for the saved session's usage-stats blob (src/sessions.rs);
+# the session types themselves live in rhema-core
+serde = { workspace = true }
 # Full-screen rendering; the crossterm version must stay the one ratatui
 # builds on so the event types unify.
 ratatui = "0.30"

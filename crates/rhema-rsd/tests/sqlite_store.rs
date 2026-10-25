@@ -78,6 +78,7 @@ fn records_survive_a_reopen() {
             history: vec![Message::text(Role::User, "half the work is done")],
             driver_state: serde_json::json!({ "attempt": 2 }),
             cost_usd: 0.0,
+            usage_stats: serde_json::Value::Null,
         },
         plan: Some(serde_json::json!(["step one"])),
         artifact_ref: Some("worktrees/issue-142".into()),

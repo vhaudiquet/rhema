@@ -52,6 +52,44 @@ pub fn base_dir() -> io::Result<PathBuf> {
     Ok(cache.join("rhema").join("sessions"))
 }
 
+/// The usage accounting a saved session carries: what the Usage page
+/// needs to keep reading as one run after a resume. It rides the
+/// session as the opaque `usage_stats` JSON blob — the engine and the
+/// other session readers never touch it — and this type owns the
+/// blob's shape.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct UsageStats {
+    /// The transcript's benchmark counters: request counts, the
+    /// prompt-cache totals, the categories' token split. `None` when
+    /// the session ran with the transcript off or saved none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<rhema_transcript::TranscriptStats>,
+    /// The last finished turn's token accounting, so the page's "last
+    /// turn" row and the context gauge pick up where the save left
+    /// off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn: Option<rhema_core::Usage>,
+}
+
+impl UsageStats {
+    /// Reads the accounting off a session; `None` when it carries
+    /// none — a file from before the field existed, or a blob that no
+    /// longer parses. Stats are decoration: a bad blob costs the page
+    /// its numbers, never the resume.
+    pub fn from_session(session: &Session) -> Option<Self> {
+        if session.usage_stats.is_null() {
+            return None;
+        }
+        serde_json::from_value(session.usage_stats.clone()).ok()
+    }
+
+    /// Stamps the accounting onto `session` — the save path, so the
+    /// file carries what this run measured.
+    pub fn write_into(self, session: &mut Session) {
+        session.usage_stats = serde_json::to_value(&self).unwrap_or_default();
+    }
+}
+
 /// Milliseconds since the epoch; 0 when the clock sits behind the epoch,
 /// which only muddles ordering, never correctness.
 pub fn now_millis() -> u64 {
@@ -340,6 +378,54 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
         write_session(&path, &session_with("prompt again")).unwrap();
         assert_eq!(mode(&path), 0o600);
+    }
+
+    #[test]
+    fn usage_stats_round_trip_through_the_saved_file() {
+        let (_dir, base) = temp_base();
+        let workspace = Path::new("/home/u/proj");
+        let mut session = session_with("prompt");
+        let stats = UsageStats {
+            transcript: Some(rhema_transcript::TranscriptStats {
+                requests: 3,
+                input_tokens: 900,
+                cached_input_tokens: 700,
+                output_tokens: 90,
+                ..rhema_transcript::TranscriptStats::default()
+            }),
+            last_turn: Some(rhema_core::Usage {
+                input_tokens: 300,
+                output_tokens: 30,
+                cached_input_tokens: 200,
+            }),
+        };
+        stats.clone().write_into(&mut session);
+        let path = save_session(&base, workspace, &session).unwrap().unwrap();
+
+        // What the file holds, a load reads back: the same shape
+        // --resume takes.
+        let loaded = CodingAgent::load_session_from(&path).unwrap();
+        assert_eq!(UsageStats::from_session(&loaded), Some(stats));
+    }
+
+    #[test]
+    fn a_session_without_usage_stats_reads_as_none() {
+        // Files from before the field existed load as null.
+        let session = session_with("prompt");
+        assert_eq!(UsageStats::from_session(&session), None);
+
+        // A blob of a foreign object shape parses to an empty
+        // accounting: the page loses its numbers, the resume does not
+        // fail. Junk that is not an object fails the parse and reads
+        // the same.
+        let mut session = session_with("prompt");
+        session.usage_stats = serde_json::json!({ "requests": 3 });
+        assert_eq!(
+            UsageStats::from_session(&session),
+            Some(UsageStats::default())
+        );
+        session.usage_stats = serde_json::json!("three requests");
+        assert_eq!(UsageStats::from_session(&session), None);
     }
 
     #[test]

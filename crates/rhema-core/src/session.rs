@@ -25,6 +25,12 @@ pub struct Session {
     /// load as free.
     #[serde(default)]
     pub cost_usd: f64,
+    /// The frontend's usage accounting, carried across resumes so a
+    /// resumed session's stats keep reading as one run: an opaque JSON
+    /// blob the engine never reads. Serde-defaulted to null, so files
+    /// written before the field existed load without stats.
+    #[serde(default)]
+    pub usage_stats: serde_json::Value,
 }
 
 #[cfg(test)]
@@ -41,6 +47,7 @@ mod tests {
             }],
             driver_state: serde_json::json!({ "key": "interactive:main" }),
             cost_usd: 0.0,
+            usage_stats: serde_json::Value::Null,
         };
         let json = serde_json::to_string(&session).unwrap();
         let back: Session = serde_json::from_str(&json).unwrap();
@@ -63,6 +70,36 @@ mod tests {
             .expect("the field was written");
         let session: Session = serde_json::from_value(value).unwrap();
         assert_eq!(session.cost_usd, 0.0);
+    }
+
+    #[test]
+    fn a_session_written_before_usage_stats_existed_loads_without() {
+        // The same shape minus the field is what the first format
+        // wrote; a resumed conversation starts with no stats blob, not
+        // a corrupt one.
+        let session = Session {
+            history: vec![Message::text(Role::User, "hi")],
+            ..Session::default()
+        };
+        let mut value = serde_json::to_value(&session).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("usage_stats")
+            .expect("the field was written");
+        let session: Session = serde_json::from_value(value).unwrap();
+        assert_eq!(session.usage_stats, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn the_usage_stats_blob_round_trips_through_the_saved_format() {
+        let session = Session {
+            usage_stats: serde_json::json!({ "transcript": { "requests": 3 } }),
+            ..Session::default()
+        };
+        let json = serde_json::to_string(&session).unwrap();
+        let back: Session = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.usage_stats["transcript"]["requests"], 3);
     }
 
     #[test]

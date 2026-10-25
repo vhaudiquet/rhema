@@ -3419,6 +3419,7 @@ dependencies = [
  "rhema-sandbox-ssh",
  "rhema-subagents",
  "rhema-transcript",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

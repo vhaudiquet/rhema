@@ -118,7 +118,9 @@ impl UsageBreakdown {
 /// The compaction's benchmark snapshot: what the view has been doing,
 /// and what the providers' own usage says about the prefix cache. All
 /// counters run from the transcript's construction; a resumed session
-/// starts fresh.
+/// keeps its run continuous by folding the saved counters in with
+/// [`TranscriptStats::carry`]. The struct is the saved shape: the
+/// frontend serializes it into the session file verbatim.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TranscriptStats {
     /// Requests the decorator forwarded.
@@ -172,6 +174,44 @@ impl TranscriptStats {
             None
         } else {
             Some(self.cached_input_tokens as f64 / self.input_tokens as f64)
+        }
+    }
+
+    /// Folds a saved session's counters in, so a resumed session's
+    /// stats read as one run with the pre-resume requests included:
+    /// the run counters and the usage split sum, the cache rate keeps
+    /// covering everything. The at-last-request snapshots describe
+    /// the mirror that measured them, so they stay this side's —
+    /// except while this mirror has not looked at a log yet
+    /// (`log_messages == 0`), where the snapshot is what a Usage page
+    /// opened before the first request would otherwise render as
+    /// zeros, and the saved one is the honest figure.
+    pub fn carry(&mut self, saved: &Self) {
+        self.requests += saved.requests;
+        self.pass_through += saved.pass_through;
+        self.viewed += saved.viewed;
+        self.flushes += saved.flushes;
+        self.consolidations += saved.consolidations;
+        self.summarizer_calls += saved.summarizer_calls;
+        self.summarizer_failures += saved.summarizer_failures;
+        self.input_tokens += saved.input_tokens;
+        self.cached_input_tokens += saved.cached_input_tokens;
+        self.output_tokens += saved.output_tokens;
+        let usage = &mut self.usage;
+        let saved_usage = &saved.usage;
+        usage.system_prompt_tokens += saved_usage.system_prompt_tokens;
+        usage.skills_tokens += saved_usage.skills_tokens;
+        usage.tool_calls_input_tokens += saved_usage.tool_calls_input_tokens;
+        usage.tool_calls_output_tokens += saved_usage.tool_calls_output_tokens;
+        usage.user_messages_tokens += saved_usage.user_messages_tokens;
+        usage.model_output_tokens += saved_usage.model_output_tokens;
+        if self.log_messages == 0 {
+            self.log_messages = saved.log_messages;
+            self.sectioned_messages = saved.sectioned_messages;
+            self.sections = saved.sections;
+            self.block_bytes = saved.block_bytes;
+            self.band_bytes = saved.band_bytes;
+            self.tail_bytes = saved.tail_bytes;
         }
     }
 }
@@ -296,6 +336,20 @@ impl Transcript {
     /// The compaction's benchmark snapshot.
     pub fn stats(&self) -> TranscriptStats {
         self.stats
+    }
+
+    /// Folds a saved session's benchmark counters in: a resumed
+    /// session's stats keep reading as one run. See
+    /// [`TranscriptStats::carry`] for what sums and what does not.
+    pub fn carry(&mut self, saved: &TranscriptStats) {
+        self.stats.carry(saved);
+    }
+
+    /// Zeroes the benchmark counters; the log and the compaction state
+    /// stay — the next request rebuilds both anyway. A conversation
+    /// cleared mid-agent starts its accounting over.
+    pub fn reset_stats(&mut self) {
+        self.stats = TranscriptStats::default();
     }
 
     /// Sets the skills section's byte share of the system prompt —
@@ -1061,6 +1115,96 @@ mod tests {
         let b = transcript.stats().usage;
         assert_eq!(b.skills_tokens, 100);
         assert_eq!(b.system_prompt_tokens, 0);
+    }
+
+    #[test]
+    fn a_carry_continues_the_saved_run() {
+        let saved = TranscriptStats {
+            requests: 10,
+            pass_through: 6,
+            viewed: 4,
+            flushes: 1,
+            consolidations: 1,
+            summarizer_calls: 2,
+            summarizer_failures: 1,
+            input_tokens: 90_000,
+            cached_input_tokens: 70_000,
+            output_tokens: 10_000,
+            usage: UsageBreakdown {
+                system_prompt_tokens: 20_000,
+                skills_tokens: 2_000,
+                tool_calls_input_tokens: 30_000,
+                tool_calls_output_tokens: 30_000,
+                user_messages_tokens: 8_000,
+                model_output_tokens: 10_000,
+            },
+            // The saved snapshot describes the log the resume replaced.
+            log_messages: 12,
+            sectioned_messages: 4,
+            sections: 2,
+            block_bytes: 900,
+            band_bytes: 3_000,
+            tail_bytes: 1_200,
+        };
+
+        // A mirror that has not looked at a log yet shows the saved
+        // run whole — the counters and, until its first request, the
+        // snapshot too.
+        let mut fresh = TranscriptStats::default();
+        fresh.carry(&saved);
+        assert_eq!(fresh, saved);
+
+        // The mirror then counts requests of its own: each read folds
+        // the same saved run in once, so the totals are the run's,
+        // never doubled, and the snapshot is the live mirror's.
+        let mut live = TranscriptStats {
+            requests: 2,
+            input_tokens: 5_000,
+            output_tokens: 300,
+            usage: UsageBreakdown {
+                user_messages_tokens: 5_000,
+                model_output_tokens: 300,
+                ..UsageBreakdown::default()
+            },
+            log_messages: 4,
+            block_bytes: 100,
+            ..TranscriptStats::default()
+        };
+        live.carry(&saved);
+        assert_eq!(live.requests, 12);
+        assert_eq!(live.input_tokens, 95_000);
+        assert_eq!(live.output_tokens, 10_300);
+        assert_eq!(live.usage.user_messages_tokens, 13_000);
+        assert_eq!(live.usage.model_output_tokens, 10_300);
+        assert_eq!(live.usage.system_prompt_tokens, 20_000);
+        assert_eq!(live.block_bytes, 100, "the live mirror's snapshot");
+        assert_eq!(live.log_messages, 4);
+
+        // A later read: the mirror grew, the baseline still folds in
+        // once.
+        let mut later = TranscriptStats {
+            requests: 3,
+            input_tokens: 8_000,
+            ..TranscriptStats::default()
+        };
+        later.carry(&saved);
+        assert_eq!(later.requests, 13);
+        assert_eq!(later.input_tokens, 98_000);
+    }
+
+    #[test]
+    fn reset_stats_zeroes_the_accounting_and_keeps_the_log() {
+        let mut transcript = Transcript::new(TranscriptSettings::default());
+        transcript.observe(&[Message::text(Role::User, "kept")]);
+        transcript.record_usage(&Usage {
+            input_tokens: 1_000,
+            output_tokens: 100,
+            cached_input_tokens: 0,
+        });
+        assert_eq!(transcript.len(), 1);
+        transcript.reset_stats();
+        assert_eq!(transcript.stats(), TranscriptStats::default());
+        assert_eq!(transcript.len(), 1);
     }
 
     #[test]
