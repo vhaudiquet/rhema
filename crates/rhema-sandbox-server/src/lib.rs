@@ -150,6 +150,21 @@ pub async fn run(args: Args) -> std::io::Result<()> {
     axum::serve(listener, router(daemon)).await
 }
 
+/// Byte-length-safe constant-time equality over the two strings' UTF-8
+/// bytes: every compared byte is XOR-folded into one difference word
+/// along with the length difference, so the answer takes the same work
+/// whether the mismatch is in the first byte or the last. Not a MAC —
+/// just enough that the bearer check does not leak the token a timing
+/// probe at a time.
+fn tokens_match(presented: &str, expected: &str) -> bool {
+    let (presented, expected) = (presented.as_bytes(), expected.as_bytes());
+    let mut diff = presented.len() ^ expected.len();
+    for (a, b) in presented.iter().zip(expected) {
+        diff |= usize::from(a ^ b);
+    }
+    diff == 0
+}
+
 /// The shared secret on every route: a wrong or missing token is a 401
 /// before the route runs.
 async fn require_token(
@@ -161,7 +176,7 @@ async fn require_token(
         .headers()
         .get(TOKEN_HEADER)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|candidate| candidate == daemon.token);
+        .is_some_and(|candidate| tokens_match(candidate, &daemon.token));
     if !good {
         return (
             StatusCode::UNAUTHORIZED,
