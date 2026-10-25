@@ -3117,7 +3117,29 @@ fn session_agent_config(
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_workspace(&mut config);
     }
+    apply_prompt_sections(&mut config, options, sandboxed);
     (config, subagents)
+}
+
+/// The prompt's two optional sections. The user's global `USER.md`
+/// rides verbatim when present — a blank or missing file renders
+/// nothing, which is the same render as before the file existed. The
+/// environment section reports where `bash` runs: host facts for a
+/// local session, the sandbox notice for a sandboxed one, because host
+/// facts would be lies about a container.
+fn apply_prompt_sections(
+    config: &mut CodingAgentConfig,
+    options: &RunOptions,
+    sandboxed: Option<&crate::sandbox::Sandboxed>,
+) {
+    config.user_preferences = Config::dir()
+        .ok()
+        .and_then(|dir| std::fs::read_to_string(dir.join("USER.md")).ok())
+        .filter(|text| !text.trim().is_empty());
+    config.environment = Some(match sandboxed {
+        Some(sandboxed) => rhema_coding_agent::remote_notice(sandboxed.choice.stored_name()),
+        None => rhema_coding_agent::host_report(&options.workspace),
+    });
 }
 
 /// The context a reported usage stands for: the whole prompt plus the
