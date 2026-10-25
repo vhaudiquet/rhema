@@ -710,3 +710,42 @@ report. In the resumed session the registry is empty: a fetch of a
 lost id returns `is_error` saying the job is gone, and the model
 re-delegates. A start call that lost its result to the crash is
 `Unsafe`: reported interrupted, never re-run.
+
+## 14. Onboarding, bundled skills, and the no-gate chat (`rhema-code`)
+
+The TUI's startup rule is: only the wizard gates, and only the first
+time. `config.onboarded` carries the state — `None` (a config from
+before the wizard, or no marker) reads as onboarded, `Some(false)`
+reopens the wizard on the next start, `Some(true)` never shows it
+again. `rhema onboard` forces it back on. Everything else that used to
+gate — no usable backend, no stored model — opens the chat: the footer
+names the missing piece in red, the submit box declines with the fix,
+and `/login` or `/model` is one keystroke away. The wizard reuses the
+settings' add-instance dialog inline (its validation is the model
+fetch) and the palette list; steps live in `onboarding.rs`, and the
+finish step is the only writer of `onboarded: true`, so Esc-ing out
+halfway always reopens.
+
+**Bundled skills.** `commit-message` and `unslop` ship in the binary
+(`include_str!`) and seed into the global skills directory on start —
+never overwriting an existing file, and skipping disabled names. The
+config's `skills_disabled` set is the only switch: the wizard's skills
+step and the settings Skills page flip it, the prompt filter
+(`CodingAgentConfig::disabled_skills`, applied after collection and
+after discovery alike) reads it, and the UIs show disabled rows greyed
+rather than hidden. Re-enabling re-seeds a missing folder; a user's
+folder of the same name shadows a bundled one like any other skill.
+Skills carry an optional frontmatter `license` (plus a `NOTICE` file
+where attribution must travel with copies), which the UIs render a
+step dimmer than the description.
+
+**Terminal graphics.** The wizard's rail draws the repo logo through
+the kitty graphics protocol on kitty and Ghostty, placed outside the
+ratatui frame (images composite above cells, so a frame never erases
+one) and keyed on the rect the renderer restates each draw. Detection
+is environment-based with a `RHEMA_NO_IMAGES` override; every other
+terminal gets the wordmark.
+
+**Shared chrome.** The full-screen menus draw their panels, selection
+markers, and rules through `chrome.rs`, so the visual vocabulary
+changes in one place — the coherence is in the calls, not in copies.
