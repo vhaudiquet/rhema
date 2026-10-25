@@ -21,8 +21,11 @@ probe:
 
 # The session facts every shape carries — written once here and placed
 # by reference (`{{ facts }}`), never duplicated in the texts below.
+# The date is stamped at the conversation's start and carried across
+# resumes, so the prompt prefix stays byte-identical and the label
+# tells the model what the stamp means.
 facts: |
-  - Date: {{ date }}
+  - Date: {{ date }} (at conversation start)
   - Model: {{ model }}
   - Harness: {{ harness }}
 

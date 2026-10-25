@@ -28,6 +28,26 @@ use rhema_core::{
 
 use crate::config::{CodingAgentConfig, Steering};
 
+/// The driver-state key carrying the conversation's rendered
+/// environment section: stamped at the conversation's start, reused by
+/// every resume, so the system prompt's bytes — and with them the
+/// provider's prompt cache for the whole prefix — survive rebuilds.
+const ENVIRONMENT_STATE_KEY: &str = "environment_report";
+
+/// Clears a session's stamped environment report — the transition hook
+/// for rebuilds that change the facts the report carries: a machine
+/// switch (a sandbox picked mid-conversation re-reports where `bash`
+/// runs) or a model switch (the report names the model, and the
+/// provider's cache is per-model regardless). Transitions that change
+/// neither — a thinking level, a resume — keep the stamp: the report is
+/// conversation state, and re-rendering it would rewrite the system
+/// prompt and break the prefix cache for nothing.
+pub fn clear_environment_stamp(session: &mut Session) {
+    if let Some(state) = session.driver_state.as_object_mut() {
+        state.remove(ENVIRONMENT_STATE_KEY);
+    }
+}
+
 /// Why a turn or a session operation failed.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CodingAgentError {
@@ -257,27 +277,85 @@ impl CodingAgent {
                 ..ChatParams::new(config.model.clone())
             })
             .build()?;
-        Ok(Self {
+        let mut built = Self {
             agent,
             config,
             session: Session::default(),
             tools,
             transcript,
             turns: 0,
-        })
+        };
+        built.stamp_environment();
+        Ok(built)
     }
 
     /// A fresh agent resuming `session` (e.g. from
     /// [`CodingAgent::load_session_from`]); the next turn continues the
     /// prior history.
+    ///
+    /// The conversation's environment report is conversation state: a
+    /// session carrying one reuses its bytes verbatim, whatever the
+    /// config would render fresh — the report's date names the
+    /// conversation's start, and a resume that re-stamped it would
+    /// rewrite the system prompt and break the provider's prompt cache
+    /// for the whole prefix. A session without one (a conversation from
+    /// before the report existed) stamps the config's render and
+    /// carries it forward.
     pub fn from_session(
         provider: Arc<dyn rhema_core::ModelProvider>,
-        config: CodingAgentConfig,
+        mut config: CodingAgentConfig,
         session: Session,
     ) -> Result<Self, CodingAgentError> {
+        if let Some(stamped) = session
+            .driver_state
+            .get(ENVIRONMENT_STATE_KEY)
+            .and_then(|value| value.as_str())
+        {
+            if config.environment.is_some() {
+                config.environment = Some(stamped.to_owned());
+            }
+        }
         let mut agent = Self::new(provider, config)?;
         agent.session = session;
+        agent.stamp_environment();
         Ok(agent)
+    }
+
+    /// Clears a session's stamped environment report — the transition
+    /// hook for rebuilds that change the facts the report carries: a
+    /// machine switch (a sandbox picked mid-conversation re-reports where
+    /// `bash` runs) or a model switch (the report names the model, and the
+    /// provider's cache is per-model regardless). Transitions that change
+    /// neither — a thinking level, a resume — keep the stamp: the report
+    /// is conversation state, and re-rendering it would rewrite the system
+    /// prompt and break the prefix cache for nothing.
+    pub fn clear_environment_stamp(session: &mut Session) {
+        if let Some(state) = session.driver_state.as_object_mut() {
+            state.remove(ENVIRONMENT_STATE_KEY);
+        }
+    }
+
+    /// Writes the configured environment section into the session's
+    /// driver state when none is stamped yet: the checkpoint paths
+    /// persist the session whole, so the stamp rides every save and the
+    /// next resume reuses it. Idempotent, and silent when no section is
+    /// configured (a verbatim prompt or an off switch).
+    fn stamp_environment(&mut self) {
+        let Some(report) = self.config.environment.clone() else {
+            return;
+        };
+        let state = &mut self.session.driver_state;
+        if !state.is_object() {
+            if !state.is_null() {
+                // Another driver's shape: never clobbered, never
+                // extended — the stamp is skipped, not forced.
+                return;
+            }
+            *state = serde_json::json!({});
+        }
+        if state.get(ENVIRONMENT_STATE_KEY).is_none() {
+            state[ENVIRONMENT_STATE_KEY] = serde_json::json!(report);
+        }
     }
 
     /// Installs the commit-before-execute hook on the engine (see
@@ -769,6 +847,161 @@ mod extra_tools_tests {
         let bare = stamped_system_with_skills(None, &workspace, &[], &[]).unwrap();
         assert!(!bare.contains("- OS: test os"), "{bare}");
         assert!(!bare.contains("prefer concise answers"), "{bare}");
+    }
+}
+
+#[cfg(test)]
+mod environment_stamp_tests {
+    use super::*;
+    use rhema_agent_tools::AllowAll;
+    use rhema_core::{
+        Event, ModelProvider, ModelRequest, ProviderError, StopReason, Usage, async_trait,
+    };
+
+    /// Ends the turn at once; the exchange never matters here.
+    struct Ender;
+    #[async_trait]
+    impl ModelProvider for Ender {
+        async fn complete(
+            &self,
+            _req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    struct NoopSink;
+    impl EventSink for NoopSink {
+        fn emit(&mut self, _event: Event<'_>) {}
+    }
+
+    fn config(report: &str) -> CodingAgentConfig {
+        CodingAgentConfig {
+            environment: Some(report.to_owned()),
+            ..CodingAgentConfig::new("m", std::env::temp_dir())
+        }
+    }
+
+    /// A fresh conversation stamps its report at construction, before
+    /// any turn: the first checkpoint already carries it.
+    #[test]
+    fn a_fresh_conversation_stamps_at_construction() {
+        let agent = CodingAgent::new(Arc::new(Ender), config("REPORT-A")).unwrap();
+        assert_eq!(
+            agent
+                .session()
+                .driver_state
+                .get(ENVIRONMENT_STATE_KEY)
+                .and_then(|v| v.as_str()),
+            Some("REPORT-A")
+        );
+    }
+
+    /// The resume contract: a session carrying a report reuses its
+    /// bytes, whatever the config would render fresh — the date inside
+    /// names the conversation's start, and a re-stamp would rewrite
+    /// the system prompt and break the prefix cache.
+    #[tokio::test]
+    async fn a_resumed_conversation_keeps_its_stamped_report() {
+        let mut first = CodingAgent::new(Arc::new(Ender), config("REPORT-A")).unwrap();
+        first
+            .turn("hi", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+        let session = first.session().clone();
+
+        // Whatever the rebuilt config carries — a model switch, a
+        // profile switch, a resume — the conversation's bytes stand.
+        let second =
+            CodingAgent::from_session(Arc::new(Ender), config("REPORT-B"), session).unwrap();
+        let prompt = second.system().expect("the agent has a prompt");
+        assert!(prompt.contains("REPORT-A"), "{prompt}");
+        assert!(!prompt.contains("REPORT-B"), "{prompt}");
+        assert_eq!(
+            second
+                .session()
+                .driver_state
+                .get(ENVIRONMENT_STATE_KEY)
+                .and_then(|v| v.as_str()),
+            Some("REPORT-A"),
+            "the stamp is idempotent across rebuilds"
+        );
+    }
+
+    /// A conversation from before the report existed stamps the fresh
+    /// render and carries it forward from there.
+    #[tokio::test]
+    async fn a_pre_report_session_stamps_the_fresh_render_once() {
+        let mut first = CodingAgent::new(Arc::new(Ender), config("REPORT-A")).unwrap();
+        first
+            .turn("hi", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+        // Age the session: the stamp disappears, the history stays.
+        let session = Session {
+            driver_state: serde_json::Value::Null,
+            ..first.session().clone()
+        };
+
+        let second =
+            CodingAgent::from_session(Arc::new(Ender), config("REPORT-B"), session).unwrap();
+        let prompt = second.system().expect("the agent has a prompt");
+        assert!(prompt.contains("REPORT-B"), "{prompt}");
+        assert_eq!(
+            second
+                .session()
+                .driver_state
+                .get(ENVIRONMENT_STATE_KEY)
+                .and_then(|v| v.as_str()),
+            Some("REPORT-B"),
+            "stamped once on arrival, carried forward"
+        );
+    }
+
+    /// Another driver's keys coexist with the stamp — driver_state is
+    /// one object per driver key — and a non-object shape is never
+    /// clobbered: no stamp, no error, the section still renders.
+    #[test]
+    fn driver_state_shapes_coexist_or_stay_untouched() {
+        let session = Session {
+            driver_state: serde_json::json!({ "someone-elses": "shape" }),
+            ..Session::default()
+        };
+        let agent =
+            CodingAgent::from_session(Arc::new(Ender), config("REPORT-A"), session).unwrap();
+        let state = &agent.session().driver_state;
+        assert_eq!(
+            state.get("someone-elses"),
+            Some(&serde_json::json!("shape")),
+            "the other driver's key stands"
+        );
+        assert_eq!(
+            state.get(ENVIRONMENT_STATE_KEY).and_then(|v| v.as_str()),
+            Some("REPORT-A"),
+            "the stamp coexists beside it"
+        );
+
+        let opaque = Session {
+            driver_state: serde_json::json!("a driver's opaque shape"),
+            ..Session::default()
+        };
+        let agent = CodingAgent::from_session(Arc::new(Ender), config("REPORT-A"), opaque).unwrap();
+        assert_eq!(
+            agent.session().driver_state,
+            serde_json::json!("a driver's opaque shape"),
+            "a non-object shape is never clobbered"
+        );
+        assert!(
+            agent
+                .system()
+                .is_some_and(|prompt| prompt.contains("REPORT-A")),
+            "the section still renders for this conversation"
+        );
     }
 }
 

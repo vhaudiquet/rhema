@@ -1190,7 +1190,9 @@ impl App {
     fn rebuild_for_sandbox(&mut self, notice: &str) {
         if let Some(agent) = self.agent.take() {
             let stats = agent.transcript_stats();
-            let session = agent.session().clone();
+            let mut session = agent.session().clone();
+            // The machine changed: the report re-states where bash runs.
+            rhema_coding_agent::clear_environment_stamp(&mut session);
             match self.build_agent(session) {
                 Ok((mut rebuilt, subagents)) => {
                     // The counters survive the rebuild: same
@@ -2159,6 +2161,10 @@ impl App {
             .as_ref()
             .and_then(CodingAgent::transcript_stats)
             .or(self.transcript_stats);
+        // The model may have changed with the profile, and the cache is
+        // per-model regardless: the report re-states its facts.
+        let mut session = session;
+        rhema_coding_agent::clear_environment_stamp(&mut session);
         match self.build_agent(session) {
             Ok((mut agent, subagents)) => {
                 // The counters survive the swap: same conversation,
@@ -2737,6 +2743,10 @@ impl App {
             .as_ref()
             .and_then(CodingAgent::transcript_stats)
             .or(self.transcript_stats);
+        // The model may have changed, and the cache is per-model
+        // regardless: the report re-states its facts.
+        let mut session = session;
+        rhema_coding_agent::clear_environment_stamp(&mut session);
         match self.build_agent(session) {
             Ok((mut agent, subagents)) => {
                 // The counters survive the swap: same conversation,

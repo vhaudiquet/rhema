@@ -42,8 +42,8 @@ pub mod environment;
 pub mod prompt;
 
 pub use agent::{
-    CodingAgent, CodingAgentError, stamped_system, stamped_system_with_sections,
-    stamped_system_with_skills,
+    CodingAgent, CodingAgentError, clear_environment_stamp, stamped_system,
+    stamped_system_with_sections, stamped_system_with_skills,
 };
 pub use config::{CodingAgentConfig, Steering};
 pub use environment::{host_report, remote_notice};
