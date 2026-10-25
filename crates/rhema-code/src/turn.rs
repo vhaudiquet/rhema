@@ -8,9 +8,7 @@ use std::time::Duration;
 use rhema_coding_agent::{Approval, CodingAgent, repair_dangling_calls};
 use rhema_core::{Event, EventSink, Session};
 use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
-#[cfg(feature = "mock")]
-use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -49,19 +47,38 @@ async fn cancelled(mut rx: watch::Receiver<bool>) {
     }
 }
 
-/// Spawns one turn on a tokio task: runs `agent.turn` with the given
+/// The steered message channel, read forever: a closed channel — the UI
+/// dropped the sender mid-chain, so nothing more can arrive — parks this
+/// future instead of resolving `None`, so the select's steer arm goes
+/// silent rather than spinning on an immediately-ready receive.
+async fn next_steer(steer: &mut UnboundedReceiver<String>) -> Option<String> {
+    loop {
+        match steer.recv().await {
+            Some(text) => return Some(text),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+/// Spawns a turn chain on a tokio task: runs `agent.turn` with the given
 /// approval hook, commits the session before each tool round and
-/// checkpoints it on success (when `save` is set), and hands the agent
-/// back via [`UiEvent::TurnFinished`] — or, when the cancel flag flips,
-/// drops the turn future at its current await and hands the agent back
-/// via [`UiEvent::TurnCancelled`]. The UI thread must treat the agent as
-/// gone until either event arrives.
+/// checkpoints the final turn on success (when `save` is set), and hands
+/// the agent back via [`UiEvent::TurnFinished`] — or, when the cancel flag
+/// flips, drops the turn future at its current await and hands the agent
+/// back via [`UiEvent::TurnCancelled`]. A message on `steer` drops the
+/// turn future the same way, but the task carries on: the message runs as
+/// the next turn on the same agent, so the conversation continues right
+/// where the interruption landed. The UI thread must treat the agent as
+/// gone until either event arrives; `steer`'s receiver travels inside
+/// that event, so a message sent in the finishing race is buffered there,
+/// never lost.
 pub fn spawn_turn(
     mut agent: CodingAgent,
     input: String,
     approval: Arc<dyn Approval>,
     save: Option<PathBuf>,
     cancel: watch::Receiver<bool>,
+    mut steer: UnboundedReceiver<String>,
     events: UnboundedSender<UiEvent>,
 ) -> JoinHandle<()> {
     // Commit-before-execute: when the session persists to a file, the
@@ -76,17 +93,38 @@ pub fn spawn_turn(
     }
     tokio::spawn(async move {
         let mut sink = ChannelSink { tx: events.clone() };
-        // The select's scope ends before the match: the pinned future —
-        // and with it the borrow of `agent` — is gone by then.
-        let result = {
-            let turn = agent.turn(input, &mut sink, approval);
+        let mut input = input;
+        // The chain's outcome: `None` once the cancel flag ended it, the
+        // final turn's result otherwise. A steered interruption leaves it
+        // alone — the chain just turns another round. An intermediate
+        // turn's error is carried no further than this task: the steered
+        // turn proceeds, and only the final result is reported.
+        let mut outcome = None;
+        loop {
+            let turn = agent.turn(std::mem::take(&mut input), &mut sink, Arc::clone(&approval));
             tokio::pin!(turn);
             tokio::select! {
-                _ = cancelled(cancel) => None,
-                result = &mut turn => Some(result),
+                _ = cancelled(cancel.clone()) => break,
+                Some(text) = next_steer(&mut steer) => {
+                    // The pinned future drops here, at its current await
+                    // — a streaming request or a running tool. The next
+                    // `agent.turn` revives whatever committed before the
+                    // drop (see `revive_dangling_calls`), so the history
+                    // stays load-bearing without a repair step here.
+                    input = text;
+                }
+                result = &mut turn => match steer.try_recv() {
+                    // A message that raced the completion steers the next
+                    // turn instead of slipping into the closing window.
+                    Ok(text) => input = text,
+                    Err(_) => {
+                        outcome = Some(result);
+                        break;
+                    }
+                },
             }
-        };
-        match result {
+        }
+        match outcome {
             Some(result) => {
                 // Checkpoint after a completed turn: the file's freshest
                 // complete state. A crash can leave a committed intent (a
@@ -101,6 +139,7 @@ pub fn spawn_turn(
                 let _ = events.send(UiEvent::TurnFinished {
                     agent: Box::new(agent),
                     result: result.map_err(|err| err.to_string()),
+                    steer,
                 });
             }
             None => {
@@ -110,6 +149,7 @@ pub fn spawn_turn(
                 repair_dangling_calls(agent.session_mut());
                 let _ = events.send(UiEvent::TurnCancelled {
                     agent: Box::new(agent),
+                    steer,
                 });
             }
         }
@@ -241,7 +281,7 @@ pub async fn drive_turn_for_test(
     loop {
         match events.recv().await.expect("turn task still alive") {
             UiEvent::Engine(owned) => transcript.apply(&owned),
-            UiEvent::TurnFinished { agent, result } => return (agent, result),
+            UiEvent::TurnFinished { agent, result, .. } => return (agent, result),
             UiEvent::TurnCancelled { .. }
             | UiEvent::ModelsLoaded { .. }
             | UiEvent::UsageLoaded { .. }
@@ -306,6 +346,111 @@ mod mock_tests {
         }
     }
 
+    /// The first call signals the test and hangs — the generation a steer
+    /// interrupts — and every later call answers, standing in for the turn
+    /// the steer starts.
+    struct HangsThenAnswers {
+        /// Signalled when the first generation enters `complete`, so the
+        /// test only steers a live generation (steering earlier is a
+        /// scheduling coin-flip that can drop the first future unpolled).
+        entered: tokio::sync::Notify,
+        calls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for HangsThenAnswers {
+        async fn complete(
+            &self,
+            _req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                self.entered.notify_one();
+                std::future::pending().await
+            } else {
+                Ok(scripted_output("steered answer"))
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_steered_message_interrupts_the_turn_and_runs_as_the_next_turn() {
+        let (tx, mut rx) = unbounded_channel();
+        let (cancel, cancelled) = watch_cancel();
+        let (steer_tx, steered) = unbounded_channel();
+        let provider = Arc::new(HangsThenAnswers {
+            entered: tokio::sync::Notify::new(),
+            calls: std::sync::atomic::AtomicU32::new(0),
+        });
+        let agent = CodingAgent::new(
+            Arc::clone(&provider) as Arc<dyn ModelProvider>,
+            CodingAgentConfig::new("test-model", std::env::temp_dir()),
+        )
+        .unwrap();
+        spawn_turn(
+            agent,
+            "hi".into(),
+            Arc::new(AllowAll),
+            None,
+            cancelled,
+            steered,
+            tx,
+        );
+
+        // Wait for the first generation to be in flight, then steer: the
+        // message drops it and starts the next turn with itself as the
+        // input.
+        tokio::time::timeout(Duration::from_secs(5), provider.entered.notified())
+            .await
+            .expect("the first generation never started");
+        steer_tx.send("look at the tests instead".into()).unwrap();
+        let mut transcript = Transcript::new();
+        let (agent, result) = loop {
+            match rx.recv().await.expect("turn task still alive") {
+                UiEvent::Engine(owned) => transcript.apply(&owned),
+                UiEvent::TurnFinished { agent, result, .. } => break (agent, result),
+                UiEvent::TurnCancelled { .. } => {
+                    panic!("a steered chain must not come back as cancelled");
+                }
+                _ => {}
+            }
+        };
+        assert!(result.is_ok());
+        // The interrupted generation left nothing behind: the history is
+        // the first prompt, the steered message, and the steered turn's
+        // reply — consecutive user messages are valid.
+        let texts: Vec<String> = agent
+            .session()
+            .history
+            .iter()
+            .map(|message| {
+                message
+                    .content
+                    .iter()
+                    .filter_map(|content| match content {
+                        Content::Text(text) => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("")
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec![
+                "hi".to_owned(),
+                "look at the tests instead".to_owned(),
+                "steered answer".to_owned(),
+            ]
+        );
+        // This provider never sinks deltas, so the transcript stays
+        // empty; the streamed-turns-separate line is the app's concern
+        // (the user line between them), not this task's.
+        assert!(transcript.lines().is_empty());
+        drop(cancel);
+        // The returned receiver is drained: nothing was lost to the race.
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_turn_streams_into_the_transcript_and_returns_the_agent() {
         let (tx, mut rx) = unbounded_channel();
@@ -317,7 +462,16 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
-        spawn_turn(agent, "hi".into(), Arc::new(AllowAll), None, cancelled, tx);
+        let (_steer_tx, steered) = unbounded_channel();
+        spawn_turn(
+            agent,
+            "hi".into(),
+            Arc::new(AllowAll),
+            None,
+            cancelled,
+            steered,
+            tx,
+        );
 
         let mut transcript = Transcript::new();
         let (agent, result) = drive_turn_for_test(&mut rx, &mut transcript).await;
@@ -341,12 +495,14 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
+        let (_steer_tx, steered) = unbounded_channel();
         spawn_turn(
             agent,
             "hi".into(),
             Arc::new(AllowAll),
             Some(save.clone()),
             cancelled,
+            steered,
             tx,
         );
         let mut transcript = Transcript::new();
@@ -366,12 +522,21 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
-        spawn_turn(agent, "hi".into(), Arc::new(AllowAll), None, cancelled, tx);
+        let (_steer_tx, steered) = unbounded_channel();
+        spawn_turn(
+            agent,
+            "hi".into(),
+            Arc::new(AllowAll),
+            None,
+            cancelled,
+            steered,
+            tx,
+        );
 
         cancel.send(true).unwrap();
         loop {
             match rx.recv().await.expect("turn task still alive") {
-                UiEvent::TurnCancelled { agent } => {
+                UiEvent::TurnCancelled { agent, .. } => {
                     // At most the prompt committed — zero when the flag
                     // won the race against the task's first poll. Either
                     // way the history is clean for the next turn.
@@ -408,12 +573,14 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
+        let (_steer_tx, steered) = unbounded_channel();
         spawn_turn(
             agent,
             "hi".into(),
             Arc::new(AllowAll),
             Some(save.clone()),
             cancelled,
+            steered,
             tx,
         );
 

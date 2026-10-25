@@ -902,19 +902,27 @@ fn dispatch(
                 return;
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
+            let (steer, steered) = tokio::sync::mpsc::unbounded_channel();
             // The status names the prompt until a tool call takes over.
             status.note_prompt(&input);
             // Auto-approved for now: the Approval seam — and the modal
             // wired through it — is where command allowlists will land.
-            app.begin_turn(cancel, None);
+            app.begin_turn(cancel, steer, None);
             spawn_turn(
                 agent,
                 input,
                 Arc::new(AllowAll),
                 app.options.save.clone(),
                 cancelled,
+                steered,
                 tx.clone(),
             );
+        }
+        Effect::SteerTurn(text) => {
+            // The app already sent the message over the turn's steer
+            // channel; the strip names the interruption until the next
+            // tool call takes over.
+            status.note_prompt(&text);
         }
         Effect::StartLoginFlow => {
             let provider = match &app.screen {

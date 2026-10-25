@@ -2123,13 +2123,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 }
 
 fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
-    // The input is the one interactive element, so it earns the accent;
-    // while a turn runs it calms to a hairline.
-    let border = if app.turn.running {
-        theme.border_strong
-    } else {
-        theme.accent
-    };
+    // The input is the one interactive element, so it earns the accent —
+    // while a turn runs too, because the box stays live: typing steers
+    // the running turn, and the border must not suggest otherwise.
+    let border = theme.accent;
     // No fill of its own: the input sits on the same canvas as everything
     // else; only the border marks it.
     let block = Block::default()
@@ -2149,8 +2146,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // anchors inline, as chips, exactly as they sit in the input.
     let layout = input_layout(&app.chat.input, &app.chat.attachments, width, theme);
     let cursor_at = cursor_at_rows(&layout, app.chat.cursor);
-    // The window keeps the cursor's row visible; with no cursor (a
-    // running turn) the tail shows.
+    // The window keeps the cursor's row visible.
     let remaining = INPUT_MAX_CONTENT_ROWS.max(1);
     let total = layout.len();
     let (cursor_row, cursor_col) = cursor_at.unwrap_or((total.saturating_sub(1), 0));
@@ -2172,17 +2168,16 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             .collect()
     };
     frame.render_widget(Paragraph::new(rows), inner);
-    if !app.turn.running {
-        // The prompt and the continuation indent are both two cells,
-        // and only rows carrying one shift the cursor by them. A cursor
-        // past a full row's last cell clamps onto it — there is no
-        // column beyond the box.
-        let marker = u16::from(layout[cursor_row].marker);
-        frame.set_cursor_position(Position {
-            x: (inner.x + marker * 2 + cursor_col as u16).min(inner.right().saturating_sub(1)),
-            y: inner.y + cursor_row.saturating_sub(first) as u16,
-        });
-    }
+    // The cursor stays during a turn: the box takes input the whole
+    // time. The prompt and the continuation indent are both two cells,
+    // and only rows carrying one shift the cursor by them. A cursor
+    // past a full row's last cell clamps onto it — there is no
+    // column beyond the box.
+    let marker = u16::from(layout[cursor_row].marker);
+    frame.set_cursor_position(Position {
+        x: (inner.x + marker * 2 + cursor_col as u16).min(inner.right().saturating_sub(1)),
+        y: inner.y + cursor_row.saturating_sub(first) as u16,
+    });
 }
 
 /// Content rows the input box may grow to; past that, a window keeps the

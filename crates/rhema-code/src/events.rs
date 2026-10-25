@@ -198,6 +198,11 @@ pub enum UiEvent {
         agent: Box<CodingAgent>,
         /// The final output, or the error text of the failed turn.
         result: Result<ModelOutput, String>,
+        /// The steering channel's receiver, returned so a message sent in
+        /// the finishing race — after the task's last poll, before the UI
+        /// saw this event — sits buffered here instead of vanishing. The
+        /// app drains it and runs what it holds as the next turn.
+        steer: tokio::sync::mpsc::UnboundedReceiver<String>,
     },
     /// The turn was cancelled from the keyboard and hands the agent back.
     /// Whatever committed before the drop stays in the history; dangling
@@ -205,6 +210,10 @@ pub enum UiEvent {
     TurnCancelled {
         /// The agent, with the partial turn's committed messages.
         agent: Box<CodingAgent>,
+        /// The steering channel's receiver, as in
+        /// [`UiEvent::TurnFinished::steer`]; the app puts what it holds
+        /// back in the input box, since the user stopped the turn.
+        steer: tokio::sync::mpsc::UnboundedReceiver<String>,
     },
     /// The sandbox assembly the picker's choice spawned finished: the
     /// assembled tool set, or the failure text. The session's current

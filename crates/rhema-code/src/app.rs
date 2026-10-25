@@ -606,6 +606,9 @@ pub enum Effect {
     FetchUsage,
     /// Start one turn with this prompt.
     StartTurn(String),
+    /// A steered prompt interrupted the running turn; the status strip
+    /// names it until the next tool call takes over.
+    SteerTurn(String),
     /// Spawn the interactive login flow the login screen chose (its
     /// stage is already `Flow`); updates arrive as
     /// `UiEvent::LoginUpdate`.
@@ -793,6 +796,12 @@ pub struct TurnState {
     /// The cancel flag of the running turn; the task watches the
     /// receiver. The runner creates the pair at submit.
     pub cancel: Option<tokio::sync::watch::Sender<bool>>,
+    /// The steering channel of the running turn: a submit while the turn
+    /// runs lands here, and the task interrupts the in-flight step with
+    /// it. The task returns the receiver in its final event, so a message
+    /// sent in the finishing race sits buffered there instead of
+    /// vanishing. `None` while no turn runs.
+    steer: Option<tokio::sync::mpsc::UnboundedSender<String>>,
     /// The tool call currently awaiting the user's answer.
     pub pending_approval: Option<ToolCall>,
     /// Every future approval request is declined without a modal (the
@@ -826,6 +835,7 @@ impl TurnState {
             running: false,
             started_at: None,
             cancel: None,
+            steer: None,
             pending_approval: None,
             decline_all: false,
             answers: None,
@@ -841,12 +851,14 @@ impl TurnState {
     /// (a stale modal, a preview buffer) is gone.
     fn running(
         cancel: tokio::sync::watch::Sender<bool>,
+        steer: tokio::sync::mpsc::UnboundedSender<String>,
         answers: Option<ApprovalAnswerer>,
     ) -> Self {
         Self {
             running: true,
             started_at: Some(std::time::Instant::now()),
             cancel: Some(cancel),
+            steer: Some(steer),
             answers,
             ..Self::idle()
         }
@@ -858,6 +870,7 @@ impl TurnState {
         self.running = false;
         self.started_at = None;
         self.cancel = None;
+        self.steer = None;
         self.processing = false;
         self.thinking.clear();
         self.decline_all = false;
@@ -1906,10 +1919,26 @@ impl App {
         }
         match action {
             ChatAction::Submit(text) => {
-                if self.turn.running || text.trim().is_empty() {
-                    // The input is kept, so typing during a turn is not
-                    // lost.
+                if text.trim().is_empty() {
                     Vec::new()
+                } else if self.turn.running {
+                    // The box stays live while the turn runs: the text
+                    // steers. `/settings` opens the snapshot screens over
+                    // the chat instead — the turn keeps working in the
+                    // background, and their instance actions still wait
+                    // for idle on their own. Every other command stays
+                    // idle-only — it acts on app state the running turn
+                    // also touches — and keeps the input, as before.
+                    if text.split_whitespace().next() == Some("/settings") {
+                        self.chat.input.clear();
+                        self.chat.cursor = 0;
+                        self.chat.attachments.clear();
+                        crate::commands::dispatch(self, rhema_core::paste::expand(&text).trim())
+                    } else if text.trim().starts_with('/') {
+                        Vec::new()
+                    } else {
+                        self.steer_turn(text)
+                    }
                 } else if text.trim().starts_with('/') {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
@@ -1943,6 +1972,23 @@ impl App {
             }
             ChatAction::None => Vec::new(),
         }
+    }
+
+    /// Steers the running turn: the text echoes into the transcript now
+    /// and rides the steer channel to the turn task, which drops the
+    /// in-flight step at its current await and runs the text as the next
+    /// turn on the same agent. A send can only fail once the task has
+    /// exited — the finishing race — and the receiver it returned holds
+    /// the message buffered for the turn-end handler to run.
+    fn steer_turn(&mut self, text: String) -> Vec<Effect> {
+        self.chat.input.clear();
+        self.chat.cursor = 0;
+        self.chat.attachments.clear();
+        self.transcript.push_user(&text);
+        if let Some(steer) = &self.turn.steer {
+            let _ = steer.send(text.clone());
+        }
+        vec![Effect::SteerTurn(text)]
     }
 
     /// The add-instance dialog validated a new instance's input: fetch
@@ -2286,14 +2332,20 @@ impl App {
                 }
                 Vec::new()
             }
-            UiEvent::TurnFinished { agent, result } => {
-                self.end_turn(agent, result);
+            UiEvent::TurnFinished {
+                agent,
+                result,
+                steer,
+            } => {
                 // The turn just moved the account's counters; the badge
-                // is only as good as its last fetch.
-                vec![Effect::FetchUsage]
+                // is only as good as its last fetch. A steered message
+                // that raced the finish rides along as the next turn.
+                let mut effects = self.end_turn(agent, result, steer);
+                effects.push(Effect::FetchUsage);
+                effects
             }
-            UiEvent::TurnCancelled { agent } => {
-                self.cancel_finished(agent);
+            UiEvent::TurnCancelled { agent, steer } => {
+                self.cancel_finished(agent, steer);
                 vec![Effect::FetchUsage]
             }
         }
@@ -2675,9 +2727,10 @@ impl App {
     pub fn begin_turn(
         &mut self,
         cancel: tokio::sync::watch::Sender<bool>,
+        steer: tokio::sync::mpsc::UnboundedSender<String>,
         answers: Option<ApprovalAnswerer>,
     ) {
-        self.turn = TurnState::running(cancel, answers);
+        self.turn = TurnState::running(cancel, steer, answers);
         self.remember_profile();
     }
 
@@ -2754,18 +2807,39 @@ impl App {
 
     /// The turn task was cancelled from the keyboard: take the agent
     /// back, drop the turn's state, and mark the cutoff in the transcript.
-    fn cancel_finished(&mut self, agent: Box<CodingAgent>) {
+    fn cancel_finished(
+        &mut self,
+        agent: Box<CodingAgent>,
+        mut steer: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) {
         self.transcript_stats = agent.transcript_stats();
         self.agent = Some(*agent);
         self.turn.finished();
         self.transcript.push_notice("turn cancelled");
+        // A steered message that raced the cancel goes back to the input:
+        // the user stopped the turn, so the words are not spent.
+        let mut restore = String::new();
+        while let Ok(text) = steer.try_recv() {
+            if !restore.is_empty() {
+                restore.push('\n');
+            }
+            restore.push_str(&text);
+        }
+        if !restore.is_empty() {
+            self.chat.insert_str(&restore);
+        }
     }
 
     /// The turn task finished: take the agent back, record the usage or
     /// the error, and drop any stale modal (the turn cannot finish while
     /// an approval is unanswered, so a leftover modal means the answer
     /// channel is gone).
-    fn end_turn(&mut self, agent: Box<CodingAgent>, result: Result<ModelOutput, String>) {
+    fn end_turn(
+        &mut self,
+        agent: Box<CodingAgent>,
+        result: Result<ModelOutput, String>,
+        mut steer: tokio::sync::mpsc::UnboundedReceiver<String>,
+    ) -> Vec<Effect> {
         self.transcript_stats = agent.transcript_stats();
         self.agent = Some(*agent);
         self.turn.finished();
@@ -2798,6 +2872,14 @@ impl App {
             }
             Err(message) => self.error = Some(message),
         }
+        // Messages sent in the finishing race sit in the returned
+        // receiver: they run as the next turns, in order. The transcript
+        // already carries their user lines from submit time.
+        let mut effects = Vec::new();
+        while let Ok(text) = steer.try_recv() {
+            effects.push(Effect::StartTurn(text));
+        }
+        effects
     }
 
     /// The stop reason as the few words a notice names it by.
@@ -3467,6 +3549,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert_eq!(effects, vec![Effect::FetchUsage]);
     }
@@ -3488,6 +3571,7 @@ mod tests {
                 stop_reason: StopReason::MaxTokens,
                 usage: Usage::default(),
             }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert!(h.app.transcript.lines().contains(&Line::Notice(
             "the model returned no content (stopped: max tokens)".into()
@@ -3501,6 +3585,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         // The first turn's notice rightly persists; a real reply raised
         // no second one.
@@ -4418,6 +4503,7 @@ mod tests {
                     cached_input_tokens: 400_000,
                 },
             }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         // 600k uncached in at $0.75/M + 400k cached in at a quarter of
         // that + 1M out at $3.75/M.
@@ -4883,7 +4969,8 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.turn.running = true;
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
-        h.app.begin_turn(cancel, None);
+        h.app
+            .begin_turn(cancel, tokio::sync::mpsc::unbounded_channel().0, None);
 
         // The provider's running tally lands as an engine event: its
         // prompt count already covers the whole conversation, so the
@@ -4918,7 +5005,8 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.turn.running = true;
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
-        h.app.begin_turn(cancel, None);
+        h.app
+            .begin_turn(cancel, tokio::sync::mpsc::unbounded_channel().0, None);
 
         // The step begins: thinking.
         h.app
@@ -4949,6 +5037,7 @@ mod tests {
         .unwrap();
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert!(!h.app.turn.processing);
     }
@@ -4993,6 +5082,7 @@ mod tests {
         .unwrap();
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert!(!h.app.turn.running);
         assert!(h.app.turn.cancel.is_none());
@@ -5009,7 +5099,11 @@ mod tests {
         let (hook, answers) = TuiApproval::pair(tx);
         let handle = std::thread::spawn(move || hook.approve(&test_call()));
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
-        h.app.begin_turn(cancel, Some(answers));
+        h.app.begin_turn(
+            cancel,
+            tokio::sync::mpsc::unbounded_channel().0,
+            Some(answers),
+        );
         let (cancel, cancelled) = tokio::sync::watch::channel(false);
         h.app.turn.cancel = Some(cancel);
         h.app.turn.running = true;
@@ -5037,6 +5131,7 @@ mod tests {
         .unwrap();
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert!(!h.app.turn.running);
         assert!(h.app.agent.is_some());
@@ -5054,7 +5149,11 @@ mod tests {
         let (hook, answers) = TuiApproval::pair(tx);
         let handle = std::thread::spawn(move || hook.approve(&test_call()));
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
-        h.app.begin_turn(cancel, Some(answers));
+        h.app.begin_turn(
+            cancel,
+            tokio::sync::mpsc::unbounded_channel().0,
+            Some(answers),
+        );
 
         let event = rx.blocking_recv().expect("the parked call requested");
         h.app.on_event(event);
@@ -5088,6 +5187,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage,
             }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert!(!h.app.turn.running);
         assert!(h.app.error.is_none());
@@ -5097,6 +5197,7 @@ mod tests {
         h.app.on_event(UiEvent::TurnFinished {
             agent: make_agent(),
             result: Err("stopped after 4 steps without finishing; send a follow-up to keep going, or raise the step limit".into()),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert!(!h.app.turn.running);
         assert_eq!(
@@ -5117,17 +5218,26 @@ mod tests {
         // An empty input never submits.
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
         assert!(!h.app.turn.running);
-        // While a turn runs, typing works but Enter is inert.
+        // While a turn runs, typing works and Enter steers: the input
+        // clears, the user line shows, and the effect notes the
+        // interruption on the status strip.
         h.app.turn.running = true;
         for c in "hi".chars() {
             h.app.on_key(key(KeyCode::Char(c)));
         }
         assert_eq!(h.app.chat.input, "hi");
-        assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
+        assert_eq!(
+            h.app.on_key(key(KeyCode::Enter)),
+            vec![Effect::SteerTurn("hi".into())]
+        );
         assert!(h.app.turn.running);
-        // Idle again: Enter submits, shows the user line, and blocks
-        // re-entry.
+        assert!(h.app.chat.input.is_empty());
+        // Idle again: Enter submits a fresh turn, shows the user line,
+        // and blocks re-entry.
         h.app.turn.running = false;
+        for c in "hi".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
         assert_eq!(
             h.app.on_key(key(KeyCode::Enter)),
             vec![Effect::StartTurn("hi".into())]
@@ -5137,6 +5247,7 @@ mod tests {
             h.app.transcript.lines().first(),
             Some(&Line::User("hi".into()))
         );
+        // An empty input still never submits or steers.
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
     }
 
@@ -5807,7 +5918,8 @@ mod tests {
         let workspace = h.app.options.workspace.clone();
         h.app.session_profile = Some("work".to_owned());
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
-        h.app.begin_turn(cancel, None);
+        h.app
+            .begin_turn(cancel, tokio::sync::mpsc::unbounded_channel().0, None);
         assert_eq!(
             h.app.config.last_profile_in(&workspace).as_deref(),
             Some("work"),
@@ -6087,6 +6199,48 @@ mod tests {
         // model stored, the session lands back in the chat.
         h.app.on_key(key(KeyCode::Enter));
         assert!(matches!(h.app.screen, Screen::Chat));
+    }
+
+    /// `/settings` opens over a running turn without steering it: the
+    /// model keeps working in the background, the screens read
+    /// snapshots, and esc hands the still-running turn back.
+    #[test]
+    fn slash_settings_opens_over_a_running_turn_without_steering() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.turn.running = true;
+        for c in "/settings".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(h.app.screen, Screen::Settings(_)));
+        assert!(h.app.turn.running);
+        assert!(effects.is_empty(), "no steer, no turn start: {effects:?}");
+        // The command never reached the transcript as a prompt.
+        assert!(
+            !h.app
+                .transcript
+                .lines()
+                .iter()
+                .any(|line| matches!(line, Line::User(_)))
+        );
+        // Esc leaves the screen; the turn is still running underneath.
+        h.app.on_key(key(KeyCode::Esc));
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert!(h.app.turn.running);
+    }
+
+    /// Every other command keeps its idle-only rule while a turn runs:
+    /// the input is kept, nothing dispatches, nothing steers.
+    #[test]
+    fn other_commands_stay_inert_while_a_turn_runs() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.turn.running = true;
+        for c in "/model".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(matches!(h.app.screen, Screen::Chat));
+        assert_eq!(h.app.chat.input, "/model");
     }
 
     #[test]
@@ -6670,6 +6824,7 @@ mod tests {
         tracker.observe(&UiEvent::TurnFinished {
             agent: Box::new(agent),
             result: Err("provider exploded\nwith detail".to_owned()),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         match tracker.status_for(&h.app) {
             crate::status::Status::Error { msg: Some(msg) } => {
@@ -6699,6 +6854,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
         });
         assert!(matches!(
             tracker.status_for(&h.app),
