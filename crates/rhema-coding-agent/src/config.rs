@@ -91,6 +91,17 @@ pub struct CodingAgentConfig {
     /// the model. `None` — the default — runs the turn exactly as
     /// before: the loop is the provided `run_turn` with no injection.
     pub steering: Option<Arc<dyn Steering>>,
+    /// The environment section rendered into the system prompt: machine
+    /// facts probed where commands run (see the [`environment`
+    /// module](crate::environment)). `None` renders the section empty.
+    /// A verbatim `system` prompt ignores it, like every template
+    /// section.
+    pub environment: Option<String>,
+    /// The user-preferences section rendered into the system prompt —
+    /// the contents of the user's global `USER.md`, verbatim, a
+    /// frontend that has one reads it and passes it here. `None`
+    /// renders nothing.
+    pub user_preferences: Option<String>,
 }
 
 impl std::fmt::Debug for CodingAgentConfig {
@@ -111,6 +122,8 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("summary_worker", &self.summary_worker.is_some())
             .field("steering", &self.steering.is_some())
             .field("shell_env", &self.shell_env.len())
+            .field("environment", &self.environment.is_some())
+            .field("user_preferences", &self.user_preferences.is_some())
             .finish()
     }
 }
@@ -139,6 +152,8 @@ impl CodingAgentConfig {
             summary_worker: None,
             steering: None,
             shell_env: std::collections::BTreeMap::new(),
+            environment: None,
+            user_preferences: None,
         }
     }
 }

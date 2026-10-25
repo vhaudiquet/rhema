@@ -66,7 +66,8 @@ impl From<minijinja::Error> for CodingAgentError {
 /// request's tools array cannot drift. The one assembly point:
 /// [`CodingAgent::new`] builds every agent's prompt here, and a driver
 /// that previews the prompt calls the same function, so what is
-/// previewed is what turns send.
+/// previewed is what turns send. No optional sections: the environment
+/// report and the user preferences render empty.
 pub fn stamped_system(
     base: Option<&str>,
     workspace: &Path,
@@ -76,7 +77,7 @@ pub fn stamped_system(
     // as an empty one.
     let global = rhema_config::Config::skills_dir().ok();
     let skills = rhema_agent_tools::skills::discover(global.as_deref(), workspace);
-    stamped_system_with_skills(base, workspace, extra, &skills)
+    stamped_system_with_sections(base, workspace, extra, &skills, None, None)
 }
 
 /// [`stamped_system`] over skills collected elsewhere — the input path
@@ -91,13 +92,32 @@ pub fn stamped_system_with_skills(
     extra: &[ToolSpec],
     skills: &[Skill],
 ) -> Result<String, CodingAgentError> {
+    stamped_system_with_sections(base, workspace, extra, skills, None, None)
+}
+
+/// The full assembly: the template over `workspace`, the skills, the
+/// tool specs, and the two optional sections — `environment` (machine
+/// facts probed where commands run, see [`crate::environment`]) and
+/// `user` (the user's preferences file, verbatim). The template decides
+/// whether and where the sections appear; `None` is the section-less
+/// render the older constructors name.
+pub fn stamped_system_with_sections(
+    base: Option<&str>,
+    workspace: &Path,
+    extra: &[ToolSpec],
+    skills: &[Skill],
+    environment: Option<&str>,
+    user: Option<&str>,
+) -> Result<String, CodingAgentError> {
     let mut tools = ShellTools::builtin_specs();
     tools.extend_from_slice(extra);
-    rhema_agent_tools::render_system(
+    rhema_agent_tools::render_system_with_sections(
         base.unwrap_or(crate::prompt::DEFAULT_SYSTEM_MD),
         workspace,
         skills,
         &tools,
+        environment,
+        user,
     )
     .map_err(CodingAgentError::from)
 }
@@ -169,13 +189,27 @@ impl CodingAgent {
             // verbatim, not templated.
             Some(system) => system,
             None => match &config.skills {
-                Some(skills) => stamped_system_with_skills(
+                Some(skills) => stamped_system_with_sections(
                     config.base_system.as_deref(),
                     tools.workspace(),
                     &extra,
                     skills,
+                    config.environment.as_deref(),
+                    config.user_preferences.as_deref(),
                 )?,
-                None => stamped_system(config.base_system.as_deref(), tools.workspace(), &extra)?,
+                None => {
+                    let global = rhema_config::Config::skills_dir().ok();
+                    let skills =
+                        rhema_agent_tools::skills::discover(global.as_deref(), tools.workspace());
+                    stamped_system_with_sections(
+                        config.base_system.as_deref(),
+                        tools.workspace(),
+                        &extra,
+                        &skills,
+                        config.environment.as_deref(),
+                        config.user_preferences.as_deref(),
+                    )?
+                }
             },
         };
         // The skills section's byte share of the system prompt: the
@@ -189,9 +223,11 @@ impl CodingAgent {
                 // rendering is deterministic for fixed inputs (skills
                 // arrive from BTreeMap-sorted discovery), so the bare
                 // re-render differs from `system` by that section alone.
+                // The environment and user sections ride both renders
+                // identically — they carry no skills — and cancel out.
                 let mut bare = ShellTools::builtin_specs();
                 bare.extend_from_slice(&extra);
-                rhema_agent_tools::render_system(
+                rhema_agent_tools::render_system_with_sections(
                     config
                         .base_system
                         .as_deref()
@@ -199,6 +235,8 @@ impl CodingAgent {
                     tools.workspace(),
                     &[],
                     &bare,
+                    config.environment.as_deref(),
+                    config.user_preferences.as_deref(),
                 )
                 .map(|without| system.len().saturating_sub(without.len()))
                 .unwrap_or(0)
@@ -710,6 +748,27 @@ mod extra_tools_tests {
         assert!(with.contains("echo") && with.contains("canary"), "{with}");
         let without = stamped_system(None, &workspace, &[]).unwrap();
         assert!(!without.contains("canary"), "{without}");
+    }
+
+    #[test]
+    fn the_optional_sections_reach_the_prompt_where_the_template_places_them() {
+        let workspace = std::env::temp_dir();
+        let prompt = stamped_system_with_sections(
+            None,
+            &workspace,
+            &[],
+            &[],
+            Some("## Environment\n\n- OS: test os"),
+            Some("prefer concise answers"),
+        )
+        .unwrap();
+        assert!(prompt.contains("- OS: test os"), "{prompt}");
+        assert!(prompt.contains("prefer concise answers"), "{prompt}");
+        // The section-less constructors render neither: an absent
+        // section is the render a template without the blocks makes.
+        let bare = stamped_system_with_skills(None, &workspace, &[], &[]).unwrap();
+        assert!(!bare.contains("- OS: test os"), "{bare}");
+        assert!(!bare.contains("prefer concise answers"), "{bare}");
     }
 }
 

@@ -5,6 +5,13 @@ a short python one-liner) and write a whole file only when creating it.
 Tool errors are recoverable.
 Report what failed and adapt. Commands start in the workspace root.
 
+{% if user %}
+{{ user }}
+{% endif %}
+{% if environment %}
+{{ environment }}
+{% endif %}
+
 {% if tools %}
 You have the following tools (name | description | arguments). The
 arguments are the JSON schema a call must satisfy.
