@@ -80,6 +80,98 @@ impl EventSink for NullSink {
     fn emit(&mut self, _event: Event<'_>) {}
 }
 
+/// A mid-turn finish: the job ends while the parent's turn is between
+/// steps, and the between-steps drain appends the notification before
+/// the model's next request — the steering path, against the real
+/// registry, not a scripted `Steering`.
+#[tokio::test]
+async fn a_job_finishing_mid_turn_is_announced_at_the_next_step_boundary() {
+    let provider = Arc::new(ByRole {
+        marker: "the parent's system prompt".into(),
+        // Round 0: start a scout. Round 1: a short sleep — the job (an
+        // instant report) finishes under it. Round 2: end the turn.
+        parent_replies: vec![
+            tool_use(
+                "c1",
+                serde_json::json!({"name": "scout", "prompt": "look around"}),
+            ),
+            ModelOutput {
+                message: Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolCall(ToolCall {
+                        id: "c2".to_owned(),
+                        name: "bash".into(),
+                        args: serde_json::json!({"command": "sleep 1"}),
+                        ..ToolCall::default()
+                    })],
+                },
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            },
+            end_turn("done"),
+        ],
+        job_report: "scout report",
+        parent_served: AtomicUsize::new(0),
+    });
+    let scout = SubagentDef {
+        name: "scout".into(),
+        description: "looks around".into(),
+        model: None,
+        max_steps: None,
+        body: "You are the scout. Look.".into(),
+    };
+    let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
+    let tools = Arc::new(SubagentTools::new(
+        provider.clone(),
+        vec![scout],
+        shell.clone(),
+        "parent-model",
+    ));
+    let mut config = CodingAgentConfig::new("m", std::env::temp_dir());
+    config.base_system = Some("the parent's system prompt".into());
+    config.tools = Some(shell);
+    config.extra_resolver = Some(tools.clone());
+    config.steering = Some(tools.handle().steering());
+    let mut agent = CodingAgent::new(provider.clone(), config).unwrap();
+
+    agent
+        .turn("delegate the look", &mut NullSink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    // The notification landed mid-turn, between the sleep round and
+    // the final round — before the turn ended, without a new turn.
+    let history = &agent.session().history;
+    let is_notification = |message: &Message| {
+        message.role == Role::User
+            && message
+                .content
+                .iter()
+                .any(|content| matches!(content, Content::Text(text) if text.contains("Subagent scout (job-1) has finished.")))
+    };
+    assert_eq!(
+        history.iter().filter(|m| is_notification(m)).count(),
+        1,
+        "one mid-turn announcement: {history:?}"
+    );
+    let notification_pos = history.iter().position(is_notification).unwrap();
+    // The sleep call's result closed round 1; the announcement sits
+    // after it and before the turn's final reply.
+    let sleep_result_pos = history
+        .iter()
+        .position(|m| {
+            m.role == Role::Tool
+                && m.content
+                    .iter()
+                    .any(|c| matches!(c, Content::ToolResult(result) if result.id == "c2"))
+        })
+        .expect("the sleep round closed before the turn ended");
+    assert!(
+        notification_pos > sleep_result_pos,
+        "announced after the sleep round, before the turn's end: {history:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_wired_agent_starts_notifies_and_fetches_by_job_id() {
     let provider = Arc::new(ByRole {
@@ -145,17 +237,18 @@ async fn a_wired_agent_starts_notifies_and_fetches_by_job_id() {
         "the start names its job: {start_results:?}"
     );
 
-    // The job finishes while no turn runs.
+    // The job finishes while no turn runs: finished jobs leave the
+    // status snapshot, and the finish event names the moment.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while tools
-        .handle()
-        .status()
-        .first()
-        .is_none_or(|job| job.phase != "finished")
-    {
+    let finished = loop {
+        let events = tools.handle().take_finished();
+        if !events.is_empty() {
+            break events;
+        }
         assert!(Instant::now() < deadline, "the job never finished");
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
+    assert_eq!(finished[0].line, "Subagent scout (job-1) has finished.");
 
     // Turn 2: the notification precedes the input; the fetch returns
     // the cached report.

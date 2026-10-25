@@ -291,17 +291,13 @@ fn job_id(result: &ToolResult) -> String {
     rest[..end].to_owned()
 }
 
-/// Waits until `id` left the running set: its status phase reads
-/// `finished` (ok or error — the fetch tells which).
+/// Waits until `id` finished: a finished job leaves the status
+/// snapshot at once — it carries working jobs only — and its finish
+/// event names the outcome (ok or error — the fetch tells which).
 async fn wait_finished(handle: &rhema_subagents::SubagentHandle, id: &str) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let finished = handle
-            .status()
-            .iter()
-            .find(|s| s.id == id)
-            .is_none_or(|status| status.phase == "finished");
-        if finished {
+        if handle.status().iter().all(|s| s.id != id) {
             return;
         }
         assert!(

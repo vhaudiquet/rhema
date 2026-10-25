@@ -17,13 +17,19 @@
 //! at once; a start beyond the cap queues — the id is still minted and
 //! returned at once, and the job begins when a slot frees.
 //!
-//! Two read-only surfaces leave the registry: [`Registry::status`],
-//! the subscription the UI's redraw tick renders one live line per
-//! job from, and the [`Steering`] implementation, one notification
-//! line per finished-but-unfetched job. Both are queries, never
-//! mutations of record: the driver deduplicates announcements within a
-//! turn, and a crash between its append and its checkpoint only
-//! re-delivers.
+//! Three surfaces leave the registry. [`Registry::status`] is the
+//! subscription the UI's redraw tick renders one working line per job
+//! from — working only: a finished job leaves it at once, and the
+//! finish moves to the transcript as a notice. The [`Steering`]
+//! implementation is one notification line per finished-but-unfetched
+//! job, a pure query — the driver deduplicates within a turn, and a
+//! crash between its append and its checkpoint only re-delivers. And
+//! the two consuming takes serve the frontend: [`Registry::take_finished`]
+//! delivers each finish once, the transcript notice, and
+//! [`Registry::take_notifications`] hands a session with no running
+//! turn the pending lines to run as the next turn's prompt, retiring
+//! them so the driver's drain does not repeat what the prompt already
+//! said.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -55,8 +61,8 @@ pub struct JobStatus {
     pub id: String,
     /// The subagent definition the job runs.
     pub name: String,
-    /// `queued`, the phase the inner turn last reported, or `finished`
-    /// for a report the model has not fetched yet.
+    /// `queued`, or the phase the inner turn last reported. A finished
+    /// job is not in the snapshot: the transcript carries the outcome.
     pub phase: String,
     /// The job's current model call's usage, when reported.
     pub context: Option<Usage>,
@@ -96,6 +102,20 @@ pub enum Fetched {
     Unknown,
 }
 
+/// One finished job, as the finish feed delivers it: the transcript
+/// notice a frontend pushes the moment a job ends. The `line` is the
+/// same announcement the driver steers with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobFinished {
+    /// The job's registry id (`job-<n>`).
+    pub id: String,
+    /// The subagent definition the job ran.
+    pub name: String,
+    /// The outcome in the notification wording: the job finished, or
+    /// finished with an error and its reason.
+    pub line: String,
+}
+
 /// A minted job: its id and the cancel flag the spawned task owns.
 #[derive(Debug, Clone)]
 pub(crate) struct Minted {
@@ -119,11 +139,13 @@ enum State {
         model: Option<String>,
     },
     /// Its report exists (capped at production) and stays cached until
-    /// the registry drops; `fetched` retires the job's UI line and its
-    /// notifications.
+    /// the registry drops. `fetched` retires the announcements (the
+    /// cache stays); `announced` retires the notification line for a
+    /// frontend that took it to run as a prompt.
     Finished {
         outcome: Result<String, String>,
         fetched: bool,
+        announced: bool,
     },
 }
 
@@ -149,6 +171,9 @@ pub struct Registry {
 struct RegistryInner {
     next: u64,
     jobs: BTreeMap<String, Job>,
+    /// Finished-but-untaken jobs, oldest first: the finish feed
+    /// [`Registry::take_finished`] drains.
+    finished: Vec<JobFinished>,
 }
 
 impl Registry {
@@ -159,6 +184,7 @@ impl Registry {
             inner: Mutex::new(RegistryInner {
                 next: 0,
                 jobs: BTreeMap::new(),
+                finished: Vec::new(),
             }),
             permits: Arc::new(tokio::sync::Semaphore::new(max_running.max(1))),
         }
@@ -232,20 +258,31 @@ impl Registry {
     /// The job's run ended: its report or the reason it failed. The
     /// report was capped at production; the cache is what was cut.
     pub(crate) fn finish(&self, id: &str, outcome: Result<String, String>) {
-        if let Some(job) = self.lock().jobs.get_mut(id) {
-            if !matches!(job.state, State::Finished { .. }) {
-                job.state = State::Finished {
-                    outcome,
-                    fetched: false,
-                };
-            }
+        let mut inner = self.lock();
+        let Some(job) = inner.jobs.get_mut(id) else {
+            return;
+        };
+        if matches!(job.state, State::Finished { .. }) {
+            return;
         }
+        let name = job.name.clone();
+        let line = announcement(&name, id, &outcome);
+        job.state = State::Finished {
+            outcome,
+            fetched: false,
+            announced: false,
+        };
+        inner.finished.push(JobFinished {
+            id: id.to_owned(),
+            name,
+            line,
+        });
     }
 
     /// Reads a job's report back — never an execution. A Report or
-    /// Failed fetch marks the job fetched: its UI line leaves and it
-    /// stops announcing, while the cache stays until the registry
-    /// drops.
+    /// Failed fetch marks the job fetched: it stops announcing here
+    /// and in the steering drain, while the cache stays until the
+    /// registry drops.
     pub(crate) fn fetch(&self, id: &str) -> Fetched {
         let mut inner = self.lock();
         let Some(job) = inner.jobs.get_mut(id) else {
@@ -276,44 +313,91 @@ impl Registry {
         fetched_state
     }
 
-    /// The notification lines: one per finished-but-unfetched job,
-    /// oldest first. A pure query — calling it twice returns the same
-    /// lines; the driver deduplicates within a turn.
+    /// The notification lines: one per finished job neither fetched
+    /// nor taken, oldest first. A pure query — calling it twice
+    /// returns the same lines; the driver deduplicates within a turn,
+    /// and a line a frontend took for its prompt is retired at the
+    /// take, not here.
     pub(crate) fn notifications(&self) -> Vec<String> {
         let inner = self.lock();
         let mut jobs: Vec<(&str, &Job)> = inner
             .jobs
             .iter()
-            .filter(|(_, job)| matches!(job.state, State::Finished { fetched: false, .. }))
+            .filter(|(_, job)| {
+                matches!(
+                    job.state,
+                    State::Finished {
+                        fetched: false,
+                        announced: false,
+                        ..
+                    }
+                )
+            })
             .map(|(id, job)| (id.as_str(), job))
             .collect();
         jobs.sort_by_key(|(_, job)| job.seq);
         jobs.iter()
             .map(|(id, job)| match &job.state {
-                State::Finished { outcome: Ok(_), .. } => {
-                    format!("Subagent {} ({id}) has finished.", job.name)
-                }
-                State::Finished {
-                    outcome: Err(reason),
-                    ..
-                } => format!(
-                    "Subagent {} ({id}) has finished with an error: {reason}.",
-                    job.name
-                ),
+                State::Finished { outcome, .. } => announcement(&job.name, id, outcome),
                 _ => unreachable!("filtered to finished jobs"),
             })
             .collect()
     }
 
-    /// The subscription the UI renders: one entry per queued, running,
-    /// or finished-but-unfetched job. A fetched job leaves the snapshot
-    /// — the transcript's tool row carries the outcome now.
+    /// Takes the pending notification lines out, oldest first, marking
+    /// each taken job announced: its line stops announcing here and in
+    /// the [`Steering`] drain. The frontend's idle path — a session
+    /// with no running turn runs the lines as the next turn's prompt,
+    /// and this take keeps the driver's turn-start drain from
+    /// repeating what the prompt already said. While a turn runs, the
+    /// lines belong to the driver's steering: do not call this.
+    pub(crate) fn take_notifications(&self) -> Vec<String> {
+        let mut inner = self.lock();
+        let mut taken: Vec<(u64, String, String)> = inner
+            .jobs
+            .iter()
+            .filter_map(|(id, job)| match &job.state {
+                State::Finished {
+                    outcome,
+                    fetched: false,
+                    announced: false,
+                } => Some((job.seq, id.clone(), announcement(&job.name, id, outcome))),
+                _ => None,
+            })
+            .collect();
+        taken.sort_by_key(|(seq, _, _)| *seq);
+        for (_, id, _) in &taken {
+            if let Some(job) = inner.jobs.get_mut(id) {
+                if let State::Finished { announced, .. } = &mut job.state {
+                    *announced = true;
+                }
+            }
+        }
+        taken.into_iter().map(|(_, _, line)| line).collect()
+    }
+
+    /// Takes the finish events out, oldest first — one per job,
+    /// exactly once. The transcript notice feed: a frontend pushes
+    /// each event's `line` when the job ends, whatever turn is
+    /// running. Taking an event retires nothing else: the job keeps
+    /// announcing until its report is fetched or its line is taken.
+    pub(crate) fn take_finished(&self) -> Vec<JobFinished> {
+        let mut inner = self.lock();
+        let mut events = std::mem::take(&mut inner.finished);
+        events.sort_by_key(|event| inner.jobs.get(&event.id).map_or(0, |job| job.seq));
+        events
+    }
+
+    /// The subscription the UI renders: one entry per working job —
+    /// queued or running. A finished job leaves the snapshot at once
+    /// (the finish notice carries the outcome) and its report stays on
+    /// the fetch until the registry drops.
     pub fn status(&self) -> Vec<JobStatus> {
         let inner = self.lock();
         let mut jobs: Vec<(&str, &Job)> = inner
             .jobs
             .iter()
-            .filter(|(_, job)| !matches!(job.state, State::Finished { fetched: true, .. }))
+            .filter(|(_, job)| !matches!(job.state, State::Finished { .. }))
             .map(|(id, job)| (id.as_str(), job))
             .collect();
         jobs.sort_by_key(|(_, job)| job.seq);
@@ -327,7 +411,7 @@ impl Registry {
                         spent,
                         model,
                     } => (phase.clone(), *context, *spent, model.clone()),
-                    State::Finished { .. } => ("finished".to_owned(), None, None, None),
+                    State::Finished { .. } => unreachable!("filtered to working jobs"),
                 };
                 JobStatus {
                     id: (*id).to_owned(),
@@ -355,6 +439,15 @@ impl Drop for Registry {
         for job in self.lock().jobs.values() {
             job.cancel.store(true, Ordering::Relaxed);
         }
+    }
+}
+
+/// The notification line for one finished job: the driver's steering
+/// vocabulary, and the finish notice's text.
+fn announcement(name: &str, id: &str, outcome: &Result<String, String>) -> String {
+    match outcome {
+        Ok(_) => format!("Subagent {name} ({id}) has finished."),
+        Err(reason) => format!("Subagent {name} ({id}) has finished with an error: {reason}."),
     }
 }
 
@@ -417,9 +510,17 @@ mod tests {
         let registry = registry();
         let job = registry.mint("scout");
         registry.finish(&job.id, Ok("the report".to_owned()));
-        // Finished-but-unfetched: still on the snapshot, still
-        // announcing.
-        assert_eq!(registry.status()[0].phase, "finished");
+        // Finished: off the working snapshot at once, the finish event
+        // pending, the announcement still steering.
+        assert!(registry.status().is_empty());
+        assert_eq!(
+            registry.take_finished(),
+            vec![JobFinished {
+                id: "job-1".into(),
+                name: "scout".into(),
+                line: "Subagent scout (job-1) has finished.".into(),
+            }]
+        );
         assert_eq!(
             registry.notifications(),
             vec!["Subagent scout (job-1) has finished.".to_owned()]
@@ -445,11 +546,92 @@ mod tests {
     }
 
     #[test]
+    fn the_finish_feed_delivers_each_job_once_in_mint_order() {
+        let registry = registry();
+        let ok = registry.mint("scout");
+        let bad = registry.mint("reviewer");
+        registry.finish(&bad.id, Err("hit its step budget of 256".to_owned()));
+        registry.finish(&ok.id, Ok("the report".to_owned()));
+        assert_eq!(
+            registry.take_finished(),
+            vec![
+                JobFinished {
+                    id: "job-1".into(),
+                    name: "scout".into(),
+                    line: "Subagent scout (job-1) has finished.".into(),
+                },
+                JobFinished {
+                    id: "job-2".into(),
+                    name: "reviewer".into(),
+                    line: "Subagent reviewer (job-2) has finished with an error: hit its step budget of 256."
+                        .into(),
+                },
+            ],
+            "oldest first, whatever the finish order"
+        );
+        assert!(registry.take_finished().is_empty(), "one event per job");
+    }
+
+    #[test]
+    fn a_taken_line_stops_announcing_but_a_finish_event_retires_nothing() {
+        let registry = registry();
+        let job = registry.mint("scout");
+        registry.finish(&job.id, Ok("the report".to_owned()));
+        // The notice feed alone leaves the steering line pending: the
+        // driver still announces it.
+        let _ = registry.take_finished();
+        assert_eq!(
+            registry.notifications(),
+            vec!["Subagent scout (job-1) has finished.".to_owned()]
+        );
+        // The idle take retires the line: the prompt carries the text
+        // now, and the driver's drain must not repeat it.
+        assert_eq!(
+            registry.take_notifications(),
+            vec!["Subagent scout (job-1) has finished.".to_owned()]
+        );
+        assert!(registry.notifications().is_empty());
+        assert!(registry.take_notifications().is_empty());
+        // The report is still on the fetch.
+        assert_eq!(
+            registry.fetch(&job.id),
+            Fetched::Report {
+                name: "scout".into(),
+                report: "the report".into()
+            }
+        );
+    }
+
+    #[test]
+    fn the_idle_take_covers_only_finished_jobs() {
+        let registry = registry();
+        let done = registry.mint("alpha");
+        let running = registry.mint("zeta");
+        registry.finish(&done.id, Ok("r".to_owned()));
+        registry.mark_running(&running.id, None);
+        assert_eq!(
+            registry.take_notifications(),
+            vec!["Subagent alpha (job-1) has finished.".to_owned()],
+            "a running job has no line to take"
+        );
+        // The running job keeps its snapshot line.
+        let snapshot = registry.status();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, running.id);
+        assert_eq!(snapshot[0].phase, "thinking");
+    }
+
+    #[test]
     fn a_failed_job_fetches_as_its_reason() {
         let registry = registry();
         let job = registry.mint("reviewer");
         registry.finish(&job.id, Err("hit its step budget of 256".to_owned()));
-        // The failure announced itself before the fetch.
+        // The failure announced itself before the fetch, notice
+        // included.
+        assert_eq!(
+            registry.take_finished()[0].line,
+            "Subagent reviewer (job-1) has finished with an error: hit its step budget of 256."
+        );
         assert_eq!(
             registry.notifications(),
             vec![
@@ -485,10 +667,14 @@ mod tests {
             },
         );
         assert_eq!(
-            registry.status()[0].phase,
-            "finished",
-            "a status after the finish changes nothing"
+            registry.fetch(&job.id),
+            Fetched::Report {
+                name: "scout".into(),
+                report: "final".into()
+            },
+            "a late status changes nothing: the finish stands"
         );
+        assert!(!registry.notifications().is_empty());
     }
 
     #[test]
@@ -525,14 +711,18 @@ mod tests {
         let registry = registry();
         let first = registry.mint("alpha");
         let second = registry.mint("zeta");
-        registry.finish(&second.id, Ok("r2".to_owned()));
-        registry.finish(&first.id, Ok("r1".to_owned()));
         let ids: Vec<String> = registry.status().iter().map(|s| s.id.clone()).collect();
         assert_eq!(ids, vec!["job-1", "job-2"], "mint order, not id order");
+        registry.finish(&second.id, Ok("r2".to_owned()));
+        registry.finish(&first.id, Ok("r1".to_owned()));
         assert_eq!(
             registry.notifications()[0],
             "Subagent alpha (job-1) has finished."
         );
+        let events = registry.take_finished();
+        let names: Vec<&str> = events.iter().map(|event| event.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "zeta"], "mint order, not id order");
+        assert!(registry.status().is_empty(), "finished jobs leave it");
     }
 
     #[test]

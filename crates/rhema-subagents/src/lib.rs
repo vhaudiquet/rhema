@@ -16,10 +16,13 @@
 //! Jobs live in a [`registry`](crate::registry::Registry): ids, states,
 //! the capped report cache, one cancel flag per job (escape stops the
 //! main session, never a running subagent), and a concurrency cap
-//! past which starts queue. The registry is also the two read surfaces:
-//! the status subscription the UI renders one live line per job from,
-//! and the notifications the driver drains at step boundaries. Jobs are
-//! bound to the agent's lifetime — dropped with it, reports lost.
+//! past which starts queue. The registry is also the read surfaces:
+//! the status subscription the UI renders one working line per job
+//! from, the finish feed a frontend turns into transcript notices, and
+//! the notifications — the driver drains them at step boundaries while
+//! a turn runs, and a frontend with no running turn takes them to run
+//! as the next turn's prompt. Jobs are bound to the agent's lifetime —
+//! dropped with it, reports lost.
 //!
 //! Layout:
 //! - [`def`] — `SubagentDef`, discovery over markdown definitions
@@ -48,6 +51,6 @@ pub mod tools;
 pub mod wire;
 
 pub use def::{SubagentDef, builtin, discover};
-pub use registry::JobStatus;
+pub use registry::{JobFinished, JobStatus};
 pub use tools::SubagentTools;
 pub use wire::{SubagentHandle, extra_specs, wire, wire_at};

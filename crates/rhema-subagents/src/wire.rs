@@ -25,9 +25,10 @@ use crate::registry::Registry;
 use crate::tools::SubagentTools;
 
 /// The registry-backed handle `wire` returns beside the config: the
-/// UI's status subscription and the driver's steering, both reading the
-/// one registry the `subagent` tool starts jobs into. Cloneable; a
-/// clone reads the same jobs.
+/// UI's status subscription, the finish notice feed, the idle
+/// notification take, and the driver's steering — all reading the one
+/// registry the `subagent` tool starts jobs into. Cloneable; a clone
+/// reads the same jobs.
 #[derive(Clone)]
 pub struct SubagentHandle {
     registry: Arc<Registry>,
@@ -39,15 +40,33 @@ impl SubagentHandle {
         Self { registry }
     }
 
-    /// The jobs' screen-facing state: one entry per queued, running, or
-    /// finished-but-unfetched job, oldest first. Empty when the session
-    /// wired no subagents.
+    /// The jobs' screen-facing state: one entry per working job —
+    /// queued or running, oldest first. A finished job left at once;
+    /// its outcome arrived on [`Self::take_finished`]. Empty when the
+    /// session wired no subagents.
     pub fn status(&self) -> Vec<crate::registry::JobStatus> {
         self.registry.status()
     }
 
+    /// The finish events, oldest first — one per job, exactly once per
+    /// job. The transcript notice feed: a frontend pushes each event's
+    /// `line` the moment the job ends, whatever turn is running.
+    pub fn take_finished(&self) -> Vec<crate::registry::JobFinished> {
+        self.registry.take_finished()
+    }
+
+    /// Takes the pending notification lines out, oldest first, marking
+    /// them announced. The idle-session path: a frontend with no
+    /// running turn runs the lines as the next turn's prompt — the
+    /// regular-prompt delivery — and this take keeps the driver's
+    /// turn-start drain from repeating what the prompt already said.
+    /// While a turn runs, leave these for the driver's steering.
+    pub fn take_notifications(&self) -> Vec<String> {
+        self.registry.take_notifications()
+    }
+
     /// The registry as the driver's steering source: one notification
-    /// line per finished-but-unfetched job, per drain. Set this on
+    /// line per finished-but-untaken job, per drain. Set this on
     /// `CodingAgentConfig::steering` — it is already set by [`wire`];
     /// a frontend rebuilding configs by hand carries it over.
     pub fn steering(&self) -> Arc<dyn rhema_coding_agent::Steering> {
