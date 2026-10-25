@@ -18,6 +18,9 @@ probe:
       Use `rg` rather than recursive grep: it respects .gitignore by
       default. `rg -uu` also searches ignored files.
   - executable: fd
+  - executable: jq
+  - executable: yq
+  - executable: sd
 
 # The session facts every shape carries — written once here and placed
 # by reference (`{{ facts }}`), never duplicated in the texts below.
