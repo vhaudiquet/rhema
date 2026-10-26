@@ -474,7 +474,7 @@ fn final_text(message: &Message) -> Option<String> {
         .iter()
         .filter_map(|content| match content {
             Content::Text(text) => Some(text.as_str()),
-            Content::ToolCall(_) | Content::ToolResult(_) => None,
+            Content::ToolCall(_) | Content::ToolResult(_) | Content::Image(_) => None,
         })
         .collect::<Vec<_>>()
         .join("");

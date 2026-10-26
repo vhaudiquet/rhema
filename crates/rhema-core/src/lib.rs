@@ -8,7 +8,7 @@
 //! drivers (SPEC.md §0, §5).
 //!
 //! Layout:
-//! - [`message`] — `Role`, `Content`, `Message`
+//! - [`message`] — `Role`, `Content`, `Message`, the `Image` block
 //! - [`paste`] — embedded pastes in message text: the chip codec
 //! - [`session`] — the caller-owned, serializable `Session`
 //! - [`request`] — `ModelRequest`, `ChatParams`, `ToolSpec`
@@ -38,7 +38,7 @@ pub mod tool;
 pub use async_trait::async_trait;
 pub use engine::{Agent, AgentBuilder, AgentError, CommitError, CommitHook, run_turn};
 pub use event::{Event, EventSink};
-pub use message::{Content, Message, Role};
+pub use message::{Content, Image, ImageMediaType, Message, Role};
 #[cfg(feature = "mock")]
 pub use mock::MockProvider;
 pub use output::{ModelOutput, Step, StopReason, Usage};

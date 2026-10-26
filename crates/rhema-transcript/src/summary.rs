@@ -28,6 +28,7 @@ pub fn message_bytes(message: &Message) -> usize {
             Content::Text(text) => text.len(),
             Content::ToolCall(call) => call.name.len() + call.args.to_string().len(),
             Content::ToolResult(result) => result.content.len(),
+            Content::Image(image) => image.data.len(),
         })
         .sum()
 }
@@ -97,6 +98,7 @@ fn block_line(content: &Content, cap: usize) -> String {
             if result.is_error { "failed" } else { "ok" },
             head(&result.content, cap)
         ),
+        Content::Image(image) => format!("[image: {}]", image.media_type.as_str()),
     }
 }
 
@@ -164,6 +166,8 @@ pub(crate) fn summarize_range(messages: &[Message], range: Range) -> ((usize, us
                     results += 1;
                     failures += usize::from(result.is_error);
                 }
+                // A head quotes text; an image has none.
+                Content::Image(_) => {}
             }
         }
     }
@@ -244,6 +248,12 @@ pub fn render_message(message: &Message) -> String {
                     if result.is_error { "failed" } else { "ok" },
                     result.content
                 ));
+            }
+            Content::Image(image) => {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                out.push_str(&format!("[image: {}]", image.media_type.as_str()));
             }
         }
     }

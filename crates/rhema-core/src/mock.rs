@@ -66,6 +66,8 @@ impl ModelProvider for MockProvider {
                     });
                 }
                 crate::message::Content::ToolResult(_) => {}
+                // Images ride the message; the event stream carries none.
+                crate::message::Content::Image(_) => {}
             }
         }
         Ok(out)

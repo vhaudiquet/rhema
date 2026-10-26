@@ -358,6 +358,9 @@ pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, Provid
                         ..WirePart::default()
                     });
                 }
+                // Images ride the session but not this wire yet; the
+                // inline-data part is a later effort.
+                Content::Image(_) => {}
             }
         }
         if parts.is_empty() {

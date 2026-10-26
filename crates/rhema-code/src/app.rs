@@ -3705,7 +3705,8 @@ pub(crate) fn context_tokens(usage: &Usage) -> u64 {
 }
 
 /// A rough token estimate over a history: about four characters per
-/// token, counted across text, tool arguments, and tool results. There
+/// token, counted across text, tool arguments, tool results, and image
+/// data. There
 /// is no tokenizer this side of the wire, and the footer is a gauge,
 /// not an invoice.
 fn estimate_history_tokens(history: &[Message]) -> u64 {
@@ -3716,6 +3717,7 @@ fn estimate_history_tokens(history: &[Message]) -> u64 {
             Content::Text(text) => text.len(),
             Content::ToolCall(call) => call.args.to_string().len(),
             Content::ToolResult(result) => result.content.len(),
+            Content::Image(image) => image.data.len(),
         })
         .sum();
     (chars as u64) / 4

@@ -396,6 +396,9 @@ impl Transcript {
                     Content::ToolResult(result) => {
                         shares.tool_results += result.content.len();
                     }
+                    // Shares spreads tokens over the categories it names;
+                    // image bytes are the message budgets' to count.
+                    Content::Image(_) => {}
                 }
             }
         }

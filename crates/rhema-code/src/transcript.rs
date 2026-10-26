@@ -121,6 +121,8 @@ impl Transcript {
                             // Results live in Tool-role messages, never in
                             // assistant content.
                             Content::ToolResult(_) => {}
+                            // Assistant turns carry no image blocks.
+                            Content::Image(_) => {}
                         }
                     }
                 }
