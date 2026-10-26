@@ -2,9 +2,8 @@
 # compiled builtin named under `run`.
 name: bootstrap_save
 description: >-
-  Write one of your identity files. `kind` is `soul` (who you are:
-  name, tone, purpose) or `user` (who the user is). Overwrites the
-  file, so send the whole document every time. Both files enter every
+  Write one of your identity files Overwrites the file, 
+  so send the whole document every time. Both files enter every
   request: keep each one small, stable, and high-signal.
 parameters:
   type: object
@@ -12,7 +11,7 @@ parameters:
     kind:
       type: string
       enum: [soul, user]
-      description: "Which file to write: soul or user."
+      description: "Which file to write"
     content:
       type: string
       description: The file's full markdown contents.
