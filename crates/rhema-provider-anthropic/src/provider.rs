@@ -295,11 +295,19 @@ struct ZaiFacts {
     cached_input_per_mtok: f64,
     input_per_mtok: f64,
     output_per_mtok: f64,
+    /// Whether the model accepts image input. The GLM-5.3 family's
+    /// multimodal input is a published product surface — Z.ai's model
+    /// documentation and pricing list the vision-capable chat rows — a
+    /// verdict neither the Anthropic-compatible route nor the monitor
+    /// endpoint carries a field for.
+    vision: bool,
 }
 
 const ZAI_CATALOG: &[ZaiFacts] = &[
     ZaiFacts {
         id: "glm-5.3",
+        // Multimodal chat, per Z.ai's GLM-5.3 model documentation.
+        vision: true,
         context: 1_000_000,
         output: 128_000,
         cached_input_per_mtok: 0.26,
@@ -308,6 +316,8 @@ const ZAI_CATALOG: &[ZaiFacts] = &[
     },
     ZaiFacts {
         id: "glm-5.3-flash",
+        // Multimodal chat, per Z.ai's GLM-5.3 model documentation.
+        vision: true,
         context: 1_000_000,
         output: 128_000,
         cached_input_per_mtok: 0.03,
@@ -316,6 +326,8 @@ const ZAI_CATALOG: &[ZaiFacts] = &[
     },
     ZaiFacts {
         id: "glm-5.3-flashx",
+        // Multimodal like the rest of the GLM-5.3 family.
+        vision: true,
         context: 1_000_000,
         output: 128_000,
         cached_input_per_mtok: 0.075,
@@ -337,6 +349,7 @@ fn decorate_zai(models: &mut [ModelCard]) {
         {
             model.input_token_limit = Some(row.context);
             model.output_token_limit = Some(row.output);
+            model.supports_vision = Some(row.vision);
             model.pricing = Some(Pricing {
                 input_per_mtok: row.input_per_mtok,
                 output_per_mtok: row.output_per_mtok,
@@ -540,6 +553,8 @@ mod tests {
                 cached_input_per_mtok: Some(0.26),
             })
         );
+        // Every GLM-5.3-family row is multimodal input.
+        assert_eq!(models[0].supports_vision, Some(true));
         // The endpoint spells the ids lowercase, the docs uppercase —
         // both hit the catalog row.
         assert_eq!(models[1].input_token_limit, Some(1_000_000));
@@ -547,9 +562,11 @@ mod tests {
             models[1].pricing.map(|pricing| pricing.input_per_mtok),
             Some(0.37)
         );
+        assert_eq!(models[1].supports_vision, Some(true));
         // An id outside the catalog shows no invented facts.
         assert_eq!(models[2].input_token_limit, None);
         assert_eq!(models[2].pricing, None);
+        assert_eq!(models[2].supports_vision, None);
     }
 
     #[test]

@@ -15,6 +15,13 @@
 //!   by a `User` one) merge into one message, and `tool_result` blocks are
 //!   hoisted ahead of text blocks — the API expects results at the top of
 //!   the user turn.
+//! - Images ride the [`Content::Image`] blocks of user turns, each a
+//!   `source` block of base64 bytes beside the text — the API accepts
+//!   jpeg, png, gif, and webp, exactly
+//!   [`rhema_core::message::ImageMediaType`]'s set, and no url sources.
+//!   Models never emit image blocks, so the response side is untouched.
+//!   An image is a content block like any other: a turn's last image
+//!   carries the cache breakpoint like a text block would.
 //! - `tool_use.input` must be a JSON object: objects pass through, absent
 //!   args become `{}`, anything else is wrapped under [`WRAPPED_ARGS_KEY`].
 //!   Call ids and names round-trip verbatim.
@@ -205,16 +212,44 @@ pub enum WireBlock {
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<WireCacheControl>,
     },
+    /// An image the user attached (user turns only), as base64 bytes
+    /// beside the text. The API accepts jpeg, png, gif, and webp —
+    /// exactly [`rhema_core::message::ImageMediaType`]'s set — and no
+    /// url sources, so core's inline-image model maps one-to-one.
+    Image {
+        /// The base64 payload and its media type.
+        source: WireImageSource,
+        /// The cache breakpoint marker, when this block ends a cached
+        /// prefix.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<WireCacheControl>,
+    },
+}
+
+/// The `source` object of a [`WireBlock::Image`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireImageSource {
+    /// Always `"base64"`: core carries images inline, and the API takes
+    /// no url sources.
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    /// The image's full MIME type (`image/png`, ...).
+    pub media_type: String,
+    /// The base64-encoded file bytes, exactly as core carries them.
+    pub data: String,
 }
 
 impl WireBlock {
     /// Marks this block as a cache breakpoint. Assistant blocks are
     /// never the last block of a request — a turn always ends with the
     /// user's input or a tool result — so only the user-side variants
-    /// carry the marker.
+    /// carry the marker, images included: a turn may end on an attached
+    /// image, and a lookup position there is as good as one on text.
     fn mark_ephemeral(&mut self) {
         match self {
-            WireBlock::Text { cache_control, .. } | WireBlock::ToolResult { cache_control, .. } => {
+            WireBlock::Text { cache_control, .. }
+            | WireBlock::ToolResult { cache_control, .. }
+            | WireBlock::Image { cache_control, .. } => {
                 *cache_control = EPHEMERAL;
             }
             _ => {}
@@ -430,8 +465,19 @@ pub struct WireModel {
     pub display_name: String,
 }
 
+/// Whether a listed model accepts image input, as far as this adapter
+/// knows. The models list carries no modality field, so this is curated
+/// knowledge: every `claude`-prefixed id is a Claude 3+ chat model, and
+/// every Claude 3+ model takes images — the same honesty basis as the
+/// pricing other adapters bake into their listings. Anything else (Z.ai's
+/// route serves non-claude ids too) stays unknown, not guessed.
+fn vision_of(id: &str) -> Option<bool> {
+    id.starts_with("claude").then_some(true)
+}
+
 impl From<WireModel> for ModelCard {
     fn from(wire: WireModel) -> Self {
+        let supports_vision = vision_of(&wire.id);
         Self {
             id: wire.id,
             display_name: wire.display_name,
@@ -441,8 +487,8 @@ impl From<WireModel> for ModelCard {
             description: String::new(),
             input_token_limit: None,
             output_token_limit: None,
+            supports_vision,
             // Every listed model is offered through the Messages API.
-            supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
         }
@@ -633,9 +679,19 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
                         _ => None,
                     })
                     .collect();
+                // Text and images keep their own relative order — the
+                // model reads the blocks as the user arranged them.
                 blocks.extend(message.content.iter().filter_map(|content| match content {
                     Content::Text(text) if !text.is_empty() => Some(WireBlock::Text {
                         text: text.clone(),
+                        cache_control: None,
+                    }),
+                    Content::Image(image) => Some(WireBlock::Image {
+                        source: WireImageSource {
+                            kind: "base64",
+                            media_type: image.media_type.as_str().to_owned(),
+                            data: image.data.clone(),
+                        },
                         cache_control: None,
                     }),
                     _ => None,
@@ -1140,6 +1196,7 @@ fn stop_reason(stop_reason: Option<&str>) -> StopReason {
 mod tests {
     use super::*;
     use rhema_core::event::Event;
+    use rhema_core::message::{Image, ImageMediaType};
     use rhema_core::request::{ChatParams, ToolSpec};
     use rhema_core::tool::ToolResult;
     use serde_json::json;
@@ -1335,6 +1392,102 @@ mod tests {
                   "cache_control": { "type": "ephemeral" } }
             ]),
             "the final block ends the cached prefix"
+        );
+    }
+
+    #[test]
+    fn a_user_turn_with_an_image_maps_to_a_base64_source_block() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text_with_images(
+                Role::User,
+                "what is in this screenshot?",
+                vec![Image::new(ImageMediaType::Png, "aGVsbG8=")],
+            )],
+            tools: Vec::new(),
+            params: ChatParams::new("claude-sonnet-4-5"),
+        };
+
+        let json = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        assert_eq!(
+            json["messages"][0]["content"],
+            json!([
+                { "type": "text", "text": "what is in this screenshot?" },
+                { "type": "image",
+                  "source": { "type": "base64", "media_type": "image/png", "data": "aGVsbG8=" },
+                  // The turn's last block ends the cached prefix, image or
+                  // not.
+                  "cache_control": { "type": "ephemeral" } }
+            ])
+        );
+    }
+
+    #[test]
+    fn a_two_image_turn_yields_two_image_blocks_in_order() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text_with_images(
+                Role::User,
+                "compare these",
+                vec![
+                    Image::new(ImageMediaType::Png, "cG5n"),
+                    Image::new(ImageMediaType::Webp, "d2VicA=="),
+                ],
+            )],
+            tools: Vec::new(),
+            params: ChatParams::new("claude-sonnet-4-5"),
+        };
+
+        let json = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        let content = json["messages"][0]["content"].as_array().expect("blocks");
+        assert_eq!(content.len(), 3);
+        assert_eq!(
+            content[1]["source"],
+            json!({ "type": "base64", "media_type": "image/png", "data": "cG5n" })
+        );
+        assert_eq!(
+            content[2]["source"],
+            json!({ "type": "base64", "media_type": "image/webp", "data": "d2VicA==" })
+        );
+    }
+
+    #[test]
+    fn an_image_as_the_last_block_carries_the_breakpoint_like_any_block() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![
+                Message::text(Role::User, "first"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![Content::Text("sure".into())],
+                },
+                Message::text_with_images(
+                    Role::User,
+                    "and this one?",
+                    vec![Image::new(ImageMediaType::Jpeg, "anM=")],
+                ),
+            ],
+            tools: Vec::new(),
+            params: ChatParams::new("claude-sonnet-4-5"),
+        };
+
+        let json = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        let messages = json["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 3);
+        // The rolling pair follows the last block of each turn wherever
+        // it lands: the earlier user turn's text, and this one's image.
+        assert_eq!(
+            messages[0]["content"],
+            json!([{ "type": "text", "text": "first",
+                     "cache_control": { "type": "ephemeral" } }])
+        );
+        let content = messages[2]["content"].as_array().expect("blocks");
+        assert_eq!(content[0].get("cache_control"), None);
+        assert_eq!(
+            content[1],
+            json!({ "type": "image",
+                    "source": { "type": "base64", "media_type": "image/jpeg", "data": "anM=" },
+                    "cache_control": { "type": "ephemeral" } })
         );
     }
 
@@ -2053,6 +2206,28 @@ mod tests {
         assert_eq!(models[0].generation_methods, vec!["generateContent"]);
         assert_eq!(models[0].pricing, None);
         assert!(models[0].supports_chat());
+        // The one catalog fact the list's rows do carry is the curated
+        // vision rule: every claude-prefixed id takes images.
+        assert_eq!(models[0].supports_vision, Some(true));
+    }
+
+    #[test]
+    fn the_vision_verdict_follows_the_id_and_unknown_ids_stay_unknown() {
+        let claude: ModelCard = WireModel {
+            id: "claude-sonnet-4-5".to_owned(),
+            display_name: "Claude Sonnet 4.5".to_owned(),
+        }
+        .into();
+        assert_eq!(claude.supports_vision, Some(true));
+
+        // Z.ai's route serves non-claude ids too; their facts belong to
+        // the provider's catalog, not to a guessed rule here.
+        let foreign: ModelCard = WireModel {
+            id: "glm-5.3".to_owned(),
+            display_name: "GLM 5.3".to_owned(),
+        }
+        .into();
+        assert_eq!(foreign.supports_vision, None);
     }
 
     #[test]
