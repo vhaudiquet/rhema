@@ -666,6 +666,11 @@ mod tests {
                 model: Some("m".into()),
             },
         );
+        // The finish announced itself; the late status did not silence it.
+        assert!(
+            !registry.notifications().is_empty(),
+            "the announcement survives a report it must ignore"
+        );
         assert_eq!(
             registry.fetch(&job.id),
             Fetched::Report {
@@ -674,7 +679,10 @@ mod tests {
             },
             "a late status changes nothing: the finish stands"
         );
-        assert!(!registry.notifications().is_empty());
+        assert!(
+            registry.notifications().is_empty(),
+            "and the fetch retires the announcement, like any fetched job"
+        );
     }
 
     #[test]
