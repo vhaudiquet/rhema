@@ -26,6 +26,10 @@
 //! - `functionResponse.response` must be a JSON object; a successful
 //!   `ToolResult` maps to `{"output": <content>}`,
 //!   a failed one to `{"error": <content>}`.
+//! - Images in a user turn ride one `inlineData` part per image — the
+//!   media type and the bare base64 bytes, beside the text parts in the
+//!   order the user arranged them. The model never emits images, so the
+//!   response side of the mapping is untouched.
 
 use std::collections::HashMap;
 
@@ -74,7 +78,7 @@ pub struct WireContent {
 
 /// One part of a [`WireContent`].
 ///
-/// Unknown part kinds (media, code execution, ...) deserialize to an empty
+/// Unknown part kinds (code execution, video, ...) deserialize to an empty
 /// part and are dropped by the mapping functions.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -82,6 +86,11 @@ pub struct WirePart {
     /// Text of a text part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// Present on an inline-image part (requests only): the image's media
+    /// type and base64 bytes. Models never emit images, so a response part
+    /// never carries it and one that somehow did is dropped as unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inline_data: Option<WireInlineData>,
     /// `true` on internal thought parts: they stream as
     /// [`Event::ThinkingDelta`], and only the thought that led to a
     /// function call also maps into the message — riding the call's
@@ -99,6 +108,18 @@ pub struct WirePart {
     /// `ToolCall::provider_data`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thought_signature: Option<String>,
+}
+
+/// The `inlineData` object of an inline-image [`WirePart`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WireInlineData {
+    /// The image's IANA media type (e.g. `image/png`).
+    #[serde(default)]
+    pub mime_type: String,
+    /// The image bytes, bare base64 — no `data:` prefix, no newlines.
+    #[serde(default)]
+    pub data: String,
 }
 
 /// A `functionCall` part: the model requesting a tool invocation.
@@ -358,9 +379,13 @@ pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, Provid
                         ..WirePart::default()
                     });
                 }
-                // Images ride the session but not this wire yet; the
-                // inline-data part is a later effort.
-                Content::Image(_) => {}
+                Content::Image(image) => parts.push(WirePart {
+                    inline_data: Some(WireInlineData {
+                        mime_type: image.media_type.as_str().to_owned(),
+                        data: image.data.clone(),
+                    }),
+                    ..WirePart::default()
+                }),
             }
         }
         if parts.is_empty() {
@@ -739,6 +764,11 @@ pub struct WireModel {
 }
 
 impl From<WireModel> for ModelCard {
+    /// Every chat model this listing keeps accepts image input, so the row
+    /// states `Some(true)`: the ListModels response carries no modality
+    /// field to read, but the rows that would disagree — image generation,
+    /// video, speech, and the other non-chat families — are already
+    /// excluded by id (`is_text`) before a picker sees them.
     fn from(wire: WireModel) -> Self {
         Self {
             id: wire
@@ -750,7 +780,7 @@ impl From<WireModel> for ModelCard {
             description: wire.description,
             input_token_limit: wire.input_token_limit,
             output_token_limit: wire.output_token_limit,
-            supports_vision: None,
+            supports_vision: Some(true),
             generation_methods: wire.supported_generation_methods,
             // ListModels carries no pricing; the provider step bakes the
             // curated table in.
@@ -787,6 +817,7 @@ pub fn is_text(model: &ModelCard) -> bool {
 mod tests {
     use super::*;
     use rhema_core::event::Event;
+    use rhema_core::message::{Image, ImageMediaType};
     use rhema_core::request::{ChatParams, ToolSpec};
     use rhema_core::tool::ToolResult;
     use serde_json::json;
@@ -1077,6 +1108,98 @@ mod tests {
             request_body(&no_messages),
             Err(ProviderError::InvalidRequest(_))
         ));
+    }
+
+    #[test]
+    fn an_image_block_maps_to_an_inline_data_part() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text_with_images(
+                Role::User,
+                "what is this?",
+                vec![Image::new(ImageMediaType::Png, "aGVsbG8=")],
+            )],
+            tools: vec![],
+            params: ChatParams::new("gemini-2.5-flash"),
+        };
+
+        let json = serde_json::to_value(request_body(&req).expect("request maps"))
+            .expect("body serializes");
+        assert_eq!(
+            json["contents"][0]["parts"],
+            json!([
+                { "text": "what is this?" },
+                { "inlineData": { "mimeType": "image/png", "data": "aGVsbG8=" } }
+            ])
+        );
+    }
+
+    #[test]
+    fn image_parts_keep_the_message_block_order() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![
+                    Content::Text("first".into()),
+                    Content::Image(Image::new(ImageMediaType::Webp, "d2VicA==")),
+                    Content::Text("second".into()),
+                ],
+            }],
+            tools: vec![],
+            params: ChatParams::new("gemini-2.5-flash"),
+        };
+
+        let json = serde_json::to_value(request_body(&req).expect("request maps"))
+            .expect("body serializes");
+        assert_eq!(
+            json["contents"][0]["parts"],
+            json!([
+                { "text": "first" },
+                { "inlineData": { "mimeType": "image/webp", "data": "d2VicA==" } },
+                { "text": "second" }
+            ])
+        );
+    }
+
+    #[test]
+    fn a_text_only_turn_serializes_bare_text_parts() {
+        let req = ModelRequest {
+            system: Some("be terse".into()),
+            messages: vec![
+                Message::text(Role::User, "list files"),
+                Message {
+                    role: Role::Tool,
+                    content: vec![Content::ToolResult(ToolResult::success("call_0", "[]"))],
+                },
+            ],
+            tools: vec![],
+            params: ChatParams::new("gemini-2.5-flash"),
+        };
+
+        // Byte-identical to the pre-image shape: text and functionResponse
+        // parts only, no inlineData machinery anywhere.
+        let json = serde_json::to_value(request_body(&req).expect("request maps"))
+            .expect("body serializes");
+        assert_eq!(
+            json["systemInstruction"]["parts"],
+            json!([{ "text": "be terse" }])
+        );
+        // The tool result merges into the same `user` content: consecutive
+        // turns of one wire role collapse.
+        assert_eq!(json["contents"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            json["contents"][0]["parts"][0],
+            json!({ "text": "list files" })
+        );
+        assert_eq!(
+            json["contents"][0]["parts"][1],
+            json!({ "functionResponse": { "name": "call_0", "response": { "output": "[]" } } })
+        );
+        assert!(
+            !serde_json::to_string(&json).unwrap().contains("inlineData"),
+            "{json}"
+        );
     }
 
     #[test]
@@ -1416,6 +1539,9 @@ mod tests {
         assert_eq!(model.output_token_limit, None);
         assert!(model.supports_chat());
         assert!(is_text(&model));
+        // Every chat row the listing keeps takes images: no modality
+        // field on the wire, so the verdict is by exclusion.
+        assert_eq!(model.supports_vision, Some(true));
 
         let tts: ModelCard = serde_json::from_str::<WireModel>(
             r#"{
