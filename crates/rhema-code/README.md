@@ -122,7 +122,7 @@ Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimo
 ## Documentation
 
 - `rhema onboard` — re-run the first-run wizard (provider, model, profile, colors, skills).
-- `/settings` — everything the wizard sets, plus appearance, subagents, usage, and about; the Skills page toggles skills on and off and shows each one's license.
+- `/settings` — everything the wizard sets, plus profiles, appearance, subagents, usage, and about; the Profiles page adds, removes, and switches profiles and cycles each one's name color; the Skills page toggles skills on and off and shows each one's license.
 
 ## About
 

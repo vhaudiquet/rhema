@@ -376,6 +376,41 @@ fn render_add_dialog(
     };
     frame.render_widget(Paragraph::new(status), status_area);
 }
+
+/// The add-profile dialog: one input line over its status line, the
+/// Profiles page's pop-over for naming a new profile.
+fn render_add_profile_dialog(
+    frame: &mut Frame,
+    dialog: &crate::screens::AddProfileDialog,
+    theme: &Theme,
+) {
+    let area = centered(58, 4, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken).fg(theme.text))
+        .title(" add a profile ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [body_area, status_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).areas(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("name: ").fg(theme.text3),
+            Span::raw(dialog.input.clone()).bold(),
+        ])),
+        body_area,
+    );
+    let status = match &dialog.error {
+        Some(error) => Line::from(error.clone()).fg(theme.error),
+        None => Line::from("name the profile · enter creates · esc cancels").fg(theme.text3),
+    };
+    frame.render_widget(Paragraph::new(status), status_area);
+}
+
 fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
     let area = frame.area();
     let block = crate::chrome::panel(Some("select a model"), theme);
@@ -1136,6 +1171,9 @@ fn render_settings(
     if let Some(dialog) = &settings.dialog {
         render_add_dialog(frame, dialog, theme, hits);
     }
+    if let Some(dialog) = &settings.add_profile {
+        render_add_profile_dialog(frame, dialog, theme);
+    }
 }
 
 /// Tokens as the Usage page spells an amount: kilo-scaled past a
@@ -1266,6 +1304,54 @@ fn settings_page(
                 lines.push(settings_row(line, selected, theme));
             }
             (lines, footer("d - delete provider"), row_hits)
+        }
+        SettingsSection::Profiles => {
+            let mut row_hits = Vec::new();
+            for (index, row) in settings.profiles.iter().enumerate() {
+                let selected = index == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                // The dot wears the profile's color — the stored hex,
+                // else the theme's tone for the name.
+                let color = row
+                    .color
+                    .as_deref()
+                    .and_then(crate::palette::parse_hex_color)
+                    .unwrap_or_else(|| crate::palette::default_profile_color(&row.name, theme));
+                let mut detail = String::new();
+                match &row.provider {
+                    Some(provider) => detail.push_str(provider),
+                    None => detail.push_str("no provider"),
+                }
+                if let Some(model) = &row.model {
+                    detail.push_str(&format!(" · {model}"));
+                }
+                if !row.usable {
+                    detail.push_str(" · no API key");
+                }
+                if row.active {
+                    detail.push_str(" · active");
+                }
+                let line = Line::from(vec![
+                    Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                    Span::raw("● ").fg(color),
+                    Span::raw(row.name.clone()).fg(color),
+                    Span::raw(format!("  {detail}")).fg(theme.text3),
+                ]);
+                lines.push(settings_row(line, selected, theme));
+            }
+            let add = settings.profiles.len();
+            let selected = settings.row == add;
+            row_hits.push((lines.len(), SettingsHit::PageRow(add)));
+            lines.push(settings_row(
+                Line::from(vec![
+                    Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                    Span::raw("+ Add a profile...").fg(theme.text2),
+                ]),
+                selected,
+                theme,
+            ));
+            lines.push(Line::default());
+            (lines, footer("enter switch · c color · d remove"), row_hits)
         }
         SettingsSection::Appearance => {
             let mut row_hits = Vec::new();
@@ -3139,6 +3225,68 @@ mod tests {
             hits.len(),
             SettingsSection::ALL.len() + 2,
             "sidebar rows and the two page rows register: {hits:?}"
+        );
+    }
+
+    /// The Profiles page lists the registry with its details and the
+    /// add row, one click target each.
+    #[test]
+    fn the_profiles_page_lists_the_registry_and_their_targets() {
+        let mut settings = crate::screens::SettingsScreen::new();
+        settings.section = SettingsSection::Profiles;
+        settings.profiles = vec![
+            crate::screens::ProfileRow {
+                name: "personal".into(),
+                provider: Some("google".into()),
+                model: Some("gemini".into()),
+                color: Some("#64C9A3".into()),
+                usable: true,
+                active: true,
+            },
+            crate::screens::ProfileRow {
+                name: "work".into(),
+                provider: None,
+                model: None,
+                color: None,
+                usable: false,
+                active: false,
+            },
+        ];
+
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        let text = (0..24)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Profiles"), "the page titles: {text}");
+        assert!(
+            text.contains("google · gemini · active"),
+            "the configured row's details: {text}"
+        );
+        assert!(
+            text.contains("no provider · no API key"),
+            "the empty row's details: {text}"
+        );
+        assert!(text.contains("+ Add a profile..."), "the add row: {text}");
+        assert!(
+            text.contains("enter switch · c color · d remove"),
+            "the footer hints: {text}"
+        );
+        // Every sidebar row plus the two profile rows and the add row.
+        assert_eq!(
+            hits.len(),
+            SettingsSection::ALL.len() + 3,
+            "sidebar and page rows register: {hits:?}"
         );
     }
 

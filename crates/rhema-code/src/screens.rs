@@ -3,7 +3,7 @@
 //! list the filesystem. The renderer reads these structs;
 //! [`crate::app`] routes their actions into transitions and effects.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -107,6 +107,28 @@ pub enum ProfileAction {
     BackToChat,
 }
 
+/// The config's profiles as rows, sorted by name: the profile picker's
+/// list and the settings Profiles page's snapshot.
+pub fn profile_rows(
+    profiles: &BTreeMap<String, rhema_config::Profile>,
+    active: Option<&str>,
+    secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+) -> Vec<ProfileRow> {
+    let mut entries: Vec<ProfileRow> = profiles
+        .iter()
+        .map(|(name, profile)| ProfileRow {
+            name: name.clone(),
+            provider: profile.provider.clone(),
+            model: profile.model.clone(),
+            color: profile.color.clone(),
+            usable: profile.has_credentials(secrets),
+            active: Some(name.as_str()) == active,
+        })
+        .collect();
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    entries
+}
+
 /// The profile picker: one highlighted row, arrows to move, enter to
 /// switch, esc back to the chat. Profiles are few, so there is no filter.
 #[derive(Debug)]
@@ -125,20 +147,8 @@ impl ProfileScreen {
         active: Option<&str>,
         secrets: Option<&dyn rhema_config::secrets::SecretStore>,
     ) -> Self {
-        let mut entries: Vec<ProfileRow> = profiles
-            .iter()
-            .map(|(name, profile)| ProfileRow {
-                name: name.clone(),
-                provider: profile.provider.clone(),
-                model: profile.model.clone(),
-                color: profile.color.clone(),
-                usable: profile.has_credentials(secrets),
-                active: Some(name.as_str()) == active,
-            })
-            .collect();
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
         Self {
-            entries,
+            entries: profile_rows(profiles, active, secrets),
             selected: 0,
         }
     }
@@ -357,6 +367,8 @@ pub enum SettingsSection {
     /// The profile's provider, model, and logged-in instances — the
     /// login flow lives here now.
     Providers,
+    /// The named profiles: add, remove, switch, and their name colors.
+    Profiles,
     /// The theme and the footer's icon flavor.
     Appearance,
     /// Cross-session memory: a status page today.
@@ -375,6 +387,7 @@ impl SettingsSection {
     /// Every section, in sidebar order.
     pub const ALL: &'static [SettingsSection] = &[
         SettingsSection::Providers,
+        SettingsSection::Profiles,
         SettingsSection::Appearance,
         SettingsSection::Memory,
         SettingsSection::Skills,
@@ -387,6 +400,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             SettingsSection::Providers => "Providers",
+            SettingsSection::Profiles => "Profiles",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Memory => "Memory",
             SettingsSection::Skills => "Skills",
@@ -410,6 +424,18 @@ pub enum SettingsAction {
     RemoveInstance,
     /// Enter on the add row: the add-instance dialog opens.
     OpenDialog,
+    /// Enter on a profile row: the session switches to it.
+    SelectProfile,
+    /// `d` on a profile row: remove it from the config.
+    RemoveProfile,
+    /// `c` on a profile row: cycle the name color through the defaults.
+    CycleProfileColor,
+    /// Enter on the add row: the add-profile dialog opens.
+    OpenProfileDialog,
+    /// The add-profile dialog accepted a name: create the profile.
+    SubmitProfileDialog,
+    /// Esc left the add-profile dialog.
+    CloseProfileDialog,
     /// The dialog validated a typed key: the fetch is the validation.
     Validate,
     /// The dialog named a flow provider: the app spawns its flow.
@@ -972,6 +998,11 @@ pub struct SettingsScreen {
     pub stored: rhema_config::Profile,
     /// The add-instance dialog, when it is up.
     pub dialog: Option<AddInstanceDialog>,
+    // The Profiles page's snapshot.
+    /// The config's profiles, sorted by name.
+    pub profiles: Vec<ProfileRow>,
+    /// The add-profile dialog, when it is up.
+    pub add_profile: Option<AddProfileDialog>,
     // The Skills page's snapshot.
     /// The discovered skills, global and workspace merged.
     pub skills: Vec<SkillRow>,
@@ -1028,6 +1059,8 @@ impl SettingsScreen {
             profile: "personal".to_owned(),
             stored: rhema_config::Profile::default(),
             dialog: None,
+            profiles: Vec::new(),
+            add_profile: None,
             skills: Vec::new(),
             skills_global_dir: None,
             skills_workspace_dir: String::new(),
@@ -1093,6 +1126,15 @@ impl SettingsScreen {
             .and_then(|row| (!row.add).then_some(row.name))
     }
 
+    /// The highlighted profile row; `None` on the add row, with the
+    /// dialog up, or anywhere but the Profiles page.
+    pub fn selected_profile(&self) -> Option<&str> {
+        if self.section != SettingsSection::Profiles || self.add_profile.is_some() {
+            return None;
+        }
+        self.profiles.get(self.row).map(|row| row.name.as_str())
+    }
+
     /// The highlighted subagent row; `None` anywhere but the Subagents
     /// page, with the dialog up, or past the list's end.
     pub fn selected_subagent(&self) -> Option<&SubagentRow> {
@@ -1116,6 +1158,7 @@ impl SettingsScreen {
     fn row_count(&self) -> usize {
         match self.section {
             SettingsSection::Providers => self.instance_rows().len(),
+            SettingsSection::Profiles => self.profiles.len() + 1,
             SettingsSection::Appearance => 3,
             SettingsSection::Skills => self.skills.len(),
             SettingsSection::Subagents => self.subagents.len(),
@@ -1141,6 +1184,10 @@ impl SettingsScreen {
                 Some(_) => SettingsAction::ActivateInstance,
                 None => SettingsAction::OpenDialog,
             },
+            SettingsSection::Profiles => match self.selected_profile() {
+                Some(_) => SettingsAction::SelectProfile,
+                None => SettingsAction::OpenProfileDialog,
+            },
             SettingsSection::Appearance => match self.row {
                 0 => SettingsAction::CyclePalette,
                 1 => SettingsAction::ToggleTheme,
@@ -1161,10 +1208,25 @@ impl SettingsScreen {
     /// Handles one keypress. The left/right arrows and tabs move the
     /// sidebar, the vertical arrows move the page's rows, esc or `q`
     /// backs out (dialog first, then the screen), enter acts on the
-    /// selected row, `d` forgets an instance, `e` edits the selected
-    /// subagent, and the Appearance page carries `c`/`t`/`i` as
-    /// shortcuts for its toggles.
+    /// selected row, `d` forgets an instance or removes a profile, `c`
+    /// cycles a profile's name color (and colors the Appearance page),
+    /// `e` edits the selected subagent, and the Appearance page carries
+    /// `t`/`i` as shortcuts for its remaining toggles.
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
+        if let Some(action) = self
+            .add_profile
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key))
+        {
+            if action == ProfileDialogAction::Close {
+                self.add_profile = None;
+            }
+            return match action {
+                ProfileDialogAction::None => SettingsAction::None,
+                ProfileDialogAction::Submit => SettingsAction::SubmitProfileDialog,
+                ProfileDialogAction::Close => SettingsAction::CloseProfileDialog,
+            };
+        }
         if let Some(action) = self.dialog.as_mut().map(|dialog| dialog.handle_key(key)) {
             // Esc closes the dialog from any stage; the app drops the
             // flow task's handle when it sees the CloseDialog action.
@@ -1203,6 +1265,12 @@ impl SettingsScreen {
             KeyCode::Char('d') if self.selected_instance().is_some() => {
                 SettingsAction::RemoveInstance
             }
+            KeyCode::Char('d') if self.selected_profile().is_some() => {
+                SettingsAction::RemoveProfile
+            }
+            KeyCode::Char('c') if self.selected_profile().is_some() => {
+                SettingsAction::CycleProfileColor
+            }
             KeyCode::Char('e') if self.selected_subagent().is_some() => {
                 SettingsAction::EditSubagent
             }
@@ -1219,6 +1287,96 @@ impl SettingsScreen {
                 SettingsAction::ToggleIcons
             }
             _ => SettingsAction::None,
+        }
+    }
+}
+
+/// What one add-profile dialog keypress means.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileDialogAction {
+    /// Nothing to do.
+    None,
+    /// Enter on a fresh non-blank name: the app creates the profile.
+    Submit,
+    /// Esc left the dialog.
+    Close,
+}
+
+/// The pop-in dialog over the Profiles page: one line naming the profile
+/// to create. Creation is the app's; the dialog collects the name and
+/// refuses the names the registry already holds.
+#[derive(Debug, Default)]
+pub struct AddProfileDialog {
+    /// The line being typed.
+    pub input: String,
+    /// The profile names taken when the dialog opened. The dialog is
+    /// modal, so a snapshot cannot go stale.
+    taken: BTreeSet<String>,
+    /// Why the last enter did not submit, when it did not: the text the
+    /// status line renders.
+    pub error: Option<String>,
+}
+
+impl AddProfileDialog {
+    /// An empty dialog, deduping names against the config's registry.
+    pub fn new(profiles: &BTreeMap<String, rhema_config::Profile>) -> Self {
+        Self {
+            input: String::new(),
+            taken: profiles.keys().cloned().collect(),
+            error: None,
+        }
+    }
+
+    /// The typed name, trimmed; blank names never submit.
+    pub fn name(&self) -> &str {
+        self.input.trim()
+    }
+
+    /// A bracketed paste landed on the input. A name is a single line:
+    /// control characters — newlines above all, the trailing one a
+    /// stray copy loves to carry — are dropped.
+    pub fn paste(&mut self, text: &str) {
+        self.input.extend(text.chars().filter(|c| !c.is_control()));
+    }
+
+    /// Handles one keypress. Printable keys and backspace edit, enter
+    /// submits a fresh non-blank name, esc closes; ctrl-v (ctrl-shift-v
+    /// included) reads the clipboard, like the add-instance dialog's
+    /// inputs.
+    pub fn handle_key(&mut self, key: KeyEvent) -> ProfileDialogAction {
+        if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(text) = crate::clipboard::read() {
+                self.paste(&text);
+            }
+            return ProfileDialogAction::None;
+        }
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            return ProfileDialogAction::None;
+        }
+        match key.code {
+            KeyCode::Char(c) => {
+                self.input.push(c);
+                self.error = None;
+                ProfileDialogAction::None
+            }
+            KeyCode::Backspace => {
+                self.input.pop();
+                self.error = None;
+                ProfileDialogAction::None
+            }
+            KeyCode::Enter => {
+                let name = self.name().to_owned();
+                if name.is_empty() {
+                    return ProfileDialogAction::None;
+                }
+                if self.taken.contains(&name) {
+                    self.error = Some(format!("a profile named {name} already exists"));
+                    return ProfileDialogAction::None;
+                }
+                ProfileDialogAction::Submit
+            }
+            KeyCode::Esc => ProfileDialogAction::Close,
+            _ => ProfileDialogAction::None,
         }
     }
 }
@@ -2364,7 +2522,11 @@ mod tests {
             "right wraps back"
         );
         settings.handle_key(key(KeyCode::Tab));
+        assert_eq!(settings.section, SettingsSection::Profiles);
+        settings.handle_key(key(KeyCode::Tab));
         assert_eq!(settings.section, SettingsSection::Appearance);
+        settings.handle_key(key(KeyCode::Left));
+        assert_eq!(settings.section, SettingsSection::Profiles);
         settings.handle_key(key(KeyCode::Left));
         assert_eq!(settings.section, SettingsSection::Providers);
         // The row selection restarts with the page.
@@ -3681,5 +3843,111 @@ mod tests {
             ChatAction::None
         );
         assert_eq!(chat.input, "");
+    }
+
+    fn two_profiles() -> BTreeMap<String, rhema_config::Profile> {
+        BTreeMap::from([
+            ("personal".to_owned(), keyed_profile("google", "k")),
+            ("work".to_owned(), rhema_config::Profile::default()),
+        ])
+    }
+
+    #[test]
+    fn the_profiles_page_moves_over_the_add_row_and_acts() {
+        let profiles = two_profiles();
+        let mut screen = crate::screens::SettingsScreen::new();
+        screen.section = SettingsSection::Profiles;
+        screen.profiles = profile_rows(&profiles, Some("personal"), None);
+        // Rows: personal, work, add. Down walks them and wraps.
+        assert_eq!(screen.selected_profile(), Some("personal"));
+        screen.handle_key(key(KeyCode::Down));
+        assert_eq!(screen.selected_profile(), Some("work"));
+        screen.handle_key(key(KeyCode::Down));
+        assert_eq!(screen.selected_profile(), None, "the add row is no profile");
+        screen.handle_key(key(KeyCode::Down));
+        assert_eq!(screen.selected_profile(), Some("personal"), "the rows wrap");
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Enter)),
+            SettingsAction::SelectProfile
+        );
+        // Up from the top wraps onto the add row, whose enter opens the
+        // dialog; esc then closes it.
+        screen.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Enter)),
+            SettingsAction::OpenProfileDialog
+        );
+        screen.add_profile = Some(AddProfileDialog::new(&profiles));
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Esc)),
+            SettingsAction::CloseProfileDialog
+        );
+        assert!(screen.add_profile.is_none(), "esc closed the dialog");
+        // d and c answer only on a profile row.
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Char('d'))),
+            SettingsAction::None,
+            "the add row removes nothing"
+        );
+        screen.handle_key(key(KeyCode::Up));
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Char('d'))),
+            SettingsAction::RemoveProfile
+        );
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Char('c'))),
+            SettingsAction::CycleProfileColor
+        );
+        // The other pages are untouched: selected_profile is page-bound.
+        screen.section = SettingsSection::Providers;
+        assert_eq!(screen.selected_profile(), None);
+    }
+
+    #[test]
+    fn the_add_profile_dialog_edits_refuses_and_closes() {
+        let profiles = two_profiles();
+        let mut dialog = AddProfileDialog::new(&profiles);
+        // Blank names never submit.
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Enter)),
+            ProfileDialogAction::None
+        );
+        for c in "  side ".chars() {
+            dialog.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(dialog.name(), "side", "the name trims");
+        // A taken name refuses and stays up, the error named.
+        dialog.input.clear();
+        for c in "work".chars() {
+            dialog.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Enter)),
+            ProfileDialogAction::None
+        );
+        assert!(dialog.error.is_some(), "the taken name names the error");
+        // Editing clears the error; a fresh name submits.
+        dialog.handle_key(key(KeyCode::Backspace));
+        assert_eq!(dialog.error, None);
+        for c in "side".chars() {
+            dialog.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Enter)),
+            ProfileDialogAction::Submit
+        );
+        // Esc closes; ctrl combos never reach the input, and a paste's
+        // control characters drop.
+        assert_eq!(
+            dialog.handle_key(key(KeyCode::Esc)),
+            ProfileDialogAction::Close
+        );
+        dialog.input.clear();
+        dialog.paste("a\nb\u{7}c");
+        assert_eq!(dialog.input, "abc");
+        assert_eq!(
+            dialog.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            ProfileDialogAction::None
+        );
     }
 }

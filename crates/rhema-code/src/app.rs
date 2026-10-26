@@ -1311,6 +1311,7 @@ impl App {
             &self.options,
             self.session_profile.as_deref(),
             self.config_root.as_deref(),
+            self.secret_store(),
         );
         settings.section = section;
         settings.allowance = self.subscription.clone();
@@ -1331,6 +1332,7 @@ impl App {
         options: &RunOptions,
         session_profile: Option<&str>,
         config_root: Option<&Path>,
+        secrets: Option<&dyn rhema_config::secrets::SecretStore>,
     ) -> SettingsScreen {
         let effective = config.effective(session_profile);
         let workspace =
@@ -1352,6 +1354,8 @@ impl App {
             .unwrap_or(rhema_config::DEFAULT_PROFILE)
             .to_owned();
         settings.stored = effective;
+        settings.profiles =
+            crate::screens::profile_rows(&config.profiles, session_profile, secrets);
         settings.skills = skills;
         settings.skills_global_dir = global_skills.map(|dir| dir.to_string_lossy().into_owned());
         settings.skills_workspace_dir = workspace
@@ -1730,6 +1734,138 @@ impl App {
         }
     }
 
+    /// Refills the settings Profiles page's snapshot from the config:
+    /// the registry the add, remove, and color edits just changed.
+    fn sync_profile_rows(&mut self) {
+        let rows = crate::screens::profile_rows(
+            &self.config.profiles,
+            self.session_profile.as_deref(),
+            self.secret_store(),
+        );
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.profiles = rows;
+        }
+    }
+
+    /// The add-profile dialog's accepted name: a fresh, empty profile
+    /// joins the registry — provider, model, and key stay unset, the
+    /// Providers page's login flow fills those in — and the snapshot
+    /// follows. The session does not move: creation is not a switch.
+    fn create_profile(&mut self) -> Vec<Effect> {
+        let name = match &self.screen {
+            Screen::Settings(settings) => match &settings.add_profile {
+                Some(dialog) => dialog.name().to_owned(),
+                None => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+        if name.is_empty() {
+            return Vec::new();
+        }
+        if self.config.profiles.contains_key(&name) {
+            // The dialog dedupes against its opening snapshot; this is
+            // the belt for a path that should not exist.
+            self.transcript
+                .push_notice(&format!("a profile named {name} already exists"));
+            return Vec::new();
+        }
+        self.config
+            .profiles
+            .insert(name.clone(), rhema_config::Profile::default());
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.add_profile = None;
+        }
+        self.sync_profile_rows();
+        self.transcript
+            .push_notice(&format!("added profile {name}"));
+        Vec::new()
+    }
+
+    /// `d` on a Profiles page row: forget the profile. The one this
+    /// session runs on stays — the session's identity is not dropped
+    /// from under it, and that refusal is also what keeps the registry
+    /// from emptying. The workspace memory forgets the name with the
+    /// registry, the way a rename does.
+    fn remove_profile(&mut self) -> Vec<Effect> {
+        let Some(name) = (match &self.screen {
+            Screen::Settings(settings) => settings.selected_profile().map(str::to_owned),
+            _ => None,
+        }) else {
+            return Vec::new();
+        };
+        if self.session_profile.as_deref() == Some(name.as_str()) {
+            self.transcript
+                .push_notice("the profile this session runs on cannot be removed — switch first");
+            return Vec::new();
+        }
+        self.config.profiles.remove(&name);
+        self.config
+            .last_profile_by_workspace
+            .retain(|_, remembered| remembered != &name);
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        self.sync_profile_rows();
+        // Keep the selection inside the shrunken list.
+        if let Screen::Settings(settings) = &mut self.screen {
+            let rows = settings.profiles.len() + 1;
+            if settings.row >= rows {
+                settings.row = rows.saturating_sub(1);
+            }
+        }
+        self.transcript
+            .push_notice(&format!("removed profile {name}"));
+        Vec::new()
+    }
+
+    /// `c` on a Profiles page row: the name color moves to the next
+    /// entry of the default wheel — the theme's auto first, then each
+    /// default hex — and persists. The page's swatch is the record;
+    /// no notice.
+    fn cycle_profile_color(&mut self) -> Vec<Effect> {
+        let Some(name) = (match &self.screen {
+            Screen::Settings(settings) => settings.selected_profile().map(str::to_owned),
+            _ => None,
+        }) else {
+            return Vec::new();
+        };
+        let stored = self
+            .config
+            .profiles
+            .get(&name)
+            .and_then(|profile| profile.color.as_deref());
+        let next = Self::next_profile_color(stored);
+        self.config.set_for_profile(Some(&name), |profile| {
+            profile.color = next.map(str::to_owned)
+        });
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        self.sync_profile_rows();
+        Vec::new()
+    }
+
+    /// The next entry of the profile color wheel after `stored`: auto
+    /// (no stored color) first, then each default hex, wrapping to
+    /// auto. A hand-edited color the wheel does not spell rejoins at
+    /// auto.
+    fn next_profile_color(stored: Option<&str>) -> Option<&'static str> {
+        match stored {
+            None => Some(crate::palette::PROFILE_COLORS[0]),
+            Some(hex) => crate::palette::PROFILE_COLORS
+                .iter()
+                .position(|color| color.eq_ignore_ascii_case(hex))
+                .and_then(|index| crate::palette::PROFILE_COLORS.get(index + 1))
+                .copied(),
+        }
+    }
+
     /// Sets the session's thinking effort: persisted into the session's
     /// profile like a model pick, and the agent rebuilds carrying the
     /// conversation so the very next turn asks at the new level.
@@ -1874,6 +2010,9 @@ impl App {
                 if let Some(dialog) = &mut settings.dialog {
                     dialog.paste(text);
                 }
+                if let Some(dialog) = &mut settings.add_profile {
+                    dialog.paste(text);
+                }
             }
             Screen::Onboarding(wizard) => {
                 if let Some(dialog) = &mut wizard.dialog {
@@ -1932,8 +2071,8 @@ impl App {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();
                 };
-                if settings.dialog.is_some() {
-                    // The dialog is modal: clicks behind it do nothing.
+                if settings.dialog.is_some() || settings.add_profile.is_some() {
+                    // A dialog is modal: clicks behind it do nothing.
                     return Vec::new();
                 }
                 settings.section = section;
@@ -1944,7 +2083,7 @@ impl App {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();
                 };
-                if settings.dialog.is_some() {
+                if settings.dialog.is_some() || settings.add_profile.is_some() {
                     return Vec::new();
                 }
                 settings.row = index;
@@ -2041,6 +2180,27 @@ impl App {
             }
             SettingsAction::ActivateInstance => self.activate_instance(),
             SettingsAction::RemoveInstance => self.remove_instance(),
+            SettingsAction::SelectProfile => {
+                let name = match &self.screen {
+                    Screen::Settings(settings) => settings.selected_profile().map(str::to_owned),
+                    _ => None,
+                };
+                match name {
+                    Some(name) => self.switch_profile(&name),
+                    None => Vec::new(),
+                }
+            }
+            SettingsAction::RemoveProfile => self.remove_profile(),
+            SettingsAction::CycleProfileColor => self.cycle_profile_color(),
+            SettingsAction::OpenProfileDialog => {
+                if let Screen::Settings(settings) = &mut self.screen {
+                    settings.add_profile =
+                        Some(crate::screens::AddProfileDialog::new(&self.config.profiles));
+                }
+                Vec::new()
+            }
+            SettingsAction::SubmitProfileDialog => self.create_profile(),
+            SettingsAction::CloseProfileDialog => Vec::new(),
             SettingsAction::OpenDialog => {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();
@@ -6912,6 +7072,8 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         assert_eq!(h.app.theme, crate::palette::DARK);
         crate::commands::dispatch(&mut h.app, "/settings");
+        // Two tabs: Profiles sits between Providers and Appearance.
+        h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('t')));
         assert_eq!(h.app.theme, crate::palette::LIGHT, "the swap is live");
@@ -6926,6 +7088,7 @@ mod tests {
     fn settings_toggles_the_icon_flavor_and_persists_it() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/settings");
+        h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('i')));
         assert_eq!(h.app.options.icons, crate::icons::Flavor::Nerd);
@@ -7386,6 +7549,185 @@ mod tests {
     }
 
     #[test]
+    fn the_profiles_page_adds_a_profile_through_its_dialog() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .open_settings_at(crate::screens::SettingsSection::Profiles);
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected settings");
+        };
+        assert_eq!(settings.profiles.len(), 1, "the harness ships personal");
+        // The add row is the row past the profiles.
+        if let Screen::Settings(settings) = &mut h.app.screen {
+            settings.row = settings.profiles.len();
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        if let Screen::Settings(settings) = &h.app.screen {
+            assert!(settings.add_profile.is_some(), "the dialog opened");
+        }
+        for c in "side".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert!(h.app.config.profiles.contains_key("side"), "created");
+        assert_eq!(
+            h.app.config.profiles["side"],
+            rhema_config::Profile::default(),
+            "creation is not a switch: the profile stays empty"
+        );
+        assert!(
+            h.store.load().unwrap().profiles.contains_key("side"),
+            "and persisted"
+        );
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected settings");
+        };
+        assert!(settings.add_profile.is_none(), "the dialog closed");
+        assert_eq!(settings.profiles.len(), 2, "the snapshot follows");
+
+        // A taken name refuses in the dialog and changes nothing.
+        if let Screen::Settings(settings) = &mut h.app.screen {
+            settings.row = settings.profiles.len();
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        for c in "side".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected settings");
+        };
+        assert!(settings.add_profile.is_some(), "the dialog stayed up");
+        assert!(
+            settings.add_profile.as_ref().unwrap().error.is_some(),
+            "the taken name names the error"
+        );
+        assert_eq!(h.app.config.profiles.len(), 2, "nothing was overwritten");
+    }
+
+    #[test]
+    fn d_removes_a_profile_the_session_is_not_on() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), rhema_config::Profile::default());
+        h.app
+            .config
+            .last_profile_by_workspace
+            .insert("/proj".to_owned(), "work".to_owned());
+        h.app
+            .open_settings_at(crate::screens::SettingsSection::Profiles);
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected settings");
+        };
+        assert_eq!(settings.profiles.len(), 2, "personal and work, sorted");
+        // Row 1 is work; the session runs personal.
+        if let Screen::Settings(settings) = &mut h.app.screen {
+            settings.row = 1;
+        }
+        h.app.on_key(key(KeyCode::Char('d')));
+        assert!(!h.app.config.profiles.contains_key("work"));
+        let stored = h.store.load().unwrap();
+        assert!(stored.profiles.contains_key("personal"));
+        assert!(!stored.profiles.contains_key("work"), "and persisted");
+        assert!(
+            !stored
+                .last_profile_by_workspace
+                .values()
+                .any(|remembered| remembered == "work"),
+            "the workspace memory forgets the name"
+        );
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected settings");
+        };
+        assert_eq!(settings.profiles.len(), 1, "the snapshot follows");
+        assert!(settings.row <= settings.profiles.len(), "inside the list");
+    }
+
+    #[test]
+    fn the_active_profile_refuses_removal() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), rhema_config::Profile::default());
+        h.app
+            .open_settings_at(crate::screens::SettingsSection::Profiles);
+        // Row 0 is personal — the profile this session runs on. Its
+        // removal is also what keeps the registry from emptying.
+        h.app.on_key(key(KeyCode::Char('d')));
+        assert!(
+            h.app.config.profiles.contains_key("personal"),
+            "the session's profile stays"
+        );
+        assert!(
+            h.store.load().unwrap().profiles.contains_key("personal"),
+            "and the stored config never loses it"
+        );
+    }
+
+    #[test]
+    fn c_cycles_a_profile_color_through_the_wheel_and_persists() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .open_settings_at(crate::screens::SettingsSection::Profiles);
+        // Row 0 is personal.
+        h.app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(
+            h.app.config.profiles["personal"].color.as_deref(),
+            Some(crate::palette::PROFILE_COLORS[0]),
+            "auto steps to the first wheel color"
+        );
+        assert_eq!(
+            h.store.load().unwrap().profiles["personal"].color,
+            h.app.config.profiles["personal"].color,
+            "and persists"
+        );
+        for _ in 0..crate::palette::PROFILE_COLORS.len() {
+            h.app.on_key(key(KeyCode::Char('c')));
+        }
+        assert_eq!(
+            h.app.config.profiles["personal"].color, None,
+            "the wheel wraps to auto"
+        );
+        // A hand-edited color the wheel does not spell rejoins at auto.
+        h.app.config.set_for_profile(Some("personal"), |profile| {
+            profile.color = Some("#12abCD".to_owned());
+        });
+        h.app.on_key(key(KeyCode::Char('c')));
+        assert_eq!(h.app.config.profiles["personal"].color, None);
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected settings");
+        };
+        assert_eq!(settings.profiles[0].color, None, "the swatch follows");
+    }
+
+    #[test]
+    fn enter_on_a_profiles_row_switches_the_session() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), rhema_config::Profile::default());
+        h.app
+            .open_settings_at(crate::screens::SettingsSection::Profiles);
+        if let Screen::Settings(settings) = &mut h.app.screen {
+            settings.row = 1; // work, which holds no credentials
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        assert_eq!(h.app.session_profile.as_deref(), Some("work"));
+        assert!(
+            matches!(h.app.screen, Screen::Chat),
+            "the switch lands back in the chat"
+        );
+        assert!(
+            h.app.backend.is_none(),
+            "work holds no key: the backend waits for /login"
+        );
+    }
+
+    #[test]
     fn a_click_on_the_wizard_s_rail_jumps_to_the_step() {
         let mut h = wizard_harness();
         // Draw one frame so the renderer registers the rail rects,
@@ -7541,6 +7883,8 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         assert_eq!(h.app.theme, crate::palette::DARK);
         crate::commands::dispatch(&mut h.app, "/settings");
+        // Two tabs: Profiles sits between Providers and Appearance.
+        h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('c')));
         assert_eq!(

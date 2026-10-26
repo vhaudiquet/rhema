@@ -142,6 +142,13 @@ pub fn default_profile_color(name: &str, theme: &Theme) -> Color {
     }
 }
 
+/// The colors a profile's name can wear, in cycling order: the set the
+/// settings Profiles page moves through when a color is picked. Mid
+/// tones kin to the themes' status colors, legible on either appearance.
+pub const PROFILE_COLORS: &[&str] = &[
+    "#E2854A", "#64C9A3", "#3FB8AF", "#5FA8D3", "#A98FE3", "#E4687A", "#D9A643", "#8FA6B8",
+];
+
 /// The dark Rhema appearance: the default.
 pub const DARK: Theme = Theme {
     ground: Color::Rgb(0x0F, 0x14, 0x13),
