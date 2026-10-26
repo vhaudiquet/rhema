@@ -165,11 +165,18 @@ struct DeepSeekFacts {
     cached_input_per_mtok: f64,
     input_per_mtok: f64,
     output_per_mtok: f64,
+    /// Whether the model accepts image input. DeepSeek's model
+    /// documentation describes both rows as text-only chat, and the
+    /// endpoint rejects image parts — a verdict the catalog can state
+    /// that the generic `/models` listing cannot.
+    vision: bool,
 }
 
 const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
     DeepSeekFacts {
         id: "deepseek-flash",
+        // Text-only chat, per DeepSeek's model documentation.
+        vision: false,
         context: 1_048_576,
         output: 393_216,
         cached_input_per_mtok: 0.006,
@@ -178,6 +185,8 @@ const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
     },
     DeepSeekFacts {
         id: "deepseek-v4-pro",
+        // Text-only chat, per DeepSeek's model documentation.
+        vision: false,
         context: 1_048_576,
         output: 393_216,
         cached_input_per_mtok: 0.044,
@@ -194,6 +203,9 @@ fn decorate_deepseek(models: &mut [ModelCard]) {
         if let Some(row) = DEEPSEEK_CATALOG.iter().find(|row| row.id == model.id) {
             model.input_token_limit = Some(row.context);
             model.output_token_limit = Some(row.output);
+            // Unknown ids stay `None`: a generic server exposes no
+            // modality metadata, and no verdict beats a guessed one.
+            model.supports_vision = Some(row.vision);
             model.pricing = Some(Pricing {
                 input_per_mtok: row.input_per_mtok,
                 output_per_mtok: row.output_per_mtok,
@@ -339,6 +351,8 @@ mod tests {
         let flash = &models[0];
         assert_eq!(flash.input_token_limit, Some(1_048_576));
         assert_eq!(flash.output_token_limit, Some(393_216));
+        // Both catalog rows are known text-only chat models.
+        assert_eq!(flash.supports_vision, Some(false));
         let pricing = flash.pricing.expect("flash is priced");
         assert_eq!(pricing.input_per_mtok, 0.30);
         assert_eq!(pricing.output_per_mtok, 1.20);
@@ -346,10 +360,13 @@ mod tests {
 
         let pro = &models[1];
         assert_eq!(pro.pricing.expect("pro is priced").input_per_mtok, 1.32);
+        assert_eq!(pro.supports_vision, Some(false));
 
         // The server's own facts win: a decorated listing leaves unknown
-        // models exactly as the endpoint described them.
+        // models exactly as the endpoint described them — modality
+        // included, since the generic listing carries none.
         assert_eq!(models[2].input_token_limit, Some(8192));
         assert!(models[2].pricing.is_none());
+        assert_eq!(models[2].supports_vision, None);
     }
 }

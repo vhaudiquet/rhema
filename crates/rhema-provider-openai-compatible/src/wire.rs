@@ -15,6 +15,13 @@
 //!   (text blocks joined by a blank line). `Role::User` and `Role::Assistant`
 //!   map to their like-named roles; text blocks of one message are joined by
 //!   a blank line into the single `content` string.
+//! - A user turn carrying [`Content::Image`] blocks maps to a content parts
+//!   array — one part per content block in order, each text block a `text`
+//!   part and each image an `image_url` part whose url is a
+//!   `data:{media type};base64,…` URI. A turn with no images keeps the bare
+//!   joined string: text-only traffic stays byte-identical on the wire, and
+//!   strict servers predate the parts shape. Assistant and tool messages
+//!   never carry parts.
 //! - An assistant turn with text and/or tool calls becomes ONE wire message:
 //!   `content` is omitted when there is no text, `tool_calls` when there are
 //!   no calls. Servers reject assistant messages with neither, so an empty
@@ -127,16 +134,55 @@ pub struct WireStreamOptions {
     pub include_usage: bool,
 }
 
-/// One message on the wire. A single wire message carries either a text
-/// `content`, or an assistant's `tool_calls`, or a tool result's
+/// A message's `content`: the text-only dialect's bare string, or the
+/// multimodal parts array a user turn carries when it has images.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WireContent {
+    /// The bare joined text — the shape every compatible server accepts,
+    /// including ones predating content parts.
+    Text(String),
+    /// One part per content block, in order.
+    Parts(Vec<WirePart>),
+}
+
+/// One entry of a content parts array, keyed by its `type`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WirePart {
+    /// A piece of the turn's text.
+    Text {
+        /// The text itself.
+        text: String,
+    },
+    /// An inline image. The url is a `data:{media type};base64,{bytes}`
+    /// URI — the dialect also accepts remote `http(s)` urls, but core
+    /// carries images inline, so rhema only ever sends data URIs.
+    ImageUrl {
+        /// The image location, wrapped in the dialect's `image_url` object.
+        image_url: WireImageUrl,
+    },
+}
+
+/// The `image_url` object of a [`WirePart::ImageUrl`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireImageUrl {
+    /// The image URL; rhema sends only `data:` URIs.
+    pub url: String,
+}
+
+/// One message on the wire. A single wire message carries either a
+/// `content` (a joined text string, or a parts array for a user turn with
+/// images), or an assistant's `tool_calls`, or a tool result's
 /// `tool_call_id` — exactly one of the three is set by the mapper.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WireMessage {
     /// `"system"`, `"user"`, `"assistant"`, or `"tool"`.
     pub role: String,
-    /// The turn's text, when it has any.
+    /// The turn's content: the joined text as a bare string, or — only
+    /// when a user turn carries images — one part per content block.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<WireContent>,
     /// The assistant's requested tool calls, when any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<WireToolCall>>,
@@ -446,7 +492,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
     if let Some(system) = req.system.as_deref().filter(|s| !s.trim().is_empty()) {
         messages.push(WireMessage {
             role: "system".into(),
-            content: Some(system.to_owned()),
+            content: Some(WireContent::Text(system.to_owned())),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: None,
@@ -459,7 +505,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                 if !text.is_empty() {
                     messages.push(WireMessage {
                         role: "system".into(),
-                        content: Some(text),
+                        content: Some(WireContent::Text(text)),
                         reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
@@ -467,11 +513,10 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                 }
             }
             Role::User => {
-                let text = joined_texts(message);
-                if !text.is_empty() {
+                if let Some(content) = parts_of(message) {
                     messages.push(WireMessage {
                         role: "user".into(),
-                        content: Some(text),
+                        content: Some(content),
                         reasoning_content: None,
                         tool_calls: None,
                         tool_call_id: None,
@@ -516,7 +561,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                 if !text.is_empty() || !calls.is_empty() {
                     messages.push(WireMessage {
                         role: "assistant".into(),
-                        content: (!text.is_empty()).then_some(text),
+                        content: (!text.is_empty()).then_some(WireContent::Text(text)),
                         tool_calls: (!calls.is_empty()).then_some(calls),
                         reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
                         tool_call_id: None,
@@ -571,6 +616,37 @@ fn reasoning_effort(thinking: ThinkingEffort) -> Option<&'static str> {
     }
 }
 
+/// The user turn's content: a parts array — one part per content block in
+/// order — when the turn carries any [`Content::Image`], else the bare
+/// joined text. Text-only turns must stay byte-identical on the wire:
+/// strict servers predate the parts shape. Tool blocks keep their own wire
+/// messages and never become parts.
+fn parts_of(message: &Message) -> Option<WireContent> {
+    let has_images = message
+        .content
+        .iter()
+        .any(|content| matches!(content, Content::Image(_)));
+    if !has_images {
+        let text = joined_texts(message);
+        return (!text.is_empty()).then_some(WireContent::Text(text));
+    }
+    Some(WireContent::Parts(
+        message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                Content::Text(text) => Some(WirePart::Text { text: text.clone() }),
+                Content::Image(image) => Some(WirePart::ImageUrl {
+                    image_url: WireImageUrl {
+                        url: format!("data:{};base64,{}", image.media_type.as_str(), image.data),
+                    },
+                }),
+                Content::ToolCall(_) | Content::ToolResult(_) => None,
+            })
+            .collect(),
+    ))
+}
+
 /// The text blocks of a message, joined by a blank line.
 fn joined_texts(message: &Message) -> String {
     message
@@ -589,7 +665,7 @@ fn tool_results_of(message: &Message) -> impl Iterator<Item = WireMessage> + '_ 
     message.content.iter().filter_map(|content| match content {
         Content::ToolResult(result) => Some(WireMessage {
             role: "tool".into(),
-            content: Some(result.content.clone()),
+            content: Some(WireContent::Text(result.content.clone())),
             reasoning_content: None,
             tool_calls: None,
             tool_call_id: Some(result.id.clone()),
@@ -825,6 +901,7 @@ fn stop_reason(finish_reason: Option<&str>, has_calls: bool) -> StopReason {
 mod tests {
     use super::*;
     use rhema_core::event::Event;
+    use rhema_core::message::{Image, ImageMediaType};
     use rhema_core::request::{ChatParams, ToolSpec};
     use rhema_core::tool::ToolResult;
     use serde_json::json;
@@ -999,6 +1076,118 @@ mod tests {
         assert_eq!(messages[1]["role"], "tool");
         assert_eq!(messages[1]["tool_call_id"], "call_9");
         assert_eq!(messages[1]["content"], "boom");
+    }
+
+    #[test]
+    fn a_user_turn_with_images_maps_to_content_parts() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text_with_images(
+                Role::User,
+                "what is this?",
+                vec![Image::new(ImageMediaType::Png, "aGVsbG8=")],
+            )],
+            tools: vec![],
+            params: ChatParams::new("gpt-4o-mini"),
+        };
+
+        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        assert!(
+            body.contains(concat!(
+                r#""content":[{"type":"text","text":"what is this?"},"#,
+                r#"{"type":"image_url","#,
+                r#""image_url":{"url":"data:image/png;base64,aGVsbG8="}}]"#,
+            ),),
+            "{body}"
+        );
+        // The array replaces the bare string outright: no text leaks
+        // outside the parts.
+        assert!(!body.contains(r#""content":""#), "{body}");
+    }
+
+    #[test]
+    fn parts_keep_the_message_block_order() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message {
+                role: Role::User,
+                content: vec![
+                    Content::Text("first".into()),
+                    Content::Image(Image::new(ImageMediaType::Png, "cG5n")),
+                    Content::Text("second".into()),
+                ],
+            }],
+            tools: vec![],
+            params: ChatParams::new("gpt-4o-mini"),
+        };
+
+        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        assert!(
+            body.contains(concat!(
+                r#""content":[{"type":"text","text":"first"},"#,
+                r#"{"type":"image_url","#,
+                r#""image_url":{"url":"data:image/png;base64,cG5n"}},"#,
+                r#"{"type":"text","text":"second"}]"#,
+            ),),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn two_images_of_different_media_types_become_two_image_parts() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text_with_images(
+                Role::User,
+                "compare",
+                vec![
+                    Image::new(ImageMediaType::Png, "cG5n"),
+                    Image::new(ImageMediaType::Webp, "d2VicA=="),
+                ],
+            )],
+            tools: vec![],
+            params: ChatParams::new("gpt-4o-mini"),
+        };
+
+        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        assert_eq!(body.matches(r#""type":"image_url""#).count(), 2, "{body}");
+        assert!(
+            body.contains(r#"{"url":"data:image/png;base64,cG5n"}"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"{"url":"data:image/webp;base64,d2VicA=="}"#),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn a_text_only_turn_keeps_the_bare_content_string() {
+        let req = ModelRequest {
+            system: Some("be terse".into()),
+            messages: vec![
+                Message::text(Role::User, "list files"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![Content::Text("checking".into())],
+                },
+                Message {
+                    role: Role::Tool,
+                    content: vec![Content::ToolResult(ToolResult::success("call_0", "[]"))],
+                },
+            ],
+            tools: vec![],
+            params: ChatParams::new("gpt-4o-mini"),
+        };
+
+        // Byte-identical to the pre-parts shape: every content is a JSON
+        // string, on every role, and no parts machinery appears.
+        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        assert!(body.contains(r#""content":"be terse""#), "{body}");
+        assert!(body.contains(r#""content":"list files""#), "{body}");
+        assert!(body.contains(r#""content":"checking""#), "{body}");
+        assert!(body.contains(r#""content":"[]""#), "{body}");
+        assert!(!body.contains("image_url"), "{body}");
     }
 
     #[test]
