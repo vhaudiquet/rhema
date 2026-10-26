@@ -181,6 +181,22 @@ Backends fall into two families:
 - **fs-disjoint** — every fs op crosses a boundary: copied-workspace
   containers, VMs, SSH remotes, the protocol family.
 
+**The workspace has two postures, and the seam holds both.** A
+workspace is either **copy-in** — born on the machine the frontend
+runs on, so the sandbox must receive it — or **native** — born where
+the executor lives, so copying is meaningless. `rhema-code` on a
+laptop is the copy-in case: `local` and the mount postures make the
+copy the mount itself, a copied container takes `docker cp`, and
+`sandboxd` copies through the protocol's `put`/`get`. SSH is copy-in
+with no mount — nothing yet answers "how does the current folder get
+there", which is the mode's open piece (§8). A Durable Object serving
+claw is the native case: its workspace storage IS the sandbox fs, exec
+and the file ops meet in one place, and the meta-table seed marker is
+the whole story. The trait stays silent about provenance — that
+silence is the design — but the posture rides the frontend and the
+backend together, and no assembly may assume one posture for every
+backend.
+
 | choice | the implementation | new code |
 |---|---|---|
 | local direct | `LocalSandbox`: processes rooted at a host dir | small |
@@ -307,6 +323,11 @@ infrastructure); phase 9 is the one users see.
   UX's decision, not this spec's.
 - **Cross-cloud resume:** a session checkpointed in DO storage resuming
   against Vercel's Postgres is Store portability, not sandboxing.
+- **The copy-in story for ssh:** what carries the working tree to the
+  remote, and when — a git-remote sync, an rsync/tar push at startup
+  and on demand, or `sandboxd` behind `ssh -L` (then the protocol's
+  `put`/`get` IS the story). Until one lands, ssh stays daemonless
+  exec with seeded files, honest about not mirroring the working tree.
 
 ## 9. Decisions
 
@@ -343,3 +364,8 @@ infrastructure); phase 9 is the one users see.
 - **VMs are packaging** — if an isolation tier costs no client code,
   the abstraction is right; the success test is that §4's "later" rows
   need no trait change.
+- **Both workspace postures stay first-class** — copy-in (the laptop
+  folder carried to the sandbox: the mount, `docker cp`, the protocol's
+  `put`/`get`, ssh's story still to land) and native (the DO's storage
+  IS the workspace; copying there is meaningless). The seam serves
+  both; an assembly that assumes one posture everywhere is wrong.
