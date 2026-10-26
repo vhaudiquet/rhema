@@ -14,6 +14,13 @@
 //!   (text blocks joined by a blank line). `Role::User` and `Role::Assistant`
 //!   map to their like-named roles; text blocks of one message are joined by
 //!   a blank line into the single `content` string.
+//! - A user turn carrying [`Content::Image`] blocks maps to a content parts
+//!   array — one part per content block in order, each text block a `text`
+//!   part and each image an `image_url` part whose url is a
+//!   `data:{media type};base64,…` URI. A turn with no images keeps the bare
+//!   joined string: text-only traffic stays byte-identical on the wire, and
+//!   strict servers predate the parts shape. Assistant and tool messages
+//!   never carry parts.
 //! - An assistant turn with text and/or tool calls becomes ONE wire message:
 //!   `content` is omitted when there is no text, `tool_calls` when there are
 //!   no calls. OpenRouter rejects assistant messages with neither, so an
@@ -54,6 +61,10 @@
 //!   in the assembled message winning as
 //!   [`StopReason::ToolUse`](rhema_core::StopReason::ToolUse) — the same
 //!   rule as the sibling adapters.
+//! - An entry's `architecture.input_modalities`, when published, is the
+//!   listing's own vision verdict — `image` named there sets
+//!   `ModelCard::supports_vision` to `Some`, its absence to `Some(false)`;
+//!   an entry publishing nothing stays unknown.
 //! - Models: `GET /models` needs no auth in practice and paginates with
 //!   `limit`/`offset` (`links.next` is null on the last page). An entry's
 //!   `pricing.prompt`/`pricing.completion` are STRINGS of USD per single
@@ -114,16 +125,55 @@ pub struct WireReasoning {
     pub effort: &'static str,
 }
 
-/// One message on the wire. A single wire message carries either a text
-/// `content`, or an assistant's `tool_calls`, or a tool result's
+/// A message's `content`: the text-only dialect's bare string, or the
+/// multimodal parts array a user turn carries when it has images.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WireContent {
+    /// The bare joined text — the shape every compatible server accepts,
+    /// including ones predating content parts.
+    Text(String),
+    /// One part per content block, in order.
+    Parts(Vec<WirePart>),
+}
+
+/// One entry of a content parts array, keyed by its `type`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WirePart {
+    /// A piece of the turn's text.
+    Text {
+        /// The text itself.
+        text: String,
+    },
+    /// An inline image. The url is a `data:{media type};base64,{bytes}`
+    /// URI — the dialect also accepts remote `http(s)` urls, but core
+    /// carries images inline, so rhema only ever sends data URIs.
+    ImageUrl {
+        /// The image location, wrapped in the dialect's `image_url` object.
+        image_url: WireImageUrl,
+    },
+}
+
+/// The `image_url` object of a [`WirePart::ImageUrl`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WireImageUrl {
+    /// The image URL; rhema sends only `data:` URIs.
+    pub url: String,
+}
+
+/// One message on the wire. A single wire message carries either a
+/// `content` (a joined text string, or a parts array for a user turn with
+/// images), or an assistant's `tool_calls`, or a tool result's
 /// `tool_call_id` — exactly one of the three is set by the mapper.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WireMessage {
     /// `"system"`, `"user"`, `"assistant"`, or `"tool"`.
     pub role: String,
-    /// The turn's text, when it has any.
+    /// The turn's content: the joined text as a bare string, or — only
+    /// when a user turn carries images — one part per content block.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<WireContent>,
     /// The assistant's requested tool calls, when any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<WireToolCall>>,
@@ -353,9 +403,22 @@ pub struct WireModel {
     /// Max context in tokens, when advertised.
     #[serde(default)]
     pub context_length: Option<u64>,
+    /// The entry's modality facts, when advertised.
+    #[serde(default)]
+    pub architecture: Option<WireArchitecture>,
     /// Prices in USD per single token, when advertised.
     #[serde(default)]
     pub pricing: Option<WirePricing>,
+}
+
+/// The `architecture` object of a [`WireModel`]: what goes in, what comes
+/// out. The only field a picker row needs is the input modality list.
+#[derive(Debug, Default, Deserialize)]
+pub struct WireArchitecture {
+    /// The input modalities the model accepts (e.g. `["text", "image"]`),
+    /// when the entry publishes them.
+    #[serde(default)]
+    pub input_modalities: Option<Vec<String>>,
 }
 
 /// The `pricing` object of a [`WireModel`]; the per-request, image, and
@@ -403,10 +466,23 @@ fn per_mtok_pricing(wire: &WireModel) -> Option<Pricing> {
     })
 }
 
+/// The listing's own vision verdict: an entry publishing its input
+/// modalities names `image` there or not — a real `Some` either way. No
+/// published list (`architecture` absent, or the field absent from it)
+/// stays unknown rather than guessed.
+fn vision_of(wire: &WireModel) -> Option<bool> {
+    wire.architecture
+        .as_ref()?
+        .input_modalities
+        .as_ref()
+        .map(|modalities| modalities.iter().any(|modality| modality == "image"))
+}
+
 impl From<WireModel> for ModelCard {
     fn from(wire: WireModel) -> Self {
-        // Priced before the fields move out.
+        // Priced and judged before the fields move out.
         let pricing = per_mtok_pricing(&wire);
+        let supports_vision = vision_of(&wire);
         Self {
             id: wire.id,
             display_name: wire.name,
@@ -416,7 +492,7 @@ impl From<WireModel> for ModelCard {
             // reports no output ceiling.
             output_token_limit: None,
             // Every listed model is offered through chat completions.
-            supports_vision: None,
+            supports_vision,
             generation_methods: vec!["generateContent".to_owned()],
             pricing,
         }
@@ -512,7 +588,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
         messages.push(WireMessage {
             role: "system".into(),
             reasoning: None,
-            content: Some(system.to_owned()),
+            content: Some(WireContent::Text(system.to_owned())),
             tool_calls: None,
             tool_call_id: None,
         });
@@ -525,19 +601,18 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                     messages.push(WireMessage {
                         role: "system".into(),
                         reasoning: None,
-                        content: Some(text),
+                        content: Some(WireContent::Text(text)),
                         tool_calls: None,
                         tool_call_id: None,
                     });
                 }
             }
             Role::User => {
-                let text = joined_texts(message);
-                if !text.is_empty() {
+                if let Some(content) = parts_of(message) {
                     messages.push(WireMessage {
                         role: "user".into(),
                         reasoning: None,
-                        content: Some(text),
+                        content: Some(content),
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -581,7 +656,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                 if !text.is_empty() || !calls.is_empty() {
                     messages.push(WireMessage {
                         role: "assistant".into(),
-                        content: (!text.is_empty()).then_some(text),
+                        content: (!text.is_empty()).then_some(WireContent::Text(text)),
                         tool_calls: (!calls.is_empty()).then_some(calls),
                         reasoning: (!reasoning.is_empty()).then_some(reasoning),
                         tool_call_id: None,
@@ -634,6 +709,35 @@ fn reasoning_effort(thinking: ThinkingEffort) -> Option<WireReasoning> {
     Some(WireReasoning { effort })
 }
 
+/// A user turn's content: the bare joined text when it has no images,
+/// else one part per content block in order. `None` for a turn with
+/// neither text nor images — nothing to send.
+fn parts_of(message: &Message) -> Option<WireContent> {
+    let has_images = message
+        .content
+        .iter()
+        .any(|content| matches!(content, Content::Image(_)));
+    if !has_images {
+        let text = joined_texts(message);
+        return (!text.is_empty()).then_some(WireContent::Text(text));
+    }
+    Some(WireContent::Parts(
+        message
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                Content::Text(text) => Some(WirePart::Text { text: text.clone() }),
+                Content::Image(image) => Some(WirePart::ImageUrl {
+                    image_url: WireImageUrl {
+                        url: format!("data:{};base64,{}", image.media_type.as_str(), image.data),
+                    },
+                }),
+                Content::ToolCall(_) | Content::ToolResult(_) => None,
+            })
+            .collect(),
+    ))
+}
+
 /// The text blocks of a message, joined by a blank line.
 fn joined_texts(message: &Message) -> String {
     message
@@ -653,7 +757,7 @@ fn tool_results_of(message: &Message) -> impl Iterator<Item = WireMessage> + '_ 
         Content::ToolResult(result) => Some(WireMessage {
             role: "tool".into(),
             reasoning: None,
-            content: Some(result.content.clone()),
+            content: Some(WireContent::Text(result.content.clone())),
             tool_calls: None,
             tool_call_id: Some(result.id.clone()),
         }),
@@ -884,6 +988,7 @@ fn stop_reason(finish_reason: Option<&str>, has_calls: bool) -> StopReason {
 mod tests {
     use super::*;
     use rhema_core::event::Event;
+    use rhema_core::message::{Image, ImageMediaType};
     use rhema_core::request::{ChatParams, ToolSpec};
     use rhema_core::tool::ToolResult;
     use serde_json::json;
@@ -1568,6 +1673,87 @@ mod tests {
     }
 
     #[test]
+    fn a_user_turn_with_an_image_maps_to_a_data_uri_part() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text_with_images(
+                Role::User,
+                "what is in this screenshot?",
+                vec![Image::new(ImageMediaType::Png, "aGVsbG8=")],
+            )],
+            tools: Vec::new(),
+            params: ChatParams {
+                thinking: ThinkingEffort::Default,
+                model: "google/gemini-2.0-flash-001".into(),
+                temperature: None,
+                max_tokens: None,
+            },
+        };
+
+        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        assert_eq!(
+            json["messages"][0]["content"],
+            json!([
+                { "type": "text", "text": "what is in this screenshot?" },
+                { "type": "image_url",
+                  "image_url": { "url": "data:image/png;base64,aGVsbG8=" } }
+            ])
+        );
+    }
+
+    #[test]
+    fn a_text_only_user_turn_keeps_the_bare_string_content() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "plain text")],
+            tools: Vec::new(),
+            params: ChatParams {
+                thinking: ThinkingEffort::Default,
+                model: "openai/gpt-4o-mini".into(),
+                temperature: None,
+                max_tokens: None,
+            },
+        };
+
+        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        assert_eq!(json["messages"][0]["content"], json!("plain text"));
+    }
+
+    #[test]
+    fn two_images_map_to_two_parts_in_block_order() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message::text_with_images(
+                Role::User,
+                "compare",
+                vec![
+                    Image::new(ImageMediaType::Webp, "d2VicA=="),
+                    Image::new(ImageMediaType::Jpeg, "anM="),
+                ],
+            )],
+            tools: Vec::new(),
+            params: ChatParams {
+                thinking: ThinkingEffort::Default,
+                model: "google/gemini-2.0-flash-001".into(),
+                temperature: None,
+                max_tokens: None,
+            },
+        };
+
+        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let content = json["messages"][0]["content"].as_array().expect("parts");
+        assert_eq!(content.len(), 3);
+        assert_eq!(
+            content[1]["image_url"]["url"],
+            "data:image/webp;base64,d2VicA=="
+        );
+        assert_eq!(
+            content[2]["image_url"]["url"],
+            "data:image/jpeg;base64,anM="
+        );
+    }
+
+    #[test]
     fn model_entries_map_to_gemini_rows_with_per_mtok_pricing() {
         let page: WireModelsPage = serde_json::from_str(
             r#"{
@@ -1577,7 +1763,10 @@ mod tests {
                         "name": "GPT-4o mini",
                         "description": "the small openai model",
                         "context_length": 128000,
-                        "architecture": { "modality": "text->text" },
+                        "architecture": {
+                            "modality": "text+image->text",
+                            "input_modalities": ["text", "image"]
+                        },
                         "pricing": {
                             "prompt": "0.00000015",
                             "completion": "0.0000006",
@@ -1632,6 +1821,38 @@ mod tests {
         );
         // No pricing object means no price at all.
         assert_eq!(models[2].pricing, None);
+
+        // The listing's own input modalities are the vision verdict.
+        assert_eq!(models[0].supports_vision, Some(true));
+    }
+
+    #[test]
+    fn the_vision_verdict_is_the_listings_own_modality_facts() {
+        let page: WireModelsPage = serde_json::from_str(
+            r#"{
+                "data": [
+                    {
+                        "id": "text-only/model",
+                        "architecture": { "input_modalities": ["text"] }
+                    },
+                    { "id": "silent/model" },
+                    {
+                        "id": "half-silent/model",
+                        "architecture": { "modality": "text->text" }
+                    }
+                ],
+                "links": { "next": null }
+            }"#,
+        )
+        .expect("models page parses");
+
+        let models: Vec<ModelCard> = page.data.into_iter().map(Into::into).collect();
+        // A published list without `image` is a real no, not a shrug.
+        assert_eq!(models[0].supports_vision, Some(false));
+        // No architecture object at all stays unknown.
+        assert_eq!(models[1].supports_vision, None);
+        // An architecture object without the modality list too.
+        assert_eq!(models[2].supports_vision, None);
     }
 
     #[test]
