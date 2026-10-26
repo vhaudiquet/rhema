@@ -21,6 +21,13 @@ pub struct ModelCard {
     pub input_token_limit: Option<u64>,
     /// Output ceiling in tokens, when advertised.
     pub output_token_limit: Option<u64>,
+    /// Whether the model accepts image input, when the listing or the
+    /// adapter's own knowledge says so. Tri-state: `None` — the common
+    /// case — is unknown, not "no": most listings carry no modality
+    /// data. A `Some` verdict rides the catalog row; sending an image
+    /// to a `false` model fails server-side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_vision: Option<bool>,
     /// What the listing says the model can do; chat-capable rows carry
     /// `generateContent`, the adapters' shared chat marker.
     pub generation_methods: Vec<String>,
@@ -38,5 +45,47 @@ impl ModelCard {
         self.generation_methods
             .iter()
             .any(|m| m == "generateContent")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn card() -> ModelCard {
+        ModelCard {
+            id: "gemini-3.8-flash".to_owned(),
+            display_name: "Gemini 3.8 Flash".to_owned(),
+            description: String::new(),
+            input_token_limit: None,
+            output_token_limit: None,
+            supports_vision: None,
+            generation_methods: vec!["generateContent".to_owned()],
+            pricing: None,
+        }
+    }
+
+    #[test]
+    fn the_vision_flag_serializes_only_when_known_and_loads_as_unknown() {
+        let unknown = card();
+        let json = serde_json::to_string(&unknown).unwrap();
+        // `None` is unknown, not "no", so it never reaches the payload.
+        assert!(!json.contains("supports_vision"), "{json}");
+        assert_eq!(serde_json::from_str::<ModelCard>(&json).unwrap(), unknown);
+
+        let known = ModelCard {
+            supports_vision: Some(true),
+            ..card()
+        };
+        let json = serde_json::to_string(&known).unwrap();
+        assert!(json.contains("\"supports_vision\":true"), "{json}");
+        assert_eq!(serde_json::from_str::<ModelCard>(&json).unwrap(), known);
+
+        // A payload from before the field existed loads as unknown.
+        let legacy: ModelCard = serde_json::from_str(
+            r#"{"id":"m","display_name":"m","description":"","generation_methods":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.supports_vision, None);
     }
 }

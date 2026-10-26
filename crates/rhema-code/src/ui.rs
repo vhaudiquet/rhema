@@ -3027,6 +3027,7 @@ mod tests {
             description: String::new(),
             input_token_limit: None,
             output_token_limit: None,
+            supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
         }
@@ -4149,6 +4150,7 @@ mod scroll_tests {
                 description: String::new(),
                 input_token_limit: Some(1_048_576),
                 output_token_limit: None,
+                supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
             },
@@ -4462,6 +4464,7 @@ mod scroll_tests {
                     description: String::new(),
                     input_token_limit: Some(1_048_576),
                     output_token_limit: None,
+                    supports_vision: None,
                     generation_methods: vec!["generateContent".into()],
                     pricing: None,
                 }]),

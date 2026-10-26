@@ -442,6 +442,7 @@ impl From<WireModel> for ModelCard {
             input_token_limit: None,
             output_token_limit: None,
             // Every listed model is offered through the Messages API.
+            supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
         }

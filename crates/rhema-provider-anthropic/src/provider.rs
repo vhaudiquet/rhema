@@ -520,6 +520,7 @@ mod tests {
             description: String::new(),
             input_token_limit: None,
             output_token_limit: None,
+            supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
         }

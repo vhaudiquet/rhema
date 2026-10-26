@@ -750,6 +750,7 @@ impl From<WireModel> for ModelCard {
             description: wire.description,
             input_token_limit: wire.input_token_limit,
             output_token_limit: wire.output_token_limit,
+            supports_vision: None,
             generation_methods: wire.supported_generation_methods,
             // ListModels carries no pricing; the provider step bakes the
             // curated table in.

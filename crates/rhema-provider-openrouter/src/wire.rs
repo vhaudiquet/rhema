@@ -416,6 +416,7 @@ impl From<WireModel> for ModelCard {
             // reports no output ceiling.
             output_token_limit: None,
             // Every listed model is offered through chat completions.
+            supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing,
         }
@@ -1669,6 +1670,7 @@ mod tests {
                 description: String::new(),
                 input_token_limit: None,
                 output_token_limit: None,
+                supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
             })

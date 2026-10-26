@@ -331,6 +331,7 @@ impl From<LlamaModel> for ModelCard {
             // per-direction output ceiling.
             output_token_limit: None,
             // Every listed model is offered through chat completions.
+            supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
         }

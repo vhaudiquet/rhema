@@ -2458,6 +2458,7 @@ mod tests {
             description: String::new(),
             input_token_limit: Some(1_048_576),
             output_token_limit: Some(65_536),
+            supports_vision: None,
             generation_methods: if chat {
                 vec!["generateContent".into()]
             } else {

@@ -370,6 +370,7 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
                 // no per-direction output ceiling.
                 output_token_limit: None,
                 // Every listed model is offered through chat completions.
+                supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 // The generic listing carries no prices; adapters with a
                 // richer catalog map their own.
@@ -1593,6 +1594,7 @@ mod tests {
                 description: String::new(),
                 input_token_limit: None,
                 output_token_limit: None,
+                supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
             })

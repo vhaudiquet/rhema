@@ -356,6 +356,7 @@ fn card(id: &str, context_length: Option<u64>) -> ModelCard {
         description: String::new(),
         input_token_limit: context_length,
         output_token_limit: None,
+        supports_vision: None,
         generation_methods: vec!["generateContent".to_owned()],
         pricing: None,
     }

@@ -261,6 +261,7 @@ impl App {
                             // math have something to ride on in tests.
                             input_token_limit: Some(200_000),
                             output_token_limit: None,
+                            supports_vision: None,
                             generation_methods: vec!["generateContent".to_owned()],
                             pricing: Some(rhema_provider::Pricing {
                                 input_per_mtok: 1.0,

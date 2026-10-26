@@ -372,6 +372,7 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
                     .and_then(|l| l.get("max_output_tokens"))
                     .and_then(Value::as_u64),
                 // Every kept model is offered through chat completions.
+                supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 // A subscription serves the tokens: no per-MTok prices.
                 pricing: None,
