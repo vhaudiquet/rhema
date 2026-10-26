@@ -18,9 +18,22 @@ probe:
       Use `rg` rather than recursive grep: it respects .gitignore by
       default. `rg -uu` also searches ignored files.
   - executable: fd
+    advice: >-
+      Use `fd` rather than `find`: it respects .gitignore by default.
+      `fd -uu` also searches ignored files.
   - executable: jq
+    advice: >-
+      Use `jq` for JSON parsing and editing. Useful for API responses as well.
   - executable: yq
+    advice: >-
+      Use `yq` for YAML parsing and editing.
   - executable: sd
+    advice: >-
+      Use `sd` for targetted edits: `sd "before" "after" file`
+  - executable: curl
+    advice: >-
+      Use `curl` to access APIs (`curl | jq` pattern), raw data pages (.md,.txt, etc.)
+      and to download files. The rest of the web will likely not work.
 
 # The session facts every shape carries — written once here and placed
 # by reference (`{{ facts }}`), never duplicated in the texts below.
