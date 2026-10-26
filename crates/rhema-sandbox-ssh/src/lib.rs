@@ -184,8 +184,11 @@ fn cd_prefix(cwd: &str) -> Option<String> {
 }
 
 /// The exec argv: `ssh <host> -- timeout --kill-after=5 <secs>
-/// bash -c <command>`, the remote cwd handled by the `cd` prefix. The
-/// empty cwd runs in the remote login's default directory.
+/// bash -c <script>`, the remote cwd handled by the `cd` prefix. The
+/// empty cwd runs in the remote login's default directory. The script
+/// rides as one quoted word: ssh joins its command words and the far
+/// end reparses them, so an unquoted script would reach `bash -c`
+/// truncated to its first word.
 fn exec_argv(host: &str, timeout_secs: u64, cwd: &str, command: &str) -> Vec<String> {
     let script = match cd_prefix(cwd) {
         Some(prefix) => format!("{prefix}{command}"),
@@ -200,7 +203,7 @@ fn exec_argv(host: &str, timeout_secs: u64, cwd: &str, command: &str) -> Vec<Str
         timeout_secs.to_string(),
         "bash".to_owned(),
         "-c".to_owned(),
-        script,
+        shquote(&script),
     ]
 }
 
@@ -406,7 +409,7 @@ mod tests {
                 "30",
                 "bash",
                 "-c",
-                "cd '/src' && echo hi",
+                "'cd '\\''/src'\\'' && echo hi'",
             ]
         );
     }
@@ -425,7 +428,7 @@ mod tests {
                     "30",
                     "bash",
                     "-c",
-                    "echo hi",
+                    "'echo hi'",
                 ]
             );
         }
@@ -481,7 +484,7 @@ mod tests {
         let argv = exec_argv("box", 30, "/my dir", "echo hi");
         assert_eq!(
             argv.last().map(String::as_str),
-            Some("cd '/my dir' && echo hi")
+            Some("'cd '\\''/my dir'\\'' && echo hi'")
         );
     }
 
@@ -670,12 +673,15 @@ mod tests {
         }
         let remote = format!("/tmp/rhema-ssh-test-{}", std::process::id());
         let sandbox = SshSandbox::new("localhost").with_workspace(remote.clone());
+        // The fs ops take remote-absolute paths; the workspace root is
+        // the seed's target, so the test's paths hang under it.
+        let note = format!("{remote}/deep/note.md");
         sandbox
-            .write_file("/deep/note.md", b"# note")
+            .write_file(&note, b"# note")
             .await
             .expect("the write lands remotely");
         let read = sandbox
-            .read_file("/deep/note.md")
+            .read_file(&note)
             .await
             .expect("the read lands remotely");
         assert_eq!(read, b"# note");
@@ -738,7 +744,7 @@ mod tests {
             .await
             .expect("the remote clone lands");
         let read = sandbox
-            .read_file("/seeded.txt")
+            .read_file(&format!("{remote}/seeded.txt"))
             .await
             .expect("the cloned file reads back");
         assert_eq!(read, b"from git");
