@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use rhema_coding_agent::{Approval, CodingAgent, repair_dangling_calls};
-use rhema_core::{Event, EventSink, Session};
+use rhema_core::{Event, EventSink, Image, Message, Role, Session};
 use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
@@ -60,21 +60,42 @@ async fn next_steer(steer: &mut UnboundedReceiver<String>) -> Option<String> {
     }
 }
 
-/// Spawns a turn chain on a tokio task: runs `agent.turn` with the given
-/// approval hook, commits the session before each tool round and
-/// checkpoints the final turn on success (when `save` is set), and hands
-/// the agent back via [`UiEvent::TurnFinished`] — or, when the cancel flag
-/// flips, drops the turn future at its current await and hands the agent
-/// back via [`UiEvent::TurnCancelled`]. A message on `steer` drops the
-/// turn future the same way, but the task carries on: the message runs as
-/// the next turn on the same agent, so the conversation continues right
-/// where the interruption landed. The UI thread must treat the agent as
-/// gone until either event arrives; `steer`'s receiver travels inside
-/// that event, so a message sent in the finishing race is buffered there,
-/// never lost.
+/// The prompt a turn chain starts from: the text and the images beside
+/// it, in submission order. Every later prompt of the chain — a steered
+/// nudge — is text only.
+#[derive(Debug, Default)]
+pub struct Prompt {
+    /// The prompt's text.
+    pub text: String,
+    /// The images beside the text.
+    pub images: Vec<Image>,
+}
+
+impl Prompt {
+    /// A text-only prompt — every steered nudge's shape.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+        }
+    }
+}
+
+/// Spawns a turn chain on a tokio task: runs the prompt through the
+/// agent with the given approval hook, commits the session before each
+/// tool round and checkpoints the final turn on success (when `save` is
+/// set), and hands the agent back via [`UiEvent::TurnFinished`] — or,
+/// when the cancel flag flips, drops the turn future at its current
+/// await and hands the agent back via [`UiEvent::TurnCancelled`]. A
+/// message on `steer` drops the turn future the same way, but the task
+/// carries on: the message runs as the next turn on the same agent, so
+/// the conversation continues right where the interruption landed. The
+/// UI thread must treat the agent as gone until either event arrives;
+/// `steer`'s receiver travels inside that event, so a message sent in
+/// the finishing race is buffered there, never lost.
 pub fn spawn_turn(
     mut agent: CodingAgent,
-    input: String,
+    prompt: Prompt,
     approval: Arc<dyn Approval>,
     save: Option<PathBuf>,
     cancel: watch::Receiver<bool>,
@@ -91,9 +112,33 @@ pub fn spawn_turn(
                 .map_err(|err| rhema_core::CommitError(err.to_string()))
         })));
     }
+    // The cancel flag the executor polls is an atomic, the UI's is a
+    // watch: a mirror task keeps the two honest — a flip asks in-flight
+    // tools to stop, not only drops the turn at its next await. The
+    // task ends when the watch does (the turn chain finished or the UI
+    // is gone).
+    let cancelled_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mirror = Arc::clone(&cancelled_flag);
+    let mut cancel_mirror = cancel.clone();
+    tokio::spawn(async move {
+        loop {
+            if *cancel_mirror.borrow_and_update() {
+                mirror.store(true, std::sync::atomic::Ordering::Relaxed);
+                return;
+            }
+            if cancel_mirror.changed().await.is_err() {
+                return;
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut sink = ChannelSink { tx: events.clone() };
-        let mut input = input;
+        let Prompt { text, images } = prompt;
+        // The images ride the first turn only: a steered nudge is a
+        // sentence, and `text_with_images` with none folds to the plain
+        // text message.
+        let mut text = text;
+        let mut images = images;
         // The chain's outcome: `None` once the cancel flag ended it, the
         // final turn's result otherwise. A steered interruption leaves it
         // alone — the chain just turns another round. An intermediate
@@ -101,22 +146,32 @@ pub fn spawn_turn(
         // turn proceeds, and only the final result is reported.
         let mut outcome = None;
         loop {
-            let turn = agent.turn(std::mem::take(&mut input), &mut sink, Arc::clone(&approval));
+            let message = Message::text_with_images(
+                Role::User,
+                std::mem::take(&mut text),
+                std::mem::take(&mut images),
+            );
+            let turn = agent.turn_message_with_cancel(
+                message,
+                &mut sink,
+                Arc::clone(&approval),
+                Arc::clone(&cancelled_flag),
+            );
             tokio::pin!(turn);
             tokio::select! {
                 _ = cancelled(cancel.clone()) => break,
-                Some(text) = next_steer(&mut steer) => {
+                Some(nudge) = next_steer(&mut steer) => {
                     // The pinned future drops here, at its current await
                     // — a streaming request or a running tool. The next
-                    // `agent.turn` revives whatever committed before the
-                    // drop (see `revive_dangling_calls`), so the history
+                    // turn revives whatever committed before the drop
+                    // (see `revive_dangling_calls`), so the history
                     // stays load-bearing without a repair step here.
-                    input = text;
+                    text = nudge;
                 }
                 result = &mut turn => match steer.try_recv() {
                     // A message that raced the completion steers the next
                     // turn instead of slipping into the closing window.
-                    Ok(text) => input = text,
+                    Ok(nudge) => text = nudge,
                     Err(_) => {
                         outcome = Some(result);
                         break;
@@ -389,7 +444,7 @@ mod mock_tests {
         .unwrap();
         spawn_turn(
             agent,
-            "hi".into(),
+            Prompt::text("hi"),
             Arc::new(AllowAll),
             None,
             cancelled,
@@ -465,7 +520,7 @@ mod mock_tests {
         let (_steer_tx, steered) = unbounded_channel();
         spawn_turn(
             agent,
-            "hi".into(),
+            Prompt::text("hi"),
             Arc::new(AllowAll),
             None,
             cancelled,
@@ -498,7 +553,7 @@ mod mock_tests {
         let (_steer_tx, steered) = unbounded_channel();
         spawn_turn(
             agent,
-            "hi".into(),
+            Prompt::text("hi"),
             Arc::new(AllowAll),
             Some(save.clone()),
             cancelled,
@@ -525,7 +580,7 @@ mod mock_tests {
         let (_steer_tx, steered) = unbounded_channel();
         spawn_turn(
             agent,
-            "hi".into(),
+            Prompt::text("hi"),
             Arc::new(AllowAll),
             None,
             cancelled,
@@ -576,7 +631,7 @@ mod mock_tests {
         let (_steer_tx, steered) = unbounded_channel();
         spawn_turn(
             agent,
-            "hi".into(),
+            Prompt::text("hi"),
             Arc::new(AllowAll),
             Some(save.clone()),
             cancelled,

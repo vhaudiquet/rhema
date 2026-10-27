@@ -10,7 +10,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig, CodingAgentError};
 use rhema_config::Config;
 use rhema_core::{
-    AgentError, Content, Message, ModelOutput, ModelProvider, Session, StopReason, ToolCall, Usage,
+    AgentError, Content, Image, Message, ModelOutput, ModelProvider, Session, StopReason, ToolCall,
+    Usage,
 };
 use rhema_provider::{Allowance, ModelCard};
 
@@ -616,15 +617,21 @@ pub enum OnboardingHit {
 }
 
 /// A side effect the runner must perform (network or task spawn).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Effect {
     /// Fetch the model list for `why`.
     FetchModels(FetchWhy),
     /// Fetch the active backend's subscription allowance, if its
     /// provider reports one.
     FetchUsage,
-    /// Start one turn with this prompt.
-    StartTurn(String),
+    /// Start one turn with this prompt: the text and the images beside
+    /// it, in the order they were submitted.
+    StartTurn {
+        /// The prompt's text.
+        text: String,
+        /// The images beside the text.
+        images: Vec<Image>,
+    },
     /// A steered prompt interrupted the running turn; the status strip
     /// names it until the next tool call takes over.
     SteerTurn(String),
@@ -2368,8 +2375,17 @@ impl App {
             return Vec::new();
         }
         match action {
-            ChatAction::Submit(text) => {
-                if text.trim().is_empty() {
+            ChatAction::Submit { text, images } => {
+                // An image alone is a prompt: only a truly empty submit
+                // is dropped.
+                if text.trim().is_empty() && images.is_empty() {
+                    Vec::new()
+                } else if self.turn.running && !images.is_empty() {
+                    // Steering stays text: an image rides a fresh prompt,
+                    // and nothing here may silently strip one from a
+                    // nudge. Everything stays for the next submit.
+                    self.transcript
+                        .push_notice("an image rides a fresh prompt; esc ends the turn first");
                     Vec::new()
                 } else if self.turn.running {
                     // The box stays live while the turn runs: the text
@@ -2382,19 +2398,21 @@ impl App {
                     if text.split_whitespace().next() == Some("/settings") {
                         self.chat.input.clear();
                         self.chat.cursor = 0;
-                        self.chat.attachments.clear();
+                        self.chat.chips.clear();
                         crate::commands::dispatch(self, rhema_core::paste::expand(&text).trim())
                     } else if text.trim().starts_with('/') {
                         Vec::new()
                     } else {
                         self.steer_turn(text)
                     }
-                } else if text.trim().starts_with('/') {
+                } else if images.is_empty() && text.trim().starts_with('/') {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
-                    self.chat.attachments.clear();
+                    self.chat.chips.clear();
                     // Commands read plain text: a paste embedded in the
-                    // line expands for them, as it would for the model.
+                    // line expands for them, as it would for the model. A
+                    // submission carrying images is a prompt, never a
+                    // command — a command is a sentence, not a screenshot.
                     crate::commands::dispatch(self, rhema_core::paste::expand(&text).trim())
                 } else if self.provider.is_none() {
                     // The text stays: it is the prompt for once the
@@ -2418,13 +2436,13 @@ impl App {
                 } else {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
-                    self.chat.attachments.clear();
-                    self.transcript.push_user(&text);
+                    self.chat.chips.clear();
+                    self.transcript.push_user(&text, images.clone());
                     self.turn.running = true;
                     self.turn.started_at = Some(std::time::Instant::now());
                     self.error = None;
                     self.turn.decline_all = false;
-                    vec![Effect::StartTurn(text)]
+                    vec![Effect::StartTurn { text, images }]
                 }
             }
             ChatAction::None => Vec::new(),
@@ -2440,8 +2458,9 @@ impl App {
     fn steer_turn(&mut self, text: String) -> Vec<Effect> {
         self.chat.input.clear();
         self.chat.cursor = 0;
-        self.chat.attachments.clear();
-        self.transcript.push_user(&text);
+        self.chat.chips.clear();
+        // A nudge carries no images: the steer channel is text-only.
+        self.transcript.push_user(&text, Vec::new());
         if let Some(steer) = &self.turn.steer {
             let _ = steer.send(text.clone());
         }
@@ -2857,8 +2876,11 @@ impl App {
             return Vec::new();
         }
         let prompt = lines.join("\n");
-        self.transcript.push_user(&prompt);
-        vec![Effect::StartTurn(prompt)]
+        self.transcript.push_user(&prompt, Vec::new());
+        vec![Effect::StartTurn {
+            text: prompt,
+            images: Vec::new(),
+        }]
     }
 
     /// Persists a validated login: the instance lands in `tab`'s profile
@@ -3490,7 +3512,10 @@ impl App {
         // already carries their user lines from submit time.
         let mut effects = Vec::new();
         while let Ok(text) = steer.try_recv() {
-            effects.push(Effect::StartTurn(text));
+            effects.push(Effect::StartTurn {
+                text,
+                images: Vec::new(),
+            });
         }
         effects
     }
@@ -5298,7 +5323,9 @@ mod tests {
         h.app.on_key(key(KeyCode::Char('a')));
         let effects = h.app.on_key(key(KeyCode::Enter));
         match effects.as_slice() {
-            [Effect::StartTurn(_)] => {}
+            [Effect::StartTurn { images, .. }] => {
+                assert!(images.is_empty());
+            }
             other => panic!("expected a turn start, got {other:?}"),
         }
         let agent = Box::new(h.app.agent.take().unwrap());
@@ -6052,12 +6079,18 @@ mod tests {
         }
         assert_eq!(
             h.app.on_key(key(KeyCode::Enter)),
-            vec![Effect::StartTurn("hi".into())]
+            vec![Effect::StartTurn {
+                text: "hi".into(),
+                images: Vec::new()
+            }]
         );
         assert!(h.app.turn.running);
         assert_eq!(
             h.app.transcript.lines().first(),
-            Some(&Line::User("hi".into()))
+            Some(&Line::User {
+                text: "hi".into(),
+                images: Vec::new()
+            })
         );
         // An empty input still never submits or steers.
         assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
@@ -6073,12 +6106,59 @@ mod tests {
         // carries it — the chip survives the send.
         assert_eq!(
             h.app.on_key(key(KeyCode::Enter)),
-            vec![Effect::StartTurn(embedded.clone())]
+            vec![Effect::StartTurn {
+                text: embedded.clone(),
+                images: Vec::new()
+            }]
         );
         assert_eq!(
             h.app.transcript.lines().first(),
-            Some(&Line::User(embedded))
+            Some(&Line::User {
+                text: embedded,
+                images: Vec::new()
+            })
         );
+    }
+
+    /// A command with an image attached is a prompt with an image, not
+    /// a command: images route to a turn unconditionally.
+    #[test]
+    fn a_submission_carrying_images_is_never_a_command() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8=");
+        h.app.chat.input = format!("/help {}", ChatState::MARK);
+        h.app.chat.chips = vec![crate::screens::Chip::Image(image.clone())];
+        h.app.chat.cursor = h.app.chat.input.chars().count();
+        match h.app.on_key(key(KeyCode::Enter)).as_slice() {
+            [Effect::StartTurn { text, images }] => {
+                assert_eq!(text, "/help ");
+                assert_eq!(images.first(), Some(&image));
+            }
+            other => panic!("an image-bearing submit is a turn, not a command: {other:?}"),
+        }
+        assert_eq!(
+            h.app.transcript.lines().last(),
+            Some(&Line::User {
+                text: "/help ".into(),
+                images: vec![image],
+            })
+        );
+    }
+
+    /// Steering stays text: an image mid-turn keeps everything in the
+    /// box for the next submit rather than stripping the image from a
+    /// nudge.
+    #[test]
+    fn an_image_cannot_steer_a_running_turn() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.turn.running = true;
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8=");
+        h.app.chat.insert_str("look");
+        h.app.chat.paste_image(image);
+        assert!(h.app.on_key(key(KeyCode::Enter)).is_empty());
+        assert!(!h.app.chat.input.is_empty(), "the text stays");
+        assert_eq!(h.app.chat.chips.len(), 1, "the image stays");
+        assert!(h.app.turn.running);
     }
 
     /// A running command's output fills the preview buffer from its
@@ -7034,7 +7114,7 @@ mod tests {
                 .transcript
                 .lines()
                 .iter()
-                .any(|line| matches!(line, Line::User(_)))
+                .any(|line| matches!(line, Line::User { .. }))
         );
         // Esc leaves the screen; the turn is still running underneath.
         h.app.on_key(key(KeyCode::Esc));
@@ -7145,7 +7225,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
         // Speak one line first: resuming replaces it.
-        h.app.transcript.push_user("current talk");
+        h.app.transcript.push_user("current talk", Vec::new());
 
         // The picker over the temp base; the dispatch path resolves its
         // own base from the environment, which a test cannot own.
@@ -7181,7 +7261,10 @@ mod tests {
         assert!(h.app.agent.is_some());
         assert_eq!(
             h.app.transcript.lines().first(),
-            Some(&Line::User("the older prompt".into()))
+            Some(&Line::User {
+                text: "the older prompt".into(),
+                images: Vec::new()
+            })
         );
         assert!(matches!(
             h.app.transcript.lines().last(),
@@ -7222,7 +7305,7 @@ mod tests {
             .session
             .history
             .push(Message::text(Role::User, "talk"));
-        h.app.transcript.push_user("talk");
+        h.app.transcript.push_user("talk", Vec::new());
         h.app.resumed_from = Some(PathBuf::from("/tmp/old.json"));
 
         crate::commands::dispatch(&mut h.app, "/new");
@@ -8340,13 +8423,18 @@ mod tests {
         // The idle tick: the notification becomes the prompt.
         let effects = h.app.on_tick();
         assert_eq!(effects.len(), 1);
-        let Effect::StartTurn(prompt) = &effects[0] else {
+        let Effect::StartTurn {
+            text: prompt,
+            images,
+        } = &effects[0]
+        else {
             panic!("the idle tick starts a turn, got {:?}", effects[0]);
         };
         assert_eq!(prompt, "Subagent scout (job-1) has finished.");
+        assert!(images.is_empty());
         let last = h.app.transcript.lines().last();
         assert!(
-            matches!(last, Some(Line::User(text)) if text == prompt.as_str()),
+            matches!(last, Some(Line::User { text, .. }) if text == prompt.as_str()),
             "the prompt's user line is the record, got {last:?}"
         );
 

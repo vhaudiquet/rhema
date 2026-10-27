@@ -1925,16 +1925,34 @@ impl PickerScreen {
 // --- Chat input ---
 
 /// What one chat keypress means.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ChatAction {
     /// Nothing to do.
     None,
     /// Enter on the (possibly empty) input; the app drops empty and
     /// suppresses submits while a turn runs. The text is the session
-    /// form — attachments embedded at their anchors — which the app
+    /// form — paste payloads embedded at their anchors — which the app
     /// pushes to the transcript as-is and expands only where plain
-    /// text is wanted (commands, the provider).
-    Submit(String),
+    /// text is wanted (commands, the provider). The images ride beside
+    /// the text, in their anchors' order.
+    Submit {
+        /// The session-form text.
+        text: String,
+        /// Images submitted beside the text.
+        images: Vec<rhema_core::Image>,
+    },
+}
+
+/// One chip anchored in the input: the payload a [`ChatState::MARK`]
+/// carries. Text pastes and clipboard images anchor the same way and
+/// render the same — one atomic cell — and differ only in what submit
+/// does with them.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Chip {
+    /// A multi-line text paste's payload.
+    Paste(String),
+    /// A clipboard image, carried as bare base64.
+    Image(rhema_core::Image),
 }
 
 /// The chat screen's input-box state: text, cursor (character index), and
@@ -1947,10 +1965,11 @@ pub struct ChatState {
     /// The input being typed. An [`Self::MARK`] character anchors an
     /// attachment chip at the position its paste landed.
     pub input: String,
-    /// Paste payloads, in the order their [`Self::MARK`] anchors appear
-    /// in `input` — a 1:1 pairing the edit paths keep true. Chips render
-    /// at their anchors; submit expands the payloads in place.
-    pub attachments: Vec<String>,
+    /// The anchors' payloads, in the order their [`Self::MARK`] anchors
+    /// appear in `input` — a 1:1 pairing the edit paths keep true. Chips
+    /// render at their anchors; submit embeds the paste payloads in
+    /// place and hands the images over beside the text.
+    pub chips: Vec<Chip>,
     /// Cursor position as a character index into `input`.
     pub cursor: usize,
     /// Transcript scroll: rendered rows scrolled up beyond the bottom
@@ -1998,16 +2017,24 @@ impl ChatState {
     }
 
     /// A paste landed. Short enough, it joins the input inline; longer,
-    /// it becomes an attachment anchored at the cursor — one cell in the
-    /// box at the paste's place, full content on submit.
+    /// it becomes a chip anchored at the cursor — one cell in the box at
+    /// the paste's place, full content on submit.
     pub fn paste(&mut self, text: &str) {
         let normalized = Self::normalize(text);
         if normalized.lines().count() > Self::PASTE_INLINE_LINES {
-            self.attachments.push(normalized);
+            self.chips.push(Chip::Paste(normalized));
             self.insert_char(Self::MARK);
         } else {
             self.insert_str(&normalized);
         }
+    }
+
+    /// A clipboard image landed: always a chip anchored at the cursor,
+    /// never inline — an image has no inline form, and a prompt carries
+    /// it as one cell beside the text, full payload on submit.
+    pub fn paste_image(&mut self, image: rhema_core::Image) {
+        self.chips.push(Chip::Image(image));
+        self.insert_char(Self::MARK);
     }
 
     /// Terminal text made insertable: carriage returns normalize to
@@ -2025,24 +2052,43 @@ impl ChatState {
     }
 
     /// Removes `input[start..end]` (byte offsets) and, with it, the
-    /// payload of every attachment anchor in the range — the 1:1
-    /// mark-to-payload pairing survives any deletion.
+    /// chip of every anchor in the range, paste or image — the 1:1
+    /// mark-to-chip pairing survives any deletion.
     fn delete_range(&mut self, start: usize, end: usize) {
         let dropped = self.input[start..end].matches(Self::MARK).count();
         if dropped > 0 {
             let first = self.input[..start].matches(Self::MARK).count();
-            self.attachments.drain(first..first + dropped);
+            self.chips.drain(first..first + dropped);
         }
         self.input.replace_range(start..end, "");
     }
 
-    /// The text a submit sends: the typed input with every attachment
-    /// embedded at its anchor — the session's record of the prompt. The
-    /// transcript renders each embed as its chip, and the model sees the
-    /// plain expansion (`rhema_core::paste::expand`, applied at the
-    /// provider seam), never the encoding.
-    fn submission(&self) -> String {
-        rhema_core::paste::embed(&self.input, &self.attachments)
+    /// What a submit sends: the typed input with every paste embedded at
+    /// its anchor, and the images beside it in anchor order — the
+    /// session's record of the prompt. The transcript renders each embed
+    /// as its chip, and the model sees the plain expansion
+    /// (`rhema_core::paste::expand`, applied at the provider seam), never
+    /// the encoding. Image anchors drop out of the text: an image
+    /// travels as a block beside it, and an anchor left in would desync
+    /// `embed`'s positional pairing of marks to payloads.
+    fn submission(&self) -> (String, Vec<rhema_core::Image>) {
+        let mut marked = String::with_capacity(self.input.len());
+        let mut pastes = Vec::new();
+        let mut images = Vec::new();
+        for (index, piece) in self.input.split(Self::MARK).enumerate() {
+            if index > 0 {
+                match self.chips.get(index - 1) {
+                    Some(Chip::Paste(payload)) => {
+                        pastes.push(payload.clone());
+                        marked.push(Self::MARK);
+                    }
+                    Some(Chip::Image(image)) => images.push(image.clone()),
+                    None => {}
+                }
+            }
+            marked.push_str(piece);
+        }
+        (rhema_core::paste::embed(&marked, &pastes), images)
     }
 
     /// Inserts `text` at the cursor, newlines and all — the bracketed
@@ -2151,13 +2197,16 @@ impl ChatState {
         }
         // Ctrl-v (with or without shift) is paste in terminals that do
         // not bind it themselves: the clipboard is read directly, the
-        // same text a bracketed paste would have carried — attachments
-        // and all.
+        // same content a bracketed paste would have carried. A clipboard
+        // holds one thing or the other — an image is tried first and the
+        // text falls through.
         if key.code == KeyCode::Char('v')
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
-            if let Some(text) = crate::clipboard::read() {
+            if let Some(image) = crate::clipboard::read_image() {
+                self.paste_image(image);
+            } else if let Some(text) = crate::clipboard::read() {
                 self.paste(&text);
             }
             return ChatAction::None;
@@ -2270,22 +2319,22 @@ impl ChatState {
                             // The input is replaced wholesale: any
                             // anchors in it go, and their payloads go
                             // with them.
-                            self.attachments.clear();
+                            self.chips.clear();
                             self.input = spec.name.to_owned();
                             self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Model { id, .. } => {
-                            self.attachments.clear();
+                            self.chips.clear();
                             self.input = format!("/model {id}");
                             self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Profile { name, .. } => {
-                            self.attachments.clear();
+                            self.chips.clear();
                             self.input = format!("/profile {name}");
                             self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Choice { command, value, .. } => {
-                            self.attachments.clear();
+                            self.chips.clear();
                             self.input = format!("{command} {value}");
                             self.cursor = self.input.chars().count();
                         }
@@ -2322,7 +2371,8 @@ impl ChatState {
                 // history. The input is NOT cleared: the app clears when
                 // it accepts the submit, so a declined one keeps it.
                 self.scroll = 0;
-                ChatAction::Submit(self.submission())
+                let (text, images) = self.submission();
+                ChatAction::Submit { text, images }
             }
             _ => ChatAction::None,
         }
@@ -2430,6 +2480,15 @@ mod tests {
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    /// The submit a text-only input produces, the shape most tests
+    /// assert against.
+    fn submit(text: &str) -> ChatAction {
+        ChatAction::Submit {
+            text: text.to_owned(),
+            images: Vec::new(),
+        }
     }
 
     /// A profile holding one stored instance of `provider`, named after
@@ -3248,7 +3307,7 @@ mod tests {
         }
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter), &[], &[]),
-            ChatAction::Submit("fix it".into())
+            submit("fix it")
         );
         // The input box is NOT cleared here: the app clears it only when
         // it accepts the submit (a rejected submit — empty or mid-turn —
@@ -3271,7 +3330,7 @@ mod tests {
         // Enter itself still submits the whole multi-line text.
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter), &[], &[]),
-            ChatAction::Submit("x\n\n".into())
+            submit("x\n\n")
         );
     }
 
@@ -3355,7 +3414,7 @@ mod tests {
         let long = "l1\nl2\nl3\nl4";
         chat.insert_str("look at ");
         chat.paste(long);
-        assert_eq!(chat.attachments, vec![long.to_owned()]);
+        assert_eq!(chat.chips, vec![Chip::Paste(long.to_owned())]);
         assert_eq!(
             chat.input,
             format!("look at {}", ChatState::MARK),
@@ -3368,7 +3427,7 @@ mod tests {
         chat.insert_str(" closely");
         assert_eq!(
             chat.handle_key(key(KeyCode::Enter), &[], &[]),
-            ChatAction::Submit(format!(
+            submit(&format!(
                 "look at {}{long}{} closely",
                 ChatState::MARK,
                 ChatState::MARK
@@ -3379,7 +3438,80 @@ mod tests {
             format!("look at {} closely", ChatState::MARK),
             "declined keeps the text"
         );
-        assert_eq!(chat.attachments.len(), 1);
+        assert_eq!(chat.chips.len(), 1);
+    }
+
+    #[test]
+    fn a_pasted_image_mints_a_chip_and_rides_submit_beside_the_text() {
+        let mut chat = ChatState::new();
+        chat.insert_str("what is this? ");
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8=");
+        chat.paste_image(image.clone());
+        assert_eq!(chat.input, format!("what is this? {}", ChatState::MARK));
+        assert_eq!(chat.chips, vec![Chip::Image(image.clone())]);
+
+        // Submit: the anchor drops out of the text and the image rides
+        // beside it — an image has no inline form to embed into.
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter), &[], &[]),
+            ChatAction::Submit {
+                text: "what is this? ".into(),
+                images: vec![image],
+            }
+        );
+    }
+
+    #[test]
+    fn interleaved_pastes_and_images_keep_each_kind_in_order() {
+        let mut chat = ChatState::new();
+        let first = "p1\np2\np3\np4";
+        let second = "q1\nq2\nq3\nq4\nq5";
+        chat.paste(first);
+        chat.insert_str(" mid ");
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Jpeg, "d29ybGQ=");
+        chat.paste_image(image.clone());
+        chat.insert_str(" end");
+        chat.paste(second);
+        assert_eq!(
+            chat.input.matches(ChatState::MARK).count(),
+            3,
+            "three anchors"
+        );
+
+        // Each paste embeds at its own anchor; the image's anchor drops
+        // and the block keeps its place in the image list.
+        assert_eq!(
+            chat.handle_key(key(KeyCode::Enter), &[], &[]),
+            ChatAction::Submit {
+                text: format!(
+                    // The image's anchor leaves only the spaces its
+                    // neighbours typed.
+                    "{m}{first}{m} mid  end{m}{second}{m}",
+                    m = ChatState::MARK
+                ),
+                images: vec![image],
+            }
+        );
+    }
+
+    #[test]
+    fn backspacing_an_image_chip_removes_it_alone() {
+        let mut chat = ChatState::new();
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8=");
+        chat.paste_image(image);
+        chat.paste("p1\np2\np3\np4");
+        assert_eq!(chat.input.chars().count(), 2);
+
+        // The backspace takes the last chip — the paste — and leaves
+        // the image chip with its anchor.
+        chat.handle_key(key(KeyCode::Backspace), &[], &[]);
+        assert_eq!(chat.input, ChatState::MARK.to_string());
+        assert!(matches!(chat.chips.as_slice(), [Chip::Image(_)]));
+
+        // And the image chip deletes like any other.
+        chat.handle_key(key(KeyCode::Backspace), &[], &[]);
+        assert!(chat.chips.is_empty());
+        assert_eq!(chat.input, "");
     }
 
     #[test]
@@ -3394,13 +3526,13 @@ mod tests {
         // Backspace removes the anchor behind the cursor — the last
         // chip — and its payload alone.
         chat.handle_key(key(KeyCode::Backspace), &[], &[]);
-        assert_eq!(chat.attachments, vec![first.to_owned()]);
+        assert_eq!(chat.chips, vec![Chip::Paste(first.to_owned())]);
         assert_eq!(chat.input, ChatState::MARK.to_string());
 
         // Deleting the remaining anchor from before it works the same.
         chat.handle_key(key(KeyCode::Home), &[], &[]);
         chat.handle_key(key(KeyCode::Delete), &[], &[]);
-        assert!(chat.attachments.is_empty());
+        assert!(chat.chips.is_empty());
         assert_eq!(chat.input, "");
     }
 
@@ -3408,7 +3540,7 @@ mod tests {
     fn a_short_paste_joins_the_input_inline() {
         let mut chat = ChatState::new();
         chat.paste("l1\nl2\nl3");
-        assert!(chat.attachments.is_empty());
+        assert!(chat.chips.is_empty());
         assert_eq!(chat.input, "l1\nl2\nl3");
     }
 
@@ -3421,7 +3553,7 @@ mod tests {
         // and submit all index into.
         chat.paste(&format!("a{}b", ChatState::MARK));
         assert_eq!(chat.input, "ab");
-        assert!(chat.attachments.is_empty());
+        assert!(chat.chips.is_empty());
         chat.insert_str(&ChatState::MARK.to_string());
         assert_eq!(chat.input, "ab");
 
@@ -3440,7 +3572,7 @@ mod tests {
         assert_eq!(chat.input, format!("ab{}", ChatState::MARK));
         chat.handle_key(key(KeyCode::Backspace), &[], &[]);
         assert_eq!(chat.input, "ab");
-        assert!(chat.attachments.is_empty());
+        assert!(chat.chips.is_empty());
     }
 
     #[test]
@@ -3481,10 +3613,7 @@ mod tests {
     #[test]
     fn chat_enter_on_an_empty_input_yields_an_empty_submit() {
         let mut chat = ChatState::new();
-        assert_eq!(
-            chat.handle_key(key(KeyCode::Enter), &[], &[]),
-            ChatAction::Submit(String::new())
-        );
+        assert_eq!(chat.handle_key(key(KeyCode::Enter), &[], &[]), submit(""));
     }
 
     #[test]
@@ -3795,7 +3924,7 @@ mod tests {
         let base = dir.path().display().to_string();
         let mut chat = ChatState::new();
         chat.paste("p\np\np\np");
-        assert_eq!(chat.attachments.len(), 1);
+        assert_eq!(chat.chips.len(), 1);
         for c in format!(" see {base}/b").chars() {
             chat.handle_key(key(KeyCode::Char(c)), &[], &[]);
         }
@@ -3804,7 +3933,7 @@ mod tests {
             chat.input,
             format!("{} see {base}/Beta.txt", ChatState::MARK)
         );
-        assert_eq!(chat.attachments.len(), 1, "the chip survives");
+        assert_eq!(chat.chips.len(), 1, "the chip survives");
     }
 
     #[test]

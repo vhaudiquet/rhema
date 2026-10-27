@@ -6,7 +6,7 @@
 //! or a model switch must render the same lines the live stream produced
 //! (within the summary/truncation rules).
 
-use rhema_core::{Content, Message, Role};
+use rhema_core::{Content, Image, Message, Role};
 
 use crate::events::OwnedEvent;
 
@@ -18,10 +18,16 @@ pub const ARGS_MAX_LINES: usize = 12;
 pub const ARGS_MAX_CHARS: usize = 400;
 
 /// One renderable line of the chat transcript.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Line {
-    /// A user prompt.
-    User(String),
+    /// A user prompt: the text in its session form (paste payloads
+    /// embedded at their anchors) and the images that rode beside it.
+    User {
+        /// The prompt's session-form text.
+        text: String,
+        /// The images the prompt carried, in submission order.
+        images: Vec<Image>,
+    },
     /// Assistant text; streamed deltas merge into these lines.
     Assistant(String),
     /// A tool invocation and, once it resolved, its outcome — one line.
@@ -103,7 +109,15 @@ impl Transcript {
                         })
                         .collect::<Vec<_>>()
                         .join("\n");
-                    transcript.push_user(&text);
+                    let images = message
+                        .content
+                        .iter()
+                        .filter_map(|content| match content {
+                            Content::Image(image) => Some(image.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    transcript.push_user(&text, images);
                 }
                 Role::Assistant => {
                     for content in &message.content {
@@ -162,8 +176,11 @@ impl Transcript {
     }
 
     /// Adds the line for a submitted user prompt.
-    pub fn push_user(&mut self, text: &str) {
-        self.lines.push(Line::User(text.to_owned()));
+    pub fn push_user(&mut self, text: &str, images: Vec<Image>) {
+        self.lines.push(Line::User {
+            text: text.to_owned(),
+            images,
+        });
     }
 
     /// Adds a UI notice line.
@@ -536,7 +553,7 @@ mod tests {
     #[test]
     fn from_history_rebuilds_what_the_stream_produced() {
         let mut streamed = Transcript::new();
-        streamed.push_user("fix it");
+        streamed.push_user("fix it", Vec::new());
         streamed.apply(&OwnedEvent::TextDelta("on it".into()));
         streamed.apply(&OwnedEvent::ToolCallStart {
             id: "c1".into(),
@@ -580,8 +597,35 @@ mod tests {
     fn an_embedded_paste_rebuilds_identically() {
         let text = rhema_core::paste::embed("look", &["l1\nl2\nl3\nl4".to_owned()]);
         let mut streamed = Transcript::new();
-        streamed.push_user(&text);
+        streamed.push_user(&text, Vec::new());
         let rebuilt = Transcript::from_history(&[Message::text(Role::User, &text)]);
+        assert_eq!(rebuilt.lines(), streamed.lines());
+    }
+
+    /// An image submitted beside the prompt rebuilds with its chip: a
+    /// resume shows what was sent, not only what was typed.
+    #[test]
+    fn an_image_beside_the_prompt_rebuilds_identically() {
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8=");
+        let mut streamed = Transcript::new();
+        streamed.push_user("what is this?", vec![image.clone()]);
+        let rebuilt = Transcript::from_history(&[Message::text_with_images(
+            Role::User,
+            "what is this?",
+            vec![image],
+        )]);
+        assert_eq!(rebuilt.lines(), streamed.lines());
+    }
+
+    /// A prompt of images alone — an empty text beside them — rebuilds
+    /// the same line the submit pushed.
+    #[test]
+    fn an_images_only_prompt_rebuilds_identically() {
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Jpeg, "d29ybGQ=");
+        let mut streamed = Transcript::new();
+        streamed.push_user("", vec![image.clone()]);
+        let rebuilt =
+            Transcript::from_history(&[Message::text_with_images(Role::User, "", vec![image])]);
         assert_eq!(rebuilt.lines(), streamed.lines());
     }
 

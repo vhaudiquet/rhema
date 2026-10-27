@@ -68,10 +68,16 @@ serde_json = { workspace = true }
 # Turn tasks and the unbounded UI event channel
 async-trait = { workspace = true }
 # The system clipboard, for ctrl-v as a paste key where the terminal
-# does not bind it itself; no image payloads
+# does not bind it itself; image-data so a copied image pastes as a
+# chip like a text paste does
 arboard = { version = "3", default-features = false, features = [
     "wayland-data-control",
+    "image-data",
 ] }
+# RGBA clipboard pixels re-encoded as PNG before they ride a message
+image = { version = "0.25", default-features = false, features = ["png"] }
+# The image block's data is bare base64
+base64 = "0.22"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
 
 [dev-dependencies]

@@ -10,8 +10,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Screen, SettingsHit};
-use crate::screens::{PROVIDERS, PickerScreen, PickerStatus, SettingsSection, format_tokens};
+use crate::screens::{Chip, PROVIDERS, PickerScreen, PickerStatus, SettingsSection, format_tokens};
 use crate::transcript::{self, pretty_args};
+use rhema_core::Image;
 use rhema_provider::ModelCard;
 use std::path::Path;
 
@@ -58,7 +59,7 @@ fn partition(lines: &[transcript::Line]) -> Vec<TranscriptBlock> {
                 }
                 Kind::Response
             }
-            transcript::Line::User(_) => Kind::User,
+            transcript::Line::User { .. } => Kind::User,
             transcript::Line::ToolCall { .. } => Kind::ToolRun,
             transcript::Line::Notice(_) => Kind::Notice,
             transcript::Line::Markdown(_) => Kind::Markdown,
@@ -183,12 +184,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 // bound to the agent's lifetime, not the turn's.
                 None => 1 + subagent_lines(app, &theme).len() as u16,
             };
-            let input_rows = input_rows(
-                &app.chat.input,
-                &app.chat.attachments,
-                frame.area().width,
-                &theme,
-            );
+            let input_rows =
+                input_rows(&app.chat.input, &app.chat.chips, frame.area().width, &theme);
             let [transcript_area, status_area, input_area, footer_area] = Layout::vertical([
                 Constraint::Min(0),
                 Constraint::Length(status_rows),
@@ -1819,10 +1816,10 @@ fn render_block(
         Kind::User => range
             .iter()
             .filter_map(|line| match line {
-                transcript::Line::User(text) => Some(text.as_str()),
+                transcript::Line::User { text, images } => Some((text.as_str(), images)),
                 _ => None,
             })
-            .flat_map(|text| render_user(text, theme))
+            .flat_map(|(text, images)| render_user(text, images, theme))
             .collect(),
         // The run's absorbed empty text parts render as nothing.
         Kind::ToolRun => range
@@ -1855,9 +1852,9 @@ fn render_block(
 /// row's spans would vanish. The prompt glyph marks only the first row;
 /// the rest speak for themselves. An embedded paste renders as its
 /// chip — id and size, the body hidden.
-fn render_user(text: &str, theme: &Theme) -> Vec<Line<'static>> {
+fn render_user(text: &str, images: &[Image], theme: &Theme) -> Vec<Line<'static>> {
     let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
-    let mut pastes = 0usize;
+    let mut anchors = 0usize;
     for part in rhema_core::paste::parts(text) {
         match part {
             rhema_core::paste::Part::Text(segment) => {
@@ -1875,10 +1872,18 @@ fn render_user(text: &str, theme: &Theme) -> Vec<Line<'static>> {
             rhema_core::paste::Part::Paste(payload) => {
                 rows.last_mut()
                     .unwrap()
-                    .extend(chip_spans(payload, pastes, theme));
-                pastes += 1;
+                    .extend(chip_spans(chip_label(payload, anchors), theme));
+                anchors += 1;
             }
         }
+    }
+    // The images ride after the text, on its last row: they have no
+    // inline form to sit inside.
+    for image in images {
+        rows.last_mut()
+            .unwrap()
+            .extend(chip_spans(image_chip_label(image, anchors), theme));
+        anchors += 1;
     }
     rows.into_iter()
         .enumerate()
@@ -2055,21 +2060,25 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
 
 fn render_line(line: &transcript::Line, theme: &Theme, robot: &'static str) -> Line<'static> {
     match line {
-        transcript::Line::User(text) => {
+        transcript::Line::User { text, images } => {
             // Embedded pastes collapse to their chips here too — this
             // arm is the fallback off the transcript's multi-row path.
             let mut spans = vec![Span::raw("❯ ").fg(theme.text3)];
-            let mut pastes = 0usize;
+            let mut anchors = 0usize;
             for part in rhema_core::paste::parts(text) {
                 match part {
                     rhema_core::paste::Part::Text(text) => {
                         spans.push(Span::raw(text.replace('\n', " ")));
                     }
                     rhema_core::paste::Part::Paste(payload) => {
-                        spans.extend(chip_spans(payload, pastes, theme));
-                        pastes += 1;
+                        spans.extend(chip_spans(chip_label(payload, anchors), theme));
+                        anchors += 1;
                     }
                 }
+            }
+            for image in images {
+                spans.extend(chip_spans(image_chip_label(image, anchors), theme));
+                anchors += 1;
             }
             Line::from(spans)
         }
@@ -2655,7 +2664,7 @@ fn render_input(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     let prompt = "❯ ";
     // The layout is the render's source of truth: text rows with the
     // anchors inline, as chips, exactly as they sit in the input.
-    let layout = input_layout(&app.chat.input, &app.chat.attachments, width, theme);
+    let layout = input_layout(&app.chat.input, &app.chat.chips, width, theme);
     let cursor_at = cursor_at_rows(&layout, app.chat.cursor);
     // The window keeps the cursor's row visible.
     let remaining = INPUT_MAX_CONTENT_ROWS.max(1);
@@ -2845,18 +2854,54 @@ fn wrap_segments(segments: Vec<Segment>, width: usize) -> Vec<RowSegs> {
     rows
 }
 
-/// A chip's inline label: `▣1 5L` — the anchor's one-based id and the
-/// payload's line count.
+/// A paste chip's inline label: `▣1 5L` — the anchor's one-based id
+/// and the payload's line count.
 fn chip_label(paste: &str, index: usize) -> String {
     format!("▣{} {}L", index + 1, paste.lines().count())
 }
 
-/// One attachment chip's span: the label padded one cell each side on
-/// a surface-colored card — a thing apart from the typed text around
-/// it, no border glyphs needed.
-fn chip_spans(paste: &str, index: usize, theme: &Theme) -> Vec<Span<'static>> {
+/// An image chip's inline label: `▣1 PNG 12.3 KB` — the anchor's id,
+/// the format, and the decoded size.
+fn image_chip_label(image: &Image, index: usize) -> String {
+    format!(
+        "▣{} {} {}",
+        index + 1,
+        media_type_label(image.media_type),
+        format_bytes(image.data.len() * 3 / 4)
+    )
+}
+
+/// The format's short tag, the way a file extension reads.
+fn media_type_label(media_type: rhema_core::ImageMediaType) -> &'static str {
+    match media_type {
+        rhema_core::ImageMediaType::Png => "PNG",
+        rhema_core::ImageMediaType::Jpeg => "JPEG",
+        rhema_core::ImageMediaType::Gif => "GIF",
+        rhema_core::ImageMediaType::Webp => "WEBP",
+    }
+}
+
+/// A decoded byte count as a size label: bytes under a kibibyte, else
+/// KB or MB with one decimal — the precision a screenshot's size reads
+/// at.
+fn format_bytes(bytes: usize) -> String {
+    const KIB: usize = 1024;
+    const MIB: usize = 1024 * 1024;
+    if bytes < KIB {
+        format!("{bytes} B")
+    } else if bytes < MIB {
+        format!("{:.1} KB", bytes as f64 / KIB as f64)
+    } else {
+        format!("{:.1} MB", bytes as f64 / MIB as f64)
+    }
+}
+
+/// One chip's span: the label padded one cell each side on a
+/// surface-colored card — a thing apart from the typed text around it,
+/// no border glyphs needed.
+fn chip_spans(label: String, theme: &Theme) -> Vec<Span<'static>> {
     vec![Span::styled(
-        format!(" {} ", chip_label(paste, index)),
+        format!(" {label} "),
         Style::default().fg(theme.info).bg(theme.surface),
     )]
 }
@@ -2892,7 +2937,7 @@ fn cursor_at_rows(layout: &[InputRow], cursor: usize) -> Option<(usize, usize)> 
 /// exactly where the paste landed. A chip is one character to the
 /// cursor, wrapping, and backspace alike, whatever its label's width.
 /// Shared by the render and the height math so both always agree.
-fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme) -> Vec<InputRow> {
+fn input_layout(input: &str, chips: &[Chip], width: usize, theme: &Theme) -> Vec<InputRow> {
     let mut rows: Vec<InputRow> = Vec::new();
     let text_width = width.saturating_sub(2).max(1);
     let lines: Vec<&str> = input.split('\n').collect();
@@ -2906,8 +2951,16 @@ fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme
         for (pi, piece) in line.split(crate::screens::ChatState::MARK).enumerate() {
             if pi > 0 {
                 segments.push(Segment::Chip(chip_spans(
-                    attachments.get(anchor).map(String::as_str).unwrap_or(""),
-                    anchor,
+                    chips
+                        .get(anchor)
+                        .map(|chip| match chip {
+                            Chip::Paste(paste) => chip_label(paste, anchor),
+                            Chip::Image(image) => image_chip_label(image, anchor),
+                        })
+                        // An anchor without a chip cannot be minted; the
+                        // label still names the slot so the cursor math
+                        // and the render agree.
+                        .unwrap_or_else(|| chip_label("", anchor)),
                     theme,
                 )));
                 anchor += 1;
@@ -2954,9 +3007,9 @@ fn input_layout(input: &str, attachments: &[String], width: usize, theme: &Theme
 
 /// The input box's total height: borders plus the layout rows, growing
 /// with the text up to the cap. An empty input is one row.
-fn input_rows(input: &str, attachments: &[String], width: u16, theme: &Theme) -> u16 {
+fn input_rows(input: &str, chips: &[Chip], width: u16, theme: &Theme) -> u16 {
     let width = width.saturating_sub(2).max(1) as usize;
-    (input_layout(input, attachments, width, theme)
+    (input_layout(input, chips, width, theme)
         .len()
         .clamp(1, INPUT_MAX_CONTENT_ROWS)
         + 2) as u16
@@ -3618,7 +3671,8 @@ mod tests {
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
     use super::{
-        cursor_at_rows, elapsed_text, footer_folder, input_layout, input_rows, render, wrap_line,
+        cursor_at_rows, elapsed_text, footer_folder, format_bytes, image_chip_label, input_layout,
+        input_rows, render, wrap_line,
     };
     use crate::app::{App, AppSetup, RunOptions};
     use crate::events::OwnedEvent;
@@ -3627,7 +3681,7 @@ mod scroll_tests {
     use ratatui::text::Line;
     use std::collections::BTreeMap;
 
-    use crate::screens::{CatalogModel, ChatState};
+    use crate::screens::{CatalogModel, ChatState, Chip};
     use crate::store::MemoryStore;
     use ratatui::{Terminal, backend::TestBackend};
     use rhema_core::Usage;
@@ -4216,7 +4270,7 @@ mod scroll_tests {
     fn long_lines_wrap_and_scroll_reaches_the_top() {
         let mut app = chat_app();
         let long = format!("{} end-marker", "word ".repeat(200));
-        app.transcript.push_user(&long);
+        app.transcript.push_user(&long, Vec::new());
 
         // At the tail, the last word is visible.
         let text = screen_text(&mut app);
@@ -4257,10 +4311,13 @@ mod scroll_tests {
     fn a_submitted_paste_renders_as_a_chip_in_the_transcript() {
         let mut app = chat_app();
         let long = "l1\nl2\nl3\nl4\nl5";
-        app.transcript.push_user(&rhema_core::paste::embed(
-            &format!("look at {} this", ChatState::MARK),
-            &[long.to_owned()],
-        ));
+        app.transcript.push_user(
+            &rhema_core::paste::embed(
+                &format!("look at {} this", ChatState::MARK),
+                &[long.to_owned()],
+            ),
+            Vec::new(),
+        );
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();
@@ -4272,6 +4329,68 @@ mod scroll_tests {
         // and its newlines never show.
         assert!(screen.contains("look at  ▣1 5L  this"), "{screen}");
         assert!(!screen.contains("l1"), "{screen}");
+    }
+
+    #[test]
+    fn a_submitted_image_renders_as_a_chip_after_the_prompt() {
+        let mut app = chat_app();
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8=");
+        app.transcript.push_user("what is this?", vec![image]);
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let screen: String = (0..buffer.area.height)
+            .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+            .collect();
+        // The chip names format and size; the payload itself never
+        // shows.
+        assert!(screen.contains("what is this? ▣1 PNG 6 B"), "{screen}");
+        assert!(!screen.contains("aGVsbG8="), "{screen}");
+    }
+
+    #[test]
+    fn an_image_chip_is_one_atomic_cell_like_a_paste_chip() {
+        let input = format!("before{} after", ChatState::MARK);
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8=");
+        let rows = input_layout(&input, &[Chip::Image(image)], 40, &DARK);
+        // One row, text and chip in prompt order: the chip costs no row
+        // of its own and accounts for its one source character.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source_chars, 13);
+        let rendered: String = rows[0]
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.to_string())
+            .collect();
+        assert_eq!(rendered, "❯ before ▣1 PNG 6 B  after");
+        // The cursor crosses the twelve-cell chip in one step: on its
+        // first cell, then past it on the following character.
+        assert_eq!(cursor_at_rows(&rows, 6), Some((0, 6)));
+        assert_eq!(cursor_at_rows(&rows, 7), Some((0, 18)));
+    }
+
+    #[test]
+    fn image_chips_label_format_and_decoded_size() {
+        assert_eq!(format_bytes(6), "6 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(12_600), "12.3 KB");
+        assert_eq!(format_bytes(3 * 1024 * 1024), "3.0 MB");
+
+        for (media_type, tag) in [
+            (rhema_core::ImageMediaType::Png, "PNG"),
+            (rhema_core::ImageMediaType::Jpeg, "JPEG"),
+            (rhema_core::ImageMediaType::Gif, "GIF"),
+            (rhema_core::ImageMediaType::Webp, "WEBP"),
+        ] {
+            let image = rhema_core::Image::new(media_type, "aGVsbG8=");
+            assert_eq!(image_chip_label(&image, 0), format!("▣1 {tag} 6 B"));
+        }
+        // The size reads the decoded bytes, not the base64 length: a
+        // 16800-character payload is 12600 bytes.
+        let image = rhema_core::Image::new(rhema_core::ImageMediaType::Jpeg, "a".repeat(16_800));
+        assert_eq!(image_chip_label(&image, 2), "▣3 JPEG 12.3 KB");
     }
 
     /// A running command's output earns the preview at a second line —
@@ -4417,7 +4536,7 @@ mod scroll_tests {
     fn the_spinner_sits_below_a_blank_row_and_on_the_transcript_inset() {
         let mut app = chat_app();
         app.turn.running = true;
-        app.transcript.push_user("look at this");
+        app.transcript.push_user("look at this", Vec::new());
 
         let backend = TestBackend::new(40, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -4560,8 +4679,8 @@ mod scroll_tests {
         // Chips render inline: two of them between text cost no rows of
         // their own.
         let marked = format!("a{}{}b", ChatState::MARK, ChatState::MARK);
-        let pastes = vec!["x\ny\nz\nw".to_owned(); 2];
-        assert_eq!(input_rows(&marked, &pastes, 40, &DARK), 3);
+        let paste = Chip::Paste("x\ny\nz\nw".to_owned());
+        assert_eq!(input_rows(&marked, &[paste.clone(), paste], 40, &DARK), 3);
         let wall = "x\n".repeat(20);
         assert_eq!(input_rows(&wall, &[], 40, &DARK), 10, "the cap holds");
     }
@@ -4579,7 +4698,7 @@ mod scroll_tests {
         // lands on the border's first cell, then crosses the whole chip
         // in one step onto the next character.
         let marked = format!("a{}b", ChatState::MARK);
-        let layout = input_layout(&marked, &["x\ny".to_owned()], 40, &DARK);
+        let layout = input_layout(&marked, &[Chip::Paste("x\ny".to_owned())], 40, &DARK);
         assert_eq!(cursor_at_rows(&layout, 1), Some((0, 1)), "on the chip");
         assert_eq!(
             cursor_at_rows(&layout, 2),
@@ -4595,7 +4714,10 @@ mod scroll_tests {
         let input = format!("a{}\nb{}", ChatState::MARK, ChatState::MARK);
         let rows = input_layout(
             &input,
-            &["l1\nl2\nl3\nl4".to_owned(), "m1\nm2\nm3\nm4\nm5".to_owned()],
+            &[
+                Chip::Paste("l1\nl2\nl3\nl4".to_owned()),
+                Chip::Paste("m1\nm2\nm3\nm4\nm5".to_owned()),
+            ],
             40,
             &DARK,
         );
@@ -4618,7 +4740,7 @@ mod scroll_tests {
         // The chip sits exactly past the wrap edge: it moves whole to
         // the next row rather than splitting.
         let marked = format!("wordy {}", ChatState::MARK);
-        let layout = input_layout(&marked, &["x\ny".to_owned()], 12, &DARK);
+        let layout = input_layout(&marked, &[Chip::Paste("x\ny".to_owned())], 12, &DARK);
         assert_eq!(layout.len(), 2, "the word's row, then the chip alone");
         let chip: String = layout[1]
             .line
@@ -4636,7 +4758,12 @@ mod scroll_tests {
     #[test]
     fn attachment_chips_render_inline_where_they_were_pasted() {
         let input = format!("before{} after", ChatState::MARK);
-        let rows = input_layout(&input, &["l1\nl2\nl3\nl4\nl5".to_owned()], 40, &DARK);
+        let rows = input_layout(
+            &input,
+            &[Chip::Paste("l1\nl2\nl3\nl4\nl5".to_owned())],
+            40,
+            &DARK,
+        );
         // One row, text and chip in prompt order: the chip costs no row
         // of its own and accounts for its one source character.
         assert_eq!(rows.len(), 1);
@@ -4703,7 +4830,7 @@ mod scroll_tests {
         let mut app = chat_app();
         // Content taller than the viewport: there is a real range.
         app.transcript
-            .push_user(&format!("{} end", "word ".repeat(200)));
+            .push_user(&format!("{} end", "word ".repeat(200)), Vec::new());
 
         // Way past the top: the first draw pulls the offset back into
         // the content's range.
@@ -4752,7 +4879,7 @@ mod scroll_tests {
     #[test]
     fn a_blank_row_separates_a_tool_run_from_the_reply() {
         let mut app = chat_app();
-        app.transcript.push_user("investigate");
+        app.transcript.push_user("investigate", Vec::new());
         app.transcript
             .apply(&crate::events::OwnedEvent::ToolCallStart {
                 id: "c1".into(),
@@ -4796,7 +4923,7 @@ mod scroll_tests {
     #[test]
     fn a_multi_line_prompt_keeps_its_lines() {
         let mut app = chat_app();
-        app.transcript.push_user("alpha\nbeta\ngamma");
+        app.transcript.push_user("alpha\nbeta\ngamma", Vec::new());
 
         let backend = TestBackend::new(40, 24);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -4837,7 +4964,7 @@ mod scroll_tests {
     #[test]
     fn table_wraps_keep_their_columns_aligned() {
         let mut app = chat_app();
-        app.transcript.push_user("what skills");
+        app.transcript.push_user("what skills", Vec::new());
         // A trigger long enough to wrap inside its column at this
         // terminal width: continuation rows must stay inside the
         // column, not fall back to the row start.
@@ -4932,7 +5059,7 @@ mod scroll_tests {
     #[test]
     fn a_tool_row_cuts_at_the_width_and_right_aligns_the_code() {
         let mut app = chat_app();
-        app.transcript.push_user("investigate");
+        app.transcript.push_user("investigate", Vec::new());
         let long = "x".repeat(100);
         app.transcript
             .apply(&crate::events::OwnedEvent::ToolCallStart {
@@ -4971,7 +5098,7 @@ mod scroll_tests {
     #[test]
     fn empty_assistant_noise_between_tools_stays_tight() {
         let mut app = chat_app();
-        app.transcript.push_user("investigate");
+        app.transcript.push_user("investigate", Vec::new());
         for (id, command) in [("c1", "git status"), ("c2", "git log")] {
             app.transcript
                 .apply(&crate::events::OwnedEvent::ToolCallStart {
@@ -5034,7 +5161,7 @@ mod scroll_tests {
     #[test]
     fn a_late_result_mark_rerenders_its_cached_block() {
         let mut app = chat_app();
-        app.transcript.push_user("investigate");
+        app.transcript.push_user("investigate", Vec::new());
         app.transcript
             .apply(&crate::events::OwnedEvent::ToolCallStart {
                 id: "c1".into(),
@@ -5088,10 +5215,10 @@ mod scroll_tests {
     #[test]
     fn a_blank_row_separates_a_reply_from_the_next_prompt() {
         let mut app = chat_app();
-        app.transcript.push_user("alpha");
+        app.transcript.push_user("alpha", Vec::new());
         app.transcript
             .apply(&crate::events::OwnedEvent::TextDelta("beta reply".into()));
-        app.transcript.push_user("gamma");
+        app.transcript.push_user("gamma", Vec::new());
 
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();

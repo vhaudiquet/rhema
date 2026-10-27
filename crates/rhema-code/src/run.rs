@@ -1125,20 +1125,20 @@ fn dispatch(
             };
             spawn_usage_fetch(backend, tx.clone());
         }
-        Effect::StartTurn(input) => {
+        Effect::StartTurn { text, images } => {
             let Some(agent) = app.agent.take() else {
                 return;
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
             let (steer, steered) = tokio::sync::mpsc::unbounded_channel();
             // The status names the prompt until a tool call takes over.
-            status.note_prompt(&input);
+            status.note_prompt(&text);
             // Auto-approved for now: the Approval seam — and the modal
             // wired through it — is where command allowlists will land.
             app.begin_turn(cancel, steer, None);
             spawn_turn(
                 agent,
-                input,
+                crate::turn::Prompt { text, images },
                 Arc::new(AllowAll),
                 app.options.save.clone(),
                 cancelled,
