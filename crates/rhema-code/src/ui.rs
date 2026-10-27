@@ -1374,7 +1374,11 @@ fn settings_page(
                         Span::raw("+ Add a sandbox instance...").fg(theme.text2),
                     ])
                 } else {
-                    let mut detail = row.detail.clone();
+                    let mut detail = if row.name == "local" {
+                        row.detail.clone()
+                    } else {
+                        format!("{} · {}", row.kind.stored_name(), row.detail)
+                    };
                     if row.active {
                         detail.push_str(" · active");
                     }
@@ -1391,7 +1395,7 @@ fn settings_page(
                     };
                     Line::from(vec![
                         Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
-                        Span::styled(row.kind.stored_name().to_owned(), name_style),
+                        Span::styled(row.name.to_owned(), name_style),
                         Span::raw(format!("  {detail}")).fg(theme.text3),
                     ])
                 };
@@ -1401,7 +1405,7 @@ fn settings_page(
             (
                 lines,
                 footer(
-                    "enter runs bash here · d unsets the instance · ssh and http stay in config.yaml",
+                    "enter runs bash here · d removes the instance · docker and lxd can be added",
                 ),
                 row_hits,
             )

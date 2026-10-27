@@ -1794,18 +1794,30 @@ impl App {
         if value.is_empty() {
             return Vec::new();
         }
+        // The instance's name derives from its target — `rhema-dev`
+        // names the rhema-dev container — with a numeric suffix when
+        // the name is taken. Storing never activates.
+        let mut name = value.clone();
+        let mut suffix = 2;
+        while self
+            .config
+            .effective(self.session_profile.as_deref())
+            .sandbox_instances
+            .contains_key(&name)
+        {
+            name = format!("{value}-{suffix}");
+            suffix += 1;
+        }
         self.config
             .set_for_profile(self.session_profile.as_deref(), |profile| {
-                let sandbox = profile
-                    .sandbox
-                    .get_or_insert_with(rhema_config::SandboxSettings::default);
-                match kind {
-                    SandboxChoice::Docker => sandbox.container = Some(value.clone()),
-                    SandboxChoice::Lxd => sandbox.instance = Some(value.clone()),
-                    SandboxChoice::Ssh => sandbox.host = Some(value.clone()),
-                    SandboxChoice::Http => sandbox.url = Some(value.clone()),
-                    SandboxChoice::Local => {}
-                }
+                profile.place_sandbox_instance(
+                    name.clone(),
+                    rhema_config::SandboxInstance {
+                        kind: kind.stored_name().to_owned(),
+                        target: Some(value.clone()),
+                        vm: None,
+                    },
+                );
             });
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
@@ -1816,71 +1828,124 @@ impl App {
             settings.stored = self.config.effective(self.session_profile.as_deref());
         }
         self.transcript.push_notice(&format!(
-            "the {} sandbox is set; enter its row to run bash there",
-            kind.stored_name()
+            "the {name} instance is stored; enter its row to run bash there"
         ));
         Vec::new()
     }
 
-    /// `d` on a Sandbox page kind row: unset the kind's stored
-    /// instance — the container, the instance, the host, or the url.
-    /// Config only: the session already running there keeps running,
-    /// and the stored kind stays put; the next assembly under that
-    /// kind asks for its instance again (docker derives one, ssh
-    /// refuses loudly until a host is stored).
-    fn delete_sandbox_instance(&mut self) -> Vec<Effect> {
-        let choice = match &self.screen {
-            Screen::Settings(settings) => settings.selected_sandbox(),
+    /// `d` on a Sandbox page instance row: remove the instance. The
+    /// record goes from the map and the section's active pointer goes
+    /// with it; a session already running there keeps running, the
+    /// providers' stance. The next assembly under the stored kind
+    /// falls through to the section's facts or a derived name.
+    fn remove_sandbox_instance(&mut self) -> Vec<Effect> {
+        let name = match &self.screen {
+            Screen::Settings(settings) => settings.selected_sandbox_instance().map(str::to_owned),
             _ => return Vec::new(),
         };
-        let Some(choice) = choice else {
+        let Some(name) = name else {
             return Vec::new();
         };
-        if choice == SandboxChoice::Local {
-            self.transcript
-                .push_notice("the local sandbox has nothing to unset");
-            return Vec::new();
-        }
-        let had = self
-            .config
-            .effective(self.session_profile.as_deref())
-            .sandbox
-            .as_ref()
-            .map(|sandbox| match choice {
-                SandboxChoice::Docker => sandbox.container.is_some(),
-                SandboxChoice::Lxd => sandbox.instance.is_some(),
-                SandboxChoice::Ssh => sandbox.host.is_some(),
-                SandboxChoice::Http => sandbox.url.is_some(),
-                SandboxChoice::Local => false,
-            })
-            .unwrap_or(false);
+        let mut removed = None;
         self.config
             .set_for_profile(self.session_profile.as_deref(), |profile| {
-                let Some(sandbox) = profile.sandbox.as_mut() else {
-                    return;
-                };
-                match choice {
-                    SandboxChoice::Docker => sandbox.container = None,
-                    SandboxChoice::Lxd => sandbox.instance = None,
-                    SandboxChoice::Ssh => sandbox.host = None,
-                    SandboxChoice::Http => sandbox.url = None,
-                    SandboxChoice::Local => {}
-                }
+                removed = profile.remove_sandbox_instance(&name);
             });
+        if removed.is_none() {
+            return Vec::new();
+        }
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
             return Vec::new();
         }
-        if had {
-            self.transcript.push_notice(&format!(
-                "the {} sandbox instance is unset",
-                choice.stored_name()
-            ));
-        }
+        self.transcript
+            .push_notice(&format!("the {name} sandbox instance is removed"));
         if let Screen::Settings(settings) = &mut self.screen {
             settings.stored = self.config.effective(self.session_profile.as_deref());
         }
         Vec::new()
+    }
+
+    /// Enter on a Sandbox page instance row: run `bash` in it — the
+    /// same flow `/sandbox <kind>` runs, with the section's active
+    /// pointer naming the instance so the assembly reads its target.
+    /// The session's kind moves only when the instance's kind differs;
+    /// two instances of one kind switch without touching the kind.
+    fn activate_sandbox_instance(&mut self, name: &str) -> Vec<Effect> {
+        let instance = self
+            .config
+            .effective(self.session_profile.as_deref())
+            .sandbox_instances
+            .get(name)
+            .cloned();
+        let Some(instance) = instance else {
+            return Vec::new();
+        };
+        let Some(choice) = crate::args::SandboxChoice::from_stored(Some(&instance.kind)) else {
+            self.transcript.push_notice(&format!(
+                "the {name} instance's kind is not one rhema runs: {}",
+                instance.kind
+            ));
+            return Vec::new();
+        };
+        if self.turn.running {
+            self.transcript
+                .push_notice("a turn is running; the sandbox waits for it to finish");
+            return Vec::new();
+        }
+        if self.assembling.is_some() {
+            self.transcript
+                .push_notice("a sandbox is being stood up; the sandbox waits for it");
+            return Vec::new();
+        }
+        if !self.sandbox_offered.offers(choice) {
+            self.transcript.push_notice(&format!(
+                "{} is not offered on this machine; the {name} instance cannot run here",
+                choice.stored_name()
+            ));
+            return Vec::new();
+        }
+        let active_name = self
+            .config
+            .effective(self.session_profile.as_deref())
+            .sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.active.clone());
+        if active_name.as_deref() == Some(name) && self.active_sandbox() == choice {
+            self.transcript
+                .push_notice(&format!("bash already runs in the {name} instance"));
+            return Vec::new();
+        }
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |profile| {
+                let sandbox = profile
+                    .sandbox
+                    .get_or_insert_with(rhema_config::SandboxSettings::default);
+                sandbox.kind = Some(choice.stored_name().to_owned());
+                sandbox.active = Some(name.to_owned());
+            });
+        self.config
+            .note_sandbox_in(&self.options.workspace, choice.stored_name());
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        // Enter selects and returns: the page closes on an accepted
+        // choice, the assembly's answer arrives over the chat.
+        self.screen = Screen::Chat;
+        match choice {
+            SandboxChoice::Local => {
+                self.sandboxed = None;
+                self.rebuild_for_sandbox("bash runs on this host");
+                Vec::new()
+            }
+            non_local => {
+                self.assembling = Some(non_local);
+                self.transcript
+                    .push_notice(&format!("standing up the {name} sandbox instance…"));
+                vec![Effect::AssembleSandbox(non_local)]
+            }
+        }
     }
 
     /// `d` on a Profiles page row: forget the profile. The one this
@@ -2338,7 +2403,19 @@ impl App {
             }
             SettingsAction::SubmitSandboxDialog => self.submit_sandbox_instance(),
             SettingsAction::CloseSandboxDialog => Vec::new(),
-            SettingsAction::DeleteSandboxInstance => self.delete_sandbox_instance(),
+            SettingsAction::SelectSandboxInstance => {
+                let name = match &self.screen {
+                    Screen::Settings(settings) => {
+                        settings.selected_sandbox_instance().map(str::to_owned)
+                    }
+                    _ => None,
+                };
+                match name {
+                    Some(name) => self.activate_sandbox_instance(&name),
+                    None => Vec::new(),
+                }
+            }
+            SettingsAction::RemoveSandboxInstance => self.remove_sandbox_instance(),
             SettingsAction::EditSubagent => self.edit_subagent(),
             SettingsAction::ToggleSkill => {
                 let name = match &self.screen {
@@ -6843,54 +6920,91 @@ mod tests {
             panic!("expected the settings screen");
         };
         assert_eq!(settings.section, SettingsSection::Sandbox);
-        // The ready set only: local and docker, whatever ssh config
-        // exists; the marks say what this machine offered.
+        // An empty config: the host's own row and the add row — the
+        // default view is only local.
         assert_eq!(
             settings
                 .sandbox_rows()
                 .iter()
-                .filter(|row| !row.add)
-                .map(|row| (row.kind, row.offered))
+                .map(|row| (row.name, row.offered))
                 .collect::<Vec<_>>(),
-            vec![
-                (SandboxChoice::Local, true),
-                (SandboxChoice::Docker, true),
-                (SandboxChoice::Lxd, true),
-            ]
+            vec![("local", true), ("", false)]
         );
-        // Down to the docker row, then enter: the select routes
-        // through choose_sandbox and lands back on the chat as the
-        // assembly effect.
+    }
+
+    #[test]
+    fn enter_on_a_sandbox_instance_row_runs_it() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.sandbox_offered = offered(true, true, true, false);
+        h.app.config.set_for_profile(Some("personal"), |profile| {
+            profile.place_sandbox_instance(
+                "dev",
+                rhema_config::SandboxInstance {
+                    kind: "docker".to_owned(),
+                    target: Some("rhema-dev".to_owned()),
+                    vm: None,
+                },
+            );
+        });
+        h.store.save(&h.app.config).unwrap();
+        crate::commands::dispatch(&mut h.app, "/sandbox");
+        // Down to the dev row, then enter: the assembly effect fires
+        // and the page closes.
         h.app.on_key(key(KeyCode::Down));
         let effects = h.app.on_key(key(KeyCode::Enter));
         assert_eq!(
             effects,
             vec![Effect::AssembleSandbox(SandboxChoice::Docker)],
-            "enter on docker assembles it"
+            "enter on the dev instance assembles its kind"
         );
         assert!(matches!(h.app.screen, Screen::Chat), "enter returns");
+        let stored = h.store.load().unwrap();
+        let profile = stored.effective(Some("personal"));
+        let sandbox = profile.sandbox.as_ref().expect("the section lands");
+        assert_eq!(sandbox.kind.as_deref(), Some("docker"));
+        assert_eq!(
+            sandbox.active.as_deref(),
+            Some("dev"),
+            "the pointer names the instance"
+        );
     }
 
     #[test]
-    fn sandbox_d_unsets_the_stored_instance_and_keeps_the_kind() {
+    fn sandbox_d_removes_the_instance_and_keeps_the_kind() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        // A stored docker instance to delete.
+        // A stored instance to remove, active and all.
         h.app.config.set_for_profile(Some("personal"), |profile| {
+            profile.place_sandbox_instance(
+                "dev",
+                rhema_config::SandboxInstance {
+                    kind: "docker".to_owned(),
+                    target: Some("rhema-dev".to_owned()),
+                    vm: None,
+                },
+            );
             profile.sandbox = Some(rhema_config::SandboxSettings {
                 kind: Some("docker".to_owned()),
+                active: Some("dev".to_owned()),
                 container: Some("rhema-dev".to_owned()),
                 ..rhema_config::SandboxSettings::default()
             });
         });
         h.store.save(&h.app.config).unwrap();
         crate::commands::dispatch(&mut h.app, "/sandbox");
-        // One down to the docker row, then d.
+        // One down to the dev row, then d.
         h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Char('d')));
         let stored = h.store.load().unwrap();
         let profile = stored.effective(Some("personal"));
+        assert!(
+            !profile.sandbox_instances.contains_key("dev"),
+            "the instance is gone from the map"
+        );
         let sandbox = profile.sandbox.as_ref().expect("the section stays");
-        assert_eq!(sandbox.container, None, "the instance is unset");
+        assert_eq!(
+            sandbox.active, None,
+            "the active pointer went with the instance"
+        );
         assert_eq!(
             sandbox.kind.as_deref(),
             Some("docker"),
@@ -6901,16 +7015,17 @@ mod tests {
                 .transcript
                 .lines()
                 .iter()
-                .any(|line| matches!(line, Line::Notice(text) if text.contains("unset"))),
+                .any(|line| matches!(line, Line::Notice(text) if text.contains("removed"))),
             "the notice says what happened"
         );
-        // d on local refuses: it has nothing to unset.
+        // d on local does nothing: there is no instance there.
         h.app.on_key(key(KeyCode::Up));
+        let notices = h.app.transcript.lines().len();
         h.app.on_key(key(KeyCode::Char('d')));
-        assert!(
-            h.app.transcript.lines().iter().any(
-                |line| matches!(line, Line::Notice(text) if text.contains("nothing to unset"))
-            ),
+        assert_eq!(
+            h.app.transcript.lines().len(),
+            notices,
+            "no notice: d on local is inert"
         );
     }
 
@@ -6918,11 +7033,9 @@ mod tests {
     fn the_sandbox_add_dialog_stores_the_kinds_instance() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/sandbox");
-        // Three downs: local, docker, lxd, add row. Enter opens the
-        // dialog; docker is its first kind.
-        for _ in 0..3 {
-            h.app.on_key(key(KeyCode::Down));
-        }
+        // One down: local, add row. Enter opens the dialog; docker is
+        // its first kind.
+        h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Enter));
         h.app.on_key(key(KeyCode::Enter)); // pick docker
         for c in "rhema-dev".chars() {
@@ -6930,19 +7043,19 @@ mod tests {
         }
         h.app.on_key(key(KeyCode::Enter)); // store
         let stored = h.store.load().unwrap();
-        let sandbox = stored
-            .effective(Some("personal"))
-            .sandbox
-            .expect("the section exists");
-        assert_eq!(
-            sandbox.container.as_deref(),
-            Some("rhema-dev"),
-            "the instance stored"
-        );
-        assert_eq!(
-            sandbox.kind.as_deref(),
-            None,
-            "storing never activates: the kind is still unset"
+        let profile = stored.effective(Some("personal"));
+        let instance = profile
+            .sandbox_instances
+            .get("rhema-dev")
+            .expect("the instance stored under its target's name");
+        assert_eq!(instance.kind, "docker");
+        assert_eq!(instance.target.as_deref(), Some("rhema-dev"));
+        let sandbox = profile.sandbox.as_ref();
+        assert!(
+            sandbox
+                .map(|s| s.kind.is_none() && s.active.is_none())
+                .unwrap_or(true),
+            "storing never activates: the kind and the pointer stay unset"
         );
         let Screen::Settings(settings) = &h.app.screen else {
             panic!("still on the settings screen");
@@ -6953,15 +7066,15 @@ mod tests {
                 .transcript
                 .lines()
                 .iter()
-                .any(|line| matches!(line, Line::Notice(text) if text.contains("docker"))),
-            "the notice names the kind"
+                .any(|line| matches!(line, Line::Notice(text) if text.contains("rhema-dev"))),
+            "the notice names the instance"
         );
-        // Same flow, lxd picked: the value lands on the instance
-        // field, the vm flag untouched (config.yaml's call).
+        // Same flow, lxd picked: the value is the lxd instance's name,
+        // the launch flag stays unset (config.yaml's call). Two downs
+        // now — rhema-dev's row sits between local and the add row.
         crate::commands::dispatch(&mut h.app, "/sandbox");
-        for _ in 0..3 {
-            h.app.on_key(key(KeyCode::Down));
-        }
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Enter));
         h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Enter));
@@ -6971,9 +7084,12 @@ mod tests {
         h.app.on_key(key(KeyCode::Enter));
         let stored = h.store.load().unwrap();
         let profile = stored.effective(Some("personal"));
-        let sandbox = profile.sandbox.as_ref().expect("the section lands");
-        assert_eq!(sandbox.instance.as_deref(), Some("dev-vm"));
-        assert_eq!(sandbox.vm, None, "the instance type stays config's");
+        let instance = profile
+            .sandbox_instances
+            .get("dev-vm")
+            .expect("the lxd instance stored");
+        assert_eq!(instance.kind, "lxd");
+        assert_eq!(instance.vm, None, "the instance type stays config's");
     }
 
     #[test]

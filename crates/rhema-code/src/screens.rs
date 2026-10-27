@@ -191,11 +191,14 @@ impl ProfileScreen {
 /// `sandbox` section holds a single set of fields, so adding an
 /// instance of a kind means filling that kind's field.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SandboxRow {
-    /// The kind this row stands for.
+pub struct SandboxRow<'a> {
+    /// The instance's name — `local` for the host's own row, empty on
+    /// the add row.
+    pub name: &'a str,
+    /// The kind the instance runs: `local` on the host's own row.
     pub kind: crate::args::SandboxChoice,
-    /// The kind's stored fact — the container, the host, the url — or
-    /// the hint naming what the add flow would ask for.
+    /// What the kind execs in — the container, the LXD instance, the
+    /// host, the url — or the hint naming what the add flow asks for.
     pub detail: String,
     /// Whether this machine offered the kind at the startup probe
     /// (`local` always).
@@ -234,12 +237,6 @@ pub enum SandboxDialogStage {
 /// http presumes a `sandboxd` to reach — so they stay out of sight
 /// here and remain config-file citizens: store their section in
 /// `config.yaml` and `/sandbox <kind>` runs them when offered.
-pub const SANDBOX_PAGE_KINDS: &[crate::args::SandboxChoice] = &[
-    crate::args::SandboxChoice::Local,
-    crate::args::SandboxChoice::Docker,
-    crate::args::SandboxChoice::Lxd,
-];
-
 /// The kinds the add dialog offers: the page's kinds minus `local` —
 /// the local instance exists by doing nothing.
 pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[
@@ -567,8 +564,10 @@ pub enum SettingsAction {
     SelectSandbox(crate::args::SandboxChoice),
     /// Enter on the sandbox add row: the add-sandbox dialog opens.
     OpenSandboxDialog,
-    /// `d` on a sandbox kind row: unset the kind's stored instance.
-    DeleteSandboxInstance,
+    /// Enter on a sandbox instance row: run `bash` in it.
+    SelectSandboxInstance,
+    /// `d` on a sandbox instance row: remove it.
+    RemoveSandboxInstance,
     /// The add-sandbox dialog accepted a kind and value: store it.
     SubmitSandboxDialog,
     /// Esc left the add-sandbox dialog.
@@ -1250,47 +1249,48 @@ impl SettingsScreen {
     /// The Sandbox page as rendered rows: the four kinds in the spec's
     /// canonical order, then the add row. The detail names the kind's
     /// stored fact; the marks say active, remembered, offered.
-    pub fn sandbox_rows(&self) -> Vec<SandboxRow> {
+    pub fn sandbox_rows(&self) -> Vec<SandboxRow<'_>> {
         let sandbox = self.stored.sandbox.as_ref();
-        let mut rows: Vec<SandboxRow> = SANDBOX_PAGE_KINDS
-            .iter()
-            .copied()
-            .map(|kind| {
-                let stored = match kind {
-                    crate::args::SandboxChoice::Local => None,
-                    crate::args::SandboxChoice::Docker => {
-                        sandbox.and_then(|s| s.container.as_deref())
+        let active_name = sandbox.and_then(|s| s.active.as_deref());
+        // The host's own row is pinned: the local instance exists by
+        // doing nothing, and every stored instance lists after it, in
+        // the map's name order.
+        let mut rows = vec![SandboxRow {
+            name: "local",
+            kind: crate::args::SandboxChoice::Local,
+            detail: "this host".to_owned(),
+            offered: true,
+            remembered: self.sandbox_remembered == Some(crate::args::SandboxChoice::Local),
+            active: self.sandbox_active == crate::args::SandboxChoice::Local,
+            add: false,
+        }];
+        rows.extend(
+            self.stored
+                .sandbox_instances
+                .iter()
+                .map(|(name, instance)| {
+                    let kind = crate::args::SandboxChoice::from_stored(Some(&instance.kind));
+                    let vm = instance.vm.unwrap_or(false) && instance.kind == "lxd";
+                    SandboxRow {
+                        name,
+                        kind: kind.unwrap_or(crate::args::SandboxChoice::Local),
+                        detail: match (instance.target.as_deref(), vm) {
+                            (Some(target), false) => target.to_owned(),
+                            (Some(target), true) => format!("{target} · vm"),
+                            (None, _) => "no target set".to_owned(),
+                        },
+                        offered: kind
+                            .map(|kind| self.sandbox_offered.offers(kind))
+                            .unwrap_or(false),
+                        remembered: kind == self.sandbox_remembered,
+                        active: active_name == Some(name.as_str()),
+                        add: false,
                     }
-                    crate::args::SandboxChoice::Lxd => sandbox.and_then(|s| s.instance.as_deref()),
-                    crate::args::SandboxChoice::Ssh => sandbox.and_then(|s| s.host.as_deref()),
-                    crate::args::SandboxChoice::Http => sandbox.and_then(|s| s.url.as_deref()),
-                };
-                let detail = match kind {
-                    crate::args::SandboxChoice::Local => "this host".to_owned(),
-                    crate::args::SandboxChoice::Docker => stored
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| "no container set".to_owned()),
-                    crate::args::SandboxChoice::Lxd => stored
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| "no instance set".to_owned()),
-                    crate::args::SandboxChoice::Ssh => stored
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| "no host set".to_owned()),
-                    crate::args::SandboxChoice::Http => stored
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| "no url set".to_owned()),
-                };
-                SandboxRow {
-                    kind,
-                    detail,
-                    offered: self.sandbox_offered.offers(kind),
-                    remembered: self.sandbox_remembered == Some(kind),
-                    active: self.sandbox_active == kind,
-                    add: false,
-                }
-            })
-            .collect();
+                })
+                .collect::<Vec<_>>(),
+        );
         rows.push(SandboxRow {
+            name: "",
             kind: crate::args::SandboxChoice::Local,
             detail: String::new(),
             offered: false,
@@ -1321,15 +1321,28 @@ impl SettingsScreen {
         self.profiles.get(self.row).map(|row| row.name.as_str())
     }
 
-    /// The highlighted sandbox kind row; `None` on the add row, with
-    /// the dialog up, or anywhere but the Sandbox page.
+    /// The highlighted local row; `Some` only there — instance rows
+    /// answer [`Self::selected_sandbox_instance`] instead, and the add
+    /// row answers neither.
     pub fn selected_sandbox(&self) -> Option<crate::args::SandboxChoice> {
         if self.section != SettingsSection::Sandbox || self.sandbox_dialog.is_some() {
             return None;
         }
         self.sandbox_rows()
             .get(self.row)
-            .and_then(|row| (!row.add).then_some(row.kind))
+            .and_then(|row| (row.name == "local").then_some(row.kind))
+    }
+
+    /// The highlighted sandbox instance row's name; `None` on the
+    /// local and add rows, with the dialog up, or anywhere but the
+    /// Sandbox page.
+    pub fn selected_sandbox_instance(&self) -> Option<&str> {
+        if self.section != SettingsSection::Sandbox || self.sandbox_dialog.is_some() {
+            return None;
+        }
+        self.sandbox_rows()
+            .get(self.row)
+            .and_then(|row| (!row.add && row.name != "local").then_some(row.name))
     }
 
     /// The highlighted subagent row; `None` anywhere but the Subagents
@@ -1395,10 +1408,16 @@ impl SettingsScreen {
                 Some(_) => SettingsAction::EditSubagent,
                 None => SettingsAction::None,
             },
-            SettingsSection::Sandbox => match self.selected_sandbox() {
-                Some(choice) => SettingsAction::SelectSandbox(choice),
-                None => SettingsAction::OpenSandboxDialog,
-            },
+            SettingsSection::Sandbox => {
+                if self.selected_sandbox_instance().is_some() {
+                    SettingsAction::SelectSandboxInstance
+                } else {
+                    match self.selected_sandbox() {
+                        Some(choice) => SettingsAction::SelectSandbox(choice),
+                        None => SettingsAction::OpenSandboxDialog,
+                    }
+                }
+            }
             SettingsSection::Skills => match self.selected_skill() {
                 Some(_) => SettingsAction::ToggleSkill,
                 None => SettingsAction::None,
@@ -1484,8 +1503,8 @@ impl SettingsScreen {
             KeyCode::Char('d') if self.selected_profile().is_some() => {
                 SettingsAction::RemoveProfile
             }
-            KeyCode::Char('d') if self.selected_sandbox().is_some() => {
-                SettingsAction::DeleteSandboxInstance
+            KeyCode::Char('d') if self.selected_sandbox_instance().is_some() => {
+                SettingsAction::RemoveSandboxInstance
             }
             KeyCode::Char('c') if self.selected_profile().is_some() => {
                 SettingsAction::CycleProfileColor
@@ -2641,112 +2660,154 @@ mod tests {
         settings
     }
 
+    /// A stored instance under `name`.
+    fn instance(kind: &str, target: &str) -> rhema_config::SandboxInstance {
+        rhema_config::SandboxInstance {
+            kind: kind.to_owned(),
+            target: Some(target.to_owned()),
+            vm: None,
+        }
+    }
+
     #[test]
-    fn the_sandbox_rows_list_every_kind_in_the_canonical_order() {
+    fn the_sandbox_page_lists_local_then_the_instances_then_add() {
+        // An empty config: the host's own row and the add row — the
+        // default view is only local, the ready kinds arriving as
+        // instances are stored.
         let settings = sandbox_screen(
             offered(false, true, false),
             None,
             SandboxChoice::Local,
             rhema_config::Profile::default(),
         );
+        let rows = settings.sandbox_rows();
+        assert_eq!(
+            rows.iter().map(|row| row.name).collect::<Vec<_>>(),
+            vec!["local", ""],
+            "only local until an instance is stored; the add row last"
+        );
+        // Stored instances list in name order, whatever their kind —
+        // the page shows what is configured; the add dialog decides
+        // what can be added.
+        let mut stored = rhema_config::Profile::default();
+        stored.place_sandbox_instance("build", instance("lxd", "build-vm"));
+        stored.place_sandbox_instance("dev", instance("docker", "rhema-dev"));
+        stored.sandbox = Some(rhema_config::SandboxSettings {
+            active: Some("build".to_owned()),
+            ..rhema_config::SandboxSettings::default()
+        });
+        let settings = sandbox_screen(
+            offered(false, true, false),
+            None,
+            SandboxChoice::Local,
+            stored,
+        );
         assert_eq!(
             settings
                 .sandbox_rows()
                 .iter()
-                .map(|row| row.kind)
+                .map(|row| row.name)
                 .collect::<Vec<_>>(),
-            vec![
-                SandboxChoice::Local,
-                SandboxChoice::Docker,
-                SandboxChoice::Lxd,
-                SandboxChoice::Local,
-            ],
-            "the ready set lists, offered or not: the marks say which; the add row sits last"
+            vec!["local", "build", "dev", ""],
+            "the map's name order; the add row sits last"
         );
-        let rows = settings.sandbox_rows();
-        assert!(rows.last().expect("rows").add);
-        assert!(
-            rows.iter().filter(|row| !row.add).all(|row| matches!(
-                row.kind,
-                SandboxChoice::Local | SandboxChoice::Docker | SandboxChoice::Lxd
-            )),
-            "ssh and http stay out of sight until their stories land"
-        );
-        // The three kinds plus the add row are the arrows' range:
-        // four downs from the top wrap back to it.
+        // The rows plus the add row are the arrows' range: four downs
+        // from the top wrap back to it.
         let mut stepped = sandbox_screen(
             offered(false, true, false),
             None,
             SandboxChoice::Local,
             rhema_config::Profile::default(),
         );
-        for _ in 0..4 {
+        for _ in 0..2 {
             stepped.handle_key(key(KeyCode::Down));
         }
-        assert_eq!(stepped.row, 0, "the range wraps");
+        assert_eq!(stepped.row, 0, "the range wraps at two rows");
     }
 
     #[test]
-    fn the_sandbox_rows_carry_the_stored_facts_and_the_marks() {
-        let stored = rhema_config::Profile {
-            sandbox: Some(rhema_config::SandboxSettings {
-                container: Some("rhema-dev".to_owned()),
-                instance: Some("dev-vm".to_owned()),
-                host: Some("box@far".to_owned()),
-                ..rhema_config::SandboxSettings::default()
-            }),
-            ..rhema_config::Profile::default()
-        };
+    fn the_sandbox_rows_carry_the_instance_facts_and_the_marks() {
+        let mut stored = rhema_config::Profile::default();
+        stored.place_sandbox_instance("dev", instance("docker", "rhema-dev"));
+        stored.place_sandbox_instance("box", instance("ssh", "deploy@far"));
+        stored.place_sandbox_instance(
+            "dev-vm",
+            rhema_config::SandboxInstance {
+                kind: "lxd".to_owned(),
+                target: Some("dev".to_owned()),
+                vm: Some(true),
+            },
+        );
+        stored.sandbox = Some(rhema_config::SandboxSettings {
+            kind: Some("docker".to_owned()),
+            active: Some("dev".to_owned()),
+            ..rhema_config::SandboxSettings::default()
+        });
         let settings = sandbox_screen(
-            offered(true, true, false),
+            offered(true, false, false),
             Some(SandboxChoice::Docker),
-            SandboxChoice::Local,
+            SandboxChoice::Docker,
             stored,
         );
         let rows = settings.sandbox_rows();
-        let by_kind = |kind| {
+        let by_name = |name: &str| {
             rows.iter()
-                .find(|row| row.kind == kind && !row.add)
+                .find(|row| row.name == name && !row.add)
                 .expect("row present")
         };
-        assert_eq!(by_kind(SandboxChoice::Local).detail, "this host");
-        assert_eq!(by_kind(SandboxChoice::Docker).detail, "rhema-dev");
-        assert_eq!(by_kind(SandboxChoice::Lxd).detail, "dev-vm");
-        assert!(by_kind(SandboxChoice::Docker).offered);
-        assert!(by_kind(SandboxChoice::Docker).remembered);
-        assert!(by_kind(SandboxChoice::Local).active);
-        // A stored ssh host is real config, but the page does not
-        // surface it while ssh is not a ready feature.
-        assert!(!rows.iter().any(|row| row.kind == SandboxChoice::Ssh));
+        // The kind and the target read off the instance; a vm shows in
+        // the detail.
+        assert_eq!(by_name("dev").kind, SandboxChoice::Docker);
+        assert_eq!(by_name("dev").detail, "rhema-dev");
+        assert_eq!(by_name("dev-vm").detail, "dev · vm");
+        // The marks: offered by the kind's probe, remembered by the
+        // workspace memory's kind, active by the section's pointer.
+        assert!(by_name("dev").offered);
+        assert!(by_name("dev").remembered);
+        assert!(by_name("dev").active);
+        assert!(!by_name("dev-vm").active, "the pointer names dev");
+        // The lxd probe answered no: the instance lists anyway, the
+        // mark says why it cannot run.
+        assert!(!by_name("dev-vm").offered);
+        // ssh is real config: it lists, and its offer needs the
+        // binary plus the probe.
+        assert_eq!(by_name("box").kind, SandboxChoice::Ssh);
+        assert!(!by_name("box").offered);
     }
 
     #[test]
-    fn sandbox_enter_selects_a_kind_and_the_add_row_opens_the_dialog() {
+    fn sandbox_enter_runs_local_instances_and_opens_the_add() {
+        let mut stored = rhema_config::Profile::default();
+        stored.place_sandbox_instance("dev", instance("docker", "rhema-dev"));
         let mut settings = sandbox_screen(
             offered(false, true, false),
             None,
             SandboxChoice::Local,
-            rhema_config::Profile::default(),
+            stored,
         );
-        // One down: local, docker.
+        // Enter on the host's own row selects local.
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::SelectSandbox(SandboxChoice::Local)
+        );
+        // One down to the dev instance: enter reports the selection by
+        // name; opening and running is the app's act on it.
         settings.handle_key(key(KeyCode::Down));
         assert_eq!(
             settings.handle_key(key(KeyCode::Enter)),
-            SettingsAction::SelectSandbox(SandboxChoice::Docker)
+            SettingsAction::SelectSandboxInstance
         );
-        // Two more downs land on the add row, the last of four.
-        for _ in 0..2 {
-            settings.handle_key(key(KeyCode::Down));
-        }
+        assert_eq!(settings.selected_sandbox_instance(), Some("dev"));
+        assert_eq!(settings.selected_sandbox(), None, "the instance row");
+        // One more down lands on the add row.
+        settings.handle_key(key(KeyCode::Down));
         assert_eq!(settings.selected_sandbox(), None, "the add row");
-        // Opening the dialog is the app's act on this action; the
-        // screen only reports it.
         assert_eq!(
             settings.handle_key(key(KeyCode::Enter)),
             SettingsAction::OpenSandboxDialog
         );
         settings.sandbox_dialog = Some(AddSandboxDialog::new());
-        // With the dialog up the kind rows stop answering: the dialog
+        // With the dialog up the rows stop answering: the dialog
         // takes every key while it is open.
         assert_eq!(
             settings.handle_key(key(KeyCode::Enter)),
@@ -2755,24 +2816,28 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_d_reports_the_delete_and_the_add_row_stays_inert() {
+    fn sandbox_d_reports_the_removal_and_local_and_add_stay_inert() {
+        let mut stored = rhema_config::Profile::default();
+        stored.place_sandbox_instance("dev", instance("docker", "rhema-dev"));
         let mut settings = sandbox_screen(
             offered(false, true, false),
             None,
             SandboxChoice::Local,
-            rhema_config::Profile::default(),
+            stored,
         );
-        // One down to docker: d reports the delete.
+        // The host's own row has nothing to remove.
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('d'))),
+            SettingsAction::None
+        );
+        // One down to the dev instance: d reports the removal.
         settings.handle_key(key(KeyCode::Down));
         assert_eq!(
             settings.handle_key(key(KeyCode::Char('d'))),
-            SettingsAction::DeleteSandboxInstance
+            SettingsAction::RemoveSandboxInstance
         );
-        // The add row has no instance to unset: two downs from docker,
-        // through lxd.
+        // The add row stays inert.
         settings.handle_key(key(KeyCode::Down));
-        settings.handle_key(key(KeyCode::Down));
-        assert_eq!(settings.selected_sandbox(), None, "the add row");
         assert_eq!(
             settings.handle_key(key(KeyCode::Char('d'))),
             SettingsAction::None

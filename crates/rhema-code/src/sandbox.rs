@@ -104,8 +104,7 @@ pub async fn assemble(
         // The caller skips this arm; the fast path constructs nothing.
         SandboxChoice::Local => anyhow::bail!("the local sandbox needs no assembly"),
         SandboxChoice::Docker => {
-            let container = profile
-                .sandbox_container()
+            let container = sandbox_target(profile, "docker")
                 .unwrap_or_else(|| derived_container_name(workspace));
             ensure_container(&container, &host_workspace)?;
             // The workspace IS the bind mount: the sandbox-side path is
@@ -116,10 +115,13 @@ pub async fn assemble(
             Arc::new(DockerSandbox::new(container, root, host_workspace.clone()))
         }
         SandboxChoice::Lxd => {
-            let instance = profile
-                .sandbox_instance()
-                .unwrap_or_else(|| derived_lxd_name(workspace));
-            if profile.sandbox_vm() {
+            let instance =
+                sandbox_target(profile, "lxd").unwrap_or_else(|| derived_lxd_name(workspace));
+            let vm = profile
+                .sandbox_instance_for("lxd")
+                .map(|(_, stored)| stored.vm.unwrap_or(false))
+                .unwrap_or_else(|| profile.sandbox_vm());
+            if vm {
                 // A virtual machine takes no disk-device mount of a
                 // host path: the attached posture, the workspace
                 // carried in by the seed like ssh, exec through the
@@ -141,8 +143,11 @@ pub async fn assemble(
         SandboxChoice::Ssh => {
             // Stored only, no env tier: a stray variable must not
             // silently move where commands run (rhema-config's stance).
-            let host = profile.sandbox_host().ok_or_else(|| {
-                anyhow::anyhow!("the ssh sandbox needs a host: set `sandbox.host` in the profile")
+            let host = sandbox_target(profile, "ssh").ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the ssh sandbox needs a host: name an ssh instance or set \
+                     `sandbox.host` in the profile"
+                )
             })?;
             // The remote workspace root is the workspace path itself, so
             // the seeded skills land where the prompt's list points.
@@ -150,10 +155,10 @@ pub async fn assemble(
             Arc::new(sandbox)
         }
         SandboxChoice::Http => {
-            let url = profile.sandbox_url().ok_or_else(|| {
+            let url = sandbox_target(profile, "http").ok_or_else(|| {
                 anyhow::anyhow!(
-                    "the http sandbox needs a url: set RHEMA_SANDBOX_URL or the \
-                     profile's `sandbox.url`"
+                    "the http sandbox needs a url: name an http instance or set \
+                     RHEMA_SANDBOX_URL or the profile's `sandbox.url`"
                 )
             })?;
             // One session per workspace, stable across runs: the
@@ -416,6 +421,26 @@ fn discovered_skills(
         bodies.push((skill.name, body));
     }
     (skills, bodies)
+}
+
+/// The target a non-local `kind` execs in: the named instance's first
+/// — the active pointer or the first stored of the kind — then the
+/// section's own single-instance fact, the shape the map grew out of.
+/// `None` means neither place has one and the caller derives or
+/// refuses.
+fn sandbox_target(profile: &Profile, kind: &str) -> Option<String> {
+    profile
+        .sandbox_instance_for(kind)
+        .and_then(|(_, instance)| instance.target.clone())
+        .map(|target| target.trim().to_owned())
+        .filter(|target| !target.is_empty())
+        .or_else(|| match kind {
+            "docker" => profile.sandbox_container(),
+            "lxd" => profile.sandbox_instance(),
+            "ssh" => profile.sandbox_host(),
+            "http" => profile.sandbox_url(),
+            _ => None,
+        })
 }
 
 /// Stands the container up when it is not already running:
@@ -818,6 +843,45 @@ mod tests {
         assert!(
             !SandboxAvailability::from_parts(false, false, false, &bare)
                 .offers(SandboxChoice::Http)
+        );
+    }
+
+    #[test]
+    fn the_instance_map_outranks_the_section_fact_for_a_target() {
+        // No instance stored: the section's single-instance fact is
+        // the fallback.
+        let mut profile = sandbox_profile(None, None);
+        profile.sandbox = Some(rhema_config::SandboxSettings {
+            container: Some("section-dev".to_owned()),
+            ..rhema_config::SandboxSettings::default()
+        });
+        assert_eq!(
+            sandbox_target(&profile, "docker").as_deref(),
+            Some("section-dev")
+        );
+        // A stored instance outranks it, and whitespace trims.
+        profile.place_sandbox_instance(
+            "dev",
+            rhema_config::SandboxInstance {
+                kind: "docker".to_owned(),
+                target: Some(" map-dev ".to_owned()),
+                vm: None,
+            },
+        );
+        assert_eq!(
+            sandbox_target(&profile, "docker").as_deref(),
+            Some("map-dev"),
+            "the instance wins, trimmed"
+        );
+        // A kind with no instance and no fact: None, the caller
+        // derives or refuses.
+        assert_eq!(sandbox_target(&profile, "lxd"), None);
+        // A section fact answers for that kind while no instance of it
+        // is stored.
+        profile.sandbox.as_mut().unwrap().instance = Some("section-vm".to_owned());
+        assert_eq!(
+            sandbox_target(&profile, "lxd").as_deref(),
+            Some("section-vm")
         );
     }
 

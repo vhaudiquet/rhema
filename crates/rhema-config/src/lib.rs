@@ -173,6 +173,7 @@ impl fmt::Debug for SandboxSettings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SandboxSettings")
             .field("kind", &self.kind)
+            .field("active", &self.active)
             .field("url", &self.url)
             .field("token", &redacted(&self.token))
             .field("token_ref", &self.token_ref)
@@ -235,6 +236,7 @@ impl fmt::Debug for Profile {
             .field("color", &self.color)
             .field("thinking", &self.thinking)
             .field("sandbox", &self.sandbox)
+            .field("sandbox_instances", &self.sandbox_instances)
             .finish()
     }
 }
@@ -1374,12 +1376,14 @@ mod tests {
 
     #[test]
     fn the_sandbox_instance_resolves_through_the_active_name_then_the_first() {
-        let mut profile = Profile::default();
-        profile.sandbox = Some(SandboxSettings {
-            kind: Some("lxd".into()),
-            active: Some("dev-vm".into()),
-            ..SandboxSettings::default()
-        });
+        let mut profile = Profile {
+            sandbox: Some(SandboxSettings {
+                kind: Some("lxd".into()),
+                active: Some("dev-vm".into()),
+                ..SandboxSettings::default()
+            }),
+            ..Profile::default()
+        };
         profile.place_sandbox_instance(
             "dev-vm",
             SandboxInstance {
@@ -1416,12 +1420,14 @@ mod tests {
 
     #[test]
     fn removing_a_sandbox_instance_clears_the_active_pointer() {
-        let mut profile = Profile::default();
-        profile.sandbox = Some(SandboxSettings {
-            kind: Some("lxd".into()),
-            active: Some("dev-vm".into()),
-            ..SandboxSettings::default()
-        });
+        let mut profile = Profile {
+            sandbox: Some(SandboxSettings {
+                kind: Some("lxd".into()),
+                active: Some("dev-vm".into()),
+                ..SandboxSettings::default()
+            }),
+            ..Profile::default()
+        };
         profile.place_sandbox_instance(
             "dev-vm",
             SandboxInstance {
