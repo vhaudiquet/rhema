@@ -1,0 +1,28 @@
+[package]
+name = "rhema-sandbox-lxd"
+description = "LXD sandbox backend for the rhema `Sandbox` seam: one driver, two postures — a bind-mounted container and an instance taken as-is — both through the `lxc` CLI"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The seam and the process family's shared machinery (`spawn`): the
+# stream pump, the fs routes, the textual path guard, `FsRoot`
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = ["spawn"] }
+async-trait = { workspace = true }
+# File contents cross the seed staging base64
+base64 = "0.22"
+# The `lxc` child, buffered reads, the cancel tick's timer
+tokio = { workspace = true, features = ["process", "io-util", "time", "fs"] }
+# The write route stages bytes in a host temp file for `lxc file push`
+tempfile = "3"
+
+[dev-dependencies]
+# The tests run on the test runtime, against throwaway host directories
+tokio = { workspace = true }
+
+[lints]
+workspace = true
