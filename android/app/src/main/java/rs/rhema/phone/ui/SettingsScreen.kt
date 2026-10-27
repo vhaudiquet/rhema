@@ -434,7 +434,7 @@ private fun ProvidersCard(container: AppContainer) {
                         options = when (val l = listing) {
                             is ListingState.Available ->
                                 listOf(DEFAULT_MODEL to stringResource(R.string.providers_default_option)) +
-                                    l.models.map { it.id to it.id }
+                                    l.models.map { it.id to modelOptionLabel(it) }
                             else -> listOf(DEFAULT_MODEL to stringResource(R.string.providers_default_option))
                         },
                         enabled = !saving,
@@ -530,6 +530,18 @@ private fun ProvidersCard(container: AppContainer) {
             }
         }
     }
+}
+
+/** A model option's label: the id plus the listing's vision verdict,
+ * spelled the way the web UI and the TUI's picker spell it — a mark
+ * when the model takes images, a bare "no vision" when it does not,
+ * and nothing when the key is absent: unknown is no verdict, never a
+ * false. */
+@Composable
+private fun modelOptionLabel(model: ModelCard): String = model.id + when (model.supportsVision) {
+    true -> stringResource(R.string.vision_badge)
+    false -> stringResource(R.string.vision_badge_absent)
+    null -> ""
 }
 
 private sealed interface ListingState {

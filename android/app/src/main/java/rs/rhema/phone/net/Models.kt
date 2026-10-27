@@ -20,9 +20,20 @@ data class SessionInfo(
     @SerialName("last_outcome") val lastOutcome: JsonElement? = null,
 )
 
-// POST /v1/sessions/{key}/messages
+// POST /v1/sessions/{key}/messages. The Json instance skips defaults,
+// so an empty image list keeps the old {"text"} body byte-for-byte.
+// Text stays required: the claw 422s an empty text even with images.
 @Serializable
-data class MessageRequest(val text: String)
+data class MessageRequest(val text: String, val images: List<OutboundImage> = emptyList())
+
+// One image in the POST body: the full MIME type plus bare base64. The
+// claw's budget — at most eight, 5 MiB decoded each, png/jpeg/gif/webp
+// only — is enforced client-side at stage time (the composer).
+@Serializable
+data class OutboundImage(
+    @SerialName("media_type") val mediaType: String,
+    val data: String,
+)
 
 // GET /v1/providers — the backend instances and the active pair. Each
 // row is one instance, named by its id: the kind unless a login named
@@ -46,6 +57,9 @@ data class ModelCard(
     val id: String,
     @SerialName("display_name") val displayName: String? = null,
     val description: String? = null,
+    // Whether the model takes image input, when the adapter knows:
+    // absent means unknown — no verdict, never a false.
+    @SerialName("supports_vision") val supportsVision: Boolean? = null,
 )
 
 @Serializable
@@ -97,6 +111,12 @@ data class RhemaNotification(
     @SerialName("created_at") val createdAt: Long,
 )
 
+// One image a user_message names: the attachment id the bytes live
+// under (GET /v1/attachments/{id}, bearer-guarded) plus the MIME type —
+// megabytes never ride the stream.
+@Serializable
+data class UserImage(val id: String, @SerialName("media_type") val mediaType: String)
+
 // Frames of GET /v1/sessions/{key}/events; "type" is the discriminator.
 // The stream opens with the session's recorded turns replayed before the
 // live feed, so a screen (re)builds its transcript from the replay.
@@ -106,7 +126,12 @@ data class RhemaNotification(
 sealed interface ClawEvent {
     @Serializable
     @SerialName("user_message")
-    data class UserMessage(val text: String = "") : ClawEvent
+    // Rows recorded before images rode the stream carry no field at
+    // all; absent folds to none, never a guessed shape.
+    data class UserMessage(
+        val text: String = "",
+        val images: List<UserImage> = emptyList(),
+    ) : ClawEvent
 
     @Serializable
     @SerialName("thinking_delta")

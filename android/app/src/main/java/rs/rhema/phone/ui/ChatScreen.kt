@@ -6,9 +6,16 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,12 +28,16 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -49,6 +60,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
@@ -60,8 +72,11 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
+import androidx.core.net.toUri
 import rs.rhema.phone.R
 import rs.rhema.phone.chat.ChatController
+import rs.rhema.phone.chat.MAX_IMAGE_BYTES
+import rs.rhema.phone.chat.MAX_STAGED_IMAGES
 import rs.rhema.phone.data.AgentIdentityCache
 import rs.rhema.phone.di.AppContainer
 import rs.rhema.phone.net.ClawResult
@@ -70,6 +85,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+import java.util.Locale
+import android.provider.OpenableColumns
 
 // The transcript screen, the design's chat panel as a phone screen:
 // avatar rows per turn (the tool cards with their one-sided accent
@@ -88,6 +105,65 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
     BackHandler { onBack() }
 
     var draft by rememberSaveable { mutableStateOf("") }
+
+    // Images staged for the next send, held as files in the app cache:
+    // the picker's read grant dies with the activity result, while the
+    // send reads the staged file whenever the message leaves.
+    var staged by remember { mutableStateOf<List<StagedChip>>(emptyList()) }
+    var stageError by remember { mutableStateOf<ImageStageError?>(null) }
+    var attachOpen by remember { mutableStateOf(false) }
+    // The camera's content:// target, remembered so the result callback
+    // still knows what was written even after a configuration change.
+    var cameraTarget by rememberSaveable { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    // Labels resolve in composition, not at callback time: a lookup
+    // through LocalContext.current freezes the first composition's
+    // locale (the same rule the attachment card's templates follow).
+    val cameraLabel = stringResource(R.string.chat_attach_camera)
+    val cameraShotName = stringResource(R.string.chat_camera_shot_name)
+
+    // Stage one image for the next send: the budget and the type are
+    // checked here — loudly, never a silent drop — the bytes copied into
+    // the cache's staged dir, and a downscaled chip preview decoded off
+    // the main thread.
+    fun stageImage(uri: Uri, name: String, mediaType: String?) {
+        stageError = null
+        if (staged.size >= MAX_STAGED_IMAGES) {
+            stageError = ImageStageError.TooMany(name, MAX_STAGED_IMAGES)
+            return
+        }
+        val type = mediaType?.takeIf { it in IMAGE_MEDIA_TYPES }
+            ?: MIME_BY_EXTENSION[name.substringAfterLast('.', "").lowercase()]
+        if (type == null) {
+            stageError = ImageStageError.BadType(name)
+            return
+        }
+        scope.launch {
+            when (val outcome = stageImageTask(context, uri, name, type)) {
+                is StageOutcome.Staged -> staged = staged + outcome.chip
+                is StageOutcome.Failed -> stageError = outcome.error
+            }
+        }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        if (uri != null) {
+            val type = context.contentResolver.getType(uri)
+            val name = queryDisplayName(context, uri) ?: "photo." + typeFallbackExtension(type)
+            stageImage(uri, name, type)
+        }
+    }
+
+    val cameraLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture(),
+    ) { shot ->
+        val target = cameraTarget
+        if (shot && target != null) {
+            stageImage(target.toUri(), cameraShotName, "image/jpeg")
+        }
+    }
 
     // The claw's presentation identity: the avatar picture (when one is
     // set), the initials glyph otherwise, and the agent's name on every
@@ -124,6 +200,27 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
             )
         }
 
+        // The staged chips sit above the input row like the web composer's
+        // paste-chip row: thumbnail, ▣N name size, and a drop affordance.
+        if (staged.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                staged.forEachIndexed { index, chip ->
+                    StagedChipView(chip, index + 1) { staged = staged - chip }
+                }
+            }
+        }
+
+        stageError?.let { error ->
+            ImageErrorRow(error) { stageError = null }
+        }
+
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -131,6 +228,16 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
             verticalAlignment = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            IconButton(
+                onClick = { attachOpen = true },
+                enabled = !controller.sending,
+            ) {
+                Icon(
+                    Icons.Filled.Add,
+                    contentDescription = stringResource(R.string.chat_attach),
+                    tint = JadeiteText3,
+                )
+            }
             OutlinedTextField(
                 value = draft,
                 onValueChange = { draft = it },
@@ -152,11 +259,58 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
                 enabled = !controller.sending && draft.isNotBlank(),
             ) {
                 val text = draft
+                val sending = staged
                 draft = ""
+                staged = emptyList()
+                stageError = null
                 scope.launch {
-                    if (!controller.send(text)) draft = text
+                    if (!controller.send(text, sending.map { it.image })) {
+                        draft = text
+                        staged = sending
+                    }
                 }
             }
+        }
+
+        // The attach door: gallery pick or camera shot, the only two ways
+        // images enter the composer.
+        if (attachOpen) {
+            AlertDialog(
+                onDismissRequest = { attachOpen = false },
+                title = { Text(stringResource(R.string.chat_attach)) },
+                text = {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(
+                            onClick = {
+                                attachOpen = false
+                                galleryLauncher.launch(
+                                    PickVisualMediaRequest(
+                                        ActivityResultContracts.PickVisualMedia.ImageOnly,
+                                    ),
+                                )
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(stringResource(R.string.chat_attach_gallery))
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                attachOpen = false
+                                newCameraTarget(context)?.let { target ->
+                                    cameraTarget = target.toString()
+                                    cameraLauncher.launch(target)
+                                } ?: run {
+                                    stageError = ImageStageError.ReadFailed(cameraLabel)
+                                }
+                            },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(stringResource(R.string.chat_attach_camera))
+                        }
+                    }
+                },
+                confirmButton = {},
+            )
         }
     }
 }
@@ -247,7 +401,11 @@ private fun SendButton(enabled: Boolean, onClick: () -> Unit) {
 private sealed interface TurnGroup {
     val key: String
 
-    data class User(val id: Long, val text: String) : TurnGroup {
+    data class User(
+        val id: Long,
+        val text: String,
+        val images: List<ChatController.SentImage>,
+    ) : TurnGroup {
         override val key: String = "u$id"
     }
 
@@ -260,7 +418,7 @@ private fun turnGroups(items: List<ChatController.Item>): List<TurnGroup> {
     val groups = mutableListOf<TurnGroup>()
     for (item in items) {
         when (item) {
-            is ChatController.UserMessage -> groups += TurnGroup.User(item.id, item.text)
+            is ChatController.UserMessage -> groups += TurnGroup.User(item.id, item.text, item.images)
             else -> {
                 val last = groups.lastOrNull()
                 if (last is TurnGroup.Agent) last.items += item else groups += TurnGroup.Agent(mutableListOf(item))
@@ -297,6 +455,19 @@ private fun TurnGroupRow(
                         .weight(1f, fill = false),
                     verticalArrangement = Arrangement.spacedBy(4.dp),
                 ) {
+                    // The message's images sit above its text, the web
+                    // sent row's layout: a locally sent row previews its
+                    // own staged files, a replayed one fetches by id.
+                    if (group.images.isNotEmpty()) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                        ) {
+                            group.images.forEach { image ->
+                                SentImageThumb(image, container)
+                            }
+                        }
+                    }
                     // Embedded pastes render as chips, not payloads; the
                     // text around them stays verbatim.
                     var chip = 0
@@ -576,6 +747,267 @@ private fun lineCount(text: String): Int {
 /** A chip's label: `▣1 5L` — the anchor's one-based id and the
  * payload's line count. */
 private fun chipLabel(paste: String, chip: Int): String = "▣$chip ${lineCount(paste)}L"
+
+// --- staged images ----------------------------------------------------
+
+// One staged image as the composer holds it: the sendable part (file,
+// wire type, decoded size) plus what only the UI needs — the label and
+// the downscaled preview.
+private data class StagedChip(
+    val image: ChatController.StagedImage,
+    val name: String,
+    val thumb: ImageBitmap?,
+)
+
+// Why an image refused to stage — failure data, resolved to text at
+// render (the UiMessage rule), never a silent drop.
+private sealed interface ImageStageError {
+    data class TooMany(val name: String, val max: Int) : ImageStageError
+    data class TooLarge(val name: String) : ImageStageError
+    data class BadType(val name: String) : ImageStageError
+    data class ReadFailed(val name: String) : ImageStageError
+}
+
+private sealed interface StageOutcome {
+    data class Staged(val chip: StagedChip) : StageOutcome
+    data class Failed(val error: ImageStageError) : StageOutcome
+}
+
+// The claw accepts png, jpeg, gif, and webp only; anything else the
+// picker offers (heic, raw camera types) refuses loudly at stage time.
+private val IMAGE_MEDIA_TYPES = listOf("image/png", "image/jpeg", "image/gif", "image/webp")
+
+private val MIME_BY_EXTENSION = mapOf(
+    "png" to "image/png",
+    "jpg" to "image/jpeg",
+    "jpeg" to "image/jpeg",
+    "gif" to "image/gif",
+    "webp" to "image/webp",
+)
+
+// Chip previews at staging, transcript previews at render — both far
+// under the decoded sizes they stand for.
+private const val STAGE_THUMB_PX = 256
+private const val TRANSCRIPT_THUMB_PX = 512
+
+/** Copies a picked or shot image into the cache's staged dir, size-checked
+ * against the claw's budget, with a downscaled chip preview decoded off
+ * the main thread. Every refusal answers a failure the composer shows. */
+private suspend fun stageImageTask(
+    context: Context,
+    uri: Uri,
+    name: String,
+    mediaType: String,
+): StageOutcome = withContext(Dispatchers.IO) {
+    // The read can fail on a dead grant (SecurityException) or a gone
+    // source (IOException); both stage as unreadable, both visible.
+    val bytes = try {
+        context.contentResolver.openInputStream(uri)?.use { stream -> stream.readBytes() }
+    } catch (e: IOException) {
+        null
+    } catch (e: SecurityException) {
+        null
+    }
+    when {
+        bytes == null -> StageOutcome.Failed(ImageStageError.ReadFailed(name))
+        bytes.size > MAX_IMAGE_BYTES -> StageOutcome.Failed(ImageStageError.TooLarge(name))
+        else -> {
+            val dir = File(context.cacheDir, "staged")
+            when {
+                !dir.exists() && !dir.mkdirs() ->
+                    StageOutcome.Failed(ImageStageError.ReadFailed(name))
+                else -> try {
+                    // Synthetic on-disk name, never shown: the chip and
+                    // the sent row label carry the pick's display name.
+                    val file = File(
+                        dir,
+                        "staged-${System.currentTimeMillis()}.${stagedExtension(mediaType)}",
+                    )
+                    file.writeBytes(bytes)
+                    StageOutcome.Staged(
+                        StagedChip(
+                            image = ChatController.StagedImage(file, mediaType, bytes.size.toLong()),
+                            name = name,
+                            thumb = decodeThumbnail(bytes, STAGE_THUMB_PX),
+                        ),
+                    )
+                } catch (e: IOException) {
+                    StageOutcome.Failed(ImageStageError.ReadFailed(name))
+                }
+            }
+        }
+    }
+}
+
+/** The staged file's extension, from its accepted media type. */
+private fun stagedExtension(mediaType: String): String =
+    if (mediaType == "image/jpeg") "jpg" else mediaType.removePrefix("image/")
+
+/** A label's extension when the provider named no type: the image
+ * subtype when usable, png otherwise. */
+private fun typeFallbackExtension(mediaType: String?): String =
+    when (mediaType?.removePrefix("image/")) {
+        "gif" -> "gif"
+        "webp" -> "webp"
+        "jpeg" -> "jpg"
+        else -> "png"
+    }
+
+/** The pick's display name from the media provider; null when it names
+ * nothing — the caller falls back to a type-derived one. */
+private fun queryDisplayName(context: Context, uri: Uri): String? = runCatching {
+    context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+        ?.use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+}.getOrNull()
+
+/** A fresh cache file for a camera shot, mapped through the manifest's
+ * FileProvider: TakePicture writes straight into the content:// uri, and
+ * it needs no CAMERA permission. Null when the cache directory cannot
+ * be made — the composer surfaces that, it never drops silently. */
+private fun newCameraTarget(context: Context): Uri? {
+    val dir = File(context.cacheDir, "camera")
+    if (!dir.exists() && !dir.mkdirs()) return null
+    val file = File(dir, "shot-${System.currentTimeMillis()}.jpg")
+    return FileProvider.getUriForFile(context, context.packageName + ".fileprovider", file)
+}
+
+/** A downscaled decode: inSampleSize halves until the longer side is
+ * near [maxDim], so a 12 MP camera shot never becomes a full bitmap in
+ * memory. Null when the bytes decode to nothing. */
+private fun decodeThumbnail(bytes: ByteArray, maxDim: Int): ImageBitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / (sample * 2) >= maxDim || bounds.outHeight / (sample * 2) >= maxDim) {
+        sample *= 2
+    }
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)?.asImageBitmap()
+}
+
+/** B/KB/MB with one decimal past 1 KB — the chip label's size, the web
+ * composer's format. */
+private fun formatSize(size: Long): String = when {
+    size < 1024 -> "$size B"
+    size < 1024 * 1024 -> String.format(Locale.US, "%.1f KB", size / 1024.0)
+    else -> String.format(Locale.US, "%.1f MB", size / (1024.0 * 1024.0))
+}
+
+// A staged image's chip, the paste chip's sibling: downscaled thumbnail,
+// the ▣N name size label, and a drop affordance.
+@Composable
+private fun StagedChipView(chip: StagedChip, number: Int, onRemove: () -> Unit) {
+    Surface(
+        shape = MaterialTheme.shapes.extraSmall,
+        color = JadeiteSunken,
+        border = BorderStroke(1.dp, JadeiteBorder),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(start = 6.dp, end = 6.dp, top = 4.dp, bottom = 4.dp),
+        ) {
+            chip.thumb?.let { thumb ->
+                Image(
+                    bitmap = thumb,
+                    contentDescription = chip.name,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .clip(MaterialTheme.shapes.extraSmall),
+                )
+            }
+            Text(
+                "▣$number ${chip.name} ${formatSize(chip.image.sizeBytes)}",
+                style = MaterialTheme.typography.labelSmall,
+                fontFamily = JadeiteMono,
+                color = JadeiteText3,
+            )
+            Icon(
+                Icons.Filled.Close,
+                contentDescription = stringResource(R.string.chat_image_drop, chip.name),
+                tint = JadeiteText3,
+                modifier = Modifier
+                    .size(14.dp)
+                    .clickable(onClick = onRemove),
+            )
+        }
+    }
+}
+
+// A refused image's inline error with its dismiss — the web composer's
+// role=alert row.
+@Composable
+private fun ImageErrorRow(error: ImageStageError, onDismiss: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 2.dp),
+    ) {
+        Text(
+            when (error) {
+                is ImageStageError.TooMany ->
+                    stringResource(R.string.chat_image_too_many, error.name, error.max)
+                is ImageStageError.TooLarge ->
+                    stringResource(R.string.chat_image_too_large, error.name)
+                is ImageStageError.BadType ->
+                    stringResource(R.string.chat_image_bad_type, error.name)
+                is ImageStageError.ReadFailed ->
+                    stringResource(R.string.chat_image_read_failed, error.name)
+            },
+            color = JadeiteError,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(
+            Icons.Filled.Close,
+            contentDescription = stringResource(R.string.chat_image_dismiss),
+            tint = JadeiteText3,
+            modifier = Modifier
+                .size(16.dp)
+                .clickable(onClick = onDismiss),
+        )
+    }
+}
+
+// One image a sent row carries: the local file decodes in place; a
+// replayed row fetches its bytes bearer-guarded once per row lifetime —
+// the attachment card's own caching pattern. The preview is a downscaled
+// decode, capped at the attachment card's 240 dp.
+@Composable
+private fun SentImageThumb(image: ChatController.SentImage, container: AppContainer) {
+    var thumb by remember(image.attachmentId, image.file) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(image.attachmentId, image.file) {
+        thumb = withContext(Dispatchers.IO) {
+            val bytes = when {
+                image.file != null -> runCatching { image.file.readBytes() }.getOrNull()
+                image.attachmentId != null -> when (
+                    val result = container.api.attachment(image.attachmentId)
+                ) {
+                    is ClawResult.Ok -> result.value
+                    else -> null
+                }
+                else -> null
+            }
+            bytes?.let { decodeThumbnail(it, TRANSCRIPT_THUMB_PX) }
+        }
+    }
+    thumb?.let { bitmap ->
+        Image(
+            bitmap = bitmap,
+            contentDescription = stringResource(R.string.chat_sent_image),
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .widthIn(max = 240.dp)
+                .heightIn(max = 240.dp)
+                .clip(MaterialTheme.shapes.small)
+                .border(1.dp, JadeiteBorder, MaterialTheme.shapes.small),
+        )
+    }
+}
 
 // --- attachments ------------------------------------------------------
 

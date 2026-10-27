@@ -102,10 +102,16 @@ class ClawApi(
 
     // The claw's documented dance: subscribe to the event stream first, then
     // POST; the reply arrives on the stream, not in the POST response (202).
-    suspend fun postMessage(sessionKey: String, text: String): ClawResult<Unit> {
+    // Staged images ride the body only when there are some (the request
+    // type's default keeps the old shape byte-stable otherwise).
+    suspend fun postMessage(
+        sessionKey: String,
+        text: String,
+        images: List<OutboundImage> = emptyList(),
+    ): ClawResult<Unit> {
         val builder = v1("sessions", sessionKey, "messages")
             ?: return ClawResult.Network("no base URL configured")
-        val body = json.encodeToString(MessageRequest(text)).toRequestBody(jsonBody)
+        val body = json.encodeToString(MessageRequest(text, images)).toRequestBody(jsonBody)
         return execute(builder.post(body).build()) { }
     }
 

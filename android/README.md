@@ -20,6 +20,10 @@ manages the device fleet the claw keeps.
   backend instances (`GET /v1/providers`), each one's live model
   listing, and the active pair staged as a draft behind an explicit save
   (`PUT /v1/providers/active`; it applies from the claw's next turn).
+  Model options carry the listing's vision verdict the way the web and
+  the TUI spell it — `◉ vision` when the adapter knows the model takes
+  images, a bare `no vision` when it knows it does not, nothing when the
+  key is absent (unknown is no verdict, never a `false`).
   The **Diagnostics** page answers "why is the fleet row stale" from the
   phone's side: the three WorkManager jobs' live state (an empty info
   list — a cancelled schedule — is the loud answer), the two clocks
@@ -53,7 +57,19 @@ manages the device fleet the claw keeps.
   types skipped). The reader's own messages render as right-anchored
   bubbles (elevated surface, accent bar on the trailing edge); the
   agent's turns keep the avatar on the left. The
-  composer POSTs `{"text"}`; the claw's documented dance is preserved:
+  composer's (+) door stages images for the next send — a photo-picker
+  pick or a camera shot written straight into a FileProvider-mapped
+  cache uri (no CAMERA permission) — each a removable `▣N name size`
+  chip with a downscaled thumbnail above the input row. The claw's own
+  budget is enforced client-side with visible inline errors, never
+  silent drops: at most eight images a message, 5 MiB decoded each,
+  png/jpeg/gif/webp only (a heic pick refuses rather than being sent),
+  and the text stays required — the claw 422s an empty text even with
+  images aboard. Send reads the staged files back and POSTs bare base64
+  in the body's `images` (omitted when there are none, so the old
+  `{"text"}` shape stays byte-stable); a failed send restores the draft
+  and the chips. The composer POSTs `{"text"}` plus those images; the
+  claw's documented dance is preserved:
   **subscribe first, then POST**, the reply arrives on the stream. Thinking
   deltas render dim and collapsible, tool rows show name/summary with error
   coloring (bash-like tools render as shell lines instead: dim `$` prefix,
@@ -63,7 +79,15 @@ manages the device fleet the claw keeps.
   preview for small (≤ 2 MB) images, and a download-and-open row (bytes
   from `GET /v1/attachments/{id}` land in the app cache and open through a
   FileProvider `ACTION_VIEW`, the only way another app can read a private
-  cache file). The agent's `consent_request` questions (a secret, or an
+  cache file). Sent messages with images render their thumbnails in the
+  right-anchored bubble: the optimistic row previews the staged files at
+  once, and a replayed `user_message` (the stream carries attachment
+  ids, never bytes) fetches through the same bearer-guarded
+  `GET /v1/attachments/{id}` as an attachment card, decoded downscaled
+  and capped at the card's 240 dp. The stream's echo of a message this
+  surface just sent dedupes against the optimistic row (same text, same
+  image count), so the local previews stand. The agent's
+  `consent_request` questions (a secret, or an
   approval of a phone control action) render as cards answered in place —
   `POST`/`DELETE /v1/consents/{id}` — and `consent_resolved` settles them
   (a reconnect's replay rebuilds the settled states). The streaming reply
@@ -190,7 +214,7 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `GET /v1/providers/{id}/models` | an instance's live model listing |
 | `PUT /v1/providers/active` | switch the backend instance, persisted |
 | `GET /v1/sessions` | session list |
-| `POST /v1/sessions/{key}/messages` | `{"text"}` → 202; reply via stream |
+| `POST /v1/sessions/{key}/messages` | `{"text"}`, optional `images` (≤ 8, ≤ 5 MiB decoded each, bare base64) → 202; reply via stream |
 | `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment`, `consent_request`, `consent_resolved`. `?since=N` skips the replay's oldest N events — the transcript cache's cursor |
 | `GET /v1/attachments/{id}` | an attachment event's bytes (bearer) |
 | `GET /v1/consents` | pending consent questions, oldest first |

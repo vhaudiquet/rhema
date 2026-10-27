@@ -1,5 +1,6 @@
 package rs.rhema.phone.chat
 
+import android.util.Base64
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -9,14 +10,25 @@ import rs.rhema.phone.data.SessionCache
 import rs.rhema.phone.net.ClawApi
 import rs.rhema.phone.net.ClawEvent
 import rs.rhema.phone.net.ClawResult
+import rs.rhema.phone.net.OutboundImage
 import rs.rhema.phone.net.SseFrame
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.NonCancellable
+import java.io.File
+import java.io.IOException
+
+// The claw's own image budget (POST .../messages): eight images a
+// message, 5 MiB decoded each. The composer enforces it at stage time;
+// send() checks again so a stale staged file cannot smuggle an
+// oversized body past it.
+const val MAX_STAGED_IMAGES = 8
+const val MAX_IMAGE_BYTES = 5L * 1024 * 1024
 
 // Holds the live transcript of one open chat screen. The transcript is
 // seeded from the session cache before the first frame and kept in the
@@ -34,7 +46,20 @@ class ChatController(
         val id: Long
     }
 
-    data class UserMessage(override val id: Long, val text: String) : Item
+    // One image a user row renders: the staged file behind a message
+    // this surface just sent (previews locally, no id yet), or the
+    // attachment id a replayed row names (bytes live at the claw).
+    data class SentImage(
+        val attachmentId: String?,
+        val file: File?,
+        val mediaType: String,
+    )
+
+    data class UserMessage(
+        override val id: Long,
+        val text: String,
+        val images: List<SentImage> = emptyList(),
+    ) : Item
     data class Thinking(override val id: Long, val text: String) : Item
     data class ToolCall(
         override val id: Long,
@@ -158,22 +183,57 @@ class ChatController(
         streamJob = null
     }
 
+    // One image staged for the next send: the file the optimistic row
+    // previews, the wire type the POST body carries, and its decoded
+    // size for the budget's last look.
+    data class StagedImage(val file: File, val mediaType: String, val sizeBytes: Long)
+
     // The stream is already collecting by the time the user can press send,
-    // so this preserves the claw's subscribe-then-post order. A failed POST
-    // restores the draft in the UI. The turn's user_message event is the
+    // so this preserves the claw's subscribe-then-post order. Images are
+    // read and encoded here — the send path's own budget look (the composer
+    // already enforced it at stage time); a violation or an unreadable file
+    // fails the send with the error surfaced, never a silent drop. A failed
+    // POST restores the draft in the UI. The turn's user_message event is the
     // transcript's own record of the question — replayed on a reload, and
     // echoed live right about when this returns — so the local row is only
     // appended when the echo has not already landed.
-    suspend fun send(text: String): Boolean {
+    suspend fun send(text: String, staged: List<StagedImage> = emptyList()): Boolean {
+        if (staged.size > MAX_STAGED_IMAGES) {
+            sendError = "over the $MAX_STAGED_IMAGES-image budget"
+            return false
+        }
         sending = true
         sendError = null
-        val result = api.postMessage(sessionKey, text)
+        val outbound = mutableListOf<OutboundImage>()
+        for (image in staged) {
+            try {
+                val bytes = withContext(Dispatchers.IO) { image.file.readBytes() }
+                if (bytes.size > MAX_IMAGE_BYTES) {
+                    sending = false
+                    sendError = "image over the 5 MiB decoded budget"
+                    return false
+                }
+                outbound += OutboundImage(
+                    image.mediaType,
+                    Base64.encodeToString(bytes, Base64.NO_WRAP),
+                )
+            } catch (e: IOException) {
+                sending = false
+                sendError = "image could not be read"
+                return false
+            }
+        }
+        val result = api.postMessage(sessionKey, text, outbound)
         sending = false
         return when (result) {
             is ClawResult.Ok -> {
                 val last = items.lastOrNull()
-                if (!(last is UserMessage && last.text == text)) {
-                    items = items + UserMessage(newId(), text)
+                if (!(last is UserMessage && last.text == text && last.images.size == staged.size)) {
+                    items = items + UserMessage(
+                        newId(),
+                        text,
+                        staged.map { SentImage(attachmentId = null, file = it.file, mediaType = it.mediaType) },
+                    )
                 }
                 true
             }
@@ -200,10 +260,15 @@ class ChatController(
             is ClawEvent.UserMessage -> {
                 // The recorded question — replayed on reload, echoed live
                 // for a message this surface just sent. An identical last
-                // row is that echo's stand-in; skip it.
+                // row — same text, same image count — is that echo's
+                // stand-in; skip it, previews and all.
                 val last = list.lastOrNull()
-                if (!(last is UserMessage && last.text == event.text)) {
-                    list = list + UserMessage(newId(), event.text)
+                if (!(last is UserMessage && last.text == event.text && last.images.size == event.images.size)) {
+                    list = list + UserMessage(
+                        newId(),
+                        event.text,
+                        event.images.map { SentImage(attachmentId = it.id, file = null, mediaType = it.mediaType) },
+                    )
                 }
             }
             is ClawEvent.ThinkingDelta -> {

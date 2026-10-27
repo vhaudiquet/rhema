@@ -3,4 +3,7 @@
      hand-off; FileProvider maps files under it to content:// uris. -->
 <paths>
     <cache-path name="attachments" path="attachments/" />
+    <!-- Camera shots stage here before a send: TakePicture writes straight
+         into the FileProvider-mapped content:// uri (no CAMERA permission). -->
+    <cache-path name="camera" path="camera/" />
 </paths>
