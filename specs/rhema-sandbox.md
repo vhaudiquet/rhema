@@ -246,11 +246,13 @@ sessions` — verified, not workspace-relative), the clipboard, the TUI
 itself. That is the whole migration for `rhema-code`: no state moves;
 only the tool's executor and the prompt's workspace string change.
 
-The v1 set is `local | docker | ssh | http`, with `lxd` the fifth:
-containers and `--vm` instances are one driver and a launch flag, not
-two kinds in the vocabulary (§9). bubblewrap/nsjail and microVM images
-land later with zero trait change — that is the test the abstraction
-has to pass (§2). SSH ships daemonless first: zero setup on the far
+The v1 set is `local | docker | lxd | ssh | http` — lxd landed as one
+driver and a launch flag, containers and `--vm` instances alike
+(§9): `rhema-sandbox-lxd` execs through `lxc exec`, mounts a `disk`
+device 1:1 for the container posture, and rides `lxc file` attached
+for the VM one. bubblewrap/nsjail and microVM images land later with
+zero trait change — that is the test the abstraction has to pass
+(§2). SSH ships daemonless first: zero setup on the far
 end is the mode's reason to exist; tunnel-plus-`sandboxd` is the
 documented fast path.
 
@@ -386,8 +388,9 @@ infrastructure); phase 9 is the one users see.
   vocabulary. The VM type is the point: local and mounts are process
   hygiene, and an LXD VM is the strongest isolation tier a
   `rhema-code` host can offer without a cloud.
-- **The settings page advertises the ready set only** — `local` and
-  `docker`; ssh and http keep out of sight while their stories are
-  open. The UI's silence is a feature-status statement, not a
-  capability one: `/sandbox <kind>` still runs a configured kind the
-  probe offers.
+- **The settings page advertises the ready set only** — `local`,
+  `docker`, and `lxd`; ssh and http keep out of sight while their
+  stories are open. The UI's silence is a feature-status statement,
+  not a capability one: `/sandbox <kind>` still runs a configured
+  kind the probe offers, and `d` on a row unsets its instance
+  without touching the stored kind.
