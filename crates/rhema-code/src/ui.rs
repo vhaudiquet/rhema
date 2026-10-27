@@ -442,6 +442,7 @@ fn render_add_sandbox_dialog(
                     let mark = if selected { "❯ " } else { "  " };
                     let what = match kind {
                         crate::args::SandboxChoice::Docker => "a container, by name",
+                        crate::args::SandboxChoice::Lxd => "an LXD instance, by name",
                         crate::args::SandboxChoice::Ssh => "a remote box, by user@host",
                         crate::args::SandboxChoice::Http => "a rhema-sandboxd, by url",
                         crate::args::SandboxChoice::Local => "this host",

@@ -25,6 +25,7 @@ use rhema_config::secrets::SecretStore;
 use rhema_sandbox::{FsRoot, Sandbox, ShellSandbox, seed_workspace};
 use rhema_sandbox_docker::DockerSandbox;
 use rhema_sandbox_http::HttpSandbox;
+use rhema_sandbox_lxd::LxdSandbox;
 use rhema_sandbox_ssh::SshSandbox;
 
 use crate::args::SandboxChoice;
@@ -34,6 +35,11 @@ use crate::args::SandboxChoice;
 /// its own when it is not — a few seconds is the whole patience the
 /// startup path can afford.
 const DOCKER_PROBE_BUDGET: Duration = Duration::from_secs(3);
+
+/// The same bound on one `lxc info` probe: the CLI answers fast when
+/// the local daemon answers, and the startup path's patience is the
+/// same few seconds.
+const LXD_PROBE_BUDGET: Duration = Duration::from_secs(3);
 
 /// The name the seeding marker file carries, under the workspace's
 /// `.rhema` directory — the sandbox-side twin of the cloud frontends'
@@ -108,6 +114,29 @@ pub async fn assemble(
             let root = FsRoot::new(workspace.to_path_buf())
                 .map_err(|err| anyhow::anyhow!("docker sandbox root: {err}"))?;
             Arc::new(DockerSandbox::new(container, root, host_workspace.clone()))
+        }
+        SandboxChoice::Lxd => {
+            let instance = profile
+                .sandbox_instance()
+                .unwrap_or_else(|| derived_lxd_name(workspace));
+            if profile.sandbox_vm() {
+                // A virtual machine takes no disk-device mount of a
+                // host path: the attached posture, the workspace
+                // carried in by the seed like ssh, exec through the
+                // same lxc argv.
+                ensure_lxd_instance(&instance, true)?;
+                Arc::new(LxdSandbox::attached(&instance).with_workspace(&host_workspace))
+            } else {
+                // The bind-mount posture: a disk device mirrors the
+                // host workspace at its own path, so the sandbox-side
+                // path is the host path itself and FsRoot's file
+                // routes are plain fs on the host side.
+                ensure_lxd_instance(&instance, false)?;
+                ensure_lxd_mount(&instance, &host_workspace)?;
+                let root = FsRoot::new(workspace.to_path_buf())
+                    .map_err(|err| anyhow::anyhow!("lxd sandbox root: {err}"))?;
+                Arc::new(LxdSandbox::mounted(&instance, root, host_workspace.clone()))
+            }
         }
         SandboxChoice::Ssh => {
             // Stored only, no env tier: a stray variable must not
@@ -189,6 +218,8 @@ impl Sandboxed {
 pub struct SandboxAvailability {
     /// `docker info` answered within the budget.
     pub docker: bool,
+    /// `lxc info` answered within the budget.
+    pub lxd: bool,
     /// The `ssh` binary exists and the profile names a host.
     pub ssh: bool,
     /// The profile names a sandbox URL. Never network-probed: a daemon
@@ -199,20 +230,31 @@ pub struct SandboxAvailability {
 
 impl SandboxAvailability {
     /// Probes this machine and profile: one `docker info` run, one
-    /// `PATH` scan for `ssh`, and the profile's own `sandbox` section.
-    /// Bounded work — the docker probe at most [`DOCKER_PROBE_BUDGET`]
-    /// — so startup waits seconds, never minutes.
+    /// `lxc info` run, one `PATH` scan for `ssh`, and the profile's
+    /// own `sandbox` section. Bounded work — each CLI probe at most
+    /// its budget — so startup waits seconds, never minutes.
     pub fn probe(profile: &Profile) -> Self {
-        Self::from_parts(docker_info_answers(), binary_on_path("ssh"), profile)
+        Self::from_parts(
+            docker_info_answers(),
+            lxd_info_answers(),
+            binary_on_path("ssh"),
+            profile,
+        )
     }
 
     /// The offered set from injected machine facts: the testable seam
     /// of [`Self::probe`]. `ssh` is offered only when the binary
     /// exists AND the profile names a host; `http` only when a URL is
     /// set (`RHEMA_SANDBOX_URL` included).
-    fn from_parts(docker_answers: bool, ssh_present: bool, profile: &Profile) -> Self {
+    fn from_parts(
+        docker_answers: bool,
+        lxd_answers: bool,
+        ssh_present: bool,
+        profile: &Profile,
+    ) -> Self {
         Self {
             docker: docker_answers,
+            lxd: lxd_answers,
             ssh: ssh_present && profile.sandbox_host().is_some(),
             http: profile.sandbox_url().is_some(),
         }
@@ -224,6 +266,7 @@ impl SandboxAvailability {
         match choice {
             SandboxChoice::Local => true,
             SandboxChoice::Docker => self.docker,
+            SandboxChoice::Lxd => self.lxd,
             SandboxChoice::Ssh => self.ssh,
             SandboxChoice::Http => self.http,
         }
@@ -235,12 +278,39 @@ impl SandboxAvailability {
         [
             SandboxChoice::Local,
             SandboxChoice::Docker,
+            SandboxChoice::Lxd,
             SandboxChoice::Ssh,
             SandboxChoice::Http,
         ]
         .into_iter()
         .filter(|choice| self.offers(*choice))
         .collect()
+    }
+}
+
+/// Whether `lxc` answers at all: `lxc info` exiting zero within the
+/// budget. A missing binary is the common "no" — treated exactly like
+/// a refusing daemon.
+fn lxd_info_answers() -> bool {
+    let Ok(mut child) = std::process::Command::new("lxc")
+        .arg("info")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + LXD_PROBE_BUDGET;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => return false,
+        }
     }
 }
 
@@ -424,6 +494,103 @@ fn derived_container_name(workspace: &Path) -> String {
     )
 }
 
+/// Stands the LXD instance up when it is not already running:
+/// `lxc list` answers whether it exists, an existing one is started,
+/// an absent one is launched — `--vm` for a virtual machine, else a
+/// container — from the stock `ubuntu:24.04` image. First launches
+/// wait on the image download the same way the docker path waits on
+/// its pull; the assembly is the one place that patience is spent.
+fn ensure_lxd_instance(name: &str, vm: bool) -> anyhow::Result<()> {
+    let output = std::process::Command::new("lxc")
+        .args(["list", "--format", "csv", "-c", "s", name])
+        .output()
+        .map_err(|err| anyhow::anyhow!("lxc list failed: {err}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "lxc list failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if state == "RUNNING" {
+        return Ok(());
+    }
+    let argv: Vec<&str> = match state.as_str() {
+        "" => {
+            // Absent: launch it, virtual machine or container.
+            if vm {
+                vec!["launch", "--vm", "ubuntu:24.04", name]
+            } else {
+                vec!["launch", "ubuntu:24.04", name]
+            }
+        }
+        // Present but stopped.
+        _ => vec!["start", name],
+    };
+    let output = std::process::Command::new("lxc")
+        .args(&argv)
+        .output()
+        .map_err(|err| anyhow::anyhow!("lxc {} failed: {err}", argv[0]))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "lxc {} failed: {}",
+            argv.join(" "),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// Adds the workspace's `disk` device when it is not already there:
+/// `lxc config device add <name> workspace disk source=<ws>
+/// path=<ws>` — the 1:1 mirror that makes the sandbox-side path the
+/// host path itself. Containers only; a virtual machine takes no
+/// host-path mount and rides the attached posture instead.
+fn ensure_lxd_mount(name: &str, workspace: &str) -> anyhow::Result<()> {
+    let output = std::process::Command::new("lxc")
+        .args(["config", "device", "show", name])
+        .output()
+        .map_err(|err| anyhow::anyhow!("lxc config device show failed: {err}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "lxc config device show failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    if String::from_utf8_lossy(&output.stdout).contains("workspace:") {
+        return Ok(());
+    }
+    let output = std::process::Command::new("lxc")
+        .args([
+            "config",
+            "device",
+            "add",
+            name,
+            "workspace",
+            "disk",
+            &format!("source={workspace}"),
+            &format!("path={workspace}"),
+        ])
+        .output()
+        .map_err(|err| anyhow::anyhow!("lxc config device add failed: {err}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "lxc config device add failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// The instance name a workspace derives when none is stored: the
+/// docker pattern — `rhema-sandbox-<basename>-<hash>` — recognizable
+/// in `lxc list`, unique per workspace path, and valid whatever the
+/// directory is called (LXD names take a narrow charset; the basename
+/// is filtered and capped).
+fn derived_lxd_name(workspace: &Path) -> String {
+    derived_container_name(workspace)
+}
+
 /// FNV-1a over the workspace path, hex — a hash pinned here so a
 /// workspace's derived container name is stable across rhema builds
 /// and Rust versions (std's `DefaultHasher` makes no such promise).
@@ -596,6 +763,7 @@ mod tests {
         let none = SandboxAvailability::default();
         assert!(none.offers(SandboxChoice::Local));
         assert!(!none.offers(SandboxChoice::Docker));
+        assert!(!none.offers(SandboxChoice::Lxd));
         assert!(!none.offers(SandboxChoice::Ssh));
         assert!(!none.offers(SandboxChoice::Http));
         assert_eq!(none.offered(), vec![SandboxChoice::Local]);
@@ -605,6 +773,7 @@ mod tests {
     fn the_offered_list_keeps_the_canonical_order() {
         let all = SandboxAvailability {
             docker: true,
+            lxd: true,
             ssh: true,
             http: true,
         };
@@ -613,6 +782,7 @@ mod tests {
             vec![
                 SandboxChoice::Local,
                 SandboxChoice::Docker,
+                SandboxChoice::Lxd,
                 SandboxChoice::Ssh,
                 SandboxChoice::Http,
             ]
@@ -622,12 +792,18 @@ mod tests {
     #[test]
     fn ssh_needs_both_the_binary_and_a_host() {
         let host = sandbox_profile(Some("deploy@box"), None);
-        assert!(SandboxAvailability::from_parts(true, true, &host).offers(SandboxChoice::Ssh));
+        assert!(
+            SandboxAvailability::from_parts(true, false, true, &host).offers(SandboxChoice::Ssh)
+        );
         // A configured host with no ssh binary is not offered.
-        assert!(!SandboxAvailability::from_parts(true, false, &host).offers(SandboxChoice::Ssh));
+        assert!(
+            !SandboxAvailability::from_parts(true, false, false, &host).offers(SandboxChoice::Ssh)
+        );
         // A binary with nothing configured is not either.
         let bare = sandbox_profile(None, None);
-        assert!(!SandboxAvailability::from_parts(true, true, &bare).offers(SandboxChoice::Ssh));
+        assert!(
+            !SandboxAvailability::from_parts(true, false, true, &bare).offers(SandboxChoice::Ssh)
+        );
     }
 
     #[test]
@@ -635,17 +811,26 @@ mod tests {
         // No probe runs: a daemon that is down must still be
         // selectable, and the turn reports the failure in-band.
         let url = sandbox_profile(None, Some("http://box:7331"));
-        assert!(SandboxAvailability::from_parts(false, false, &url).offers(SandboxChoice::Http));
+        assert!(
+            SandboxAvailability::from_parts(false, false, false, &url).offers(SandboxChoice::Http)
+        );
         let bare = sandbox_profile(None, None);
-        assert!(!SandboxAvailability::from_parts(false, false, &bare).offers(SandboxChoice::Http));
+        assert!(
+            !SandboxAvailability::from_parts(false, false, false, &bare)
+                .offers(SandboxChoice::Http)
+        );
     }
 
     #[test]
     fn docker_passes_its_machine_fact_through_untouched() {
         let bare = sandbox_profile(None, None);
-        assert!(SandboxAvailability::from_parts(true, false, &bare).offers(SandboxChoice::Docker));
         assert!(
-            !SandboxAvailability::from_parts(false, false, &bare).offers(SandboxChoice::Docker)
+            SandboxAvailability::from_parts(true, false, false, &bare)
+                .offers(SandboxChoice::Docker)
+        );
+        assert!(
+            !SandboxAvailability::from_parts(false, false, false, &bare)
+                .offers(SandboxChoice::Docker)
         );
     }
 

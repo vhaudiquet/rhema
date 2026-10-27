@@ -64,6 +64,10 @@ const SANDBOX_KINDS: &[Choice] = &[
         description: "a container, when the docker CLI answers",
     },
     Choice {
+        name: "lxd",
+        description: "an LXD instance, when the lxc CLI answers",
+    },
+    Choice {
         name: "ssh",
         description: "a remote box, when a host is configured",
     },
@@ -109,7 +113,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/sandbox",
-        description: "where bash runs (local, docker, ssh, http)",
+        description: "where bash runs (local, docker, lxd, ssh, http)",
         argument: Argument::Choice(SANDBOX_KINDS),
         handler: sandbox,
     },

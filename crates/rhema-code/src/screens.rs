@@ -237,11 +237,15 @@ pub enum SandboxDialogStage {
 pub const SANDBOX_PAGE_KINDS: &[crate::args::SandboxChoice] = &[
     crate::args::SandboxChoice::Local,
     crate::args::SandboxChoice::Docker,
+    crate::args::SandboxChoice::Lxd,
 ];
 
 /// The kinds the add dialog offers: the page's kinds minus `local` —
 /// the local instance exists by doing nothing.
-pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[crate::args::SandboxChoice::Docker];
+pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[
+    crate::args::SandboxChoice::Docker,
+    crate::args::SandboxChoice::Lxd,
+];
 
 /// The pop-in dialog over the Sandbox page: pick the kind, then type
 /// what it names its instance by — the container, the `user@host`, or
@@ -285,6 +289,7 @@ impl AddSandboxDialog {
     pub fn input_label(&self) -> &'static str {
         match self.kind {
             crate::args::SandboxChoice::Docker => "container: ",
+            crate::args::SandboxChoice::Lxd => "instance: ",
             crate::args::SandboxChoice::Ssh => "host: ",
             crate::args::SandboxChoice::Http => "url: ",
             crate::args::SandboxChoice::Local => "",
@@ -1256,6 +1261,7 @@ impl SettingsScreen {
                     crate::args::SandboxChoice::Docker => {
                         sandbox.and_then(|s| s.container.as_deref())
                     }
+                    crate::args::SandboxChoice::Lxd => sandbox.and_then(|s| s.instance.as_deref()),
                     crate::args::SandboxChoice::Ssh => sandbox.and_then(|s| s.host.as_deref()),
                     crate::args::SandboxChoice::Http => sandbox.and_then(|s| s.url.as_deref()),
                 };
@@ -1264,6 +1270,9 @@ impl SettingsScreen {
                     crate::args::SandboxChoice::Docker => stored
                         .map(str::to_owned)
                         .unwrap_or_else(|| "no container set".to_owned()),
+                    crate::args::SandboxChoice::Lxd => stored
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "no instance set".to_owned()),
                     crate::args::SandboxChoice::Ssh => stored
                         .map(str::to_owned)
                         .unwrap_or_else(|| "no host set".to_owned()),
@@ -2606,8 +2615,14 @@ mod tests {
     use rhema_provider::ModelCard;
 
     /// What this machine offers, spelled per test.
+    #[allow(dead_code)]
     fn offered(docker: bool, ssh: bool, http: bool) -> SandboxAvailability {
-        SandboxAvailability { docker, ssh, http }
+        SandboxAvailability {
+            docker,
+            lxd: false,
+            ssh,
+            http,
+        }
     }
 
     /// A settings screen on the Sandbox page, with the snapshot filled.
@@ -2643,6 +2658,7 @@ mod tests {
             vec![
                 SandboxChoice::Local,
                 SandboxChoice::Docker,
+                SandboxChoice::Lxd,
                 SandboxChoice::Local,
             ],
             "the ready set lists, offered or not: the marks say which; the add row sits last"
@@ -2650,20 +2666,21 @@ mod tests {
         let rows = settings.sandbox_rows();
         assert!(rows.last().expect("rows").add);
         assert!(
-            rows.iter()
-                .filter(|row| !row.add)
-                .all(|row| matches!(row.kind, SandboxChoice::Local | SandboxChoice::Docker)),
+            rows.iter().filter(|row| !row.add).all(|row| matches!(
+                row.kind,
+                SandboxChoice::Local | SandboxChoice::Docker | SandboxChoice::Lxd
+            )),
             "ssh and http stay out of sight until their stories land"
         );
-        // The two kinds plus the add row are the arrows' range: three
-        // downs from the top wrap back to it.
+        // The three kinds plus the add row are the arrows' range:
+        // four downs from the top wrap back to it.
         let mut stepped = sandbox_screen(
             offered(false, true, false),
             None,
             SandboxChoice::Local,
             rhema_config::Profile::default(),
         );
-        for _ in 0..3 {
+        for _ in 0..4 {
             stepped.handle_key(key(KeyCode::Down));
         }
         assert_eq!(stepped.row, 0, "the range wraps");
@@ -2674,6 +2691,7 @@ mod tests {
         let stored = rhema_config::Profile {
             sandbox: Some(rhema_config::SandboxSettings {
                 container: Some("rhema-dev".to_owned()),
+                instance: Some("dev-vm".to_owned()),
                 host: Some("box@far".to_owned()),
                 ..rhema_config::SandboxSettings::default()
             }),
@@ -2693,6 +2711,7 @@ mod tests {
         };
         assert_eq!(by_kind(SandboxChoice::Local).detail, "this host");
         assert_eq!(by_kind(SandboxChoice::Docker).detail, "rhema-dev");
+        assert_eq!(by_kind(SandboxChoice::Lxd).detail, "dev-vm");
         assert!(by_kind(SandboxChoice::Docker).offered);
         assert!(by_kind(SandboxChoice::Docker).remembered);
         assert!(by_kind(SandboxChoice::Local).active);
@@ -2715,8 +2734,10 @@ mod tests {
             settings.handle_key(key(KeyCode::Enter)),
             SettingsAction::SelectSandbox(SandboxChoice::Docker)
         );
-        // One more down lands on the add row, the last of three.
-        settings.handle_key(key(KeyCode::Down));
+        // Two more downs land on the add row, the last of four.
+        for _ in 0..2 {
+            settings.handle_key(key(KeyCode::Down));
+        }
         assert_eq!(settings.selected_sandbox(), None, "the add row");
         // Opening the dialog is the app's act on this action; the
         // screen only reports it.
@@ -2747,7 +2768,9 @@ mod tests {
             settings.handle_key(key(KeyCode::Char('d'))),
             SettingsAction::DeleteSandboxInstance
         );
-        // The add row has no instance to unset: one down from docker.
+        // The add row has no instance to unset: two downs from docker,
+        // through lxd.
+        settings.handle_key(key(KeyCode::Down));
         settings.handle_key(key(KeyCode::Down));
         assert_eq!(settings.selected_sandbox(), None, "the add row");
         assert_eq!(

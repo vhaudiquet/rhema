@@ -1801,6 +1801,7 @@ impl App {
                     .get_or_insert_with(rhema_config::SandboxSettings::default);
                 match kind {
                     SandboxChoice::Docker => sandbox.container = Some(value.clone()),
+                    SandboxChoice::Lxd => sandbox.instance = Some(value.clone()),
                     SandboxChoice::Ssh => sandbox.host = Some(value.clone()),
                     SandboxChoice::Http => sandbox.url = Some(value.clone()),
                     SandboxChoice::Local => {}
@@ -1847,6 +1848,7 @@ impl App {
             .as_ref()
             .map(|sandbox| match choice {
                 SandboxChoice::Docker => sandbox.container.is_some(),
+                SandboxChoice::Lxd => sandbox.instance.is_some(),
                 SandboxChoice::Ssh => sandbox.host.is_some(),
                 SandboxChoice::Http => sandbox.url.is_some(),
                 SandboxChoice::Local => false,
@@ -1859,6 +1861,7 @@ impl App {
                 };
                 match choice {
                     SandboxChoice::Docker => sandbox.container = None,
+                    SandboxChoice::Lxd => sandbox.instance = None,
                     SandboxChoice::Ssh => sandbox.host = None,
                     SandboxChoice::Http => sandbox.url = None,
                     SandboxChoice::Local => {}
@@ -6526,8 +6529,18 @@ mod tests {
     }
 
     /// What this machine offers, spelled per test.
-    fn offered(docker: bool, ssh: bool, http: bool) -> crate::sandbox::SandboxAvailability {
-        crate::sandbox::SandboxAvailability { docker, ssh, http }
+    fn offered(
+        docker: bool,
+        lxd: bool,
+        ssh: bool,
+        http: bool,
+    ) -> crate::sandbox::SandboxAvailability {
+        crate::sandbox::SandboxAvailability {
+            docker,
+            lxd,
+            ssh,
+            http,
+        }
     }
 
     #[test]
@@ -6545,7 +6558,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(true, true, true)
+                &offered(true, true, true, true)
             ),
             SandboxChoice::Docker
         );
@@ -6558,7 +6571,7 @@ mod tests {
                 &config,
                 &layered,
                 Path::new("/proj"),
-                &offered(true, true, true)
+                &offered(true, true, true, true)
             ),
             SandboxChoice::Http
         );
@@ -6569,7 +6582,7 @@ mod tests {
                 &config,
                 &typo,
                 Path::new("/proj"),
-                &offered(true, true, true)
+                &offered(true, true, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6589,7 +6602,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, true, false)
+                &offered(false, true, true, false)
             ),
             SandboxChoice::Ssh
         );
@@ -6600,7 +6613,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, false, false)
+                &offered(false, true, false, false)
             ),
             SandboxChoice::Local
         );
@@ -6616,7 +6629,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, false, true)
+                &offered(false, true, false, true)
             ),
             SandboxChoice::Http
         );
@@ -6627,7 +6640,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, false, false)
+                &offered(false, true, false, false)
             ),
             SandboxChoice::Local
         );
@@ -6637,7 +6650,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(true, true, true)
+                &offered(true, true, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6647,7 +6660,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/other"),
-                &offered(true, true, true)
+                &offered(true, true, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6661,7 +6674,7 @@ mod tests {
                 &config,
                 &rhema_config::Profile::default(),
                 Path::new("/proj"),
-                &offered(true, true, true)
+                &offered(true, true, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6688,7 +6701,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(true, false, false)
+                &offered(true, true, false, false)
             ),
             SandboxChoice::Docker
         );
@@ -6706,7 +6719,7 @@ mod tests {
             workspace: "/workspace".to_owned(),
             skills: Vec::new(),
         });
-        h.app.sandbox_offered = offered(true, false, false);
+        h.app.sandbox_offered = offered(true, true, false, false);
         let effects = h.app.choose_sandbox(SandboxChoice::Local);
         assert!(effects.is_empty(), "local rebuilds inline: {effects:?}");
         assert!(h.app.sandboxed.is_none());
@@ -6727,7 +6740,7 @@ mod tests {
     #[test]
     fn choosing_a_non_local_sandbox_assembles_through_an_effect() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(true, false, false);
+        h.app.sandbox_offered = offered(true, true, false, false);
         let effects = h.app.choose_sandbox(SandboxChoice::Docker);
         assert_eq!(
             effects,
@@ -6773,7 +6786,7 @@ mod tests {
     #[test]
     fn a_failed_assembly_reports_in_band_and_keeps_the_running_tools() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(false, false, true);
+        h.app.sandbox_offered = offered(false, true, false, true);
         assert_eq!(
             h.app.choose_sandbox(SandboxChoice::Http),
             vec![Effect::AssembleSandbox(SandboxChoice::Http)]
@@ -6824,7 +6837,7 @@ mod tests {
     #[test]
     fn slash_sandbox_opens_the_settings_sandbox_page() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(true, true, false);
+        h.app.sandbox_offered = offered(true, true, true, false);
         crate::commands::dispatch(&mut h.app, "/sandbox");
         let Screen::Settings(settings) = &h.app.screen else {
             panic!("expected the settings screen");
@@ -6839,7 +6852,11 @@ mod tests {
                 .filter(|row| !row.add)
                 .map(|row| (row.kind, row.offered))
                 .collect::<Vec<_>>(),
-            vec![(SandboxChoice::Local, true), (SandboxChoice::Docker, true)]
+            vec![
+                (SandboxChoice::Local, true),
+                (SandboxChoice::Docker, true),
+                (SandboxChoice::Lxd, true),
+            ]
         );
         // Down to the docker row, then enter: the select routes
         // through choose_sandbox and lands back on the chat as the
@@ -6901,9 +6918,9 @@ mod tests {
     fn the_sandbox_add_dialog_stores_the_kinds_instance() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/sandbox");
-        // Two downs: local, docker, add row. Enter opens the dialog;
-        // docker is its only kind.
-        for _ in 0..2 {
+        // Three downs: local, docker, lxd, add row. Enter opens the
+        // dialog; docker is its first kind.
+        for _ in 0..3 {
             h.app.on_key(key(KeyCode::Down));
         }
         h.app.on_key(key(KeyCode::Enter));
@@ -6939,6 +6956,24 @@ mod tests {
                 .any(|line| matches!(line, Line::Notice(text) if text.contains("docker"))),
             "the notice names the kind"
         );
+        // Same flow, lxd picked: the value lands on the instance
+        // field, the vm flag untouched (config.yaml's call).
+        crate::commands::dispatch(&mut h.app, "/sandbox");
+        for _ in 0..3 {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Enter));
+        for c in "dev-vm".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        let stored = h.store.load().unwrap();
+        let profile = stored.effective(Some("personal"));
+        let sandbox = profile.sandbox.as_ref().expect("the section lands");
+        assert_eq!(sandbox.instance.as_deref(), Some("dev-vm"));
+        assert_eq!(sandbox.vm, None, "the instance type stays config's");
     }
 
     #[test]
@@ -6954,7 +6989,7 @@ mod tests {
         };
         assert_eq!(
             choices.iter().map(|c| c.name).collect::<Vec<_>>(),
-            vec!["local", "docker", "ssh", "http"]
+            vec!["local", "docker", "lxd", "ssh", "http"]
         );
     }
 

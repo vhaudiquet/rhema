@@ -113,9 +113,9 @@ impl fmt::Debug for ProviderInstance {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct SandboxSettings {
-    /// The stored choice: `local`, `docker`, `ssh`, or `http`. The
-    /// name is stored as given — unknown spellings are the consumer's
-    /// to resolve or reject.
+    /// The stored choice: `local`, `docker`, `lxd`, `ssh`, or `http`.
+    /// The name is stored as given — unknown spellings are the
+    /// consumer's to resolve or reject.
     pub kind: Option<String>,
     /// The `http` sandbox's base URL.
     pub url: Option<String>,
@@ -132,6 +132,14 @@ pub struct SandboxSettings {
     pub host: Option<String>,
     /// The `docker` container to exec in.
     pub container: Option<String>,
+    /// The `lxd` instance to exec in — container or virtual machine,
+    /// the type riding `vm` (spec §9: one driver and a launch flag,
+    /// not two kinds).
+    pub instance: Option<String>,
+    /// Whether the `lxd` instance is a virtual machine — the launch
+    /// flag the assembly stands the instance up with. Unset is a
+    /// container.
+    pub vm: Option<bool>,
 }
 
 impl fmt::Debug for SandboxSettings {
@@ -143,6 +151,8 @@ impl fmt::Debug for SandboxSettings {
             .field("token_ref", &self.token_ref)
             .field("host", &self.host)
             .field("container", &self.container)
+            .field("instance", &self.instance)
+            .field("vm", &self.vm)
             .finish()
     }
 }
@@ -534,6 +544,23 @@ impl Profile {
             .and_then(|s| s.container.clone())
             .map(|c| c.trim().to_owned())
             .filter(|c| !c.is_empty())
+    }
+
+    /// The `lxd` instance to exec in, as stored. Stored only — the
+    /// same stance as [`Profile::sandbox_container`]. Whitespace-only
+    /// values count as unset.
+    pub fn sandbox_instance(&self) -> Option<String> {
+        self.sandbox
+            .as_ref()
+            .and_then(|s| s.instance.clone())
+            .map(|i| i.trim().to_owned())
+            .filter(|i| !i.is_empty())
+    }
+
+    /// Whether the `lxd` instance is a virtual machine. Stored only;
+    /// unset is a container.
+    pub fn sandbox_vm(&self) -> bool {
+        self.sandbox.as_ref().and_then(|s| s.vm).unwrap_or(false)
     }
 }
 
@@ -1873,6 +1900,8 @@ mod tests {
                     token_ref: Some("ref-sandbox".into()),
                     host: Some("deploy@box".into()),
                     container: Some("rhema-dev".into()),
+                    instance: Some("dev-vm".into()),
+                    vm: Some(true),
                 }),
             )]),
             last_sandbox_by_workspace: BTreeMap::from([(
@@ -1958,6 +1987,8 @@ mod tests {
             token_ref: Some("ref-sandbox".into()),
             host: Some(" deploy@box ".into()),
             container: Some(" rhema-dev ".into()),
+            instance: Some(" dev-vm ".into()),
+            vm: Some(true),
         });
         assert_eq!(profile.sandbox_kind().as_deref(), Some("ssh"));
         assert_eq!(profile.sandbox_url().as_deref(), Some("http://box:7331"));

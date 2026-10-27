@@ -39,6 +39,7 @@ rhema-acp = { path = "../rhema-acp", version = "0.1.0" }
 rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = [
     "spawn",
 ] }
+rhema-sandbox-lxd = { path = "../rhema-sandbox-lxd", version = "0.1.0" }
 rhema-sandbox-docker = { path = "../rhema-sandbox-docker", version = "0.1.0" }
 rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.1.0" }
 rhema-sandbox-ssh = { path = "../rhema-sandbox-ssh", version = "0.1.0" }

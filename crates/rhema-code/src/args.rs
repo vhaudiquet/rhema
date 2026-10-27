@@ -85,6 +85,9 @@ pub enum SandboxChoice {
     Local,
     /// A bind-mounted container, driven through the `docker` CLI.
     Docker,
+    /// An LXD instance — container or `--vm`, one driver and a launch
+    /// flag — driven through the `lxc` CLI.
+    Lxd,
     /// A remote box over ssh, nothing installed on the far end.
     Ssh,
     /// A daemon speaking the sandbox protocol over HTTPS
@@ -100,6 +103,7 @@ impl SandboxChoice {
         match value {
             Some("local") => Some(Self::Local),
             Some("docker") => Some(Self::Docker),
+            Some("lxd") => Some(Self::Lxd),
             Some("ssh") => Some(Self::Ssh),
             Some("http") => Some(Self::Http),
             _ => None,
@@ -112,6 +116,7 @@ impl SandboxChoice {
         match self {
             Self::Local => "local",
             Self::Docker => "docker",
+            Self::Lxd => "lxd",
             Self::Ssh => "ssh",
             Self::Http => "http",
         }
