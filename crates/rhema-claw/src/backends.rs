@@ -669,10 +669,10 @@ pub fn discover(
 /// The config file's model seeds llama's fallback, as discovery always
 /// has: it names the deployment's local model when it names one at all.
 fn seed_llama_model(backend: &mut Backend, config: &crate::config::ClawConfig) {
-    if backend.kind == "llama-cpp" {
-        if let Some(model) = &config.model {
-            backend.default_model = model.clone();
-        }
+    if backend.kind == "llama-cpp"
+        && let Some(model) = &config.model
+    {
+        backend.default_model = model.clone();
     }
 }
 

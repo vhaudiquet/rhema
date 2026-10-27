@@ -161,10 +161,10 @@ impl CopilotProvider {
     /// margin, else a fresh exchange that replaces it.
     async fn copilot_token(&self) -> Result<CopilotToken, ProviderError> {
         let mut cached = self.cached.lock().await;
-        if let Some(token) = cached.as_ref() {
-            if now_epoch() + EXPIRY_MARGIN < token.expires_at {
-                return Ok(token.clone());
-            }
+        if let Some(token) = cached.as_ref()
+            && now_epoch() + EXPIRY_MARGIN < token.expires_at
+        {
+            return Ok(token.clone());
         }
         let fresh = self.exchange().await?;
         *cached = Some(fresh.clone());

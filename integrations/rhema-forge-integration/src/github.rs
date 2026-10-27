@@ -400,10 +400,10 @@ fn review_event(
     }
     // A review without a submission time was never submitted.
     let timestamp = required(row.submitted_at.clone(), "review submitted_at")?;
-    if let Some(since) = since {
-        if timestamp < *since {
-            return Ok(None);
-        }
+    if let Some(since) = since
+        && timestamp < *since
+    {
+        return Ok(None);
     }
     let id = required(row.id, "review id")?;
     Ok(Some(ForgeEvent {

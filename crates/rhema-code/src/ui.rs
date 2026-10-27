@@ -2396,15 +2396,14 @@ fn subagent_line(app: &App, subagent: &rhema_subagents::JobStatus, theme: &Theme
         .model
         .as_deref()
         .and_then(|model| app.model_pricing(model))
+        && let Some(spent) = subagent.spent
     {
-        if let Some(spent) = subagent.spent {
-            let cost = pricing.cost(
-                u64::from(spent.input_tokens),
-                u64::from(spent.output_tokens),
-                u64::from(spent.cached_input_tokens),
-            );
-            spans.push(Span::raw(format!(" · {}", cost_text(cost))).fg(theme.text3));
-        }
+        let cost = pricing.cost(
+            u64::from(spent.input_tokens),
+            u64::from(spent.output_tokens),
+            u64::from(spent.cached_input_tokens),
+        );
+        spans.push(Span::raw(format!(" · {}", cost_text(cost))).fg(theme.text3));
     }
     spans.push(
         Span::raw(format!(
@@ -2685,15 +2684,15 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // A kind names the unit where the amount alone would read as
     // noise ("238/300"); a money amount needs no word beside it.
     let active = app.backend.as_ref().map(crate::app::Backend::config_name);
-    if let Some((provider, Some(allowance))) = &app.subscription {
-        if Some(*provider) == active {
-            let mut badge = format!("{} {}", app.icons.allowance, allowance.amount);
-            if !allowance.kind.is_empty() {
-                badge.push(' ');
-                badge.push_str(&allowance.kind);
-            }
-            parts.push(Span::raw(format!(" · {badge}")).fg(theme.text3));
+    if let Some((provider, Some(allowance))) = &app.subscription
+        && Some(*provider) == active
+    {
+        let mut badge = format!("{} {}", app.icons.allowance, allowance.amount);
+        if !allowance.kind.is_empty() {
+            badge.push(' ');
+            badge.push_str(&allowance.kind);
         }
+        parts.push(Span::raw(format!(" · {badge}")).fg(theme.text3));
     }
     if app.chat.scroll > 0 && app.error.is_none() {
         parts.push(Span::raw(" · viewing history").fg(theme.text3));

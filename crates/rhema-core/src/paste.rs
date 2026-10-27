@@ -81,13 +81,13 @@ pub fn embed(input: &str, attachments: &[String]) -> String {
     let mut embedded = String::with_capacity(input.len());
     let mut payloads = attachments.iter();
     for (index, piece) in input.split(MARK).enumerate() {
-        if index > 0 {
-            if let Some(payload) = payloads.next() {
-                let payload = normalize(payload);
-                embedded.push(MARK);
-                embedded.push_str(&payload);
-                embedded.push(MARK);
-            }
+        if index > 0
+            && let Some(payload) = payloads.next()
+        {
+            let payload = normalize(payload);
+            embedded.push(MARK);
+            embedded.push_str(&payload);
+            embedded.push(MARK);
         }
         embedded.push_str(piece);
     }

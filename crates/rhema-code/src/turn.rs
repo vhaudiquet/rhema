@@ -186,10 +186,10 @@ pub fn spawn_turn(
                 // call without its result) in the file — the next turn's
                 // revive closes exactly that, so it is a resume input now,
                 // not a half-finished write.
-                if result.is_ok() {
-                    if let Some(path) = &save {
-                        let _ = agent.save_session_to(path);
-                    }
+                if result.is_ok()
+                    && let Some(path) = &save
+                {
+                    let _ = agent.save_session_to(path);
                 }
                 let _ = events.send(UiEvent::TurnFinished {
                     agent: Box::new(agent),

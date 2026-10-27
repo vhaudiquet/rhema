@@ -632,10 +632,10 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         Ok(output) => {
             // Checkpoint after the completed turn: the file's freshest
             // complete state, the same shape the TUI leaves.
-            if let Some(path) = &save {
-                if let Err(err) = agent.save_session_to(path) {
-                    eprintln!("warning: the session was not checkpointed: {err}");
-                }
+            if let Some(path) = &save
+                && let Err(err) = agent.save_session_to(path)
+            {
+                eprintln!("warning: the session was not checkpointed: {err}");
             }
             eprintln!(
                 "· {} · ctx {}",
@@ -751,10 +751,10 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // discovers them — the wizard's skills step and the agent's prompt
     // both read the same folders. Best effort: a read-only config
     // directory only means fewer skills.
-    if let Ok(dir) = Config::skills_dir() {
-        if let Err(err) = crate::bundled::seed(&dir, &config.skills_disabled) {
-            eprintln!("warning: the bundled skills were not seeded: {err}");
-        }
+    if let Ok(dir) = Config::skills_dir()
+        && let Err(err) = crate::bundled::seed(&dir, &config.skills_disabled)
+    {
+        eprintln!("warning: the bundled skills were not seeded: {err}");
     }
     // The session's keychain: startup resolution reads it, and the app
     // places fresh logins in it and cleans up after removals.

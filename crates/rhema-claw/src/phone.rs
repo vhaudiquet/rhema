@@ -462,13 +462,13 @@ pub async fn wait_for_command_result(
 ) -> CommandOutcome {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        if let Ok(Some(command)) = store.command_by_id(id) {
-            if let Some(ok) = command.result_ok {
-                return CommandOutcome::Confirmed {
-                    ok,
-                    detail: command.result_detail,
-                };
-            }
+        if let Ok(Some(command)) = store.command_by_id(id)
+            && let Some(ok) = command.result_ok
+        {
+            return CommandOutcome::Confirmed {
+                ok,
+                detail: command.result_detail,
+            };
         }
         let waiter = bridge.waiter(id);
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

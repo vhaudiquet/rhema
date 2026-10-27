@@ -220,15 +220,15 @@ impl Registry {
 
     /// The job's task took a slot: the inner turn starts working.
     pub(crate) fn mark_running(&self, id: &str, model: Option<String>) {
-        if let Some(job) = self.lock().jobs.get_mut(id) {
-            if matches!(job.state, State::Queued) {
-                job.state = State::Running {
-                    phase: "thinking".to_owned(),
-                    context: None,
-                    spent: None,
-                    model,
-                };
-            }
+        if let Some(job) = self.lock().jobs.get_mut(id)
+            && matches!(job.state, State::Queued)
+        {
+            job.state = State::Running {
+                phase: "thinking".to_owned(),
+                context: None,
+                spent: None,
+                model,
+            };
         }
     }
 
@@ -237,20 +237,19 @@ impl Registry {
     /// keeps its last state.
     pub(crate) fn report(&self, id: &str, status: &rhema_core::ToolStatus) {
         let mut inner = self.lock();
-        if let Some(job) = inner.jobs.get_mut(id) {
-            if let State::Running {
+        if let Some(job) = inner.jobs.get_mut(id)
+            && let State::Running {
                 phase,
                 context,
                 spent,
                 model,
             } = &mut job.state
-            {
-                *phase = status.phase.clone();
-                *context = status.context;
-                *spent = status.spent;
-                if status.model.is_some() {
-                    *model = status.model.clone();
-                }
+        {
+            *phase = status.phase.clone();
+            *context = status.context;
+            *spent = status.spent;
+            if status.model.is_some() {
+                *model = status.model.clone();
             }
         }
     }
@@ -305,10 +304,10 @@ impl Registry {
         };
         // The fetch retires the job: its UI line leaves, its
         // announcements stop. A Busy fetch retires nothing.
-        if !matches!(fetched_state, Fetched::Busy { .. }) {
-            if let State::Finished { fetched, .. } = &mut job.state {
-                *fetched = true;
-            }
+        if !matches!(fetched_state, Fetched::Busy { .. })
+            && let State::Finished { fetched, .. } = &mut job.state
+        {
+            *fetched = true;
         }
         fetched_state
     }
@@ -367,10 +366,10 @@ impl Registry {
             .collect();
         taken.sort_by_key(|(seq, _, _)| *seq);
         for (_, id, _) in &taken {
-            if let Some(job) = inner.jobs.get_mut(id) {
-                if let State::Finished { announced, .. } = &mut job.state {
-                    *announced = true;
-                }
+            if let Some(job) = inner.jobs.get_mut(id)
+                && let State::Finished { announced, .. } = &mut job.state
+            {
+                *announced = true;
             }
         }
         taken.into_iter().map(|(_, _, line)| line).collect()

@@ -142,12 +142,12 @@ impl IdentityStore {
         ];
         for (field, value, cap) in fields {
             let cleaned = value.as_deref().map(str::trim).filter(|v| !v.is_empty());
-            if let Some(value) = cleaned {
-                if value.chars().count() > cap {
-                    return Err(IdentityError::Backend(format!(
-                        "{field} is over {cap} characters"
-                    )));
-                }
+            if let Some(value) = cleaned
+                && value.chars().count() > cap
+            {
+                return Err(IdentityError::Backend(format!(
+                    "{field} is over {cap} characters"
+                )));
             }
             self.settings
                 .set(

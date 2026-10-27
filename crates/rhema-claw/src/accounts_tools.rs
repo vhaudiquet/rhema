@@ -132,16 +132,14 @@ pub fn save_account(
         forge_known: forge.is_some(),
         watch_added: false,
     };
-    if watch {
-        if let Some(kind) = forge {
-            let host = saved.account.url.as_deref().filter(|url| !url.is_empty());
-            saved.watch_added = watches
-                .add_account_watch(kind.name(), host, &saved.account.id)
-                .map_err(|err| err.to_string())?;
-        }
-        // Asked to watch a service the daemon cannot watch: the save
-        // stands, the watch verdict says why not.
+    if watch && let Some(kind) = forge {
+        let host = saved.account.url.as_deref().filter(|url| !url.is_empty());
+        saved.watch_added = watches
+            .add_account_watch(kind.name(), host, &saved.account.id)
+            .map_err(|err| err.to_string())?;
     }
+    // Asked to watch a service the daemon cannot watch: the save
+    // stands, the watch verdict says why not.
     Ok(saved)
 }
 

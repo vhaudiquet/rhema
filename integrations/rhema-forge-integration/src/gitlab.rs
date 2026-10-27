@@ -382,10 +382,10 @@ fn note_event(
         return Ok(None);
     }
     let timestamp = required(row.created_at.clone(), "note created_at")?;
-    if let Some(since) = since {
-        if timestamp < *since {
-            return Ok(None);
-        }
+    if let Some(since) = since
+        && timestamp < *since
+    {
+        return Ok(None);
     }
     let id = required(row.id, "note id")?;
     Ok(Some(ForgeEvent {

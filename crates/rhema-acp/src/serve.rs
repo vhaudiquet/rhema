@@ -447,10 +447,10 @@ impl App {
     /// Fires the cancel flag of the session's running turn. No turn, no
     /// effect: cancellation is idempotent by protocol.
     fn cancel(&self, id: &str) {
-        if let Some(slot) = self.lock().get(id) {
-            if let Some(cancel) = &slot.cancel {
-                let _ = cancel.send(true);
-            }
+        if let Some(slot) = self.lock().get(id)
+            && let Some(cancel) = &slot.cancel
+        {
+            let _ = cancel.send(true);
         }
     }
 
@@ -691,10 +691,10 @@ impl App {
     /// leave the title alone.
     fn remember_title(&self, id: &str, prompt: &str) {
         let mut sessions = self.lock();
-        if let Some(slot) = sessions.get_mut(id) {
-            if !slot.titled {
-                slot.title = title_of(prompt);
-            }
+        if let Some(slot) = sessions.get_mut(id)
+            && !slot.titled
+        {
+            slot.title = title_of(prompt);
         }
     }
 
@@ -953,27 +953,27 @@ async fn serve_connection(
                     // that ride along. Any other slash spelling —
                     // a path, an unknown command — is model input
                     // like any other text.
-                    if let Some((name, args)) = slash_command(&prompt) {
-                        if let Some(answer) = app.command(&session_id.0, &name, &args)? {
-                            app.remember_title(&session_id.0, &prompt);
+                    if let Some((name, args)) = slash_command(&prompt)
+                        && let Some(answer) = app.command(&session_id.0, &name, &args)?
+                    {
+                        app.remember_title(&session_id.0, &prompt);
+                        let _ = cx.send_notification(SessionNotification::new(
+                            session_id.clone(),
+                            SessionUpdate::AgentMessageChunk(ContentChunk::new(
+                                ContentBlock::Text(TextContent::new(answer.message)),
+                            )),
+                        ));
+                        if !answer.selects.is_empty() {
                             let _ = cx.send_notification(SessionNotification::new(
                                 session_id.clone(),
-                                SessionUpdate::AgentMessageChunk(ContentChunk::new(
-                                    ContentBlock::Text(TextContent::new(answer.message)),
+                                SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(
+                                    answer.selects,
                                 )),
                             ));
-                            if !answer.selects.is_empty() {
-                                let _ = cx.send_notification(SessionNotification::new(
-                                    session_id.clone(),
-                                    SessionUpdate::ConfigOptionUpdate(ConfigOptionUpdate::new(
-                                        answer.selects,
-                                    )),
-                                ));
-                            }
-                            app.note_activity(&session_id.0, &cx);
-                            let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
-                            return Ok(());
                         }
+                        app.note_activity(&session_id.0, &cx);
+                        let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
+                        return Ok(());
                     }
                     let Some((mut agent, memory)) = app.take_agent(&session_id.0) else {
                         return Err(Error::invalid_request()

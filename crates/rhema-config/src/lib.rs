@@ -331,10 +331,10 @@ impl Profile {
     /// profile's active instance is of that provider, else the first
     /// stored instance of it, else `None`.
     pub fn instance_for_provider(&self, provider: &str) -> Option<(&str, &ProviderInstance)> {
-        if self.provider.as_deref() == Some(provider) {
-            if let Some((name, instance)) = self.active_instance() {
-                return Some((name, instance));
-            }
+        if self.provider.as_deref() == Some(provider)
+            && let Some((name, instance)) = self.active_instance()
+        {
+            return Some((name, instance));
         }
         self.instances
             .iter()
@@ -347,12 +347,11 @@ impl Profile {
     /// `None`.
     pub fn active_instance(&self) -> Option<(&str, &ProviderInstance)> {
         let provider = self.provider.as_deref()?;
-        if let Some(name) = self.instance.as_deref() {
-            if let Some(instance) = self.instances.get(name) {
-                if instance.provider == provider {
-                    return Some((name, instance));
-                }
-            }
+        if let Some(name) = self.instance.as_deref()
+            && let Some(instance) = self.instances.get(name)
+            && instance.provider == provider
+        {
+            return Some((name, instance));
         }
         self.instances
             .iter()
@@ -384,12 +383,11 @@ impl Profile {
     /// the caller's fallback, the single-instance form this map grew
     /// out of.
     pub fn sandbox_instance_for(&self, kind: &str) -> Option<(&str, &SandboxInstance)> {
-        if let Some(name) = self.sandbox.as_ref().and_then(|s| s.active.as_deref()) {
-            if let Some(instance) = self.sandbox_instances.get(name) {
-                if instance.kind == kind {
-                    return Some((name, instance));
-                }
-            }
+        if let Some(name) = self.sandbox.as_ref().and_then(|s| s.active.as_deref())
+            && let Some(instance) = self.sandbox_instances.get(name)
+            && instance.kind == kind
+        {
+            return Some((name, instance));
         }
         self.sandbox_instances
             .iter()
@@ -409,12 +407,11 @@ impl Profile {
     /// the removed record, `None` for a name that was not there.
     pub fn remove_sandbox_instance(&mut self, name: &str) -> Option<SandboxInstance> {
         let removed = self.sandbox_instances.remove(name);
-        if removed.is_some() {
-            if let Some(sandbox) = self.sandbox.as_mut() {
-                if sandbox.active.as_deref() == Some(name) {
-                    sandbox.active = None;
-                }
-            }
+        if removed.is_some()
+            && let Some(sandbox) = self.sandbox.as_mut()
+            && sandbox.active.as_deref() == Some(name)
+        {
+            sandbox.active = None;
         }
         removed
     }
@@ -441,12 +438,12 @@ impl Profile {
         instance: &ProviderInstance,
         secrets: Option<&dyn SecretStore>,
     ) -> Option<String> {
-        if let (Some(store), Some(id)) = (secrets, instance.secret_ref.as_deref()) {
-            if let Ok(Some(key)) = store.get(id) {
-                let trimmed = key.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_owned());
-                }
+        if let (Some(store), Some(id)) = (secrets, instance.secret_ref.as_deref())
+            && let Ok(Some(key)) = store.get(id)
+        {
+            let trimmed = key.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
             }
         }
         instance
@@ -583,12 +580,12 @@ impl Profile {
     /// [`Profile::sandbox_token`].
     pub fn stored_sandbox_token(&self, secrets: Option<&dyn SecretStore>) -> Option<String> {
         let sandbox = self.sandbox.as_ref()?;
-        if let (Some(store), Some(id)) = (secrets, sandbox.token_ref.as_deref()) {
-            if let Ok(Some(token)) = store.get(id) {
-                let trimmed = token.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_owned());
-                }
+        if let (Some(store), Some(id)) = (secrets, sandbox.token_ref.as_deref())
+            && let Ok(Some(token)) = store.get(id)
+        {
+            let trimmed = token.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_owned());
             }
         }
         sandbox

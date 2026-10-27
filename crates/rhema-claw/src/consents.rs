@@ -349,14 +349,14 @@ pub async fn wait_for_resolution(
 ) -> WaitOutcome {
     let deadline = tokio::time::Instant::now() + budget;
     loop {
-        if let Ok(Some(consent)) = store.get(id) {
-            if let Some(granted) = consent.granted {
-                return if granted {
-                    WaitOutcome::Granted(consent.account_id)
-                } else {
-                    WaitOutcome::Denied
-                };
-            }
+        if let Ok(Some(consent)) = store.get(id)
+            && let Some(granted) = consent.granted
+        {
+            return if granted {
+                WaitOutcome::Granted(consent.account_id)
+            } else {
+                WaitOutcome::Denied
+            };
         }
         let waiter = bridge.waiter(id);
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

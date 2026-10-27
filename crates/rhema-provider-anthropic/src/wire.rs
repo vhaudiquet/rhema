@@ -636,20 +636,19 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
                             // re-deriving it. The API rejects thinking
                             // blocks on plain turns, so the replay rides
                             // only when a budget is set.
-                            if thinking.is_some() {
-                                if let Some((text, signature)) = call
+                            if thinking.is_some()
+                                && let Some((text, signature)) = call
                                     .provider_data
                                     .get("thinking")
                                     .and_then(Value::as_str)
                                     .zip(
                                         call.provider_data.get("signature").and_then(Value::as_str),
                                     )
-                                {
-                                    blocks.push(WireBlock::Thinking {
-                                        thinking: text.to_owned(),
-                                        signature: signature.to_owned(),
-                                    });
-                                }
+                            {
+                                blocks.push(WireBlock::Thinking {
+                                    thinking: text.to_owned(),
+                                    signature: signature.to_owned(),
+                                });
                             }
                             blocks.push(WireBlock::ToolUse {
                                 id: call.id.clone(),
@@ -720,15 +719,15 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
         .enumerate()
         .filter(|(_, message)| message.role == "user")
         .map(|(index, _)| index);
-    if let Some(previous) = user_turns.rev().nth(1) {
-        if let Some(block) = messages[previous].content.last_mut() {
-            block.mark_ephemeral();
-        }
+    if let Some(previous) = user_turns.rev().nth(1)
+        && let Some(block) = messages[previous].content.last_mut()
+    {
+        block.mark_ephemeral();
     }
-    if let Some(last_message) = messages.last_mut() {
-        if let Some(last_block) = last_message.content.last_mut() {
-            last_block.mark_ephemeral();
-        }
+    if let Some(last_message) = messages.last_mut()
+        && let Some(last_block) = last_message.content.last_mut()
+    {
+        last_block.mark_ephemeral();
     }
 
     let tools = (!req.tools.is_empty()).then(|| {

@@ -1518,10 +1518,8 @@ impl App {
         }
         // A bundled skill switched back on must exist on disk again —
         // seeding skips disabled names, so its folder may be gone.
-        if turning_on {
-            if let Some(root) = self.config_root.clone() {
-                let _ = crate::bundled::seed_one(&root.join("skills"), name);
-            }
+        if turning_on && let Some(root) = self.config_root.clone() {
+            let _ = crate::bundled::seed_one(&root.join("skills"), name);
         }
         if let Err(err) = self.store.save(&self.config) {
             self.error = Some(format!("cannot save config: {err}"));
@@ -1548,17 +1546,17 @@ impl App {
         }
         // The prompt change rides the next agent build; mid-turn the
         // rebuild would race the running one, so it waits.
-        if !self.turn.running {
-            if let Some(agent) = self.agent.take() {
-                let stats = agent.transcript_stats();
-                let session = agent.session().clone();
-                if let Ok((mut rebuilt, subagents)) = self.build_agent(session) {
-                    if let Some(stats) = stats {
-                        rebuilt.carry_transcript_stats(&stats);
-                    }
-                    self.agent = Some(rebuilt);
-                    self.subagents = Some(subagents);
+        if !self.turn.running
+            && let Some(agent) = self.agent.take()
+        {
+            let stats = agent.transcript_stats();
+            let session = agent.session().clone();
+            if let Ok((mut rebuilt, subagents)) = self.build_agent(session) {
+                if let Some(stats) = stats {
+                    rebuilt.carry_transcript_stats(&stats);
                 }
+                self.agent = Some(rebuilt);
+                self.subagents = Some(subagents);
             }
         }
     }
@@ -2205,13 +2203,13 @@ impl App {
                 .iter()
                 .find(|(area, _)| area.contains(ratatui::layout::Position::new(x, y)))
                 .map(|(_, hit)| *hit);
-            if let Some(OnboardingHit::RailStep(step)) = hit {
-                if let Screen::Onboarding(wizard) = &mut self.screen {
-                    // The dialog is modal, like the settings': clicks
-                    // behind it do nothing.
-                    if wizard.dialog.is_none() {
-                        wizard.go(step);
-                    }
+            if let Some(OnboardingHit::RailStep(step)) = hit
+                && let Screen::Onboarding(wizard) = &mut self.screen
+            {
+                // The dialog is modal, like the settings': clicks
+                // behind it do nothing.
+                if wizard.dialog.is_none() {
+                    wizard.go(step);
                 }
             }
             return Vec::new();
@@ -2825,16 +2823,16 @@ impl App {
                 entry.provider != old.provider || entry.instance.as_deref() != Some(name.as_str())
             });
         }
-        if let Some(id) = removed.and_then(|old| old.secret_ref) {
-            if let Some(store) = self.secret_store() {
-                // The login leaves the config either way; a keychain
-                // that refuses the delete leaves the secret behind, and
-                // that must not pass silently.
-                if let Err(err) = store.delete(&id) {
-                    self.error = Some(format!(
-                        "the login is removed, but its keychain entry could not be deleted: {err}"
-                    ));
-                }
+        if let Some(id) = removed.and_then(|old| old.secret_ref)
+            && let Some(store) = self.secret_store()
+        {
+            // The login leaves the config either way; a keychain
+            // that refuses the delete leaves the secret behind, and
+            // that must not pass silently.
+            if let Err(err) = store.delete(&id) {
+                self.error = Some(format!(
+                    "the login is removed, but its keychain entry could not be deleted: {err}"
+                ));
             }
         }
         if let Err(err) = self.store.save(&self.config) {
@@ -3090,14 +3088,12 @@ impl App {
             // keychain entry must not linger — but a store that refuses
             // the delete must not pass silently either, or the secret
             // outlives the login that named it.
-            if let Some(old) = settings.instances.get(instance) {
-                if let Some(id) = old.secret_ref.as_deref() {
-                    if let Some(store) = secrets {
-                        if let Err(err) = store.delete(id) {
-                            keychain_delete_failure = Some(err.to_string());
-                        }
-                    }
-                }
+            if let Some(old) = settings.instances.get(instance)
+                && let Some(id) = old.secret_ref.as_deref()
+                && let Some(store) = secrets
+                && let Err(err) = store.delete(id)
+            {
+                keychain_delete_failure = Some(err.to_string());
             }
             settings.provider = Some(provider.to_owned());
             settings.instance = Some(instance.to_owned());

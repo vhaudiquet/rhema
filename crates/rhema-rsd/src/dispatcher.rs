@@ -423,10 +423,10 @@ impl Dispatcher {
     pub fn list_active(&self) -> Result<Vec<KeyStatus>, DispatchError> {
         let mut active = Vec::new();
         for key in self.store.keys()? {
-            if let Some(record) = self.store.load(&key)? {
-                if record.state == KeyState::Leased {
-                    active.push(KeyStatus::from_record(&record));
-                }
+            if let Some(record) = self.store.load(&key)?
+                && record.state == KeyState::Leased
+            {
+                active.push(KeyStatus::from_record(&record));
             }
         }
         Ok(active)
@@ -446,10 +446,11 @@ impl Dispatcher {
     fn leased_count(&self, source: Option<&str>) -> Result<usize, StoreError> {
         let mut leased = 0;
         for key in self.store.keys()? {
-            if let Some(record) = self.store.load(&key)? {
-                if record.state == KeyState::Leased && source.is_none_or(|s| record.source == s) {
-                    leased += 1;
-                }
+            if let Some(record) = self.store.load(&key)?
+                && record.state == KeyState::Leased
+                && source.is_none_or(|s| record.source == s)
+            {
+                leased += 1;
             }
         }
         Ok(leased)

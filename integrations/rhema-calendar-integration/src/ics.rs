@@ -234,18 +234,18 @@ fn vevent_blocks(raw: &str) -> Vec<Vec<ContentLine>> {
             }
             "END" => {
                 let component = line.value.trim().to_ascii_uppercase();
-                if component == "VEVENT" {
-                    if let Some(block) = current.take() {
-                        blocks.push(block);
-                    }
+                if component == "VEVENT"
+                    && let Some(block) = current.take()
+                {
+                    blocks.push(block);
                 }
                 stack.pop();
             }
             _ => {
-                if stack.last().map(String::as_str) == Some("VEVENT") {
-                    if let Some(block) = current.as_mut() {
-                        block.push(line);
-                    }
+                if stack.last().map(String::as_str) == Some("VEVENT")
+                    && let Some(block) = current.as_mut()
+                {
+                    block.push(line);
                 }
             }
         }
@@ -755,10 +755,10 @@ fn expand_rule(
         if walked > MAX_CANDIDATES {
             return false;
         }
-        if let Some(until) = rule.until {
-            if start > until {
-                return false;
-            }
+        if let Some(until) = rule.until
+            && start > until
+        {
+            return false;
         }
         if start > window.to {
             return false;

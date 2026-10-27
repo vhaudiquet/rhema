@@ -320,20 +320,20 @@ impl ClawConfig {
         // The agent token's safety is that it is scoped; making it the
         // human token silently unscopes everything the model's shell
         // holds. Boot refuses the configuration instead.
-        if let (Some(token), Some(agent_token)) = (&self.token, &self.agent_token) {
-            if !token.is_empty() && token == agent_token {
-                return Err(ConfigError::SameAgentToken);
-            }
+        if let (Some(token), Some(agent_token)) = (&self.token, &self.agent_token)
+            && !token.is_empty()
+            && token == agent_token
+        {
+            return Err(ConfigError::SameAgentToken);
         }
         // The ingest credential's safety is that it is write-only and
         // one route deep; a value shared with a wider class silently
         // widens it, so boot refuses the collision with either token.
-        if let Some(ingest_token) = self.ingest_token.as_deref().filter(|t| !t.is_empty()) {
-            if Some(ingest_token) == self.token.as_deref()
-                || Some(ingest_token) == self.agent_token.as_deref()
-            {
-                return Err(ConfigError::IngestTokenCollision);
-            }
+        if let Some(ingest_token) = self.ingest_token.as_deref().filter(|t| !t.is_empty())
+            && (Some(ingest_token) == self.token.as_deref()
+                || Some(ingest_token) == self.agent_token.as_deref())
+        {
+            return Err(ConfigError::IngestTokenCollision);
         }
         Ok(())
     }

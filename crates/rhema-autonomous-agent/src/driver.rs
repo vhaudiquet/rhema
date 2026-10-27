@@ -147,10 +147,10 @@ impl Driver {
         let keys = self.dispatcher.admit()?;
         let mut set = JoinSet::new();
         for key in keys {
-            if let Some(owns) = &self.owns {
-                if !owns(&key) {
-                    continue;
-                }
+            if let Some(owns) = &self.owns
+                && !owns(&key)
+            {
+                continue;
             }
             let driver = Driver {
                 dispatcher: self.dispatcher.clone(),

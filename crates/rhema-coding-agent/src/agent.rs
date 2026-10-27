@@ -308,10 +308,9 @@ impl CodingAgent {
             .driver_state
             .get(ENVIRONMENT_STATE_KEY)
             .and_then(|value| value.as_str())
+            && config.environment.is_some()
         {
-            if config.environment.is_some() {
-                config.environment = Some(stamped.to_owned());
-            }
+            config.environment = Some(stamped.to_owned());
         }
         let mut agent = Self::new(provider, config)?;
         agent.session = session;

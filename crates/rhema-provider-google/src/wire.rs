@@ -313,10 +313,10 @@ pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, Provid
     }
 
     let mut system_texts: Vec<String> = Vec::new();
-    if let Some(system) = req.system.as_deref() {
-        if !system.trim().is_empty() {
-            system_texts.push(system.to_owned());
-        }
+    if let Some(system) = req.system.as_deref()
+        && !system.trim().is_empty()
+    {
+        system_texts.push(system.to_owned());
     }
     let mut contents: Vec<WireContent> = Vec::new();
     let mut call_names: HashMap<String, String> = HashMap::new();

@@ -398,10 +398,10 @@ fn review_event(
         Some(timestamp) => timestamp,
         None => return Ok(None),
     };
-    if let Some(since) = since {
-        if timestamp < *since {
-            return Ok(None);
-        }
+    if let Some(since) = since
+        && timestamp < *since
+    {
+        return Ok(None);
     }
     let id = required(row.id, "review id")?;
     Ok(Some(ForgeEvent {
@@ -577,10 +577,10 @@ impl Forge for GiteaForge {
         ];
         for row in self.paged::<WirePull>(&pulls_path, &query).await? {
             let updated = required(row.updated_at.clone(), "pull updated_at")?;
-            if let Some(since) = since {
-                if updated < *since {
-                    continue;
-                }
+            if let Some(since) = since
+                && updated < *since
+            {
+                continue;
             }
             let number = required(row.number, "pull number")?;
             if let Some(event) = pull_event(&row, repo)? {

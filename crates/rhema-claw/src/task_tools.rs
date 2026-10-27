@@ -149,13 +149,13 @@ impl ToolOp for ScheduleTask {
             .as_deref()
             .map(str::trim)
             .filter(|session| !session.is_empty());
-        if let Some(session) = deliver_to {
-            if !is_resident_key(session) {
-                return Err(format!(
-                    "session must be a resident key (interactive:, task:, or phone:), got {session:?}"
-                )
-                .into());
-            }
+        if let Some(session) = deliver_to
+            && !is_resident_key(session)
+        {
+            return Err(format!(
+                "session must be a resident key (interactive:, task:, or phone:), got {session:?}"
+            )
+            .into());
         }
         let record = match (args.at, args.every_secs) {
             (Some(at), None) => {

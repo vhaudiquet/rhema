@@ -142,17 +142,16 @@ impl Transcript {
                 }
                 Role::Tool => {
                     for content in &message.content {
-                        if let Content::ToolResult(result) = content {
-                            if let Some(Line::ToolCall { ok, code, .. }) =
+                        if let Content::ToolResult(result) = content
+                            && let Some(Line::ToolCall { ok, code, .. }) =
                                 transcript.lines.iter_mut().rev().find(|line| {
                                     matches!(line, Line::ToolCall {
                                         id: line_id, ok: None, ..
                                     } if *line_id == result.id)
                                 })
-                            {
-                                *ok = Some(!result.is_error);
-                                *code = result.code;
-                            }
+                        {
+                            *ok = Some(!result.is_error);
+                            *code = result.code;
                         }
                     }
                 }
@@ -254,11 +253,11 @@ impl Transcript {
                         } if *line_id == *id)
                     })
                 };
-                if let Some(index) = target {
-                    if let Some(Line::ToolCall { args, .. }) = self.lines.get_mut(index) {
-                        args.push_str(delta);
-                        self.mutated(index);
-                    }
+                if let Some(index) = target
+                    && let Some(Line::ToolCall { args, .. }) = self.lines.get_mut(index)
+                {
+                    args.push_str(delta);
+                    self.mutated(index);
                 }
             }
             OwnedEvent::ToolResult {
@@ -287,17 +286,16 @@ impl Transcript {
                         .iter()
                         .rposition(|line| matches!(line, Line::ToolCall { ok: None, .. }))
                 };
-                if let Some(index) = target {
-                    if let Some(Line::ToolCall {
+                if let Some(index) = target
+                    && let Some(Line::ToolCall {
                         ok,
                         code: line_code,
                         ..
                     }) = self.lines.get_mut(index)
-                    {
-                        *ok = Some(!*is_error);
-                        *line_code = *code;
-                        self.mutated(index);
-                    }
+                {
+                    *ok = Some(!*is_error);
+                    *line_code = *code;
+                    self.mutated(index);
                 }
             }
             OwnedEvent::StepEnd { .. } => {}

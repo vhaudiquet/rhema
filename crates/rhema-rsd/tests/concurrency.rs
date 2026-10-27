@@ -47,22 +47,22 @@ async fn concurrent_tasks_acquire_distinct_keys_under_the_global_cap() {
             // a LeaseHeld/AtCapacity race just means retry on a later pass.
             for _ in 0..2_000 {
                 let due = dispatcher.admit().unwrap();
-                if due.contains(&key) {
-                    if let Ok((lease, mut session)) = dispatcher.acquire(key.clone(), "task") {
-                        let now_live = live.fetch_add(1, Ordering::SeqCst) + 1;
-                        max_live.fetch_max(now_live, Ordering::SeqCst);
-                        // The triggering event is still pending: drain it.
-                        assert_eq!(dispatcher.poll_inbox(&lease).unwrap().len(), 1);
-                        session
-                            .core
-                            .history
-                            .push(Message::text(Role::User, "one turn of work"));
-                        dispatcher.checkpoint(&lease, session).unwrap();
-                        dispatcher.renew(&lease).unwrap();
-                        live.fetch_sub(1, Ordering::SeqCst);
-                        dispatcher.release(&lease, Outcome::Handled).unwrap();
-                        return;
-                    }
+                if due.contains(&key)
+                    && let Ok((lease, mut session)) = dispatcher.acquire(key.clone(), "task")
+                {
+                    let now_live = live.fetch_add(1, Ordering::SeqCst) + 1;
+                    max_live.fetch_max(now_live, Ordering::SeqCst);
+                    // The triggering event is still pending: drain it.
+                    assert_eq!(dispatcher.poll_inbox(&lease).unwrap().len(), 1);
+                    session
+                        .core
+                        .history
+                        .push(Message::text(Role::User, "one turn of work"));
+                    dispatcher.checkpoint(&lease, session).unwrap();
+                    dispatcher.renew(&lease).unwrap();
+                    live.fetch_sub(1, Ordering::SeqCst);
+                    dispatcher.release(&lease, Outcome::Handled).unwrap();
+                    return;
                 }
                 tokio::task::yield_now().await;
             }

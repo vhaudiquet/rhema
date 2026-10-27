@@ -77,16 +77,16 @@ impl FsRoot {
         let mut resolved = self.root.clone();
         for name in names {
             resolved.push(name);
-            if let Ok(meta) = std::fs::symlink_metadata(&resolved) {
-                if meta.is_symlink() || meta.is_dir() {
-                    resolved = std::fs::canonicalize(&resolved).map_err(|err| {
-                        SandboxError::Failed(format!("sandbox path does not resolve: {err}"))
-                    })?;
-                    if !resolved.starts_with(&self.root) {
-                        return Err(SandboxError::Failed(
-                            "sandbox path leaves the workspace through a link".into(),
-                        ));
-                    }
+            if let Ok(meta) = std::fs::symlink_metadata(&resolved)
+                && (meta.is_symlink() || meta.is_dir())
+            {
+                resolved = std::fs::canonicalize(&resolved).map_err(|err| {
+                    SandboxError::Failed(format!("sandbox path does not resolve: {err}"))
+                })?;
+                if !resolved.starts_with(&self.root) {
+                    return Err(SandboxError::Failed(
+                        "sandbox path leaves the workspace through a link".into(),
+                    ));
                 }
             }
         }

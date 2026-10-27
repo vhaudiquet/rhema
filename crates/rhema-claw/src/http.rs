@@ -1433,17 +1433,17 @@ async fn ingest(State(state): State<ClawState>, Json(body): Json<IngestBody>) ->
     // `phone status` read cannot. A bare `phone:<device>` key is a
     // message on the device's resident key and dispatches like any
     // resident key's. A store failure is logged, never fatal.
-    if source == crate::phone::SOURCE {
-        if let Some((device, topic)) = crate::phone::phone_key_parts(key) {
-            if let Err(err) = state.phone.observe(device, topic, &body.payload) {
-                eprintln!("[claw] warning: phone state for {key} not stored: {err}");
-            }
-            return (
-                StatusCode::ACCEPTED,
-                Json(json!({ "ingested": "observed" })),
-            )
-                .into_response();
+    if source == crate::phone::SOURCE
+        && let Some((device, topic)) = crate::phone::phone_key_parts(key)
+    {
+        if let Err(err) = state.phone.observe(device, topic, &body.payload) {
+            eprintln!("[claw] warning: phone state for {key} not stored: {err}");
         }
+        return (
+            StatusCode::ACCEPTED,
+            Json(json!({ "ingested": "observed" })),
+        )
+            .into_response();
     }
     match state.ingest_external(source, key, body.payload) {
         Ok(result) => (
@@ -1761,13 +1761,13 @@ async fn providers_set_credentials(
     }
     let kind = match state.backends().get(id) {
         Some(existing) => {
-            if let Some(kind) = body["kind"].as_str() {
-                if kind != existing.kind {
-                    return Err(bad_request(format!(
-                        "provider {id:?} is a {} backend, not {kind:?}",
-                        existing.kind
-                    )));
-                }
+            if let Some(kind) = body["kind"].as_str()
+                && kind != existing.kind
+            {
+                return Err(bad_request(format!(
+                    "provider {id:?} is a {} backend, not {kind:?}",
+                    existing.kind
+                )));
             }
             existing.kind.clone()
         }

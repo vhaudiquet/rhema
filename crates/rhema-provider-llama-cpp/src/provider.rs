@@ -109,10 +109,10 @@ impl LlamaCppProvider {
                 .map(|model| model.id.clone())
                 .collect();
             for id in silent {
-                if let Some(n_ctx) = self.props(Some(&id)).await? {
-                    if let Some(model) = models.iter_mut().find(|model| model.id == id) {
-                        model.context_length = Some(n_ctx);
-                    }
+                if let Some(n_ctx) = self.props(Some(&id)).await?
+                    && let Some(model) = models.iter_mut().find(|model| model.id == id)
+                {
+                    model.context_length = Some(n_ctx);
                 }
             }
         }

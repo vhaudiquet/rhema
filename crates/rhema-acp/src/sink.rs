@@ -161,10 +161,10 @@ impl EventSink for AcpSink {
                 // naming a different call has no slot in the single
                 // pending update, the same discipline the result path's
                 // id check applies.
-                if let Some((pending_id, _, args)) = &mut self.pending {
-                    if *pending_id == id {
-                        args.push_str(delta);
-                    }
+                if let Some((pending_id, _, args)) = &mut self.pending
+                    && *pending_id == id
+                {
+                    args.push_str(delta);
                 }
             }
             // A running command's completed lines stream as in-progress
