@@ -1630,6 +1630,67 @@ async fn providers_are_listed_switched_and_persisted() {
     assert_eq!(daemon.backends().active().1, "mock-large");
 }
 
+/// The models route: the cards serialize as rhema-provider's
+/// `ModelCard`, so a model the adapter knows is vision-capable rides
+/// with `supports_vision: true` and an unknown one omits the key
+/// entirely — unknown stays absent, never `false`.
+#[tokio::test]
+async fn model_listings_carry_the_vision_flag_only_when_known() {
+    let card = |id: &str, vision: Option<bool>| rhema_provider::ModelCard {
+        id: id.to_owned(),
+        display_name: id.to_owned(),
+        description: String::new(),
+        input_token_limit: None,
+        output_token_limit: None,
+        supports_vision: vision,
+        generation_methods: vec!["generateContent".to_owned()],
+        pricing: None,
+    };
+    let cards = vec![
+        card("claude-sonnet-4-5", Some(true)),
+        card("some-foreign-model", None),
+    ];
+    let backend =
+        rhema_claw::Backend::headless("anthropic", Arc::new(MockProvider::new([reply("on it")])))
+            .with_listing(move || {
+                let cards = cards.clone();
+                Box::pin(async move { Ok(cards) })
+            });
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        Arc::new(
+            rhema_claw::BackendRegistry::new(vec![backend], None)
+                .expect("a single backend always constructs"),
+        ),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+
+    let listed: Value = reqwest::Client::new()
+        .get(format!("{base}/v1/providers/anthropic/models"))
+        .send()
+        .await
+        .expect("the listing reads")
+        .json()
+        .await
+        .expect("the listing parses");
+    let entries = listed["models"].as_array().expect("the models array");
+    assert_eq!(entries.len(), 2, "{listed}");
+    assert_eq!(entries[0]["id"], "claude-sonnet-4-5");
+    assert_eq!(
+        entries[0]["supports_vision"], true,
+        "a known-vision model says so: {listed}"
+    );
+    assert_eq!(entries[1]["id"], "some-foreign-model");
+    assert!(
+        entries[1].get("supports_vision").is_none(),
+        "unknown stays absent, not false: {:?}",
+        entries[1]
+    );
+}
+
 /// The credentials surface: a runtime login adds a backend, the list
 /// names where its credential came from, a re-add replaces it in place,
 /// and a removal drops it — refusing to remove the last backend, and

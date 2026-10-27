@@ -1864,8 +1864,12 @@ async fn providers_active(
 }
 
 /// `GET /v1/providers/{id}/models`: the instance's live listing,
-/// straight from the provider. An id without a listing (unknown, or the
-/// mock) is a 404.
+/// straight from the provider, the cards serialized as rhema-provider's
+/// `ModelCard` spells them. `supports_vision` rides when the adapter
+/// knows — `true` or `false` — and is absent when it does not: unknown
+/// stays absent, never `false`, and a client reads the key's absence as
+/// no verdict at all. An id without a listing (unknown, or the mock) is
+/// a 404.
 async fn providers_models(
     State(state): State<ClawState>,
     Path(id): Path<String>,

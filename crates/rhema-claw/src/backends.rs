@@ -115,6 +115,18 @@ impl Backend {
             list_models: None,
         }
     }
+
+    /// Attaches a live listing. [`construct`] builds the real ones off
+    /// the provider; this shape exists so the surface's model routes
+    /// can be exercised offline — a test mounts a listing over a
+    /// scripted card set.
+    pub fn with_listing(
+        mut self,
+        list_models: impl Fn() -> ModelListing + Send + Sync + 'static,
+    ) -> Self {
+        self.list_models = Some(Arc::new(list_models));
+        self
+    }
 }
 
 /// The currently active backend instance: id plus the model turns run on.
