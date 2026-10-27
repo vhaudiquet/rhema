@@ -7,8 +7,9 @@
 //! family mirrors the provider family: this crate is its base — the
 //! contract ([`Sandbox`]), the [`ShellSandbox`] adapter, the wire
 //! protocol ([`protocol`]), the seeding helper ([`seed_workspace`]),
-//! the scripted mock ([`mock`], the `mock` feature), and, behind the
-//! `spawn` feature, the process-spawning family's shared machinery
+//! the scripted mock ([`mock`], the `mock` feature), the instances'
+//! cross-process lock ([`shared`]), and, behind the `spawn` feature,
+//! the process-spawning family's shared machinery
 //! ([`exec_util`], [`fsroot`]). The backends are sibling crates: the
 //! process family — `rhema-sandbox-local`, the commands as host
 //! processes rooted at one host directory; `rhema-sandbox-docker`, the
@@ -41,6 +42,7 @@ pub mod fsroot;
 pub mod mock;
 pub mod protocol;
 pub mod seed;
+pub mod shared;
 
 pub use adapter::ShellSandbox;
 #[cfg(feature = "spawn")]
@@ -50,6 +52,7 @@ pub use protocol::{
     stream_reply,
 };
 pub use seed::seed_workspace;
+pub use shared::InstanceLock;
 
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
