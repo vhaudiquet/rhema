@@ -1233,7 +1233,7 @@ impl App {
         self.screen = Screen::Chat;
         match choice {
             SandboxChoice::Local => {
-                self.sandboxed = None;
+                self.replace_sandboxed(None);
                 self.rebuild_for_sandbox("bash runs on this host");
                 Vec::new()
             }
@@ -1246,6 +1246,17 @@ impl App {
                 vec![Effect::AssembleSandbox(non_local)]
             }
         }
+    }
+
+    /// Swaps the session's assembled sandbox, stopping the outgoing
+    /// one first: a switch to another instance — or back to local — is
+    /// an exit for the outgoing session's hold, and its stop-on-exit
+    /// answer belongs to this moment, not to the process's end.
+    fn replace_sandboxed(&mut self, assembled: Option<crate::sandbox::Sandboxed>) {
+        if let Some(outgoing) = self.sandboxed.as_mut() {
+            outgoing.shutdown();
+        }
+        self.sandboxed = assembled;
     }
 
     /// Rebuilds the running agent carrying the conversation over — the
@@ -1931,7 +1942,7 @@ impl App {
         self.screen = Screen::Chat;
         match choice {
             SandboxChoice::Local => {
-                self.sandboxed = None;
+                self.replace_sandboxed(None);
                 self.rebuild_for_sandbox("bash runs on this host");
                 Vec::new()
             }
@@ -2979,7 +2990,7 @@ impl App {
                 self.assembling = None;
                 match result {
                     Ok(assembled) => {
-                        self.sandboxed = Some(assembled);
+                        self.replace_sandboxed(Some(assembled));
                         self.rebuild_for_sandbox(&format!(
                             "bash runs on {} now",
                             choice.stored_name()
@@ -6786,6 +6797,8 @@ mod tests {
             tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/workspace")),
             workspace: "/workspace".to_owned(),
             skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
         });
         h.app.sandbox_offered = offered(true, true, false, false);
         let effects = h.app.choose_sandbox(SandboxChoice::Local);
@@ -6832,6 +6845,8 @@ mod tests {
             tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/host/ws")),
             workspace: "/host/ws".to_owned(),
             skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
         };
         let effects = h.app.on_event(crate::events::UiEvent::SandboxAssembled {
             choice: SandboxChoice::Docker,

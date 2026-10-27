@@ -113,7 +113,7 @@ The `bash` tool can run somewhere other than your host. The profile's `sandbox.k
 - `ssh`: commands run on a remote box named by `sandbox.host`, with nothing installed on the far end.
 - `http`: commands run behind a `rhema-sandboxd` daemon named by `sandbox.url`, with an optional token.
 
-The discovered skills and your `SYSTEM.md` are copied into the sandbox at startup; your keys, profiles, and session history stay on your host in every mode. On safety, plainly: `local` and the mount postures are process hygiene, not security boundaries.
+Your `SYSTEM.md` is copied into the sandbox at startup, and in the mount postures (`docker`, `lxd` containers) the discovered skills ride read-only mounts — the global skills directory alongside the workspace — so a skill you edit mid-session is the new text the next read sees; the seeded postures (`ssh`, `http`, `lxd` vms) copy the skills in instead. Your keys, profiles, and session history stay on your host in every mode. On safety, plainly: `local` and the mount postures are process hygiene, not security boundaries. When the last rhema session using a rhema-created sandbox instance exits, the instance is stopped; an instance you named yourself in the profile is never stopped out from under you.
 
 ### Program status (OSC 7501)
 

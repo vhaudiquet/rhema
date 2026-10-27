@@ -11,6 +11,12 @@
 //! spec, caps, and error shaping are unchanged wherever commands run.
 //! Everything else stays host-side: profiles, sessions, config reads,
 //! subagent definition discovery, the skills' discovery itself.
+//!
+//! A non-local choice is also a shared instance: the assembly runs
+//! under the instance's cross-process lock ([`InstanceLock`]) —
+//! exclusive for the launch, the devices, the provision, and the seed,
+//! shared for the session — and the last session out stops a
+//! rhema-derived instance, never one a stored target named.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -22,7 +28,7 @@ use rhema_agent_tools::{ShellTools, Skill};
 use rhema_coding_agent::CodingAgentConfig;
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
-use rhema_sandbox::{FsRoot, Sandbox, ShellSandbox, seed_workspace};
+use rhema_sandbox::{FsRoot, InstanceLock, Sandbox, ShellSandbox, seed_workspace};
 use rhema_sandbox_docker::DockerSandbox;
 use rhema_sandbox_http::HttpSandbox;
 use rhema_sandbox_lxd::LxdSandbox;
@@ -78,10 +84,32 @@ pub struct Sandboxed {
     /// over http, the workspace's own path for the mount and ssh
     /// postures.
     pub workspace: String,
-    /// The discovered skills, seeded into the sandbox; every
-    /// `Skill::path` resolves inside [`Self::workspace`], because the
-    /// model reads the bodies through the sandbox's shell.
+    /// The discovered skills; every `Skill::path` resolves inside the
+    /// sandbox's filesystem — [`Self::workspace`] itself for the seeded
+    /// postures, the workspace plus the read-only skills mount for the
+    /// mounted ones — because the model reads the bodies through the
+    /// sandbox's shell.
     pub skills: Vec<Skill>,
+    /// The shared instance's lock, held shared for the session: the
+    /// mounted choices (docker, lxd) only. Dropping it is the release.
+    pub(crate) instance_lock: Option<InstanceLock>,
+    /// The instance stop-on-exit may stop: a rhema-derived name only —
+    /// a stored target names an instance the user owns, never stopped.
+    pub(crate) managed: Option<ManagedInstance>,
+}
+
+/// The backend of a managed instance — the stop argv's program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ManagedKind {
+    Docker,
+    Lxd,
+}
+
+/// A rhema-derived instance this process may stop on the way out.
+#[derive(Debug)]
+pub(crate) struct ManagedInstance {
+    kind: ManagedKind,
+    name: String,
 }
 
 /// Builds the tool set a non-local choice runs the agent on: the
@@ -100,18 +128,37 @@ pub async fn assemble(
     base_system: Option<&str>,
 ) -> anyhow::Result<Sandboxed> {
     let host_workspace = workspace.to_string_lossy().into_owned();
+    // The shared instance's coordination, `Some` for the mounted
+    // choices: the lock is taken exclusive before any ensure — the
+    // mutation window no two assemblies may share — and carried out on
+    // `Sandboxed` for the session and the exit to use.
+    let mut instance_lock = None;
+    let mut managed = None;
+    // Whether the skills ride the mounts; the seeded postures copy them
+    // into the workspace instead.
+    let mut mounted_skills = false;
     let sandbox: Arc<dyn Sandbox> = match choice {
         // The caller skips this arm; the fast path constructs nothing.
         SandboxChoice::Local => anyhow::bail!("the local sandbox needs no assembly"),
         SandboxChoice::Docker => {
-            let container = sandbox_target(profile, "docker")
+            let stored = sandbox_target(profile, "docker");
+            let container = stored
+                .clone()
                 .unwrap_or_else(|| derived_container_name(workspace));
-            ensure_container(&container, &host_workspace)?;
+            let (uid, gid) = workspace_owner(workspace)?;
+            let skills = global_skills_dir();
+            let lock = InstanceLock::acquire("docker", &container)
+                .map_err(|err| anyhow::anyhow!("the docker sandbox lock: {err}"))?;
+            ensure_container(&container, &host_workspace, skills.as_deref())?;
+            instance_lock = Some(lock);
+            managed = stored.is_none().then(|| ManagedInstance {
+                kind: ManagedKind::Docker,
+                name: container.clone(),
+            });
+            mounted_skills = true;
             // The workspace IS the bind mount: the sandbox-side path is
             // the host path itself, and FsRoot's file routes are plain
             // fs on the host side of the mount.
-            let (uid, gid) = workspace_owner(workspace)?;
-            ensure_container(&container, &host_workspace)?;
             let root = FsRoot::new(workspace.to_path_buf())
                 .map_err(|err| anyhow::anyhow!("docker sandbox root: {err}"))?;
             Arc::new(
@@ -119,13 +166,24 @@ pub async fn assemble(
             )
         }
         SandboxChoice::Lxd => {
-            let instance =
-                sandbox_target(profile, "lxd").unwrap_or_else(|| derived_lxd_name(workspace));
+            let stored = sandbox_target(profile, "lxd");
+            let instance = stored
+                .clone()
+                .unwrap_or_else(|| derived_lxd_name(workspace));
             let vm = profile
                 .sandbox_instance_for("lxd")
                 .map(|(_, stored)| stored.vm.unwrap_or(false))
                 .unwrap_or_else(|| profile.sandbox_vm());
             let (uid, gid) = workspace_owner(workspace)?;
+            let skills = global_skills_dir();
+            let lock = InstanceLock::acquire("lxd", &instance)
+                .map_err(|err| anyhow::anyhow!("the lxd sandbox lock: {err}"))?;
+            instance_lock = Some(lock);
+            managed = stored.is_none().then(|| ManagedInstance {
+                kind: ManagedKind::Lxd,
+                name: instance.clone(),
+            });
+            mounted_skills = !vm;
             if vm {
                 // A virtual machine takes no disk-device mount of a
                 // host path: the attached posture, the workspace
@@ -143,7 +201,7 @@ pub async fn assemble(
                 // path is the host path itself and FsRoot's file
                 // routes are plain fs on the host side.
                 ensure_lxd_instance(&instance, false, uid, gid)?;
-                ensure_lxd_mount(&instance, &host_workspace)?;
+                ensure_lxd_mount(&instance, &host_workspace, skills.as_deref())?;
                 let root = FsRoot::new(workspace.to_path_buf())
                     .map_err(|err| anyhow::anyhow!("lxd sandbox root: {err}"))?;
                 Arc::new(
@@ -190,12 +248,19 @@ pub async fn assemble(
         // The mount and ssh postures see the workspace at its own path.
         _ => host_workspace,
     };
-    let (skills, owned_bodies) = discovered_skills(workspace, &workspace_string);
+    let (skills, owned_bodies) = discovered_skills(workspace, mounted_skills, &workspace_string);
     let bodies: Vec<(&str, &str)> = owned_bodies
         .iter()
         .map(|(name, body)| (name.as_str(), body.as_str()))
         .collect();
     ensure_seeded(&*sandbox, &workspace_string, &bodies, base_system).await?;
+    // The assembly is done — devices, provision, and seed all landed
+    // under the exclusive hold. Downgrade to the session's shared
+    // posture; the lock rides `Sandboxed` out to the exit path.
+    if let Some(lock) = instance_lock.as_ref() {
+        lock.share()
+            .map_err(|err| anyhow::anyhow!("the sandbox lock: {err}"))?;
+    }
     let tools = Arc::new(ShellTools::with_executor(
         workspace_string.clone(),
         Arc::new(ShellSandbox::new(sandbox)),
@@ -205,6 +270,8 @@ pub async fn assemble(
         tools,
         workspace: workspace_string,
         skills,
+        instance_lock,
+        managed,
     })
 }
 
@@ -225,6 +292,54 @@ impl Sandboxed {
     pub fn apply_workspace(&self, config: &mut CodingAgentConfig) {
         config.workspace = PathBuf::from(&self.workspace);
     }
+
+    /// Stop-on-exit: when the session ran on a rhema-derived instance
+    /// and this process is its lock's sole holder, stop it — no peer
+    /// session remains to lose the sandbox under. Everything else (a
+    /// stored target the user owns, a peer still holding the session
+    /// open, a choice with no instance) leaves the instance as it
+    /// stands; the lock's release is the drop. Best-effort by design:
+    /// a failed stop leaves the instance for the next assembly to find,
+    /// which the safe direction — up, never killed under a peer.
+    pub fn shutdown(&mut self) {
+        let Some(managed) = self.managed.take() else {
+            self.instance_lock = None;
+            return;
+        };
+        let Some(lock) = self.instance_lock.take() else {
+            return;
+        };
+        if !lock.is_sole() {
+            // A peer holds the session open: the instance is its
+            // problem now, and this process's hold releases on the drop.
+            return;
+        }
+        let program = match managed.kind {
+            ManagedKind::Docker => "docker",
+            ManagedKind::Lxd => "lxc",
+        };
+        let mut argv = vec!["stop".to_owned()];
+        if managed.kind == ManagedKind::Lxd {
+            // The bound on the clean-shutdown wait; past it LXD stops
+            // the instance the hard way, and this exit does not wait
+            // past that either.
+            argv.push("--timeout=30".to_owned());
+        }
+        argv.push(managed.name.clone());
+        let _ = std::process::Command::new(program)
+            .args(&argv)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// The user's global skills directory, when it exists on disk — the
+/// read-only `skills` mount's source. Absent, nothing is mounted and
+/// discovery sees workspace skills only, as it always has.
+fn global_skills_dir() -> Option<PathBuf> {
+    let dir = rhema_config::Config::skills_dir().ok()?;
+    dir.is_dir().then_some(dir)
 }
 
 /// The sandbox kinds this machine and this profile can run `bash`
@@ -407,11 +522,17 @@ async fn ensure_seeded(
 /// The same discovery the local path's prompt renders — the global
 /// config directory, then the workspace's `.rhema/skills`, project
 /// shadowing global — paired with each body read host-side now. The
-/// returned list names the seeded, sandbox-side paths; a body that
+/// seeded postures' returned list names the rewritten, sandbox-side
+/// paths and carries the bodies `seed_workspace` writes; a body that
 /// cannot be read here would be unreadable there too, so it drops from
-/// both.
+/// both. Mounted, the paths stand as discovered — the workspace's and
+/// the skills directory's 1:1 mounts put both trees at their own paths
+/// inside the instance — and no bodies come back: the mounts are the
+/// delivery, nothing is copied, and a skill edited mid-session is
+/// simply the new text the next read sees.
 fn discovered_skills(
     workspace: &Path,
+    mounted: bool,
     sandbox_workspace: &str,
 ) -> (Vec<Skill>, Vec<(String, String)>) {
     let global = rhema_config::Config::skills_dir().ok();
@@ -421,6 +542,10 @@ fn discovered_skills(
         let Ok(body) = std::fs::read_to_string(&skill.path) else {
             continue;
         };
+        if mounted {
+            skills.push(skill);
+            continue;
+        }
         skills.push(Skill {
             name: skill.name.clone(),
             description: skill.description,
@@ -538,33 +663,133 @@ fn docker_provision_argv(name: &str) -> Vec<String> {
 /// workspace at its own path, held open between runs. Posture, plainly:
 /// process hygiene, not a security boundary — the container's commands
 /// reach the same fs the local path would.
-fn ensure_container(name: &str, workspace: &str) -> anyhow::Result<()> {
-    if !container_running(name)? {
-        let argv = [
-            "run",
-            "-d",
-            "--name",
-            name,
-            "-v",
-            &format!("{workspace}:{workspace}"),
-            "debian:trixie",
-            "sleep",
-            "infinity",
-        ];
+fn ensure_container(
+    name: &str,
+    workspace: &str,
+    skills: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    if let Some(mounts) = docker_mounts(name)? {
+        if mounts_current(&mounts, workspace, skills) {
+            // Present, mounts whole: started when it is not.
+            if !container_running(name)? {
+                let output = std::process::Command::new("docker")
+                    .args(["start", name])
+                    .output()
+                    .map_err(|err| anyhow::anyhow!("docker start failed: {err}"))?;
+                if !output.status.success() {
+                    anyhow::bail!(
+                        "docker start failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+            }
+            prepare_instance("docker", name, &docker_provision_argv(name));
+            return Ok(());
+        }
+        // Present with a stale mount set — a container from before
+        // the skills bind, say. A start can never gain a mount, so
+        // the container is recreated; running under the assembly's
+        // exclusive lock, no peer session is live to lose it. What
+        // is lost is container-internal state only (the provision's
+        // packages), which the next prepare re-installs.
         let output = std::process::Command::new("docker")
-            .args(argv)
+            .args(["rm", "-f", name])
             .output()
-            .map_err(|err| anyhow::anyhow!("docker run failed: {err}"))?;
+            .map_err(|err| anyhow::anyhow!("docker rm failed: {err}"))?;
         if !output.status.success() {
             anyhow::bail!(
-                "docker {} failed: {}",
-                argv.join(" "),
+                "docker rm failed: {}",
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
     }
+    let argv = docker_run_argv(name, workspace, skills);
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let output = std::process::Command::new("docker")
+        .args(&refs)
+        .output()
+        .map_err(|err| anyhow::anyhow!("docker run failed: {err}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "docker run failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
     prepare_instance("docker", name, &docker_provision_argv(name));
     Ok(())
+}
+
+/// The container's mounts as `docker inspect` prints them — `None` when
+/// the container does not exist. A missing binary or refusing daemon
+/// reads as absence: the `run` below fails with the same word.
+fn docker_mounts(name: &str) -> anyhow::Result<Option<String>> {
+    let output = std::process::Command::new("docker")
+        .args(["inspect", "-f", "{{json .Mounts}}", name])
+        .output()
+        .map_err(|err| anyhow::anyhow!("docker inspect failed: {err}"))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()))
+}
+
+/// Whether the container's mounts cover this assembly's needs: the
+/// workspace bind, and — when the global skills directory exists — the
+/// read-only skills bind. Matched by the inspect JSON's `"Source"`
+/// entries — the host side, the same string the run argv names — so a
+/// workspace that is a prefix of some other mount's path cannot pass
+/// for its own bind. A path the JSON's escaping mangles reads as
+/// missing: the container is recreated with the correct mounts, the
+/// slow path, never the wrong one.
+fn mounts_current(mounts_json: &str, workspace: &str, skills: Option<&std::path::Path>) -> bool {
+    if !mounts_json.contains(&source_entry(workspace)) {
+        return false;
+    }
+    match skills {
+        None => true,
+        Some(dir) => mounts_json.contains(&source_entry(&dir.to_string_lossy())),
+    }
+}
+
+/// The inspect JSON's source entry for one host path:
+/// `"Source":"<path>"`.
+fn source_entry(path: &str) -> String {
+    format!(r#""Source":"{path}""#)
+}
+
+/// The run argv: `docker run -d --name <name> -v <ws>:<ws>
+/// [-v <skills>:<skills>:ro] debian:trixie sleep infinity` — the
+/// workspace bind is the container's filesystem story, the skills bind
+/// rides read-only when the global directory exists.
+fn docker_run_argv(name: &str, workspace: &str, skills: Option<&std::path::Path>) -> Vec<String> {
+    let mut argv = vec![
+        "run".to_owned(),
+        "-d".to_owned(),
+        "--name".to_owned(),
+        name.to_owned(),
+        "-v".to_owned(),
+        bind_mount(workspace, false),
+    ];
+    if let Some(dir) = skills {
+        argv.push("-v".to_owned());
+        argv.push(bind_mount(&dir.to_string_lossy(), true));
+    }
+    argv.extend([
+        "debian:trixie".to_owned(),
+        "sleep".to_owned(),
+        "infinity".to_owned(),
+    ]);
+    argv
+}
+
+/// One bind-mount argument: `src:src`, `:ro` when read-only — source
+/// and destination agree, the same 1:1 posture the lxd device takes.
+fn bind_mount(source: &str, readonly: bool) -> String {
+    if readonly {
+        format!("{source}:{source}:ro")
+    } else {
+        format!("{source}:{source}")
+    }
 }
 
 /// Prepares an instance once per process: the marker gate inside the
@@ -757,12 +982,30 @@ fn idmap_of(name: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Adds the workspace's `disk` device when it is not already there:
-/// `lxc config device add <name> workspace disk source=<ws>
-/// path=<ws>` — the 1:1 mirror that makes the sandbox-side path the
-/// host path itself. Containers only; a virtual machine takes no
-/// host-path mount and rides the attached posture instead.
-fn ensure_lxd_mount(name: &str, workspace: &str) -> anyhow::Result<()> {
+/// Adds the workspace's `disk` device — and the global skills
+/// directory's, read-only, when it exists: `lxc config device add
+/// <name> <device> disk source=<dir> path=<dir>` — the 1:1 mirrors
+/// that make the sandbox-side paths the host paths themselves.
+/// Containers only; a virtual machine takes no host-path mount and
+/// rides the attached posture instead.
+fn ensure_lxd_mount(
+    name: &str,
+    workspace: &str,
+    skills: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let devices = lxd_devices(name)?;
+    lxd_device(name, &devices, "workspace", workspace, false)?;
+    if let Some(dir) = skills {
+        // Re-shown: the first add changed the set this check reads.
+        let devices = lxd_devices(name)?;
+        let dir = dir.to_string_lossy().into_owned();
+        lxd_device(name, &devices, "skills", &dir, true)?;
+    }
+    Ok(())
+}
+
+/// The instance's device set as `lxc config device show` prints it.
+fn lxd_devices(name: &str) -> anyhow::Result<String> {
     let output = std::process::Command::new("lxc")
         .args(["config", "device", "show", name])
         .output()
@@ -773,29 +1016,56 @@ fn ensure_lxd_mount(name: &str, workspace: &str) -> anyhow::Result<()> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    if String::from_utf8_lossy(&output.stdout).contains("workspace:") {
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// One 1:1 `disk` device, added when the shown set lacks it. A failed
+/// add re-shows before failing: a device another hand added in the gap
+/// is success, not error.
+fn lxd_device(
+    name: &str,
+    devices: &str,
+    device: &str,
+    dir: &str,
+    readonly: bool,
+) -> anyhow::Result<()> {
+    if devices.contains(&format!("{device}:")) {
         return Ok(());
     }
+    let argv = lxd_device_argv(name, device, dir, readonly);
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let output = std::process::Command::new("lxc")
-        .args([
-            "config",
-            "device",
-            "add",
-            name,
-            "workspace",
-            "disk",
-            &format!("source={workspace}"),
-            &format!("path={workspace}"),
-        ])
+        .args(&refs)
         .output()
         .map_err(|err| anyhow::anyhow!("lxc config device add failed: {err}"))?;
-    if !output.status.success() {
+    if !output.status.success() && !lxd_devices(name)?.contains(&format!("{device}:")) {
         anyhow::bail!(
             "lxc config device add failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(())
+}
+
+/// The add argv: `config device add <name> <device> disk
+/// source=<dir> path=<dir> [readonly=true]` — read-only for the
+/// skills device, the user's own config the instance must read but
+/// never write.
+fn lxd_device_argv(name: &str, device: &str, dir: &str, readonly: bool) -> Vec<String> {
+    let mut argv = vec![
+        "config".to_owned(),
+        "device".to_owned(),
+        "add".to_owned(),
+        name.to_owned(),
+        device.to_owned(),
+        "disk".to_owned(),
+        format!("source={dir}"),
+        format!("path={dir}"),
+    ];
+    if readonly {
+        argv.push("readonly=true".to_owned());
+    }
+    argv
 }
 
 /// The instance name a workspace derives when none is stored: the
@@ -962,6 +1232,163 @@ mod tests {
         );
         assert!(files.contains_key("/workspace/.rhema/.seeded"));
         assert!(sandbox.seeds().is_empty(), "rhema-code has no git seed");
+    }
+
+    /// One workspace skill on disk, for the discovery tests: the
+    /// frontmatter the parser answers to.
+    fn workspace_with_skill() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill = dir.path().join(".rhema").join("skills").join("review");
+        std::fs::create_dir_all(&skill).expect("the skill directory");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\ndescription: review a diff\n---\n# review\n",
+        )
+        .expect("the skill lands");
+        dir
+    }
+
+    #[test]
+    fn mounted_discovery_keeps_the_host_paths_and_seeds_nothing() {
+        let dir = workspace_with_skill();
+        let ws = dir.path().to_path_buf();
+        let (skills, bodies) = discovered_skills(&ws, true, &ws.to_string_lossy());
+        assert!(bodies.is_empty(), "the mounts are the delivery: {bodies:?}");
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "review")
+            .expect("the workspace skill is discovered");
+        assert_eq!(
+            skill.path,
+            ws.join(".rhema")
+                .join("skills")
+                .join("review")
+                .join("SKILL.md"),
+            "the 1:1 mount puts the tree at its own path"
+        );
+    }
+
+    #[test]
+    fn seeded_discovery_rewrites_the_paths_and_carries_the_bodies() {
+        let dir = workspace_with_skill();
+        let ws = dir.path().to_path_buf();
+        let (skills, bodies) = discovered_skills(&ws, false, "/workspace");
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "review")
+            .expect("the workspace skill is discovered");
+        assert_eq!(
+            skill.path,
+            PathBuf::from("/workspace/.rhema/skills/review/SKILL.md")
+        );
+        assert!(
+            bodies
+                .iter()
+                .any(|(name, body)| name == "review" && body.contains("# review")),
+            "the seeded posture carries the bodies: {bodies:?}"
+        );
+    }
+
+    #[test]
+    fn the_run_argv_binds_the_workspace_and_the_read_only_skills() {
+        assert_eq!(
+            docker_run_argv("box", "/home/me/proj", None),
+            vec![
+                "run",
+                "-d",
+                "--name",
+                "box",
+                "-v",
+                "/home/me/proj:/home/me/proj",
+                "debian:trixie",
+                "sleep",
+                "infinity",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        let skills = Path::new("/h/.config/rhema/skills");
+        assert_eq!(
+            docker_run_argv("box", "/home/me/proj", Some(skills)),
+            vec![
+                "run",
+                "-d",
+                "--name",
+                "box",
+                "-v",
+                "/home/me/proj:/home/me/proj",
+                "-v",
+                "/h/.config/rhema/skills:/h/.config/rhema/skills:ro",
+                "debian:trixie",
+                "sleep",
+                "infinity",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_mount_set_missing_the_skills_bind_is_stale() {
+        let mounts = r#"[{"Type":"bind","Source":"/home/me/proj","Destination":"/home/me/proj"}]"#;
+        assert!(mounts_current(mounts, "/home/me/proj", None));
+        assert!(!mounts_current(
+            mounts,
+            "/home/me/proj",
+            Some(Path::new("/h/.config/rhema/skills"))
+        ));
+        let whole = r#"[{"Source":"/home/me/proj"},{"Source":"/h/.config/rhema/skills"}]"#;
+        assert!(mounts_current(
+            whole,
+            "/home/me/proj",
+            Some(Path::new("/h/.config/rhema/skills"))
+        ));
+        // A workspace that is a prefix of another mount's path does not
+        // pass for its own bind.
+        assert!(!mounts_current(
+            r#"[{"Source":"/home/me/proj2"}]"#,
+            "/home/me/proj",
+            None
+        ));
+    }
+
+    #[test]
+    fn the_lxd_device_argv_names_the_seam_and_the_read_only_bit() {
+        assert_eq!(
+            lxd_device_argv("box", "workspace", "/home/me/proj", false),
+            vec![
+                "config",
+                "device",
+                "add",
+                "box",
+                "workspace",
+                "disk",
+                "source=/home/me/proj",
+                "path=/home/me/proj",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            lxd_device_argv("box", "skills", "/h/.config/rhema/skills", true),
+            vec![
+                "config",
+                "device",
+                "add",
+                "box",
+                "skills",
+                "disk",
+                "source=/h/.config/rhema/skills",
+                "path=/h/.config/rhema/skills",
+                "readonly=true",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -1176,6 +1603,8 @@ mod tests {
                 license: None,
                 path: PathBuf::from("/workspace/.rhema/skills/review/SKILL.md"),
             }],
+            instance_lock: None,
+            managed: None,
         };
         let mut config = CodingAgentConfig::new("m", Path::new("/host/ws"));
         assert!(config.tools.is_none());

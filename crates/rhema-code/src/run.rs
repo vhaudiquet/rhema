@@ -968,6 +968,13 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             eprintln!("warning: the session was not saved for /resume: {err}");
         }
     }
+    // Stop-on-exit: the last session out of a rhema-derived instance
+    // stops it; a peer's shared hold says otherwise and the instance
+    // stays up. The terminal is already back, so the stop's wait (a
+    // container, a second; a vm, a few) lands on a plain shell prompt.
+    if let Some(mut sandboxed) = app.sandboxed.take() {
+        sandboxed.shutdown();
+    }
     outcome
 }
 
