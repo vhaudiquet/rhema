@@ -44,18 +44,37 @@ pub const TURN_CHANNEL_CAPACITY: usize = 1024;
 /// thinking traces and tool rows are deltas, and they add up.
 pub const RECORD_CAPACITY: usize = 8192;
 
+/// One image a chat message carried, as the transcript records it: the
+/// attachment store's id and the media type the bytes carry. The
+/// transcript streams ids, never megabytes — a client fetches the
+/// bytes through `GET /v1/attachments/{id}`, the route the agent's own
+/// attachments already serve.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UserImage {
+    /// The attachment store's id — the fetch route's address.
+    pub id: String,
+    /// The full MIME type (`image/png`).
+    pub media_type: String,
+}
+
 /// One event of a turn, as the wire sees it. Serialized with an internal
 /// `type` tag, snake-cased: `{"type":"text_delta","text":"..."}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum TurnEvent {
-    /// The turn's input: the text (a batch folds into one) the turn
-    /// answers, recorded by the handler when the dispatch starts. It
-    /// exists for the replay — a chat surface shows its own messages
-    /// as it sends them, and skips the live echo.
+    /// The turn's input: the text (a batch folds into one) and the
+    /// images the message batch carried, recorded by the handler when
+    /// the dispatch starts. It exists for the replay — a chat surface
+    /// shows its own messages as it sends them, and skips the live
+    /// echo.
     UserMessage {
         /// The input text, verbatim.
         text: String,
+        /// The batch's images, in arrival order, as the attachment
+        /// store holds them. `default` because rows recorded before
+        /// images rode the transcript carry no field.
+        #[serde(default)]
+        images: Vec<UserImage>,
     },
     /// A piece of the model's reasoning trace, in stream order.
     ThinkingDelta {
@@ -316,8 +335,12 @@ mod tests {
             r#"{"type":"text_delta","text":"hi"}"#
         );
         assert_eq!(
-            serde_json::to_string(&TurnEvent::UserMessage { text: "hi".into() }).unwrap(),
-            r#"{"type":"user_message","text":"hi"}"#
+            serde_json::to_string(&TurnEvent::UserMessage {
+                text: "hi".into(),
+                images: Vec::new(),
+            })
+            .unwrap(),
+            r#"{"type":"user_message","text":"hi","images":[]}"#
         );
         assert_eq!(
             serde_json::to_string(&TurnEvent::ToolResult {
@@ -340,6 +363,21 @@ mod tests {
         );
     }
 
+    /// Rows recorded before images rode the transcript carry no
+    /// `images` field; they replay as plain questions.
+    #[test]
+    fn a_user_message_row_from_before_images_loads_without_them() {
+        let event: TurnEvent =
+            serde_json::from_str(r#"{"type":"user_message","text":"hello"}"#).unwrap();
+        assert_eq!(
+            event,
+            TurnEvent::UserMessage {
+                text: "hello".into(),
+                images: Vec::new()
+            }
+        );
+    }
+
     #[test]
     fn the_kind_is_the_wire_type_tag() {
         assert_eq!(
@@ -347,7 +385,11 @@ mod tests {
             "text_delta"
         );
         assert_eq!(
-            TurnEvent::UserMessage { text: "x".into() }.kind(),
+            TurnEvent::UserMessage {
+                text: "x".into(),
+                images: Vec::new()
+            }
+            .kind(),
             "user_message"
         );
         assert_eq!(
@@ -389,6 +431,7 @@ mod tests {
             &key,
             TurnEvent::UserMessage {
                 text: "hello".into(),
+                images: Vec::new(),
             },
         );
         hub.emit(&key, text("hi"));
@@ -398,7 +441,8 @@ mod tests {
             history,
             vec![
                 TurnEvent::UserMessage {
-                    text: "hello".into()
+                    text: "hello".into(),
+                    images: Vec::new()
                 },
                 text("hi"),
             ],
@@ -523,6 +567,7 @@ mod tests {
             &key,
             TurnEvent::UserMessage {
                 text: "earlier".into(),
+                images: Vec::new(),
             },
         );
         let (history, mut receiver) = hub.subscribe_with_history(&key);

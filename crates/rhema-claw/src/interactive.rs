@@ -17,7 +17,10 @@
 //! verbatim, and the handler's only classification is "none". One
 //! dispatch drains the inbox and folds every drained text into ONE user
 //! input (the spec §3 batching rule), so a burst of quick messages costs
-//! one reasoning step, not one per message.
+//! one reasoning step, not one per message. A message may carry images:
+//! the batch's images copy into the attachment store, the transcript
+//! records their ids, and the turn's input carries the inline image
+//! blocks the providers take — the checkpoint holds what the model saw.
 //!
 //! **The delivery rule:** `interactive:` keys reply into the live chat
 //! surface (the event hub's stream). Task, phone, and calendar keys
@@ -57,8 +60,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use rhema_agent_tools::{AllowAll, ExpandPastes, ShellTools, revive_dangling_calls};
 use rhema_autonomous_agent::{Allowlist, Handler, ResolverChain, SessionContext, async_trait};
 use rhema_core::{
-    Agent, ChatParams, Content, Event as ModelEvent, EventSink, Message, ModelProvider, Role,
-    Session, ToolContext, ToolResolver, run_turn,
+    Agent, ChatParams, Content, Event as ModelEvent, EventSink, Image, ImageMediaType, Message,
+    ModelProvider, Role, Session, ToolContext, ToolResolver, run_turn,
 };
 use rhema_memory::{MemoryResolver, MemoryStore, Scope};
 use rhema_rsd::{Dispatcher, Event, KeyFn, Outcome, ResourceKey};
@@ -66,7 +69,7 @@ use serde_json::{Value, json};
 
 use crate::backends::BackendRegistry;
 use crate::bootstrap::{Bootstrap, DEFAULT_SYSTEM_MD, render_system};
-use crate::hub::{EventHub, TurnEvent};
+use crate::hub::{EventHub, TurnEvent, UserImage};
 use crate::notifications::NotificationStore;
 
 /// The key prefixes of the resident context (see the module docs):
@@ -133,10 +136,24 @@ pub fn register_user(dispatcher: &Dispatcher) {
     dispatcher.register_source(SOURCE, passthrough_key_fn());
 }
 
+/// One inbound image on a chat message's payload: the full MIME type
+/// and the bare base64 body — no `data:` prefix, exactly the shape the
+/// provider APIs take inline.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WireImage {
+    /// The full MIME type (`image/png`), parseable by
+    /// [`ImageMediaType::parse`].
+    pub media_type: String,
+    /// The bare base64 body.
+    pub data: String,
+}
+
 /// The event one chat message becomes. The id is unique per message (a
 /// wall-clock millisecond plus a process counter), so a redelivery
-/// never dedups a different message away.
-pub fn user_event(key: &str, text: &str) -> Event {
+/// never dedups a different message away. The payload carries the
+/// message's images when it has any, and no `images` key when it has
+/// none — old payloads stay byte-identical.
+pub fn user_event(key: &str, text: &str, images: &[WireImage]) -> Event {
     static MESSAGE_SEQ: AtomicU64 = AtomicU64::new(0);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -148,9 +165,24 @@ pub fn user_event(key: &str, text: &str) -> Event {
             MESSAGE_SEQ.fetch_add(1, Ordering::Relaxed)
         ),
         source: SOURCE.to_owned(),
-        payload: json!({ "key": key, "text": text }),
+        payload: if images.is_empty() {
+            json!({ "key": key, "text": text })
+        } else {
+            json!({ "key": key, "text": text, "images": images })
+        },
         received_at: now.as_millis() as u64,
     }
+}
+
+/// Decodes an inbound chat image's base64 body: the standard alphabet
+/// with padding, the shape every browser and fetch helper mints.
+/// `None` when it does not decode — a junk entry rides no further than
+/// the fold, and the rest of the batch is unaffected.
+fn decode_image_data(data: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(data.trim())
+        .ok()
 }
 
 /// The resident agent: a provider, a model, one shared workspace, the
@@ -169,6 +201,10 @@ pub struct InteractiveHandler {
     /// The identity files: the system prompt renders from them per
     /// dispatch, and the `bootstrap_save` resolver writes them.
     bootstrap: Arc<Bootstrap>,
+    /// The attachment store: inbound chat images copy into it, so the
+    /// transcript carries ids and a client fetches the bytes over the
+    /// attachments route it already has.
+    attachments: Arc<crate::attachments::AttachmentStore>,
     bootstrap_resolver: Arc<dyn rhema_core::ToolResolver>,
     hub: Arc<EventHub>,
     /// The notification table: the `notify` tool writes it, and
@@ -197,7 +233,7 @@ impl InteractiveHandler {
     /// shell (approval v1-permissive — the shell is the point of a
     /// resident coding agent — installed once, since resolution is
     /// synchronous within a turn), memory, and `bootstrap_save`.
-    #[expect(clippy::too_many_arguments, reason = "nine parts, each load-bearing")]
+    #[expect(clippy::too_many_arguments, reason = "ten parts, each load-bearing")]
     pub fn new(
         backends: Arc<BackendRegistry>,
         workspace: impl Into<PathBuf>,
@@ -205,6 +241,7 @@ impl InteractiveHandler {
         bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
         notifications: Arc<NotificationStore>,
+        attachments: Arc<crate::attachments::AttachmentStore>,
         max_turn_steps: u32,
         extensions: Arc<crate::extension::Extensions>,
         transcript: bool,
@@ -223,6 +260,7 @@ impl InteractiveHandler {
             bootstrap_resolver,
             hub,
             notifications,
+            attachments,
             max_turn_steps,
             extensions,
             transcript_mirror: transcript.then(|| {
@@ -311,19 +349,67 @@ impl InteractiveHandler {
             .poll_inbox()
             .await
             .map_err(|err| format!("inbox poll for {key} failed: {err}"))?;
-        let input = items
-            .iter()
-            .filter_map(|item| {
-                item.event
-                    .payload
-                    .get("text")
-                    .or_else(|| item.event.payload.get("prompt"))
-                    .and_then(Value::as_str)
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
+        // Texts fold in arrival order, and so do the images, across
+        // the whole batch whichever events carried them.
+        let mut texts = Vec::new();
+        let mut images = Vec::new();
+        for item in &items {
+            let payload = &item.event.payload;
+            if let Some(text) = payload
+                .get("text")
+                .or_else(|| payload.get("prompt"))
+                .and_then(Value::as_str)
+            {
+                texts.push(text);
+            }
+            if let Some(carried) = payload.get("images").and_then(Value::as_array) {
+                images.extend(
+                    carried.iter().filter_map(|image| {
+                        serde_json::from_value::<WireImage>(image.clone()).ok()
+                    }),
+                );
+            }
+        }
+        let input = texts.join("\n\n");
         if input.trim().is_empty() {
             return Err(format!("dispatch for {key} carried no text"));
+        }
+        // Inbound images: the bytes copy into the attachment store and
+        // the transcript records ids — a replay streams the same small
+        // cards every other event does, never the megabytes again. A
+        // payload the messages route never validated (the generic
+        // ingest door) loses its junk entries here: an unparseable
+        // media type or an undecodable body rides nothing, and the
+        // rest of the batch is unaffected.
+        let mut transcript_images = Vec::new();
+        let mut core_images = Vec::new();
+        for (n, image) in images.iter().enumerate() {
+            let Some(media_type) = ImageMediaType::parse(&image.media_type) else {
+                continue;
+            };
+            let Some(bytes) = decode_image_data(&image.data) else {
+                continue;
+            };
+            let extension = match media_type {
+                ImageMediaType::Png => "png",
+                // `jpg`, not `jpeg`: the shorter form is the
+                // conventional file name, and the store's content type
+                // guess knows both.
+                ImageMediaType::Jpeg => "jpg",
+                ImageMediaType::Gif => "gif",
+                ImageMediaType::Webp => "webp",
+            };
+            let stored = self
+                .attachments
+                .put(&format!("image-{}.{extension}", n + 1), &bytes)
+                .map_err(|err| format!("image store for {key} failed: {err}"))?;
+            transcript_images.push(UserImage {
+                id: stored.id,
+                media_type: media_type.as_str().to_owned(),
+            });
+            // The request's base64 verbatim: the session checkpoint
+            // carries what the model saw.
+            core_images.push(Image::new(media_type, image.data.clone()));
         }
         // The transcript's question, recorded before anything else can
         // stream: a replay shows what was asked, not only what was
@@ -333,6 +419,7 @@ impl InteractiveHandler {
             &ctx.key,
             TurnEvent::UserMessage {
                 text: input.clone(),
+                images: transcript_images,
             },
         );
         // A non-chat resident key has no subscriber to read the reply:
@@ -385,7 +472,7 @@ impl InteractiveHandler {
         let output = run_turn(
             &mut agent,
             &mut session,
-            Message::text(Role::User, input),
+            Message::text_with_images(Role::User, input, core_images),
             &mut sink,
             &tools,
             self.max_turn_steps,
@@ -753,6 +840,30 @@ mod tests {
                 })
                 .expect("a user text")
         }
+
+        /// The last request's user-turn images, as (media type, base64)
+        /// pairs in block order — what the model was handed inline.
+        fn last_user_images(&self) -> Vec<(String, String)> {
+            let requests = self.requests.lock().unwrap();
+            let last = requests.last().expect("a request was made");
+            last.messages
+                .iter()
+                .rev()
+                .find(|message| message.role == CoreRole::User)
+                .map(|message| {
+                    message
+                        .content
+                        .iter()
+                        .filter_map(|content| match content {
+                            Content::Image(image) => {
+                                Some((image.media_type.as_str().to_owned(), image.data.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+                .expect("a user turn")
+        }
     }
 
     #[async_trait]
@@ -797,6 +908,7 @@ mod tests {
                 Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
                 hub,
                 notifications,
+                attachments(),
                 crate::config::DEFAULT_MAX_TURN_STEPS,
                 extensions,
                 on,
@@ -844,6 +956,7 @@ mod tests {
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -864,6 +977,7 @@ mod tests {
             .ingest(user_event(
                 key.as_str(),
                 "review this:\u{FFFC}fn main() {}\nfn other() {}\u{FFFC}",
+                &[],
             ))
             .expect("ingests");
         driver.run_once().await.expect("the run happens");
@@ -875,7 +989,7 @@ mod tests {
         );
         let (history, _) = hub.subscribe_with_history(&key);
         let saw_input = history.into_iter().find_map(|event| match event {
-            TurnEvent::UserMessage { text } => Some(text),
+            TurnEvent::UserMessage { text, .. } => Some(text),
             _ => None,
         });
         assert!(
@@ -932,6 +1046,7 @@ mod tests {
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -1005,14 +1120,51 @@ mod tests {
 
     #[test]
     fn user_events_carry_the_key_and_unique_ids() {
-        let first = user_event("interactive:web", "hello");
-        let second = user_event("interactive:web", "again");
+        let first = user_event("interactive:web", "hello", &[]);
+        let second = user_event("interactive:web", "again", &[]);
         assert_eq!(first.source, "user");
         assert_eq!(first.id, first.id, "stable within itself");
         assert_ne!(first.id, second.id, "messages never share a dedup id");
         assert_eq!(
             first.payload,
             json!({"key": "interactive:web", "text": "hello"})
+        );
+    }
+
+    /// An image-carrying message names its images on the payload, in
+    /// order; a plain message carries no `images` key at all.
+    #[test]
+    fn user_events_carry_images_only_when_the_message_has_any() {
+        let bare = user_event("interactive:web", "plain", &[]);
+        assert_eq!(
+            bare.payload,
+            json!({"key": "interactive:web", "text": "plain"}),
+            "no images, no key"
+        );
+        let carried = user_event(
+            "interactive:web",
+            "look",
+            &[
+                WireImage {
+                    media_type: "image/png".to_owned(),
+                    data: "cG5n".to_owned(),
+                },
+                WireImage {
+                    media_type: "image/webp".to_owned(),
+                    data: "d2VicA==".to_owned(),
+                },
+            ],
+        );
+        assert_eq!(
+            carried.payload,
+            json!({
+                "key": "interactive:web",
+                "text": "look",
+                "images": [
+                    {"media_type": "image/png", "data": "cG5n"},
+                    {"media_type": "image/webp", "data": "d2VicA=="},
+                ],
+            })
         );
     }
 
@@ -1024,7 +1176,7 @@ mod tests {
             Arc::new(VolatileStore::new()),
         );
         register_user(&dispatcher);
-        let event = user_event("interactive:web", "hello");
+        let event = user_event("interactive:web", "hello", &[]);
         // Ingesting resolves the key through the registered fn: the
         // record lands under exactly the payload's key.
         dispatcher.ingest(event).expect("ingests");
@@ -1203,6 +1355,7 @@ mod tests {
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -1221,7 +1374,7 @@ mod tests {
         let key = Key::from("interactive:web");
         let mut receiver = hub.subscribe(&key);
         dispatcher
-            .ingest(user_event(key.as_str(), "hello"))
+            .ingest(user_event(key.as_str(), "hello", &[]))
             .expect("ingests");
 
         let driver = rhema_autonomous_agent::Driver::new(dispatcher.clone(), Arc::new(handler))
@@ -1233,7 +1386,8 @@ mod tests {
         assert_eq!(
             receiver.try_recv().unwrap(),
             TurnEvent::UserMessage {
-                text: "hello".into()
+                text: "hello".into(),
+                images: Vec::new()
             }
         );
         assert_eq!(
@@ -1253,6 +1407,142 @@ mod tests {
         assert_eq!(
             dispatcher.status(&key).expect("status reads").state,
             KeyState::Idle
+        );
+    }
+
+    /// A batch whose messages carry images: the bytes land in the
+    /// attachment store under image-<n>.<ext> names, the transcript
+    /// carries the stored ids and media types in arrival order, and the
+    /// turn's input is the texts folded with the inline images behind
+    /// them — base64 verbatim, what the checkpoint will hold.
+    #[tokio::test]
+    async fn a_batched_dispatch_stores_images_and_the_turn_sees_them() {
+        use base64::Engine as _;
+
+        let recorder = RecordingProvider::new();
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        let hub = Arc::new(EventHub::default());
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let attachments = Arc::new(
+            crate::attachments::AttachmentStore::open(workspace.path().join("attachments"))
+                .expect("store opens"),
+        );
+        let notifications = notifications();
+        let extensions = test_extensions(
+            hub.clone(),
+            store,
+            notifications.clone(),
+            tasks(),
+            jobs(),
+            accounts(),
+            consents(),
+            bridge(),
+            attachments.clone(),
+            phone(),
+            identity(),
+            &workspace.path().join("interactive"),
+        );
+        let handler = InteractiveHandler::new(
+            test_registry(recorder.clone()),
+            workspace.path().join("interactive"),
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub.clone(),
+            notifications.clone(),
+            attachments.clone(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+            extensions,
+            true,
+        );
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            Arc::new(VolatileStore::new()),
+        ));
+        register_user(&dispatcher);
+        let driver = rhema_autonomous_agent::Driver::new(dispatcher.clone(), Arc::new(handler))
+            .with_holder("test");
+        let key = Key::from("interactive:web");
+        let png = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG-fake");
+        let jpeg = base64::engine::general_purpose::STANDARD.encode(b"\xff\xd8jpeg");
+
+        // Two messages with images and one without, one batch.
+        dispatcher
+            .ingest(user_event(
+                key.as_str(),
+                "look at this",
+                &[WireImage {
+                    media_type: "image/png".to_owned(),
+                    data: png.clone(),
+                }],
+            ))
+            .expect("ingests");
+        dispatcher
+            .ingest(user_event(
+                key.as_str(),
+                "and at this",
+                &[WireImage {
+                    media_type: "Image/JPEG".to_owned(),
+                    data: jpeg.clone(),
+                }],
+            ))
+            .expect("ingests");
+        dispatcher
+            .ingest(user_event(key.as_str(), "no picture here", &[]))
+            .expect("ingests");
+        assert_eq!(
+            driver.run_once().await.expect("the run happens"),
+            vec![RsdOutcome::Handled]
+        );
+
+        // The transcript's question carries both stored images, in
+        // arrival order, media types canonical.
+        let (history, _) = hub.subscribe_with_history(&key);
+        let question = history
+            .iter()
+            .find_map(|event| match event {
+                TurnEvent::UserMessage { text, images } => Some((text.clone(), images.clone())),
+                _ => None,
+            })
+            .expect("the transcript saw the question");
+        assert_eq!(question.0, "look at this\n\nand at this\n\nno picture here");
+        assert_eq!(question.1.len(), 2);
+        assert_eq!(question.1[0].media_type, "image/png");
+        assert_eq!(question.1[1].media_type, "image/jpeg");
+
+        // Each id fetches the exact decoded bytes from the store, under
+        // the numbered image-<n>.<ext> name.
+        let (stored, bytes) = attachments
+            .get(&question.1[0].id)
+            .expect("the store reads")
+            .expect("the image is stored");
+        assert_eq!(stored.name, "image-1.png");
+        // The name is what the store's media guess reads: an image, so
+        // a client renders it inline.
+        assert_eq!(crate::attachments::media_of(&stored.name), "image");
+        assert_eq!(bytes, b"\x89PNG-fake");
+        let (stored, bytes) = attachments
+            .get(&question.1[1].id)
+            .expect("the store reads")
+            .expect("the image is stored");
+        assert_eq!(stored.name, "image-2.jpg", "jpeg stores under jpg");
+        assert_eq!(bytes, b"\xff\xd8jpeg");
+
+        // The model saw the folded text, then the images inline, base64
+        // verbatim.
+        assert_eq!(
+            recorder.last_user_text(),
+            "look at this\n\nand at this\n\nno picture here"
+        );
+        assert_eq!(
+            recorder.last_user_images(),
+            vec![
+                ("image/png".to_owned(), png),
+                ("image/jpeg".to_owned(), jpeg)
+            ]
         );
     }
 
@@ -1299,6 +1589,7 @@ mod tests {
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -1319,7 +1610,7 @@ mod tests {
 
         // Dispatch 1: the model saves through the chain's memory tools.
         dispatcher
-            .ingest(user_event(key.as_str(), "remember the channel"))
+            .ingest(user_event(key.as_str(), "remember the channel", &[]))
             .expect("ingests");
         assert_eq!(
             driver.run_once().await.expect("first run"),
@@ -1338,7 +1629,7 @@ mod tests {
         // Dispatch 2: the model searches the same chain and answers from
         // memory — a fresh session turn, the same durable store.
         dispatcher
-            .ingest(user_event(key.as_str(), "where do releases go?"))
+            .ingest(user_event(key.as_str(), "where do releases go?", &[]))
             .expect("ingests");
         assert_eq!(
             driver.run_once().await.expect("second run"),
@@ -1404,6 +1695,7 @@ mod tests {
             bootstrap.clone(),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -1425,7 +1717,7 @@ mod tests {
         // Dispatch 1: the model writes SOUL.md through the chain. A key
         // with a session continues, so both calls ride one key.
         dispatcher
-            .ingest(user_event(key.as_str(), "call me claw"))
+            .ingest(user_event(key.as_str(), "call me claw", &[]))
             .expect("ingests");
         assert_eq!(
             driver.run_once().await.expect("first run"),
@@ -1444,7 +1736,7 @@ mod tests {
 
         // Dispatch 2: USER.md, same chain — and the pending flag clears.
         dispatcher
-            .ingest(user_event(key.as_str(), "and I am Ana"))
+            .ingest(user_event(key.as_str(), "and I am Ana", &[]))
             .expect("ingests");
         assert_eq!(
             driver.run_once().await.expect("second run"),
@@ -1485,6 +1777,7 @@ mod tests {
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -1501,7 +1794,7 @@ mod tests {
         register_user(&dispatcher);
         let key = Key::from("interactive:web");
         dispatcher
-            .ingest(user_event(key.as_str(), "hello"))
+            .ingest(user_event(key.as_str(), "hello", &[]))
             .expect("ingests");
         let driver = rhema_autonomous_agent::Driver::new(dispatcher, Arc::new(handler));
         driver.run_once().await.expect("the run happens");
@@ -1567,6 +1860,7 @@ mod tests {
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -1640,7 +1934,7 @@ mod tests {
         // An interactive reply is the chat surface's business: notified
         // nowhere.
         dispatcher
-            .ingest(user_event("interactive:web", "hello"))
+            .ingest(user_event("interactive:web", "hello", &[]))
             .expect("ingests");
         assert_eq!(
             driver.run_once().await.expect("the run happens"),
@@ -1691,6 +1985,7 @@ mod tests {
             Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
             hub.clone(),
             notifications.clone(),
+            attachments(),
             crate::config::DEFAULT_MAX_TURN_STEPS,
             extensions,
             true,
@@ -1717,7 +2012,7 @@ mod tests {
 
         // The evening's work, in the chat session.
         dispatcher
-            .ingest(user_event(key.as_str(), "we shipped the claw tonight"))
+            .ingest(user_event(key.as_str(), "we shipped the claw tonight", &[]))
             .expect("ingests");
         assert_eq!(
             driver.run_once().await.expect("first run"),

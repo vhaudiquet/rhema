@@ -352,6 +352,7 @@ impl Daemon {
             bootstrap.clone(),
             hub.clone(),
             notifications.clone(),
+            attachments.clone(),
             config.max_turn_steps,
             extensions.clone(),
             config.transcript_enabled(),

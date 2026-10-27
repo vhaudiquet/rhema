@@ -20,6 +20,13 @@
 //! still a pass; a pathological backlog stops at
 //! [`MAX_DRAIN_PASSES`] and leaves the rest to the daemon's tick, which
 //! drains the interactive dispatcher as its backstop.
+//!
+//! A chat message may carry images. The route checks the budget —
+//! [`MAX_INBOUND_IMAGE_BYTES`] decoded per image, [`MAX_INBOUND_IMAGES`]
+//! a message — and the dispatch decodes the bodies into the attachment
+//! store: the stream replays ids and media types, never megabytes, and
+//! a client fetches the bytes through the attachments route it already
+//! has.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -35,6 +42,7 @@ use axum::routing::put;
 use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use rhema_autonomous_agent::Driver;
+use rhema_core::ImageMediaType;
 use rhema_rsd::{
     DispatchError, Dispatcher, IngestResult, KeyRecord, KeyState, ResourceKey, SqliteStore, Store,
 };
@@ -49,6 +57,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::backends::BackendRegistry;
 use crate::bootstrap::Bootstrap;
 use crate::hub::{EventHub, TurnEvent};
+use crate::interactive::WireImage;
 use crate::notifications::NotificationStore;
 use crate::task_store::TaskStore;
 use crate::watch_store::{ClawStore, validate_watch};
@@ -235,7 +244,10 @@ impl ClawState {
 pub fn router(state: ClawState) -> Router {
     let v1 = Router::new()
         .route("/sessions", get(sessions).post(sessions_create))
-        .route("/sessions/{key}/messages", post(messages))
+        .route(
+            "/sessions/{key}/messages",
+            post(messages).layer(axum::extract::DefaultBodyLimit::max(MAX_MESSAGE_BODY_BYTES)),
+        )
         .route("/sessions/{key}/events", get(events))
         .route("/bootstrap", get(bootstrap_status))
         .route("/watches", get(watches_list).post(watches_add))
@@ -508,11 +520,68 @@ async fn bootstrap_status(
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))
 }
 
-/// `{"text": "..."}` — one chat message.
+/// The decoded budget for one inbound chat image: 5 MiB decoded per
+/// image, eight images a message ([`MAX_INBOUND_IMAGES`]) — enough for
+/// screenshots, small enough that one message cannot bury the
+/// attachment store or a provider's inline limit.
+pub const MAX_INBOUND_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+
+/// How many images one chat message may carry.
+pub const MAX_INBOUND_IMAGES: usize = 8;
+
+/// The messages route's request-body ceiling, derived from the image
+/// budget: [`MAX_INBOUND_IMAGES`] images at [`MAX_INBOUND_IMAGE_BYTES`]
+/// decoded each, base64-expanded 4:3, plus room for the text. Axum's
+/// default 2 MiB would refuse what the budget allows before this
+/// route's own check could answer.
+pub const MAX_MESSAGE_BODY_BYTES: usize =
+    MAX_INBOUND_IMAGE_BYTES * 4 / 3 * MAX_INBOUND_IMAGES + 1024 * 1024;
+
+/// `{"text": "..."}` — one chat message, plus the images it carries.
+/// A body without `images` is the old shape, unchanged.
 #[derive(Deserialize)]
 pub struct MessageBody {
     /// The message text.
     pub text: String,
+    /// The message's inline images, each the full MIME type plus bare
+    /// base64. The route checks the budget, then the dispatch copies
+    /// the bytes into the attachment store — the stream carries ids,
+    /// not megabytes.
+    #[serde(default)]
+    pub images: Vec<WireImage>,
+}
+
+/// The inbound-image budget: a media type that parses as an image
+/// format, a non-empty base64 body (the decoder, not this check, is
+/// the base64 judge), decoded size within [`MAX_INBOUND_IMAGE_BYTES`],
+/// at most [`MAX_INBOUND_IMAGES`] a message. The OpenAI shim runs the
+/// same check over the same budget.
+pub(crate) fn validate_images(images: &[WireImage]) -> Result<(), String> {
+    if images.len() > MAX_INBOUND_IMAGES {
+        return Err(format!(
+            "at most {MAX_INBOUND_IMAGES} images a message, got {}",
+            images.len()
+        ));
+    }
+    for image in images {
+        if ImageMediaType::parse(&image.media_type).is_none() {
+            return Err(format!(
+                "unsupported image media type {:?}",
+                image.media_type
+            ));
+        }
+        if image.data.trim().is_empty() {
+            return Err("image data must not be empty".to_owned());
+        }
+        // Bare base64: four characters decode to three bytes, so the
+        // size check needs no decode.
+        if image.data.len() * 3 / 4 > MAX_INBOUND_IMAGE_BYTES {
+            return Err(format!(
+                "image too large: the decoded budget is {MAX_INBOUND_IMAGE_BYTES} bytes"
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn messages(
@@ -534,15 +603,19 @@ async fn messages(
         )
             .into_response();
     }
+    if let Err(reason) = validate_images(&body.images) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": reason}))).into_response();
+    }
     let key = ResourceKey::from(key);
     // No subscribe-before-ingest here: the hub records every turn
     // whether or not anyone is watching, so a chat surface connecting
     // later replays the whole exchange. The reply itself is consumed on
     // the event stream, not here.
-    if let Err(err) = state
-        .dispatcher
-        .ingest(crate::interactive::user_event(key.as_str(), &body.text))
-    {
+    if let Err(err) = state.dispatcher.ingest(crate::interactive::user_event(
+        key.as_str(),
+        &body.text,
+        &body.images,
+    )) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"error": err.to_string()})),

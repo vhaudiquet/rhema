@@ -191,9 +191,10 @@ pub async fn chat_completions(
     // Subscribe first, ingest second, drain third — the same contract
     // the messages route keeps.
     let mut receiver = state.hub().subscribe(&key);
-    if let Err(err) = state
-        .dispatcher()
-        .ingest(crate::interactive::user_event(key.as_str(), &text))
+    if let Err(err) =
+        state
+            .dispatcher()
+            .ingest(crate::interactive::user_event(key.as_str(), &text, &[]))
     {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
     }

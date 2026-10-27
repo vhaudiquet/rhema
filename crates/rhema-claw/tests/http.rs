@@ -274,6 +274,163 @@ async fn chat_streams_turns_and_remembers_across_messages() {
     assert_eq!(refused.status(), 400, "only resident keys take messages");
 }
 
+/// A chat message with images: the route enforces the budget (media
+/// type, non-empty body, decoded size, count), the transcript's
+/// user_message card names the stored ids and media types, and each id
+/// fetches the exact bytes back through the attachments route. A body
+/// without `images` is the old shape — accepted unchanged.
+#[tokio::test]
+async fn chat_messages_carry_images_into_the_attachment_store() {
+    use base64::Engine as _;
+
+    let provider = Arc::new(MockProvider::new([reply("nice pictures")]));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(provider),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+    let messages = format!("{base}/v1/sessions/interactive:web/messages");
+
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+
+    // The old shape: no images field, accepted as ever.
+    let accepted = client
+        .post(&messages)
+        .json(&json!({"text": "no pictures"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    assert!(
+        !seen.contains(r#""images":[{"#),
+        "a plain message carries no image cards: {seen}"
+    );
+
+    // The image shape: one png, posted with the text.
+    let raw: &[u8] = b"\x89PNG\r\n\x1a\n fake bytes";
+    let png = base64::engine::general_purpose::STANDARD.encode(raw);
+    let accepted = client
+        .post(&messages)
+        .json(&json!({
+            "text": "look at this",
+            "images": [{"media_type": "image/png", "data": png}],
+        }))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+    read_until(&mut stream, &mut seen, r#""images":[{"id""#).await;
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    let card = seen
+        .rsplit(r#""type":"user_message""#)
+        .next()
+        .expect("a card");
+    let id = card
+        .split(r#""id":""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the card names the stored id")
+        .to_owned();
+    let media_type = card
+        .split(r#""media_type":""#)
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the card names the media type");
+    assert_eq!(media_type, "image/png");
+    assert!(id.starts_with("att-"), "{id}");
+
+    // The stored bytes are fetchable, and they are the original ones.
+    let fetched = client
+        .get(format!("{base}/v1/attachments/{id}"))
+        .send()
+        .await
+        .expect("the fetch goes out");
+    assert_eq!(fetched.status(), 200);
+    assert_eq!(
+        fetched
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png"),
+        "the content type follows the stored name"
+    );
+    assert_eq!(fetched.bytes().await.expect("the bytes arrive"), raw);
+
+    // The budget: an unparseable media type, an empty body, an
+    // oversized body, and a ninth image are all refusals.
+    async fn refused(client: &reqwest::Client, messages: &str, body: Value) -> reqwest::StatusCode {
+        client
+            .post(messages)
+            .json(&body)
+            .send()
+            .await
+            .expect("the refusal posts")
+            .status()
+    }
+    let oversized = "A".repeat((rhema_claw::http::MAX_INBOUND_IMAGE_BYTES + 1) * 4 / 3 + 4);
+    let nine = |data: &str| {
+        json!({
+            "text": "too many",
+            "images": vec![json!({"media_type": "image/png", "data": data}); 9],
+        })
+    };
+    assert_eq!(
+        refused(
+            &client,
+            &messages,
+            json!({
+                "text": "look",
+                "images": [{"media_type": "image/svg+xml", "data": "cG5n"}],
+            })
+        )
+        .await,
+        400,
+        "svg is not an image format the providers take"
+    );
+    assert_eq!(
+        refused(
+            &client,
+            &messages,
+            json!({
+                "text": "look",
+                "images": [{"media_type": "image/png", "data": "   "}],
+            })
+        )
+        .await,
+        400,
+        "an empty body carries no image"
+    );
+    assert_eq!(
+        refused(
+            &client,
+            &messages,
+            json!({
+                "text": "look",
+                "images": [{"media_type": "image/png", "data": oversized}],
+            })
+        )
+        .await,
+        400,
+        "over the decoded budget"
+    );
+    assert_eq!(
+        refused(&client, &messages, nine("cG5n")).await,
+        400,
+        "eight images a message"
+    );
+}
+
 /// A turn nobody watched is still replayable: a client arriving after
 /// the fact — a reloaded browser, a reopened phone — subscribes cold and
 /// gets the finished turns back before the live feed. The same holds

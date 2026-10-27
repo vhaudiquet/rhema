@@ -73,6 +73,9 @@ tokio-stream = { workspace = true }
 rusqlite = { version = "0.40", features = ["bundled"] }
 # RFC3339 parsing for schedule_task's `at`
 time = { version = "0.3", default-features = false, features = ["parsing"] }
+# Inbound chat images ride base64; the dispatch decodes them into the
+# attachment store
+base64 = "0.22"
 
 [dev-dependencies]
 tempfile = "3"

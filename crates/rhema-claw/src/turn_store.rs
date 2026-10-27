@@ -222,6 +222,7 @@ mod tests {
                 &[
                     TurnEvent::UserMessage {
                         text: "hello".into(),
+                        images: Vec::new(),
                     },
                     text_delta("hi"),
                 ],
@@ -240,7 +241,8 @@ mod tests {
             store.events("interactive:web").expect("reads"),
             vec![
                 TurnEvent::UserMessage {
-                    text: "hello".into()
+                    text: "hello".into(),
+                    images: Vec::new()
                 },
                 text_delta("hi"),
                 TurnEvent::TurnDone {
