@@ -154,6 +154,12 @@ pub struct TranscriptStats {
     pub band_bytes: usize,
     /// The current turn's bytes at the last request.
     pub tail_bytes: usize,
+    /// The log's wire bytes at the last request — what the
+    /// conversation actually holds, each message counted once. The
+    /// usage split below sums the same content once per request;
+    /// this is the once.
+    #[serde(default)]
+    pub log_bytes: usize,
     /// Input tokens the providers reported, summed over requests —
     /// cached tokens included.
     pub input_tokens: u64,
@@ -212,6 +218,7 @@ impl TranscriptStats {
             self.block_bytes = saved.block_bytes;
             self.band_bytes = saved.band_bytes;
             self.tail_bytes = saved.tail_bytes;
+            self.log_bytes = saved.log_bytes;
         }
     }
 }
@@ -539,6 +546,7 @@ impl Transcript {
     /// benchmark counters.
     pub fn render(&mut self) -> Option<Vec<Message>> {
         self.stats.requests += 1;
+        self.stats.log_bytes = self.bytes(0, self.log.len());
         if self.cut == 0 {
             self.stats.pass_through += 1;
             return None;
@@ -1179,6 +1187,7 @@ mod tests {
             block_bytes: 900,
             band_bytes: 3_000,
             tail_bytes: 1_200,
+            log_bytes: 5_400,
         };
 
         // A mirror that has not looked at a log yet shows the saved
@@ -1224,6 +1233,26 @@ mod tests {
         later.carry(&saved);
         assert_eq!(later.requests, 13);
         assert_eq!(later.input_tokens, 98_000);
+    }
+
+    /// The log-size snapshot: what the conversation holds, each
+    /// message counted once, refreshed on every request — pass-through
+    /// ones included. The usage split's once-counted counterpart.
+    #[test]
+    fn the_log_bytes_snapshot_counts_the_log_once() {
+        let mut transcript = Transcript::new(settings(128_000));
+        let messages = long_history(4); // ~33 KiB, below the budget
+        transcript.observe(&messages);
+        transcript.render();
+        let expected: usize = messages.iter().map(summary::message_bytes).sum();
+        assert_eq!(transcript.stats().log_bytes, expected);
+
+        // An extension rides in; the next request recounts the log.
+        let grown = long_history(5);
+        transcript.observe(&grown);
+        transcript.render();
+        let expected: usize = grown.iter().map(summary::message_bytes).sum();
+        assert_eq!(transcript.stats().log_bytes, expected);
     }
 
     #[test]
