@@ -256,13 +256,20 @@ zero trait change — that is the test the abstraction has to pass
 end is the mode's reason to exist; tunnel-plus-`sandboxd` is the
 documented fast path.
 
-The choice UI advertises the ready set only: `local` and `docker` in
-the settings page, ssh and http out of sight — not absent from the
-contract, just honest about their standing (ssh's working tree has no
-carry story yet, §8; http presumes a daemon to reach). A configured
-kind still runs: `/sandbox <kind>` takes it when the probe offers it,
-and `config.yaml` is where its instance lives. The bar for a kind
-joining the page is a story, not a checkbox.
+The choice UI is an instance list, not a kind list: the host's own
+`local` row, then the named instances the config stores — a user's
+name over a kind and that kind's one target — then the add row. The
+add dialog offers the ready kinds only (docker, lxd), ssh and http
+out of the picker — not absent from the contract, just honest about
+their standing (ssh's working tree has no carry story yet, §8; http
+presumes a daemon to reach). What is configured still shows and
+still runs: a stored ssh instance lists with its not-offered mark,
+and `/sandbox <kind>` takes it when the probe offers it. Enter runs
+the row's instance — the section's active pointer names it, so two
+instances of one kind switch without touching the kind — and `d`
+removes the instance outright, the active pointer going with it.
+The bar for a kind joining the add dialog is a story, not a
+checkbox.
 
 On safety, plainly: `local` and the mount postures are process hygiene,
 not security boundaries; copied containers and VMs are the real tiers.
@@ -388,9 +395,12 @@ infrastructure); phase 9 is the one users see.
   vocabulary. The VM type is the point: local and mounts are process
   hygiene, and an LXD VM is the strongest isolation tier a
   `rhema-code` host can offer without a cloud.
-- **The settings page advertises the ready set only** — `local`,
-  `docker`, and `lxd`; ssh and http keep out of sight while their
-  stories are open. The UI's silence is a feature-status statement,
-  not a capability one: `/sandbox <kind>` still runs a configured
-  kind the probe offers, and `d` on a row unsets its instance
-  without touching the stored kind.
+- **The settings page is an instance list** — the host's `local`
+  row, the stored instances, the add row last. The add dialog
+  advertises the ready set only (docker, lxd) while ssh and http
+  instances stay addable through `config.yaml`, where they list with
+  their marks like any other. The UI's silence is a feature-status
+  statement, not a capability one: `/sandbox <kind>` still runs a
+  configured kind the probe offers, enter runs a stored instance
+  through the section's active pointer, and `d` removes the instance
+  outright — record and pointer, never the stored kind.
