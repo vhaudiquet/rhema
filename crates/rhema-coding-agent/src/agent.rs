@@ -446,6 +446,32 @@ impl CodingAgent {
         approval: Arc<dyn Approval>,
         cancelled: Arc<AtomicBool>,
     ) -> Result<ModelOutput, CodingAgentError> {
+        self.turn_message_with_cancel(Message::text(Role::User, input), sink, approval, cancelled)
+            .await
+    }
+
+    /// [`Self::turn`] over a whole [`Message`]: the entry point for
+    /// inputs carrying image blocks beside the text. Steering stays
+    /// text — a steered nudge is a sentence, not a screenshot.
+    pub async fn turn_message(
+        &mut self,
+        message: Message,
+        sink: &mut dyn EventSink,
+        approval: Arc<dyn Approval>,
+    ) -> Result<ModelOutput, CodingAgentError> {
+        self.turn_message_with_cancel(message, sink, approval, Arc::new(AtomicBool::new(false)))
+            .await
+    }
+
+    /// [`Self::turn_message`] with [`Self::turn_with_cancel`]'s cancel
+    /// flag — the full form both convenience wrappers fold into.
+    pub async fn turn_message_with_cancel(
+        &mut self,
+        message: Message,
+        sink: &mut dyn EventSink,
+        approval: Arc<dyn Approval>,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<ModelOutput, CodingAgentError> {
         self.turns += 1;
         let ctx = ToolContext {
             cwd: self.tools.workspace().to_path_buf(),
@@ -459,19 +485,14 @@ impl CodingAgent {
         // points; without one, the provided convenience runs unchanged.
         let result = match self.config.steering.clone() {
             Some(steering) => {
-                self.steered_turn(
-                    Message::text(Role::User, input),
-                    sink,
-                    &ctx,
-                    steering.as_ref(),
-                )
-                .await
+                self.steered_turn(message, sink, &ctx, steering.as_ref())
+                    .await
             }
             None => {
                 run_turn(
                     &mut self.agent,
                     &mut self.session,
-                    Message::text(Role::User, input),
+                    message,
                     sink,
                     &ctx,
                     self.config.max_turn_steps,
@@ -617,6 +638,92 @@ mod paste_tests {
         let seen = recording.0.lock().unwrap();
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0], format!("look at {payload} this"));
+    }
+
+    /// Records the content blocks of every User message each request
+    /// carried, then ends the turn.
+    struct RecordingBlocks(Mutex<Vec<Vec<Content>>>);
+
+    #[async_trait]
+    impl ModelProvider for RecordingBlocks {
+        async fn complete(
+            &self,
+            req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            let mut blocks = Vec::new();
+            for message in &req.messages {
+                if message.role == Role::User {
+                    blocks.extend(message.content.iter().cloned());
+                }
+            }
+            self.0.lock().unwrap().push(blocks);
+            Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    fn blocks_agent(recording: &Arc<RecordingBlocks>) -> CodingAgent {
+        CodingAgent::new(
+            recording.clone(),
+            CodingAgentConfig::new("m", std::env::temp_dir()),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn turn_message_delivers_text_then_image_blocks_to_the_provider() {
+        let recording = Arc::new(RecordingBlocks(Mutex::new(Vec::new())));
+        let mut agent = blocks_agent(&recording);
+        let message = Message::text_with_images(
+            Role::User,
+            "what is in this picture?",
+            vec![
+                rhema_core::Image::new(rhema_core::ImageMediaType::Png, "aGVsbG8="),
+                rhema_core::Image::new(rhema_core::ImageMediaType::Jpeg, "d29ybGQ="),
+            ],
+        );
+        agent
+            .turn_message(message, &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+
+        let seen = recording.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0],
+            vec![
+                Content::Text("what is in this picture?".into()),
+                Content::Image(rhema_core::Image::new(
+                    rhema_core::ImageMediaType::Png,
+                    "aGVsbG8="
+                )),
+                Content::Image(rhema_core::Image::new(
+                    rhema_core::ImageMediaType::Jpeg,
+                    "d29ybGQ="
+                )),
+            ]
+        );
+        // The session history is the message, verbatim — checkpointing
+        // must carry the images byte-for-byte.
+        assert_eq!(agent.session().history[0].content, seen[0]);
+    }
+
+    #[tokio::test]
+    async fn the_text_entry_still_sends_exactly_one_text_block() {
+        let recording = Arc::new(RecordingBlocks(Mutex::new(Vec::new())));
+        let mut agent = blocks_agent(&recording);
+        agent
+            .turn("plain words", &mut NoopSink, Arc::new(AllowAll))
+            .await
+            .unwrap();
+
+        let seen = recording.0.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], vec![Content::Text("plain words".into())]);
     }
 }
 
