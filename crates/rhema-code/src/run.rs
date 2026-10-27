@@ -582,7 +582,7 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     // The handle rides to the UI in the wire-up piece; the registry
     // is live either way.
     let (mut agent_config, _subagents) = rhema_subagents::wire(backend.provider(), agent_config);
-    if let Some(assembled) = sandboxed {
+    if let Some(assembled) = sandboxed.as_ref() {
         assembled.apply_workspace(&mut agent_config);
     }
     // The workspace remembers the profile that served it, the same
@@ -628,7 +628,7 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
         max_steps: args.max_steps,
     };
     let outcome = agent.turn(prompt, &mut sink, approval).await;
-    match outcome {
+    let served: anyhow::Result<()> = match outcome {
         Ok(output) => {
             // Checkpoint after the completed turn: the file's freshest
             // complete state, the same shape the TUI leaves.
@@ -678,7 +678,17 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
             }
             Err(err.into())
         }
+    };
+    // Stop-on-exit for the one-shot: a headless run is a session like
+    // the TUI's, and the last holder out — here, always this process —
+    // stops a derived instance. A setup failure before the turn (an
+    // unreadable `--resume`, a backend that will not build) leaves the
+    // instance for the next assembly to find: the safe direction is
+    // up, never killed under a peer.
+    if let Some(mut assembled) = sandboxed {
+        assembled.shutdown();
     }
+    served
 }
 
 /// Where a failed headless turn leaves its partial session when no

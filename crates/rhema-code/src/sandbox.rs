@@ -326,12 +326,32 @@ impl Sandboxed {
             argv.push("--timeout=30".to_owned());
         }
         argv.push(managed.name.clone());
-        let _ = std::process::Command::new(program)
-            .args(&argv)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        // Best effort, but not silent: a stop that could not run — the
+        // client missing, the daemon gone, a refused command — names
+        // itself, so "the instance is still up" has an author on the
+        // terminal the TUI just restored. The safe direction is
+        // unchanged: up, never killed under a peer.
+        match stop_instance(program, &argv) {
+            Ok(true) => {}
+            Ok(false) => eprintln!(
+                "warning: the {} instance stays up: `{program} {}` failed",
+                managed.name,
+                argv.join(" ")
+            ),
+            Err(err) => eprintln!("warning: the {} instance stays up: {err}", managed.name),
+        }
     }
+}
+
+/// Runs one stop command, output discarded. The bool answers "the
+/// command ran and succeeded"; `Err` is the command never starting.
+fn stop_instance(program: &str, argv: &[String]) -> std::io::Result<bool> {
+    std::process::Command::new(program)
+        .args(argv)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
 }
 
 /// The user's global skills directory, when it exists on disk — the
@@ -1328,6 +1348,16 @@ mod tests {
             .map(String::from)
             .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn the_stop_answers_whether_the_command_ran_and_succeeded() {
+        // The PATH's `true` and `false` are the cheapest stand-ins for
+        // `docker stop`/`lxc stop`: the three outcomes a shutdown can
+        // see — clean, failed, never started — each have a shape.
+        assert_eq!(stop_instance("true", &[]).ok(), Some(true));
+        assert_eq!(stop_instance("false", &[]).ok(), Some(false));
+        assert!(stop_instance("rhema-no-such-program", &[]).is_err());
     }
 
     #[test]
