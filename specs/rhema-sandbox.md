@@ -203,6 +203,7 @@ backend.
 | bwrap / nsjail | the same `FsRoot`, a wrapped argv | ~one wrapper each |
 | container, v1 | the `docker` CLI: bind-mount posture = `FsRoot` + `docker exec`; copied posture = `docker cp` | medium |
 | container, later | the Engine API over the unix socket, behind its own seam (the `SandboxApi` precedent) | medium |
+| LXD / Incus | `rhema-sandbox-lxd`: one driver, two instance types. A container takes the docker bind-mount posture (`lxc exec` prefix, a `disk` device mapping the host root in) or the fs-disjoint one via `lxc file`; a `--vm` instance is the same driver with a launch flag — and the first true isolation tier in the offer | medium |
 | VM / microVM | an image running `rhema-sandboxd` — packaging, not code | ~zero |
 | SSH | daemonless: exec = `ssh host -- bash -c` (live lines through the existing pump), files via `ssh cat`/`tee`, seed via `ssh git clone`; or `sandboxd` on the remote behind `ssh -L` — then it *is* `HttpSandbox` | medium / zero |
 | cloud sandboxes | `SandboxDo` (transport unchanged, types from `protocol.rs`); `VercelSandbox` (the vendor adapter, kept) | done |
@@ -245,11 +246,21 @@ sessions` — verified, not workspace-relative), the clipboard, the TUI
 itself. That is the whole migration for `rhema-code`: no state moves;
 only the tool's executor and the prompt's workspace string change.
 
-The v1 set is `local | docker | ssh | http`. bubblewrap/nsjail and VM
-images land later with zero trait change — that is the test the
-abstraction has to pass (§2). SSH ships daemonless first: zero setup on
-the far end is the mode's reason to exist; tunnel-plus-`sandboxd` is the
+The v1 set is `local | docker | ssh | http`, with `lxd` the fifth:
+containers and `--vm` instances are one driver and a launch flag, not
+two kinds in the vocabulary (§9). bubblewrap/nsjail and microVM images
+land later with zero trait change — that is the test the abstraction
+has to pass (§2). SSH ships daemonless first: zero setup on the far
+end is the mode's reason to exist; tunnel-plus-`sandboxd` is the
 documented fast path.
+
+The choice UI advertises the ready set only: `local` and `docker` in
+the settings page, ssh and http out of sight — not absent from the
+contract, just honest about their standing (ssh's working tree has no
+carry story yet, §8; http presumes a daemon to reach). A configured
+kind still runs: `/sandbox <kind>` takes it when the probe offers it,
+and `config.yaml` is where its instance lives. The bar for a kind
+joining the page is a story, not a checkbox.
 
 On safety, plainly: `local` and the mount postures are process hygiene,
 not security boundaries; copied containers and VMs are the real tiers.
@@ -369,3 +380,14 @@ infrastructure); phase 9 is the one users see.
   `put`/`get`, ssh's story still to land) and native (the DO's storage
   IS the workspace; copying there is meaningless). The seam serves
   both; an assembly that assumes one posture everywhere is wrong.
+- **LXD is one driver and a launch flag, not two kinds** — `lxc exec`
+  and `lxc file` speak to containers and `--vm` instances alike, so
+  the instance type lives in the lxd config section, not in the choice
+  vocabulary. The VM type is the point: local and mounts are process
+  hygiene, and an LXD VM is the strongest isolation tier a
+  `rhema-code` host can offer without a cloud.
+- **The settings page advertises the ready set only** — `local` and
+  `docker`; ssh and http keep out of sight while their stories are
+  open. The UI's silence is a feature-status statement, not a
+  capability one: `/sandbox <kind>` still runs a configured kind the
+  probe offers.
