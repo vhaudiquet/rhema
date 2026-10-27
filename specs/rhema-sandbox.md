@@ -262,12 +262,16 @@ name over a kind and that kind's one target — then the add row. The
 add dialog offers the ready kinds only (docker, lxd), ssh and http
 out of the picker — not absent from the contract, just honest about
 their standing (ssh's working tree has no carry story yet, §8; http
-presumes a daemon to reach). What is configured still shows and
-still runs: a stored ssh instance lists with its not-offered mark,
-and `/sandbox <kind>` takes it when the probe offers it. Enter runs
-the row's instance — the section's active pointer names it, so two
-instances of one kind switch without touching the kind — and `d`
-removes the instance outright, the active pointer going with it.
+presumes a daemon to reach) — and asks nothing else: no target is
+collected, because the concrete name is the workspace's to set,
+derived at assembly time and stable across sessions. Pinning a
+target — an existing container, an LXD VM, a host — is config.yaml's
+edit. What is configured still shows and still runs: a stored ssh
+instance lists with its not-offered mark, and `/sandbox <kind>`
+takes it when the probe offers it. Enter runs the row's instance —
+the section's active pointer names it, so two instances of one kind
+switch without touching the kind — and `d` removes the instance
+outright, the active pointer going with it.
 The bar for a kind joining the add dialog is a story, not a
 checkbox.
 

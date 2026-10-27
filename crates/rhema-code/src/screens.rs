@@ -222,15 +222,6 @@ pub enum SandboxDialogAction {
     Close,
 }
 
-/// Which half of the add-sandbox dialog is showing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxDialogStage {
-    /// The kind list: docker, ssh, http — `local` needs nothing added.
-    SelectKind,
-    /// The value input: what the chosen kind names its instance by.
-    EnterValue,
-}
-
 /// The kinds the Sandbox page lists, in the spec's canonical order.
 /// The ready set only: `local` and `docker`. ssh and http are not
 /// ready features — ssh has no carry story for the working tree yet,
@@ -244,30 +235,23 @@ pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[
     crate::args::SandboxChoice::Lxd,
 ];
 
-/// The pop-in dialog over the Sandbox page: pick the kind, then type
-/// what it names its instance by — the container, the `user@host`, or
-/// the daemon URL. Storing is the app's; the dialog collects.
+/// The pop-in dialog over the Sandbox page: pick the kind and be
+/// done. No target is asked — the concrete name is the workspace's
+/// to set, derived at assembly time and stable across sessions, so
+/// the stored instance is "docker for whatever workspace I am in".
+/// Naming an existing instance — pinning a container, an LXD VM, a
+/// host — is config.yaml's edit. Storing is the app's; the dialog
+/// collects nothing else.
 #[derive(Debug)]
 pub struct AddSandboxDialog {
-    /// Which half of the dialog is showing.
-    pub stage: SandboxDialogStage,
     /// The highlighted row of the kind list.
     pub selected: usize,
-    /// The kind being added, from the pick on.
-    pub kind: crate::args::SandboxChoice,
-    /// The line being typed on the value stage.
-    pub input: String,
 }
 
 impl AddSandboxDialog {
     /// A dialog at the kind list.
     pub fn new() -> Self {
-        Self {
-            stage: SandboxDialogStage::SelectKind,
-            selected: 0,
-            kind: SANDBOX_ADD_KINDS[0],
-            input: String::new(),
-        }
+        Self { selected: 0 }
     }
 
     /// The kind the highlighted row stands for.
@@ -275,48 +259,9 @@ impl AddSandboxDialog {
         SANDBOX_ADD_KINDS[self.selected.min(SANDBOX_ADD_KINDS.len() - 1)]
     }
 
-    /// Enter on the kind list: descend into the value input.
-    fn choose_kind(&mut self) {
-        self.kind = self.selected_kind();
-        self.input = String::new();
-        self.stage = SandboxDialogStage::EnterValue;
-    }
-
-    /// The value stage's prompt.
-    pub fn input_label(&self) -> &'static str {
-        match self.kind {
-            crate::args::SandboxChoice::Docker => "container: ",
-            crate::args::SandboxChoice::Lxd => "instance: ",
-            crate::args::SandboxChoice::Ssh => "host: ",
-            crate::args::SandboxChoice::Http => "url: ",
-            crate::args::SandboxChoice::Local => "",
-        }
-    }
-
-    /// The hint under the input, per the stage.
-    pub fn input_hint(&self) -> String {
-        match self.stage {
-            SandboxDialogStage::SelectKind => {
-                "arrows choose · enter to continue · esc cancels".to_owned()
-            }
-            SandboxDialogStage::EnterValue => format!(
-                "{}· ctrl-v paste · enter stores · esc back",
-                self.input_label()
-            ),
-        }
-    }
-
-    /// The accepted kind and value; the app calls this on the Submit
-    /// action. Blank values never reach here (handle_key holds them).
-    pub fn submitted(&self) -> (crate::args::SandboxChoice, String) {
-        (self.kind, self.input.trim().to_owned())
-    }
-
-    /// Bracketed paste onto the value line.
-    pub fn paste(&mut self, text: &str) {
-        if self.stage == SandboxDialogStage::EnterValue {
-            self.input.push_str(text);
-        }
+    /// The accepted kind; the app calls this on the Submit action.
+    pub fn picked(&self) -> crate::args::SandboxChoice {
+        self.selected_kind()
     }
 
     /// Handles one keypress.
@@ -324,46 +269,18 @@ impl AddSandboxDialog {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return SandboxDialogAction::None;
         }
-        match self.stage {
-            SandboxDialogStage::SelectKind => match key.code {
-                KeyCode::Down => {
-                    self.selected = (self.selected + 1).min(SANDBOX_ADD_KINDS.len() - 1);
-                    SandboxDialogAction::None
-                }
-                KeyCode::Up => {
-                    self.selected = self.selected.saturating_sub(1);
-                    SandboxDialogAction::None
-                }
-                KeyCode::Enter => {
-                    self.choose_kind();
-                    SandboxDialogAction::None
-                }
-                KeyCode::Esc => SandboxDialogAction::Close,
-                _ => SandboxDialogAction::None,
-            },
-            SandboxDialogStage::EnterValue => match key.code {
-                KeyCode::Char(c) => {
-                    self.input.push(c);
-                    SandboxDialogAction::None
-                }
-                KeyCode::Backspace => {
-                    self.input.pop();
-                    SandboxDialogAction::None
-                }
-                KeyCode::Enter => {
-                    if self.input.trim().is_empty() {
-                        SandboxDialogAction::None
-                    } else {
-                        SandboxDialogAction::Submit
-                    }
-                }
-                KeyCode::Esc => {
-                    self.stage = SandboxDialogStage::SelectKind;
-                    self.input = String::new();
-                    SandboxDialogAction::None
-                }
-                _ => SandboxDialogAction::None,
-            },
+        match key.code {
+            KeyCode::Down => {
+                self.selected = (self.selected + 1).min(SANDBOX_ADD_KINDS.len() - 1);
+                SandboxDialogAction::None
+            }
+            KeyCode::Up => {
+                self.selected = self.selected.saturating_sub(1);
+                SandboxDialogAction::None
+            }
+            KeyCode::Enter => SandboxDialogAction::Submit,
+            KeyCode::Esc => SandboxDialogAction::Close,
+            _ => SandboxDialogAction::None,
         }
     }
 }
@@ -1277,7 +1194,13 @@ impl SettingsScreen {
                         detail: match (instance.target.as_deref(), vm) {
                             (Some(target), false) => target.to_owned(),
                             (Some(target), true) => format!("{target} · vm"),
-                            (None, _) => "no target set".to_owned(),
+                            (None, true) => "named after this workspace · vm".to_owned(),
+                            (None, _) => match instance.kind.as_str() {
+                                // The ready kinds derive the concrete
+                                // name per workspace at assembly time.
+                                "docker" | "lxd" => "named after this workspace".to_owned(),
+                                _ => "no target set".to_owned(),
+                            },
                         },
                         offered: kind
                             .map(|kind| self.sandbox_offered.offers(kind))
@@ -2808,10 +2731,11 @@ mod tests {
         );
         settings.sandbox_dialog = Some(AddSandboxDialog::new());
         // With the dialog up the rows stop answering: the dialog
-        // takes every key while it is open.
+        // takes every key while it is open, enter reporting the
+        // submit for the app to act on.
         assert_eq!(
             settings.handle_key(key(KeyCode::Enter)),
-            SettingsAction::None
+            SettingsAction::SubmitSandboxDialog
         );
     }
 
@@ -2845,7 +2769,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sandbox_dialog_picks_a_kind_then_collects_a_value() {
+    fn the_sandbox_dialog_picks_a_kind_and_stores_nothing_else() {
         let mut settings = sandbox_screen(
             SandboxAvailability::default(),
             None,
@@ -2853,43 +2777,26 @@ mod tests {
             rhema_config::Profile::default(),
         );
         settings.sandbox_dialog = Some(AddSandboxDialog::new());
-        // Docker is the kind list's only row; enter takes it.
-        settings.handle_key(key(KeyCode::Enter));
-        let dialog = settings.sandbox_dialog.as_ref().expect("still up");
-        assert_eq!(dialog.kind, SandboxChoice::Docker);
-        // A blank value never submits.
-        settings.handle_key(key(KeyCode::Enter));
-        assert!(settings.sandbox_dialog.is_some());
-        // The value types; esc walks back to the kind list and the
-        // next pick clears the line.
-        for c in "box@far".chars() {
-            settings.handle_key(key(KeyCode::Char(c)));
-        }
-        settings.handle_key(key(KeyCode::Esc));
-        let dialog = settings.sandbox_dialog.as_ref().expect("still up");
-        assert_eq!(dialog.stage, SandboxDialogStage::SelectKind);
-        assert!(dialog.input.is_empty());
-        settings.handle_key(key(KeyCode::Enter));
-        for c in "rhema-dev".chars() {
-            settings.handle_key(key(KeyCode::Char(c)));
-        }
+        // Arrows walk the ready kinds; enter reports the submit with
+        // the kind picked — and no value, ever: the concrete name is
+        // the workspace's to set, the app's to derive.
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            settings
+                .sandbox_dialog
+                .as_ref()
+                .expect("up")
+                .selected_kind(),
+            SandboxChoice::Lxd
+        );
+        settings.handle_key(key(KeyCode::Up));
         assert_eq!(
             settings.handle_key(key(KeyCode::Enter)),
             SettingsAction::SubmitSandboxDialog
         );
-        let dialog = settings.sandbox_dialog.as_ref().expect("still up");
-        assert_eq!(
-            dialog.submitted(),
-            (SandboxChoice::Docker, "rhema-dev".to_owned())
-        );
         // The screen keeps the dialog until the app acts on the
-        // submit; here esc walks back to the kind list, and a second
-        // esc closes the dialog.
-        settings.handle_key(key(KeyCode::Esc));
-        assert_eq!(
-            settings.sandbox_dialog.as_ref().expect("still up").stage,
-            SandboxDialogStage::SelectKind
-        );
+        // submit; esc closes it.
+        assert!(settings.sandbox_dialog.is_some());
         settings.handle_key(key(KeyCode::Esc));
         assert!(settings.sandbox_dialog.is_none());
     }

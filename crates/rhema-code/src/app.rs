@@ -1784,20 +1784,18 @@ impl App {
     /// container, the host, or the url — and the snapshot follows.
     /// Storing never activates: enter on a kind row runs `bash` there.
     fn submit_sandbox_instance(&mut self) -> Vec<Effect> {
-        let (kind, value) = match &self.screen {
+        let kind = match &self.screen {
             Screen::Settings(settings) => match &settings.sandbox_dialog {
-                Some(dialog) => dialog.submitted(),
+                Some(dialog) => dialog.picked(),
                 None => return Vec::new(),
             },
             _ => return Vec::new(),
         };
-        if value.is_empty() {
-            return Vec::new();
-        }
-        // The instance's name derives from its target — `rhema-dev`
-        // names the rhema-dev container — with a numeric suffix when
-        // the name is taken. Storing never activates.
-        let mut name = value.clone();
+        // The instance carries no target: the concrete name is the
+        // workspace's to set, derived at assembly time and stable
+        // across sessions. The row's name is the kind's — first free,
+        // `docker-2` once `docker` is taken. Storing never activates.
+        let mut name = kind.stored_name().to_owned();
         let mut suffix = 2;
         while self
             .config
@@ -1805,7 +1803,7 @@ impl App {
             .sandbox_instances
             .contains_key(&name)
         {
-            name = format!("{value}-{suffix}");
+            name = format!("{}-{suffix}", kind.stored_name());
             suffix += 1;
         }
         self.config
@@ -1814,7 +1812,7 @@ impl App {
                     name.clone(),
                     rhema_config::SandboxInstance {
                         kind: kind.stored_name().to_owned(),
-                        target: Some(value.clone()),
+                        target: None,
                         vm: None,
                     },
                 );
@@ -2174,9 +2172,6 @@ impl App {
                     dialog.paste(text);
                 }
                 if let Some(dialog) = &mut settings.add_profile {
-                    dialog.paste(text);
-                }
-                if let Some(dialog) = &mut settings.sandbox_dialog {
                     dialog.paste(text);
                 }
             }
@@ -7033,23 +7028,23 @@ mod tests {
     fn the_sandbox_add_dialog_stores_the_kinds_instance() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/sandbox");
-        // One down: local, add row. Enter opens the dialog; docker is
-        // its first kind.
+        // One down: local, add row. Enter opens the dialog; enter
+        // again stores docker — no name asked, the concrete one is
+        // the workspace's to set at assembly time.
         h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Enter));
-        h.app.on_key(key(KeyCode::Enter)); // pick docker
-        for c in "rhema-dev".chars() {
-            h.app.on_key(key(KeyCode::Char(c)));
-        }
-        h.app.on_key(key(KeyCode::Enter)); // store
+        h.app.on_key(key(KeyCode::Enter)); // store docker
         let stored = h.store.load().unwrap();
         let profile = stored.effective(Some("personal"));
         let instance = profile
             .sandbox_instances
-            .get("rhema-dev")
-            .expect("the instance stored under its target's name");
+            .get("docker")
+            .expect("the instance stored under the kind's name");
         assert_eq!(instance.kind, "docker");
-        assert_eq!(instance.target.as_deref(), Some("rhema-dev"));
+        assert_eq!(
+            instance.target, None,
+            "no target collected: derived per workspace"
+        );
         let sandbox = profile.sandbox.as_ref();
         assert!(
             sandbox
@@ -7066,29 +7061,26 @@ mod tests {
                 .transcript
                 .lines()
                 .iter()
-                .any(|line| matches!(line, Line::Notice(text) if text.contains("rhema-dev"))),
+                .any(|line| matches!(line, Line::Notice(text) if text.contains("docker"))),
             "the notice names the instance"
         );
-        // Same flow, lxd picked: the value is the lxd instance's name,
-        // the launch flag stays unset (config.yaml's call). Two downs
-        // now — rhema-dev's row sits between local and the add row.
+        // Same flow, lxd picked — two downs now, docker's row sits
+        // between local and the add row. Its launch flag stays unset
+        // (config.yaml's call).
         crate::commands::dispatch(&mut h.app, "/sandbox");
         h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Enter));
         h.app.on_key(key(KeyCode::Down));
-        h.app.on_key(key(KeyCode::Enter));
-        for c in "dev-vm".chars() {
-            h.app.on_key(key(KeyCode::Char(c)));
-        }
-        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Enter)); // store lxd
         let stored = h.store.load().unwrap();
         let profile = stored.effective(Some("personal"));
         let instance = profile
             .sandbox_instances
-            .get("dev-vm")
+            .get("lxd")
             .expect("the lxd instance stored");
         assert_eq!(instance.kind, "lxd");
+        assert_eq!(instance.target, None);
         assert_eq!(instance.vm, None, "the instance type stays config's");
     }
 

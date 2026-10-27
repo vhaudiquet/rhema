@@ -413,12 +413,7 @@ fn render_add_sandbox_dialog(
     dialog: &crate::screens::AddSandboxDialog,
     theme: &Theme,
 ) {
-    let body: u16 = match dialog.stage {
-        crate::screens::SandboxDialogStage::SelectKind => {
-            2 + crate::screens::SANDBOX_ADD_KINDS.len() as u16
-        }
-        crate::screens::SandboxDialogStage::EnterValue => 2,
-    };
+    let body: u16 = 2 + crate::screens::SANDBOX_ADD_KINDS.len() as u16;
     let area = centered(58, body + 2, frame.area());
     frame.render_widget(Clear, area);
     let block = Block::default()
@@ -432,42 +427,29 @@ fn render_add_sandbox_dialog(
 
     let [body_area, status_area] =
         Layout::vertical([Constraint::Length(body), Constraint::Length(1)]).areas(inner);
-    match dialog.stage {
-        crate::screens::SandboxDialogStage::SelectKind => {
-            let rows: Vec<Line> = crate::screens::SANDBOX_ADD_KINDS
-                .iter()
-                .enumerate()
-                .map(|(index, kind)| {
-                    let selected = index == dialog.selected;
-                    let mark = if selected { "❯ " } else { "  " };
-                    let what = match kind {
-                        crate::args::SandboxChoice::Docker => "a container, by name",
-                        crate::args::SandboxChoice::Lxd => "an LXD instance, by name",
-                        crate::args::SandboxChoice::Ssh => "a remote box, by user@host",
-                        crate::args::SandboxChoice::Http => "a rhema-sandboxd, by url",
-                        crate::args::SandboxChoice::Local => "this host",
-                    };
-                    Line::from(vec![
-                        Span::raw(mark).fg(theme.accent_text),
-                        Span::raw(kind.stored_name().to_owned()).fg(theme.text),
-                        Span::raw(format!("  {what}")).fg(theme.text3),
-                    ])
-                })
-                .collect();
-            frame.render_widget(Paragraph::new(rows), body_area);
-        }
-        crate::screens::SandboxDialogStage::EnterValue => {
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::raw(dialog.input_label()).fg(theme.text3),
-                    Span::raw(dialog.input.clone()).bold(),
-                ])),
-                body_area,
-            );
-        }
-    }
+    let rows: Vec<Line> = crate::screens::SANDBOX_ADD_KINDS
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| {
+            let selected = index == dialog.selected;
+            let mark = if selected { "❯ " } else { "  " };
+            let what = match kind {
+                crate::args::SandboxChoice::Docker => "a container, named after this workspace",
+                crate::args::SandboxChoice::Lxd => "an LXD instance, named after this workspace",
+                crate::args::SandboxChoice::Ssh => "a remote box, by user@host",
+                crate::args::SandboxChoice::Http => "a rhema-sandboxd, by url",
+                crate::args::SandboxChoice::Local => "this host",
+            };
+            Line::from(vec![
+                Span::raw(mark).fg(theme.accent_text),
+                Span::raw(kind.stored_name().to_owned()).fg(theme.text),
+                Span::raw(format!("  {what}")).fg(theme.text3),
+            ])
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), body_area);
     frame.render_widget(
-        Paragraph::new(dialog.input_hint()).fg(theme.text3),
+        Paragraph::new("arrows choose · enter stores · esc cancels").fg(theme.text3),
         status_area,
     );
 }
