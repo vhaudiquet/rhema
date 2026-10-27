@@ -302,8 +302,15 @@ impl Sandboxed {
     /// a failed stop leaves the instance for the next assembly to find,
     /// which the safe direction — up, never killed under a peer.
     pub fn shutdown(&mut self) {
+        // RHEMA_SANDBOX_TRACE=1 makes every no-stop decision say why on
+        // stderr; the failures already speak for themselves.
+        let trace = std::env::var_os("RHEMA_SANDBOX_TRACE")
+            .is_some_and(|value| value == "1" || value == "true");
         let Some(managed) = self.managed.take() else {
             self.instance_lock = None;
+            if trace {
+                eprintln!("sandbox: the profile names this instance; leaving it running");
+            }
             return;
         };
         let Some(lock) = self.instance_lock.take() else {
@@ -312,7 +319,16 @@ impl Sandboxed {
         if !lock.is_sole() {
             // A peer holds the session open: the instance is its
             // problem now, and this process's hold releases on the drop.
+            if trace {
+                eprintln!(
+                    "sandbox: a peer still holds {}; leaving it running",
+                    managed.name
+                );
+            }
             return;
+        }
+        if trace {
+            eprintln!("sandbox: stopping {}", managed.name);
         }
         let program = match managed.kind {
             ManagedKind::Docker => "docker",
@@ -332,7 +348,11 @@ impl Sandboxed {
         // terminal the TUI just restored. The safe direction is
         // unchanged: up, never killed under a peer.
         match stop_instance(program, &argv) {
-            Ok(true) => {}
+            Ok(true) => {
+                if trace {
+                    eprintln!("sandbox: stopped {}", managed.name);
+                }
+            }
             Ok(false) => eprintln!(
                 "warning: the {} instance stays up: `{program} {}` failed",
                 managed.name,
