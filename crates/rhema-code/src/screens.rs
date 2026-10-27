@@ -562,6 +562,8 @@ pub enum SettingsAction {
     SelectSandbox(crate::args::SandboxChoice),
     /// Enter on the sandbox add row: the add-sandbox dialog opens.
     OpenSandboxDialog,
+    /// `d` on a sandbox kind row: unset the kind's stored instance.
+    DeleteSandboxInstance,
     /// The add-sandbox dialog accepted a kind and value: store it.
     SubmitSandboxDialog,
     /// Esc left the add-sandbox dialog.
@@ -1472,6 +1474,9 @@ impl SettingsScreen {
             }
             KeyCode::Char('d') if self.selected_profile().is_some() => {
                 SettingsAction::RemoveProfile
+            }
+            KeyCode::Char('d') if self.selected_sandbox().is_some() => {
+                SettingsAction::DeleteSandboxInstance
             }
             KeyCode::Char('c') if self.selected_profile().is_some() => {
                 SettingsAction::CycleProfileColor
@@ -2724,6 +2729,29 @@ mod tests {
         // takes every key while it is open.
         assert_eq!(
             settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::None
+        );
+    }
+
+    #[test]
+    fn sandbox_d_reports_the_delete_and_the_add_row_stays_inert() {
+        let mut settings = sandbox_screen(
+            offered(false, true, false),
+            None,
+            SandboxChoice::Local,
+            rhema_config::Profile::default(),
+        );
+        // One down to docker: d reports the delete.
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('d'))),
+            SettingsAction::DeleteSandboxInstance
+        );
+        // The add row has no instance to unset: one down from docker.
+        settings.handle_key(key(KeyCode::Down));
+        assert_eq!(settings.selected_sandbox(), None, "the add row");
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Char('d'))),
             SettingsAction::None
         );
     }

@@ -1821,6 +1821,65 @@ impl App {
         Vec::new()
     }
 
+    /// `d` on a Sandbox page kind row: unset the kind's stored
+    /// instance — the container, the instance, the host, or the url.
+    /// Config only: the session already running there keeps running,
+    /// and the stored kind stays put; the next assembly under that
+    /// kind asks for its instance again (docker derives one, ssh
+    /// refuses loudly until a host is stored).
+    fn delete_sandbox_instance(&mut self) -> Vec<Effect> {
+        let choice = match &self.screen {
+            Screen::Settings(settings) => settings.selected_sandbox(),
+            _ => return Vec::new(),
+        };
+        let Some(choice) = choice else {
+            return Vec::new();
+        };
+        if choice == SandboxChoice::Local {
+            self.transcript
+                .push_notice("the local sandbox has nothing to unset");
+            return Vec::new();
+        }
+        let had = self
+            .config
+            .effective(self.session_profile.as_deref())
+            .sandbox
+            .as_ref()
+            .map(|sandbox| match choice {
+                SandboxChoice::Docker => sandbox.container.is_some(),
+                SandboxChoice::Ssh => sandbox.host.is_some(),
+                SandboxChoice::Http => sandbox.url.is_some(),
+                SandboxChoice::Local => false,
+            })
+            .unwrap_or(false);
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |profile| {
+                let Some(sandbox) = profile.sandbox.as_mut() else {
+                    return;
+                };
+                match choice {
+                    SandboxChoice::Docker => sandbox.container = None,
+                    SandboxChoice::Ssh => sandbox.host = None,
+                    SandboxChoice::Http => sandbox.url = None,
+                    SandboxChoice::Local => {}
+                }
+            });
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        if had {
+            self.transcript.push_notice(&format!(
+                "the {} sandbox instance is unset",
+                choice.stored_name()
+            ));
+        }
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.stored = self.config.effective(self.session_profile.as_deref());
+        }
+        Vec::new()
+    }
+
     /// `d` on a Profiles page row: forget the profile. The one this
     /// session runs on stays — the session's identity is not dropped
     /// from under it, and that refusal is also what keeps the registry
@@ -2276,6 +2335,7 @@ impl App {
             }
             SettingsAction::SubmitSandboxDialog => self.submit_sandbox_instance(),
             SettingsAction::CloseSandboxDialog => Vec::new(),
+            SettingsAction::DeleteSandboxInstance => self.delete_sandbox_instance(),
             SettingsAction::EditSubagent => self.edit_subagent(),
             SettingsAction::ToggleSkill => {
                 let name = match &self.screen {
@@ -6792,6 +6852,49 @@ mod tests {
             "enter on docker assembles it"
         );
         assert!(matches!(h.app.screen, Screen::Chat), "enter returns");
+    }
+
+    #[test]
+    fn sandbox_d_unsets_the_stored_instance_and_keeps_the_kind() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        // A stored docker instance to delete.
+        h.app.config.set_for_profile(Some("personal"), |profile| {
+            profile.sandbox = Some(rhema_config::SandboxSettings {
+                kind: Some("docker".to_owned()),
+                container: Some("rhema-dev".to_owned()),
+                ..rhema_config::SandboxSettings::default()
+            });
+        });
+        h.store.save(&h.app.config).unwrap();
+        crate::commands::dispatch(&mut h.app, "/sandbox");
+        // One down to the docker row, then d.
+        h.app.on_key(key(KeyCode::Down));
+        h.app.on_key(key(KeyCode::Char('d')));
+        let stored = h.store.load().unwrap();
+        let profile = stored.effective(Some("personal"));
+        let sandbox = profile.sandbox.as_ref().expect("the section stays");
+        assert_eq!(sandbox.container, None, "the instance is unset");
+        assert_eq!(
+            sandbox.kind.as_deref(),
+            Some("docker"),
+            "the kind stays put"
+        );
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .iter()
+                .any(|line| matches!(line, Line::Notice(text) if text.contains("unset"))),
+            "the notice says what happened"
+        );
+        // d on local refuses: it has nothing to unset.
+        h.app.on_key(key(KeyCode::Up));
+        h.app.on_key(key(KeyCode::Char('d')));
+        assert!(
+            h.app.transcript.lines().iter().any(
+                |line| matches!(line, Line::Notice(text) if text.contains("nothing to unset"))
+            ),
+        );
     }
 
     #[test]

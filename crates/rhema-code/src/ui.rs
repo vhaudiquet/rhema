@@ -1399,7 +1399,9 @@ fn settings_page(
             lines.push(Line::default());
             (
                 lines,
-                footer("enter runs bash here · ssh and http stay in config.yaml"),
+                footer(
+                    "enter runs bash here · d unsets the instance · ssh and http stay in config.yaml",
+                ),
                 row_hits,
             )
         }
