@@ -103,6 +103,27 @@ impl fmt::Debug for ProviderInstance {
     }
 }
 
+/// One named place `bash` can run: a user-chosen name over a kind and
+/// whatever that kind needs — the sandbox twin of
+/// [`ProviderInstance`]. `local` needs no record: the local instance
+/// exists by doing nothing.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxInstance {
+    /// Which kind runs here: `docker`, `lxd`, `ssh`, or `http`. Stored
+    /// as given — unknown spellings are the consumer's to resolve or
+    /// reject.
+    pub kind: String,
+    /// What the kind names its instance by: the docker container, the
+    /// LXD instance, the ssh host, or the http URL. Whitespace-only
+    /// values count as unset at use time.
+    pub target: Option<String>,
+    /// Whether an `lxd` instance is a virtual machine — the launch
+    /// flag the assembly stands it up with. Unset is a container, and
+    /// every other kind ignores it.
+    pub vm: Option<bool>,
+}
+
 /// Where `bash` runs when a frontend honors the stored choice: the
 /// [`Profile`] section behind the sandbox kinds `local`, `docker`,
 /// `ssh`, and `http`. Every field is stored as a string and validated
@@ -117,6 +138,12 @@ pub struct SandboxSettings {
     /// The name is stored as given — unknown spellings are the
     /// consumer's to resolve or reject.
     pub kind: Option<String>,
+    /// The name of the active sandbox instance in
+    /// [`Profile::sandbox_instances`] — the one `bash` runs in. Must
+    /// name an instance of `kind` to count; `None` is the section's
+    /// own single-instance form (the facts below), the shape this map
+    /// grew out of.
+    pub active: Option<String>,
     /// The `http` sandbox's base URL.
     pub url: Option<String>,
     /// A literal bearer token for the `http` sandbox — the fallback
@@ -191,6 +218,11 @@ pub struct Profile {
     /// are the same behavior; the choice machinery engages only
     /// non-local kinds.
     pub sandbox: Option<SandboxSettings>,
+    /// The named places `bash` can run, keyed by a user-chosen name —
+    /// the sandbox twin of [`Profile::instances`]. Absent from the
+    /// file while empty: most profiles never leave `local`.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub sandbox_instances: BTreeMap<String, SandboxInstance>,
 }
 
 impl fmt::Debug for Profile {
@@ -340,6 +372,47 @@ impl Profile {
         let removed = self.instances.remove(name);
         if removed.is_some() && self.instance.as_deref() == Some(name) {
             self.instance = None;
+        }
+        removed
+    }
+
+    /// The sandbox instance a non-local `kind` runs in: the active one
+    /// when it is of that kind, else the first stored instance of it,
+    /// else `None` — the section's own facts (or the derived name) are
+    /// the caller's fallback, the single-instance form this map grew
+    /// out of.
+    pub fn sandbox_instance_for(&self, kind: &str) -> Option<(&str, &SandboxInstance)> {
+        if let Some(name) = self.sandbox.as_ref().and_then(|s| s.active.as_deref()) {
+            if let Some(instance) = self.sandbox_instances.get(name) {
+                if instance.kind == kind {
+                    return Some((name, instance));
+                }
+            }
+        }
+        self.sandbox_instances
+            .iter()
+            .find(|(_, instance)| instance.kind == kind)
+            .map(|(name, instance)| (name.as_str(), instance))
+    }
+
+    /// Inserts or replaces the named sandbox instance. The caller
+    /// keeps `sandbox.kind`/`sandbox.active` coherent — a new active
+    /// instance must be of the stored kind.
+    pub fn place_sandbox_instance(&mut self, name: impl Into<String>, instance: SandboxInstance) {
+        self.sandbox_instances.insert(name.into(), instance);
+    }
+
+    /// Removes the named sandbox instance, clearing the sandbox
+    /// section's active pointer when it named the removed one. Returns
+    /// the removed record, `None` for a name that was not there.
+    pub fn remove_sandbox_instance(&mut self, name: &str) -> Option<SandboxInstance> {
+        let removed = self.sandbox_instances.remove(name);
+        if removed.is_some() {
+            if let Some(sandbox) = self.sandbox.as_mut() {
+                if sandbox.active.as_deref() == Some(name) {
+                    sandbox.active = None;
+                }
+            }
         }
         removed
     }
@@ -1201,6 +1274,7 @@ mod tests {
             profiles: BTreeMap::from([(
                 "personal".to_owned(),
                 Profile {
+                    sandbox_instances: BTreeMap::new(),
                     provider: Some("llama-cpp".into()),
                     instance: Some("home server".into()),
                     instances: BTreeMap::from([
@@ -1296,6 +1370,84 @@ mod tests {
             let mode = std::fs::metadata(&path).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600, "credentials file must be 0600");
         }
+    }
+
+    #[test]
+    fn the_sandbox_instance_resolves_through_the_active_name_then_the_first() {
+        let mut profile = Profile::default();
+        profile.sandbox = Some(SandboxSettings {
+            kind: Some("lxd".into()),
+            active: Some("dev-vm".into()),
+            ..SandboxSettings::default()
+        });
+        profile.place_sandbox_instance(
+            "dev-vm",
+            SandboxInstance {
+                kind: "lxd".into(),
+                target: Some("dev".into()),
+                vm: Some(true),
+            },
+        );
+        profile.place_sandbox_instance(
+            "build",
+            SandboxInstance {
+                kind: "lxd".into(),
+                target: Some("build".into()),
+                vm: None,
+            },
+        );
+        // The active pointer names the one.
+        let (name, instance) = profile.sandbox_instance_for("lxd").unwrap();
+        assert_eq!(name, "dev-vm");
+        assert_eq!(instance.target.as_deref(), Some("dev"));
+        // A pointer at a different kind falls through to the first of
+        // the kind asked for.
+        profile.sandbox.as_mut().unwrap().active = Some("build".into());
+        let (name, instance) = profile.sandbox_instance_for("lxd").unwrap();
+        assert_eq!(name, "build", "the pointer names an lxd instance");
+        assert_eq!(instance.target.as_deref(), Some("build"));
+        profile.sandbox.as_mut().unwrap().active = Some("gone".into());
+        let (name, _) = profile.sandbox_instance_for("lxd").unwrap();
+        assert_eq!(name, "build", "a dangling pointer falls through");
+        // No instance of the kind: the section's facts are the
+        // caller's fallback.
+        assert_eq!(profile.sandbox_instance_for("docker"), None);
+    }
+
+    #[test]
+    fn removing_a_sandbox_instance_clears_the_active_pointer() {
+        let mut profile = Profile::default();
+        profile.sandbox = Some(SandboxSettings {
+            kind: Some("lxd".into()),
+            active: Some("dev-vm".into()),
+            ..SandboxSettings::default()
+        });
+        profile.place_sandbox_instance(
+            "dev-vm",
+            SandboxInstance {
+                kind: "lxd".into(),
+                target: Some("dev".into()),
+                vm: None,
+            },
+        );
+        profile.place_sandbox_instance(
+            "build",
+            SandboxInstance {
+                kind: "lxd".into(),
+                target: Some("build".into()),
+                vm: None,
+            },
+        );
+        let removed = profile.remove_sandbox_instance("dev-vm").unwrap();
+        assert_eq!(removed.target.as_deref(), Some("dev"));
+        assert_eq!(
+            profile.sandbox.as_ref().unwrap().active,
+            None,
+            "the pointer went with it"
+        );
+        assert_eq!(profile.sandbox_instance_for("lxd").unwrap().0, "build");
+        // Removing a name that is not there removes nothing.
+        assert!(profile.remove_sandbox_instance("dev-vm").is_none());
     }
 
     #[test]
@@ -1900,6 +2052,7 @@ mod tests {
                     token_ref: Some("ref-sandbox".into()),
                     host: Some("deploy@box".into()),
                     container: Some("rhema-dev".into()),
+                    active: Some("dev-vm".into()),
                     instance: Some("dev-vm".into()),
                     vm: Some(true),
                 }),
@@ -1987,6 +2140,7 @@ mod tests {
             token_ref: Some("ref-sandbox".into()),
             host: Some(" deploy@box ".into()),
             container: Some(" rhema-dev ".into()),
+            active: None,
             instance: Some(" dev-vm ".into()),
             vm: Some(true),
         });
