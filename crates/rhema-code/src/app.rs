@@ -2133,7 +2133,10 @@ impl App {
             Screen::Settings(settings) => Routed::Settings(settings.handle_key(key)),
             Screen::Chat => {
                 let profiles = self.palette_profiles();
-                Routed::Chat(self.chat.handle_key(key, &self.models, &profiles))
+                Routed::Chat(
+                    self.chat
+                        .handle_key(key, &self.models, &profiles, self.icons),
+                )
             }
         };
         match routed {

@@ -156,11 +156,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         Screen::Onboarding(wizard) => render_onboarding(
             frame,
             wizard,
+            icons,
             &theme,
             &mut app.logo_rect,
             &mut onboarding_hits,
         ),
-        Screen::Picker(picker) => render_picker(frame, picker, &theme),
+        Screen::Picker(picker) => render_picker(frame, picker, icons, &theme),
         Screen::Profile(profile) => render_profile_picker(frame, profile, &theme),
         Screen::Sandbox(sandbox) => render_sandbox_picker(frame, sandbox, &theme),
         Screen::Resume(resume) => render_resume_picker(frame, resume, &theme),
@@ -408,7 +409,12 @@ fn render_add_profile_dialog(
     frame.render_widget(Paragraph::new(status), status_area);
 }
 
-fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
+fn render_picker(
+    frame: &mut Frame,
+    picker: &PickerScreen,
+    icons: &crate::icons::Icons,
+    theme: &Theme,
+) {
     let area = frame.area();
     let block = crate::chrome::panel(Some("select a model"), theme);
     let inner = block.inner(area);
@@ -441,7 +447,7 @@ fn render_picker(frame: &mut Frame, picker: &PickerScreen, theme: &Theme) {
     let filtered = picker.filtered();
     let rows: Vec<ListItem> = filtered
         .iter()
-        .map(|entry| ListItem::new(model_row(entry.provider, &entry.model, theme)))
+        .map(|entry| ListItem::new(model_row(entry.provider, &entry.model, icons, theme)))
         .collect();
     let mut state = ListState::default();
     state.select(Some(picker.selected));
@@ -665,6 +671,7 @@ const ONBOARDING_LOGO_ROWS: u16 = 10;
 fn render_onboarding(
     frame: &mut Frame,
     wizard: &crate::onboarding::OnboardingScreen,
+    icons: &crate::icons::Icons,
     theme: &Theme,
     logo_rect: &mut Option<Rect>,
     hits: &mut Vec<(Rect, crate::app::OnboardingHit)>,
@@ -740,7 +747,7 @@ fn render_onboarding(
         rail_area,
     );
 
-    let (body, footer) = onboarding_body(wizard, theme, text_width);
+    let (body, footer) = onboarding_body(wizard, icons, theme, text_width);
     frame.render_widget(
         Paragraph::new(body).block(Block::default().padding(Padding::new(2, 2, 1, 0))),
         content_area,
@@ -796,6 +803,7 @@ fn connected_lines(
 /// modal shows, in the wizard's own pane.
 fn onboarding_body(
     wizard: &crate::onboarding::OnboardingScreen,
+    icons: &crate::icons::Icons,
     theme: &Theme,
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<Span<'static>>) {
@@ -950,7 +958,7 @@ fn onboarding_body(
                 let selected = index == wizard.row;
                 let mut line = Line::from(vec![crate::chrome::marker(selected, theme)]);
                 line.spans
-                    .extend(model_row(entry.provider, &entry.model, theme).spans);
+                    .extend(model_row(entry.provider, &entry.model, icons, theme).spans);
                 if selected {
                     line = line.style(Style::default().bg(theme.elevated));
                 }
@@ -1897,14 +1905,26 @@ fn render_user(text: &str, images: &[Image], theme: &Theme) -> Vec<Line<'static>
 }
 
 /// One picker row: `provider/` dim, id bright, then display name, price,
-/// and context window dim.
-fn model_row(provider: &str, model: &ModelCard, theme: &Theme) -> Line<'static> {
+/// the vision verdict, and context window dim. The verdict is tri-state
+/// like the catalog's: `None` — the common case — says nothing, because
+/// unknown is not a verdict.
+fn model_row(
+    provider: &str,
+    model: &ModelCard,
+    icons: &crate::icons::Icons,
+    theme: &Theme,
+) -> Line<'static> {
     let mut details = String::new();
     if let Some(pricing) = model.pricing {
         details.push_str(&format!(
             "${:.2}/M in · ${:.2}/M out · ",
             pricing.input_per_mtok, pricing.output_per_mtok
         ));
+    }
+    match model.supports_vision {
+        Some(true) => details.push_str(&format!("{} vision · ", icons.vision)),
+        Some(false) => details.push_str("no vision · "),
+        None => {}
     }
     details.push_str(&format!("{} ctx", format_tokens(model.input_token_limit)));
     Line::from(vec![
@@ -2433,8 +2453,13 @@ fn thinking_rows(app: &App, width: usize) -> u16 {
 /// Tab completes, enter runs.
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme: &Theme) {
     let profiles = app.palette_profiles();
-    let rows =
-        crate::screens::palette_rows(&app.chat.input, app.chat.cursor, &app.models, &profiles);
+    let rows = crate::screens::palette_rows(
+        &app.chat.input,
+        app.chat.cursor,
+        &app.models,
+        &profiles,
+        app.icons,
+    );
     if rows.is_empty() {
         return;
     }
@@ -3086,6 +3111,31 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_picker_row_names_the_vision_verdict_only_when_known() {
+        let mut card = model("m");
+        let row_text = |card: &ModelCard| {
+            model_row("google", card, &crate::icons::UNICODE, &DARK)
+                .spans
+                .iter()
+                .map(|span| span.content.to_string())
+                .collect::<String>()
+        };
+        // Unknown says nothing: unknown is not a verdict.
+        assert!(!row_text(&card).contains("vision"), "{}", row_text(&card));
+
+        card.supports_vision = Some(true);
+        assert!(row_text(&card).contains("◉ vision"), "{}", row_text(&card));
+
+        card.supports_vision = Some(false);
+        let row = row_text(&card);
+        assert!(row.contains("no vision"), "{row}");
+        assert!(
+            !row.contains("◉"),
+            "the badge is earned, not the note: {row}"
+        );
+    }
+
     /// The Usage page's detailed split: the subtitle, the six rows as
     /// percentages of the total with their kilo-scaled amounts.
     #[test]
@@ -3364,7 +3414,16 @@ mod tests {
         let mut logo_rect = None;
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
-            .draw(|frame| render_onboarding(frame, &wizard, &DARK, &mut logo_rect, &mut Vec::new()))
+            .draw(|frame| {
+                render_onboarding(
+                    frame,
+                    &wizard,
+                    &crate::icons::UNICODE,
+                    &DARK,
+                    &mut logo_rect,
+                    &mut Vec::new(),
+                )
+            })
             .unwrap();
         let text: String = (0..30)
             .map(|y| {
@@ -3405,7 +3464,16 @@ mod tests {
         wizard.go(crate::onboarding::OnboardingStep::Skills);
         let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
         terminal
-            .draw(|frame| render_onboarding(frame, &wizard, &DARK, &mut logo_rect, &mut Vec::new()))
+            .draw(|frame| {
+                render_onboarding(
+                    frame,
+                    &wizard,
+                    &crate::icons::UNICODE,
+                    &DARK,
+                    &mut logo_rect,
+                    &mut Vec::new(),
+                )
+            })
             .unwrap();
         let text: String = (0..30)
             .map(|y| {
@@ -3522,7 +3590,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
-            .draw(|frame| render_picker(frame, &picker, &DARK))
+            .draw(|frame| render_picker(frame, &picker, &crate::icons::UNICODE, &DARK))
             .unwrap();
         let rows: Vec<String> = (0..12)
             .map(|y| {
@@ -3557,7 +3625,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
-            .draw(|frame| render_picker(frame, &picker, &DARK))
+            .draw(|frame| render_picker(frame, &picker, &crate::icons::UNICODE, &DARK))
             .unwrap();
         let footer: String = (0..80)
             .map(|x| terminal.backend().buffer()[(x, 10)].symbol())
@@ -3582,7 +3650,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal
-            .draw(|frame| render_picker(frame, &picker, &DARK))
+            .draw(|frame| render_picker(frame, &picker, &crate::icons::UNICODE, &DARK))
             .unwrap();
         let rows: Vec<String> = (0..12)
             .map(|y| {
@@ -4591,7 +4659,12 @@ mod scroll_tests {
         });
         assert!(!app.models.is_empty(), "the catalog is cached");
         for c in "/model ".chars() {
-            app.chat.handle_key(key(KeyCode::Char(c)), &app.models, &[]);
+            app.chat.handle_key(
+                key(KeyCode::Char(c)),
+                &app.models,
+                &[],
+                &crate::icons::UNICODE,
+            );
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();
@@ -4616,7 +4689,12 @@ mod scroll_tests {
         }
         let mut app = chat_app();
         for c in "/thinking ".chars() {
-            app.chat.handle_key(key(KeyCode::Char(c)), &app.models, &[]);
+            app.chat.handle_key(
+                key(KeyCode::Char(c)),
+                &app.models,
+                &[],
+                &crate::icons::UNICODE,
+            );
         }
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();
@@ -4644,7 +4722,8 @@ mod scroll_tests {
         // selection on /resume (the /sandbox row sits beside /profile
         // now), and the window must have followed it.
         for _ in 0..9 {
-            app.chat.handle_key(key(KeyCode::Down), &[], &[]);
+            app.chat
+                .handle_key(key(KeyCode::Down), &[], &[], &crate::icons::UNICODE);
         }
         assert_eq!(app.chat.palette_index, 9);
         let backend = TestBackend::new(60, 24);
