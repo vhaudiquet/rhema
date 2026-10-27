@@ -17,6 +17,12 @@
 //! `delta.content` for text, a final chunk with `finish_reason: "stop"`,
 //! then `data: [DONE]`); `stream: false` answers one completion object
 //! once the turn's end marker arrives.
+//!
+//! The last user message may carry OpenAI's image parts
+//! (`{"type": "image_url", "image_url": {"url": ...}}`). Only inline
+//! `data:` URIs ride — the crate carries images inline, so a remote
+//! http(s) url is skipped — and the same budget as the messages route
+//! applies.
 
 use std::time::Duration;
 
@@ -25,6 +31,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
+use rhema_core::ImageMediaType;
 use rhema_rsd::{KeyState, ResourceKey};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -32,7 +39,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::hub::TurnEvent;
-use crate::interactive::KEY_PREFIX;
+use crate::interactive::{KEY_PREFIX, WireImage};
 
 /// How long the non-stream path waits for the turn's end marker. Turns
 /// can legitimately run minutes of shell work; a web UI's default
@@ -90,6 +97,17 @@ impl ChatContent {
                 .join(""),
         }
     }
+
+    /// The message's inline images, in part order: every part whose
+    /// `image_url` is a `data:` URI with a parseable image mime. A
+    /// remote url and an unknown mime are skipped, not errors — the
+    /// crate carries images inline only.
+    pub fn images(&self) -> Vec<WireImage> {
+        match self {
+            ChatContent::Text(_) => Vec::new(),
+            ChatContent::Parts(parts) => parts.iter().filter_map(|part| part.image()).collect(),
+        }
+    }
 }
 
 /// One content part; unknown parts carry no readable text.
@@ -98,15 +116,56 @@ pub struct ChatPart {
     /// The part's text, for `{"type": "text"}` parts.
     #[serde(default)]
     pub text: Option<String>,
+    /// The part's image reference, for `{"type": "image_url"}` parts.
+    #[serde(default)]
+    pub image_url: Option<ChatImageUrl>,
 }
 
-/// The last `user` message's text — the only input a turn gets.
-pub fn last_user_text(messages: &[ChatMessage]) -> Option<String> {
+/// OpenAI's image part payload: `{"url": ...}`.
+#[derive(Debug, Deserialize)]
+pub struct ChatImageUrl {
+    /// A `data:{mime};base64,{body}` URI is the one shape the claw
+    /// carries; anything else parses as no image at all.
+    pub url: String,
+}
+
+impl ChatPart {
+    /// The part's inline image, when it is one: an `image_url` part
+    /// carrying a `data:{mime};base64,{body}` URI whose mime parses as
+    /// an image format. The body rides as bare base64, exactly what
+    /// the provider APIs take.
+    fn image(&self) -> Option<WireImage> {
+        let uri = self.image_url.as_ref()?.url.trim();
+        let rest = uri.strip_prefix("data:")?;
+        let (meta, body) = rest.split_once(',')?;
+        let mime = meta.strip_suffix(";base64")?;
+        let media_type = ImageMediaType::parse(mime)?;
+        Some(WireImage {
+            media_type: media_type.as_str().to_owned(),
+            data: body.to_owned(),
+        })
+    }
+}
+
+/// The input one turn runs on, as the shim cut it from the request's
+/// last `user` entry.
+pub struct UserInput {
+    /// The text parts, joined.
+    pub text: String,
+    /// The inline images, in part order.
+    pub images: Vec<WireImage>,
+}
+
+/// The last `user` message's input — the only input a turn gets.
+pub fn last_user_input(messages: &[ChatMessage]) -> Option<UserInput> {
     messages
         .iter()
         .rev()
         .find(|message| message.role == "user")
-        .map(|message| message.content.text())
+        .map(|message| UserInput {
+            text: message.content.text(),
+            images: message.content.images(),
+        })
 }
 
 /// The completion/chunk id: `chatcmpl-` plus a process-unique suffix.
@@ -168,12 +227,18 @@ pub async fn chat_completions(
     State(state): State<crate::http::ClawState>,
     Json(request): Json<ChatRequest>,
 ) -> Response {
-    let Some(text) = last_user_text(&request.messages).filter(|t| !t.trim().is_empty()) else {
+    let Some(input) = last_user_input(&request.messages).filter(|i| !i.text.trim().is_empty())
+    else {
         return error_response(
             StatusCode::BAD_REQUEST,
             "no usable user message: the shim reads only the last `user` entry",
         );
     };
+    // The same image budget the messages route keeps; the message must
+    // still carry text, so an images-only request is refused above.
+    if let Err(reason) = crate::http::validate_images(&input.images) {
+        return error_response(StatusCode::BAD_REQUEST, &reason);
+    }
     let user = request
         .user
         .as_deref()
@@ -191,11 +256,11 @@ pub async fn chat_completions(
     // Subscribe first, ingest second, drain third — the same contract
     // the messages route keeps.
     let mut receiver = state.hub().subscribe(&key);
-    if let Err(err) =
-        state
-            .dispatcher()
-            .ingest(crate::interactive::user_event(key.as_str(), &text, &[]))
-    {
+    if let Err(err) = state.dispatcher().ingest(crate::interactive::user_event(
+        key.as_str(),
+        &input.text,
+        &input.images,
+    )) {
         return error_response(StatusCode::INTERNAL_SERVER_ERROR, &err.to_string());
     }
     if let Err(err) = crate::http::drain(state.driver(), state.dispatcher(), &key).await {
@@ -360,9 +425,14 @@ mod tests {
             message("assistant", ChatContent::Text("no".into())),
             message("user", ChatContent::Text("second".into())),
         ];
-        assert_eq!(last_user_text(&messages).as_deref(), Some("second"));
-        assert_eq!(last_user_text(&messages[0..1]).as_deref(), None);
-        assert_eq!(last_user_text(&[]), None);
+        let read = |slice: &[ChatMessage]| {
+            last_user_input(slice)
+                .filter(|input| !input.text.trim().is_empty())
+                .map(|input| input.text)
+        };
+        assert_eq!(read(&messages).as_deref(), Some("second"));
+        assert_eq!(read(&messages[0..1]), None);
+        assert_eq!(read(&[]), None);
     }
 
     #[test]
@@ -370,16 +440,82 @@ mod tests {
         let parts = ChatContent::Parts(vec![
             ChatPart {
                 text: Some("look ".into()),
+                image_url: None,
             },
             ChatPart {
-                text: None, // an image part, say
+                text: None,
+                image_url: Some(ChatImageUrl {
+                    url: "data:image/png;base64,cG5n".into(),
+                }),
             },
             ChatPart {
                 text: Some("here".into()),
+                image_url: None,
             },
         ]);
         assert_eq!(parts.text(), "look here");
         assert_eq!(ChatContent::Text("plain".into()).text(), "plain");
+    }
+
+    /// An `image_url` part rides only as an inline data URI with a mime
+    /// the providers take: a remote url, a non-base64 data URI, and an
+    /// unknown mime are all skipped, in part order, with no error.
+    #[test]
+    fn image_parts_ride_only_as_inline_data_uris() {
+        let content = ChatContent::Parts(vec![
+            ChatPart {
+                text: Some("look".into()),
+                image_url: None,
+            },
+            ChatPart {
+                text: None,
+                image_url: Some(ChatImageUrl {
+                    url: "data:image/png;base64,cG5n".into(),
+                }),
+            },
+            ChatPart {
+                text: None,
+                image_url: Some(ChatImageUrl {
+                    url: "https://example.com/cat.png".into(),
+                }),
+            },
+            ChatPart {
+                text: None,
+                image_url: Some(ChatImageUrl {
+                    url: "data:image/svg+xml;base64,PHN2Zy8+".into(),
+                }),
+            },
+            ChatPart {
+                text: None,
+                image_url: Some(ChatImageUrl {
+                    url: "data:image/png,raw-not-base64".into(),
+                }),
+            },
+        ]);
+        let images = content.images();
+        assert_eq!(images.len(), 1, "{images:?}");
+        assert_eq!(images[0].media_type, "image/png");
+        assert_eq!(images[0].data, "cG5n");
+
+        // A plain string carries no images, and the mime is canonical
+        // even when the URI spells it with different case.
+        assert!(ChatContent::Text("plain".into()).images().is_empty());
+        let loud = ChatContent::Parts(vec![ChatPart {
+            text: None,
+            image_url: Some(ChatImageUrl {
+                url: "data:IMAGE/PNG;base64,cG5n".into(),
+            }),
+        }]);
+        assert_eq!(loud.images()[0].media_type, "image/png");
+    }
+
+    /// Text-only requests are unchanged: no parts, no images.
+    #[test]
+    fn text_only_requests_carry_no_images() {
+        let input = last_user_input(&[message("user", ChatContent::Text("plain".into()))])
+            .expect("a user message");
+        assert_eq!(input.text, "plain");
+        assert!(input.images.is_empty());
     }
 
     #[test]

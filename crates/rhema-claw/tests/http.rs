@@ -110,6 +110,48 @@ async fn sse_body(response: reqwest::Response) -> SseBody {
     Box::pin(response.bytes_stream())
 }
 
+/// A provider that keeps every request it is handed, so a test can
+/// assert on what the model would have seen.
+struct RecordingProvider {
+    requests: std::sync::Mutex<Vec<rhema_core::ModelRequest>>,
+}
+
+impl RecordingProvider {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            requests: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The last request's user-turn content blocks, in order.
+    fn last_user_content(&self) -> Vec<Content> {
+        let requests = self.requests.lock().unwrap();
+        let last = requests.last().expect("a request was made");
+        last.messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User)
+            .map(|message| message.content.clone())
+            .expect("a user turn")
+    }
+}
+
+#[rhema_autonomous_agent::async_trait]
+impl rhema_core::ModelProvider for RecordingProvider {
+    async fn complete(
+        &self,
+        request: rhema_core::ModelRequest,
+        _sink: &mut dyn rhema_core::EventSink,
+    ) -> Result<rhema_core::ModelOutput, rhema_core::ProviderError> {
+        self.requests.lock().unwrap().push(request);
+        Ok(ModelOutput {
+            message: Message::text(Role::Assistant, "noted."),
+            stop_reason: StopReason::EndTurn,
+            usage: Usage::default(),
+        })
+    }
+}
+
 /// One quiet GitHub repo, for the watches test: an issues list with a
 /// single closed issue and a quiet comments feed.
 async fn mount_github(server: &MockServer) {
@@ -915,6 +957,62 @@ async fn the_shim_rejects_requests_without_a_user_message() {
             .as_str()
             .is_some_and(|message| message.contains("user")),
         "{body}"
+    );
+}
+
+/// A shim request whose user content is parts — text plus `image_url`
+/// entries — reaches the turn as text and inline image blocks, the
+/// base64 verbatim. A remote url is skipped: the crate carries inline
+/// images only.
+#[tokio::test]
+async fn a_shim_image_part_reaches_the_turn_as_an_image_block() {
+    use base64::Engine as _;
+
+    let recorder = RecordingProvider::new();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(recorder.clone()),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let raw: &[u8] = b"\x89PNG shim bytes";
+    let png = base64::engine::general_purpose::STANDARD.encode(raw);
+    let whole: Value = client
+        .post(format!("{base}/v1/chat/completions"))
+        .json(&json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "look"},
+                    {"type": "image_url",
+                     "image_url": {"url": format!("data:image/png;base64,{png}")}},
+                    {"type": "image_url",
+                     "image_url": {"url": "https://example.com/cat.png"}},
+                    {"type": "image_url",
+                     "image_url": {"url": "data:image/svg+xml;base64,PHN2Zy8+"}},
+                ],
+            }],
+        }))
+        .send()
+        .await
+        .expect("the completion posts")
+        .json()
+        .await
+        .expect("the completion parses");
+    assert_eq!(whole["choices"][0]["message"]["content"], "noted.");
+
+    // The turn's input: the text, then the one inline image — the
+    // remote url and the unknown mime never rode.
+    assert_eq!(
+        recorder.last_user_content(),
+        vec![
+            Content::Text("look".to_owned()),
+            Content::Image(rhema_core::Image::new(rhema_core::ImageMediaType::Png, png,)),
+        ],
     );
 }
 

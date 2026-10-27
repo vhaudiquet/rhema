@@ -289,7 +289,11 @@ pub fn router(state: ClawState) -> Router {
         )
         .route("/providers/{id}", delete(providers_remove))
         .route("/providers/{id}/models", get(providers_models))
-        .route("/chat/completions", post(crate::openai::chat_completions))
+        .route(
+            "/chat/completions",
+            post(crate::openai::chat_completions)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_MESSAGE_BODY_BYTES)),
+        )
         .layer(middleware::from_fn_with_state(state.clone(), require_auth));
     Router::new()
         // The one error shape everywhere, unknown routes included: a
