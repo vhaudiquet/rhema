@@ -496,12 +496,12 @@ impl Transcript {
             let half = allowance / 2;
             let mut c_new = c_min;
             let mut band = self.bytes(c_new, tail_start);
-            while c_new < tail_start {
-                let next = band - self.sizes[c_new];
-                if next > half {
-                    break;
-                }
-                band = next;
+            // The smallest position whose remaining band fits half:
+            // walk forward while the band still exceeds it. The break
+            // on `next > half` was the inverse and left the band at
+            // the full allowance — flushes every request.
+            while c_new < tail_start && band > half {
+                band -= self.sizes[c_new];
                 c_new += 1;
             }
             // The band must not open on a tool result: its call would
@@ -919,6 +919,37 @@ mod tests {
         assert_eq!(transcript.sections, sections_after_first);
         assert_eq!(first_block, second_block, "the block is byte-identical");
         assert!(view.len() > 1);
+    }
+
+    #[test]
+    fn a_flush_overshoots_to_half_the_allowance_and_the_hysteresis_holds() {
+        let mut transcript = Transcript::new(settings(128_000));
+        let mut messages = vec![Message::text(Role::User, "fix the build")];
+        for i in 0..20 {
+            messages.extend(call_round(&format!("c{i}"), 8)); // ~164 KiB
+        }
+        messages.push(Message::text(Role::User, "go on"));
+        assert!(transcript.view(&messages).is_some());
+        let stats = transcript.stats();
+        assert_eq!(stats.flushes, 1);
+        // The band the flush leaves behind sits at or below half the
+        // allowance — the overshoot — not at the full allowance.
+        let allowance = 128_000 - stats.tail_bytes;
+        let band = stats.band_bytes - stats.tail_bytes;
+        assert!(
+            band <= allowance / 2,
+            "band {band} over half the allowance {}",
+            allowance / 2
+        );
+        // The hysteresis is the half-allowance the overshoot bought:
+        // growth inside it must not flush again.
+        let mut grown = messages.clone();
+        for i in 20..26 {
+            grown.extend(call_round(&format!("c{i}"), 8)); // ~49 KiB < allowance/2
+        }
+        grown.push(Message::text(Role::User, "still going"));
+        transcript.view(&grown);
+        assert_eq!(transcript.stats.flushes, 1, "flushed inside the hysteresis");
     }
 
     #[test]
