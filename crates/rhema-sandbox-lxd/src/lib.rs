@@ -17,11 +17,18 @@
 //! instance up (`lxc launch [--vm] <image> <name>`) and adds the disk
 //! device, the same division as the docker backend.
 //!
-//! Exec is `lxc exec [--cwd <dir>] <instance> -- timeout
-//! --kill-after=5 <secs> bash -c <command>`. The argv rides the exec
-//! API to the instance's process intact — no shell reparse, the ssh
-//! lesson inverted (sshd joins argv into one shell line; LXD does
-//! not) — so nothing here is quoted for a middle shell. The kill is
+//! Exec is `lxc exec [--user <uid>] [--group <gid>] [--cwd <dir>]
+//! <instance> -- timeout --kill-after=5 <secs> bash -c <command>`.
+//! The user flags are the workspace owner's, given by the caller
+//! ([`LxdSandbox::with_user`]): an unprivileged container maps uids,
+//! so commands must run as the uid the host tree belongs to — as
+//! root they touch nobody's files and, privileged, they would touch
+//! everyone's. The cwd defaults to the workspace: the exec lands
+//! where the session lives, not in the instance's root. The argv
+//! rides the exec API to the instance's process intact — no shell
+//! reparse, the ssh lesson inverted (sshd joins argv into one shell
+//! line; LXD does not) — so nothing here is quoted for a middle
+//! shell. The kill is
 //! the prefix's, as on every backend without a per-command kill —
 //! exits 124/137 read as a timeout. Streams pump live lines through
 //! the shared `run_child` wiring (`exec_util`), caps included.
@@ -64,6 +71,10 @@ pub struct LxdSandbox {
     /// host paths agree); attached, it is where the seed carries the
     /// workspace in.
     workspace: String,
+    /// The uid/gid exec runs as — the workspace owner's, so the
+    /// instance's commands touch the tree with the host's own
+    /// identity. Unset, exec runs as the instance's root.
+    user: Option<(u32, u32)>,
 }
 
 impl LxdSandbox {
@@ -91,6 +102,7 @@ impl LxdSandbox {
             instance: instance.into(),
             root: Some(root),
             workspace: workspace.into(),
+            user: None,
         }
     }
 
@@ -103,6 +115,7 @@ impl LxdSandbox {
             instance: instance.into(),
             root: None,
             workspace: String::new(),
+            user: None,
         }
     }
 
@@ -111,6 +124,15 @@ impl LxdSandbox {
     /// constructor.
     pub fn with_workspace(mut self, workspace: impl Into<String>) -> Self {
         self.workspace = workspace.into();
+        self
+    }
+
+    /// Names the uid/gid exec runs as. Mounted, this is the host
+    /// workspace owner's — an unprivileged container's map makes that
+    /// the only identity the tree answers to. The assembly stats the
+    /// workspace and passes the owner through.
+    pub fn with_user(mut self, uid: u32, gid: u32) -> Self {
+        self.user = Some((uid, gid));
         self
     }
 
@@ -152,15 +174,14 @@ impl LxdSandbox {
     /// seed budget: past it the local `lxc` is dropped and the budget
     /// reads as a timeout; a nonzero exit surfaces the stderr tail.
     async fn run_attached_seed(&self, argv: &[String]) -> Result<(), SandboxError> {
-        let mut full = vec![
-            "lxc".to_owned(),
-            "exec".to_owned(),
-            self.instance.clone(),
+        let mut full = vec!["lxc".to_owned(), "exec".to_owned(), self.instance.clone()];
+        full.extend(user_flags(self.user));
+        full.extend([
             "--".to_owned(),
             "timeout".to_owned(),
             "--kill-after=5".to_owned(),
             SEED_BUDGET.as_secs().to_string(),
-        ];
+        ]);
         full.extend(argv.iter().cloned());
         match tokio::time::timeout(SEED_BUDGET, self.capture(&full)).await {
             Err(_) => Err(SandboxError::Timeout(SEED_BUDGET.as_secs())),
@@ -209,8 +230,16 @@ impl LxdSandbox {
 /// for the unset cwd (`""`) — `lxc exec` keeps its own default
 /// working directory.
 fn instance_cwd(mounted: bool, workspace: &str, cwd: &str) -> Option<String> {
+    // An empty cwd is the workspace itself: the exec lands where the
+    // session lives, not in the instance's default directory. No
+    // workspace named — the attached sandbox without one — and lxc's
+    // own default stands.
     if cwd.is_empty() {
-        return None;
+        return if workspace.is_empty() {
+            None
+        } else {
+            Some(workspace.to_owned())
+        };
     }
     if !mounted {
         return Some(cwd.to_owned());
@@ -237,12 +266,14 @@ fn exec_argv(
     timeout_secs: u64,
     cwd: &str,
     command: &str,
+    user: Option<(u32, u32)>,
 ) -> Vec<String> {
     let mut argv = vec!["lxc".to_owned(), "exec".to_owned()];
     if let Some(dir) = instance_cwd(mounted, workspace, cwd) {
         argv.push("--cwd".to_owned());
         argv.push(dir);
     }
+    argv.extend(user_flags(user));
     argv.extend([
         instance.to_owned(),
         "--".to_owned(),
@@ -254,6 +285,22 @@ fn exec_argv(
         command.to_owned(),
     ]);
     argv
+}
+
+/// The exec identity: `--user <uid> --group <gid>`, the workspace
+/// owner's, so instance commands touch the tree as the host user —
+/// not as nobody's-root in an unprivileged map, not as everyone's
+/// root in a privileged one.
+fn user_flags(user: Option<(u32, u32)>) -> Vec<String> {
+    match user {
+        None => Vec::new(),
+        Some((uid, gid)) => vec![
+            "--user".to_owned(),
+            uid.to_string(),
+            "--group".to_owned(),
+            gid.to_string(),
+        ],
+    }
 }
 
 /// The read argv, attached: `lxc file pull -- <instance><path> -` —
@@ -359,6 +406,7 @@ impl Sandbox for LxdSandbox {
             request.timeout.as_secs(),
             &request.cwd,
             &request.command,
+            self.user,
         );
         let child = tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -519,12 +567,24 @@ mod tests {
     #[test]
     fn the_exec_argv_carries_the_cwd_and_the_timeout_prefix() {
         assert_eq!(
-            exec_argv("box", true, "/home/me/proj", 30, "/src", "echo hi"),
+            exec_argv(
+                "box",
+                true,
+                "/home/me/proj",
+                30,
+                "/src",
+                "echo hi",
+                Some((1000, 1000)),
+            ),
             vec![
                 "lxc",
                 "exec",
                 "--cwd",
                 "/home/me/proj/src",
+                "--user",
+                "1000",
+                "--group",
+                "1000",
                 "box",
                 "--",
                 "timeout",
@@ -538,13 +598,44 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_cwd_leaves_lxc_execs_default_directory() {
+    fn an_unset_cwd_lands_at_the_workspace() {
         assert_eq!(
-            exec_argv("box", true, "/home/me/proj", 30, "", "echo hi"),
+            exec_argv(
+                "box",
+                true,
+                "/home/me/proj",
+                30,
+                "",
+                "echo hi",
+                Some((1000, 1000)),
+            ),
             vec![
                 "lxc",
                 "exec",
+                "--cwd",
+                "/home/me/proj",
+                "--user",
+                "1000",
+                "--group",
+                "1000",
                 "box",
+                "--",
+                "timeout",
+                "--kill-after=5",
+                "30",
+                "bash",
+                "-c",
+                "echo hi",
+            ]
+        );
+        // No workspace named either: nothing to fall back to, lxc's
+        // own default stands.
+        assert_eq!(
+            exec_argv("vm0", false, "", 30, "", "echo hi", None),
+            vec![
+                "lxc",
+                "exec",
+                "vm0",
                 "--",
                 "timeout",
                 "--kill-after=5",
@@ -559,7 +650,7 @@ mod tests {
     #[test]
     fn an_attached_cwd_is_taken_as_instance_side() {
         assert_eq!(
-            exec_argv("vm0", false, "", 30, "/src", "echo hi"),
+            exec_argv("vm0", false, "", 30, "/src", "echo hi", None),
             vec![
                 "lxc",
                 "exec",
@@ -581,6 +672,12 @@ mod tests {
     fn the_root_cwd_workdirs_at_the_mount_itself() {
         assert_eq!(
             instance_cwd(true, "/home/me/proj", "/"),
+            Some("/home/me/proj".to_owned())
+        );
+        // The empty cwd is the workspace, not the instance's default:
+        // the exec lands where the session lives.
+        assert_eq!(
+            instance_cwd(true, "/home/me/proj", ""),
             Some("/home/me/proj".to_owned())
         );
     }

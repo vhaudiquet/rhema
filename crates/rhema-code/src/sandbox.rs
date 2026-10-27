@@ -121,23 +121,31 @@ pub async fn assemble(
                 .sandbox_instance_for("lxd")
                 .map(|(_, stored)| stored.vm.unwrap_or(false))
                 .unwrap_or_else(|| profile.sandbox_vm());
+            let (uid, gid) = workspace_owner(workspace)?;
             if vm {
                 // A virtual machine takes no disk-device mount of a
                 // host path: the attached posture, the workspace
                 // carried in by the seed like ssh, exec through the
                 // same lxc argv.
-                ensure_lxd_instance(&instance, true)?;
-                Arc::new(LxdSandbox::attached(&instance).with_workspace(&host_workspace))
+                ensure_lxd_instance(&instance, true, uid, gid)?;
+                Arc::new(
+                    LxdSandbox::attached(&instance)
+                        .with_workspace(&host_workspace)
+                        .with_user(uid, gid),
+                )
             } else {
                 // The bind-mount posture: a disk device mirrors the
                 // host workspace at its own path, so the sandbox-side
                 // path is the host path itself and FsRoot's file
                 // routes are plain fs on the host side.
-                ensure_lxd_instance(&instance, false)?;
+                ensure_lxd_instance(&instance, false, uid, gid)?;
                 ensure_lxd_mount(&instance, &host_workspace)?;
                 let root = FsRoot::new(workspace.to_path_buf())
                     .map_err(|err| anyhow::anyhow!("lxd sandbox root: {err}"))?;
-                Arc::new(LxdSandbox::mounted(&instance, root, host_workspace.clone()))
+                Arc::new(
+                    LxdSandbox::mounted(&instance, root, host_workspace.clone())
+                        .with_user(uid, gid),
+                )
             }
         }
         SandboxChoice::Ssh => {
@@ -525,11 +533,50 @@ fn derived_container_name(workspace: &Path) -> String {
 /// container — from the stock `ubuntu:24.04` image. First launches
 /// wait on the image download the same way the docker path waits on
 /// its pull; the assembly is the one place that patience is spent.
-fn ensure_lxd_instance(name: &str, vm: bool) -> anyhow::Result<()> {
-    let output = std::process::Command::new("lxc")
-        .args(["list", "--format", "csv", "-c", "s", name])
+/// The idmap entry the workspace's owner needs: the tree on the
+/// device belongs to the host's uid, and an unprivileged container's
+/// default map turns that into nobody — the mount attaches and no
+/// one inside can read it. `both <uid> <gid>` carries the pair in
+/// both directions, so exec's `--user` is the tree's own owner.
+fn wanted_idmap(uid: u32, gid: u32) -> String {
+    format!("both {uid} {gid}")
+}
+
+/// The launch argv: `launch [--vm] ubuntu:24.04 <name> -c
+/// raw.idmap=both <uid> <gid>` — the map set at birth, when it
+/// applies on the first boot for free.
+fn lxd_launch_argv(name: &str, vm: bool, uid: u32, gid: u32) -> Vec<String> {
+    let mut argv = vec![
+        "launch".to_owned(),
+        "ubuntu:24.04".to_owned(),
+        name.to_owned(),
+        "-c".to_owned(),
+        format!("raw.idmap={}", wanted_idmap(uid, gid)),
+    ];
+    if vm {
+        argv.insert(1, "--vm".to_owned());
+    }
+    argv
+}
+
+/// The workspace owner: the uid/gid the tree answers to on the host.
+/// The instance's map and exec's identity are both this pair.
+fn workspace_owner(workspace: &std::path::Path) -> anyhow::Result<(u32, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(workspace)
+        .map_err(|err| anyhow::anyhow!("the lxd sandbox needs the workspace's owner: {err}"))?;
+    Ok((meta.uid(), meta.gid()))
+}
+
+fn lxc_output(args: &[&str]) -> anyhow::Result<std::process::Output> {
+    std::process::Command::new("lxc")
+        .args(args)
         .output()
-        .map_err(|err| anyhow::anyhow!("lxc list failed: {err}"))?;
+        .map_err(|err| anyhow::anyhow!("lxc {} failed: {err}", args.join(" ")))
+}
+
+fn ensure_lxd_instance(name: &str, vm: bool, uid: u32, gid: u32) -> anyhow::Result<()> {
+    let output = lxc_output(&["list", "--format", "csv", "-c", "s", name])?;
     if !output.status.success() {
         anyhow::bail!(
             "lxc list failed: {}",
@@ -537,33 +584,78 @@ fn ensure_lxd_instance(name: &str, vm: bool) -> anyhow::Result<()> {
         );
     }
     let state = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let want = wanted_idmap(uid, gid);
     if state == "RUNNING" {
-        return Ok(());
-    }
-    let argv: Vec<&str> = match state.as_str() {
-        "" => {
-            // Absent: launch it, virtual machine or container.
-            if vm {
-                vec!["launch", "--vm", "ubuntu:24.04", name]
-            } else {
-                vec!["launch", "ubuntu:24.04", name]
+        // An instance launched before the map existed stays
+        // unreadable until it carries the entry: repair in place —
+        // the setting lands on the next boot, so this restarts once
+        // and never again.
+        let have = idmap_of(name)?;
+        if have != want {
+            let set = ["config", "set", name, "raw.idmap", &want];
+            let output = lxc_output(&set)?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "lxc config set failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
+            }
+            let output = lxc_output(&["restart", name])?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "lxc restart failed: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                );
             }
         }
-        // Present but stopped.
-        _ => vec!["start", name],
-    };
-    let output = std::process::Command::new("lxc")
-        .args(&argv)
-        .output()
-        .map_err(|err| anyhow::anyhow!("lxc {} failed: {err}", argv[0]))?;
+        return Ok(());
+    }
+    if state.is_empty() {
+        // Absent: launch it, virtual machine or container, the map
+        // set at birth.
+        let argv = lxd_launch_argv(name, vm, uid, gid);
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let output = lxc_output(&refs)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "lxc launch failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        return Ok(());
+    }
+    // Present but stopped: set the map while it is down, so one
+    // boot carries it.
+    if idmap_of(name)? != want {
+        let set = ["config", "set", name, "raw.idmap", &want];
+        let output = lxc_output(&set)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "lxc config set failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+    }
+    let output = lxc_output(&["start", name])?;
     if !output.status.success() {
         anyhow::bail!(
-            "lxc {} failed: {}",
-            argv.join(" "),
+            "lxc start failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
     Ok(())
+}
+
+/// The instance's raw.idmap, empty when unset.
+fn idmap_of(name: &str) -> anyhow::Result<String> {
+    let output = lxc_output(&["config", "get", name, "raw.idmap"])?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "lxc config get failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Adds the workspace's `disk` device when it is not already there:
@@ -626,6 +718,45 @@ fn path_hash(path: &str) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod lxd_launch {
+    use super::*;
+
+    #[test]
+    fn the_launch_argv_sets_the_owners_map_at_birth() {
+        assert_eq!(
+            lxd_launch_argv("rhema-sandbox-dev", false, 1000, 1000),
+            vec![
+                "launch",
+                "ubuntu:24.04",
+                "rhema-sandbox-dev",
+                "-c",
+                "raw.idmap=both 1000 1000",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_vm_flag_precedes_the_image() {
+        assert_eq!(
+            lxd_launch_argv("vm0", true, 33, 33),
+            vec![
+                "launch",
+                "--vm",
+                "ubuntu:24.04",
+                "vm0",
+                "-c",
+                "raw.idmap=both 33 33",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_idmap_names_the_pair_both_ways() {
+        assert_eq!(wanted_idmap(1000, 1000), "both 1000 1000");
+    }
 }
 
 #[cfg(test)]
