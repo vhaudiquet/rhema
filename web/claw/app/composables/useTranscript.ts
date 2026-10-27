@@ -6,7 +6,7 @@
 // mirror when the stream reopens and folds what arrives, never the other
 // way around.
 import { ref } from 'vue'
-import type { AttachmentMedia, ConsentKind, TurnEvent } from './useClaw'
+import type { AttachmentMedia, ConsentKind, OutboundImage, TurnEvent } from './useClaw'
 
 /** One tool call inside a turn: started, then completed by its result. */
 export interface ToolRow {
@@ -63,9 +63,33 @@ export interface AttachmentCard {
   url: string | null
 }
 
+/** One image a user message carried, as the transcript renders it. A
+ * locally sent row holds the browser's own object URL — no fetch, no
+ * id; a replayed row holds the attachment id the claw stored and gets
+ * its bytes bearer-guarded, like an attachment card. */
+export interface SentImage {
+  /** The attachment id behind a replayed row; null for a local one. */
+  id: string | null
+  media_type: string
+  /** The object URL once resolved: local at stage time, fetched for a replay. */
+  url: string | null
+  /** The file's name when the browser knew one; a replay has only an id. */
+  name: string | null
+}
+
+/** One image staged in the composer, as the send path hands it up: the
+ * wire payload plus the local bits the optimistic row needs and the
+ * claw never sees. */
+export interface StagedImage extends OutboundImage {
+  /** The local preview URL the optimistic row renders. */
+  url: string
+  /** The file's name, as the chip and the sent row label it. */
+  name: string
+}
+
 /** A transcript line: a message the local user sent, or one streamed turn. */
 export type TranscriptItem =
-  | { kind: 'sent'; id: number; text: string }
+  | { kind: 'sent'; id: number; text: string; images: SentImage[] }
   | { kind: 'turn'; id: number; turn: TurnBlock }
   | { kind: 'consent'; id: number; consent: ConsentCard }
   | { kind: 'attachment'; id: number; attachment: AttachmentCard }
@@ -169,10 +193,22 @@ export function useTranscript() {
       case 'user_message': {
         // The replayed question. A live echo of a message this surface
         // just sent arrives after the optimistic `sent` row: identical
-        // text as the last item means the row already stands in for it.
+        // text and the same image count as the last item means the row
+        // already stands in for it, previews and all.
         const last = items.value[items.value.length - 1]
-        if (last?.kind === 'sent' && last.text === event.text) return
-        items.value.push({ kind: 'sent', id: nextId++, text: event.text })
+        if (
+          last?.kind === 'sent' &&
+          last.text === event.text &&
+          last.images.length === event.images.length
+        ) {
+          return
+        }
+        items.value.push({
+          kind: 'sent',
+          id: nextId++,
+          text: event.text,
+          images: event.images.map((image) => ({ ...image, url: null, name: null })),
+        })
         break
       }
       case 'thinking_delta': {
@@ -280,9 +316,11 @@ export function useTranscript() {
     }
   }
 
-  /** A locally sent message, shown immediately; the reply streams after. */
-  function addSent(text: string): void {
-    items.value.push({ kind: 'sent', id: nextId++, text })
+  /** A locally sent message, shown immediately; the reply streams after.
+   * Its images render from the staged previews — the claw stores them
+   * and the stream's echo dedupes against this row. */
+  function addSent(text: string, images: SentImage[] = []): void {
+    items.value.push({ kind: 'sent', id: nextId++, text, images })
   }
 
   /** A consent card resolved: flipped in place, or ignored when no
@@ -324,6 +362,21 @@ export function useTranscript() {
     }
   }
 
+  /** A replayed sent image's object URL landed; stored on its row. The
+   * useClaw cache keeps a reconnect's replay from refetching the bytes.
+   * A user message is always a top-level row — it never rides a live
+   * turn — so the scan stays over `items`. */
+  function setSentImageUrl(id: string, url: string): void {
+    for (const item of items.value) {
+      if (item.kind !== 'sent') continue
+      const image = item.images.find((candidate) => candidate.id === id)
+      if (image) {
+        image.url = url
+        return
+      }
+    }
+  }
+
   /** Whether a card for this consent id is already on the mirror — a
    * replayed request never stacks a second card beside the first. */
   function findConsent(id: string): boolean {
@@ -346,5 +399,5 @@ export function useTranscript() {
     live.value = null
   }
 
-  return { items, live, applyEvent, addSent, resolveConsent, setAttachmentUrl, reset }
+  return { items, live, applyEvent, addSent, resolveConsent, setAttachmentUrl, setSentImageUrl, reset }
 }

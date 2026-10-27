@@ -20,6 +20,7 @@ import type {
   StreamStatus,
 } from '~/composables/useClaw'
 import { useTranscript } from '~/composables/useTranscript'
+import type { StagedImage } from '~/composables/useTranscript'
 
 const TOKEN_STORE_KEY = 'claw.token'
 const ACTIVE_STORE_KEY = 'claw.activeKey'
@@ -106,18 +107,32 @@ const attemptedAttachments = new Set<string>()
 
 // Image cards need their bytes before they can render: fetched as the
 // card appears, not on any timer. code/file fetch on download instead.
+// A replayed question's images fetch the same way — the stream carries
+// their attachment ids, never the bytes; locally sent rows hold their
+// own object URLs.
 watch(
   transcriptItems,
   (items) => {
     for (const item of items) {
-      if (item.kind !== 'attachment') continue
-      const { id, media, url } = item.attachment
-      if (media !== 'image' || url !== null || attemptedAttachments.has(id)) continue
-      attemptedAttachments.add(id)
-      claw
-        .attachmentUrl(id)
-        .then((fetched) => transcript.setAttachmentUrl(id, fetched))
-        .catch((err) => noteApiError(err))
+      if (item.kind === 'attachment') {
+        const { id, media, url } = item.attachment
+        if (media !== 'image' || url !== null || attemptedAttachments.has(id)) continue
+        attemptedAttachments.add(id)
+        claw
+          .attachmentUrl(id)
+          .then((fetched) => transcript.setAttachmentUrl(id, fetched))
+          .catch((err) => noteApiError(err))
+      } else if (item.kind === 'sent') {
+        for (const image of item.images) {
+          const { id, url } = image
+          if (id === null || url !== null || attemptedAttachments.has(id)) continue
+          attemptedAttachments.add(id)
+          claw
+            .attachmentUrl(id)
+            .then((fetched) => transcript.setSentImageUrl(id, fetched))
+            .catch((err) => noteApiError(err))
+        }
+      }
     }
   },
   { deep: true },
@@ -417,13 +432,23 @@ async function removeProvider(id: string): Promise<void> {
   }
 }
 
-async function send(text: string): Promise<void> {
-  transcript.addSent(text)
+async function send(message: { text: string; images: StagedImage[] }): Promise<void> {
+  // The optimistic row renders the staged previews; the stream's
+  // user_message echo carries the stored ids and dedupes against it.
+  transcript.addSent(
+    message.text,
+    message.images.map(({ media_type, url, name }) => ({ id: null, media_type, url, name })),
+  )
   busy.value = true
   try {
     // Fire-and-forget by design: the claw answers 202 and the reply
-    // arrives on the event stream.
-    await claw.sendMessage(activeKey.value, text)
+    // arrives on the event stream. The body carries the images only
+    // when there are some.
+    await claw.sendMessage(
+      activeKey.value,
+      message.text,
+      message.images.map(({ media_type, data }) => ({ media_type, data })),
+    )
     apiError.value = null
   } catch (err) {
     noteApiError(err)

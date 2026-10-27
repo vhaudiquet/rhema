@@ -13,7 +13,7 @@ import {
   pasteParts,
 } from '~/composables/useTranscript'
 import type { ClawSession, ConsentAnswer, StreamStatus } from '~/composables/useClaw'
-import type { PastePart, TranscriptItem, TurnBlock } from '~/composables/useTranscript'
+import type { PastePart, SentImage, StagedImage, TranscriptItem, TurnBlock } from '~/composables/useTranscript'
 
 const props = defineProps<{
   items: TranscriptItem[]
@@ -31,8 +31,15 @@ const props = defineProps<{
 
 const agentName = computed(() => props.identity?.name?.trim() || 'rhema')
 
+/** One send as the panel hands it up: the text (pastes embedded) and
+ * the staged images, previews included for the optimistic row. */
+interface SendPayload {
+  text: string
+  images: StagedImage[]
+}
+
 const emit = defineEmits<{
-  send: [text: string]
+  send: [message: SendPayload]
   openProviders: []
   consentAnswer: [id: string, answer: ConsentAnswer]
   consentDeny: [id: string]
@@ -74,10 +81,15 @@ watch(
 
 function submit(): void {
   const text = draft.value.trim()
+  // The draft stays the gate: the claw 422s an empty text even with
+  // images aboard.
   if (!text || !props.canSend || props.busy) return
-  emit('send', embedPastes(text, pastes.value))
+  emit('send', { text: embedPastes(text, pastes.value), images: stagedImages.value })
+  stageGeneration++
   draft.value = ''
   pastes.value = []
+  stagedImages.value = []
+  imageError.value = null
   pinned.value = true
   void nextTick(resizePrompt)
 }
@@ -119,14 +131,22 @@ function onPaste(event: ClipboardEvent): void {
     if (absorbPaste(text)) event.preventDefault()
     return
   }
-  // A file paste reads as its text when it claims a textual type; the
-  // rest the composer ignores.
-  const file = transfer.files[0]
-  if (!file || !file.type.startsWith('text/')) return
-  event.preventDefault()
-  void file.text().then((text) => {
-    if (!absorbPaste(text)) insertInline(text)
-  })
+  // A file paste: text files read inline or chip, images stage for the
+  // next send — the same door the (+) button opens; anything else the
+  // composer still ignores.
+  let handled = false
+  for (const file of Array.from(transfer.files)) {
+    if (file.type.startsWith('text/')) {
+      handled = true
+      void file.text().then((pasted) => {
+        if (!absorbPaste(pasted)) insertInline(pasted)
+      })
+    } else if (mediaTypeOf(file) !== null) {
+      stageImage(file)
+      handled = true
+    }
+  }
+  if (handled) event.preventDefault()
 }
 
 /** A long paste becomes one chip; whether it did is the answer. */
@@ -147,6 +167,119 @@ function insertInline(text: string): void {
     draft.value += text
   }
   resizePrompt()
+}
+
+// --- staged images ----------------------------------------------------
+// The (+) button and the clipboard both land here: files held for the
+// next send, previewed from object URLs, read to base64 at stage time
+// so a bad file surfaces before submit, not inside it. The budget is
+// the claw's own (http.rs): eight images, 5 MiB decoded each.
+
+const MAX_IMAGES = 8
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+const IMAGE_TYPES: readonly string[] = ['image/png', 'image/jpeg', 'image/gif', 'image/webp']
+const IMAGE_ACCEPT = IMAGE_TYPES.join(',')
+
+const stagedImages = ref<StagedImage[]>([])
+const imageError = ref<string | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+
+/** Bumped on submit: a read still in flight when the draft cleared
+ * must not stage into a message that already left. */
+let stageGeneration = 0
+
+/** The wire media type a file stages as, or null when it is not one
+ * the claw accepts. The type usually rides the file; browsers that
+ * cannot name one leave it empty and the extension decides. */
+function mediaTypeOf(file: File): string | null {
+  if (IMAGE_TYPES.includes(file.type)) return file.type
+  const byExt: Record<string, string> = {
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+  }
+  return byExt[file.name.split('.').pop()?.toLowerCase() ?? ''] ?? null
+}
+
+/** B / KB / MB, one decimal past 1 KB — a chip label, not precision. */
+function formatBytes(size: number): string {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function pickImages(): void {
+  fileInput.value?.click()
+}
+
+function onPick(event: Event): void {
+  const input = event.target as HTMLInputElement
+  for (const file of Array.from(input.files ?? [])) stageImage(file)
+  // Cleared so picking the same file again still fires `change`.
+  input.value = ''
+}
+
+/** Stages one file, or surfaces why not: never a silent drop. */
+function stageImage(file: File): void {
+  const label = file.name || 'clipboard image'
+  imageError.value = null
+  if (stagedImages.value.length >= MAX_IMAGES) {
+    imageError.value = `${label}: at most ${MAX_IMAGES} images a message`
+    return
+  }
+  const media_type = mediaTypeOf(file)
+  if (!media_type) {
+    imageError.value = `${label}: not a png, jpeg, gif, or webp image`
+    return
+  }
+  const generation = stageGeneration
+  const reader = new FileReader()
+  reader.onload = () => {
+    if (generation !== stageGeneration) return
+    // The data URL's head carries the mime back; the payload after the
+    // first comma is the bare base64 the body wants.
+    const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+    const comma = dataUrl.indexOf(',')
+    const data = comma === -1 ? '' : dataUrl.slice(comma + 1)
+    if (data === '') {
+      imageError.value = `${label}: could not be read`
+      return
+    }
+    // Four base64 characters decode to three bytes — the same budget
+    // check the claw runs, no decode needed.
+    if (data.length * 3 / 4 > MAX_IMAGE_BYTES) {
+      imageError.value = `${label}: over the 5 MiB decoded budget`
+      return
+    }
+    stagedImages.value.push({ media_type, data, url: URL.createObjectURL(file), name: label })
+  }
+  reader.onerror = () => {
+    if (generation === stageGeneration) imageError.value = `${label}: could not be read`
+  }
+  reader.readAsDataURL(file)
+}
+
+function removeImage(index: number): void {
+  const [gone] = stagedImages.value.splice(index, 1)
+  if (gone) URL.revokeObjectURL(gone.url)
+  imageError.value = null
+}
+
+/** A stored image opens the same download path an attachment card
+ * uses; a local preview has nothing behind it to download. */
+function downloadImage(image: SentImage): void {
+  if (image.id === null) return
+  emit('downloadAttachment', image.id, storedImageName(image))
+}
+
+/** A stored image's download name: the staged file's when the row is
+ * local, derived from the id when only the claw knows the bytes. */
+function storedImageName(image: SentImage): string {
+  if (image.name) return image.name
+  const ext = image.media_type.replace('image/', '')
+  return `image-${image.id}.${ext === 'jpeg' ? 'jpg' : ext}`
 }
 
 /** One render piece of a user message: literal text or a paste chip. */
@@ -224,6 +357,18 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           <div class="avatar user" aria-hidden="true">·</div>
           <div class="msg-body">
             <div class="who">you</div>
+            <div v-if="item.images.length > 0" class="sent-images">
+              <button
+                v-for="(image, index) in item.images"
+                :key="index"
+                class="sent-image"
+                :disabled="image.url === null || image.id === null"
+                :title="image.url !== null && image.id !== null ? `download ${storedImageName(image)}` : (image.name ?? 'attached image')"
+                @click="downloadImage(image)"
+              >
+                <img v-if="image.url" :src="image.url" :alt="image.name ?? 'attached image'" />
+              </button>
+            </div>
             <div class="reply plain">
               <template v-for="(segment, index) in messageSegments(item.text)" :key="index">
                 <span v-if="segment.kind === 'chip'" class="badge paste-chip">{{ segment.label }}</span>
@@ -300,7 +445,22 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           </button>
         </span>
       </div>
+      <div v-if="stagedImages.length > 0" class="paste-chips">
+        <span v-for="(image, index) in stagedImages" :key="image.url" class="badge paste-chip">
+          ▣{{ index + 1 }} {{ image.name }} {{ formatBytes(Math.round((image.data.length * 3) / 4)) }}
+          <button class="chip-x" :title="`drop ${image.name}`" @click="removeImage(index)">
+            ×
+          </button>
+        </span>
+      </div>
+      <p v-if="imageError" class="image-error" role="alert">
+        {{ imageError }}
+        <button class="chip-x" title="dismiss" @click="imageError = null">×</button>
+      </p>
       <div class="input-row">
+        <button class="ghost attach" title="attach images" :disabled="!canSend" @click="pickImages">
+          +
+        </button>
         <textarea
           ref="prompt"
           v-model="draft"
@@ -314,6 +474,14 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
         <button class="primary send" :disabled="!canSend || busy || draft.trim() === ''" title="send" @click="submit">
           ↑
         </button>
+        <input
+          ref="fileInput"
+          class="file-input"
+          type="file"
+          :accept="IMAGE_ACCEPT"
+          multiple
+          @change="onPick"
+        />
       </div>
     </footer>
   </section>
@@ -644,6 +812,57 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
 .input-row {
   display: flex;
   gap: 8px;
+}
+
+.attach {
+  width: 38px;
+  padding: 0;
+  font-size: 16px;
+  border-radius: 9px;
+  flex: none;
+}
+
+.file-input {
+  display: none;
+}
+
+.image-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 8px;
+  color: var(--error);
+  font-size: 12.5px;
+}
+
+/* Images a user message carried: the attachment-card visual, sized to
+   the sent row. A stored image downloads on click; a local preview has
+   nothing behind it. */
+.sent-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.sent-image {
+  display: block;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+
+.sent-image:disabled {
+  cursor: default;
+}
+
+.sent-image img {
+  display: block;
+  max-width: 100%;
+  max-height: 240px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
 }
 
 .input-row textarea {

@@ -41,9 +41,24 @@ export interface ClawAttachment {
   caption: string | null
 }
 
+/** One image a sent message carries, as the `POST .../messages` body
+ * takes it: the full MIME type plus bare base64 (http.rs `WireImage`). */
+export interface OutboundImage {
+  media_type: string
+  data: string
+}
+
+/** One image a `user_message` event carries: the attachment id the
+ * bytes live under (fetch them via `attachmentUrl`) plus the MIME type
+ * — megabytes never ride the stream (hub.rs `UserImage`). */
+export interface UserImage {
+  id: string
+  media_type: string
+}
+
 /** One turn event, exactly `hub.rs`'s `TurnEvent` (serde type tag, snake case). */
 export type TurnEvent =
-  | { type: 'user_message'; text: string }
+  | { type: 'user_message'; text: string; images: UserImage[] }
   | { type: 'thinking_delta'; text: string }
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; name: string }
@@ -78,6 +93,9 @@ export interface ModelCard {
   display_name: string
   description: string
   input_token_limit?: number | null
+  /** Whether the model takes image input, when the adapter knows:
+   * absent means unknown — no verdict, never a `false`. */
+  supports_vision?: boolean
 }
 
 /** One account of `GET /v1/accounts` (rhema-identity's `Account`):
@@ -308,8 +326,8 @@ export interface ClawApi {
    * a plain src will not do). Cached per id: attachments are immutable,
    * so a replayed event never refetches. */
   attachmentUrl(id: string): Promise<string>
-  /** `POST /v1/sessions/{key}/messages` — fire-and-forget: the claw answers 202 and the reply arrives on the event stream. */
-  sendMessage(key: string, text: string): Promise<void>
+  /** `POST /v1/sessions/{key}/messages` — fire-and-forget: the claw answers 202 and the reply arrives on the event stream. Images ride the body only when there are some; without them the body is the old `{"text"}` shape byte-for-byte. The route 422s an empty text even with images aboard. */
+  sendMessage(key: string, text: string, images?: OutboundImage[]): Promise<void>
   /** `GET /v1/providers` — the constructible backends and the active pair. */
   providers(): Promise<ProvidersState>
   /** `PUT /v1/providers/active` — switch the backend, persisted claw-side. Answers the new active pair only. */
@@ -410,11 +428,11 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     })
   }
 
-  async function sendMessage(key: string, text: string): Promise<void> {
+  async function sendMessage(key: string, text: string, images?: OutboundImage[]): Promise<void> {
     await send(`/v1/sessions/${encodeURIComponent(key)}/messages`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
-      body: JSON.stringify({ text }),
+      body: JSON.stringify(images?.length ? { text, images } : { text }),
     })
   }
 
@@ -649,12 +667,33 @@ async function readFrames(
   }
 }
 
+/** The images a `user_message` carries: rows recorded before images
+ * rode the transcript carry no field at all, and an entry without an
+ * id and an image media type is not one — both fold to fewer (or no)
+ * images rather than a guessed shape. */
+function parseUserImages(raw: unknown): UserImage[] {
+  if (!Array.isArray(raw)) return []
+  const images: UserImage[] = []
+  for (const entry of raw) {
+    const image = entry as Record<string, unknown>
+    if (typeof image.id !== 'string' || typeof image.media_type !== 'string') continue
+    if (!image.media_type.startsWith('image/')) continue
+    images.push({ id: image.id, media_type: image.media_type })
+  }
+  return images
+}
+
 /** Parses one `data:` payload into a `TurnEvent`; unknown shapes are dropped, not guessed. */
 function parseTurnEvent(data: string): TurnEvent | null {
   try {
     const raw = JSON.parse(data) as Record<string, unknown>
     switch (raw.type) {
       case 'user_message':
+        return {
+          type: 'user_message',
+          text: String(raw.text ?? ''),
+          images: parseUserImages(raw.images),
+        }
       case 'thinking_delta':
       case 'text_delta':
         return { type: raw.type, text: String(raw.text ?? '') }

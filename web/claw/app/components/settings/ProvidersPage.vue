@@ -215,6 +215,16 @@ watch(
     }
   },
 )
+
+/** The listing's vision verdict, spelled the way the TUI's picker
+ * spells it: a mark when the adapter knows the model takes images, a
+ * bare "no vision" when it knows it does not, nothing when the key is
+ * absent — unknown is no verdict at all, never a `false`. */
+function visionLabel(model: ModelCard): string {
+  if (model.supports_vision === true) return ' ◉ vision'
+  if (model.supports_vision === false) return ' no vision'
+  return ''
+}
 </script>
 
 <template>
@@ -259,7 +269,7 @@ watch(
             <select v-model="draftModel" :disabled="saving || !draftProvider">
               <option value="">(provider default)</option>
               <option v-for="m in models" :key="m.id" :value="m.id">
-                {{ m.id }}
+                {{ m.id }}{{ visionLabel(m) }}
               </option>
             </select>
           </SettingRow>

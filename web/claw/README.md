@@ -91,6 +91,14 @@ Two consequences worth knowing before changing this code:
   like the identity images) and render capped at 240px; code and file
   cards download on click. Object URLs cache per id, so a replay never
   refetches.
+- **Your images ride along.** The composer's `+` — and an image on the
+  clipboard — stage as removable chips (`▣1 photo.png 1.2 MB`), the
+  claw's own budget enforced client-side (8 a message, 5 MiB decoded
+  each; the draft stays required, the route 422s an empty text). The
+  sent row renders the local previews at once; the stream's
+  `user_message` echo carries the stored attachment ids and dedupes
+  against that row, so a replayed message renders its own thumbnails
+  through the same bearer-guarded fetch as an attachment card.
 - **Sessions are created in place.** The sidebar's `+` form posts
   `POST /v1/sessions` with a client-validated name
   (`[A-Za-z0-9._-]{1,64}`), switches the chat to the new key, and
@@ -116,7 +124,10 @@ from the `addable` kinds the claw serves; each kind's `fields` carry
 `{name, required}`, `required` marking what the daemon refuses the login
 without (llama.cpp needs neither of its fields, it serves keyless on a
 default url); the form demands only those, marks the rest optional, and
-takes an optional instance name; unnamed, the id is the kind. A login
+takes an optional instance name; unnamed, the id is the kind. Model
+options carry a `◉ vision` mark when the live listing knows the model
+takes images (`supports_vision: true`); the key's absence is unknown,
+never a no, so it renders nothing. A login
 is `PUT /v1/providers/{id}/credentials`: apply immediately,
 credentials persist; roster rows are backend instances (`id`, the kind
 unless the login named it, plus the credential's `source`
