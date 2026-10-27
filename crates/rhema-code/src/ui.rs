@@ -1399,7 +1399,7 @@ fn settings_page(
             lines.push(Line::default());
             (
                 lines,
-                footer("enter runs bash here · the add row stores a kind's instance"),
+                footer("enter runs bash here · ssh and http stay in config.yaml"),
                 row_hits,
             )
         }

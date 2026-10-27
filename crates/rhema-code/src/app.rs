@@ -6764,13 +6764,14 @@ mod tests {
     #[test]
     fn slash_sandbox_opens_the_settings_sandbox_page() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(false, true, false);
+        h.app.sandbox_offered = offered(true, true, false);
         crate::commands::dispatch(&mut h.app, "/sandbox");
         let Screen::Settings(settings) = &h.app.screen else {
             panic!("expected the settings screen");
         };
         assert_eq!(settings.section, SettingsSection::Sandbox);
-        // Every kind lists; the marks say what this machine offered.
+        // The ready set only: local and docker, whatever ssh config
+        // exists; the marks say what this machine offered.
         assert_eq!(
             settings
                 .sandbox_rows()
@@ -6778,23 +6779,17 @@ mod tests {
                 .filter(|row| !row.add)
                 .map(|row| (row.kind, row.offered))
                 .collect::<Vec<_>>(),
-            vec![
-                (SandboxChoice::Local, true),
-                (SandboxChoice::Docker, false),
-                (SandboxChoice::Ssh, true),
-                (SandboxChoice::Http, false),
-            ]
+            vec![(SandboxChoice::Local, true), (SandboxChoice::Docker, true)]
         );
-        // Down twice to the ssh row, then enter: the select routes
+        // Down to the docker row, then enter: the select routes
         // through choose_sandbox and lands back on the chat as the
         // assembly effect.
-        h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Down));
         let effects = h.app.on_key(key(KeyCode::Enter));
         assert_eq!(
             effects,
-            vec![Effect::AssembleSandbox(SandboxChoice::Ssh)],
-            "enter on ssh assembles it"
+            vec![Effect::AssembleSandbox(SandboxChoice::Docker)],
+            "enter on docker assembles it"
         );
         assert!(matches!(h.app.screen, Screen::Chat), "enter returns");
     }
@@ -6803,9 +6798,9 @@ mod tests {
     fn the_sandbox_add_dialog_stores_the_kinds_instance() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/sandbox");
-        // Four downs: local, docker, ssh, http, add row. Enter opens
-        // the dialog; docker is its first kind.
-        for _ in 0..4 {
+        // Two downs: local, docker, add row. Enter opens the dialog;
+        // docker is its only kind.
+        for _ in 0..2 {
             h.app.on_key(key(KeyCode::Down));
         }
         h.app.on_key(key(KeyCode::Enter));

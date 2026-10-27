@@ -228,13 +228,20 @@ pub enum SandboxDialogStage {
     EnterValue,
 }
 
-/// The kinds the add dialog offers, canonical order minus `local` —
-/// the local instance exists by doing nothing.
-pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[
+/// The kinds the Sandbox page lists, in the spec's canonical order.
+/// The ready set only: `local` and `docker`. ssh and http are not
+/// ready features — ssh has no carry story for the working tree yet,
+/// http presumes a `sandboxd` to reach — so they stay out of sight
+/// here and remain config-file citizens: store their section in
+/// `config.yaml` and `/sandbox <kind>` runs them when offered.
+pub const SANDBOX_PAGE_KINDS: &[crate::args::SandboxChoice] = &[
+    crate::args::SandboxChoice::Local,
     crate::args::SandboxChoice::Docker,
-    crate::args::SandboxChoice::Ssh,
-    crate::args::SandboxChoice::Http,
 ];
+
+/// The kinds the add dialog offers: the page's kinds minus `local` —
+/// the local instance exists by doing nothing.
+pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[crate::args::SandboxChoice::Docker];
 
 /// The pop-in dialog over the Sandbox page: pick the kind, then type
 /// what it names its instance by — the container, the `user@host`, or
@@ -1238,42 +1245,40 @@ impl SettingsScreen {
     /// stored fact; the marks say active, remembered, offered.
     pub fn sandbox_rows(&self) -> Vec<SandboxRow> {
         let sandbox = self.stored.sandbox.as_ref();
-        let mut rows: Vec<SandboxRow> = [
-            crate::args::SandboxChoice::Local,
-            crate::args::SandboxChoice::Docker,
-            crate::args::SandboxChoice::Ssh,
-            crate::args::SandboxChoice::Http,
-        ]
-        .into_iter()
-        .map(|kind| {
-            let stored = match kind {
-                crate::args::SandboxChoice::Local => None,
-                crate::args::SandboxChoice::Docker => sandbox.and_then(|s| s.container.as_deref()),
-                crate::args::SandboxChoice::Ssh => sandbox.and_then(|s| s.host.as_deref()),
-                crate::args::SandboxChoice::Http => sandbox.and_then(|s| s.url.as_deref()),
-            };
-            let detail = match kind {
-                crate::args::SandboxChoice::Local => "this host".to_owned(),
-                crate::args::SandboxChoice::Docker => stored
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "no container set".to_owned()),
-                crate::args::SandboxChoice::Ssh => stored
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "no host set".to_owned()),
-                crate::args::SandboxChoice::Http => stored
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "no url set".to_owned()),
-            };
-            SandboxRow {
-                kind,
-                detail,
-                offered: self.sandbox_offered.offers(kind),
-                remembered: self.sandbox_remembered == Some(kind),
-                active: self.sandbox_active == kind,
-                add: false,
-            }
-        })
-        .collect();
+        let mut rows: Vec<SandboxRow> = SANDBOX_PAGE_KINDS
+            .iter()
+            .copied()
+            .map(|kind| {
+                let stored = match kind {
+                    crate::args::SandboxChoice::Local => None,
+                    crate::args::SandboxChoice::Docker => {
+                        sandbox.and_then(|s| s.container.as_deref())
+                    }
+                    crate::args::SandboxChoice::Ssh => sandbox.and_then(|s| s.host.as_deref()),
+                    crate::args::SandboxChoice::Http => sandbox.and_then(|s| s.url.as_deref()),
+                };
+                let detail = match kind {
+                    crate::args::SandboxChoice::Local => "this host".to_owned(),
+                    crate::args::SandboxChoice::Docker => stored
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "no container set".to_owned()),
+                    crate::args::SandboxChoice::Ssh => stored
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "no host set".to_owned()),
+                    crate::args::SandboxChoice::Http => stored
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| "no url set".to_owned()),
+                };
+                SandboxRow {
+                    kind,
+                    detail,
+                    offered: self.sandbox_offered.offers(kind),
+                    remembered: self.sandbox_remembered == Some(kind),
+                    active: self.sandbox_active == kind,
+                    add: false,
+                }
+            })
+            .collect();
         rows.push(SandboxRow {
             kind: crate::args::SandboxChoice::Local,
             detail: String::new(),
@@ -2633,14 +2638,19 @@ mod tests {
             vec![
                 SandboxChoice::Local,
                 SandboxChoice::Docker,
-                SandboxChoice::Ssh,
-                SandboxChoice::Http,
                 SandboxChoice::Local,
             ],
-            "every kind lists, offered or not: the marks say which; the add row sits last"
+            "the ready set lists, offered or not: the marks say which; the add row sits last"
         );
-        assert!(settings.sandbox_rows().last().expect("rows").add);
-        // The four kinds plus the add row are the arrows' range: five
+        let rows = settings.sandbox_rows();
+        assert!(rows.last().expect("rows").add);
+        assert!(
+            rows.iter()
+                .filter(|row| !row.add)
+                .all(|row| matches!(row.kind, SandboxChoice::Local | SandboxChoice::Docker)),
+            "ssh and http stay out of sight until their stories land"
+        );
+        // The two kinds plus the add row are the arrows' range: three
         // downs from the top wrap back to it.
         let mut stepped = sandbox_screen(
             offered(false, true, false),
@@ -2648,7 +2658,7 @@ mod tests {
             SandboxChoice::Local,
             rhema_config::Profile::default(),
         );
-        for _ in 0..5 {
+        for _ in 0..3 {
             stepped.handle_key(key(KeyCode::Down));
         }
         assert_eq!(stepped.row, 0, "the range wraps");
@@ -2658,31 +2668,32 @@ mod tests {
     fn the_sandbox_rows_carry_the_stored_facts_and_the_marks() {
         let stored = rhema_config::Profile {
             sandbox: Some(rhema_config::SandboxSettings {
+                container: Some("rhema-dev".to_owned()),
                 host: Some("box@far".to_owned()),
                 ..rhema_config::SandboxSettings::default()
             }),
             ..rhema_config::Profile::default()
         };
         let settings = sandbox_screen(
-            offered(false, true, false),
-            Some(SandboxChoice::Ssh),
+            offered(true, true, false),
+            Some(SandboxChoice::Docker),
             SandboxChoice::Local,
             stored,
         );
         let rows = settings.sandbox_rows();
         let by_kind = |kind| {
             rows.iter()
-                .find(|row| row.kind == kind)
+                .find(|row| row.kind == kind && !row.add)
                 .expect("row present")
         };
         assert_eq!(by_kind(SandboxChoice::Local).detail, "this host");
-        assert_eq!(by_kind(SandboxChoice::Docker).detail, "no container set");
-        assert_eq!(by_kind(SandboxChoice::Ssh).detail, "box@far");
-        assert_eq!(by_kind(SandboxChoice::Http).detail, "no url set");
-        assert!(by_kind(SandboxChoice::Ssh).offered);
-        assert!(!by_kind(SandboxChoice::Docker).offered);
-        assert!(by_kind(SandboxChoice::Ssh).remembered);
+        assert_eq!(by_kind(SandboxChoice::Docker).detail, "rhema-dev");
+        assert!(by_kind(SandboxChoice::Docker).offered);
+        assert!(by_kind(SandboxChoice::Docker).remembered);
         assert!(by_kind(SandboxChoice::Local).active);
+        // A stored ssh host is real config, but the page does not
+        // surface it while ssh is not a ready feature.
+        assert!(!rows.iter().any(|row| row.kind == SandboxChoice::Ssh));
     }
 
     #[test]
@@ -2693,17 +2704,14 @@ mod tests {
             SandboxChoice::Local,
             rhema_config::Profile::default(),
         );
-        // Down twice: local, docker, ssh.
-        settings.handle_key(key(KeyCode::Down));
+        // One down: local, docker.
         settings.handle_key(key(KeyCode::Down));
         assert_eq!(
             settings.handle_key(key(KeyCode::Enter)),
-            SettingsAction::SelectSandbox(SandboxChoice::Ssh)
+            SettingsAction::SelectSandbox(SandboxChoice::Docker)
         );
-        // Two more downs land on the add row, the last of five.
-        for _ in 0..2 {
-            settings.handle_key(key(KeyCode::Down));
-        }
+        // One more down lands on the add row, the last of three.
+        settings.handle_key(key(KeyCode::Down));
         assert_eq!(settings.selected_sandbox(), None, "the add row");
         // Opening the dialog is the app's act on this action; the
         // screen only reports it.
@@ -2729,15 +2737,10 @@ mod tests {
             rhema_config::Profile::default(),
         );
         settings.sandbox_dialog = Some(AddSandboxDialog::new());
-        // Down once: docker, ssh — ssh is the pick.
-        settings
-            .sandbox_dialog
-            .as_mut()
-            .expect("dialog up")
-            .handle_key(key(KeyCode::Down));
+        // Docker is the kind list's only row; enter takes it.
         settings.handle_key(key(KeyCode::Enter));
         let dialog = settings.sandbox_dialog.as_ref().expect("still up");
-        assert_eq!(dialog.kind, SandboxChoice::Ssh);
+        assert_eq!(dialog.kind, SandboxChoice::Docker);
         // A blank value never submits.
         settings.handle_key(key(KeyCode::Enter));
         assert!(settings.sandbox_dialog.is_some());
@@ -2751,7 +2754,7 @@ mod tests {
         assert_eq!(dialog.stage, SandboxDialogStage::SelectKind);
         assert!(dialog.input.is_empty());
         settings.handle_key(key(KeyCode::Enter));
-        for c in "box@far".chars() {
+        for c in "rhema-dev".chars() {
             settings.handle_key(key(KeyCode::Char(c)));
         }
         assert_eq!(
@@ -2761,7 +2764,7 @@ mod tests {
         let dialog = settings.sandbox_dialog.as_ref().expect("still up");
         assert_eq!(
             dialog.submitted(),
-            (SandboxChoice::Ssh, "box@far".to_owned())
+            (SandboxChoice::Docker, "rhema-dev".to_owned())
         );
         // The screen keeps the dialog until the app acts on the
         // submit; here esc walks back to the kind list, and a second
