@@ -50,6 +50,10 @@ pub struct DockerSandbox {
     /// The running container's name, used verbatim on every `docker`
     /// command line.
     container: String,
+    /// The uid/gid exec runs as — the workspace owner's. The bind
+    /// mount answers to host identities: as root, every file a
+    /// command writes through it lands owned by root on the host.
+    user: Option<(u32, u32)>,
     /// The host directory standing in as the sandbox filesystem — the
     /// host side of the container's bind mount.
     root: FsRoot,
@@ -65,7 +69,16 @@ impl DockerSandbox {
             container: container.into(),
             root,
             workspace: workspace.into(),
+            user: None,
         }
+    }
+
+    /// Names the uid/gid exec runs as — the workspace owner's, the
+    /// identity the bind-mounted tree answers to. The assembly stats
+    /// the workspace and passes the owner through.
+    pub fn with_user(mut self, uid: u32, gid: u32) -> Self {
+        self.user = Some((uid, gid));
+        self
     }
 
     /// Runs one seed command on the host, at the root the container
@@ -108,8 +121,14 @@ impl DockerSandbox {
 /// `None` for the unset cwd (`""`) — `docker exec` keeps its own
 /// default working directory.
 fn container_cwd(workspace: &str, cwd: &str) -> Option<String> {
+    // An empty cwd is the workspace itself: the exec lands where the
+    // session lives, not in the container's default directory.
     if cwd.is_empty() {
-        return None;
+        return if workspace.is_empty() {
+            None
+        } else {
+            Some(workspace.to_owned())
+        };
     }
     let base = workspace.trim_end_matches('/');
     let tail = cwd.trim_end_matches('/');
@@ -131,11 +150,16 @@ fn exec_argv(
     timeout_secs: u64,
     cwd: &str,
     command: &str,
+    user: Option<(u32, u32)>,
 ) -> Vec<String> {
     let mut argv = vec!["docker".to_owned(), "exec".to_owned()];
     if let Some(dir) = container_cwd(workspace, cwd) {
         argv.push("--workdir".to_owned());
         argv.push(dir);
+    }
+    if let Some((uid, gid)) = user {
+        argv.push("--user".to_owned());
+        argv.push(format!("{uid}:{gid}"));
     }
     argv.extend([
         container.to_owned(),
@@ -175,6 +199,7 @@ impl Sandbox for DockerSandbox {
             request.timeout.as_secs(),
             &request.cwd,
             &request.command,
+            self.user,
         );
         let child = tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -243,12 +268,21 @@ mod tests {
     #[test]
     fn the_exec_argv_carries_the_workdir_and_the_timeout_prefix() {
         assert_eq!(
-            exec_argv("box", "/workspace", 30, "/src", "echo hi"),
+            exec_argv(
+                "box",
+                "/workspace",
+                30,
+                "/src",
+                "echo hi",
+                Some((1000, 1000)),
+            ),
             vec![
                 "docker",
                 "exec",
                 "--workdir",
                 "/workspace/src",
+                "--user",
+                "1000:1000",
                 "box",
                 "timeout",
                 "--kill-after=5",
@@ -263,7 +297,7 @@ mod tests {
     #[test]
     fn the_root_cwd_workdirs_at_the_mount_itself() {
         assert_eq!(
-            exec_argv("box", "/workspace", 30, "/", "echo hi"),
+            exec_argv("box", "/workspace", 30, "/", "echo hi", None),
             vec![
                 "docker",
                 "exec",
@@ -281,12 +315,15 @@ mod tests {
     }
 
     #[test]
-    fn an_unset_cwd_leaves_docker_execs_default_directory() {
-        let argv = exec_argv("box", "/workspace", 30, "", "echo hi");
+    fn an_unset_cwd_lands_at_the_workspace() {
+        let argv = exec_argv("box", "/workspace", 30, "", "echo hi", None);
         assert_eq!(argv[0], "docker");
         assert_eq!(argv[1], "exec");
-        assert!(!argv.contains(&"--workdir".to_owned()));
-        assert_eq!(&argv[2..6], &["box", "timeout", "--kill-after=5", "30"]);
+        assert_eq!(
+            argv[2..6],
+            ["--workdir", "/workspace", "box", "timeout"],
+            "the exec lands where the session lives"
+        );
     }
 
     #[test]
@@ -305,7 +342,14 @@ mod tests {
         );
         assert_eq!(container_cwd("/", "/src").as_deref(), Some("/src"));
         assert_eq!(container_cwd("/", "/").as_deref(), Some("/"));
-        assert_eq!(container_cwd("/workspace", ""), None);
+        // The empty cwd is the workspace itself — the exec lands
+        // where the session lives, not in the container's default.
+        assert_eq!(
+            container_cwd("/workspace", "").as_deref(),
+            Some("/workspace")
+        );
+        // No workspace named: nothing to fall back to.
+        assert_eq!(container_cwd("", ""), None);
     }
 
     #[tokio::test]

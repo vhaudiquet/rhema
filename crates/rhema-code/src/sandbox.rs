@@ -110,9 +110,13 @@ pub async fn assemble(
             // The workspace IS the bind mount: the sandbox-side path is
             // the host path itself, and FsRoot's file routes are plain
             // fs on the host side of the mount.
+            let (uid, gid) = workspace_owner(workspace)?;
+            ensure_container(&container, &host_workspace)?;
             let root = FsRoot::new(workspace.to_path_buf())
                 .map_err(|err| anyhow::anyhow!("docker sandbox root: {err}"))?;
-            Arc::new(DockerSandbox::new(container, root, host_workspace.clone()))
+            Arc::new(
+                DockerSandbox::new(container, root, host_workspace.clone()).with_user(uid, gid),
+            )
         }
         SandboxChoice::Lxd => {
             let instance =
@@ -451,6 +455,83 @@ fn sandbox_target(profile: &Profile, kind: &str) -> Option<String> {
         })
 }
 
+/// The tool set a sandbox instance is prepared with: what the bash
+/// tool's sessions lean on, installed once per instance so a stock
+/// image arrives ready. The fd binary installs as `fdfind` on the
+/// debian family; the script links the name the rest of the world
+/// uses.
+pub(crate) const SANDBOX_TOOLS: &str = "git ripgrep fd-find jq sd curl python3 build-essential";
+
+/// The preparation script: marker-gated and idempotent. The marker
+/// records the list it installed, so a list change re-runs the
+/// install; a failed install writes no marker, so the next assembly
+/// tries again. Runs as the instance's root — apt is system work,
+/// and nothing here touches the mounted tree.
+fn provision_script() -> String {
+    format!(
+        r#"set -e
+m=/var/lib/rhema-sandbox/provisioned
+w="{SANDBOX_TOOLS}"
+[ -f "$m" ] && [ "$(cat "$m")" = "$w" ] && exit 0
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y -qq $w
+if command -v fdfind >/dev/null; then ln -sf "$(command -v fdfind)" /usr/local/bin/fd; fi
+mkdir -p /var/lib/rhema-sandbox
+echo "$w" > "$m"
+"#
+    )
+}
+
+/// The provision budget: apt on a fresh image takes a minute or two,
+/// once.
+const PROVISION_BUDGET_SECS: &str = "300";
+
+/// Instances this process has already prepared or attempted — the
+/// per-assembly marker check is one `exec` a turn, and the cache
+/// makes it zero.
+fn provision_attempted(backend: &str, name: &str) -> bool {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static ATTEMPTED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let attempted = ATTEMPTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut set = attempted
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    !set.insert(format!("{backend}/{name}"))
+}
+
+/// Runs the preparation script in the instance. A failure is a
+/// degraded sandbox, not a dead one — the session runs and the tools
+/// say what exists when probed — so the caller ignores the error and
+/// the absent marker retries on the next assembly.
+fn lxd_provision_argv(name: &str) -> Vec<String> {
+    vec![
+        "exec".to_owned(),
+        name.to_owned(),
+        "--".to_owned(),
+        "timeout".to_owned(),
+        "--kill-after=5".to_owned(),
+        PROVISION_BUDGET_SECS.to_owned(),
+        "bash".to_owned(),
+        "-c".to_owned(),
+        provision_script(),
+    ]
+}
+
+fn docker_provision_argv(name: &str) -> Vec<String> {
+    vec![
+        "exec".to_owned(),
+        name.to_owned(),
+        "timeout".to_owned(),
+        "--kill-after=5".to_owned(),
+        PROVISION_BUDGET_SECS.to_owned(),
+        "bash".to_owned(),
+        "-c".to_owned(),
+        provision_script(),
+    ]
+}
+
 /// Stands the container up when it is not already running:
 /// `docker inspect` answers, and a stopped or absent container is met
 /// with `docker run -d … sleep infinity` — a bind mount of the
@@ -458,32 +539,47 @@ fn sandbox_target(profile: &Profile, kind: &str) -> Option<String> {
 /// process hygiene, not a security boundary — the container's commands
 /// reach the same fs the local path would.
 fn ensure_container(name: &str, workspace: &str) -> anyhow::Result<()> {
-    if container_running(name)? {
-        return Ok(());
+    if !container_running(name)? {
+        let argv = [
+            "run",
+            "-d",
+            "--name",
+            name,
+            "-v",
+            &format!("{workspace}:{workspace}"),
+            "debian:trixie",
+            "sleep",
+            "infinity",
+        ];
+        let output = std::process::Command::new("docker")
+            .args(argv)
+            .output()
+            .map_err(|err| anyhow::anyhow!("docker run failed: {err}"))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "docker {} failed: {}",
+                argv.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
     }
-    let argv = [
-        "run",
-        "-d",
-        "--name",
-        name,
-        "-v",
-        &format!("{workspace}:{workspace}"),
-        "debian:trixie",
-        "sleep",
-        "infinity",
-    ];
-    let output = std::process::Command::new("docker")
-        .args(argv)
-        .output()
-        .map_err(|err| anyhow::anyhow!("docker run failed: {err}"))?;
-    if !output.status.success() {
-        anyhow::bail!(
-            "docker {} failed: {}",
-            argv.join(" "),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+    prepare_instance("docker", name, &docker_provision_argv(name));
     Ok(())
+}
+
+/// Prepares an instance once per process: the marker gate inside the
+/// script makes the remote side idempotent, and this gate keeps the
+/// check itself from running a turn after the first.
+fn prepare_instance(backend: &str, name: &str, argv: &[String]) {
+    if provision_attempted(backend, name) {
+        return;
+    }
+    let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    let output = std::process::Command::new("timeout")
+        .args(["--kill-after=5", PROVISION_BUDGET_SECS])
+        .args(refs)
+        .output();
+    let _ = output; // a failed preparation is the next assembly's retry
 }
 
 /// Whether `docker` answers that the container is up. A missing or
@@ -586,6 +682,7 @@ fn ensure_lxd_instance(name: &str, vm: bool, uid: u32, gid: u32) -> anyhow::Resu
     let state = String::from_utf8_lossy(&output.stdout).trim().to_owned();
     let want = wanted_idmap(uid, gid);
     if state == "RUNNING" {
+        prepare_instance("lxd", name, &lxd_provision_argv(name));
         // An instance launched before the map existed stays
         // unreadable until it carries the entry: repair in place —
         // the setting lands on the next boot, so this restarts once
@@ -622,6 +719,7 @@ fn ensure_lxd_instance(name: &str, vm: bool, uid: u32, gid: u32) -> anyhow::Resu
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
+        prepare_instance("lxd", name, &lxd_provision_argv(name));
         return Ok(());
     }
     // Present but stopped: set the map while it is down, so one
@@ -643,6 +741,7 @@ fn ensure_lxd_instance(name: &str, vm: bool, uid: u32, gid: u32) -> anyhow::Resu
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
+    prepare_instance("lxd", name, &lxd_provision_argv(name));
     Ok(())
 }
 
@@ -718,6 +817,39 @@ fn path_hash(path: &str) -> String {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     format!("{hash:016x}")
+}
+
+#[cfg(test)]
+mod provision {
+    use super::*;
+
+    #[test]
+    fn the_lxd_provision_argv_runs_the_script_under_a_budget() {
+        let argv = lxd_provision_argv("box");
+        assert_eq!(&argv[..4], &["exec", "box", "--", "timeout"]);
+        assert_eq!(&argv[4..7], &["--kill-after=5", "300", "bash"]);
+        assert_eq!(argv[7], "-c");
+        assert_eq!(argv[8], provision_script());
+    }
+
+    #[test]
+    fn the_docker_provision_argv_runs_the_script_under_a_budget() {
+        let argv = docker_provision_argv("box");
+        assert_eq!(&argv[..3], &["exec", "box", "timeout"]);
+        assert_eq!(argv.last().unwrap(), &provision_script());
+    }
+
+    #[test]
+    fn the_script_is_marker_gated_and_installs_the_tool_list() {
+        let script = provision_script();
+        assert!(script.contains("provisioned"));
+        assert!(script.contains(SANDBOX_TOOLS));
+        assert!(script.contains("apt-get install"));
+        assert!(
+            script.contains("fdfind"),
+            "fd's debian name is linked to the common one"
+        );
+    }
 }
 
 #[cfg(test)]

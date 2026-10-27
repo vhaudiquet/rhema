@@ -254,7 +254,16 @@ for the VM one. bubblewrap/nsjail and microVM images land later with
 zero trait change — that is the test the abstraction has to pass
 (§2). SSH ships daemonless first: zero setup on the far
 end is the mode's reason to exist; tunnel-plus-`sandboxd` is the
-documented fast path.
+documented fast path. The instance is prepared, not assumed: the
+ensure step provisions a standard tool set — git, ripgrep, fd-find,
+jq, sd, curl, python3, build-essential — once per instance,
+marker-gated and idempotent, so a stock image arrives ready for the
+bash tool's sessions. A failed provisioning is a degraded sandbox,
+not a dead one: the session runs, and the tools say what exists
+when probed; the absent marker retries on the next assembly. Exec
+runs as the workspace's owner — the instance's uid map and the
+`--user` flag name the pair the tree answers to — and an empty cwd
+lands at the workspace, not the instance's default directory.
 
 The choice UI is an instance list, not a kind list: the host's own
 `local` row, then the named instances the config stores — a user's
