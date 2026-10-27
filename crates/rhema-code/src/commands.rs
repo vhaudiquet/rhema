@@ -127,7 +127,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/settings",
-        description: "providers, colors, skills, subagents, usage, about",
+        description: "providers, sandboxes, colors, skills, subagents, usage, about",
         argument: Argument::None,
         handler: settings,
     },
@@ -326,7 +326,12 @@ fn profile(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
 fn sandbox(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
     match argument {
         Some(kind) => app.choose_sandbox_by_name(kind),
-        None => app.open_sandbox_picker(),
+        None => {
+            // The settings Sandbox page, not a picker of its own:
+            // choosing and adding an instance both live there.
+            app.open_settings_at(crate::screens::SettingsSection::Sandbox);
+            Vec::new()
+        }
     }
 }
 

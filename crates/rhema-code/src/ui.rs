@@ -163,7 +163,6 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         ),
         Screen::Picker(picker) => render_picker(frame, picker, icons, &theme),
         Screen::Profile(profile) => render_profile_picker(frame, profile, &theme),
-        Screen::Sandbox(sandbox) => render_sandbox_picker(frame, sandbox, &theme),
         Screen::Resume(resume) => render_resume_picker(frame, resume, &theme),
         Screen::Settings(settings) => render_settings(frame, settings, &theme, icons, &mut hits),
         Screen::Chat => {
@@ -409,6 +408,69 @@ fn render_add_profile_dialog(
     frame.render_widget(Paragraph::new(status), status_area);
 }
 
+fn render_add_sandbox_dialog(
+    frame: &mut Frame,
+    dialog: &crate::screens::AddSandboxDialog,
+    theme: &Theme,
+) {
+    let body: u16 = match dialog.stage {
+        crate::screens::SandboxDialogStage::SelectKind => {
+            2 + crate::screens::SANDBOX_ADD_KINDS.len() as u16
+        }
+        crate::screens::SandboxDialogStage::EnterValue => 2,
+    };
+    let area = centered(58, body + 2, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken).fg(theme.text))
+        .title(" add a sandbox instance ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [body_area, status_area] =
+        Layout::vertical([Constraint::Length(body), Constraint::Length(1)]).areas(inner);
+    match dialog.stage {
+        crate::screens::SandboxDialogStage::SelectKind => {
+            let rows: Vec<Line> = crate::screens::SANDBOX_ADD_KINDS
+                .iter()
+                .enumerate()
+                .map(|(index, kind)| {
+                    let selected = index == dialog.selected;
+                    let mark = if selected { "❯ " } else { "  " };
+                    let what = match kind {
+                        crate::args::SandboxChoice::Docker => "a container, by name",
+                        crate::args::SandboxChoice::Ssh => "a remote box, by user@host",
+                        crate::args::SandboxChoice::Http => "a rhema-sandboxd, by url",
+                        crate::args::SandboxChoice::Local => "this host",
+                    };
+                    Line::from(vec![
+                        Span::raw(mark).fg(theme.accent_text),
+                        Span::raw(kind.stored_name().to_owned()).fg(theme.text),
+                        Span::raw(format!("  {what}")).fg(theme.text3),
+                    ])
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(rows), body_area);
+        }
+        crate::screens::SandboxDialogStage::EnterValue => {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw(dialog.input_label()).fg(theme.text3),
+                    Span::raw(dialog.input.clone()).bold(),
+                ])),
+                body_area,
+            );
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(dialog.input_hint()).fg(theme.text3),
+        status_area,
+    );
+}
+
 fn render_picker(
     frame: &mut Frame,
     picker: &PickerScreen,
@@ -551,67 +613,6 @@ fn render_profile_picker(frame: &mut Frame, screen: &crate::screens::ProfileScre
 
 /// The sandbox picker: the profile picker's frame and keys over the
 /// offered kinds — rounded border, `❯ ` highlight, one footer line.
-fn render_sandbox_picker(frame: &mut Frame, screen: &crate::screens::SandboxScreen, theme: &Theme) {
-    let area = frame.area();
-    let block = crate::chrome::panel(Some("where bash runs"), theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let rows: Vec<ListItem> = screen
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let selected = index == screen.selected;
-            let name_style = if selected {
-                Style::default().fg(theme.text).bold()
-            } else {
-                Style::default().fg(theme.text)
-            };
-            let mut spans = vec![Span::styled(row.kind.stored_name().to_owned(), name_style)];
-            let mut detail = String::new();
-            detail.push_str(match row.kind {
-                crate::args::SandboxChoice::Local => "this host",
-                crate::args::SandboxChoice::Docker => "a container over the docker CLI",
-                crate::args::SandboxChoice::Ssh => "a remote box over ssh",
-                crate::args::SandboxChoice::Http => "a rhema-sandboxd daemon",
-            });
-            if row.remembered {
-                detail.push_str(" · remembered here");
-            }
-            if row.active {
-                detail.push_str(" · active");
-            }
-            spans.push(Span::raw("  ").fg(theme.text3));
-            spans.push(Span::styled(detail, Style::default().fg(theme.text3)));
-            ListItem::new(Line::from(spans))
-        })
-        .collect();
-    let mut state = ListState::default();
-    state.select(Some(screen.selected));
-    frame.render_stateful_widget(
-        List::new(rows)
-            .highlight_symbol("❯ ")
-            .highlight_style(Style::default().bg(theme.elevated)),
-        inner,
-        &mut state,
-    );
-
-    let footer = Line::from(Span::raw(
-        "enter switch · esc back · edit config.yaml for url/host/token",
-    ))
-    .fg(theme.text3);
-    frame.render_widget(
-        Paragraph::new(footer).block(Block::default().padding(Padding::horizontal(1))),
-        Rect {
-            x: inner.x,
-            y: inner.y + inner.height.saturating_sub(1),
-            width: inner.width,
-            height: 1,
-        },
-    );
-}
-
 fn render_resume_picker(frame: &mut Frame, screen: &crate::screens::ResumeScreen, theme: &Theme) {
     let area = frame.area();
     let block = crate::chrome::panel(Some("resume a session"), theme);
@@ -1179,6 +1180,9 @@ fn render_settings(
     if let Some(dialog) = &settings.add_profile {
         render_add_profile_dialog(frame, dialog, theme);
     }
+    if let Some(dialog) = &settings.sandbox_dialog {
+        render_add_sandbox_dialog(frame, dialog, theme);
+    }
 }
 
 /// Tokens as the Usage page spells an amount: kilo-scaled past a
@@ -1357,6 +1361,47 @@ fn settings_page(
             ));
             lines.push(Line::default());
             (lines, footer("enter switch · c color · d remove"), row_hits)
+        }
+        SettingsSection::Sandbox => {
+            let mut row_hits = Vec::new();
+            for (index, row) in settings.sandbox_rows().iter().enumerate() {
+                let selected = index == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                let line = if row.add {
+                    Line::from(vec![
+                        Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                        Span::raw("+ Add a sandbox instance...").fg(theme.text2),
+                    ])
+                } else {
+                    let mut detail = row.detail.clone();
+                    if row.active {
+                        detail.push_str(" · active");
+                    }
+                    if row.remembered {
+                        detail.push_str(" · last used here");
+                    }
+                    if !row.offered {
+                        detail.push_str(" · not offered here");
+                    }
+                    let name_style = if row.active {
+                        Style::default().fg(theme.text).bold()
+                    } else {
+                        Style::default().fg(theme.text)
+                    };
+                    Line::from(vec![
+                        Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                        Span::styled(row.kind.stored_name().to_owned(), name_style),
+                        Span::raw(format!("  {detail}")).fg(theme.text3),
+                    ])
+                };
+                lines.push(settings_row(line, selected, theme));
+            }
+            lines.push(Line::default());
+            (
+                lines,
+                footer("enter runs bash here · the add row stores a kind's instance"),
+                row_hits,
+            )
         }
         SettingsSection::Appearance => {
             let mut row_hits = Vec::new();

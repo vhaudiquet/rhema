@@ -21,8 +21,8 @@ use crate::events::{FetchWhy, OwnedEvent, UiEvent};
 use crate::onboarding::{OnboardingAction, OnboardingScreen};
 use crate::screens::{
     AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, PickerStatus,
-    ProfileAction, ProfileScreen, SandboxAction, SandboxScreen, SettingsAction, SettingsScreen,
-    SettingsSection, SkillRow, SkillSource, SubagentRow, SubagentSource,
+    ProfileAction, ProfileScreen, SettingsAction, SettingsScreen, SettingsSection, SkillRow,
+    SkillSource, SubagentRow, SubagentSource,
 };
 use crate::store::ConfigStore;
 use crate::transcript::Transcript;
@@ -582,8 +582,6 @@ pub enum Screen {
     Picker(PickerScreen),
     /// Switch the profile the session runs under.
     Profile(ProfileScreen),
-    /// Choose where the session's `bash` runs.
-    Sandbox(SandboxScreen),
     /// Pick a saved session of this workspace to continue.
     Resume(crate::screens::ResumeScreen),
     /// The settings screen: a sidebar of sections; the Providers page
@@ -999,7 +997,6 @@ enum Routed {
     Onboarding(OnboardingAction),
     Picker(PickerAction),
     Profile(ProfileAction),
-    Sandbox(SandboxAction),
     Resume(crate::screens::ResumeAction),
     Settings(SettingsAction),
     Chat(ChatAction),
@@ -1159,23 +1156,6 @@ impl App {
         Vec::new()
     }
 
-    /// Opens the sandbox picker over this machine's offered kinds. The
-    /// workspace's remembered kind and the session's active kind mark
-    /// the rows; there is always at least `local` to choose.
-    pub fn open_sandbox_picker(&mut self) -> Vec<Effect> {
-        let remembered = self
-            .config
-            .last_sandbox_in(&self.options.workspace)
-            .as_deref()
-            .and_then(|kind| SandboxChoice::from_stored(Some(kind)));
-        self.screen = Screen::Sandbox(SandboxScreen::new(
-            &self.sandbox_offered,
-            remembered,
-            self.active_sandbox(),
-        ));
-        Vec::new()
-    }
-
     /// The kind this session's `bash` currently runs under: the
     /// assembled sandbox's choice, `local` when the agent's own tools
     /// run.
@@ -1329,6 +1309,13 @@ impl App {
             .and_then(CodingAgent::transcript_stats)
             .or(self.transcript_stats);
         settings.session_cost = self.session_cost;
+        settings.sandbox_offered = self.sandbox_offered;
+        settings.sandbox_active = self.active_sandbox();
+        settings.sandbox_remembered = self
+            .config
+            .last_sandbox_in(&self.options.workspace)
+            .as_deref()
+            .and_then(|kind| SandboxChoice::from_stored(Some(kind)));
         self.screen = Screen::Settings(Box::new(settings));
     }
 
@@ -1792,6 +1779,48 @@ impl App {
         Vec::new()
     }
 
+    /// The add-sandbox dialog's accepted kind and value: the kind's
+    /// field lands on the session profile's `sandbox` section — the
+    /// container, the host, or the url — and the snapshot follows.
+    /// Storing never activates: enter on a kind row runs `bash` there.
+    fn submit_sandbox_instance(&mut self) -> Vec<Effect> {
+        let (kind, value) = match &self.screen {
+            Screen::Settings(settings) => match &settings.sandbox_dialog {
+                Some(dialog) => dialog.submitted(),
+                None => return Vec::new(),
+            },
+            _ => return Vec::new(),
+        };
+        if value.is_empty() {
+            return Vec::new();
+        }
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |profile| {
+                let sandbox = profile
+                    .sandbox
+                    .get_or_insert_with(rhema_config::SandboxSettings::default);
+                match kind {
+                    SandboxChoice::Docker => sandbox.container = Some(value.clone()),
+                    SandboxChoice::Ssh => sandbox.host = Some(value.clone()),
+                    SandboxChoice::Http => sandbox.url = Some(value.clone()),
+                    SandboxChoice::Local => {}
+                }
+            });
+        if let Err(err) = self.store.save(&self.config) {
+            self.error = Some(format!("cannot save config: {err}"));
+            return Vec::new();
+        }
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.sandbox_dialog = None;
+            settings.stored = self.config.effective(self.session_profile.as_deref());
+        }
+        self.transcript.push_notice(&format!(
+            "the {} sandbox is set; enter its row to run bash there",
+            kind.stored_name()
+        ));
+        Vec::new()
+    }
+
     /// `d` on a Profiles page row: forget the profile. The one this
     /// session runs on stays — the session's identity is not dropped
     /// from under it, and that refusal is also what keeps the registry
@@ -2020,6 +2049,9 @@ impl App {
                 if let Some(dialog) = &mut settings.add_profile {
                     dialog.paste(text);
                 }
+                if let Some(dialog) = &mut settings.sandbox_dialog {
+                    dialog.paste(text);
+                }
             }
             Screen::Onboarding(wizard) => {
                 if let Some(dialog) = &mut wizard.dialog {
@@ -2090,7 +2122,10 @@ impl App {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();
                 };
-                if settings.dialog.is_some() || settings.add_profile.is_some() {
+                if settings.dialog.is_some()
+                    || settings.add_profile.is_some()
+                    || settings.sandbox_dialog.is_some()
+                {
                     return Vec::new();
                 }
                 settings.row = index;
@@ -2128,7 +2163,6 @@ impl App {
             Screen::Onboarding(wizard) => Routed::Onboarding(wizard.handle_key(key)),
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
             Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
-            Screen::Sandbox(sandbox) => Routed::Sandbox(sandbox.handle_key(key)),
             Screen::Resume(resume) => Routed::Resume(resume.handle_key(key)),
             Screen::Settings(settings) => Routed::Settings(settings.handle_key(key)),
             Screen::Chat => {
@@ -2156,11 +2190,6 @@ impl App {
                 self.screen = Screen::Chat;
                 Vec::new()
             }
-            Routed::Sandbox(SandboxAction::Choose(choice)) => self.choose_sandbox(choice),
-            Routed::Sandbox(SandboxAction::BackToChat) => {
-                self.screen = Screen::Chat;
-                Vec::new()
-            }
             Routed::Resume(crate::screens::ResumeAction::Pick(path)) => {
                 self.resume_session(&path);
                 Vec::new()
@@ -2172,7 +2201,6 @@ impl App {
             Routed::Picker(PickerAction::Retry) => self.retry_fetch(),
             Routed::Picker(PickerAction::None)
             | Routed::Profile(ProfileAction::None)
-            | Routed::Sandbox(SandboxAction::None)
             | Routed::Resume(crate::screens::ResumeAction::None) => Vec::new(),
             Routed::Chat(chat_action) => self.on_chat_key(key, chat_action),
         }
@@ -2239,6 +2267,15 @@ impl App {
                 self.toggle_icons();
                 Vec::new()
             }
+            SettingsAction::SelectSandbox(choice) => self.choose_sandbox(choice),
+            SettingsAction::OpenSandboxDialog => {
+                if let Screen::Settings(settings) = &mut self.screen {
+                    settings.sandbox_dialog = Some(crate::screens::AddSandboxDialog::new());
+                }
+                Vec::new()
+            }
+            SettingsAction::SubmitSandboxDialog => self.submit_sandbox_instance(),
+            SettingsAction::CloseSandboxDialog => Vec::new(),
             SettingsAction::EditSubagent => self.edit_subagent(),
             SettingsAction::ToggleSkill => {
                 let name = match &self.screen {
@@ -6725,24 +6762,33 @@ mod tests {
     }
 
     #[test]
-    fn slash_sandbox_opens_the_picker_over_the_offered_kinds() {
+    fn slash_sandbox_opens_the_settings_sandbox_page() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.sandbox_offered = offered(false, true, false);
         crate::commands::dispatch(&mut h.app, "/sandbox");
-        let Screen::Sandbox(screen) = &h.app.screen else {
-            panic!("expected the sandbox screen");
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
         };
+        assert_eq!(settings.section, SettingsSection::Sandbox);
+        // Every kind lists; the marks say what this machine offered.
         assert_eq!(
-            screen
-                .entries
+            settings
+                .sandbox_rows()
                 .iter()
-                .map(|row| row.kind)
+                .filter(|row| !row.add)
+                .map(|row| (row.kind, row.offered))
                 .collect::<Vec<_>>(),
-            vec![SandboxChoice::Local, SandboxChoice::Ssh]
+            vec![
+                (SandboxChoice::Local, true),
+                (SandboxChoice::Docker, false),
+                (SandboxChoice::Ssh, true),
+                (SandboxChoice::Http, false),
+            ]
         );
-        // Down to the ssh row, then enter: the select closes the
-        // picker, routes through choose_sandbox, and comes back as the
+        // Down twice to the ssh row, then enter: the select routes
+        // through choose_sandbox and lands back on the chat as the
         // assembly effect.
+        h.app.on_key(key(KeyCode::Down));
         h.app.on_key(key(KeyCode::Down));
         let effects = h.app.on_key(key(KeyCode::Enter));
         assert_eq!(
@@ -6751,6 +6797,50 @@ mod tests {
             "enter on ssh assembles it"
         );
         assert!(matches!(h.app.screen, Screen::Chat), "enter returns");
+    }
+
+    #[test]
+    fn the_sandbox_add_dialog_stores_the_kinds_instance() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/sandbox");
+        // Four downs: local, docker, ssh, http, add row. Enter opens
+        // the dialog; docker is its first kind.
+        for _ in 0..4 {
+            h.app.on_key(key(KeyCode::Down));
+        }
+        h.app.on_key(key(KeyCode::Enter));
+        h.app.on_key(key(KeyCode::Enter)); // pick docker
+        for c in "rhema-dev".chars() {
+            h.app.on_key(key(KeyCode::Char(c)));
+        }
+        h.app.on_key(key(KeyCode::Enter)); // store
+        let stored = h.store.load().unwrap();
+        let sandbox = stored
+            .effective(Some("personal"))
+            .sandbox
+            .expect("the section exists");
+        assert_eq!(
+            sandbox.container.as_deref(),
+            Some("rhema-dev"),
+            "the instance stored"
+        );
+        assert_eq!(
+            sandbox.kind.as_deref(),
+            None,
+            "storing never activates: the kind is still unset"
+        );
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("still on the settings screen");
+        };
+        assert!(settings.sandbox_dialog.is_none(), "the dialog closed");
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .iter()
+                .any(|line| matches!(line, Line::Notice(text) if text.contains("docker"))),
+            "the notice names the kind"
+        );
     }
 
     #[test]
@@ -7159,7 +7249,9 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         assert_eq!(h.app.theme, crate::palette::DARK);
         crate::commands::dispatch(&mut h.app, "/settings");
-        // Two tabs: Profiles sits between Providers and Appearance.
+        // Three tabs: Profiles and Sandbox sit between Providers and
+        // Appearance.
+        h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('t')));
@@ -7175,6 +7267,7 @@ mod tests {
     fn settings_toggles_the_icon_flavor_and_persists_it() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         crate::commands::dispatch(&mut h.app, "/settings");
+        h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('i')));
@@ -7973,7 +8066,9 @@ mod tests {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         assert_eq!(h.app.theme, crate::palette::DARK);
         crate::commands::dispatch(&mut h.app, "/settings");
-        // Two tabs: Profiles sits between Providers and Appearance.
+        // Three tabs: Profiles and Sandbox sit between Providers and
+        // Appearance.
+        h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Tab));
         h.app.on_key(key(KeyCode::Char('c')));

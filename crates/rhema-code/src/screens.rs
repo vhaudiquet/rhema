@@ -186,91 +186,182 @@ impl ProfileScreen {
 
 // --- Sandbox ---
 
-/// One row of the sandbox picker.
+/// One row of the settings Sandbox page: one kind of the v1 set, its
+/// stored fact, and the marks. One instance per kind — the profile's
+/// `sandbox` section holds a single set of fields, so adding an
+/// instance of a kind means filling that kind's field.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SandboxRow {
-    /// The kind this row offers.
+    /// The kind this row stands for.
     pub kind: crate::args::SandboxChoice,
+    /// The kind's stored fact — the container, the host, the url — or
+    /// the hint naming what the add flow would ask for.
+    pub detail: String,
+    /// Whether this machine offered the kind at the startup probe
+    /// (`local` always).
+    pub offered: bool,
     /// Whether this workspace last ran `bash` under this kind.
     pub remembered: bool,
     /// Whether this session's `bash` currently runs under this kind.
     pub active: bool,
+    /// Whether this is the add-a-new-instance row.
+    pub add: bool,
 }
 
-/// What one sandbox-picker keypress means.
+/// What one add-sandbox-dialog keypress means.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SandboxAction {
+pub enum SandboxDialogAction {
     /// Nothing to do.
     None,
-    /// Run `bash` under the chosen kind.
-    Choose(crate::args::SandboxChoice),
-    /// Return to the chat.
-    BackToChat,
+    /// Enter accepted the kind's value: the app stores the instance.
+    Submit,
+    /// Esc left the dialog (from the kind list).
+    Close,
 }
 
-/// The sandbox picker: one highlighted row over the machine's offered
-/// kinds, arrows to move, enter to choose, esc back to the chat. Four
-/// kinds at most, so there is no filter. Only the kind is picked here —
-/// the url, host, and token stay the config's to edit.
+/// Which half of the add-sandbox dialog is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SandboxDialogStage {
+    /// The kind list: docker, ssh, http — `local` needs nothing added.
+    SelectKind,
+    /// The value input: what the chosen kind names its instance by.
+    EnterValue,
+}
+
+/// The kinds the add dialog offers, canonical order minus `local` —
+/// the local instance exists by doing nothing.
+pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[
+    crate::args::SandboxChoice::Docker,
+    crate::args::SandboxChoice::Ssh,
+    crate::args::SandboxChoice::Http,
+];
+
+/// The pop-in dialog over the Sandbox page: pick the kind, then type
+/// what it names its instance by — the container, the `user@host`, or
+/// the daemon URL. Storing is the app's; the dialog collects.
 #[derive(Debug)]
-pub struct SandboxScreen {
-    /// The rows, in the probe's canonical order (`local` first).
-    pub entries: Vec<SandboxRow>,
-    /// Index of the highlighted row.
+pub struct AddSandboxDialog {
+    /// Which half of the dialog is showing.
+    pub stage: SandboxDialogStage,
+    /// The highlighted row of the kind list.
     pub selected: usize,
+    /// The kind being added, from the pick on.
+    pub kind: crate::args::SandboxChoice,
+    /// The line being typed on the value stage.
+    pub input: String,
 }
 
-impl SandboxScreen {
-    /// A picker over the offered kinds: `remembered` marks the kind
-    /// this workspace last ran, `active` the one the session runs on.
-    pub fn new(
-        offered: &crate::sandbox::SandboxAvailability,
-        remembered: Option<crate::args::SandboxChoice>,
-        active: crate::args::SandboxChoice,
-    ) -> Self {
-        let entries = offered
-            .offered()
-            .into_iter()
-            .map(|kind| SandboxRow {
-                kind,
-                remembered: remembered == Some(kind),
-                active: active == kind,
-            })
-            .collect();
+impl AddSandboxDialog {
+    /// A dialog at the kind list.
+    pub fn new() -> Self {
         Self {
-            entries,
+            stage: SandboxDialogStage::SelectKind,
             selected: 0,
+            kind: SANDBOX_ADD_KINDS[0],
+            input: String::new(),
+        }
+    }
+
+    /// The kind the highlighted row stands for.
+    pub fn selected_kind(&self) -> crate::args::SandboxChoice {
+        SANDBOX_ADD_KINDS[self.selected.min(SANDBOX_ADD_KINDS.len() - 1)]
+    }
+
+    /// Enter on the kind list: descend into the value input.
+    fn choose_kind(&mut self) {
+        self.kind = self.selected_kind();
+        self.input = String::new();
+        self.stage = SandboxDialogStage::EnterValue;
+    }
+
+    /// The value stage's prompt.
+    pub fn input_label(&self) -> &'static str {
+        match self.kind {
+            crate::args::SandboxChoice::Docker => "container: ",
+            crate::args::SandboxChoice::Ssh => "host: ",
+            crate::args::SandboxChoice::Http => "url: ",
+            crate::args::SandboxChoice::Local => "",
+        }
+    }
+
+    /// The hint under the input, per the stage.
+    pub fn input_hint(&self) -> String {
+        match self.stage {
+            SandboxDialogStage::SelectKind => {
+                "arrows choose · enter to continue · esc cancels".to_owned()
+            }
+            SandboxDialogStage::EnterValue => format!(
+                "{}· ctrl-v paste · enter stores · esc back",
+                self.input_label()
+            ),
+        }
+    }
+
+    /// The accepted kind and value; the app calls this on the Submit
+    /// action. Blank values never reach here (handle_key holds them).
+    pub fn submitted(&self) -> (crate::args::SandboxChoice, String) {
+        (self.kind, self.input.trim().to_owned())
+    }
+
+    /// Bracketed paste onto the value line.
+    pub fn paste(&mut self, text: &str) {
+        if self.stage == SandboxDialogStage::EnterValue {
+            self.input.push_str(text);
         }
     }
 
     /// Handles one keypress.
-    pub fn handle_key(&mut self, key: KeyEvent) -> SandboxAction {
+    pub fn handle_key(&mut self, key: KeyEvent) -> SandboxDialogAction {
         if key.modifiers.contains(KeyModifiers::CONTROL) {
-            return SandboxAction::None;
+            return SandboxDialogAction::None;
         }
-        match key.code {
-            KeyCode::Down => {
-                if !self.entries.is_empty() {
-                    self.selected = (self.selected + 1).min(self.entries.len() - 1);
+        match self.stage {
+            SandboxDialogStage::SelectKind => match key.code {
+                KeyCode::Down => {
+                    self.selected = (self.selected + 1).min(SANDBOX_ADD_KINDS.len() - 1);
+                    SandboxDialogAction::None
                 }
-                SandboxAction::None
-            }
-            KeyCode::Up => {
-                self.selected = self.selected.saturating_sub(1);
-                SandboxAction::None
-            }
-            KeyCode::Enter => self.choose(),
-            KeyCode::Esc => SandboxAction::BackToChat,
-            _ => SandboxAction::None,
+                KeyCode::Up => {
+                    self.selected = self.selected.saturating_sub(1);
+                    SandboxDialogAction::None
+                }
+                KeyCode::Enter => {
+                    self.choose_kind();
+                    SandboxDialogAction::None
+                }
+                KeyCode::Esc => SandboxDialogAction::Close,
+                _ => SandboxDialogAction::None,
+            },
+            SandboxDialogStage::EnterValue => match key.code {
+                KeyCode::Char(c) => {
+                    self.input.push(c);
+                    SandboxDialogAction::None
+                }
+                KeyCode::Backspace => {
+                    self.input.pop();
+                    SandboxDialogAction::None
+                }
+                KeyCode::Enter => {
+                    if self.input.trim().is_empty() {
+                        SandboxDialogAction::None
+                    } else {
+                        SandboxDialogAction::Submit
+                    }
+                }
+                KeyCode::Esc => {
+                    self.stage = SandboxDialogStage::SelectKind;
+                    self.input = String::new();
+                    SandboxDialogAction::None
+                }
+                _ => SandboxDialogAction::None,
+            },
         }
     }
+}
 
-    /// Enter: run `bash` under the highlighted kind.
-    fn choose(&mut self) -> SandboxAction {
-        match self.entries.get(self.selected) {
-            Some(row) => SandboxAction::Choose(row.kind),
-            None => SandboxAction::None,
-        }
+impl Default for AddSandboxDialog {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -369,6 +460,9 @@ pub enum SettingsSection {
     Providers,
     /// The named profiles: add, remove, switch, and their name colors.
     Profiles,
+    /// Where `bash` runs: the sandbox kinds, their instances, the
+    /// active one, and the add flow.
+    Sandbox,
     /// The theme and the footer's icon flavor.
     Appearance,
     /// Cross-session memory: a status page today.
@@ -388,6 +482,7 @@ impl SettingsSection {
     pub const ALL: &'static [SettingsSection] = &[
         SettingsSection::Providers,
         SettingsSection::Profiles,
+        SettingsSection::Sandbox,
         SettingsSection::Appearance,
         SettingsSection::Memory,
         SettingsSection::Skills,
@@ -401,6 +496,7 @@ impl SettingsSection {
         match self {
             SettingsSection::Providers => "Providers",
             SettingsSection::Profiles => "Profiles",
+            SettingsSection::Sandbox => "Sandbox",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Memory => "Memory",
             SettingsSection::Skills => "Skills",
@@ -455,6 +551,14 @@ pub enum SettingsAction {
     EditSubagent,
     /// Enter or Space on a skills row: flip the skill's on/off state.
     ToggleSkill,
+    /// Enter on a sandbox kind row: run `bash` under it.
+    SelectSandbox(crate::args::SandboxChoice),
+    /// Enter on the sandbox add row: the add-sandbox dialog opens.
+    OpenSandboxDialog,
+    /// The add-sandbox dialog accepted a kind and value: store it.
+    SubmitSandboxDialog,
+    /// Esc left the add-sandbox dialog.
+    CloseSandboxDialog,
 }
 
 /// One row of the Providers page's instance list: a stored instance, or
@@ -998,6 +1102,16 @@ pub struct SettingsScreen {
     pub stored: rhema_config::Profile,
     /// The add-instance dialog, when it is up.
     pub dialog: Option<AddInstanceDialog>,
+    // The Sandbox page's snapshot.
+    /// What this machine offered at the startup probe: the rows'
+    /// offered marks.
+    pub sandbox_offered: crate::sandbox::SandboxAvailability,
+    /// The kind this session's `bash` runs under.
+    pub sandbox_active: crate::args::SandboxChoice,
+    /// The kind this workspace last ran, when remembered.
+    pub sandbox_remembered: Option<crate::args::SandboxChoice>,
+    /// The add-sandbox dialog, when it is up.
+    pub sandbox_dialog: Option<AddSandboxDialog>,
     // The Profiles page's snapshot.
     /// The config's profiles, sorted by name.
     pub profiles: Vec<ProfileRow>,
@@ -1059,6 +1173,10 @@ impl SettingsScreen {
             profile: "personal".to_owned(),
             stored: rhema_config::Profile::default(),
             dialog: None,
+            sandbox_offered: crate::sandbox::SandboxAvailability::default(),
+            sandbox_active: crate::args::SandboxChoice::Local,
+            sandbox_remembered: None,
+            sandbox_dialog: None,
             profiles: Vec::new(),
             add_profile: None,
             skills: Vec::new(),
@@ -1115,6 +1233,58 @@ impl SettingsScreen {
         rows
     }
 
+    /// The Sandbox page as rendered rows: the four kinds in the spec's
+    /// canonical order, then the add row. The detail names the kind's
+    /// stored fact; the marks say active, remembered, offered.
+    pub fn sandbox_rows(&self) -> Vec<SandboxRow> {
+        let sandbox = self.stored.sandbox.as_ref();
+        let mut rows: Vec<SandboxRow> = [
+            crate::args::SandboxChoice::Local,
+            crate::args::SandboxChoice::Docker,
+            crate::args::SandboxChoice::Ssh,
+            crate::args::SandboxChoice::Http,
+        ]
+        .into_iter()
+        .map(|kind| {
+            let stored = match kind {
+                crate::args::SandboxChoice::Local => None,
+                crate::args::SandboxChoice::Docker => sandbox.and_then(|s| s.container.as_deref()),
+                crate::args::SandboxChoice::Ssh => sandbox.and_then(|s| s.host.as_deref()),
+                crate::args::SandboxChoice::Http => sandbox.and_then(|s| s.url.as_deref()),
+            };
+            let detail = match kind {
+                crate::args::SandboxChoice::Local => "this host".to_owned(),
+                crate::args::SandboxChoice::Docker => stored
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "no container set".to_owned()),
+                crate::args::SandboxChoice::Ssh => stored
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "no host set".to_owned()),
+                crate::args::SandboxChoice::Http => stored
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| "no url set".to_owned()),
+            };
+            SandboxRow {
+                kind,
+                detail,
+                offered: self.sandbox_offered.offers(kind),
+                remembered: self.sandbox_remembered == Some(kind),
+                active: self.sandbox_active == kind,
+                add: false,
+            }
+        })
+        .collect();
+        rows.push(SandboxRow {
+            kind: crate::args::SandboxChoice::Local,
+            detail: String::new(),
+            offered: false,
+            remembered: false,
+            active: false,
+            add: true,
+        });
+        rows
+    }
+
     /// The name of the highlighted instance row; `None` on the add row
     /// or anywhere but the Providers page.
     pub fn selected_instance(&self) -> Option<&str> {
@@ -1133,6 +1303,17 @@ impl SettingsScreen {
             return None;
         }
         self.profiles.get(self.row).map(|row| row.name.as_str())
+    }
+
+    /// The highlighted sandbox kind row; `None` on the add row, with
+    /// the dialog up, or anywhere but the Sandbox page.
+    pub fn selected_sandbox(&self) -> Option<crate::args::SandboxChoice> {
+        if self.section != SettingsSection::Sandbox || self.sandbox_dialog.is_some() {
+            return None;
+        }
+        self.sandbox_rows()
+            .get(self.row)
+            .and_then(|row| (!row.add).then_some(row.kind))
     }
 
     /// The highlighted subagent row; `None` anywhere but the Subagents
@@ -1159,6 +1340,7 @@ impl SettingsScreen {
         match self.section {
             SettingsSection::Providers => self.instance_rows().len(),
             SettingsSection::Profiles => self.profiles.len() + 1,
+            SettingsSection::Sandbox => self.sandbox_rows().len(),
             SettingsSection::Appearance => 3,
             SettingsSection::Skills => self.skills.len(),
             SettingsSection::Subagents => self.subagents.len(),
@@ -1196,6 +1378,10 @@ impl SettingsScreen {
             SettingsSection::Subagents => match self.selected_subagent() {
                 Some(_) => SettingsAction::EditSubagent,
                 None => SettingsAction::None,
+            },
+            SettingsSection::Sandbox => match self.selected_sandbox() {
+                Some(choice) => SettingsAction::SelectSandbox(choice),
+                None => SettingsAction::OpenSandboxDialog,
             },
             SettingsSection::Skills => match self.selected_skill() {
                 Some(_) => SettingsAction::ToggleSkill,
@@ -1238,6 +1424,20 @@ impl SettingsScreen {
                 DialogAction::Validate => SettingsAction::Validate,
                 DialogAction::StartFlow => SettingsAction::StartFlow,
                 DialogAction::Close | DialogAction::CloseCancelFlow => SettingsAction::CloseDialog,
+            };
+        }
+        if let Some(action) = self
+            .sandbox_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key))
+        {
+            if action == SandboxDialogAction::Close {
+                self.sandbox_dialog = None;
+            }
+            return match action {
+                SandboxDialogAction::None => SettingsAction::None,
+                SandboxDialogAction::Submit => SettingsAction::SubmitSandboxDialog,
+                SandboxDialogAction::Close => SettingsAction::CloseSandboxDialog,
             };
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2400,91 +2600,179 @@ mod tests {
         SandboxAvailability { docker, ssh, http }
     }
 
+    /// A settings screen on the Sandbox page, with the snapshot filled.
+    fn sandbox_screen(
+        availability: SandboxAvailability,
+        remembered: Option<SandboxChoice>,
+        active: SandboxChoice,
+        stored: rhema_config::Profile,
+    ) -> SettingsScreen {
+        let mut settings = SettingsScreen::new();
+        settings.section = SettingsSection::Sandbox;
+        settings.sandbox_offered = availability;
+        settings.sandbox_remembered = remembered;
+        settings.sandbox_active = active;
+        settings.stored = stored;
+        settings
+    }
+
     #[test]
-    fn the_rows_list_the_offered_kinds_in_the_canonical_order() {
-        let screen = SandboxScreen::new(&offered(false, true, true), None, SandboxChoice::Local);
+    fn the_sandbox_rows_list_every_kind_in_the_canonical_order() {
+        let settings = sandbox_screen(
+            offered(false, true, false),
+            None,
+            SandboxChoice::Local,
+            rhema_config::Profile::default(),
+        );
         assert_eq!(
-            screen
-                .entries
+            settings
+                .sandbox_rows()
                 .iter()
                 .map(|row| row.kind)
                 .collect::<Vec<_>>(),
             vec![
                 SandboxChoice::Local,
+                SandboxChoice::Docker,
                 SandboxChoice::Ssh,
-                SandboxChoice::Http
-            ]
+                SandboxChoice::Http,
+                SandboxChoice::Local,
+            ],
+            "every kind lists, offered or not: the marks say which; the add row sits last"
         );
-    }
-
-    #[test]
-    fn the_remembered_and_active_kinds_mark_their_rows() {
-        let screen = SandboxScreen::new(
-            &offered(true, true, false),
-            Some(SandboxChoice::Ssh),
-            SandboxChoice::Docker,
+        assert!(settings.sandbox_rows().last().expect("rows").add);
+        // The four kinds plus the add row are the arrows' range: five
+        // downs from the top wrap back to it.
+        let mut stepped = sandbox_screen(
+            offered(false, true, false),
+            None,
+            SandboxChoice::Local,
+            rhema_config::Profile::default(),
         );
-        let marked = |kind| {
-            let row = screen
-                .entries
-                .iter()
-                .find(|row| row.kind == kind)
-                .expect("row present");
-            (row.remembered, row.active)
-        };
-        assert_eq!(marked(SandboxChoice::Local), (false, false));
-        assert_eq!(marked(SandboxChoice::Docker), (false, true));
-        assert_eq!(marked(SandboxChoice::Ssh), (true, false));
-    }
-
-    #[test]
-    fn a_kind_that_is_both_remembered_and_active_carries_both_marks() {
-        let screen = SandboxScreen::new(
-            &offered(false, true, false),
-            Some(SandboxChoice::Ssh),
-            SandboxChoice::Ssh,
-        );
-        let row = &screen.entries[1];
-        assert_eq!(row.kind, SandboxChoice::Ssh);
-        assert!(row.remembered && row.active);
-    }
-
-    #[test]
-    fn sandbox_picker_arrows_stay_in_bounds_and_enter_chooses() {
-        let mut screen = SandboxScreen::new(&offered(true, true, true), None, SandboxChoice::Local);
-        for _ in 0..6 {
-            screen.handle_key(key(KeyCode::Down));
+        for _ in 0..5 {
+            stepped.handle_key(key(KeyCode::Down));
         }
-        assert_eq!(screen.selected, 3, "down stops at the last row");
-        screen.handle_key(key(KeyCode::Up));
-        assert_eq!(screen.selected, 2);
-        assert_eq!(
-            screen.handle_key(key(KeyCode::Enter)),
-            SandboxAction::Choose(SandboxChoice::Ssh)
+        assert_eq!(stepped.row, 0, "the range wraps");
+    }
+
+    #[test]
+    fn the_sandbox_rows_carry_the_stored_facts_and_the_marks() {
+        let stored = rhema_config::Profile {
+            sandbox: Some(rhema_config::SandboxSettings {
+                host: Some("box@far".to_owned()),
+                ..rhema_config::SandboxSettings::default()
+            }),
+            ..rhema_config::Profile::default()
+        };
+        let settings = sandbox_screen(
+            offered(false, true, false),
+            Some(SandboxChoice::Ssh),
+            SandboxChoice::Local,
+            stored,
         );
-        assert_eq!(
-            screen.handle_key(key(KeyCode::Esc)),
-            SandboxAction::BackToChat
+        let rows = settings.sandbox_rows();
+        let by_kind = |kind| {
+            rows.iter()
+                .find(|row| row.kind == kind)
+                .expect("row present")
+        };
+        assert_eq!(by_kind(SandboxChoice::Local).detail, "this host");
+        assert_eq!(by_kind(SandboxChoice::Docker).detail, "no container set");
+        assert_eq!(by_kind(SandboxChoice::Ssh).detail, "box@far");
+        assert_eq!(by_kind(SandboxChoice::Http).detail, "no url set");
+        assert!(by_kind(SandboxChoice::Ssh).offered);
+        assert!(!by_kind(SandboxChoice::Docker).offered);
+        assert!(by_kind(SandboxChoice::Ssh).remembered);
+        assert!(by_kind(SandboxChoice::Local).active);
+    }
+
+    #[test]
+    fn sandbox_enter_selects_a_kind_and_the_add_row_opens_the_dialog() {
+        let mut settings = sandbox_screen(
+            offered(false, true, false),
+            None,
+            SandboxChoice::Local,
+            rhema_config::Profile::default(),
         );
-        // A plain key is nothing; ctrl combos never reach the rows.
+        // Down twice: local, docker, ssh.
+        settings.handle_key(key(KeyCode::Down));
+        settings.handle_key(key(KeyCode::Down));
         assert_eq!(
-            screen.handle_key(key(KeyCode::Char('x'))),
-            SandboxAction::None
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::SelectSandbox(SandboxChoice::Ssh)
         );
+        // Two more downs land on the add row, the last of five.
+        for _ in 0..2 {
+            settings.handle_key(key(KeyCode::Down));
+        }
+        assert_eq!(settings.selected_sandbox(), None, "the add row");
+        // Opening the dialog is the app's act on this action; the
+        // screen only reports it.
         assert_eq!(
-            screen.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL)),
-            SandboxAction::None
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::OpenSandboxDialog
+        );
+        settings.sandbox_dialog = Some(AddSandboxDialog::new());
+        // With the dialog up the kind rows stop answering: the dialog
+        // takes every key while it is open.
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::None
         );
     }
 
     #[test]
-    fn zero_config_offers_local_alone_and_it_starts_selected() {
-        let screen =
-            SandboxScreen::new(&SandboxAvailability::default(), None, SandboxChoice::Local);
-        assert_eq!(screen.entries.len(), 1);
-        assert_eq!(screen.entries[0].kind, SandboxChoice::Local);
-        assert!(screen.entries[0].active, "local is what the session runs");
-        assert_eq!(screen.selected, 0);
+    fn the_sandbox_dialog_picks_a_kind_then_collects_a_value() {
+        let mut settings = sandbox_screen(
+            SandboxAvailability::default(),
+            None,
+            SandboxChoice::Local,
+            rhema_config::Profile::default(),
+        );
+        settings.sandbox_dialog = Some(AddSandboxDialog::new());
+        // Down once: docker, ssh — ssh is the pick.
+        settings
+            .sandbox_dialog
+            .as_mut()
+            .expect("dialog up")
+            .handle_key(key(KeyCode::Down));
+        settings.handle_key(key(KeyCode::Enter));
+        let dialog = settings.sandbox_dialog.as_ref().expect("still up");
+        assert_eq!(dialog.kind, SandboxChoice::Ssh);
+        // A blank value never submits.
+        settings.handle_key(key(KeyCode::Enter));
+        assert!(settings.sandbox_dialog.is_some());
+        // The value types; esc walks back to the kind list and the
+        // next pick clears the line.
+        for c in "box@far".chars() {
+            settings.handle_key(key(KeyCode::Char(c)));
+        }
+        settings.handle_key(key(KeyCode::Esc));
+        let dialog = settings.sandbox_dialog.as_ref().expect("still up");
+        assert_eq!(dialog.stage, SandboxDialogStage::SelectKind);
+        assert!(dialog.input.is_empty());
+        settings.handle_key(key(KeyCode::Enter));
+        for c in "box@far".chars() {
+            settings.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(
+            settings.handle_key(key(KeyCode::Enter)),
+            SettingsAction::SubmitSandboxDialog
+        );
+        let dialog = settings.sandbox_dialog.as_ref().expect("still up");
+        assert_eq!(
+            dialog.submitted(),
+            (SandboxChoice::Ssh, "box@far".to_owned())
+        );
+        // The screen keeps the dialog until the app acts on the
+        // submit; here esc walks back to the kind list, and a second
+        // esc closes the dialog.
+        settings.handle_key(key(KeyCode::Esc));
+        assert_eq!(
+            settings.sandbox_dialog.as_ref().expect("still up").stage,
+            SandboxDialogStage::SelectKind
+        );
+        settings.handle_key(key(KeyCode::Esc));
+        assert!(settings.sandbox_dialog.is_none());
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -2617,7 +2905,11 @@ mod tests {
         settings.handle_key(key(KeyCode::Tab));
         assert_eq!(settings.section, SettingsSection::Profiles);
         settings.handle_key(key(KeyCode::Tab));
+        assert_eq!(settings.section, SettingsSection::Sandbox);
+        settings.handle_key(key(KeyCode::Tab));
         assert_eq!(settings.section, SettingsSection::Appearance);
+        settings.handle_key(key(KeyCode::Left));
+        assert_eq!(settings.section, SettingsSection::Sandbox);
         settings.handle_key(key(KeyCode::Left));
         assert_eq!(settings.section, SettingsSection::Profiles);
         settings.handle_key(key(KeyCode::Left));
