@@ -103,10 +103,19 @@ You are a code reviewer. ...full system prompt...
   carry; without it, the parent's model.
 - `max_steps` (optional, ≥ 1) — the subagent's step budget; without it,
   the crate default (256).
-- The body (required, non-empty) — the subagent's system prompt,
-  rendered through the toolkit's Jinja renderer with `workspace` and
-  `name` in context. A body without template syntax passes through
-  verbatim.
+- The body (required, non-empty) — plain text, never rendered: it is
+  appended verbatim under the subagent's stamped system prompt, so a
+  definition written for another harness behaves as written.
+
+The system prompt one run carries is the parent's own, computed once
+at wire time off the config: the base template rendered over the
+workspace, its skills (the disabled dropped), the environment facts,
+the user preferences, and the tool list the subagent actually carries
+(the shell). The definition's body lands after it, separated by a
+blank line. `config.system`, the total-replacement escape hatch,
+replaces the stamp whole, exactly as it replaces the parent's; a
+stamp that cannot render warns and leaves the bodies bare — the
+parent's own construction fails on the same template.
 
 Discovery reads `<config dir>/subagents` and
 `<workspace>/.rhema/subagents`, project shadowing global by folder name.
@@ -133,7 +142,7 @@ resolve(call, ctx):
   def   = defs by call.args.name (unknown name → error result)
   inner = ShellTools(workspace); install the parent turn's approval hook
   resolver = inner, plus a nested SubagentTools when depth allows
-  agent = Agent(provider, resolver, render(def.body), params(def.model))
+  agent = Agent(provider, resolver, stamped(config) + def.body, params(def.model))
   session = fresh; push user message `call.args.prompt`
   for step in 0..def.max_steps:
       if ctx.cancelled → error result "cancelled"
@@ -188,8 +197,11 @@ subagents on its own.
    `Overlay::new(shell, extra)` and `stamped_system` renders the merged
    spec list, so the prompt and the tools array cannot drift.
 3. **`wire(provider, config) -> config`** — discover (the built-in
-   `general-purpose` plus the folders), then build the shell and the
-   `SubagentTools`, set both fields, return. Each frontend calls it at
+   `general-purpose` plus the folders), then stamp the subagents'
+   base prompt off the config (the parent's own sections, the shell's
+   workspace), build the shell and the `SubagentTools`, set both
+   fields, return. The frontends apply the prompt sections before the
+   wire, so the stamp carries them. Each frontend calls it at
    its agent-construction sites (TUI, headless one-shot; the claw and
    ACP when they adopt the feature). The `/system` preview goes through
    the same discovery so what is previewed is what turns send.

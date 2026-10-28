@@ -11,16 +11,20 @@
 //! must not launder the start's classification.
 //!
 //! The spawned task runs the same inner path a synchronous call always
-//! ran: a fresh [`Agent`](rhema_core::Agent) over the named
-//! [`SubagentDef`]'s body as system prompt, a bounded step loop on a
+//! ran: a fresh [`Agent`](rhema_core::Agent) over the stamped parent
+//! prompt with the named [`SubagentDef`]'s body appended, a bounded
+//! step loop on a
 //! fresh [`Session`](rhema_core::Session) whose first message is the
 //! `prompt`, reading its history through the bounded transcript view.
-//! The inner turn inherits four things and nothing else: the provider,
+//! The inner turn inherits five things and nothing else: the provider,
 //! the approval hook (captured at spawn off the parent's
 //! [`ShellTools`], held for the job's lifetime — a gate firing after
 //! the parent turn's end still consults the turn's policy), the job's
-//! own cancel flag (escape stops the main session, never the job), and
-//! the thinking effort. Its inner lifecycle streams into the registry
+//! own cancel flag (escape stops the main session, never the job), the
+//! thinking effort, and the stamped system prompt every inner agent
+//! runs under — the parent's own prompt (base template, skills,
+//! environment, user preferences) with the definition's body appended
+//! verbatim. Its inner lifecycle streams into the registry
 //! as the job's status — the UI's pinned line — and never into the
 //! call's result.
 //!
@@ -36,7 +40,7 @@ use std::sync::atomic::Ordering;
 use async_trait::async_trait;
 use serde_json::json;
 
-use rhema_agent_tools::{Approval, Overlay, ShellTools, render_template};
+use rhema_agent_tools::{Approval, Overlay, ShellTools};
 use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     Agent, ChatParams, Content, Event, EventSink, Message, ModelProvider, Role, Session, ToolCall,
@@ -71,6 +75,12 @@ struct Inner {
     /// How many nesting levels remain. One is the default: a subagent
     /// gets no `subagent` tool of its own. Zero advertises nothing.
     max_depth: u32,
+    /// The stamped system prompt every inner agent runs under: the
+    /// parent's full prompt — base template, skills, environment
+    /// facts, user preferences, the subagent's own tool list —
+    /// computed once at wire time off the config. Empty on direct
+    /// constructions (tests): the body runs alone.
+    base: String,
 }
 
 impl Inner {
@@ -122,14 +132,17 @@ impl Inner {
         inner_shell: &Arc<ShellTools>,
         progress: &mut dyn ToolProgress,
     ) -> Result<String, String> {
-        let system = render_template(
-            &def.body,
-            &json!({
-                "workspace": inner_shell.workspace().display().to_string(),
-                "name": def.name,
-            }),
-        )
-        .map_err(|err| format!("its system prompt template failed: {err}"))?;
+        // The inner system prompt: the stamp with this definition's
+        // body appended verbatim. A body is plain text, never
+        // rendered — template syntax in it reaches the model as the
+        // author wrote it, so a definition written for another
+        // harness behaves as written. An empty stamp (direct
+        // constructions, tests) runs the body alone.
+        let system = if self.base.is_empty() {
+            def.body.clone()
+        } else {
+            format!("{}\n\n{}", self.base, def.body)
+        };
         let resolver = self.inner_resolver(inner_shell);
         // Each run wraps the provider in its own fresh transcript: the
         // inner history lives and dies with the run, so there is no
@@ -235,6 +248,7 @@ impl SubagentTools {
                 default_model: default_model.into(),
                 thinking: ThinkingEffort::Default,
                 max_depth: 1,
+                base: String::new(),
             },
             shell,
             registry: Some(Arc::new(Registry::new(
@@ -261,6 +275,14 @@ impl SubagentTools {
     /// agent that delegated it samples.
     pub fn with_thinking(mut self, thinking: ThinkingEffort) -> Self {
         self.inner.thinking = thinking;
+        self
+    }
+
+    /// Sets the stamped system prompt the inner agents run under —
+    /// the parent's, computed once at wire time; the definition's
+    /// body lands under it verbatim. Call before the first job.
+    pub fn with_base_system(mut self, base: String) -> Self {
+        self.inner.base = base;
         self
     }
 

@@ -3881,9 +3881,12 @@ fn agent_config(
 /// subagents' inner shell inherits the executor
 /// (`ShellTools::executor()`), their definition discovery stays
 /// host-side — and the sandbox-side workspace path lands AFTER it.
-/// Returns the wire's handle beside the config: the registry-backed
-/// status subscription the status strip renders one live line per
-/// background subagent job from.
+/// The prompt sections land before the wire too: the subagents stamp
+/// the config's system-prompt ingredients at wire time, so they run
+/// under the same environment facts and user preferences the parent
+/// sends. Returns the wire's handle beside the config: the
+/// registry-backed status subscription the status strip renders one
+/// live line per background subagent job from.
 fn session_agent_config(
     options: &RunOptions,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
@@ -3895,27 +3898,33 @@ fn session_agent_config(
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_tools(&mut config);
     }
+    apply_prompt_sections(&mut config, options, sandboxed);
     let (mut config, subagents) = rhema_subagents::wire(provider, config);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_workspace(&mut config);
     }
-    apply_prompt_sections(&mut config, options, sandboxed);
     (config, subagents)
 }
 
 /// The prompt's two optional sections, through the one gate the
 /// `system show` preview also reads — so what is previewed is what
 /// turns send. The sandboxed session carries its kind's notice; a
-/// local one probes the host.
+/// local one probes the host. Runs BEFORE the subagent wire, so the
+/// subagents stamp the same sections into their own prompts: the
+/// sandbox-side path reads off the assembly, not the config, whose
+/// workspace only becomes that path after the wire.
 fn apply_prompt_sections(
     config: &mut CodingAgentConfig,
     options: &RunOptions,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
 ) {
     let kind = sandboxed.map(|sandboxed| sandboxed.choice.stored_name());
+    let mounted = sandboxed
+        .map(|sandboxed| sandboxed.workspace.clone())
+        .unwrap_or_else(|| config.workspace.display().to_string());
     let (environment, user) = crate::run::prompt_sections(
         &options.workspace,
-        &config.workspace.display().to_string(),
+        &mounted,
         kind,
         &config.model,
         crate::run::HARNESS,

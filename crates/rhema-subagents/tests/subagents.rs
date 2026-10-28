@@ -843,28 +843,48 @@ fn the_start_stays_replay_unsafe() {
     );
 }
 
-#[test]
-fn engine_errors_surface_in_band() {
-    // A definition whose body is a broken template fails its render,
-    // which the fetch returns as the result's error text.
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
-        let provider = Scripted::new(vec![end_turn("never")]);
-        let mut def = worker_def();
-        def.body = "{% for %}".into();
-        let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
-        let tools = Arc::new(SubagentTools::new(provider, vec![def], shell, "m"));
-        let handle = tools.handle();
-        let id = job_id(
-            &tools
-                .resolve(call("worker", "do it"), &ToolContext::default())
-                .await,
-        );
-        wait_finished(&handle, &id).await;
-        let result = tools.resolve(fetch(&id), &ToolContext::default()).await;
-        assert!(result.is_error);
-        assert!(result.content.contains("template"), "{}", result.content);
-    });
+#[tokio::test]
+async fn engine_errors_surface_in_band() {
+    // A provider that fails: the fetch returns the reason as the
+    // result's error text — failure is in-band, never a panic, never
+    // an abort of the parent's turn.
+    struct Failing;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for Failing {
+        async fn complete(
+            &self,
+            _req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            Err(ProviderError::Api {
+                message: "the engine broke".into(),
+                status: Some(500),
+            })
+        }
+    }
+
+    let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
+    let tools = Arc::new(SubagentTools::new(
+        Arc::new(Failing),
+        vec![worker_def()],
+        shell,
+        "m",
+    ));
+    let handle = tools.handle();
+    let id = job_id(
+        &tools
+            .resolve(call("worker", "do it"), &ToolContext::default())
+            .await,
+    );
+    wait_finished(&handle, &id).await;
+    let result = tools.resolve(fetch(&id), &ToolContext::default()).await;
+    assert!(result.is_error);
+    assert!(
+        result.content.contains("the engine broke"),
+        "{}",
+        result.content
+    );
 }
 
 /// The inner requests ride the transcript view (`rhema_transcript::
@@ -1026,5 +1046,63 @@ async fn a_job_dies_with_its_registry() {
         provider.calls.load(Ordering::SeqCst),
         seen,
         "the job stopped with its registry"
+    );
+}
+
+/// A provider that only records the system prompts it is sent, and
+/// ends every request at once.
+struct Capture {
+    systems: Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for Capture {
+    async fn complete(
+        &self,
+        req: ModelRequest,
+        _sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        self.systems
+            .lock()
+            .unwrap()
+            .push(req.system.unwrap_or_default());
+        Ok(end_turn("the report"))
+    }
+}
+
+/// The stamp a job is handed rides into the inner system prompt, with
+/// the definition's body appended verbatim under it — template
+/// syntax in the body reaches the model as the author wrote it.
+#[tokio::test]
+async fn a_job_runs_under_the_supplied_base_prompt() {
+    let capture = Arc::new(Capture {
+        systems: Mutex::new(Vec::new()),
+    });
+    let def = SubagentDef {
+        name: "worker".into(),
+        description: "works".into(),
+        model: None,
+        max_steps: None,
+        body: "THE BODY TEXT with {{ braces }} that stay.".into(),
+    };
+    let tools = SubagentTools::new(
+        capture.clone(),
+        vec![def],
+        Arc::new(ShellTools::new(std::env::temp_dir())),
+        "parent-model",
+    )
+    .with_base_system("THE STAMPED BASE".into());
+    let handle = tools.handle();
+
+    let result = tools
+        .resolve(call("worker", "go"), &ToolContext::default())
+        .await;
+    wait_finished(&handle, &job_id(&result)).await;
+
+    let systems = capture.systems.lock().unwrap();
+    assert_eq!(
+        systems.as_slice(),
+        ["THE STAMPED BASE\n\nTHE BODY TEXT with {{ braces }} that stay."],
+        "{systems:?}"
     );
 }

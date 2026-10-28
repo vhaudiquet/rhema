@@ -2,8 +2,9 @@
 //!
 //! A definition is a folder holding a `SUBAGENT.md` whose YAML
 //! frontmatter carries a `description` (the trigger the parent sees),
-//! an optional `model`, and an optional `max_steps`; the body is the
-//! subagent's system prompt. Only well-formed definitions exist:
+//! an optional `model`, and an optional `max_steps`; the body lands
+//! verbatim under the subagent's stamped system prompt. Only
+//! well-formed definitions exist:
 //! a folder whose file lacks a non-empty description or a non-empty
 //! body is not a subagent, not an error — a subagent without a trigger
 //! has nothing to show the parent, and one without instructions has no

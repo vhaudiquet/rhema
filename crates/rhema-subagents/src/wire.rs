@@ -107,12 +107,52 @@ pub fn wire_at(
         .clone()
         .unwrap_or_else(|| Arc::new(ShellTools::new(config.workspace.clone())));
     let tools = SubagentTools::new(provider, defs, shell.clone(), config.model.clone())
-        .with_thinking(config.thinking);
+        .with_thinking(config.thinking)
+        .with_base_system(subagent_base_system(config, shell.workspace()));
     let handle = tools.handle();
     config.tools = Some(shell);
     config.extra_resolver = Some(Arc::new(tools));
     config.steering = Some(handle.steering());
     handle
+}
+
+/// The system prompt a subagent runs under: the parent's full stamp —
+/// the base template rendered over `workspace`, its skills (the
+/// disabled dropped), the environment facts, the user preferences —
+/// with the tool list the subagent actually carries (the shell; a
+/// nested `subagent` tool arrives only by depth and rides the
+/// request's tools array). `config.system`, the total-replacement
+/// escape hatch, replaces the stamp whole, exactly as it replaces the
+/// parent's. A stamp that cannot render (a broken base template)
+/// warns and leaves the bodies bare: the parent's own construction
+/// fails on the same template, so the session is already leaving.
+fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String {
+    if let Some(system) = &config.system {
+        return system.clone();
+    }
+    let mut skills = match &config.skills {
+        Some(skills) => skills.clone(),
+        None => {
+            let global = rhema_config::Config::skills_dir().ok();
+            rhema_agent_tools::skills::discover(global.as_deref(), workspace)
+        }
+    };
+    skills.retain(|skill| !config.disabled_skills.contains(&skill.name));
+    let specs = ShellTools::builtin_specs();
+    rhema_coding_agent::stamped_system_with_sections(
+        config.base_system.as_deref(),
+        workspace,
+        &specs,
+        &skills,
+        config.environment.as_deref(),
+        config.user_preferences.as_deref(),
+    )
+    .unwrap_or_else(|err| {
+        eprintln!(
+            "· subagents: stamping the system prompt failed ({err}); the definitions run bare"
+        );
+        String::new()
+    })
 }
 
 /// The specs discovered for `workspace` — empty when none are. A prompt
@@ -250,5 +290,42 @@ mod tests {
         // The handle reads the same registry the config steers with.
         assert!(handle.status().is_empty());
         let _ = handle.steering().drain();
+    }
+
+    #[test]
+    fn the_subagent_stamp_carries_the_parents_sections() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(workspace.path()).unwrap();
+        let mut config = CodingAgentConfig::new("m", &root);
+        config.environment = Some("ENVSAYSHI".into());
+        config.user_preferences = Some("USERSAYSHI".into());
+        config.skills = Some(vec![rhema_agent_tools::Skill {
+            name: "skill".into(),
+            description: "does a thing".into(),
+            license: None,
+            path: root.join("SKILL.md"),
+        }]);
+
+        let stamp = subagent_base_system(&config, &root);
+        assert!(stamp.contains("ENVSAYSHI"), "{stamp}");
+        assert!(stamp.contains("USERSAYSHI"), "{stamp}");
+        assert!(stamp.contains("does a thing"), "{stamp}");
+        assert!(stamp.contains(&root.display().to_string()), "{stamp}");
+        // The tool list is the subagent's own surface: the shell, not
+        // the parent's extensions.
+        assert!(stamp.contains("- bash |"), "{stamp}");
+        assert!(!stamp.contains("- zoom |"), "{stamp}");
+        assert!(!stamp.contains("- subagent |"), "{stamp}");
+    }
+
+    #[test]
+    fn a_total_replacement_replaces_the_subagent_stamp_too() {
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = CodingAgentConfig::new("m", workspace.path());
+        config.system = Some("the replacement".into());
+        assert_eq!(
+            subagent_base_system(&config, workspace.path()),
+            "the replacement"
+        );
     }
 }
