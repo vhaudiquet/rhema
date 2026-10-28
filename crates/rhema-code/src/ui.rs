@@ -1652,8 +1652,34 @@ fn settings_page(
             // transcript-less session has nothing to show.
             lines.push(Line::default());
             lines.push(Line::from(Span::raw("Detailed session usage")).bold());
+            // The rows are billed input, not content: the providers
+            // report per request, and the history rides every request,
+            // so the amounts dwarf the log's own size. The note spells
+            // the unit out and gives the log's once-counted size —
+            // otherwise the tool rows read as if the session held
+            // tens of millions of tokens of tool output.
             match settings.transcript {
                 Some(stats) => {
+                    // The divisor doubles as the guard: no requests,
+                    // no average, no note.
+                    if let Some(avg) = stats.input_tokens.checked_div(stats.requests) {
+                        let cache = match stats.cache_hit_rate() {
+                            Some(rate) => format!("{:.0}% cached", rate * 100.0),
+                            None => "no usage reported yet".to_owned(),
+                        };
+                        lines.extend(settings_hint(
+                            &format!(
+                                "billed input, summed over {} requests — the history rides \
+                                 every one (~{}/request, {}); the log itself holds {} bytes",
+                                stats.requests,
+                                usage_k(avg),
+                                cache,
+                                usage_k(stats.log_bytes as u64),
+                            ),
+                            theme,
+                            width,
+                        ));
+                    }
                     let total = stats.usage.total();
                     for (label, tokens) in stats.usage.labeled() {
                         let pct = if total > 0 {
@@ -3182,6 +3208,7 @@ mod tests {
             input_tokens: 90_000,
             cached_input_tokens: 70_000,
             output_tokens: 10_000,
+            log_bytes: 4_500,
             usage: rhema_transcript::UsageBreakdown {
                 system_prompt_tokens: 20_000,
                 skills_tokens: 2_000,
@@ -3208,6 +3235,10 @@ mod tests {
             })
             .collect();
         assert!(text.contains("Detailed session usage"), "{text}");
+        assert!(text.contains("summed over 10 requests"), "{text}");
+        assert!(text.contains("(~9k/request, 78% cached)"), "{text}");
+        // The size lands on its own wrapped row.
+        assert!(text.contains("4.5k bytes"), "{text}");
         assert!(text.contains("20% (20k)"), "{text}");
         assert!(text.contains("2% (2k)"), "{text}");
         assert!(text.contains("30% (30k)"), "{text}");
