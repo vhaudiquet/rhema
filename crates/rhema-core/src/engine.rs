@@ -1,12 +1,14 @@
 //! The step engine: [`Agent::step`], one exchange, never a loop.
 //!
-//! `step()` semantics are exact (SPEC.md §4): emit `StepStart`, assemble the
+//! `step()` semantics are exact (SPEC.md §4): emit `StepStart`, hand the
+//! session to the commit hook (the stream's input durable), assemble the
 //! request from the session, stream through the provider, append the
 //! assistant message, then — on `ToolUse` — hand the session to the commit
-//! hook (commit-before-execute), resolve each call in order, append its
-//! `Tool`-role result, then emit `StepEnd`. Tool errors never abort; they
-//! are in-band `is_error` results. [`run_turn`] is the provided coding-agent
-//! driver, not part of the primitive.
+//! hook again (commit-before-execute), resolve each call in order, append
+//! its `Tool`-role result, hand the session to the hook a third time (the
+//! stream's outcome durable), and emit `StepEnd`. Tool errors never abort;
+//! they are in-band `is_error` results. [`run_turn`] is the provided
+//! coding-agent driver, not part of the primitive.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -28,9 +30,9 @@ pub enum AgentError {
     /// The model call failed.
     #[error(transparent)]
     Provider(#[from] ProviderError),
-    /// The commit hook rejected the intent (see [`CommitHook`]): the
-    /// assistant message is in the history, but no tool ran. The step
-    /// fails so the driver surfaces the persistence problem before a side
+    /// The commit hook rejected a checkpoint (see [`CommitHook`]): at a
+    /// step boundary, or before a tool ran. The step fails so the driver
+    /// surfaces the persistence problem before tokens are spent or a side
     /// effect starts.
     #[error(transparent)]
     Commit(#[from] CommitError),
@@ -93,16 +95,26 @@ impl ToolProgress for CallProgress<'_, '_> {
     }
 }
 
-/// The commit-before-execute seam: called by [`Agent::step`] on a `ToolUse`
-/// stop, after the assistant message is appended to the history and before
-/// the first call resolves. Persisting the session here is what makes a
-/// crash inside a tool call resumable without losing the fact that the call
-/// was decided: the durable history ends with the committed intent, and the
-/// resume path ([`crate::ToolResolver::replay_safety`]) decides between
-/// re-running a safe call and reporting an unsafe one interrupted. An `Err`
-/// fails the step before any tool runs — the engine never starts a side
-/// effect whose intent it could not commit. Post-round checkpointing (after
-/// the results) remains the driver's job.
+/// The checkpoint seam: called by [`Agent::step`] at every stream boundary,
+/// so a session that dies mid-turn is always resumable at the last one.
+/// Three fires per tool step, two per plain step:
+///
+/// 1. at the step's start, before the request — the caller's new input is
+///    durable before tokens are spent on it;
+/// 2. on a `ToolUse` stop, after the assistant message is appended and
+///    before the first call resolves — commit-before-execute. Persisting
+///    here is what makes a crash inside a tool call resumable without
+///    losing the fact that the call was decided: the durable history ends
+///    with the committed intent, and the resume path
+///    ([`crate::ToolResolver::replay_safety`]) decides between re-running
+///    a safe call and reporting an unsafe one interrupted;
+/// 3. at the step's end, after the results (or after the assistant message
+///    when no tools follow) — the stream's outcome is durable before the
+///    driver hears of the step's completion.
+///
+/// An `Err` fails the step at the boundary it fired on — the engine never
+/// spends tokens on, or starts a side effect for, a session it could not
+/// commit.
 pub type CommitHook = Box<dyn Fn(&Session) -> Result<(), CommitError> + Send + Sync>;
 
 /// The step engine: a provider, an optional tool resolver, and the fixed
@@ -156,6 +168,14 @@ impl Agent {
             announced: HashSet::new(),
         };
         events.emit(Event::StepStart { iteration });
+
+        // Per-stream durability: the session as it stands — the caller's
+        // new input included — is committed before the request spends
+        // tokens on it. A death mid-stream leaves a file the next start
+        // resumes from, instead of a turn that never happened.
+        if let Some(commit) = &self.commit {
+            commit(session).map_err(AgentError::Commit)?;
+        }
 
         let req = ModelRequest {
             system: self.system.clone(),
@@ -226,6 +246,14 @@ impl Agent {
                     content: vec![Content::ToolResult(result)],
                 });
             }
+        }
+
+        // The stream's outcome — results included, when tools ran — is
+        // durable before the step is announced complete. A plain step
+        // lands here too, so a final answer that never touches a tool is
+        // still checkpointed.
+        if let Some(commit) = &self.commit {
+            commit(session).map_err(AgentError::Commit)?;
         }
 
         events.emit(Event::StepEnd {

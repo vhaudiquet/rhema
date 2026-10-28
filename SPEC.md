@@ -152,7 +152,7 @@ pub trait EventSink { fn emit(&mut self, event: Event<'_>); }
 
 // engine.rs
 pub struct Agent { /* provider, resolver: Option<Arc<dyn ToolResolver>>, system, params,
-                      commit: Option<CommitHook> — commit-before-execute, see §4 */ }
+                      commit: Option<CommitHook> — checkpoint per stream, see §4 */ }
 impl Agent {
     pub fn builder() -> AgentBuilder;
     /// ONE exchange. Never loops. Appends to `session.history` in place.
@@ -167,6 +167,8 @@ impl Agent {
 
 ```
 emit StepStart
+commit_hook(session)?            # the session as it stands is durable — the caller's input included
+                                 # — before the request spends tokens on it
 req  = ModelRequest { system, messages: session.history.clone(), tools: resolver.specs(), params }
 out  = provider.complete(req, sink)?                       # streams deltas
 session.history.push(out.message)                          # assistant message (may hold ToolCall(s))
@@ -178,13 +180,14 @@ if out.stop_reason == ToolUse:
         emit ToolResult                                    # progress rode the sink as ephemeral ToolOutputDelta
                                                            # status rode it as ephemeral ToolStatus
         session.history.push(Message{ role: Tool, content: [result] })
+    commit_hook(session)?        # the stream's outcome durable before the step is announced done
 emit StepEnd
 return Step { output: out }
 ```
 
 - **No loop, no `max_iterations`, no `Final`.** Those belong to a driver.
 - **One exchange, but tool calls are resolved within it.** A step that requested tools returns with the results already appended, so the next step sees them. This is the loop's half of tool-use, and it is the minimum that makes it an agent rather than a chat call.
-- **Commit-before-execute.** On a `ToolUse` stop the optional commit hook (`CommitHook`) runs after the assistant message is appended and before the first call resolves; an `Err` fails the step (`AgentError::Commit`) before any side effect. The hook is how a driver makes a crash inside a tool call resumable: the durable history ends with the committed intent, and resume re-runs calls whose tool declared `ReplaySafety::Safe` while reporting the rest interrupted. Without a hook, intent durability rides the driver's post-round checkpoints alone, and a crash mid-call loses the record that the call was decided. The post-round checkpoint (after the results) remains the driver's either way.
+- **The hook checkpoints per stream.** The optional commit hook (`CommitHook`) fires at every stream boundary: at the step's start, before the request (the caller's input durable before tokens are spent on it); on a `ToolUse` stop, after the assistant message is appended and before the first call resolves — commit-before-execute; and at the step's end, after the results (or after the assistant message when no tools follow), before the step is announced done. An `Err` fails the step (`AgentError::Commit`) at the boundary it fired on. The middle fire is how a driver makes a crash inside a tool call resumable: the durable history ends with the committed intent, and resume re-runs calls whose tool declared `ReplaySafety::Safe` while reporting the rest interrupted. The outer fires are how a death mid-turn — mid-first-stream included, a final answer that never touches a tool included — leaves a resumable session at the last boundary instead of no record at all.
 - Tool errors never abort; they surface as in-band `is_error` the model can react to. Unknown tool name is an error result, not a panic.
 - No resolver configured → `specs()` is empty; a `ToolUse` stop with no resolver appends an error result.
 - Tool progress (`ToolOutputDelta`) is ephemeral like reasoning: streamed around the resolver's optional progress callback, never appended to history — the full text arrives in the result. A streaming resolver may also report its own status (`ToolStatus`: the phase its inner work is in and, when it runs model calls, the context its current model call carries and the cumulative spend across them, plus the model id) through the same progress channel; the engine stamps the call's id on it and the sink gets it as ephemeral `ToolStatus`, replacing any earlier one for the call. Status is screen-facing, never history.

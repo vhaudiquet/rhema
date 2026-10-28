@@ -26,8 +26,15 @@ pub struct ScriptedSandbox {
     executed: Mutex<Vec<String>>,
     /// When set, the next `exec` parks until [`Self::release`] — the
     /// deterministic "crash mid-command" point: a turn task dropped
-    /// while parked dies between commit and result.
-    hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    /// while parked dies between commit and result. The channel's two
+    /// halves travel together so the parked side has a live sender to
+    /// wait on; `release` drops the pair, which unblocks the exec.
+    hold: Mutex<
+        Option<(
+            tokio::sync::oneshot::Sender<()>,
+            tokio::sync::oneshot::Receiver<()>,
+        )>,
+    >,
     /// The workspace files `write_file` put here and `read_file` reads
     /// back.
     files: Mutex<BTreeMap<String, Vec<u8>>>,
@@ -62,8 +69,11 @@ impl ScriptedSandbox {
     /// Makes the next `exec` park until [`Self::release`] — or forever,
     /// which is how a turn is made to die mid-command.
     pub fn hold_next_exec(&self) {
-        let (_, receiver) = tokio::sync::oneshot::channel::<()>();
-        *self.hold.lock().unwrap_or_else(PoisonError::into_inner) = Some(receiver);
+        // The sender stays with the receiver: a sender dropped here
+        // would close the channel at once and the "park" would never
+        // hold.
+        let channel = tokio::sync::oneshot::channel::<()>();
+        *self.hold.lock().unwrap_or_else(PoisonError::into_inner) = Some(channel);
     }
 
     /// Releases a parked `exec`, if one is parked.
@@ -117,8 +127,11 @@ impl Sandbox for ScriptedSandbox {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        if let Some(receiver) = held {
+        if let Some((sender, receiver)) = held {
             self.parked.notify_one();
+            // The sender lives through the await: dropping it early
+            // would close the channel and end the park at once.
+            let _park_open = sender;
             let _ = receiver.await;
         }
         // An empty script answers success: a test scripts only what it

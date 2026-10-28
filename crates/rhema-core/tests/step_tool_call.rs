@@ -425,7 +425,7 @@ impl ToolResolver for LoggingResolver {
 }
 
 #[tokio::test]
-async fn the_commit_hook_fires_after_the_intent_and_before_the_first_tool() {
+async fn the_commit_hook_fires_at_every_stream_boundary() {
     let log = StageLog::default();
     let hook_log = log.clone();
     let mut agent = Agent::builder()
@@ -435,14 +435,20 @@ async fn the_commit_hook_fires_after_the_intent_and_before_the_first_tool() {
         ])))
         .resolver(Arc::new(LoggingResolver { log: log.clone() }))
         .commit_hook(Box::new(move |session: &Session| {
-            // The hook must already see the committed intent: the
-            // assistant message is in the history when it fires.
-            hook_log.push(format!("commit:{}", session.history.len()));
+            // The hook sees the session as it stands at each boundary,
+            // with the role of whatever landed last.
+            let role = session
+                .history
+                .last()
+                .map(|message| format!("{:?}", message.role))
+                .unwrap_or_else(|| "empty".into());
+            hook_log.push(format!("commit:{}:{role}", session.history.len()));
             Ok(())
         }))
         .build()
         .unwrap();
     let mut session = Session::default();
+    session.history.push(Message::text(Role::User, "go"));
     let mut sink = RecordSink::default();
     let ctx = ToolContext::default();
 
@@ -450,20 +456,40 @@ async fn the_commit_hook_fires_after_the_intent_and_before_the_first_tool() {
     assert_eq!(
         log.entries(),
         vec![
-            // The hook saw exactly the assistant message: history len 1,
-            // before any tool result existed.
-            "commit:1".to_owned(),
+            // The input was durable before the request spent tokens on
+            // it: the hook saw the caller's message alone.
+            "commit:1:User".to_owned(),
+            // Commit-before-execute held too: the hook saw exactly the
+            // assistant message, history len 2, before any tool result
+            // existed.
+            "commit:2:Assistant".to_owned(),
             "resolve".to_owned(),
+            // The stream's outcome landed: the result is in the
+            // snapshot the step's last fire took.
+            "commit:3:Tool".to_owned(),
         ]
     );
 
-    // A text-only step has no intent to commit: the hook stays silent.
+    // A text-only step commits at its two boundaries as well: a turn
+    // that never touches a tool still leaves every stream on disk.
     agent.step(&mut session, &mut sink, &ctx).await.unwrap();
-    assert_eq!(log.entries().len(), 2);
+    assert_eq!(
+        log.entries(),
+        vec![
+            "commit:1:User".to_owned(),
+            "commit:2:Assistant".to_owned(),
+            "resolve".to_owned(),
+            "commit:3:Tool".to_owned(),
+            // The second stream's input changed nothing since the last
+            // commit; the hook fires all the same.
+            "commit:3:Tool".to_owned(),
+            "commit:4:Assistant".to_owned(),
+        ]
+    );
 }
 
 #[tokio::test]
-async fn a_failing_commit_fails_the_step_before_any_tool_runs() {
+async fn a_failing_commit_before_a_tool_fails_the_step_with_nothing_run() {
     let log = StageLog::default();
     let mut agent = Agent::builder()
         .provider(Arc::new(MockProvider::new(vec![tool_use_output(call(
@@ -472,12 +498,20 @@ async fn a_failing_commit_fails_the_step_before_any_tool_runs() {
             json!({}),
         ))])))
         .resolver(Arc::new(LoggingResolver { log: log.clone() }))
-        .commit_hook(Box::new(|_session: &Session| {
-            Err(CommitError("disk full".into()))
+        .commit_hook(Box::new(|session: &Session| {
+            // The boundaries decide one by one: the stream's input
+            // commits, the call intent — the fire that guards side
+            // effects — fails.
+            if session.history.len() >= 2 {
+                Err(CommitError("disk full".into()))
+            } else {
+                Ok(())
+            }
         }))
         .build()
         .unwrap();
     let mut session = Session::default();
+    session.history.push(Message::text(Role::User, "go"));
     let mut sink = RecordSink::default();
     let ctx = ToolContext::default();
 
@@ -486,7 +520,7 @@ async fn a_failing_commit_fails_the_step_before_any_tool_runs() {
     assert_eq!(err, AgentError::Commit(CommitError("disk full".into())));
     // The intent stays in the history; no result followed it, and the
     // resolver never ran.
-    assert_eq!(session.history.len(), 1);
-    assert_eq!(session.history[0].role, Role::Assistant);
+    assert_eq!(session.history.len(), 2);
+    assert_eq!(session.history[1].role, Role::Assistant);
     assert!(log.entries().is_empty());
 }

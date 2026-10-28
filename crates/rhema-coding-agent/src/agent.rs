@@ -355,11 +355,12 @@ impl CodingAgent {
         }
     }
 
-    /// Installs the commit-before-execute hook on the engine (see
+    /// Installs the per-stream checkpoint hook on the engine (see
     /// [`rhema_core::CommitHook`]); `None` disables it. A driver that
-    /// persists the session sets this so a crash inside a tool call leaves
-    /// a committed intent — which the next turn's revive closes — rather
-    /// than no record at all.
+    /// persists the session sets this so a crash mid-turn — inside a
+    /// tool call (a committed intent, which the next turn's revive
+    /// closes) or mid-stream, first stream included — leaves a resumable
+    /// session at the last boundary rather than no record at all.
     pub fn set_commit_hook(&mut self, hook: Option<CommitHook>) {
         self.agent.set_commit_hook(hook);
     }

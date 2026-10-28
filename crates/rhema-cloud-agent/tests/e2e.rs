@@ -176,13 +176,17 @@ async fn a_full_turn_runs_bash_in_the_sandbox_through_the_round_trip() {
     assert!(result.content.contains("hello"), "{}", result.content);
     assert_eq!(result.code, Some(0));
 
-    // The commit hook fired once for the committed step — the tool-use
-    // step — and its snapshot carries the call without any result. (The
-    // end-turn step commits nothing; the DO checkpoints that one after
-    // the step returns.)
+    // The commit hook fires at each stream boundary: the tool-use step
+    // three times — the input alone, then the call without any result
+    // (the crash-resume snapshot), then the call with its result — and
+    // the end-turn step twice more (its input, its answer).
     let checkpoints = rig.checkpoints.lock().unwrap();
-    assert_eq!(checkpoints.len(), 1, "one committed step");
-    let committed = &checkpoints[0];
+    assert_eq!(
+        checkpoints.len(),
+        5,
+        "three fires on the tool step, two on the end-turn step"
+    );
+    let committed = &checkpoints[1];
     assert!(
         committed
             .history
@@ -192,6 +196,9 @@ async fn a_full_turn_runs_bash_in_the_sandbox_through_the_round_trip() {
         "the committed checkpoint carries the call"
     );
     assert!(tool_results(committed).is_empty());
+    // The stream's outcome is durable before the step is announced
+    // done: the third fire already holds the result.
+    assert_eq!(tool_results(&checkpoints[2]).len(), 1);
 }
 
 #[tokio::test]
