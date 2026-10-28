@@ -1652,11 +1652,12 @@ fn settings_page(
             // transcript-less session has nothing to show.
             lines.push(Line::default());
             lines.push(Line::from(Span::raw("Detailed session usage")).bold());
-            // The rows are billed input, not content: the providers
-            // report per request, and the history rides every request,
-            // so the amounts dwarf the log's own size. The note spells
-            // the unit out and gives the log's once-counted size —
-            // otherwise the tool rows read as if the session held
+            // The rows carry two units: the billed input the
+            // providers reported per request — the history rides every
+            // request, so it dwarfs the content — and, where the
+            // category lives in messages, that content counted once in
+            // the log. The note says so where the numbers are read;
+            // without it the tool rows read as if the session held
             // tens of millions of tokens of tool output.
             match settings.transcript {
                 Some(stats) => {
@@ -1681,15 +1682,36 @@ fn settings_page(
                         ));
                     }
                     let total = stats.usage.total();
-                    for (label, tokens) in stats.usage.labeled() {
+                    // The of-log figures line up with the breakdown's
+                    // row order. The system prompt, the skills, and
+                    // the tool definitions ride no message, so their
+                    // rows stay billed-only.
+                    let of_log = [
+                        None,
+                        None,
+                        Some(stats.log_content.tool_calls),
+                        Some(stats.log_content.tool_results),
+                        Some(stats.log_content.user_text),
+                        Some(stats.log_content.assistant_text),
+                    ];
+                    for ((label, tokens), once) in stats.usage.labeled().into_iter().zip(of_log) {
                         let pct = if total > 0 {
                             tokens as f64 / total as f64 * 100.0
                         } else {
                             0.0
                         };
+                        let value = match once {
+                            Some(bytes) => format!(
+                                "{:.0}% ({} billed \u{b7} {} of log)",
+                                pct,
+                                usage_k(tokens),
+                                usage_k(bytes as u64),
+                            ),
+                            None => format!("{:.0}% ({} billed)", pct, usage_k(tokens)),
+                        };
                         lines.extend(settings_field(
                             label,
-                            Span::raw(format!("{:.0}% ({})", pct, usage_k(tokens))).fg(theme.text),
+                            Span::raw(value).fg(theme.text),
                             theme,
                             width,
                         ));
@@ -3209,6 +3231,12 @@ mod tests {
             cached_input_tokens: 70_000,
             output_tokens: 10_000,
             log_bytes: 4_500,
+            log_content: rhema_transcript::LogContent {
+                tool_calls: 2_500,
+                tool_results: 90_000,
+                user_text: 800,
+                assistant_text: 1_200,
+            },
             usage: rhema_transcript::UsageBreakdown {
                 system_prompt_tokens: 20_000,
                 skills_tokens: 2_000,
@@ -3239,11 +3267,23 @@ mod tests {
         assert!(text.contains("(~9k/request, 78% cached)"), "{text}");
         // The size lands on its own wrapped row.
         assert!(text.contains("4.5k bytes"), "{text}");
-        assert!(text.contains("20% (20k)"), "{text}");
-        assert!(text.contains("2% (2k)"), "{text}");
-        assert!(text.contains("30% (30k)"), "{text}");
-        assert!(text.contains("8% (8k)"), "{text}");
-        assert!(text.contains("10% (10k)"), "{text}");
+        // Message-backed rows carry the once-counted figure beside the
+        // billed one; the system prompt and skills ride no message.
+        assert!(text.contains("20% (20k billed)"), "{text}");
+        assert!(text.contains("2% (2k billed)"), "{text}");
+        assert!(
+            text.contains("30% (30k billed \u{b7} 2.5k of log)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("30% (30k billed \u{b7} 90k of log)"),
+            "{text}"
+        );
+        assert!(text.contains("8% (8k billed \u{b7} 800 of log)"), "{text}");
+        assert!(
+            text.contains("10% (10k billed \u{b7} 1.2k of log)"),
+            "{text}"
+        );
     }
 
     /// The amounts scale: kilo past a thousand, mega past a million.
