@@ -38,7 +38,7 @@
 //!
 //! A subagent is a folder with a `SUBAGENT.md` whose frontmatter carries
 //! a `description` (the trigger) and whose body is the subagent's system
-//! prompt. Definitions live globally under the config directory and
+//! prompt. Definitions live globally under `<config>/subagents` and
 //! per-workspace under `.rhema/subagents`, project shadowing global —
 //! the same rules as skills. The catalog also carries a built-in:
 //! `general-purpose`, the delegation every agent gets, shadowed by a

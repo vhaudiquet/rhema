@@ -10,9 +10,10 @@
 //! prompt to run on. Project definitions shadow global ones by folder
 //! name, and both shadow the built-in.
 //!
-//! One definition is not on disk: [`builtin`], the `general-purpose`
-//! subagent every agent gets, so the catalog — and with it the tool —
-//! is never empty.
+//! One definition is compiled in: [`builtin`], the `general-purpose`
+//! subagent every agent gets, held as a `SUBAGENT.md` under the crate's
+//! `definitions/` and embedded at build time, so the catalog — and with
+//! it the tool — is never empty, on a filesystem or without one.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -53,47 +54,21 @@ impl SubagentDef {
 /// definition with the same folder name replaces it.
 const BUILTIN_NAME: &str = "general-purpose";
 
-/// The trigger the parent sees in the catalog: when delegating pays.
-const BUILTIN_DESCRIPTION: &str = "Runs one self-contained task in a fresh \
-agent with the same tools and the same workspace: codebase exploration, \
-multi-step research, or a chore whose intermediate output would only \
-flood this conversation. Give it the full task and what to report; \
-only its final report comes back.";
-
-/// The built-in definition's system prompt. Rendered like any body,
-/// with `workspace` and `name` in context — it uses neither.
-const BUILTIN_BODY: &str = "\
-You are a general-purpose subagent: a fresh agent one task was \
-delegated to. The parent reads only your final report — its \
-conversation stays its own, and yours dies with the call.
-
-You start knowing nothing: everything you need is in the task prompt. \
-You have the standard tools — a shell over the workspace — so read the \
-code, run the commands, and verify before you believe. No questions \
-back: decide, note the decision in the report, and keep going. Stay in \
-scope: the task and its verification, nothing else.
-
-Your final message is the whole report the parent receives. Make it \
-stand alone: what you did, what you found, the paths and commands that \
-matter, and what the parent should do next, if anything. Every \
-verification claim carries its evidence: a \"checks pass\" statement \
-names the exact commands you ran and the exit codes they returned, so \
-the parent can diff what you claim against what you ran and re-run the \
-gates without guessing.";
+/// The built-in definition's file, embedded at compile time: the same
+/// folder-and-`SUBAGENT.md` shape a user writes, read by the same
+/// [`parse`], so the format has exactly one definition — the built-in
+/// cannot drift out of it, and no filesystem is needed to read it.
+const BUILTIN_SRC: &str = include_str!("../definitions/general-purpose/SUBAGENT.md");
 
 /// The built-in `general-purpose` subagent: the delegation every agent
-/// gets without writing a definition. No model of its own (the parent's
-/// carries) and no budget of its own (the default applies), so it is
-/// exactly a discovered definition with both frontmatter fields
-/// omitted.
+/// gets without writing a definition. Its `SUBAGENT.md` omits `model`
+/// (the parent's carries) and `max_steps` (the default applies), so it
+/// parses to exactly a discovered definition with both fields absent;
+/// only the name is stamped here, from the folder it would sit in.
 pub fn builtin() -> SubagentDef {
-    SubagentDef {
-        name: BUILTIN_NAME.to_owned(),
-        description: BUILTIN_DESCRIPTION.to_owned(),
-        model: None,
-        max_steps: None,
-        body: BUILTIN_BODY.to_owned(),
-    }
+    let mut def = parse(BUILTIN_SRC).expect("the embedded general-purpose definition parses");
+    def.name = BUILTIN_NAME.to_owned();
+    def
 }
 
 /// The `SUBAGENT.md` frontmatter this crate reads; everything else in

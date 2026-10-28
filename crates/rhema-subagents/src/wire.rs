@@ -80,7 +80,7 @@ pub fn wire(
     provider: Arc<dyn ModelProvider>,
     mut config: CodingAgentConfig,
 ) -> (CodingAgentConfig, SubagentHandle) {
-    let global = rhema_config::Config::dir().ok();
+    let global = rhema_config::Config::subagents_dir().ok();
     let handle = wire_at(global.as_deref(), provider, &mut config);
     (config, handle)
 }
@@ -119,7 +119,7 @@ pub fn wire_at(
 /// preview passes this to `stamped_system` so the preview matches what
 /// turns send.
 pub fn extra_specs(workspace: &Path) -> Vec<ToolSpec> {
-    let global = rhema_config::Config::dir().ok();
+    let global = rhema_config::Config::subagents_dir().ok();
     extra_specs_at(global.as_deref(), workspace)
 }
 

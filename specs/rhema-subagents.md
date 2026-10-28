@@ -67,6 +67,8 @@ the subagent.
 ```
 crates/rhema-subagents/
   Cargo.toml
+  definitions/
+    general-purpose/SUBAGENT.md   # the built-in, embedded at build time
   src/
     lib.rs          # re-exports; #![forbid(unsafe_code)]
     def.rs          # SubagentDef, discovery, frontmatter
@@ -113,12 +115,16 @@ non-empty description and a non-empty body; anything else is not a
 subagent, not an error. A subagent without instructions has no prompt to
 run on, so the body is as mandatory as the trigger.
 
-One definition is not a folder: the built-in `general-purpose` — the
-delegation every agent gets — is seeded ahead of both directories, so
-the catalog, and with it the `subagent` tool, always exist. It carries
-no `model` (the parent's) and no `max_steps` (the default), and a
-definition of the same name — global or project — shadows it, exactly
-like project shadows global.
+One definition is never read from disk at runtime: the built-in
+`general-purpose`, the delegation every agent gets, lives in the crate
+at `definitions/general-purpose/SUBAGENT.md` and is embedded at build
+time, parsed by the same frontmatter code, ahead of both directories —
+so the catalog, and with it the `subagent` tool, always exist,
+filesystem or none. Its frontmatter carries no `model` (the parent's)
+and no `max_steps` (the default), and a definition of the same name —
+global or project — shadows it, exactly like project shadows global.
+Being a real `SUBAGENT.md`, it keeps the format honest: the built-in
+cannot drift into a shape a user could not have written.
 
 ## 4. Semantics of one `subagent` call
 
