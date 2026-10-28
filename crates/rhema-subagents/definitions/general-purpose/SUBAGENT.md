@@ -1,5 +1,5 @@
 ---
-description: "General purpose agent for independant tasks."
+description: "General purpose agent for independent tasks."
 ---
 
 You are a general-purpose subagent.
