@@ -3536,6 +3536,7 @@ dependencies = [
  "rhema-provider-openrouter",
  "rhema-sandbox",
  "rhema-sandbox-docker",
+ "rhema-sandbox-ecrou",
  "rhema-sandbox-http",
  "rhema-sandbox-lxd",
  "rhema-sandbox-ssh",
@@ -3764,6 +3765,17 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-docker"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "rhema-sandbox",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "rhema-sandbox-ecrou"
 version = "0.1.0"
 dependencies = [
  "async-trait",

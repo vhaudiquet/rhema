@@ -1,0 +1,26 @@
+[package]
+name = "rhema-sandbox-ecrou"
+description = "ecrou sandbox backend for the rhema `Sandbox` seam: one microVM per command through the `ecrou` CLI, the workspace as a virtiofs share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The seam and the process family's shared machinery (`spawn`): the
+# textual path guard, the fs routes, `shquote`
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = ["spawn"] }
+async-trait = { workspace = true }
+# File contents cross the seed staging base64
+base64 = "0.22"
+# The one-shot machine's child, the capture files' reads, the cancel
+# and budget tick
+tokio = { workspace = true, features = ["process", "io-util", "time", "fs"] }
+# The per-exec capture directory: created before the boot, filled by
+# the guest through its share, deleted when the call returns
+tempfile = "3"
+
+[lints]
+workspace = true
