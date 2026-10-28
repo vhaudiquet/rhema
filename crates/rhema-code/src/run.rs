@@ -604,11 +604,13 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     // allowlists will land.
     let approval: Arc<dyn Approval> = Arc::new(rhema_coding_agent::AllowAll);
 
-    // The checkpoint, headless as the TUI runs it: when `--save` names a
-    // file, the engine hands the session over after the assistant message
-    // lands and before the first tool of each round runs — a crash or a
-    // kill mid-round leaves a committed intent there, which the next
-    // `--resume`'s revive closes, instead of no record at all.
+    // The checkpoint, opt-in headless: when `--save` names a file, the
+    // engine hands the session over at every stream boundary — before
+    // each request, after the assistant message lands and before the
+    // first tool runs, after each step's results — so a crash or a kill
+    // mid-round, mid-stream included, leaves a resumable file there,
+    // which the next `--resume`'s revive closes, instead of no record at
+    // all.
     let save = args.save.clone();
     if let Some(dir) = save.as_ref().and_then(|path| path.parent()) {
         std::fs::create_dir_all(dir)
@@ -631,7 +633,8 @@ async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
     let served: anyhow::Result<()> = match outcome {
         Ok(output) => {
             // Checkpoint after the completed turn: the file's freshest
-            // complete state, the same shape the TUI leaves.
+            // complete state — the stream commits already brought it
+            // here, this re-writes it with the final usage attached.
             if let Some(path) = &save
                 && let Err(err) = agent.save_session_to(path)
             {
@@ -837,6 +840,27 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             .with_context(|| format!("cannot resume session: {}", path.display()))?,
         None => Session::default(),
     };
+    // The file this conversation persists to: a resumed run continues
+    // its own file, a fresh one gets a name from the sessions cache.
+    // This is the checkpoint target every turn's streams commit into,
+    // so an exit in the middle of the first turn — a crash, a kill, a
+    // quit — still leaves something to resume. Allocation only picks
+    // the name; nothing is written until a turn commits.
+    let session_file = match &args.resume {
+        Some(path) => Some(path.clone()),
+        None => match sessions::base_dir() {
+            Ok(base) => sessions::next_session_path(&base, &workspace)
+                .map(Some)
+                .unwrap_or_else(|err| {
+                    eprintln!("warning: the session will only be saved on exit: {err}");
+                    None
+                }),
+            Err(err) => {
+                eprintln!("warning: the session will only be saved on exit: {err}");
+                None
+            }
+        },
+    };
     let agent_base = resolve_base_system(Config::system_prompt_path().ok().as_deref());
     let thinking = args
         .thinking
@@ -911,6 +935,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             config,
             backend,
             session,
+            checkpoint: session_file,
             options,
             secrets: Some(Arc::clone(&secrets)),
             sandboxed,
@@ -965,10 +990,15 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     restore_terminal();
     // Best-effort save for /resume, after the terminal is back: an empty
     // session saves nothing, and a failed save warns without failing the
-    // exit. A resumed session writes back to its own file, so continuing
-    // it never grows a second entry.
-    if let Some((session, origin)) = app.export_session() {
-        let saved = match origin {
+    // exit. The save goes to the file the turns checkpointed, so one
+    // conversation is one entry. A turn still out owns the agent — the
+    // freshest state is the checkpoint file its stream commits wrote,
+    // and writing the pre-turn snapshot the app still holds over it
+    // would erase the interrupted turn, so nothing is exported here.
+    if !app.turn.running
+        && let Some((session, _)) = app.export_session()
+    {
+        let saved = match app.checkpoint_target() {
             Some(path) => sessions::write_session(&path, &session),
             None => sessions::base_dir()
                 .and_then(|base| sessions::save_session(&base, &workspace, &session))
@@ -1157,7 +1187,7 @@ fn dispatch(
                 agent,
                 crate::turn::Prompt { text, images },
                 Arc::new(AllowAll),
-                app.options.save.clone(),
+                app.checkpoint_target(),
                 cancelled,
                 steered,
                 tx.clone(),

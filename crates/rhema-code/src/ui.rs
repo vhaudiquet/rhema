@@ -3841,6 +3841,7 @@ mod scroll_tests {
         };
         App::new(AppSetup {
             store: Arc::new(MemoryStore::default()),
+            checkpoint: None,
             config,
             backend: Some(crate::app::Backend::Google {
                 api_key: "k".into(),

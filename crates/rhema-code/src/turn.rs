@@ -82,11 +82,11 @@ impl Prompt {
 }
 
 /// Spawns a turn chain on a tokio task: runs the prompt through the
-/// agent with the given approval hook, commits the session before each
-/// tool round and checkpoints the final turn on success (when `save` is
-/// set), and hands the agent back via [`UiEvent::TurnFinished`] — or,
-/// when the cancel flag flips, drops the turn future at its current
-/// await and hands the agent back via [`UiEvent::TurnCancelled`]. A
+/// agent with the given approval hook, checkpoints the session at every
+/// stream boundary and again after the final turn (when `save` is set),
+/// and hands the agent back via [`UiEvent::TurnFinished`] — or, when the
+/// cancel flag flips, drops the turn future at its current await and
+/// hands the agent back via [`UiEvent::TurnCancelled`]. A
 /// message on `steer` drops the turn future the same way, but the task
 /// carries on: the message runs as the next turn on the same agent, so
 /// the conversation continues right where the interruption landed. The
@@ -102,10 +102,13 @@ pub fn spawn_turn(
     mut steer: UnboundedReceiver<String>,
     events: UnboundedSender<UiEvent>,
 ) -> JoinHandle<()> {
-    // Commit-before-execute: when the session persists to a file, the
-    // engine hands it over after the assistant message lands and before
-    // the first tool runs — a crash mid-call leaves a committed intent
-    // (the next turn's revive closes it) instead of no record at all.
+    // Commit at every stream boundary: when the session persists to a
+    // file, the engine hands it over before each request (the prompt
+    // durable before tokens are spent), after the assistant message
+    // lands and before the first tool runs (a crash mid-call leaves a
+    // committed intent — the next turn's revive closes it), and after
+    // each step's results — a death mid-turn, mid-first-stream
+    // included, leaves a resumable file instead of no record at all.
     if let Some(path) = save.clone() {
         agent.set_commit_hook(Some(Box::new(move |session: &Session| {
             crate::sessions::write_session(&path, session)
@@ -639,10 +642,15 @@ mod mock_tests {
             tx,
         );
 
-        // The hook writes the intent before the tool hangs; wait for the
-        // file so the cancel cannot race ahead of the commit.
+        // The hook writes the intent before the tool hangs; wait until
+        // the intent is on disk so the cancel cannot race ahead of the
+        // commit. (The per-stream commits create the file earlier still
+        // — the prompt alone — so existence alone proves nothing.)
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !save.exists() {
+            while !std::fs::read_to_string(&save)
+                .map(|raw| raw.contains("call_1"))
+                .unwrap_or(false)
+            {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })

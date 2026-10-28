@@ -38,6 +38,11 @@ pub struct AppSetup {
     pub backend: Option<Backend>,
     /// The starting session: empty, or resumed from `--resume`.
     pub session: Session,
+    /// The file this run's conversation persists to when `--save` names
+    /// none: `--resume`'s own file, or the fresh name the runner
+    /// allocated under the sessions cache. Naming a file writes nothing,
+    /// so a run that never speaks leaves no husk behind.
+    pub checkpoint: Option<PathBuf>,
     /// The startup flags.
     pub options: RunOptions,
     /// The keychain fresh logins place keys in and removed logins
@@ -810,9 +815,13 @@ pub struct App {
     /// Dropping it ends the flow task — the watch receiver errors out —
     /// exactly what Esc and a completed flow both want.
     pub login_cancel: Option<tokio::sync::watch::Sender<bool>>,
-    /// The file this session was resumed from, if any: the exit save
-    /// updates it in place instead of growing a second entry in /resume.
-    pub resumed_from: Option<PathBuf>,
+    /// The file this conversation persists to: `--resume`'s own file, a
+    /// resumed-through-/resume file, or the fresh name the runner
+    /// allocated. The exit save updates it in place instead of growing a
+    /// second entry, and every turn checkpoints into it as its streams
+    /// land. `None` once /clear drops the conversation — the next turn
+    /// allocates a new file for what follows.
+    pub session_file: Option<PathBuf>,
     /// Set by the runner to end the event loop.
     pub should_quit: bool,
     /// The resolved design tokens every render pass reads.
@@ -1115,7 +1124,7 @@ impl App {
             error: None,
             confirm_quit: false,
             login_cancel: None,
-            resumed_from: None,
+            session_file: setup.checkpoint,
             should_quit: false,
             chat: ChatState::new(),
             settings_hits: Vec::new(),
@@ -1595,8 +1604,10 @@ impl App {
     }
 
     /// Drops the conversation: a fresh transcript and a fresh session.
-    /// The resumed origin drops with it — what is typed after /clear is
-    /// a new conversation, not a continuation of the loaded file.
+    /// The session file drops with it — what is typed after /clear is a
+    /// new conversation, not a continuation of the loaded file, so the
+    /// next turn allocates a file of its own instead of overwriting the
+    /// cleared one's history.
     pub fn clear_session(&mut self) {
         if let Some(agent) = self.agent.as_mut() {
             agent.session_mut().history.clear();
@@ -1605,7 +1616,7 @@ impl App {
         self.usage = None;
         self.session_cost = 0.0;
         self.error = None;
-        self.resumed_from = None;
+        self.session_file = None;
         // The benchmark describes one conversation: cleared with it,
         // in the fallback snapshot and in the agent's mirror alike.
         self.transcript_stats = None;
@@ -1613,6 +1624,17 @@ impl App {
             agent.reset_transcript_stats();
         }
         self.transcript.push_notice("conversation cleared");
+    }
+
+    /// The file a turn checkpoints into and the exit save updates:
+    /// `--save`'s explicit path wins; otherwise this conversation's own
+    /// file. `None` when neither exists — the exit save then falls back
+    /// to allocating at exit, and a turn simply cannot checkpoint.
+    pub fn checkpoint_target(&self) -> Option<PathBuf> {
+        self.options
+            .save
+            .clone()
+            .or_else(|| self.session_file.clone())
     }
 
     /// The session to save for /resume, and the file it belongs to: the
@@ -1640,7 +1662,7 @@ impl App {
         if session.history.is_empty() {
             None
         } else {
-            Some((session, self.resumed_from.clone()))
+            Some((session, self.session_file.clone()))
         }
     }
 
@@ -2159,7 +2181,7 @@ impl App {
         self.transcript_stats = None;
         self.agent = Some(agent);
         self.subagents = Some(subagents);
-        self.resumed_from = Some(path.to_path_buf());
+        self.session_file = Some(path.to_path_buf());
         self.transcript = Transcript::from_history(&self.session.history);
         // The saved session carries what it spent; the footer continues
         // the story instead of quoting a fresh zero.
@@ -4175,6 +4197,7 @@ mod tests {
         });
         let app = App::new(AppSetup {
             store: store.clone(),
+            checkpoint: None,
             config,
             backend,
             session,
@@ -7195,6 +7218,7 @@ mod tests {
         let backend = Backend::from_profile(&config.effective(Some(&profile)), None);
         let app = App::new(AppSetup {
             store: Arc::new(MemoryStore::new(config.clone())),
+            checkpoint: None,
             config,
             backend,
             session: Session::default(),
@@ -7620,12 +7644,39 @@ mod tests {
         ));
         // The session is now bound to the file it came from: exiting
         // updates it in place instead of listing it twice.
-        assert_eq!(h.app.resumed_from.as_deref(), Some(older.as_path()));
+        assert_eq!(h.app.session_file.as_deref(), Some(older.as_path()));
         let (exported, origin) = h.app.export_session().expect("a spoken session exports");
         assert_eq!(origin.as_deref(), Some(older.as_path()));
         assert_eq!(exported.history.len(), 1);
         // The file the picker named is what got loaded.
         assert!(older.is_file() && newer.is_file());
+    }
+
+    #[test]
+    fn the_startup_checkpoint_names_the_session_file() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let checkpoint =
+            std::env::temp_dir().join(format!("rhema-checkpoint-{}-a.json", std::process::id()));
+        h.app.session_file = Some(checkpoint.clone());
+
+        // A fresh run's turns checkpoint into the allocated file.
+        assert_eq!(h.app.checkpoint_target(), Some(checkpoint.clone()));
+        // An explicit --save outranks it, for turns and for the exit
+        // save alike.
+        h.app.options.save = Some(PathBuf::from("/tmp/explicit-save.json"));
+        assert_eq!(
+            h.app.checkpoint_target(),
+            Some(PathBuf::from("/tmp/explicit-save.json"))
+        );
+    }
+
+    #[test]
+    fn clear_drops_the_session_file_so_the_next_conversation_owns_its_own() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.session_file = Some(PathBuf::from("/tmp/cleared.json"));
+        crate::commands::dispatch(&mut h.app, "/clear");
+        assert_eq!(h.app.session_file, None);
+        assert_eq!(h.app.checkpoint_target(), None);
     }
 
     #[test]
@@ -7654,14 +7705,14 @@ mod tests {
             .history
             .push(Message::text(Role::User, "talk"));
         h.app.transcript.push_user("talk", Vec::new());
-        h.app.resumed_from = Some(PathBuf::from("/tmp/old.json"));
+        h.app.session_file = Some(PathBuf::from("/tmp/old.json"));
 
         crate::commands::dispatch(&mut h.app, "/new");
 
         // A fresh session: no history to save, no resume binding, the
         // transcript down to the notice.
         assert_eq!(h.app.export_session(), None);
-        assert_eq!(h.app.resumed_from, None);
+        assert_eq!(h.app.session_file, None);
         assert!(matches!(
             h.app.transcript.lines().last(),
             Some(Line::Notice(text)) if text.contains("cleared")

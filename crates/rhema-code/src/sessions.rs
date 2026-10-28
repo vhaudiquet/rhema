@@ -1,5 +1,5 @@
-//! Saved sessions: the conversations the TUI writes on exit and the
-//! resume picker lists.
+//! Saved sessions: the conversations the TUI checkpoints as their turns
+//! stream, writes back on exit, and the resume picker lists.
 //!
 //! LAYOUT: `<base>/<encoded-workspace>/<millis>-<n>.json`, where `base`
 //! is [`base_dir`] and the workspace directory name is the absolute
@@ -99,6 +99,31 @@ pub fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Picks the file a workspace's next session lands in: the base and the
+/// workspace directory are created (`0700`), and the name carries the
+/// current time with the same-millisecond suffix scheme the saves use.
+/// Naming a file writes nothing — a run that never speaks leaves no husk
+/// behind — so a checkpoint target can be allocated before the first
+/// turn and used by whatever turn speaks first.
+pub fn next_session_path(base: &Path, workspace: &Path) -> io::Result<PathBuf> {
+    // Conversation content: the base and the workspace directory are
+    // `0700`, the file `0600`, re-asserted on every save.
+    rhema_config::privacy::private_dir(base)?;
+    let dir = base.join(encode_workspace(workspace));
+    rhema_config::privacy::private_dir(&dir)?;
+    let millis = now_millis();
+    // Same-millisecond saves pick the next free suffix; names sort by
+    // time because the millis field is fixed-width.
+    let mut n = 0u32;
+    Ok(loop {
+        let candidate = dir.join(format!("{millis:016}-{n:02}.json"));
+        if !candidate.exists() {
+            break candidate;
+        }
+        n += 1;
+    })
+}
+
 /// Writes `session` under `base` for `workspace`, returning the file it
 /// landed in. A session with no history is not written: there is nothing
 /// to resume, and /clear should not leave a husk behind.
@@ -110,33 +135,41 @@ pub fn save_session(
     if session.history.is_empty() {
         return Ok(None);
     }
-    // Conversation content: the base and the workspace directory are
-    // `0700`, the file `0600`, re-asserted on every save.
-    rhema_config::privacy::private_dir(base)?;
-    let dir = base.join(encode_workspace(workspace));
-    rhema_config::privacy::private_dir(&dir)?;
-    let millis = now_millis();
-    // Same-millisecond saves pick the next free suffix; names sort by
-    // time because the millis field is fixed-width.
-    let mut n = 0u32;
-    let path = loop {
-        let candidate = dir.join(format!("{millis:016}-{n:02}.json"));
-        if !candidate.exists() {
-            break candidate;
-        }
-        n += 1;
-    };
+    let path = next_session_path(base, workspace)?;
     write_session(&path, session)?;
     Ok(Some(path))
 }
 
 /// Writes `session` to `path` — the in-place update a resumed session
 /// gets on exit, so continuing it never grows a second entry. The file
-/// is written `0600` and an existing wider file tightens again.
+/// is written `0600` and an existing wider file tightens again. The
+/// write lands through a sibling temporary file and a rename: the
+/// checkpoint is the record a crash resume reads, and a kill mid-write
+/// must leave the previous checkpoint whole, never a truncated
+/// half-session no resume can parse.
 pub fn write_session(path: &Path, session: &Session) -> io::Result<()> {
     let json = serde_json::to_string_pretty(session)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    rhema_config::privacy::private_write(path, json.as_bytes())
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("session");
+    let temp = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{name}.{}.tmp", std::process::id()));
+    let written = rhema_config::privacy::private_write(&temp, json.as_bytes());
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return written;
+    }
+    match std::fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
+        }
+    }
 }
 
 /// The saved sessions for `workspace`, newest first. A missing directory
@@ -155,6 +188,16 @@ pub fn list_sessions(base: &Path, workspace: &Path) -> io::Result<Vec<SavedSessi
     };
     for entry in entries {
         let path = entry?.path();
+        // Dot entries never list: a checkpoint write's temporary
+        // half-file hides behind a leading dot, and a crash mid-write
+        // may leave one behind.
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_none_or(|name| name.starts_with('.'))
+        {
+            continue;
+        }
         // The name stays the list filter (stray files never show); the
         // mtime is the truth about when the session was last live.
         let name_at = name_millis(&path);
@@ -252,6 +295,86 @@ mod tests {
         let mut session = Session::default();
         session.history.push(Message::text(Role::User, prompt));
         session
+    }
+
+    #[test]
+    fn the_next_session_path_names_a_file_without_writing_it() {
+        let (_dir, base) = temp_base();
+        let workspace = Path::new("/home/someone/proj");
+
+        let path = next_session_path(&base, workspace).unwrap();
+        // Nothing exists yet: naming a checkpoint target is not a write.
+        assert!(!path.exists());
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("json"));
+        // The directories do exist, `0700`-private, so the first commit
+        // lands in place.
+        assert!(path.parent().unwrap().is_dir());
+
+        // A second pick never lands on a name that is taken on disk:
+        // once the first file is written (the run spoke), the next
+        // allocation — a /clear'd conversation's fresh start — takes
+        // the next suffix.
+        write_session(&path, &session_with("hello")).unwrap();
+        let second = next_session_path(&base, workspace).unwrap();
+        assert_ne!(path, second);
+    }
+
+    #[test]
+    fn the_checkpoint_write_leaves_no_temp_and_never_a_half_file() {
+        let (_dir, base) = temp_base();
+        let workspace = Path::new("/home/someone/proj");
+        let path = next_session_path(&base, workspace).unwrap();
+
+        write_session(&path, &session_with("first")).unwrap();
+        // A second write over a live checkpoint still reads back whole
+        // and leaves no sibling behind.
+        write_session(&path, &session_with("second")).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("second"));
+        let siblings: Vec<_> = std::fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name())
+            .filter(|name| name.to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(siblings.is_empty(), "temp litter: {siblings:?}");
+    }
+
+    #[test]
+    fn a_temp_left_by_a_crash_never_lists() {
+        let (_dir, base) = temp_base();
+        let workspace = Path::new("/home/someone/proj");
+        let dir = base.join(encode_workspace(workspace));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let kept = next_session_path(&base, workspace).unwrap();
+        write_session(&kept, &session_with("real")).unwrap();
+        // What a kill mid-write could leave: a dot-prefixed half-file.
+        std::fs::write(dir.join(".0001793121258253-00.json.4242.tmp"), b"{").unwrap();
+
+        let listed = list_sessions(&base, workspace).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, kept);
+    }
+
+    #[test]
+    fn a_checkpointed_session_resumes_from_its_own_file() {
+        let (_dir, base) = temp_base();
+        let workspace = Path::new("/home/someone/proj");
+
+        // The run allocates its target up front, the first stream
+        // commits into it, and the file is resume-shaped from then on.
+        let path = next_session_path(&base, workspace).unwrap();
+        write_session(&path, &session_with("hello")).unwrap();
+        assert!(path.is_file());
+
+        // The exit save updates the same file: one conversation, one
+        // entry, no second listing in the picker.
+        let grown = session_with("hello");
+        write_session(&path, &grown).unwrap();
+        let listed = list_sessions(&base, workspace).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, path);
     }
 
     #[test]
