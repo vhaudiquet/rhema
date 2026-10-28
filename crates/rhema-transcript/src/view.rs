@@ -115,6 +115,22 @@ impl UsageBreakdown {
     }
 }
 
+/// The log's own wire bytes by category — each message counted once,
+/// the content the billed split re-sends once per request. The system
+/// prompt, the skills section, and the tool definitions ride every
+/// request but live in no message, so they have no figure here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LogContent {
+    /// Tool-call arguments in assistant messages.
+    pub tool_calls: usize,
+    /// Tool results in tool messages.
+    pub tool_results: usize,
+    /// User text, the compaction block included.
+    pub user_text: usize,
+    /// Assistant text.
+    pub assistant_text: usize,
+}
+
 /// The compaction's benchmark snapshot: what the view has been doing,
 /// and what the providers' own usage says about the prefix cache. All
 /// counters run from the transcript's construction; a resumed session
@@ -160,6 +176,9 @@ pub struct TranscriptStats {
     /// this is the once.
     #[serde(default)]
     pub log_bytes: usize,
+    /// The log's bytes by category at the last request, counted once.
+    #[serde(default)]
+    pub log_content: LogContent,
     /// Input tokens the providers reported, summed over requests —
     /// cached tokens included.
     pub input_tokens: u64,
@@ -219,6 +238,7 @@ impl TranscriptStats {
             self.band_bytes = saved.band_bytes;
             self.tail_bytes = saved.tail_bytes;
             self.log_bytes = saved.log_bytes;
+            self.log_content = saved.log_content;
         }
     }
 }
@@ -547,6 +567,7 @@ impl Transcript {
     pub fn render(&mut self) -> Option<Vec<Message>> {
         self.stats.requests += 1;
         self.stats.log_bytes = self.bytes(0, self.log.len());
+        self.stats.log_content = self.log_content();
         if self.cut == 0 {
             self.stats.pass_through += 1;
             return None;
@@ -598,6 +619,32 @@ impl Transcript {
     /// The wire bytes of `log[from..to]`, from the size cache.
     fn bytes(&self, from: usize, to: usize) -> usize {
         self.sizes[from..to].iter().sum()
+    }
+
+    /// The log's bytes by category, each message counted once — the
+    /// same taxonomy the request shares spread the billed input over,
+    /// minus the pieces that ride no message.
+    fn log_content(&self) -> LogContent {
+        let mut content = LogContent::default();
+        for message in &self.log {
+            for part in &message.content {
+                match part {
+                    Content::Text(text) => match message.role {
+                        Role::User => content.user_text += text.len(),
+                        Role::Assistant => content.assistant_text += text.len(),
+                        Role::System | Role::Tool => {}
+                    },
+                    Content::ToolCall(call) => {
+                        content.tool_calls += call.name.len() + call.args.to_string().len();
+                    }
+                    Content::ToolResult(result) => {
+                        content.tool_results += result.content.len();
+                    }
+                    Content::Image(_) => {}
+                }
+            }
+        }
+        content
     }
 
     /// The block's bytes: every section's header plus text.
@@ -1188,6 +1235,12 @@ mod tests {
             band_bytes: 3_000,
             tail_bytes: 1_200,
             log_bytes: 5_400,
+            log_content: LogContent {
+                tool_calls: 100,
+                tool_results: 4_000,
+                user_text: 300,
+                assistant_text: 1_000,
+            },
         };
 
         // A mirror that has not looked at a log yet shows the saved
@@ -1253,6 +1306,31 @@ mod tests {
         transcript.render();
         let expected: usize = grown.iter().map(summary::message_bytes).sum();
         assert_eq!(transcript.stats().log_bytes, expected);
+    }
+
+    /// The content split: the log's bytes by category, each message
+    /// counted once. For this fixture the categories tile the log —
+    /// no images, no system or tool-role text — so they sum to the
+    /// log's whole size.
+    #[test]
+    fn the_content_split_counts_each_message_once() {
+        let mut transcript = Transcript::new(settings(128_000));
+        let messages = long_history(4);
+        transcript.observe(&messages);
+        transcript.render();
+        let content = transcript.stats().log_content;
+        assert_eq!(content.tool_results, 4 * result_bytes(8).len());
+        assert_eq!(content.assistant_text, 4 * "checking".len());
+        assert_eq!(
+            content.user_text,
+            "fix the build".len() + "and now summarize".len()
+        );
+        let args = serde_json::json!({ "command": "make test" }).to_string();
+        assert_eq!(content.tool_calls, 4 * ("bash".len() + args.len()));
+        assert_eq!(
+            content.tool_calls + content.tool_results + content.user_text + content.assistant_text,
+            transcript.stats().log_bytes
+        );
     }
 
     #[test]

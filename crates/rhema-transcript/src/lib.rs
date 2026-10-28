@@ -30,7 +30,8 @@ pub mod zoom;
 
 pub use compact::{ModelSummarizer, PendingSummary, Section, SectionOrigin, Summarizer};
 pub use view::{
-    Transcript, TranscriptSettings, TranscriptStats, TranscriptView, UsageBreakdown, WorkerOutcome,
+    LogContent, Transcript, TranscriptSettings, TranscriptStats, TranscriptView, UsageBreakdown,
+    WorkerOutcome,
 };
 pub use zoom::{ZOOM_MAX_BYTES, Zoom};
 
