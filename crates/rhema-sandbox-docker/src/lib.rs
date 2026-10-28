@@ -17,7 +17,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 
-use rhema_sandbox::exec_util::{self, STAGING, check_remote_path};
+use rhema_sandbox::exec_util::{self, STAGING, check_remote_path, under_workspace};
 use rhema_sandbox::fsroot::FsRoot;
 use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 
@@ -193,11 +193,15 @@ impl Sandbox for DockerSandbox {
         // fs: the textual guard is what stands between the model and a
         // `..` climb, the same guard the fs-disjoint backends lean on.
         check_remote_path(&request.cwd)?;
+        // The caller names paths instance-side (the mirrored
+        // workspace's own path); the workdir join wants mount-relative
+        // ones.
+        let cwd = under_workspace(&self.workspace, &request.cwd);
         let argv = exec_argv(
             &self.container,
             &self.workspace,
             request.timeout.as_secs(),
-            &request.cwd,
+            &cwd,
             &request.command,
             self.user,
         );
@@ -241,11 +245,16 @@ impl Sandbox for DockerSandbox {
     }
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        exec_util::read_through(&self.root, path).await
+        exec_util::read_through(&self.root, &under_workspace(&self.workspace, path)).await
     }
 
     async fn write_file(&self, path: &str, contents: &[u8]) -> Result<(), SandboxError> {
-        exec_util::write_through(&self.root, path, contents).await
+        exec_util::write_through(
+            &self.root,
+            &under_workspace(&self.workspace, path),
+            contents,
+        )
+        .await
     }
 }
 
@@ -352,6 +361,55 @@ mod tests {
         assert_eq!(container_cwd("", ""), None);
     }
 
+    #[test]
+    fn the_workspace_absolute_cwd_joins_without_doubling() {
+        // The session's cwd names the workspace itself, so the join
+        // must not repeat the mount prefix.
+        assert_eq!(
+            exec_argv(
+                "box",
+                "/home/me/proj",
+                30,
+                &under_workspace("/home/me/proj", "/home/me/proj/src"),
+                "echo hi",
+                None,
+            ),
+            vec![
+                "docker",
+                "exec",
+                "--workdir",
+                "/home/me/proj/src",
+                "box",
+                "timeout",
+                "--kill-after=5",
+                "30",
+                "bash",
+                "-c",
+                "echo hi",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_absolute_file_route_lands_at_the_mount_root() {
+        let (sandbox, dir) = sandbox();
+        sandbox
+            .write_file("/workspace/.rhema/.seeded", b"1")
+            .await
+            .expect("the write lands");
+        assert_eq!(
+            std::fs::read(dir.path().join(".rhema/.seeded")).expect("the file is at the root"),
+            b"1"
+        );
+        assert_eq!(
+            sandbox
+                .read_file("/workspace/.rhema/.seeded")
+                .await
+                .expect("the read lands"),
+            b"1"
+        );
+    }
+
     #[tokio::test]
     async fn a_relative_cwd_is_refused_without_spawning_docker() {
         let (sandbox, _dir) = sandbox();
@@ -416,17 +474,21 @@ mod tests {
     #[tokio::test]
     async fn files_round_trip_through_the_mapped_root() {
         let (sandbox, dir) = sandbox();
+        // The instance-side form — the mirrored workspace's own path —
+        // lands at the mount tail, where the container's own path
+        // points.
         sandbox
             .write_file("/workspace/deep/note.md", b"# note")
             .await
             .expect("the write lands");
         assert_eq!(
-            std::fs::read(dir.path().join("workspace/deep/note.md"))
+            std::fs::read(dir.path().join("deep/note.md"))
                 .expect("the host side of the mount holds the file"),
             b"# note"
         );
+        // The mount-relative form names the same file.
         let read = sandbox
-            .read_file("/workspace/deep/note.md")
+            .read_file("/deep/note.md")
             .await
             .expect("the read lands");
         assert_eq!(read, b"# note");

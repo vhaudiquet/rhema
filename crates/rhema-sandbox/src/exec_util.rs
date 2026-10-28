@@ -158,6 +158,25 @@ pub fn check_remote_path(path: &str) -> Result<(), SandboxError> {
     Ok(())
 }
 
+/// The mounted postures' path translation. The caller names file
+/// routes and exec cwds instance-side (the workspace's own path, since
+/// the device mirrors host and instance 1:1), while the fs routes
+/// through [`FsRoot`] and the workdir joins want mount-relative ones.
+/// A path under the workspace gives up the prefix; anything else
+/// already speaks mount-relative and rides unchanged. The prefix ends
+/// at a separator, so a sibling (`/home/me/proj-other`) keeps its name.
+pub fn under_workspace(workspace: &str, path: &str) -> String {
+    let base = workspace.trim_end_matches('/');
+    if base.is_empty() {
+        return path.to_owned();
+    }
+    match path.strip_prefix(base) {
+        Some(tail) if tail.starts_with('/') => tail.to_owned(),
+        Some("") => "/".to_owned(),
+        _ => path.to_owned(),
+    }
+}
+
 /// Shell-quotes one argument, single-quote style — the shim's
 /// `shquote`, restated wherever an argument crosses a shell: the seed
 /// command lines, and every remote operand `ssh` hands its far-end
@@ -258,5 +277,27 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let tail = pump::<&[u8]>(None, false, tx).await;
         assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn under_workspace_strips_the_mount_prefix() {
+        assert_eq!(
+            under_workspace("/home/me/proj", "/home/me/proj/src/main.rs"),
+            "/src/main.rs"
+        );
+        // The workspace itself maps to the mount root.
+        assert_eq!(under_workspace("/home/me/proj", "/home/me/proj"), "/");
+        assert_eq!(
+            under_workspace("/home/me/proj/", "/home/me/proj/src"),
+            "/src"
+        );
+        // A sibling keeps its name: the prefix ends at a separator.
+        assert_eq!(
+            under_workspace("/home/me/proj", "/home/me/proj-other/src"),
+            "/home/me/proj-other/src"
+        );
+        // Already mount-relative, or no mount named: unchanged.
+        assert_eq!(under_workspace("/workspace", "/src"), "/src");
+        assert_eq!(under_workspace("", "/src"), "/src");
     }
 }

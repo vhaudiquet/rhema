@@ -47,7 +47,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 
-use rhema_sandbox::exec_util::{self, STAGING, check_remote_path, read_through, write_through};
+use rhema_sandbox::exec_util::{
+    self, STAGING, check_remote_path, read_through, under_workspace, write_through,
+};
 use rhema_sandbox::fsroot::FsRoot;
 use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
 
@@ -89,10 +91,11 @@ impl LxdSandbox {
     /// let sandbox = LxdSandbox::mounted("rhema-sandbox", root, "/home/me/proj");
     /// ```
     ///
-    /// Sandbox paths are mount-relative — sandbox path `/src/main.rs`
-    /// is `<root>/src/main.rs` on the host and `<workspace>/src/main.rs`
-    /// in the instance — and exec's working directory is the
-    /// instance-side path of the sandbox cwd.
+    /// Sandbox paths are mount-relative or instance-side —
+    /// `/src/main.rs` and `<workspace>/src/main.rs` both name
+    /// `<root>/src/main.rs` on the host and `<workspace>/src/main.rs`
+    /// in the instance, and exec's working directory is the
+    /// instance-side path of the sandbox cwd either way.
     pub fn mounted(
         instance: impl Into<String>,
         root: FsRoot,
@@ -399,12 +402,19 @@ impl Sandbox for LxdSandbox {
         // fs: the textual guard is what stands between the model and a
         // `..` climb, the same guard the fs-disjoint backends lean on.
         check_remote_path(&request.cwd)?;
+        // The mounted caller names paths instance-side (the mirrored
+        // workspace's own path); the workdir join wants mount-relative
+        // ones. Attached, the paths are already instance-side.
+        let cwd = match &self.root {
+            Some(_) => under_workspace(&self.workspace, &request.cwd),
+            None => request.cwd.clone(),
+        };
         let argv = exec_argv(
             &self.instance,
             self.root.is_some(),
             &self.workspace,
             request.timeout.as_secs(),
-            &request.cwd,
+            &cwd,
             &request.command,
             self.user,
         );
@@ -498,8 +508,9 @@ impl Sandbox for LxdSandbox {
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
         match &self.root {
-            // The mount is the route: plain fs on the host side.
-            Some(root) => read_through(root, path).await,
+            // The mount is the route: plain fs on the host side, the
+            // instance-side path translated to mount-relative first.
+            Some(root) => read_through(root, &under_workspace(&self.workspace, path)).await,
             None => {
                 check_remote_path(path)?;
                 let (stdout, code, stderr) = self.capture(&read_argv(&self.instance, path)).await?;
@@ -513,7 +524,9 @@ impl Sandbox for LxdSandbox {
 
     async fn write_file(&self, path: &str, contents: &[u8]) -> Result<(), SandboxError> {
         match &self.root {
-            Some(root) => write_through(root, path, contents).await,
+            Some(root) => {
+                write_through(root, &under_workspace(&self.workspace, path), contents).await
+            }
             None => {
                 check_remote_path(path)?;
                 // The bytes stage in a host temp file — `lxc file
@@ -679,6 +692,48 @@ mod tests {
         assert_eq!(
             instance_cwd(true, "/home/me/proj", ""),
             Some("/home/me/proj".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_workspace_absolute_cwd_joins_without_doubling() {
+        // The session's cwd names the workspace itself, so the join
+        // must not repeat the mount prefix.
+        assert_eq!(
+            instance_cwd(
+                true,
+                "/home/me/proj",
+                &under_workspace("/home/me/proj", "/home/me/proj/src"),
+            ),
+            Some("/home/me/proj/src".to_owned())
+        );
+        assert_eq!(
+            instance_cwd(
+                true,
+                "/home/me/proj",
+                &under_workspace("/home/me/proj", "/home/me/proj"),
+            ),
+            Some("/home/me/proj".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_workspace_absolute_file_route_lands_at_the_mount_root() {
+        let (sandbox, dir) = mounted();
+        sandbox
+            .write_file("/home/me/proj/.rhema/.seeded", b"1")
+            .await
+            .expect("the write lands");
+        assert_eq!(
+            std::fs::read(dir.path().join(".rhema/.seeded")).expect("the file is at the root"),
+            b"1"
+        );
+        assert_eq!(
+            sandbox
+                .read_file("/home/me/proj/.rhema/.seeded")
+                .await
+                .expect("the read lands"),
+            b"1"
         );
     }
 
