@@ -986,6 +986,13 @@ impl Config {
         Ok(Self::dir()?.join("skills"))
     }
 
+    /// The global subagent definitions directory (`<dir>/subagents`),
+    /// where user-wide subagents live; a workspace can add more under
+    /// its own `.rhema/subagents`.
+    pub fn subagents_dir() -> Result<PathBuf, ConfigError> {
+        Ok(Self::dir()?.join("subagents"))
+    }
+
     /// The system prompt file (`<dir>/SYSTEM.md`), the editable base
     /// prompt. `rhema system edit` seeds it with the built-in default,
     /// `rhema system restore` restores it; nothing is ever written at
