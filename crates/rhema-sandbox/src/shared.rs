@@ -169,14 +169,22 @@ mod tests {
     use super::*;
 
     /// Opens the lock file directly, the way a peer process would —
-    /// the tests' stand-in holders never touch the registry.
+    /// the tests' stand-in holders never touch the registry. The peer
+    /// also makes the directory: a fresh machine has no
+    /// `rhema/sandbox` under its runtime dir yet, and waiting for
+    /// another test's [`InstanceLock::acquire`] to create it is an
+    /// ordering race this test lost on CI.
     fn open_direct(backend: &str, name: &str) -> File {
+        let path = InstanceLock::path(backend, name);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).expect("the lock directory is made");
+        }
         OpenOptions::new()
             .create(true)
             .truncate(false)
             .read(true)
             .write(true)
-            .open(InstanceLock::path(backend, name))
+            .open(&path)
             .expect("the lock file opens")
     }
 
