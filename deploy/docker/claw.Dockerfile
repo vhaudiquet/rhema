@@ -14,6 +14,8 @@ COPY crates/rhema-acp/Cargo.toml crates/rhema-acp/Cargo.toml
 COPY crates/rhema-agent-tools/Cargo.toml crates/rhema-agent-tools/Cargo.toml
 COPY crates/rhema-autonomous-agent/Cargo.toml crates/rhema-autonomous-agent/Cargo.toml
 COPY crates/rhema-claw/Cargo.toml crates/rhema-claw/Cargo.toml
+COPY crates/rhema-cloud-agent/Cargo.toml crates/rhema-cloud-agent/Cargo.toml
+COPY crates/rhema-cloudflare-code/Cargo.toml crates/rhema-cloudflare-code/Cargo.toml
 COPY crates/rhema-code/Cargo.toml crates/rhema-code/Cargo.toml
 COPY crates/rhema-coding-agent/Cargo.toml crates/rhema-coding-agent/Cargo.toml
 COPY crates/rhema-config/Cargo.toml crates/rhema-config/Cargo.toml
@@ -31,9 +33,13 @@ COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
 COPY crates/rhema-sandbox/Cargo.toml crates/rhema-sandbox/Cargo.toml
 COPY crates/rhema-sandbox-docker/Cargo.toml crates/rhema-sandbox-docker/Cargo.toml
 COPY crates/rhema-sandbox-http/Cargo.toml crates/rhema-sandbox-http/Cargo.toml
+COPY crates/rhema-sandbox-local/Cargo.toml crates/rhema-sandbox-local/Cargo.toml
+COPY crates/rhema-sandbox-lxd/Cargo.toml crates/rhema-sandbox-lxd/Cargo.toml
+COPY crates/rhema-sandbox-server/Cargo.toml crates/rhema-sandbox-server/Cargo.toml
 COPY crates/rhema-sandbox-ssh/Cargo.toml crates/rhema-sandbox-ssh/Cargo.toml
 COPY crates/rhema-subagents/Cargo.toml crates/rhema-subagents/Cargo.toml
 COPY crates/rhema-transcript/Cargo.toml crates/rhema-transcript/Cargo.toml
+COPY crates/rhema-vercel-agent/Cargo.toml crates/rhema-vercel-agent/Cargo.toml
 COPY integrations/rhema-calendar-integration/Cargo.toml integrations/rhema-calendar-integration/Cargo.toml
 COPY integrations/rhema-forge-integration/Cargo.toml integrations/rhema-forge-integration/Cargo.toml
 # rhema-claw path-depends on the tools contract, which lives in its own

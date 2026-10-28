@@ -36,6 +36,7 @@ COPY crates/rhema-sandbox/Cargo.toml crates/rhema-sandbox/Cargo.toml
 COPY crates/rhema-sandbox-docker/Cargo.toml crates/rhema-sandbox-docker/Cargo.toml
 COPY crates/rhema-sandbox-http/Cargo.toml crates/rhema-sandbox-http/Cargo.toml
 COPY crates/rhema-sandbox-local/Cargo.toml crates/rhema-sandbox-local/Cargo.toml
+COPY crates/rhema-sandbox-lxd/Cargo.toml crates/rhema-sandbox-lxd/Cargo.toml
 COPY crates/rhema-sandbox-server/Cargo.toml crates/rhema-sandbox-server/Cargo.toml
 COPY crates/rhema-sandbox-ssh/Cargo.toml crates/rhema-sandbox-ssh/Cargo.toml
 COPY crates/rhema-subagents/Cargo.toml crates/rhema-subagents/Cargo.toml
