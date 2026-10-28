@@ -110,9 +110,9 @@ impl fmt::Debug for ProviderInstance {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SandboxInstance {
-    /// Which kind runs here: `docker`, `lxd`, `ssh`, or `http`. Stored
-    /// as given — unknown spellings are the consumer's to resolve or
-    /// reject.
+    /// Which kind runs here: `docker`, `lxd`, `ssh`, `http`, or
+    /// `ecrou`. Stored as given — unknown spellings are the
+    /// consumer's to resolve or reject.
     pub kind: String,
     /// What the kind names its instance by: the docker container, the
     /// LXD instance, the ssh host, or the http URL. Whitespace-only
@@ -134,9 +134,9 @@ pub struct SandboxInstance {
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct SandboxSettings {
-    /// The stored choice: `local`, `docker`, `lxd`, `ssh`, or `http`.
-    /// The name is stored as given — unknown spellings are the
-    /// consumer's to resolve or reject.
+    /// The stored choice: `local`, `docker`, `lxd`, `ssh`, `http`, or
+    /// `ecrou`. The name is stored as given — unknown spellings are
+    /// the consumer's to resolve or reject.
     pub kind: Option<String>,
     /// The name of the active sandbox instance in
     /// [`Profile::sandbox_instances`] — the one `bash` runs in. Must
@@ -167,6 +167,10 @@ pub struct SandboxSettings {
     /// flag the assembly stands the instance up with. Unset is a
     /// container.
     pub vm: Option<bool>,
+    /// The `ecrou` image every boot resolves: an ecrou distro name
+    /// (`ubuntu`, `alpine:3.23`) or an OCI image reference. Unset is
+    /// the backend's default image.
+    pub image: Option<String>,
 }
 
 impl fmt::Debug for SandboxSettings {
@@ -181,6 +185,7 @@ impl fmt::Debug for SandboxSettings {
             .field("container", &self.container)
             .field("instance", &self.instance)
             .field("vm", &self.vm)
+            .field("image", &self.image)
             .finish()
     }
 }
@@ -539,9 +544,9 @@ impl Profile {
 
     /// The sandbox kind this profile runs `bash` on: `RHEMA_SANDBOX`,
     /// then the stored `kind`. Whitespace-only values count as unset.
-    /// The name is returned as given — `local`, `docker`, `ssh`, and
-    /// `http` are the spellings the sandbox design names; unknown ones
-    /// are the consumer's to resolve or reject.
+    /// The name is returned as given — `local`, `docker`, `ssh`,
+    /// `http`, and `ecrou` are the spellings the sandbox design names;
+    /// unknown ones are the consumer's to resolve or reject.
     pub fn sandbox_kind(&self) -> Option<String> {
         resolve_key(
             |name| std::env::var(name).ok(),
@@ -633,6 +638,17 @@ impl Profile {
     /// unset is a container.
     pub fn sandbox_vm(&self) -> bool {
         self.sandbox.as_ref().and_then(|s| s.vm).unwrap_or(false)
+    }
+
+    /// The `ecrou` image every boot resolves, as stored. Stored only —
+    /// the same stance as [`Profile::sandbox_container`].
+    /// Whitespace-only values count as unset.
+    pub fn sandbox_image(&self) -> Option<String> {
+        self.sandbox
+            .as_ref()
+            .and_then(|s| s.image.clone())
+            .map(|image| image.trim().to_owned())
+            .filter(|image| !image.is_empty())
     }
 }
 
@@ -2065,6 +2081,7 @@ mod tests {
                     active: Some("dev-vm".into()),
                     instance: Some("dev-vm".into()),
                     vm: Some(true),
+                    image: Some("alpine:3.23".into()),
                 }),
             )]),
             last_sandbox_by_workspace: BTreeMap::from([(
@@ -2153,10 +2170,12 @@ mod tests {
             active: None,
             instance: Some(" dev-vm ".into()),
             vm: Some(true),
+            image: Some(" alpine:3.23 ".into()),
         });
         assert_eq!(profile.sandbox_kind().as_deref(), Some("ssh"));
         assert_eq!(profile.sandbox_url().as_deref(), Some("http://box:7331"));
         assert_eq!(profile.sandbox_token(None).as_deref(), Some("literal"));
+        assert_eq!(profile.sandbox_image().as_deref(), Some("alpine:3.23"));
         assert_eq!(profile.sandbox_host().as_deref(), Some("deploy@box"));
         assert_eq!(profile.sandbox_container().as_deref(), Some("rhema-dev"));
 
