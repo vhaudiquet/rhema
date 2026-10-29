@@ -428,27 +428,7 @@ infrastructure); phase 9 is the one users see.
   host's `/tmp`, which is a private per-run tmpfs inside the snap, so
   the capture scratch roots in the snap's own durable area and any
   `/tmp`-rooted share is refused loudly rather than silently sharing
-  an empty tree.
-
-  The machine's git reads the host's identity without any of it
-  being mounted: the effective config is flattened host-side by git
-  itself — `git config --list` with the workspace as the cwd, so
-  `gitdir:` conditions resolve to the very tree the share gives the
-  machine — and re-emitted under guard overrides (`safe.directory`,
-  signing off, credential helpers reset) into
-  `.rhema/git/config`, which the seed tucks into
-  `.git/info/exclude`. Exec points `GIT_CONFIG_GLOBAL` at it; the
-  file is the whole global tier, and repo-local `.git/config` crosses
-  with the tree. No staged file, no pair — git behaves as before.
-
-  The tool set rides the image's cache entry, not a container layer:
-  the assembly runs `ecrou provision IMAGE -- <script>` once per
-  image version — the script is the same `SANDBOX_TOOLS` list
-  through whichever package manager the image carries — and the
-  machine persists the result into its cache, so every later boot
-  carries the tools. A failed provisioning is the usual degraded
-  sandbox, retried at the next assembly; a partial one persists
-  nothing. Availability
+  an empty tree. Availability
   is `ecrou probe` — the dlopen-and-KVM check — and a stale binary
   surfaces in-band at the first exec, as an unavailable sandbox.
 - **The settings page is an instance list** — the host's `local`

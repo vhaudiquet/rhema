@@ -233,13 +233,6 @@ pub async fn assemble(
             // directory a skills mount would name.
             let root = FsRoot::new(workspace.to_path_buf())
                 .map_err(|err| anyhow::anyhow!("ecrou sandbox root: {err}"))?;
-            // The tools ride the image's cache entry, not a container
-            // layer: one provisioning machine per image version, then
-            // every boot carries them. A failed preparation is the
-            // same degraded sandbox the other backends accept — the
-            // session runs, the probes say what is missing — and the
-            // absent cache marker retries it at the next assembly.
-            prepare_instance("ecrou", &name, &ecrou_provision_argv(&image));
             Arc::new(EcrouSandbox::new(image, root, host_workspace.clone()))
         }
         SandboxChoice::Ssh => {
@@ -724,29 +717,6 @@ echo "$w" > "$m"
     )
 }
 
-/// The microvm preparation script: the same tool list as the
-/// container one, through whatever package manager the image carries
-/// — the image is whatever `sandbox.image` names, and alpine and
-/// debian differ in the details (fd's name, apk's update-less
-/// install). No marker here: the machine's cache entry is the marker,
-/// written when the provisioning run persists, so an entry that
-/// already carries the tools skips the command entirely and the
-/// preparation is one extraction.
-fn microvm_provision_script() -> String {
-    format!(
-        r#"set -e
-if command -v apk >/dev/null 2>&1; then
-    apk add --no-cache git ripgrep fd jq sd curl python3 bash build-base openssh-client
-elif command -v apt-get >/dev/null 2>&1; then
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
-    apt-get install -y -qq {SANDBOX_TOOLS} openssh-client
-    if command -v fdfind >/dev/null; then ln -sf "$(command -v fdfind)" /usr/local/bin/fd; fi
-fi
-"#
-    )
-}
-
 /// The provision budget: apt on a fresh image takes a minute or two,
 /// once.
 const PROVISION_BUDGET_SECS: &str = "300";
@@ -780,23 +750,6 @@ fn lxd_provision_argv(name: &str) -> Vec<String> {
         "bash".to_owned(),
         "-c".to_owned(),
         provision_script(),
-    ]
-}
-
-/// The provision argv for the microvm: a host-side `ecrou provision`
-/// runs the preparation inside a machine over the cache entry's
-/// rootfs and persists the result. The binary on PATH is the one
-/// exec drives, so the posture — snap or native — is the same one
-/// the session uses.
-fn ecrou_provision_argv(image: &str) -> Vec<String> {
-    vec![
-        "ecrou".to_owned(),
-        "provision".to_owned(),
-        image.to_owned(),
-        "--".to_owned(),
-        "/bin/sh".to_owned(),
-        "-c".to_owned(),
-        microvm_provision_script(),
     ]
 }
 
