@@ -1565,7 +1565,7 @@ pub fn filtered_commands(input: &str) -> Vec<&'static crate::commands::CommandSp
 /// argument completes from, when the command's argument is one:
 /// `/thinking h` names `/thinking` and its levels. None when the input
 /// names no command, or one whose argument completes from live rows
-/// (the models, the profiles).
+/// (the models, the profiles, the sandboxes).
 fn choice_argument(input: &str) -> Option<(&'static str, &'static [crate::commands::Choice])> {
     let body = input.strip_prefix('/')?;
     let (name, _) = body.split_once(' ')?;
@@ -1592,10 +1592,26 @@ pub struct PaletteProfile {
     pub active: bool,
 }
 
+/// One completable sandbox row, built from the session profile's
+/// configured instances: the palette reads it, `/sandbox <name>` runs
+/// `bash` in it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteSandbox {
+    /// The instance's name, the value completion inserts.
+    pub name: String,
+    /// The kind the instance runs: `docker`, `lxd`, `ssh`, `http`,
+    /// `ecrou` — stored as configured.
+    pub kind: String,
+    /// What the kind names its instance by, when configured.
+    pub target: Option<String>,
+    /// Whether the session currently runs `bash` in this instance.
+    pub active: bool,
+}
+
 /// One row of the input palette: a command while the typed token matches
-/// the command table, a model once `/model ` is naming its argument, or
-/// a profile under `/profile`. The palette's rendering and its keys
-/// (arrows, tab) read the same rows.
+/// the command table, a model once `/model ` is naming its argument, a
+/// profile under `/profile`, or a sandbox under `/sandbox`. The
+/// palette's rendering and its keys (arrows, tab) read the same rows.
 #[derive(Debug, Clone)]
 pub enum PaletteRow {
     /// A slash command; completing replaces the whole input with its name.
@@ -1627,6 +1643,14 @@ pub enum PaletteRow {
         /// What the row says about the word, after it.
         description: &'static str,
     },
+    /// A sandbox under `/sandbox` — a configured instance or a kind;
+    /// completing fills the argument.
+    Sandbox {
+        /// The word completion inserts: an instance's name or a kind's.
+        value: String,
+        /// What the row says about it, after the word.
+        description: String,
+    },
     /// A filesystem path under the cursor; completing splices the
     /// entry over the token it came from.
     Path {
@@ -1647,15 +1671,16 @@ pub enum PaletteRow {
 
 /// The palette's rows for an input: command names while the input
 /// matches one, the models matching the `/model` argument, the profiles
-/// matching the `/profile` argument, or — when none of those fire — the
-/// filesystem entries under the cursor's path token. The argument
-/// filters follow the picker's rules — the rendered row text,
-/// case-insensitive.
+/// matching the `/profile` argument, the sandboxes matching the
+/// `/sandbox` argument, or — when none of those fire — the filesystem
+/// entries under the cursor's path token. The argument filters follow
+/// the picker's rules — the rendered row text, case-insensitive.
 pub fn palette_rows(
     input: &str,
     cursor: usize,
     models: &[CatalogModel],
     profiles: &[PaletteProfile],
+    sandboxes: &[PaletteSandbox],
     icons: &crate::icons::Icons,
 ) -> Vec<PaletteRow> {
     if !input.starts_with('/') {
@@ -1703,6 +1728,39 @@ pub fn palette_rows(
                 name: profile.name.clone(),
                 description: profile_description(profile),
             })
+            .collect();
+        if !rows.is_empty() {
+            return rows;
+        }
+    }
+    // `/sandbox` completes from live rows first — the profile's
+    // configured instances — with the fixed kinds underneath, so a
+    // kind stays completable on a profile that named none. The same
+    // `/sandbox <name>` run handles both: a configured instance's name
+    // runs bash in it, anything else parses as a kind.
+    if let Some(needle) = input.strip_prefix("/sandbox ") {
+        let needle = needle.to_lowercase();
+        let rows: Vec<PaletteRow> = sandboxes
+            .iter()
+            .filter(|instance| {
+                let mut haystack = format!("{} {}", instance.name, instance.kind);
+                if let Some(target) = &instance.target {
+                    haystack.push_str(&format!(" {target}"));
+                }
+                needle.is_empty() || haystack.to_lowercase().contains(&needle)
+            })
+            .map(|instance| PaletteRow::Sandbox {
+                value: instance.name.clone(),
+                description: sandbox_description(instance),
+            })
+            .chain(crate::commands::SANDBOX_KINDS.iter().filter_map(|choice| {
+                (needle.is_empty() || choice.name.starts_with(&needle)).then_some(
+                    PaletteRow::Sandbox {
+                        value: choice.name.to_owned(),
+                        description: choice.description.to_owned(),
+                    },
+                )
+            }))
             .collect();
         if !rows.is_empty() {
             return rows;
@@ -1882,6 +1940,20 @@ fn profile_description(profile: &PaletteProfile) -> String {
         detail.push_str(&format!(" · {model}"));
     }
     if profile.active {
+        detail.push_str(" · active");
+    }
+    detail
+}
+
+/// A sandbox instance's palette description: the kind with its target,
+/// the way the settings Sandbox page says them, with the active marker
+/// last.
+fn sandbox_description(instance: &PaletteSandbox) -> String {
+    let mut detail = instance.kind.clone();
+    if let Some(target) = &instance.target {
+        detail.push_str(&format!(" · {target}"));
+    }
+    if instance.active {
         detail.push_str(" · active");
     }
     detail
@@ -2349,15 +2421,16 @@ impl ChatState {
 
     /// Handles one keypress. Ctrl combos are the app's (quit, model
     /// picker); Esc is the app's (approval decline / quit confirm). The
-    /// model catalog and profile registry feed the `/model` and
-    /// `/profile` palette rows; empty slices simply leave those rows
-    /// empty, and the filesystem feeds path rows for the token under
-    /// the cursor.
+    /// model catalog, profile registry, and sandbox instances feed the
+    /// `/model`, `/profile`, and `/sandbox` palette rows; empty slices
+    /// simply leave those rows empty, and the filesystem feeds path
+    /// rows for the token under the cursor.
     pub fn handle_key(
         &mut self,
         key: KeyEvent,
         models: &[CatalogModel],
         profiles: &[PaletteProfile],
+        sandboxes: &[PaletteSandbox],
         icons: &'static crate::icons::Icons,
     ) -> ChatAction {
         // Ctrl-J is readline's historical newline: it inserts even
@@ -2463,9 +2536,12 @@ impl ChatState {
             // commands, models under `/model`, profiles under
             // `/profile`, or the path entries under the cursor's token.
             KeyCode::Up | KeyCode::Down
-                if !palette_rows(&self.input, self.cursor, models, profiles, icons).is_empty() =>
+                if !palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons)
+                    .is_empty() =>
             {
-                let count = palette_rows(&self.input, self.cursor, models, profiles, icons).len();
+                let count =
+                    palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons)
+                        .len();
                 if key.code == KeyCode::Down {
                     self.palette_index = (self.palette_index + 1).min(count - 1);
                 } else {
@@ -2483,7 +2559,8 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::Tab => {
-                let rows = palette_rows(&self.input, self.cursor, models, profiles, icons);
+                let rows =
+                    palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons);
                 if let Some(row) = rows.get(self.palette_index.min(rows.len().saturating_sub(1))) {
                     match row {
                         PaletteRow::Command(spec) => {
@@ -2507,6 +2584,11 @@ impl ChatState {
                         PaletteRow::Choice { command, value, .. } => {
                             self.chips.clear();
                             self.input = format!("{command} {value}");
+                            self.cursor = self.input.chars().count();
+                        }
+                        PaletteRow::Sandbox { value, .. } => {
+                            self.chips.clear();
+                            self.input = format!("/sandbox {value}");
                             self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Path {
@@ -3634,21 +3716,39 @@ mod tests {
     fn chat_input_buffers_with_cursor_editing() {
         let mut chat = ChatState::new();
         for c in "helo".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
-        chat.handle_key(key(KeyCode::Left), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::Left), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
         // cursor sits between "hel" and "o"
-        chat.handle_key(key(KeyCode::Char('l')), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Char('l')),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, "hello");
         assert_eq!(chat.cursor, 3);
-        chat.handle_key(key(KeyCode::Backspace), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Backspace),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, "helo");
-        chat.handle_key(key(KeyCode::End), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::Char('!')), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::End), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Char('!')),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, "helo!");
-        chat.handle_key(key(KeyCode::Home), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::Delete), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Home), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Delete), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.input, "elo!");
     }
 
@@ -3656,10 +3756,10 @@ mod tests {
     fn chat_enter_submits_the_input_text() {
         let mut chat = ChatState::new();
         for c in "fix it".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter), &[], &[], &crate::icons::UNICODE),
+            chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE),
             submit("fix it")
         );
         // The input box is NOT cleared here: the app clears it only when
@@ -3679,15 +3779,16 @@ mod tests {
             KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
             &[],
             &[],
+            &[],
             &crate::icons::UNICODE,
         );
         assert_eq!(chat.input, "x\n");
-        chat.handle_key(ctrl('j'), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(ctrl('j'), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.input, "x\n\n");
         assert_eq!(chat.cursor, 3);
         // Enter itself still submits the whole multi-line text.
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter), &[], &[], &crate::icons::UNICODE),
+            chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE),
             submit("x\n\n")
         );
     }
@@ -3726,12 +3827,14 @@ mod tests {
             ),
             &[],
             &[],
+            &[],
             &crate::icons::UNICODE,
         );
         assert_eq!(chat.input, "@");
         // Plain Ctrl combos stay inert.
         chat.handle_key(
             KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+            &[],
             &[],
             &[],
             &crate::icons::UNICODE,
@@ -3744,16 +3847,16 @@ mod tests {
         let mut chat = ChatState::new();
         chat.insert_str("alpha\nbeta\ngamma");
         assert_eq!(chat.cursor_line_index(), 2, "the end is the last line");
-        chat.handle_key(key(KeyCode::Up), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Up), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.cursor_line_index(), 1);
         assert_eq!(chat.cursor_column(), 4, "column kept");
-        chat.handle_key(key(KeyCode::Up), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Up), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.cursor_line_index(), 0);
         assert_eq!(chat.cursor_column(), 4, "clamped to the shorter line");
-        chat.handle_key(key(KeyCode::Up), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Up), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.cursor_line_index(), 0, "the top stays");
-        chat.handle_key(key(KeyCode::Down), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::Down), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.cursor_line_index(), 2);
     }
 
@@ -3761,10 +3864,10 @@ mod tests {
     fn home_and_end_stay_within_the_cursor_line() {
         let mut chat = ChatState::new();
         chat.insert_str("alpha\nbeta");
-        chat.handle_key(key(KeyCode::Home), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Home), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.cursor_line_index(), 1);
         assert_eq!(chat.cursor_column(), 0);
-        chat.handle_key(key(KeyCode::End), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::End), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.cursor_column(), 4);
     }
 
@@ -3786,7 +3889,7 @@ mod tests {
         // provider seam to expand.
         chat.insert_str(" closely");
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter), &[], &[], &crate::icons::UNICODE),
+            chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE),
             submit(&format!(
                 "look at {}{long}{} closely",
                 ChatState::MARK,
@@ -3813,7 +3916,7 @@ mod tests {
         // Submit: the anchor drops out of the text and the image rides
         // beside it — an image has no inline form to embed into.
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter), &[], &[], &crate::icons::UNICODE),
+            chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE),
             ChatAction::Submit {
                 text: "what is this? ".into(),
                 images: vec![image],
@@ -3841,7 +3944,7 @@ mod tests {
         // Each paste embeds at its own anchor; the image's anchor drops
         // and the block keeps its place in the image list.
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter), &[], &[], &crate::icons::UNICODE),
+            chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE),
             ChatAction::Submit {
                 text: format!(
                     // The image's anchor leaves only the spaces its
@@ -3864,12 +3967,24 @@ mod tests {
 
         // The backspace takes the last chip — the paste — and leaves
         // the image chip with its anchor.
-        chat.handle_key(key(KeyCode::Backspace), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Backspace),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, ChatState::MARK.to_string());
         assert!(matches!(chat.chips.as_slice(), [Chip::Image(_)]));
 
         // And the image chip deletes like any other.
-        chat.handle_key(key(KeyCode::Backspace), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Backspace),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert!(chat.chips.is_empty());
         assert_eq!(chat.input, "");
     }
@@ -3885,13 +4000,19 @@ mod tests {
 
         // Backspace removes the anchor behind the cursor — the last
         // chip — and its payload alone.
-        chat.handle_key(key(KeyCode::Backspace), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Backspace),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.chips, vec![Chip::Paste(first.to_owned())]);
         assert_eq!(chat.input, ChatState::MARK.to_string());
 
         // Deleting the remaining anchor from before it works the same.
-        chat.handle_key(key(KeyCode::Home), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::Delete), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Home), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Delete), &[], &[], &[], &crate::icons::UNICODE);
         assert!(chat.chips.is_empty());
         assert_eq!(chat.input, "");
     }
@@ -3923,6 +4044,7 @@ mod tests {
             KeyEvent::new(KeyCode::Char(ChatState::MARK), KeyModifiers::NONE),
             &[],
             &[],
+            &[],
             &crate::icons::UNICODE,
         );
         assert_eq!(chat.input, "ab");
@@ -3931,7 +4053,13 @@ mod tests {
         // still removes the last payload, and nothing else.
         chat.paste("l1\nl2\nl3\nl4");
         assert_eq!(chat.input, format!("ab{}", ChatState::MARK));
-        chat.handle_key(key(KeyCode::Backspace), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Backspace),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, "ab");
         assert!(chat.chips.is_empty());
     }
@@ -3942,6 +4070,7 @@ mod tests {
         chat.insert_str("x");
         chat.handle_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT),
+            &[],
             &[],
             &[],
             &crate::icons::UNICODE,
@@ -3958,15 +4087,28 @@ mod tests {
             KeyEvent::new(KeyCode::Char('a'), KeyModifiers::SHIFT),
             &[],
             &[],
+            &[],
             &crate::icons::UNICODE,
         );
         assert_eq!(chat.input, "A");
         // Ghostty & co. send the shifted char with SHIFT cleared
         // (crossterm's alternate-key path): untouched.
-        chat.handle_key(key(KeyCode::Char('B')), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Char('B')),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, "AB");
         // Plain lowercase typing stays lowercase.
-        chat.handle_key(key(KeyCode::Char('c')), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Char('c')),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, "ABc");
     }
 
@@ -3981,7 +4123,7 @@ mod tests {
     fn chat_enter_on_an_empty_input_yields_an_empty_submit() {
         let mut chat = ChatState::new();
         assert_eq!(
-            chat.handle_key(key(KeyCode::Enter), &[], &[], &crate::icons::UNICODE),
+            chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE),
             submit("")
         );
     }
@@ -3989,17 +4131,35 @@ mod tests {
     #[test]
     fn chat_scroll_moves_with_page_keys_and_never_goes_negative() {
         let mut chat = ChatState::new();
-        chat.handle_key(key(KeyCode::PageUp), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::PageUp), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::PageUp), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::PageUp), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.scroll, 2 * ChatState::SCROLL_STEP);
         chat.scroll_by(-3);
         assert_eq!(chat.scroll, 2 * ChatState::SCROLL_STEP - 3);
-        chat.handle_key(key(KeyCode::PageDown), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::PageDown), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::PageDown), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::PageDown),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
+        chat.handle_key(
+            key(KeyCode::PageDown),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
+        chat.handle_key(
+            key(KeyCode::PageDown),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.scroll, 0);
         chat.scroll_by(5);
-        chat.handle_key(key(KeyCode::Enter), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Enter), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.scroll, 0, "submitting follows the latest line");
     }
 
@@ -4018,14 +4178,14 @@ mod tests {
     fn slash_input_filters_the_command_palette() {
         let mut chat = ChatState::new();
         for c in "/".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
         assert_eq!(
             crate::screens::filtered_commands("/").len(),
             crate::commands::COMMANDS.len()
         );
         for c in "cl".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
         let names: Vec<&str> = crate::screens::filtered_commands("/cl")
             .iter()
@@ -4040,14 +4200,14 @@ mod tests {
     fn arrows_navigate_the_palette_and_tab_completes() {
         let mut chat = ChatState::new();
         for c in "/".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
-        chat.handle_key(key(KeyCode::Down), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::Down), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.palette_index, 2);
-        chat.handle_key(key(KeyCode::Up), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Up), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.palette_index, 1);
-        chat.handle_key(key(KeyCode::Tab), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.input, "/model");
         assert_eq!(chat.cursor, "/model".chars().count());
     }
@@ -4067,7 +4227,13 @@ mod tests {
         .collect::<Vec<_>>();
         let mut chat = ChatState::new();
         for c in "/model ".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &models, &[], &crate::icons::UNICODE);
+            chat.handle_key(
+                key(KeyCode::Char(c)),
+                &models,
+                &[],
+                &[],
+                &crate::icons::UNICODE,
+            );
         }
         // The empty argument lists the whole catalog; the provider filter
         // narrows like the picker's.
@@ -4075,6 +4241,7 @@ mod tests {
             &chat.input,
             chat.cursor,
             &models,
+            &[],
             &[],
             &crate::icons::UNICODE,
         )
@@ -4086,12 +4253,19 @@ mod tests {
         .collect();
         assert_eq!(ids, ["gemini-3.8-pro", "openrouter/auto"]);
         for c in "openrouter".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &models, &[], &crate::icons::UNICODE);
+            chat.handle_key(
+                key(KeyCode::Char(c)),
+                &models,
+                &[],
+                &[],
+                &crate::icons::UNICODE,
+            );
         }
         let ids: Vec<String> = crate::screens::palette_rows(
             &chat.input,
             chat.cursor,
             &models,
+            &[],
             &[],
             &crate::icons::UNICODE,
         )
@@ -4107,12 +4281,14 @@ mod tests {
             key(KeyCode::Char('/')),
             &models,
             &[],
+            &[],
             &crate::icons::UNICODE,
         );
         let ids: Vec<String> = crate::screens::palette_rows(
             &chat.input,
             chat.cursor,
             &models,
+            &[],
             &[],
             &crate::icons::UNICODE,
         )
@@ -4124,7 +4300,7 @@ mod tests {
         .collect();
         assert_eq!(ids, ["openrouter/auto"], "openrouter/ stays alive");
         // Tab completes the argument, keeping the command prefix.
-        chat.handle_key(key(KeyCode::Tab), &models, &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Tab), &models, &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.input, "/model openrouter/auto");
         assert_eq!(chat.cursor, "/model openrouter/auto".chars().count());
     }
@@ -4133,36 +4309,44 @@ mod tests {
     fn the_thinking_palette_lists_its_levels_and_tab_fills_them() {
         let mut chat = ChatState::new();
         for c in "/thinking ".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
         // The empty argument lists every level; a stem narrows it.
         let values = |chat: &ChatState| {
-            crate::screens::palette_rows(&chat.input, chat.cursor, &[], &[], &crate::icons::UNICODE)
-                .into_iter()
-                .filter_map(|row| match row {
-                    crate::screens::PaletteRow::Choice { value, .. } => Some(value),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
+            crate::screens::palette_rows(
+                &chat.input,
+                chat.cursor,
+                &[],
+                &[],
+                &[],
+                &crate::icons::UNICODE,
+            )
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::screens::PaletteRow::Choice { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
         };
         assert_eq!(values(&chat), ["low", "medium", "high", "default"]);
         for c in "hi".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
         assert_eq!(values(&chat), ["high"]);
         // Tab completes the level, keeping the command prefix.
-        chat.handle_key(key(KeyCode::Tab), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.input, "/thinking high");
         assert_eq!(chat.cursor, "/thinking high".chars().count());
         // A stem no level answers leaves the palette empty.
         let mut chat = ChatState::new();
         for c in "/thinking zzz".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
         assert!(
             crate::screens::palette_rows(
                 &chat.input,
                 chat.cursor,
+                &[],
                 &[],
                 &[],
                 &crate::icons::UNICODE
@@ -4173,10 +4357,17 @@ mod tests {
         // not the levels.
         let mut chat = ChatState::new();
         for c in "/think".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
         assert!(matches!(
-            crate::screens::palette_rows(&chat.input, chat.cursor, &[], &[], &crate::icons::UNICODE).as_slice(),
+            crate::screens::palette_rows(
+                &chat.input,
+                chat.cursor,
+                &[],
+                &[],
+                &[],
+                &crate::icons::UNICODE
+            ).as_slice(),
             [crate::screens::PaletteRow::Command(spec)] if spec.name == "/thinking"
         ));
     }
@@ -4203,6 +4394,7 @@ mod tests {
                 key(KeyCode::Char(c)),
                 &[],
                 &profiles,
+                &[],
                 &crate::icons::UNICODE,
             );
         }
@@ -4213,6 +4405,7 @@ mod tests {
                 input.chars().count(),
                 &[],
                 &profiles,
+                &[],
                 &crate::icons::UNICODE,
             )
             .into_iter()
@@ -4228,8 +4421,66 @@ mod tests {
         // Tab completes the argument under the command prefix.
         chat.input = "/profile wo".to_owned();
         chat.cursor = chat.input.chars().count();
-        chat.handle_key(key(KeyCode::Tab), &[], &profiles, &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Tab),
+            &[],
+            &profiles,
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.input, "/profile work");
+    }
+
+    #[test]
+    fn the_sandbox_palette_describes_instances_and_matches_their_text() {
+        let sandboxes = vec![
+            PaletteSandbox {
+                name: "dev".into(),
+                kind: "docker".into(),
+                target: Some("rhema-dev".into()),
+                active: true,
+            },
+            PaletteSandbox {
+                name: "build".into(),
+                kind: "lxd".into(),
+                target: None,
+                active: false,
+            },
+        ];
+        let rows = |input: &str| {
+            crate::screens::palette_rows(
+                input,
+                input.chars().count(),
+                &[],
+                &[],
+                &sandboxes,
+                &crate::icons::UNICODE,
+            )
+        };
+        // The active instance's row says so; the kind and target ride
+        // the description.
+        let (value, description) = match &rows("/sandbox ")[0] {
+            PaletteRow::Sandbox { value, description } => (value.clone(), description.clone()),
+            other => panic!("expected a sandbox row, got {other:?}"),
+        };
+        assert_eq!(value, "dev");
+        assert_eq!(description, "docker · rhema-dev · active");
+        // A bare instance with no target names only its kind.
+        let (_, description) = match &rows("/sandbox ")[1] {
+            PaletteRow::Sandbox { value, description } => (value.clone(), description.clone()),
+            other => panic!("expected a sandbox row, got {other:?}"),
+        };
+        assert_eq!(description, "lxd");
+        // The kind text completes the instance too, the way the picker
+        // filters.
+        let values: Vec<String> = rows("/sandbox lxd")
+            .into_iter()
+            .filter_map(|row| match row {
+                PaletteRow::Sandbox { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values, ["build", "lxd"]);
     }
 
     // --- Path completion ---
@@ -4250,6 +4501,7 @@ mod tests {
         crate::screens::palette_rows(
             input,
             input.chars().count(),
+            &[],
             &[],
             &[],
             &crate::icons::UNICODE,
@@ -4320,16 +4572,16 @@ mod tests {
         // A file completes in place.
         chat.input = format!("see {base}/b");
         chat.cursor = chat.input.chars().count();
-        chat.handle_key(key(KeyCode::Tab), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.input, format!("see {base}/Beta.txt"));
         assert_eq!(chat.cursor, chat.input.chars().count());
         // A directory gains its separator; the next Tab lists inside it.
         chat.input = format!("see {base}/su");
         chat.cursor = chat.input.chars().count();
-        chat.handle_key(key(KeyCode::Tab), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(chat.input, format!("see {base}/sub/"));
         assert_eq!(chat.cursor, chat.input.chars().count());
-        chat.handle_key(key(KeyCode::Tab), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(
             chat.input,
             format!("see {base}/sub/"),
@@ -4345,9 +4597,9 @@ mod tests {
         chat.paste("p\np\np\np");
         assert_eq!(chat.chips.len(), 1);
         for c in format!(" see {base}/b").chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
-        chat.handle_key(key(KeyCode::Tab), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
         assert_eq!(
             chat.input,
             format!("{} see {base}/Beta.txt", ChatState::MARK)
@@ -4360,7 +4612,7 @@ mod tests {
         let dir = path_fixture();
         let base = dir.path().display().to_string();
         // "/" lists commands, never root's entries.
-        let rows = crate::screens::palette_rows("/", 1, &[], &[], &crate::icons::UNICODE);
+        let rows = crate::screens::palette_rows("/", 1, &[], &[], &[], &crate::icons::UNICODE);
         assert!(rows.iter().all(|row| matches!(row, PaletteRow::Command(_))));
         // A `/model` argument with no catalog match falls through to
         // path completion.
@@ -4368,6 +4620,7 @@ mod tests {
         let rows = crate::screens::palette_rows(
             &input,
             input.chars().count(),
+            &[],
             &[],
             &[],
             &crate::icons::UNICODE,
@@ -4379,10 +4632,16 @@ mod tests {
     fn editing_the_input_resets_the_palette_selection() {
         let mut chat = ChatState::new();
         for c in "/".chars() {
-            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &crate::icons::UNICODE);
+            chat.handle_key(key(KeyCode::Char(c)), &[], &[], &[], &crate::icons::UNICODE);
         }
-        chat.handle_key(key(KeyCode::Down), &[], &[], &crate::icons::UNICODE);
-        chat.handle_key(key(KeyCode::Backspace), &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
+        chat.handle_key(
+            key(KeyCode::Backspace),
+            &[],
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
         assert_eq!(chat.palette_index, 0);
     }
 
@@ -4392,6 +4651,7 @@ mod tests {
         assert_eq!(
             chat.handle_key(
                 KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL),
+                &[],
                 &[],
                 &[],
                 &crate::icons::UNICODE,

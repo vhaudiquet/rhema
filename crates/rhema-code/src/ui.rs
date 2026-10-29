@@ -2537,11 +2537,13 @@ fn thinking_rows(app: &App, width: usize) -> u16 {
 /// Tab completes, enter runs.
 fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme: &Theme) {
     let profiles = app.palette_profiles();
+    let sandboxes = app.palette_sandboxes();
     let rows = crate::screens::palette_rows(
         &app.chat.input,
         app.chat.cursor,
         &app.models,
         &profiles,
+        &sandboxes,
         app.icons,
     );
     if rows.is_empty() {
@@ -2611,20 +2613,21 @@ fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme:
 
 /// The palette row's name column: the command's name, the model's
 /// provider-prefixed id — the same shape the picker's rows carry — the
-/// profile's name, or the path entry's name.
+/// profile's name, the sandbox word, or the path entry's name.
 fn palette_row_name(row: &crate::screens::PaletteRow) -> String {
     match row {
         crate::screens::PaletteRow::Command(spec) => spec.name.to_owned(),
         crate::screens::PaletteRow::Model { provider, id, .. } => format!("{provider}/{id}"),
         crate::screens::PaletteRow::Profile { name, .. } => name.clone(),
         crate::screens::PaletteRow::Choice { value, .. } => (*value).to_owned(),
+        crate::screens::PaletteRow::Sandbox { value, .. } => value.clone(),
         crate::screens::PaletteRow::Path { name, .. } => name.clone(),
     }
 }
 
 /// The palette row's description: the command's own, the model's display
-/// name with its facts, the profile's provider and model, or the path
-/// entry's kind.
+/// name with its facts, the profile's provider and model, the sandbox's
+/// kind and target, or the path entry's kind.
 fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
     match row {
         crate::screens::PaletteRow::Command(spec) => {
@@ -2638,6 +2641,9 @@ fn palette_row_texts(row: &crate::screens::PaletteRow) -> (String, String) {
         }
         crate::screens::PaletteRow::Choice { description, .. } => {
             (palette_row_name(row), (*description).to_owned())
+        }
+        crate::screens::PaletteRow::Sandbox { description, .. } => {
+            (palette_row_name(row), description.clone())
         }
         crate::screens::PaletteRow::Path { is_dir, .. } => (
             palette_row_name(row),
@@ -2664,8 +2670,9 @@ fn effort_letter(effort: rhema_core::request::ThinkingEffort) -> &'static str {
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     // The mark, then always the same facts: profile, where the session
-    // sits, model, context footprint against the model's window, the
-    // session's accumulated cost. Key hints live in /help, not here.
+    // sits, model, where bash runs, context footprint against the
+    // model's window, the session's accumulated cost. Key hints live
+    // in /help, not here.
     // Every segment owns its leading separator — a trailing one on the
     // previous segment doubles as soon as an optional segment (folder,
     // allowance) sits between two others.
@@ -2698,6 +2705,12 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
             parts.push(Span::raw(footer_model(model).to_owned()).fg(theme.text2));
         }
     }
+    // Where bash runs: the sandbox kind, or the running instance's
+    // name when the profile's active pointer names it. Local reads as
+    // a fact too — the fast path is a choice, not an absence.
+    parts.push(
+        Span::raw(format!(" · {} {}", app.icons.sandbox, app.sandbox_badge())).fg(theme.text3),
+    );
     // A named thinking effort is session-relevant telemetry: the badge
     // only appears when the level would change the request. The letter
     // rides the glyph; the word it abbreviates is the /thinking
@@ -3892,7 +3905,7 @@ mod scroll_tests {
             session: rhema_core::Session::default(),
             secrets: None,
             sandboxed: None,
-            sandbox_offered: crate::sandbox::SandboxAvailability::default(),
+            sandbox_machines: crate::sandbox::SandboxMachines::default(),
             home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
             onboard: false,
             options: RunOptions {
@@ -4299,6 +4312,49 @@ mod scroll_tests {
         assert!(!screen.contains("·  ·"), "{screen}");
     }
 
+    /// The footer always names where bash runs: local reads as a fact,
+    /// and a running sandbox shows its kind — or its instance's name
+    /// when the profile's active pointer names it.
+    #[test]
+    fn the_footer_names_where_bash_runs() {
+        let mut app = chat_app();
+        app.config.profiles.get_mut("personal").unwrap().provider = Some("google".to_owned());
+        assert!(
+            screen_text(&mut app).contains("▣ local"),
+            "the local fast path is a fact: {}",
+            screen_text(&mut app)
+        );
+        app.sandboxed = Some(crate::sandbox::Sandboxed {
+            choice: crate::args::SandboxChoice::Docker,
+            target: "rhema-dev".to_owned(),
+            tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+        });
+        app.config.set_for_profile(Some("personal"), |profile| {
+            profile.sandbox = Some(rhema_config::SandboxSettings {
+                kind: Some("docker".to_owned()),
+                active: Some("dev".to_owned()),
+                ..rhema_config::SandboxSettings::default()
+            });
+            profile.place_sandbox_instance(
+                "dev",
+                rhema_config::SandboxInstance {
+                    kind: "docker".to_owned(),
+                    target: Some("rhema-dev".to_owned()),
+                    vm: None,
+                },
+            );
+        });
+        assert!(
+            screen_text(&mut app).contains("▣ dev"),
+            "the instance's name is where bash runs: {}",
+            screen_text(&mut app)
+        );
+    }
+
     /// The allowance badge shows only the active backend's report: a
     /// fetch from a backend the session has since left never shows. A
     /// money amount rides bare — the icon says the unit — while a
@@ -4316,8 +4372,12 @@ mod scroll_tests {
         // The report names openrouter; the session rides google.
         assert!(!screen_text(&mut app).contains("$4.12"));
 
+        // Wide enough for every segment at once: the no-provider
+        // footer alone already filled eighty columns, and the sandbox
+        // badge made the tail clip there. What this test pins is which
+        // badge shows, not a width budget.
         let draw = |app: &mut App| {
-            let backend = TestBackend::new(80, 12);
+            let backend = TestBackend::new(100, 12);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|frame| render(app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
@@ -4351,8 +4411,11 @@ mod scroll_tests {
     #[test]
     fn the_footer_shows_the_thinking_and_context_icons() {
         let mut app = chat_app();
+        // Wide enough for every segment at once — the badge and the
+        // gauge are the subject, not a width budget (see the allowance
+        // test's note).
         let draw = |app: &mut App| {
-            let backend = TestBackend::new(80, 12);
+            let backend = TestBackend::new(100, 12);
             let mut terminal = Terminal::new(backend).unwrap();
             terminal.draw(|frame| render(app, frame)).unwrap();
             let buffer = terminal.backend().buffer();
@@ -4771,6 +4834,7 @@ mod scroll_tests {
                 key(KeyCode::Char(c)),
                 &app.models,
                 &[],
+                &[],
                 &crate::icons::UNICODE,
             );
         }
@@ -4800,6 +4864,7 @@ mod scroll_tests {
             app.chat.handle_key(
                 key(KeyCode::Char(c)),
                 &app.models,
+                &[],
                 &[],
                 &crate::icons::UNICODE,
             );
@@ -4831,7 +4896,7 @@ mod scroll_tests {
         // now), and the window must have followed it.
         for _ in 0..9 {
             app.chat
-                .handle_key(key(KeyCode::Down), &[], &[], &crate::icons::UNICODE);
+                .handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
         }
         assert_eq!(app.chat.palette_index, 9);
         let backend = TestBackend::new(60, 24);

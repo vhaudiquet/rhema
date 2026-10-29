@@ -20,6 +20,8 @@ pub struct Icons {
     pub robot: &'static str,
     /// The vision badge — a model that accepts image input.
     pub vision: &'static str,
+    /// The sandbox badge — where the session's `bash` runs.
+    pub sandbox: &'static str,
 }
 
 /// The plain set: every glyph renders in any terminal font. The thinking
@@ -27,7 +29,8 @@ pub struct Icons {
 /// badge is an open tray; the allowance badge the generic currency mark;
 /// the settings badge a gear pinned to its text presentation so it never
 /// arrives as color emoji; the vision badge the fisheye, an eye any font
-/// draws. No plain font carries a robot, so the subagent badge is the
+/// draws; the sandbox badge a square held in a square, the box bash runs
+/// in. No plain font carries a robot, so the subagent badge is the
 /// delegation sign: `@` — work handed to another.
 pub const UNICODE: Icons = Icons {
     thinking: "⁂",
@@ -37,11 +40,12 @@ pub const UNICODE: Icons = Icons {
     settings: "\u{2699}\u{fe0e}",
     robot: "@",
     vision: "◉",
+    sandbox: "▣",
 };
 
 /// The Nerd Font set: FontAwesome lightbulb, database, folder, credit
-/// card, and eye — needs a patched font installed, or the badges read
-/// as tofu. Every glyph sits in the FA core range (F000–F2E0) the
+/// card, eye, and cube — needs a patched font installed, or the badges
+/// read as tofu. Every glyph sits in the FA core range (F000–F2E0) the
 /// oldest patches carry; the brain this set once used sits where Nerd
 /// Fonts v3 dropped Material Design, and v3 fonts render nothing
 /// there. The robot is the one exception: the FA5 block (F544) the
@@ -55,6 +59,7 @@ pub const NERD: Icons = Icons {
     settings: "\u{f013}",
     robot: "\u{f544}",
     vision: "\u{f06e}",
+    sandbox: "\u{f1b2}",
 };
 
 /// Which flavor the footer draws with.
@@ -136,5 +141,8 @@ mod tests {
         // The vision badge is an eye in both.
         assert_eq!(Flavor::Unicode.set().vision, "◉");
         assert_eq!(Flavor::Nerd.set().vision, "\u{f06e}");
+        // The sandbox badge is a box in both.
+        assert_eq!(Flavor::Unicode.set().sandbox, "▣");
+        assert_eq!(Flavor::Nerd.set().sandbox, "\u{f1b2}");
     }
 }

@@ -83,6 +83,12 @@ pub struct Sandboxed {
     /// The choice this assembly stands for: the session's active kind
     /// once the result lands on the app.
     pub choice: SandboxChoice,
+    /// What the choice resolved to and bound to: the container, the LXD
+    /// instance, the ssh host, the http URL, or the ecrou image. A
+    /// profile switch compares this against its own resolution to keep
+    /// a session that would land in the very same place from paying for
+    /// a re-assembly.
+    pub target: String,
     /// The shell whose commands run in the sandbox; the subagents'
     /// inner shell inherits its executor.
     pub tools: Arc<ShellTools>,
@@ -143,6 +149,9 @@ pub async fn assemble(
     // Whether the skills ride the mounts; the seeded postures copy them
     // into the workspace instead.
     let mut mounted_skills = false;
+    // What the choice resolved to — the same value `Sandboxed::target`
+    // carries out, set by whichever arm runs.
+    let target;
     let sandbox: Arc<dyn Sandbox> = match choice {
         // The caller skips this arm; the fast path constructs nothing.
         SandboxChoice::Local => anyhow::bail!("the local sandbox needs no assembly"),
@@ -151,6 +160,7 @@ pub async fn assemble(
             let container = stored
                 .clone()
                 .unwrap_or_else(|| derived_container_name(workspace));
+            target = container.clone();
             let (uid, gid) = workspace_owner(workspace)?;
             let skills = global_skills_dir();
             let lock = InstanceLock::acquire("docker", &container)
@@ -176,6 +186,7 @@ pub async fn assemble(
             let instance = stored
                 .clone()
                 .unwrap_or_else(|| derived_lxd_name(workspace));
+            target = instance.clone();
             let vm = profile
                 .sandbox_instance_for("lxd")
                 .map(|(_, stored)| stored.vm.unwrap_or(false))
@@ -224,6 +235,7 @@ pub async fn assemble(
             // window; the name is the workspace's derivation, stable
             // across sessions, never a stoppable instance.
             let image = sandbox_target(profile, "ecrou").unwrap_or_else(|| "ubuntu".to_owned());
+            target = image.clone();
             let name = derived_ecrou_name(workspace);
             let lock = InstanceLock::acquire("ecrou", &name)
                 .map_err(|err| anyhow::anyhow!("the ecrou sandbox lock: {err}"))?;
@@ -246,6 +258,7 @@ pub async fn assemble(
             })?;
             // The remote workspace root is the workspace path itself, so
             // the seeded skills land where the prompt's list points.
+            target = host.clone();
             let sandbox = SshSandbox::new(host).with_workspace(host_workspace.clone());
             Arc::new(sandbox)
         }
@@ -265,6 +278,7 @@ pub async fn assemble(
             // No token configured means no header value: a tokenless
             // daemon answers.
             let token = profile.sandbox_token(secrets).unwrap_or_default();
+            target = url.clone();
             Arc::new(HttpSandbox::new(url, &session, &token))
         }
     };
@@ -292,6 +306,7 @@ pub async fn assemble(
     ));
     Ok(Sandboxed {
         choice,
+        target,
         tools,
         workspace: workspace_string,
         skills,
@@ -415,6 +430,46 @@ fn global_skills_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
+/// The machine half of the availability probe: the profile-independent
+/// facts. Probed once at startup and carried by the app, because a
+/// profile switch must re-derive the offered set for the profile
+/// moving in — `ssh` and `http` answer on the section's facts, not the
+/// machine's alone — without paying for the CLI probes again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SandboxMachines {
+    /// `docker info` answered within the budget.
+    pub docker: bool,
+    /// `lxc info` answered within the budget.
+    pub lxd: bool,
+    /// `ecrou probe` answered within the budget: KVM working,
+    /// libkrun loadable, the cache writable.
+    pub ecrou: bool,
+    /// The `ssh` binary exists on `PATH`.
+    pub ssh: bool,
+}
+
+impl SandboxMachines {
+    /// Probes this machine: one `docker info` run, one `lxc info` run,
+    /// one `ecrou probe` run, one `PATH` scan for `ssh`. Bounded work —
+    /// each CLI probe at most its budget — so startup waits seconds,
+    /// never minutes.
+    pub fn probe() -> Self {
+        Self {
+            docker: docker_info_answers(),
+            lxd: lxd_info_answers(),
+            ecrou: ecrou_probe_answers(),
+            ssh: binary_on_path("ssh"),
+        }
+    }
+
+    /// The offered set for `profile` from these facts: `local` always,
+    /// the machine answers as they stand, and `ssh`/`http` only when
+    /// the profile's own `sandbox` section names a host or a URL.
+    pub fn offered_for(self, profile: &Profile) -> SandboxAvailability {
+        SandboxAvailability::from_parts(self.docker, self.lxd, self.ecrou, self.ssh, profile)
+    }
+}
+
 /// The sandbox kinds this machine and this profile can run `bash`
 /// under right now: the picker's rows, and the gates the startup
 /// resolution filters every tier through. `local` needs no probing and
@@ -442,13 +497,7 @@ impl SandboxAvailability {
     /// own `sandbox` section. Bounded work — each CLI probe at most
     /// its budget — so startup waits seconds, never minutes.
     pub fn probe(profile: &Profile) -> Self {
-        Self::from_parts(
-            docker_info_answers(),
-            lxd_info_answers(),
-            ecrou_probe_answers(),
-            binary_on_path("ssh"),
-            profile,
-        )
+        SandboxMachines::probe().offered_for(profile)
     }
 
     /// The offered set from injected machine facts: the testable seam
@@ -673,7 +722,7 @@ fn discovered_skills(
 /// section's own single-instance fact, the shape the map grew out of.
 /// `None` means neither place has one and the caller derives or
 /// refuses.
-fn sandbox_target(profile: &Profile, kind: &str) -> Option<String> {
+pub(crate) fn sandbox_target(profile: &Profile, kind: &str) -> Option<String> {
     profile
         .sandbox_instance_for(kind)
         .and_then(|(_, instance)| instance.target.clone())
@@ -1728,6 +1777,7 @@ mod tests {
         // stands in for an assembled one.
         let assembled = Sandboxed {
             choice: SandboxChoice::Http,
+            target: "http://box:7331".to_owned(),
             tools: Arc::new(ShellTools::new("/workspace")),
             workspace: "/workspace".to_owned(),
             skills: vec![Skill {

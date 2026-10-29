@@ -873,7 +873,8 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // headless path's shared `assemble` — before the first paint. A
     // failed assembly degrades to the host with a warning: a
     // remembered daemon that is down must not keep the UI from opening.
-    let sandbox_offered = crate::sandbox::SandboxAvailability::probe(&effective);
+    let sandbox_machines = crate::sandbox::SandboxMachines::probe();
+    let sandbox_offered = sandbox_machines.offered_for(&effective);
     let sandboxed = match startup_sandbox(&config, &effective, &workspace, &sandbox_offered) {
         crate::args::SandboxChoice::Local => None,
         non_local => {
@@ -939,7 +940,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             options,
             secrets: Some(Arc::clone(&secrets)),
             sandboxed,
-            sandbox_offered,
+            sandbox_machines,
             home: None,
             onboard,
         })?;

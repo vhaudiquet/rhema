@@ -53,9 +53,10 @@ pub struct AppSetup {
     /// non-local — built and seeded before the app existed; `None` is
     /// the local fast path, the agent's own tools.
     pub sandboxed: Option<crate::sandbox::Sandboxed>,
-    /// What this machine offered at startup, probed once: the sandbox
-    /// picker's rows and the select path's availability gate.
-    pub sandbox_offered: crate::sandbox::SandboxAvailability,
+    /// The machine half of the sandbox availability probe, probed once
+    /// before the app existed: the offered set re-derives from these
+    /// facts per profile — at startup, and at every profile switch.
+    pub sandbox_machines: crate::sandbox::SandboxMachines,
     /// The home the app resolves machine-global paths under — the
     /// isolation seam a test points at a scratch directory so the
     /// machine's own global definitions and skills never leak into a
@@ -842,9 +843,15 @@ pub struct App {
     /// `None` is the local fast path — every agent build applies this
     /// when set, so a mid-session rebuild never drops it.
     pub sandboxed: Option<crate::sandbox::Sandboxed>,
-    /// What this machine offered at startup: the picker's rows and the
-    /// select path's availability gate. Probed once, when the profile
-    /// backend was resolved.
+    /// The machine half of the availability probe: the facts the
+    /// offered set re-derives from at every profile switch, without
+    /// paying the CLI probes again.
+    pub sandbox_machines: crate::sandbox::SandboxMachines,
+    /// What this machine offers the session's current profile: the
+    /// picker's rows and the select path's availability gate. Derived
+    /// from the machine facts at startup and re-derived at every
+    /// profile switch — ssh and http answer on the profile's own
+    /// section, not the machine's alone.
     pub sandbox_offered: crate::sandbox::SandboxAvailability,
     /// The sandbox assembly in flight, if any: the picker's choice is
     /// being stood up off the UI thread. Turns and further switches
@@ -1131,7 +1138,8 @@ impl App {
             onboarding_hits: Vec::new(),
             transcript_cache: crate::ui::WrapCache::new(),
             sandboxed: setup.sandboxed,
-            sandbox_offered: setup.sandbox_offered,
+            sandbox_machines: setup.sandbox_machines,
+            sandbox_offered: setup.sandbox_machines.offered_for(&effective),
             assembling: None,
             logo_rect: None,
         })
@@ -1175,14 +1183,40 @@ impl App {
             .unwrap_or(SandboxChoice::Local)
     }
 
-    /// `/sandbox <kind>`: the picker's select with the kind spelled
-    /// out. An unknown spelling is declined in-band.
+    /// The footer's sandbox badge: the kind `bash` runs under, or the
+    /// instance's name when the profile's active pointer names the
+    /// instance this kind resolves to. Local reads as a fact too — the
+    /// fast path is a choice, not an absence.
+    pub fn sandbox_badge(&self) -> String {
+        let choice = self.active_sandbox();
+        if choice == SandboxChoice::Local {
+            return "local".to_owned();
+        }
+        self.effective()
+            .sandbox_instance_for(choice.stored_name())
+            .map(|(name, _)| name.to_owned())
+            .unwrap_or_else(|| choice.stored_name().to_owned())
+    }
+
+    /// `/sandbox <name>`: a configured instance's name runs `bash` in
+    /// it — the Sandbox page's enter, which points the section's active
+    /// instance at the name; anything else parses as a kind, the
+    /// picker's select with the kind spelled out. An unknown name is
+    /// declined in-band.
     pub fn choose_sandbox_by_name(&mut self, name: &str) -> Vec<Effect> {
+        if self
+            .config
+            .effective(self.session_profile.as_deref())
+            .sandbox_instances
+            .contains_key(name)
+        {
+            return self.activate_sandbox_instance(name);
+        }
         match SandboxChoice::from_stored(Some(name)) {
             Some(choice) => self.choose_sandbox(choice),
             None => {
                 self.transcript.push_notice(&format!(
-                    "unknown sandbox kind {name:?}; use local, docker, ssh, or http"
+                    "no sandbox {name:?}; /sandbox lists this profile's instances and the kinds"
                 ));
                 Vec::new()
             }
@@ -1679,6 +1713,11 @@ impl App {
                 .push_notice("a turn is running; /profile waits for it to finish");
             return Vec::new();
         }
+        if self.assembling.is_some() {
+            self.transcript
+                .push_notice("a sandbox is being stood up; /profile waits for it");
+            return Vec::new();
+        }
         if self.session_profile.as_deref() == Some(name) {
             self.transcript
                 .push_notice(&format!("already on profile {name}"));
@@ -1686,6 +1725,26 @@ impl App {
         }
         let effective = self.config.effective(Some(name));
         self.options.thinking = effective.thinking_effort();
+        // Profiles are isolated, `bash` included: the offered set
+        // re-derives for the profile moving in, and where its own
+        // `sandbox` section says `bash` runs is where this session's
+        // `bash` goes — local when the profile names nothing, never a
+        // sandbox the profile just left behind.
+        self.sandbox_offered = self.sandbox_machines.offered_for(&effective);
+        let wanted = profile_sandbox(&effective, &self.sandbox_offered);
+        let keep = match self.sandboxed.as_ref() {
+            None => wanted == SandboxChoice::Local,
+            Some(current) => {
+                current.choice == wanted
+                    && wanted != SandboxChoice::Local
+                    && Some(current.target.as_str())
+                        == crate::sandbox::sandbox_target(&effective, wanted.stored_name())
+                            .as_deref()
+            }
+        };
+        if !keep && wanted == SandboxChoice::Local {
+            self.replace_sandboxed(None);
+        }
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -1694,7 +1753,11 @@ impl App {
             // Never recorded: startup re-validates usability, so the
             // memory naming a keyless profile would only fall through.
             // The agent drops with the provider: a turn here would run
-            // on the profile just left.
+            // on the profile just left. The sandbox leaves with the
+            // profile too — nothing keyless can run a turn in it.
+            if !keep {
+                self.replace_sandboxed(None);
+            }
             self.session_profile = Some(name.to_owned());
             self.backend = None;
             self.provider = None;
@@ -1707,9 +1770,6 @@ impl App {
             ));
             return Vec::new();
         };
-        // The session's sandbox survives the profile switch: where
-        // `bash` runs is this session's machine choice until the picker
-        // says otherwise, even when the profile it rides on changes.
         let (agent_config, subagents) = session_agent_config(
             &self.options,
             self.sandboxed.as_ref(),
@@ -1740,17 +1800,30 @@ impl App {
                 // An explicit switch is a choice: recorded for this
                 // workspace now, not at the next turn.
                 self.remember_profile();
+                let mut notice = format!("switched to profile {name}");
                 if effective.model.is_none() {
-                    self.transcript.push_notice(&format!(
-                        "switched to profile {name}; /model to pick a model"
-                    ));
-                } else {
-                    self.transcript
-                        .push_notice(&format!("switched to profile {name}"));
+                    notice.push_str("; /model to pick a model");
                 }
-                // A new profile is a new plan: the allowance badge
-                // fetches now, not at the first turn's end.
-                vec![Effect::FetchUsage]
+                let mut effects = vec![Effect::FetchUsage];
+                if keep {
+                    // The profile moving in resolves to the sandbox
+                    // already running: nothing moves.
+                } else if wanted == SandboxChoice::Local {
+                    notice.push_str("; bash runs on this host");
+                } else {
+                    // The old tools keep running until the assembly
+                    // lands (the picker's posture): the answer arrives
+                    // as `UiEvent::SandboxAssembled`, which swaps the
+                    // tools and rebuilds again.
+                    self.assembling = Some(wanted);
+                    notice.push_str(&format!(
+                        "; standing up the {} sandbox…",
+                        wanted.stored_name()
+                    ));
+                    effects.push(Effect::AssembleSandbox(wanted));
+                }
+                self.transcript.push_notice(&notice);
+                effects
             }
             Err(err) => {
                 self.error = Some(err.to_string());
@@ -2320,10 +2393,14 @@ impl App {
             Screen::Settings(settings) => Routed::Settings(settings.handle_key(key)),
             Screen::Chat => {
                 let profiles = self.palette_profiles();
-                Routed::Chat(
-                    self.chat
-                        .handle_key(key, &self.models, &profiles, self.icons),
-                )
+                let sandboxes = self.palette_sandboxes();
+                Routed::Chat(self.chat.handle_key(
+                    key,
+                    &self.models,
+                    &profiles,
+                    &sandboxes,
+                    self.icons,
+                ))
             }
         };
         match routed {
@@ -3763,6 +3840,33 @@ impl App {
             .collect()
     }
 
+    /// The sandbox instances the input palette completes `/sandbox`
+    /// with: the session profile's configured instances, the one the
+    /// session currently runs `bash` in marked.
+    pub fn palette_sandboxes(&self) -> Vec<crate::screens::PaletteSandbox> {
+        let effective = self.config.effective(self.session_profile.as_deref());
+        let active_name = effective
+            .sandbox
+            .as_ref()
+            .and_then(|sandbox| sandbox.active.clone());
+        let running = self.active_sandbox();
+        effective
+            .sandbox_instances
+            .iter()
+            .map(|(name, instance)| crate::screens::PaletteSandbox {
+                name: name.clone(),
+                kind: instance.kind.clone(),
+                target: instance
+                    .target
+                    .clone()
+                    .map(|target| target.trim().to_owned())
+                    .filter(|target| !target.is_empty()),
+                active: active_name.as_deref() == Some(name.as_str())
+                    && SandboxChoice::from_stored(Some(&instance.kind)) == Some(running),
+            })
+            .collect()
+    }
+
     /// The active profile's name and display color: the `--profile` flag
     /// over the stored active profile, colored by its config (a `#RRGGBB`
     /// string) or by a name-based theme tone.
@@ -4029,6 +4133,21 @@ pub(crate) fn startup_sandbox(
     SandboxChoice::Local
 }
 
+/// The sandbox the profile itself runs `bash` on: its own stored kind
+/// (`RHEMA_SANDBOX` included — [`crate::sandbox::resolve_choice`]'s
+/// env-wins layering), gated by what this machine offers the profile,
+/// else local. The workspace's remembered kind is deliberately not a
+/// tier here: a profile's sandbox is the profile's, never another
+/// profile's workspace memory.
+pub(crate) fn profile_sandbox(
+    profile: &rhema_config::Profile,
+    offered: &crate::sandbox::SandboxAvailability,
+) -> SandboxChoice {
+    SandboxChoice::from_stored(profile.sandbox_kind().as_deref())
+        .filter(|choice| offered.offers(*choice))
+        .unwrap_or(SandboxChoice::Local)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4214,7 +4333,7 @@ mod tests {
                 .clone()
                 .map(|store| store as Arc<dyn rhema_config::secrets::SecretStore>),
             sandboxed: None,
-            sandbox_offered: crate::sandbox::SandboxAvailability::default(),
+            sandbox_machines: crate::sandbox::SandboxMachines::default(),
             home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
             onboard: false,
             options: RunOptions {
@@ -6828,6 +6947,7 @@ mod tests {
         // store the kind, remember the workspace, and rebuild inline.
         h.app.sandboxed = Some(crate::sandbox::Sandboxed {
             choice: SandboxChoice::Docker,
+            target: "rhema-sandbox-proj".to_owned(),
             tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/workspace")),
             workspace: "/workspace".to_owned(),
             skills: Vec::new(),
@@ -6876,6 +6996,7 @@ mod tests {
         // The assembly's answer swaps the tools in and rebuilds.
         let assembled = crate::sandbox::Sandboxed {
             choice: SandboxChoice::Docker,
+            target: "rhema-sandbox-proj".to_owned(),
             tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/host/ws")),
             workspace: "/host/ws".to_owned(),
             skills: Vec::new(),
@@ -6949,6 +7070,260 @@ mod tests {
         crate::commands::dispatch(&mut h.app, "/sandbox dockre");
         let stored = h.store.load().unwrap();
         assert_eq!(stored.effective(Some("personal")).sandbox_kind(), None);
+    }
+
+    #[test]
+    fn slash_sandbox_with_an_instance_name_runs_bash_in_it() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.sandbox_offered = offered(true, true, false, true, false);
+        h.app.config.set_for_profile(Some("personal"), |profile| {
+            profile.place_sandbox_instance(
+                "dev",
+                rhema_config::SandboxInstance {
+                    kind: "docker".to_owned(),
+                    target: Some("rhema-dev".to_owned()),
+                    vm: None,
+                },
+            );
+        });
+        h.store.save(&h.app.config).unwrap();
+        let effects = crate::commands::dispatch(&mut h.app, "/sandbox dev");
+        assert_eq!(
+            effects,
+            vec![Effect::AssembleSandbox(SandboxChoice::Docker)],
+            "the instance's kind is what assembles"
+        );
+        let stored = h.store.load().unwrap();
+        let sandbox = stored
+            .effective(Some("personal"))
+            .sandbox
+            .expect("the section lands");
+        assert_eq!(sandbox.kind.as_deref(), Some("docker"));
+        assert_eq!(
+            sandbox.active.as_deref(),
+            Some("dev"),
+            "the pointer names the instance"
+        );
+    }
+
+    #[test]
+    fn slash_sandbox_with_a_kind_still_selects_the_kind() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.sandbox_offered = offered(true, true, false, false, false);
+        let effects = crate::commands::dispatch(&mut h.app, "/sandbox docker");
+        assert_eq!(
+            effects,
+            vec![Effect::AssembleSandbox(SandboxChoice::Docker)]
+        );
+        let stored = h.store.load().unwrap();
+        let sandbox = stored
+            .effective(Some("personal"))
+            .sandbox
+            .expect("the section lands");
+        assert_eq!(sandbox.kind.as_deref(), Some("docker"));
+        assert_eq!(
+            sandbox.active, None,
+            "a kind select never points at an instance"
+        );
+    }
+
+    #[test]
+    fn an_unknown_sandbox_name_names_the_instances_and_the_kinds() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        crate::commands::dispatch(&mut h.app, "/sandbox nowhere");
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("nowhere")
+        ));
+    }
+
+    #[test]
+    fn a_profile_switch_moves_bash_to_the_new_profiles_sandbox() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app
+            .config
+            .profiles
+            .insert("work".to_owned(), keyed_profile("openrouter", "o"));
+        h.app.sandbox_machines.docker = true;
+        h.app.sandbox_offered = offered(true, true, false, false, false);
+        // The session runs on the current profile's docker instance.
+        h.app.sandboxed = Some(crate::sandbox::Sandboxed {
+            choice: SandboxChoice::Docker,
+            target: "work-box".to_owned(),
+            tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+        });
+        // work (moving in) stores nothing: its own sandbox is local.
+        let effects = h.app.switch_profile("work");
+        assert!(h.app.sandboxed.is_none(), "the docker assembly leaves");
+        assert_eq!(h.app.active_sandbox(), SandboxChoice::Local);
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::AssembleSandbox(_))),
+            "local needs no assembly: {effects:?}"
+        );
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("bash runs on this host")
+        ));
+    }
+
+    #[test]
+    fn a_profile_switch_assembles_the_profile_moving_in() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.sandbox_machines.docker = true;
+        h.app.sandbox_offered = offered(true, true, false, false, false);
+        // The session runs local; work stores its own docker instance.
+        let mut work = keyed_profile("openrouter", "o");
+        work.sandbox = Some(rhema_config::SandboxSettings {
+            kind: Some("docker".to_owned()),
+            active: Some("work-box".to_owned()),
+            ..rhema_config::SandboxSettings::default()
+        });
+        work.place_sandbox_instance(
+            "work-box",
+            rhema_config::SandboxInstance {
+                kind: "docker".to_owned(),
+                target: Some("work-box".to_owned()),
+                vm: None,
+            },
+        );
+        h.app.config.profiles.insert("work".to_owned(), work);
+        let effects = h.app.switch_profile("work");
+        assert_eq!(h.app.assembling, Some(SandboxChoice::Docker));
+        assert_eq!(
+            effects,
+            vec![
+                Effect::FetchUsage,
+                Effect::AssembleSandbox(SandboxChoice::Docker)
+            ],
+            "the assembly effect rides the switch"
+        );
+        assert!(matches!(
+            h.app.transcript.lines().last(),
+            Some(Line::Notice(text)) if text.contains("standing up the docker sandbox")
+        ));
+    }
+
+    #[test]
+    fn a_switch_keeps_a_sandbox_the_new_profile_resolves_to() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.sandbox_machines.docker = true;
+        h.app.sandbox_offered = offered(true, true, false, false, false);
+        h.app.sandboxed = Some(crate::sandbox::Sandboxed {
+            choice: SandboxChoice::Docker,
+            target: "work-box".to_owned(),
+            tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+        });
+        // work resolves to the same kind AND the same target: the
+        // running assembly is already the profile's own sandbox.
+        let mut work = keyed_profile("openrouter", "o");
+        work.sandbox = Some(rhema_config::SandboxSettings {
+            kind: Some("docker".to_owned()),
+            active: Some("work-box".to_owned()),
+            ..rhema_config::SandboxSettings::default()
+        });
+        work.place_sandbox_instance(
+            "work-box",
+            rhema_config::SandboxInstance {
+                kind: "docker".to_owned(),
+                target: Some("work-box".to_owned()),
+                vm: None,
+            },
+        );
+        h.app.config.profiles.insert("work".to_owned(), work);
+        let effects = h.app.switch_profile("work");
+        assert!(h.app.sandboxed.is_some(), "the assembly stays");
+        assert_eq!(h.app.assembling, None);
+        assert!(
+            effects
+                .iter()
+                .all(|effect| !matches!(effect, Effect::AssembleSandbox(_))),
+            "no re-assembly for the same place: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn the_offered_set_rederives_for_the_profile_moving_in() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        // The ssh binary answers on this machine; personal names no
+        // host, so ssh is not offered to it.
+        h.app.sandbox_machines.ssh = true;
+        h.app.sandbox_offered = offered(false, false, false, false, false);
+        assert!(!h.app.sandbox_offered.ssh);
+        let mut work = keyed_profile("openrouter", "o");
+        work.sandbox = Some(rhema_config::SandboxSettings {
+            host: Some("deploy@box".to_owned()),
+            ..rhema_config::SandboxSettings::default()
+        });
+        h.app.config.profiles.insert("work".to_owned(), work);
+        h.app.switch_profile("work");
+        assert!(
+            h.app.sandbox_offered.ssh,
+            "work names a host: ssh is offered to it"
+        );
+    }
+
+    #[test]
+    fn the_sandbox_badge_names_the_kind_or_the_instance() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        assert_eq!(h.app.sandbox_badge(), "local", "local is a fact too");
+        h.app.sandboxed = Some(crate::sandbox::Sandboxed {
+            choice: SandboxChoice::Docker,
+            target: "work-box".to_owned(),
+            tools: std::sync::Arc::new(rhema_coding_agent::ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+        });
+        // No instance stored: the badge is the kind.
+        assert_eq!(h.app.sandbox_badge(), "docker");
+        // The active pointer names the instance the kind resolves to:
+        // the badge says where, not just what.
+        h.app.config.set_for_profile(Some("personal"), |profile| {
+            profile.sandbox = Some(rhema_config::SandboxSettings {
+                kind: Some("docker".to_owned()),
+                active: Some("dev".to_owned()),
+                ..rhema_config::SandboxSettings::default()
+            });
+            profile.place_sandbox_instance(
+                "dev",
+                rhema_config::SandboxInstance {
+                    kind: "docker".to_owned(),
+                    target: Some("rhema-dev".to_owned()),
+                    vm: None,
+                },
+            );
+        });
+        assert_eq!(h.app.sandbox_badge(), "dev");
+    }
+
+    #[test]
+    fn profile_sandbox_reads_the_profile_alone() {
+        // No stored kind reads local, even where the workspace
+        // remembers another profile's docker: a switch never inherits.
+        let everything = offered(true, true, false, true, true);
+        assert_eq!(
+            profile_sandbox(&rhema_config::Profile::default(), &everything),
+            SandboxChoice::Local
+        );
+        // The stored kind wins while the machine offers it...
+        let stored = sandbox_kind_profile("ssh");
+        assert_eq!(profile_sandbox(&stored, &everything), SandboxChoice::Ssh);
+        // ...and an unoffered kind falls to local, never to a memory.
+        assert_eq!(
+            profile_sandbox(&stored, &offered(false, false, false, false, false)),
+            SandboxChoice::Local
+        );
     }
 
     #[test]
@@ -7130,20 +7505,92 @@ mod tests {
     }
 
     #[test]
-    fn the_sandbox_table_row_completes_its_kinds() {
-        // The palette's choice rows are generated from the command
-        // table, so the row's existence is what wires completion.
-        let spec = crate::commands::COMMANDS
-            .iter()
-            .find(|spec| spec.name == "/sandbox")
-            .expect("/sandbox is registered");
-        let crate::commands::Argument::Choice(choices) = spec.argument else {
-            panic!("the sandbox command takes fixed words");
+    fn the_sandbox_palette_completes_the_instances_then_the_kinds() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.config.set_for_profile(Some("personal"), |profile| {
+            profile.place_sandbox_instance(
+                "dev",
+                rhema_config::SandboxInstance {
+                    kind: "docker".to_owned(),
+                    target: Some("rhema-dev".to_owned()),
+                    vm: None,
+                },
+            );
+            profile.place_sandbox_instance(
+                "build",
+                rhema_config::SandboxInstance {
+                    kind: "lxd".to_owned(),
+                    target: None,
+                    vm: Some(true),
+                },
+            );
+        });
+        let sandboxes = h.app.palette_sandboxes();
+        let rows = |input: &str| {
+            crate::screens::palette_rows(
+                input,
+                input.chars().count(),
+                &[],
+                &[],
+                &sandboxes,
+                &crate::icons::UNICODE,
+            )
         };
+        // The empty argument lists the configured instances first, the
+        // fixed kinds beneath.
+        let names: Vec<String> = rows("/sandbox ")
+            .into_iter()
+            .filter_map(|row| match row {
+                crate::screens::PaletteRow::Sandbox { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect();
+        // Map order: sandbox_instances is a BTreeMap, alphabetical.
+        assert_eq!(names[..2], ["build".to_owned(), "dev".to_owned()]);
+        assert!(names.contains(&"docker".to_owned()));
+        assert!(names.contains(&"local".to_owned()));
+        // A stem narrows across the name, the kind, and the target.
         assert_eq!(
-            choices.iter().map(|c| c.name).collect::<Vec<_>>(),
-            vec!["local", "docker", "lxd", "ssh", "http"]
+            rows("/sandbox dev")
+                .into_iter()
+                .filter_map(|row| match row {
+                    crate::screens::PaletteRow::Sandbox { value, .. } => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["dev".to_owned()],
+            "the instance name matches"
         );
+        assert_eq!(
+            rows("/sandbox rhema")
+                .into_iter()
+                .filter_map(|row| match row {
+                    crate::screens::PaletteRow::Sandbox { value, .. } => Some(value),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            vec!["dev".to_owned()],
+            "the target matches too"
+        );
+        // Tab fills the instance's name under the command prefix.
+        let mut chat = crate::screens::ChatState::new();
+        for c in "/sandbox dev".chars() {
+            chat.handle_key(
+                key(KeyCode::Char(c)),
+                &[],
+                &[],
+                &sandboxes,
+                &crate::icons::UNICODE,
+            );
+        }
+        chat.handle_key(
+            key(KeyCode::Tab),
+            &[],
+            &[],
+            &sandboxes,
+            &crate::icons::UNICODE,
+        );
+        assert_eq!(chat.input, "/sandbox dev");
     }
 
     #[test]
@@ -7235,7 +7682,7 @@ mod tests {
             session: Session::default(),
             secrets: None,
             sandboxed: None,
-            sandbox_offered: crate::sandbox::SandboxAvailability::default(),
+            sandbox_machines: crate::sandbox::SandboxMachines::default(),
             home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
             onboard: false,
             options: RunOptions {
