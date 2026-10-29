@@ -98,9 +98,10 @@ pub struct Sandboxed {
     pub workspace: String,
     /// The discovered skills; every `Skill::path` resolves inside the
     /// sandbox's filesystem — [`Self::workspace`] itself for the seeded
-    /// postures, the workspace plus the read-only skills mount for the
-    /// mounted ones — because the model reads the bodies through the
-    /// sandbox's shell.
+    /// postures, the workspace plus the two read-only skills mounts
+    /// (rhema's own and the cross-agent `.agents` tree) for the mounted
+    /// ones — because the model reads the bodies through the sandbox's
+    /// shell.
     pub skills: Vec<Skill>,
     /// The shared instance's lock, held shared for the session: the
     /// mounted choices (docker, lxd) only. Dropping it is the release.
@@ -163,9 +164,15 @@ pub async fn assemble(
             target = container.clone();
             let (uid, gid) = workspace_owner(workspace)?;
             let skills = global_skills_dir();
+            let agents = agents_skills_dir();
             let lock = InstanceLock::acquire("docker", &container)
                 .map_err(|err| anyhow::anyhow!("the docker sandbox lock: {err}"))?;
-            ensure_container(&container, &host_workspace, skills.as_deref())?;
+            ensure_container(
+                &container,
+                &host_workspace,
+                skills.as_deref(),
+                agents.as_deref(),
+            )?;
             instance_lock = Some(lock);
             managed = stored.is_none().then(|| ManagedInstance {
                 kind: ManagedKind::Docker,
@@ -193,6 +200,7 @@ pub async fn assemble(
                 .unwrap_or_else(|| profile.sandbox_vm());
             let (uid, gid) = workspace_owner(workspace)?;
             let skills = global_skills_dir();
+            let agents = agents_skills_dir();
             let lock = InstanceLock::acquire("lxd", &instance)
                 .map_err(|err| anyhow::anyhow!("the lxd sandbox lock: {err}"))?;
             instance_lock = Some(lock);
@@ -218,7 +226,12 @@ pub async fn assemble(
                 // path is the host path itself and FsRoot's file
                 // routes are plain fs on the host side.
                 ensure_lxd_instance(&instance, false, uid, gid)?;
-                ensure_lxd_mount(&instance, &host_workspace, skills.as_deref())?;
+                ensure_lxd_mount(
+                    &instance,
+                    &host_workspace,
+                    skills.as_deref(),
+                    agents.as_deref(),
+                )?;
                 let root = FsRoot::new(workspace.to_path_buf())
                     .map_err(|err| anyhow::anyhow!("lxd sandbox root: {err}"))?;
                 Arc::new(
@@ -287,7 +300,15 @@ pub async fn assemble(
         // The mount and ssh postures see the workspace at its own path.
         _ => host_workspace,
     };
-    let (skills, owned_bodies) = discovered_skills(workspace, mounted_skills, &workspace_string);
+    let agents = rhema_config::Config::agents_skills_dir().ok();
+    let global = rhema_config::Config::skills_dir().ok();
+    let (skills, owned_bodies) = discovered_skills(
+        agents.as_deref(),
+        global.as_deref(),
+        workspace,
+        mounted_skills,
+        &workspace_string,
+    );
     let bodies: Vec<(&str, &str)> = owned_bodies
         .iter()
         .map(|(name, body)| (name.as_str(), body.as_str()))
@@ -427,6 +448,14 @@ fn stop_instance(program: &str, argv: &[String]) -> std::io::Result<bool> {
 /// discovery sees workspace skills only, as it always has.
 fn global_skills_dir() -> Option<PathBuf> {
     let dir = rhema_config::Config::skills_dir().ok()?;
+    dir.is_dir().then_some(dir)
+}
+
+/// The cross-agent skills tree (`~/.agents/skills`), when it exists on
+/// disk — the read-only `agents` mount's source, the same 1:1 posture
+/// the rhema skills bind takes.
+fn agents_skills_dir() -> Option<PathBuf> {
+    let dir = rhema_config::Config::agents_skills_dir().ok()?;
     dir.is_dir().then_some(dir)
 }
 
@@ -676,30 +705,42 @@ async fn ensure_seeded(
     Ok(())
 }
 
-/// The same discovery the local path's prompt renders — the global
-/// config directory, then the workspace's `.rhema/skills`, project
-/// shadowing global — paired with each body read host-side now. The
-/// seeded postures' returned list names the rewritten, sandbox-side
-/// paths and carries the bodies `seed_workspace` writes; a body that
-/// cannot be read here would be unreadable there too, so it drops from
-/// both. Mounted, the paths stand as discovered — the workspace's and
-/// the skills directory's 1:1 mounts put both trees at their own paths
-/// inside the instance — and no bodies come back: the mounts are the
-/// delivery, nothing is copied, and a skill edited mid-session is
-/// simply the new text the next read sees.
+/// The same discovery the local path's prompt renders — the
+/// cross-agent `~/.agents/skills` under rhema's global config
+/// directory under the workspace's `.rhema/skills`, a higher tier
+/// shadowing a lower by name — paired with each body read host-side
+/// now. The seeded postures' returned list names the rewritten,
+/// sandbox-side paths and carries the bodies `seed_workspace` writes; a
+/// body that cannot be read here would be unreadable there too, so it
+/// drops from both. Mounted, paths stand as discovered — the
+/// workspace's and the two global trees' 1:1 mounts put them at their
+/// own paths inside the instance, the mounts are the delivery, nothing
+/// is copied, and a skill edited mid-session is simply the new text
+/// the next read sees. Only a skill outside all three trees rides the
+/// seed, which on the mountless postures is the whole list anyway. The
+/// two global directories arrive resolved — `Config::agents_skills_dir`
+/// and `Config::skills_dir` at the call site — so a test points them
+/// at scratch paths instead of the machine's own.
 fn discovered_skills(
+    agents: Option<&Path>,
+    global: Option<&Path>,
     workspace: &Path,
     mounted: bool,
     sandbox_workspace: &str,
 ) -> (Vec<Skill>, Vec<(String, String)>) {
-    let global = rhema_config::Config::skills_dir().ok();
     let mut skills = Vec::new();
     let mut bodies = Vec::new();
-    for skill in rhema_agent_tools::skills::discover(global.as_deref(), workspace) {
+    let discovered = rhema_agent_tools::skills::discover(agents, global, workspace);
+    for skill in discovered {
         let Ok(body) = std::fs::read_to_string(&skill.path) else {
             continue;
         };
-        if mounted {
+        // A mounted tree's skill needs no delivery; anything outside
+        // the three trees travels as a body into the workspace seed.
+        let on_a_mount = skill.path.starts_with(workspace)
+            || global.is_some_and(|dir| skill.path.starts_with(dir))
+            || agents.is_some_and(|dir| skill.path.starts_with(dir));
+        if mounted && on_a_mount {
             skills.push(skill);
             continue;
         }
@@ -818,16 +859,18 @@ fn docker_provision_argv(name: &str) -> Vec<String> {
 /// Stands the container up when it is not already running:
 /// `docker inspect` answers, and a stopped or absent container is met
 /// with `docker run -d … sleep infinity` — a bind mount of the
-/// workspace at its own path, held open between runs. Posture, plainly:
+/// workspace at its own path, held open between runs, plus the two
+/// global skills trees read-only when they exist. Posture, plainly:
 /// process hygiene, not a security boundary — the container's commands
 /// reach the same fs the local path would.
 fn ensure_container(
     name: &str,
     workspace: &str,
     skills: Option<&std::path::Path>,
+    agents: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     if let Some(mounts) = docker_mounts(name)? {
-        if mounts_current(&mounts, workspace, skills) {
+        if mounts_current(&mounts, workspace, skills, agents) {
             // Present, mounts whole: started when it is not.
             if !container_running(name)? {
                 let output = std::process::Command::new("docker")
@@ -861,7 +904,7 @@ fn ensure_container(
             );
         }
     }
-    let argv = docker_run_argv(name, workspace, skills);
+    let argv = docker_run_argv(name, workspace, skills, agents);
     let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     let output = std::process::Command::new("docker")
         .args(&refs)
@@ -892,21 +935,26 @@ fn docker_mounts(name: &str) -> anyhow::Result<Option<String>> {
 }
 
 /// Whether the container's mounts cover this assembly's needs: the
-/// workspace bind, and — when the global skills directory exists — the
-/// read-only skills bind. Matched by the inspect JSON's `"Source"`
+/// workspace bind, and — when each global skills directory exists —
+/// its read-only bind. Matched by the inspect JSON's `"Source"`
 /// entries — the host side, the same string the run argv names — so a
 /// workspace that is a prefix of some other mount's path cannot pass
 /// for its own bind. A path the JSON's escaping mangles reads as
 /// missing: the container is recreated with the correct mounts, the
 /// slow path, never the wrong one.
-fn mounts_current(mounts_json: &str, workspace: &str, skills: Option<&std::path::Path>) -> bool {
+fn mounts_current(
+    mounts_json: &str,
+    workspace: &str,
+    skills: Option<&std::path::Path>,
+    agents: Option<&std::path::Path>,
+) -> bool {
     if !mounts_json.contains(&source_entry(workspace)) {
         return false;
     }
-    match skills {
-        None => true,
-        Some(dir) => mounts_json.contains(&source_entry(&dir.to_string_lossy())),
-    }
+    [skills, agents]
+        .into_iter()
+        .flatten()
+        .all(|dir| mounts_json.contains(&source_entry(&dir.to_string_lossy())))
 }
 
 /// The inspect JSON's source entry for one host path:
@@ -916,10 +964,16 @@ fn source_entry(path: &str) -> String {
 }
 
 /// The run argv: `docker run -d --name <name> -v <ws>:<ws>
-/// [-v <skills>:<skills>:ro] debian:trixie sleep infinity` — the
-/// workspace bind is the container's filesystem story, the skills bind
-/// rides read-only when the global directory exists.
-fn docker_run_argv(name: &str, workspace: &str, skills: Option<&std::path::Path>) -> Vec<String> {
+/// [-v <skills>:<skills>:ro] [-v <agents>:<agents>:ro]
+/// debian:trixie sleep infinity` — the workspace bind is the
+/// container's filesystem story, the two global skills binds ride
+/// read-only when their directories exist.
+fn docker_run_argv(
+    name: &str,
+    workspace: &str,
+    skills: Option<&std::path::Path>,
+    agents: Option<&std::path::Path>,
+) -> Vec<String> {
     let mut argv = vec![
         "run".to_owned(),
         "-d".to_owned(),
@@ -928,7 +982,7 @@ fn docker_run_argv(name: &str, workspace: &str, skills: Option<&std::path::Path>
         "-v".to_owned(),
         bind_mount(workspace, false),
     ];
-    if let Some(dir) = skills {
+    for dir in [skills, agents].into_iter().flatten() {
         argv.push("-v".to_owned());
         argv.push(bind_mount(&dir.to_string_lossy(), true));
     }
@@ -1140,7 +1194,7 @@ fn idmap_of(name: &str) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-/// Adds the workspace's `disk` device — and the global skills
+/// Adds the workspace's `disk` device — and each global skills
 /// directory's, read-only, when it exists: `lxc config device add
 /// <name> <device> disk source=<dir> path=<dir>` — the 1:1 mirrors
 /// that make the sandbox-side paths the host paths themselves.
@@ -1150,14 +1204,19 @@ fn ensure_lxd_mount(
     name: &str,
     workspace: &str,
     skills: Option<&std::path::Path>,
+    agents: Option<&std::path::Path>,
 ) -> anyhow::Result<()> {
     let devices = lxd_devices(name)?;
     lxd_device(name, &devices, "workspace", workspace, false)?;
-    if let Some(dir) = skills {
+    let binds = [("skills", skills), ("agents", agents)];
+    for (device, dir) in binds
+        .into_iter()
+        .filter_map(|(d, dir)| dir.map(|dir| (d, dir)))
+    {
         // Re-shown: the first add changed the set this check reads.
         let devices = lxd_devices(name)?;
         let dir = dir.to_string_lossy().into_owned();
-        lxd_device(name, &devices, "skills", &dir, true)?;
+        lxd_device(name, &devices, device, &dir, true)?;
     }
     Ok(())
 }
@@ -1417,7 +1476,7 @@ mod tests {
     fn mounted_discovery_keeps_the_host_paths_and_seeds_nothing() {
         let dir = workspace_with_skill();
         let ws = dir.path().to_path_buf();
-        let (skills, bodies) = discovered_skills(&ws, true, &ws.to_string_lossy());
+        let (skills, bodies) = discovered_skills(None, None, &ws, true, &ws.to_string_lossy());
         assert!(bodies.is_empty(), "the mounts are the delivery: {bodies:?}");
         let skill = skills
             .iter()
@@ -1437,7 +1496,7 @@ mod tests {
     fn seeded_discovery_rewrites_the_paths_and_carries_the_bodies() {
         let dir = workspace_with_skill();
         let ws = dir.path().to_path_buf();
-        let (skills, bodies) = discovered_skills(&ws, false, "/workspace");
+        let (skills, bodies) = discovered_skills(None, None, &ws, false, "/workspace");
         let skill = skills
             .iter()
             .find(|skill| skill.name == "review")
@@ -1454,10 +1513,82 @@ mod tests {
         );
     }
 
+    /// One skill in the cross-agent tree, for the discovery tests: the
+    /// folder no posture mounts.
+    fn agents_with_skill(home: &Path) {
+        let skill = home.join(".agents").join("skills").join("borrowed");
+        std::fs::create_dir_all(&skill).expect("the skill directory");
+        std::fs::write(
+            skill.join("SKILL.md"),
+            "---\ndescription: a borrowed trigger\n---\n# borrowed\n",
+        )
+        .expect("the skill lands");
+    }
+
+    #[test]
+    fn a_mounted_agents_skill_stands_at_its_own_path_and_seeds_nothing() {
+        let dir = workspace_with_skill();
+        let ws = dir.path().to_path_buf();
+        let agents = tempfile::tempdir().expect("tempdir");
+        agents_with_skill(agents.path());
+        let (skills, bodies) = discovered_skills(
+            Some(&agents.path().join(".agents").join("skills")),
+            None,
+            &ws,
+            true,
+            &ws.to_string_lossy(),
+        );
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "borrowed")
+            .expect("the .agents skill is discovered");
+        assert_eq!(
+            skill.path,
+            agents
+                .path()
+                .join(".agents")
+                .join("skills")
+                .join("borrowed")
+                .join("SKILL.md"),
+            "the read-only agents mount puts the tree at its own path"
+        );
+        assert!(bodies.is_empty(), "the mounts are the delivery: {bodies:?}");
+    }
+
+    #[test]
+    fn an_agents_skill_rides_the_seed_when_the_posture_mounts_nothing() {
+        let dir = workspace_with_skill();
+        let ws = dir.path().to_path_buf();
+        let agents = tempfile::tempdir().expect("tempdir");
+        agents_with_skill(agents.path());
+        let (skills, bodies) = discovered_skills(
+            Some(&agents.path().join(".agents").join("skills")),
+            None,
+            &ws,
+            false,
+            "/workspace",
+        );
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "borrowed")
+            .expect("the .agents skill is discovered");
+        assert_eq!(
+            skill.path,
+            PathBuf::from("/workspace/.rhema/skills/borrowed/SKILL.md"),
+            "a mountless posture cannot read the host tree: the seed delivers it"
+        );
+        assert!(
+            bodies
+                .iter()
+                .any(|(name, body)| name == "borrowed" && body.contains("# borrowed")),
+            "the body rides the seed: {bodies:?}"
+        );
+    }
+
     #[test]
     fn the_run_argv_binds_the_workspace_and_the_read_only_skills() {
         assert_eq!(
-            docker_run_argv("box", "/home/me/proj", None),
+            docker_run_argv("box", "/home/me/proj", None, None),
             vec![
                 "run",
                 "-d",
@@ -1475,7 +1606,7 @@ mod tests {
         );
         let skills = Path::new("/h/.config/rhema/skills");
         assert_eq!(
-            docker_run_argv("box", "/home/me/proj", Some(skills)),
+            docker_run_argv("box", "/home/me/proj", Some(skills), None),
             vec![
                 "run",
                 "-d",
@@ -1485,6 +1616,28 @@ mod tests {
                 "/home/me/proj:/home/me/proj",
                 "-v",
                 "/h/.config/rhema/skills:/h/.config/rhema/skills:ro",
+                "debian:trixie",
+                "sleep",
+                "infinity",
+            ]
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+        );
+        let agents = Path::new("/h/.agents/skills");
+        assert_eq!(
+            docker_run_argv("box", "/home/me/proj", Some(skills), Some(agents)),
+            vec![
+                "run",
+                "-d",
+                "--name",
+                "box",
+                "-v",
+                "/home/me/proj:/home/me/proj",
+                "-v",
+                "/h/.config/rhema/skills:/h/.config/rhema/skills:ro",
+                "-v",
+                "/h/.agents/skills:/h/.agents/skills:ro",
                 "debian:trixie",
                 "sleep",
                 "infinity",
@@ -1508,23 +1661,23 @@ mod tests {
     #[test]
     fn a_mount_set_missing_the_skills_bind_is_stale() {
         let mounts = r#"[{"Type":"bind","Source":"/home/me/proj","Destination":"/home/me/proj"}]"#;
-        assert!(mounts_current(mounts, "/home/me/proj", None));
-        assert!(!mounts_current(
-            mounts,
-            "/home/me/proj",
-            Some(Path::new("/h/.config/rhema/skills"))
-        ));
+        let skills = Some(Path::new("/h/.config/rhema/skills"));
+        let agents = Some(Path::new("/h/.agents/skills"));
+        assert!(mounts_current(mounts, "/home/me/proj", None, None));
+        assert!(!mounts_current(mounts, "/home/me/proj", skills, None));
         let whole = r#"[{"Source":"/home/me/proj"},{"Source":"/h/.config/rhema/skills"}]"#;
-        assert!(mounts_current(
-            whole,
-            "/home/me/proj",
-            Some(Path::new("/h/.config/rhema/skills"))
-        ));
+        assert!(mounts_current(whole, "/home/me/proj", skills, None));
+        // Both global binds must be present: a container from before
+        // the agents mount is stale, whatever else it carries.
+        assert!(!mounts_current(whole, "/home/me/proj", skills, agents));
+        let everything = r#"[{"Source":"/home/me/proj"},{"Source":"/h/.config/rhema/skills"},{"Source":"/h/.agents/skills"}]"#;
+        assert!(mounts_current(everything, "/home/me/proj", skills, agents));
         // A workspace that is a prefix of another mount's path does not
         // pass for its own bind.
         assert!(!mounts_current(
             r#"[{"Source":"/home/me/proj2"}]"#,
             "/home/me/proj",
+            None,
             None
         ));
     }

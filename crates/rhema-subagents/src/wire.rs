@@ -133,8 +133,9 @@ fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String 
     let mut skills = match &config.skills {
         Some(skills) => skills.clone(),
         None => {
+            let agents = rhema_config::Config::agents_skills_dir().ok();
             let global = rhema_config::Config::skills_dir().ok();
-            rhema_agent_tools::skills::discover(global.as_deref(), workspace)
+            rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), workspace)
         }
     };
     skills.retain(|skill| !config.disabled_skills.contains(&skill.name));

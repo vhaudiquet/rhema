@@ -5,8 +5,11 @@
 //! reach the system prompt, as the [`crate::prompt`] template's
 //! `skills` list; the model reads a skill's body itself with the
 //! bash tool (`cat`) when a trigger applies, so skills need no tool of
-//! their own, no approval, and no machinery beyond discovery. Project
-//! skills shadow global ones by folder name.
+//! their own, no approval, and no machinery beyond discovery. Skills
+//! shadow by folder name across three tiers. The workspace's
+//! `.rhema/skills` wins over rhema's global directory, which wins over
+//! the cross-agent `~/.agents/skills`. A rhema skill of the same name
+//! hides the `.agents` one, never the reverse.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -36,13 +39,19 @@ struct Frontmatter {
     license: Option<String>,
 }
 
-/// Discovers skills: the global directory first, then the workspace's
-/// `.rhema/skills`, project shadowing global by folder name. A folder is
-/// a skill only when its `SKILL.md` parses with a `description`; the
-/// trigger is the whole point, and an undescribed skill has nothing to
-/// show the model.
-pub fn discover(global: Option<&Path>, workspace: &Path) -> Vec<Skill> {
+/// Discovers skills from the lowest shadowing tier up: the cross-agent
+/// `agents` directory, rhema's own `global` directory, then the
+/// workspace's `.rhema/skills`. A name found twice appears once, the
+/// higher tier shadowing the lower by folder name, so a skill in
+/// either rhema directory hides the `.agents` copy of the same name.
+/// A folder is a skill only when its `SKILL.md` parses with a
+/// `description`; the trigger is the whole point, and an undescribed
+/// skill has nothing to show the model.
+pub fn discover(agents: Option<&Path>, global: Option<&Path>, workspace: &Path) -> Vec<Skill> {
     let mut by_name: BTreeMap<String, Skill> = BTreeMap::new();
+    if let Some(agents) = agents {
+        collect_into(agents, &mut by_name);
+    }
     if let Some(global) = global {
         collect_into(global, &mut by_name);
     }
@@ -127,7 +136,7 @@ mod tests {
             "the a trigger",
         );
 
-        let skills = discover(Some(global.path()), workspace.path());
+        let skills = discover(None, Some(global.path()), workspace.path());
         assert_eq!(
             skills,
             vec![
@@ -158,7 +167,7 @@ mod tests {
         )
         .unwrap();
 
-        let skills = discover(Some(global.path()), Path::new("/nowhere"));
+        let skills = discover(None, Some(global.path()), Path::new("/nowhere"));
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].license.as_deref(), Some("MIT (c) someone"));
     }
@@ -174,7 +183,7 @@ mod tests {
             "project trigger",
         );
 
-        let skills = discover(Some(global.path()), workspace.path());
+        let skills = discover(None, Some(global.path()), workspace.path());
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].description, "project trigger");
         assert!(skills[0].path.starts_with(workspace.path()));
@@ -194,14 +203,99 @@ mod tests {
         // A bare file, not a folder.
         std::fs::write(global.path().join("stray.md"), "x").unwrap();
 
-        assert!(discover(Some(global.path()), Path::new("/nowhere")).is_empty());
+        assert!(discover(None, Some(global.path()), Path::new("/nowhere")).is_empty());
+    }
+
+    #[test]
+    fn the_cross_agent_agents_directory_is_discovered() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_skill(
+            &home.path().join(".agents").join("skills"),
+            "shared",
+            "agents trigger",
+        );
+
+        let skills = discover(
+            Some(&home.path().join(".agents").join("skills")),
+            None,
+            workspace.path(),
+        );
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "agents trigger");
+        assert!(
+            skills[0]
+                .path
+                .starts_with(home.path().join(".agents").join("skills")),
+            "the body reads from the .agents tree"
+        );
+    }
+
+    #[test]
+    fn a_rhema_skill_hides_the_agents_copy_of_the_same_name() {
+        let home = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_skill(
+            &home.path().join(".agents").join("skills"),
+            "shared",
+            "agents trigger",
+        );
+        write_skill(global.path(), "shared", "global trigger");
+        write_skill(
+            &workspace.path().join(".rhema").join("skills"),
+            "shared",
+            "workspace trigger",
+        );
+
+        let skills = discover(
+            Some(&home.path().join(".agents").join("skills")),
+            Some(global.path()),
+            workspace.path(),
+        );
+        assert_eq!(skills.len(), 1, "one name, one skill");
+        assert_eq!(skills[0].description, "workspace trigger");
+
+        // Without the workspace copy, rhema's global still wins — the
+        // .agents folder only serves names nothing above it claims.
+        let skills = discover(
+            Some(&home.path().join(".agents").join("skills")),
+            Some(global.path()),
+            Path::new("/nowhere"),
+        );
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].description, "global trigger");
+    }
+
+    #[test]
+    fn agents_skills_sit_alongside_rhema_ones_when_the_names_differ() {
+        let home = tempfile::tempdir().unwrap();
+        let global = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        write_skill(
+            &home.path().join(".agents").join("skills"),
+            "askill",
+            "agents trigger",
+        );
+        write_skill(global.path(), "zskill", "global trigger");
+
+        let skills = discover(
+            Some(&home.path().join(".agents").join("skills")),
+            Some(global.path()),
+            workspace.path(),
+        );
+        assert_eq!(
+            skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+            vec!["askill", "zskill"],
+            "sorted by name, both present"
+        );
     }
 
     #[test]
     fn missing_directories_discover_to_nothing() {
         let workspace = tempfile::tempdir().unwrap();
         assert!(
-            discover(Some(Path::new("/nowhere")), workspace.path()).is_empty(),
+            discover(None, Some(Path::new("/nowhere")), workspace.path()).is_empty(),
             "no global dir is normal, not an error"
         );
     }

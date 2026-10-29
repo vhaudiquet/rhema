@@ -387,12 +387,14 @@ fn system_show_at(
     // The transcript is on by default, so the default preview names
     // zoom, exactly as the agent's prompt does.
     extra.push(rhema_transcript::Zoom::spec());
+    let agents = Config::agents_skills_dir().ok();
     let global = Config::skills_dir().ok();
     let disabled = Config::load()
         .ok()
         .map(|c| c.skills_disabled)
         .unwrap_or_default();
-    let mut skills = rhema_agent_tools::skills::discover(global.as_deref(), &workspace);
+    let mut skills =
+        rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), &workspace);
     // The preview shows what turns send: a disabled skill is not in the
     // prompt, so it is not in the preview either.
     skills.retain(|skill| !disabled.contains(&skill.name));

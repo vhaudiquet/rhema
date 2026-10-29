@@ -93,10 +93,12 @@ pub fn stamped_system(
     workspace: &Path,
     extra: &[ToolSpec],
 ) -> Result<String, CodingAgentError> {
-    // The global skills directory may not exist (no HOME) — as normal
-    // as an empty one.
+    // Either global directory may be missing (no HOME) — as normal as
+    // an empty one.
+    let agents = rhema_config::Config::agents_skills_dir().ok();
     let global = rhema_config::Config::skills_dir().ok();
-    let skills = rhema_agent_tools::skills::discover(global.as_deref(), workspace);
+    let skills =
+        rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), workspace);
     stamped_system_with_sections(base, workspace, extra, &skills, None, None)
 }
 
@@ -215,8 +217,13 @@ impl CodingAgent {
                 let mut skills = match &config.skills {
                     Some(skills) => skills.clone(),
                     None => {
+                        let agents = rhema_config::Config::agents_skills_dir().ok();
                         let global = rhema_config::Config::skills_dir().ok();
-                        rhema_agent_tools::skills::discover(global.as_deref(), tools.workspace())
+                        rhema_agent_tools::skills::discover(
+                            agents.as_deref(),
+                            global.as_deref(),
+                            tools.workspace(),
+                        )
                     }
                 };
                 skills.retain(|skill| !config.disabled_skills.contains(&skill.name));

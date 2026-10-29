@@ -768,7 +768,12 @@ step and the settings Skills page flip it, the prompt filter
 after discovery alike) reads it, and the UIs show disabled rows greyed
 rather than hidden. Re-enabling re-seeds a missing folder; a user's
 folder of the same name shadows a bundled one like any other skill.
-Skills carry an optional frontmatter `license` (plus a `NOTICE` file
+Discovery reads three tiers — the workspace's `.rhema/skills`, the
+global config directory, and the cross-agent `~/.agents/skills`, the
+highest tier shadowing the lower by name — so a skill in
+either rhema directory hides an `.agents` copy of the same name,
+never the reverse. Skills
+carry an optional frontmatter `license` (plus a `NOTICE` file
 where attribution must travel with copies), which the UIs render a
 step dimmer than the description.
 

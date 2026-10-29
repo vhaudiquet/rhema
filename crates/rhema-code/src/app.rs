@@ -696,19 +696,23 @@ fn subagent_rows(global: Option<&Path>, workspace: &Path) -> Vec<SubagentRow> {
 /// The skills page's rows (and the wizard's skills step's): every
 /// discovered skill with its source — bundled skills seeded into the
 /// global directory read as bundled, a workspace folder as workspace,
+/// a folder under the cross-agent `~/.agents/skills` as agents, and
 /// everything else global — and its on/off state from the config's
 /// disabled set.
 fn skill_rows(
+    agents: Option<&Path>,
     global: Option<&Path>,
     workspace: &Path,
     disabled: &std::collections::BTreeSet<String>,
 ) -> Vec<SkillRow> {
     let workspace_dir = workspace.join(".rhema").join("skills");
-    rhema_agent_tools::skills::discover(global, workspace)
+    rhema_agent_tools::skills::discover(agents, global, workspace)
         .into_iter()
         .map(|skill| {
             let source = if skill.path.starts_with(&workspace_dir) {
                 SkillSource::Workspace
+            } else if agents.is_some_and(|dir| skill.path.starts_with(dir)) {
+                SkillSource::Agents
             } else if crate::bundled::is_bundled(&skill.name) {
                 SkillSource::Bundled
             } else {
@@ -1057,7 +1061,12 @@ impl App {
         let screen = if setup.onboard {
             let workspace = std::fs::canonicalize(&setup.options.workspace)
                 .unwrap_or_else(|_| setup.options.workspace.clone());
+            let agents = setup
+                .home
+                .as_deref()
+                .map(rhema_config::Config::agents_dir_under);
             let skills = skill_rows(
+                agents.as_deref(),
                 config_root
                     .as_deref()
                     .map(|root| root.join("skills"))
@@ -1364,6 +1373,7 @@ impl App {
             &self.config,
             &self.options,
             self.session_profile.as_deref(),
+            self.home.as_deref(),
             self.config_root.as_deref(),
             self.secret_store(),
         );
@@ -1392,14 +1402,17 @@ impl App {
         config: &Config,
         options: &RunOptions,
         session_profile: Option<&str>,
+        home: Option<&Path>,
         config_root: Option<&Path>,
         secrets: Option<&dyn rhema_config::secrets::SecretStore>,
     ) -> SettingsScreen {
         let effective = config.effective(session_profile);
         let workspace =
             std::fs::canonicalize(&options.workspace).unwrap_or_else(|_| options.workspace.clone());
+        let agents_dir = home.map(rhema_config::Config::agents_dir_under);
         let global_skills = config_root.map(|root| root.join("skills"));
         let skills = skill_rows(
+            agents_dir.as_deref(),
             global_skills.as_deref(),
             &workspace,
             &config.skills_disabled,
@@ -4185,6 +4198,75 @@ mod tests {
     use rhema_provider::ModelCard;
     use rhema_provider_google::GoogleProvider;
     use std::collections::BTreeMap;
+
+    /// A described skill folder under `dir`, the way discovery reads
+    /// one.
+    fn write_skill(dir: &Path, name: &str, description: &str) -> PathBuf {
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("SKILL.md");
+        std::fs::write(
+            &file,
+            format!("---\ndescription: {description}\n---\n\nBody.\n"),
+        )
+        .unwrap();
+        file
+    }
+
+    #[test]
+    fn skill_rows_name_their_source_and_the_rhema_copy_hides_the_agents_one() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let agents = home.path().join(".agents").join("skills");
+        let global = home.path().join(".config").join("rhema").join("skills");
+        write_skill(&agents, "borrowed", "the agents trigger");
+        // A rhema-global copy and an .agents copy share one name. The
+        // page shows one row, tagged global, and the hidden copy never
+        // lists.
+        write_skill(&agents, "shared", "agents trigger");
+        write_skill(&global, "shared", "global trigger");
+        write_skill(
+            &workspace.path().join(".rhema").join("skills"),
+            "local",
+            "workspace trigger",
+        );
+
+        let disabled = std::collections::BTreeSet::new();
+        let rows = skill_rows(Some(&agents), Some(&global), workspace.path(), &disabled);
+        let tagged = |name: &str| {
+            rows.iter()
+                .find(|row| row.name == name)
+                .unwrap_or_else(|| panic!("no {name} row in {rows:?}"))
+                .source
+        };
+        assert_eq!(rows.len(), 3, "the shared .agents copy hides: {rows:?}");
+        assert_eq!(tagged("local"), SkillSource::Workspace);
+        assert_eq!(tagged("shared"), SkillSource::Global);
+        assert_eq!(tagged("borrowed"), SkillSource::Agents);
+    }
+
+    #[test]
+    fn a_workspace_skill_of_an_agents_name_shadows_to_workspace() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let agents = home.path().join(".agents").join("skills");
+        write_skill(&agents, "shared", "agents trigger");
+        write_skill(
+            &workspace.path().join(".rhema").join("skills"),
+            "shared",
+            "workspace trigger",
+        );
+
+        let rows = skill_rows(
+            Some(&agents),
+            None,
+            workspace.path(),
+            &std::collections::BTreeSet::new(),
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].source, SkillSource::Workspace);
+        assert_eq!(rows[0].description, "workspace trigger");
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::empty())

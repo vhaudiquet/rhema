@@ -1002,6 +1002,25 @@ impl Config {
         Ok(Self::dir()?.join("skills"))
     }
 
+    /// The cross-agent skills directory under an explicit home — the
+    /// seam pairing [`Self::dir_under`]. The `.agents` convention is
+    /// fixed at the home root: other tools' skills live there, not
+    /// under any config base, so no environment variable redirects it.
+    pub fn agents_dir_under(home: &Path) -> PathBuf {
+        home.join(".agents").join("skills")
+    }
+
+    /// The cross-agent skills directory (`<home>/.agents/skills`),
+    /// where the skill-sharing convention keeps user-wide skills.
+    /// Discovery reads it at the bottom of the shadowing order, so a
+    /// rhema skill of the same name always wins.
+    pub fn agents_skills_dir() -> Result<PathBuf, ConfigError> {
+        match std::env::var("HOME") {
+            Ok(home) if !home.trim().is_empty() => Ok(Self::agents_dir_under(&PathBuf::from(home))),
+            _ => Err(ConfigError::NoHome),
+        }
+    }
+
     /// The global subagent definitions directory (`<dir>/subagents`),
     /// where user-wide subagents live; a workspace can add more under
     /// its own `.rhema/subagents`.
