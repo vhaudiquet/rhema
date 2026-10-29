@@ -88,6 +88,9 @@ pub enum SandboxChoice {
     /// An LXD instance — container or `--vm`, one driver and a launch
     /// flag — driven through the `lxc` CLI.
     Lxd,
+    /// A microVM per command through the `ecrou` CLI, the workspace
+    /// shared in at its own path.
+    Ecrou,
     /// A remote box over ssh, nothing installed on the far end.
     Ssh,
     /// A daemon speaking the sandbox protocol over HTTPS
@@ -104,6 +107,7 @@ impl SandboxChoice {
             Some("local") => Some(Self::Local),
             Some("docker") => Some(Self::Docker),
             Some("lxd") => Some(Self::Lxd),
+            Some("ecrou") => Some(Self::Ecrou),
             Some("ssh") => Some(Self::Ssh),
             Some("http") => Some(Self::Http),
             _ => None,
@@ -117,6 +121,7 @@ impl SandboxChoice {
             Self::Local => "local",
             Self::Docker => "docker",
             Self::Lxd => "lxd",
+            Self::Ecrou => "ecrou",
             Self::Ssh => "ssh",
             Self::Http => "http",
         }
@@ -418,8 +423,10 @@ mod tests {
         for (name, expected) in [
             ("local", SandboxChoice::Local),
             ("docker", SandboxChoice::Docker),
+            ("lxd", SandboxChoice::Lxd),
             ("ssh", SandboxChoice::Ssh),
             ("http", SandboxChoice::Http),
+            ("ecrou", SandboxChoice::Ecrou),
         ] {
             assert_eq!(SandboxChoice::from_stored(Some(name)), Some(expected));
             assert_eq!(expected.stored_name(), name);

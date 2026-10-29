@@ -233,6 +233,7 @@ pub enum SandboxDialogAction {
 pub const SANDBOX_ADD_KINDS: &[crate::args::SandboxChoice] = &[
     crate::args::SandboxChoice::Docker,
     crate::args::SandboxChoice::Lxd,
+    crate::args::SandboxChoice::Ecrou,
 ];
 
 /// The pop-in dialog over the Sandbox page: pick the kind and be
@@ -2562,6 +2563,7 @@ mod tests {
         SandboxAvailability {
             docker,
             lxd: false,
+            ecrou: false,
             ssh,
             http,
         }

@@ -106,14 +106,16 @@ While a subagent works, the status strip pins a live line under the spinner — 
 
 ### Where bash runs
 
-The `bash` tool can run somewhere other than your host. The profile's `sandbox.kind` in `config.yaml` picks where, and `RHEMA_SANDBOX` overrides the stored kind the same way `RHEMA_PROVIDER` does. Four kinds:
+The `bash` tool can run somewhere other than your host. The profile's `sandbox.kind` in `config.yaml` picks where, and `RHEMA_SANDBOX` overrides the stored kind the same way `RHEMA_PROVIDER` does. Six kinds:
 
 - `local` (the default): commands run as your processes in the workspace, exactly as they always have.
 - `docker`: commands run in a container with the workspace bind-mounted at its own path. rhema stands the container up on first use and keeps it between runs.
+- `lxd`: commands run in an LXD instance — a container with the workspace disk-mounted 1:1, or a `--vm` with the tree attached — named by `sandbox.instance`, stood up on first use and kept between runs.
+- `ecrou`: commands run in a microVM that boots for the length of the command and dies after it, the workspace shared in at its own path. One machine per command — nothing persists between them, and the isolation is a real kernel per command.
 - `ssh`: commands run on a remote box named by `sandbox.host`, with nothing installed on the far end.
 - `http`: commands run behind a `rhema-sandboxd` daemon named by `sandbox.url`, with an optional token.
 
-Your `SYSTEM.md` is copied into the sandbox at startup, and in the mount postures (`docker`, `lxd` containers) the discovered skills ride read-only mounts — the global skills directory alongside the workspace — so a skill you edit mid-session is the new text the next read sees; the seeded postures (`ssh`, `http`, `lxd` vms) copy the skills in instead. Your keys, profiles, and session history stay on your host in every mode. On safety, plainly: `local` and the mount postures are process hygiene, not security boundaries. When the last rhema session using a rhema-created sandbox instance exits, the instance is stopped; an instance you named yourself in the profile is never stopped out from under you.
+Your `SYSTEM.md` is copied into the sandbox at startup, and in the mount postures (`docker`, `lxd` containers) the discovered skills ride read-only mounts — the global skills directory alongside the workspace — so a skill you edit mid-session is the new text the next read sees; the seeded postures (`ssh`, `http`, `lxd` vms, `ecrou`) copy the skills in instead. Your keys, profiles, and session history stay on your host in every mode. On safety, plainly: `local` and the mount postures are process hygiene, not security boundaries. When the last rhema session using a rhema-created sandbox instance exits, the instance is stopped; an instance you named yourself in the profile is never stopped out from under you.
 
 ### Program status (OSC 7501)
 

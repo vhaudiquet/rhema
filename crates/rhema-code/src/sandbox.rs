@@ -30,6 +30,7 @@ use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_sandbox::{FsRoot, InstanceLock, Sandbox, ShellSandbox, seed_workspace};
 use rhema_sandbox_docker::DockerSandbox;
+use rhema_sandbox_ecrou::EcrouSandbox;
 use rhema_sandbox_http::HttpSandbox;
 use rhema_sandbox_lxd::LxdSandbox;
 use rhema_sandbox_ssh::SshSandbox;
@@ -46,6 +47,11 @@ const DOCKER_PROBE_BUDGET: Duration = Duration::from_secs(3);
 /// the local daemon answers, and the startup path's patience is the
 /// same few seconds.
 const LXD_PROBE_BUDGET: Duration = Duration::from_secs(3);
+
+/// The same bound on one `ecrou probe`: the CLI dlopens libkrun and
+/// checks KVM, answering in well under a second when the host can
+/// boot machines.
+const ECROU_PROBE_BUDGET: Duration = Duration::from_secs(5);
 
 /// The name the seeding marker file carries, under the workspace's
 /// `.rhema` directory — the sandbox-side twin of the cloud frontends'
@@ -210,6 +216,25 @@ pub async fn assemble(
                 )
             }
         }
+        SandboxChoice::Ecrou => {
+            // One-shot machines: nothing to stand up, provision, or
+            // stop — every exec boots, and the workspace share is the
+            // whole persistence story. The lock serializes the seed
+            // the way it serializes every other assembly's mutation
+            // window; the name is the workspace's derivation, stable
+            // across sessions, never a stoppable instance.
+            let image = sandbox_target(profile, "ecrou").unwrap_or_else(|| "ubuntu".to_owned());
+            let name = derived_ecrou_name(workspace);
+            let lock = InstanceLock::acquire("ecrou", &name)
+                .map_err(|err| anyhow::anyhow!("the ecrou sandbox lock: {err}"))?;
+            instance_lock = Some(lock);
+            // The skills ride the seed, not a read-only mount: the
+            // strict snap ecrou ships in cannot see the config
+            // directory a skills mount would name.
+            let root = FsRoot::new(workspace.to_path_buf())
+                .map_err(|err| anyhow::anyhow!("ecrou sandbox root: {err}"))?;
+            Arc::new(EcrouSandbox::new(image, root, host_workspace.clone()))
+        }
         SandboxChoice::Ssh => {
             // Stored only, no env tier: a stray variable must not
             // silently move where commands run (rhema-config's stance).
@@ -309,7 +334,15 @@ impl Sandboxed {
         let Some(managed) = self.managed.take() else {
             self.instance_lock = None;
             if trace {
-                eprintln!("sandbox: the profile names this instance; leaving it running");
+                let why = match self.choice {
+                    SandboxChoice::Docker | SandboxChoice::Lxd => {
+                        "the profile names this instance; leaving it running"
+                    }
+                    // One-shot machines and transports without an
+                    // instance: nothing persists past the session.
+                    _ => "nothing persists to stop",
+                };
+                eprintln!("sandbox: {why}");
             }
             return;
         };
@@ -392,6 +425,9 @@ pub struct SandboxAvailability {
     pub docker: bool,
     /// `lxc info` answered within the budget.
     pub lxd: bool,
+    /// `ecrou probe` answered within the budget: KVM working,
+    /// libkrun loadable, the cache writable.
+    pub ecrou: bool,
     /// The `ssh` binary exists and the profile names a host.
     pub ssh: bool,
     /// The profile names a sandbox URL. Never network-probed: a daemon
@@ -409,6 +445,7 @@ impl SandboxAvailability {
         Self::from_parts(
             docker_info_answers(),
             lxd_info_answers(),
+            ecrou_probe_answers(),
             binary_on_path("ssh"),
             profile,
         )
@@ -421,12 +458,14 @@ impl SandboxAvailability {
     fn from_parts(
         docker_answers: bool,
         lxd_answers: bool,
+        ecrou_answers: bool,
         ssh_present: bool,
         profile: &Profile,
     ) -> Self {
         Self {
             docker: docker_answers,
             lxd: lxd_answers,
+            ecrou: ecrou_answers,
             ssh: ssh_present && profile.sandbox_host().is_some(),
             http: profile.sandbox_url().is_some(),
         }
@@ -439,6 +478,7 @@ impl SandboxAvailability {
             SandboxChoice::Local => true,
             SandboxChoice::Docker => self.docker,
             SandboxChoice::Lxd => self.lxd,
+            SandboxChoice::Ecrou => self.ecrou,
             SandboxChoice::Ssh => self.ssh,
             SandboxChoice::Http => self.http,
         }
@@ -451,6 +491,7 @@ impl SandboxAvailability {
             SandboxChoice::Local,
             SandboxChoice::Docker,
             SandboxChoice::Lxd,
+            SandboxChoice::Ecrou,
             SandboxChoice::Ssh,
             SandboxChoice::Http,
         ]
@@ -473,6 +514,33 @@ fn lxd_info_answers() -> bool {
         return false;
     };
     let deadline = Instant::now() + LXD_PROBE_BUDGET;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(25)),
+            Err(_) => return false,
+        }
+    }
+}
+
+/// Whether `ecrou` answers at all: `ecrou probe` exiting zero within
+/// the budget. A missing binary is the common "no" — the host cannot
+/// boot machines, and the picker says so.
+fn ecrou_probe_answers() -> bool {
+    let Ok(mut child) = std::process::Command::new("ecrou")
+        .arg("probe")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + ECROU_PROBE_BUDGET;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.success(),
@@ -614,6 +682,7 @@ fn sandbox_target(profile: &Profile, kind: &str) -> Option<String> {
         .or_else(|| match kind {
             "docker" => profile.sandbox_container(),
             "lxd" => profile.sandbox_instance(),
+            "ecrou" => profile.sandbox_image(),
             "ssh" => profile.sandbox_host(),
             "http" => profile.sandbox_url(),
             _ => None,
@@ -1117,6 +1186,13 @@ fn derived_lxd_name(workspace: &Path) -> String {
     derived_container_name(workspace)
 }
 
+/// The ecrou lock's name: the same derivation. There is no instance
+/// to list — the name keys the assembly's cross-process lock only,
+/// the seed's mutation window.
+fn derived_ecrou_name(workspace: &Path) -> String {
+    derived_container_name(workspace)
+}
+
 /// FNV-1a over the workspace path, hex — a hash pinned here so a
 /// workspace's derived container name is stable across rhema builds
 /// and Rust versions (std's `DefaultHasher` makes no such promise).
@@ -1529,6 +1605,7 @@ mod tests {
         assert!(none.offers(SandboxChoice::Local));
         assert!(!none.offers(SandboxChoice::Docker));
         assert!(!none.offers(SandboxChoice::Lxd));
+        assert!(!none.offers(SandboxChoice::Ecrou));
         assert!(!none.offers(SandboxChoice::Ssh));
         assert!(!none.offers(SandboxChoice::Http));
         assert_eq!(none.offered(), vec![SandboxChoice::Local]);
@@ -1539,6 +1616,7 @@ mod tests {
         let all = SandboxAvailability {
             docker: true,
             lxd: true,
+            ecrou: true,
             ssh: true,
             http: true,
         };
@@ -1548,6 +1626,7 @@ mod tests {
                 SandboxChoice::Local,
                 SandboxChoice::Docker,
                 SandboxChoice::Lxd,
+                SandboxChoice::Ecrou,
                 SandboxChoice::Ssh,
                 SandboxChoice::Http,
             ]
@@ -1558,16 +1637,19 @@ mod tests {
     fn ssh_needs_both_the_binary_and_a_host() {
         let host = sandbox_profile(Some("deploy@box"), None);
         assert!(
-            SandboxAvailability::from_parts(true, false, true, &host).offers(SandboxChoice::Ssh)
+            SandboxAvailability::from_parts(true, false, false, true, &host)
+                .offers(SandboxChoice::Ssh)
         );
         // A configured host with no ssh binary is not offered.
         assert!(
-            !SandboxAvailability::from_parts(true, false, false, &host).offers(SandboxChoice::Ssh)
+            !SandboxAvailability::from_parts(true, false, false, false, &host)
+                .offers(SandboxChoice::Ssh)
         );
         // A binary with nothing configured is not either.
         let bare = sandbox_profile(None, None);
         assert!(
-            !SandboxAvailability::from_parts(true, false, true, &bare).offers(SandboxChoice::Ssh)
+            !SandboxAvailability::from_parts(true, false, false, true, &bare)
+                .offers(SandboxChoice::Ssh)
         );
     }
 
@@ -1577,11 +1659,12 @@ mod tests {
         // selectable, and the turn reports the failure in-band.
         let url = sandbox_profile(None, Some("http://box:7331"));
         assert!(
-            SandboxAvailability::from_parts(false, false, false, &url).offers(SandboxChoice::Http)
+            SandboxAvailability::from_parts(false, false, false, false, &url)
+                .offers(SandboxChoice::Http)
         );
         let bare = sandbox_profile(None, None);
         assert!(
-            !SandboxAvailability::from_parts(false, false, false, &bare)
+            !SandboxAvailability::from_parts(false, false, false, false, &bare)
                 .offers(SandboxChoice::Http)
         );
     }
@@ -1629,11 +1712,11 @@ mod tests {
     fn docker_passes_its_machine_fact_through_untouched() {
         let bare = sandbox_profile(None, None);
         assert!(
-            SandboxAvailability::from_parts(true, false, false, &bare)
+            SandboxAvailability::from_parts(true, false, false, false, &bare)
                 .offers(SandboxChoice::Docker)
         );
         assert!(
-            !SandboxAvailability::from_parts(false, false, false, &bare)
+            !SandboxAvailability::from_parts(false, false, false, false, &bare)
                 .offers(SandboxChoice::Docker)
         );
     }

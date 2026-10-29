@@ -6643,12 +6643,14 @@ mod tests {
     fn offered(
         docker: bool,
         lxd: bool,
+        ecrou: bool,
         ssh: bool,
         http: bool,
     ) -> crate::sandbox::SandboxAvailability {
         crate::sandbox::SandboxAvailability {
             docker,
             lxd,
+            ecrou,
             ssh,
             http,
         }
@@ -6669,7 +6671,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(true, true, true, true)
+                &offered(true, true, false, true, true)
             ),
             SandboxChoice::Docker
         );
@@ -6682,7 +6684,7 @@ mod tests {
                 &config,
                 &layered,
                 Path::new("/proj"),
-                &offered(true, true, true, true)
+                &offered(true, true, false, true, true)
             ),
             SandboxChoice::Http
         );
@@ -6693,7 +6695,7 @@ mod tests {
                 &config,
                 &typo,
                 Path::new("/proj"),
-                &offered(true, true, true, true)
+                &offered(true, true, false, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6713,7 +6715,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, true, true, false)
+                &offered(false, true, false, true, false)
             ),
             SandboxChoice::Ssh
         );
@@ -6724,7 +6726,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, true, false, false)
+                &offered(false, true, false, false, false)
             ),
             SandboxChoice::Local
         );
@@ -6740,7 +6742,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, true, false, true)
+                &offered(false, true, false, false, true)
             ),
             SandboxChoice::Http
         );
@@ -6751,7 +6753,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(false, true, false, false)
+                &offered(false, true, false, false, false)
             ),
             SandboxChoice::Local
         );
@@ -6761,7 +6763,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(true, true, true, true)
+                &offered(true, true, false, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6771,7 +6773,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/other"),
-                &offered(true, true, true, true)
+                &offered(true, true, false, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6785,7 +6787,7 @@ mod tests {
                 &config,
                 &rhema_config::Profile::default(),
                 Path::new("/proj"),
-                &offered(true, true, true, true)
+                &offered(true, true, false, true, true)
             ),
             SandboxChoice::Local
         );
@@ -6812,7 +6814,7 @@ mod tests {
                 &config,
                 &profile,
                 Path::new("/proj"),
-                &offered(true, true, false, false)
+                &offered(true, true, false, false, false)
             ),
             SandboxChoice::Docker
         );
@@ -6832,7 +6834,7 @@ mod tests {
             instance_lock: None,
             managed: None,
         });
-        h.app.sandbox_offered = offered(true, true, false, false);
+        h.app.sandbox_offered = offered(true, true, false, false, false);
         let effects = h.app.choose_sandbox(SandboxChoice::Local);
         assert!(effects.is_empty(), "local rebuilds inline: {effects:?}");
         assert!(h.app.sandboxed.is_none());
@@ -6853,7 +6855,7 @@ mod tests {
     #[test]
     fn choosing_a_non_local_sandbox_assembles_through_an_effect() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(true, true, false, false);
+        h.app.sandbox_offered = offered(true, true, false, false, false);
         let effects = h.app.choose_sandbox(SandboxChoice::Docker);
         assert_eq!(
             effects,
@@ -6901,7 +6903,7 @@ mod tests {
     #[test]
     fn a_failed_assembly_reports_in_band_and_keeps_the_running_tools() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(false, true, false, true);
+        h.app.sandbox_offered = offered(false, true, false, false, true);
         assert_eq!(
             h.app.choose_sandbox(SandboxChoice::Http),
             vec![Effect::AssembleSandbox(SandboxChoice::Http)]
@@ -6952,7 +6954,7 @@ mod tests {
     #[test]
     fn slash_sandbox_opens_the_settings_sandbox_page() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(true, true, true, false);
+        h.app.sandbox_offered = offered(true, true, false, true, false);
         crate::commands::dispatch(&mut h.app, "/sandbox");
         let Screen::Settings(settings) = &h.app.screen else {
             panic!("expected the settings screen");
@@ -6973,7 +6975,7 @@ mod tests {
     #[test]
     fn enter_on_a_sandbox_instance_row_runs_it() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        h.app.sandbox_offered = offered(true, true, true, false);
+        h.app.sandbox_offered = offered(true, true, false, true, false);
         h.app.config.set_for_profile(Some("personal"), |profile| {
             profile.place_sandbox_instance(
                 "dev",

@@ -436,6 +436,9 @@ fn render_add_sandbox_dialog(
             let what = match kind {
                 crate::args::SandboxChoice::Docker => "a container, named after this workspace",
                 crate::args::SandboxChoice::Lxd => "an LXD instance, named after this workspace",
+                crate::args::SandboxChoice::Ecrou => {
+                    "a microVM per command, named after this workspace"
+                }
                 crate::args::SandboxChoice::Ssh => "a remote box, by user@host",
                 crate::args::SandboxChoice::Http => "a rhema-sandboxd, by url",
                 crate::args::SandboxChoice::Local => "this host",
