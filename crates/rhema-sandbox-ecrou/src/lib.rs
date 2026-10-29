@@ -22,7 +22,10 @@
 //! the console (kernel and boot chatter, merged) is discarded, and
 //! the pump tails the two files while the machine runs — complete
 //! lines through `progress`, a capped tail each, the same shape
-//! `exec_util` gives the pipe-backed backends.
+//! `exec_util` gives the pipe-backed backends. The scratch roots
+//! where the `ecrou` on PATH can see it: `/tmp` for a native build,
+//! the snap's durable area for the snap, whose private `/tmp` would
+//! take the files and swallow the output.
 //!
 //! The budget and the cancel are the kill, host-side: killing the
 //! `ecrou` process kills the machine with it (the VMM child carries
@@ -127,6 +130,80 @@ fn shell_line(command: &str) -> String {
 /// `--`. Nothing in the payload is quoted for a middle shell — the
 /// argv crosses the CLI as argv, and the init script's own quoting
 /// takes it from there.
+/// The capture scratch, in a directory both sides see. A native ecrou
+/// shares `/tmp` with this process, so the default tempdir is right;
+/// the snap runs in a private `/tmp` of its own, where a shared
+/// directory would take the payload's streams and vanish — the
+/// machine writes them, the host never sees a byte. Under the snap
+/// the scratch moves to the snap's durable area
+/// (`~/snap/ecrou/common`), which the confinement maps to
+/// `$SNAP_USER_COMMON` and the home interface grants; the tempdir's
+/// drop cleans it either way.
+fn capture_dir() -> Result<tempfile::TempDir, SandboxError> {
+    scratch_dir().map_err(|err| SandboxError::Unavailable(format!("the capture directory: {err}")))
+}
+
+/// A scratch directory the `ecrou` on PATH can see, for anything that
+/// crosses the process boundary — the capture files, and the tests'
+/// workspace shares. The snap's `/tmp` is a private per-run tmpfs: a
+/// host-created directory there is invisible to the machine, and
+/// ecrou refuses the share ("share host path does not exist") or,
+/// when the capture path happens to sit inside the share, silently
+/// materializes an empty copy of it and shares that — output
+/// swallowed, exit green. The snap's durable area
+/// (`~/snap/ecrou/common`) is on the real filesystem and visible to
+/// both sides, so scratch under the snap roots there; a native build
+/// shares `/tmp` with this process and keeps the default. The plain
+/// prefix is for the snap's other rule: dot entries under `$HOME` are
+/// silently invisible to it, and tempfile's default `.tmp` prefix is
+/// exactly that.
+fn scratch_dir() -> std::io::Result<tempfile::TempDir> {
+    let lookup = snap_lookup_path().and_then(|p| std::fs::canonicalize(p).ok());
+    match snap_common(lookup.as_deref()) {
+        Some(root) => {
+            std::fs::create_dir_all(&root)?;
+            tempfile::Builder::new()
+                .prefix("rhema-ecrou-")
+                .rand_bytes(6)
+                .tempdir_in(root)
+        }
+        None => tempfile::Builder::new()
+            .prefix("rhema-ecrou-")
+            .rand_bytes(6)
+            .tempdir(),
+    }
+}
+
+/// Resolve the `ecrou` name the way exec will, so the capture scratch
+/// lands where the binary that writes it can reach. The backend
+/// spawns the name bare, so the search is PATH's own.
+fn snap_lookup_path() -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join("ecrou"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// The snap's durable area when the resolved binary is snapd's
+/// launcher: `/snap/bin/ecrou` is a symlink into snapd's own tree,
+/// and a native build never is.
+fn snap_common(resolved: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let resolved = resolved?;
+    let confined = resolved == std::path::Path::new("/usr/bin/snap")
+        || resolved.starts_with("/usr/lib/snapd/")
+        || resolved.starts_with("/snap/");
+    if !confined {
+        return None;
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(
+        std::path::Path::new(&home)
+            .join("snap")
+            .join("ecrou")
+            .join("common"),
+    )
+}
+
 fn run_argv(image: &str, capture: &Path, share: &str, workdir: &str, command: &str) -> Vec<String> {
     vec![
         "ecrou".to_owned(),
@@ -324,7 +401,7 @@ fn ecrou_ready() -> bool {
         }
         // The smoke boot: one machine, a tempdir share — the whole
         // path a live test takes, minus the assertions.
-        let Ok(smoke) = tempfile::tempdir() else {
+        let Ok(smoke) = scratch_dir() else {
             return false;
         };
         let share = smoke.path().to_string_lossy().into_owned();
@@ -373,8 +450,7 @@ impl Sandbox for EcrouSandbox {
         // The capture directory lives one call: the guest writes the
         // payload's streams into it through the share ecrou takes,
         // and the drop deletes whatever the run left.
-        let capture = tempfile::tempdir()
-            .map_err(|err| SandboxError::Unavailable(format!("the capture directory: {err}")))?;
+        let capture = capture_dir()?;
         let argv = run_argv(
             &self.image,
             capture.path(),
@@ -522,10 +598,27 @@ impl EcrouSandbox {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use std::path::Path;
     use std::sync::Arc;
 
+    /// The snap detector: snapd's launcher under its aliases counts, a
+    /// native build never does.
+    #[test]
+    fn the_capture_scratch_only_moves_for_the_snap() {
+        assert!(snap_common(Some(Path::new("/usr/bin/snap"))).is_some());
+        assert!(snap_common(Some(Path::new("/usr/lib/snapd/snapd"))).is_some());
+        assert!(snap_common(Some(Path::new("/snap/ecrou/current/bin/ecrou"))).is_some());
+        assert!(snap_common(Some(Path::new("/usr/local/bin/ecrou"))).is_none());
+        assert!(snap_common(Some(Path::new("/home/u/.cargo/bin/ecrou"))).is_none());
+        assert!(snap_common(Some(Path::new("/snapd/ecrou"))).is_none());
+        assert!(
+            snap_common(None).is_none(),
+            "an unresolved binary stays native"
+        );
+    }
+
     fn sandbox() -> (EcrouSandbox, tempfile::TempDir) {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = scratch_dir().expect("tempdir");
         let root = FsRoot::new(dir.path().to_path_buf()).expect("the sandbox root builds");
         let ws = dir.path().to_string_lossy().into_owned();
         (EcrouSandbox::new("alpine:3.23", root, ws), dir)
@@ -603,7 +696,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_tail_pump_reads_complete_lines_and_holds_the_partial() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = scratch_dir().expect("tempdir");
         let path = dir.path().join("out");
         std::fs::write(&path, b"first\nsec").expect("the first chunk is written");
         let mut stream = StreamTail {
@@ -635,7 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_final_pass_takes_a_trailing_partial_line() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = scratch_dir().expect("tempdir");
         let path = dir.path().join("out");
         std::fs::write(&path, b"no newline at the end").expect("the chunk is written");
         let mut stream = StreamTail {
@@ -653,7 +746,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_tail_pump_treats_an_absent_file_as_silence() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = scratch_dir().expect("tempdir");
         let mut stream = StreamTail {
             path: dir.path().join("never-written"),
             ..StreamTail::default()
@@ -752,7 +845,7 @@ mod tests {
 
     #[test]
     fn the_guest_cwd_joins_the_mount_point() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = scratch_dir().expect("tempdir");
         let root = FsRoot::new(dir.path().to_path_buf()).expect("the root builds");
         let mount = std::fs::canonicalize(dir.path())
             .expect("the tempdir resolves")
@@ -921,7 +1014,7 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_from_a_tarball_unpacks_into_the_root() {
-        let payload = tempfile::tempdir().expect("tempdir");
+        let payload = scratch_dir().expect("tempdir");
         std::fs::write(payload.path().join("packed.txt"), b"from tar")
             .expect("the payload file is written");
         let archive = payload.path().join("packed.tar.gz");
@@ -957,7 +1050,7 @@ mod tests {
     /// the git-seed test clones. Skips the test when git or the
     /// GNU `timeout` the seed budget leans on are missing.
     fn fixture_repo() -> tempfile::TempDir {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = scratch_dir().expect("tempdir");
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(args)

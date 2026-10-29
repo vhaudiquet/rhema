@@ -424,7 +424,11 @@ infrastructure); phase 9 is the one users see.
   share is 1:1 at its own host path (the model's absolute paths are
   the same strings on both sides), and the skills ride the seed
   instead of a read-only mount: the snap ecrou ships in is confined
-  and cannot see the config directory a mount would name. Availability
+  and cannot see the config directory a mount would name — nor the
+  host's `/tmp`, which is a private per-run tmpfs inside the snap, so
+  the capture scratch roots in the snap's own durable area and any
+  `/tmp`-rooted share is refused loudly rather than silently sharing
+  an empty tree. Availability
   is `ecrou probe` — the dlopen-and-KVM check — and a stale binary
   surfaces in-band at the first exec, as an unavailable sandbox.
 - **The settings page is an instance list** — the host's `local`
