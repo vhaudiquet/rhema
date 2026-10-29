@@ -549,7 +549,10 @@ that executes commands.
 The same crate is what lets `rhema-code` choose where its `bash` runs:
 `local | docker | ssh | http` in v1 — stored, remembered per workspace
 beside the remembered profile, pickable in the TUI, probed for
-availability. Backends sort into two families — fs-sharing (`FsRoot`
+availability. The choice is profile state like the provider and the
+model: a profile switch re-resolves `bash`'s home from the profile
+moving in and re-assembles it, so work and personal never share a
+sandbox by accident. Backends sort into two families — fs-sharing (`FsRoot`
 plus an exec prefix: local direct, bubblewrap, a bind-mounted container)
 and fs-disjoint (copied containers, VMs, SSH, the protocol family) — and
 a VM costs no client code at all: an image running `sandboxd` is
