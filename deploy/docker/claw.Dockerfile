@@ -32,6 +32,7 @@ COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openroute
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
 COPY crates/rhema-sandbox/Cargo.toml crates/rhema-sandbox/Cargo.toml
 COPY crates/rhema-sandbox-docker/Cargo.toml crates/rhema-sandbox-docker/Cargo.toml
+COPY crates/rhema-sandbox-ecrou/Cargo.toml crates/rhema-sandbox-ecrou/Cargo.toml
 COPY crates/rhema-sandbox-http/Cargo.toml crates/rhema-sandbox-http/Cargo.toml
 COPY crates/rhema-sandbox-local/Cargo.toml crates/rhema-sandbox-local/Cargo.toml
 COPY crates/rhema-sandbox-lxd/Cargo.toml crates/rhema-sandbox-lxd/Cargo.toml
