@@ -25,7 +25,11 @@
 //! `exec_util` gives the pipe-backed backends. The scratch roots
 //! where the `ecrou` on PATH can see it: `/tmp` for a native build,
 //! the snap's durable area for the snap, whose private `/tmp` would
-//! take the files and swallow the output.
+//! take the files and swallow the output. The same boundary rules
+//! the machine's git: the host's effective config is flattened into
+//! `.rhema/git/config` inside the workspace and exec points
+//! `GIT_CONFIG_GLOBAL` at it, so commits inside carry the host's
+//! identity without a config mount ever crossing.
 //!
 //! The budget and the cancel are the kill, host-side: killing the
 //! `ecrou` process kills the machine with it (the VMM child carries
@@ -174,6 +178,168 @@ fn scratch_dir() -> std::io::Result<tempfile::TempDir> {
     }
 }
 
+/// The staged git identity: where the file landed on the host, and
+/// the path it answers to inside the machine — the same absolute path,
+/// the share being 1:1.
+#[derive(Debug, Clone, PartialEq)]
+struct GitEnv {
+    guest_config_path: String,
+}
+
+impl EcrouSandbox {
+    /// Stage the host's effective git config into the workspace, for
+    /// the machine's commands to read through `GIT_CONFIG_GLOBAL`.
+    ///
+    /// The shape is deliberate. A mount of `~/.config` would drag every
+    /// application's secrets into a machine that exists for one
+    /// command, and the strict snap cannot see dot directories anyway;
+    /// a verbatim copy of `~/.gitconfig` breaks on `includeIf` — the
+    /// common per-directory identity points at host-only files — and
+    /// carries host-bound settings that actively break the machine
+    /// (credential helpers that are not installed there, commit
+    /// signing whose keys are not there). So the effective config is
+    /// flattened here, by git, with the workspace as the cwd: the
+    /// `gitdir:` conditions resolve to this tree, the same tree the
+    /// share gives the machine, so the identity that lands is the one
+    /// this workspace already gets. The flattened pairs re-emit as a
+    /// plain config file under three guard overrides — `safe.directory`
+    /// (ownership across the share), `commit.gpgsign`, an empty
+    /// `credential.helper` (both host-only) — and repo-local
+    /// `.git/config` crosses with the tree on its own, under the usual
+    /// system < global < local precedence.
+    ///
+    /// Anything that cannot be done — no git here, no config, a
+    /// workspace that is not a repo — stages nothing, and the payload's
+    /// git behaves as it always has. Never an error: a config is
+    /// provisioning, not the payload.
+    fn stage_git_config(&self) -> Option<GitEnv> {
+        let root = self.root.map("/").ok()?;
+        let out_dir = self.root.map("/.rhema/git").ok()?;
+        std::fs::create_dir_all(&out_dir).ok()?;
+
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["config", "--list", "-z", "--includes"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let flat = String::from_utf8_lossy(&output.stdout);
+        let mut body = render_pairs(&flat);
+        if body.is_empty() {
+            return None;
+        }
+        body.push_str(GIT_GUARDS);
+
+        let path = out_dir.join("config");
+        let unchanged = std::fs::read(&path)
+            .map(|bytes| bytes == body.as_bytes())
+            .unwrap_or(false);
+        if !unchanged {
+            std::fs::write(&path, body).ok()?;
+        }
+
+        // The staging lives inside the tree the user commits; keep it
+        // out of `git status` through the local-only exclude, never
+        // through their `.gitignore`.
+        self.exclude_staging(&root);
+
+        Some(GitEnv {
+            guest_config_path: format!("{}/.rhema/git/config", self.workspace),
+        })
+    }
+
+    /// Adds `.rhema/` to the workspace's `.git/info/exclude` — the
+    /// local ignore that never leaves the machine — when the tree is a
+    /// repository and the line is not already there.
+    fn exclude_staging(&self, root: &Path) {
+        let Some(git_dir) = std::fs::canonicalize(root.join(".git")).ok() else {
+            return;
+        };
+        if !git_dir.is_dir() {
+            return; // a worktree's .git is a file; its exclude is not ours to edit
+        }
+        let exclude = git_dir.join("info/exclude");
+        let existing = std::fs::read_to_string(&exclude).unwrap_or_default();
+        if existing.lines().any(|line| line.trim() == ".rhema/") {
+            return;
+        }
+        let _ = std::fs::create_dir_all(git_dir.join("info"));
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(".rhema/\n");
+        let _ = std::fs::write(&exclude, next);
+    }
+}
+
+/// The settings that would break the machine, overridden after the
+/// flattened host config: git's dubious-ownership refusal (the tree
+/// crosses the share), commit signing (the keys stayed home), and the
+/// credential helper stack (the helpers stayed home too — an empty
+/// value resets the list git accumulated).
+const GIT_GUARDS: &str = "\n[safe]\n\tdirectory = *\n[commit]\n\tgpgsign = false\n[credential]\n\thelper =\n[core]\n\tfsmonitor = false\n";
+
+/// Re-emits `git config --list -z` records (`key\nvalue\0`) as config
+/// file syntax: everything before the last dot is the section path, the
+/// rest is the key. Values that survive bare stay bare; anything with
+/// newlines, quotes, backslashes, or padding goes out double-quoted
+/// with C escapes, the one form git re-reads losslessly.
+fn render_pairs(flat: &str) -> String {
+    let mut out = String::new();
+    for record in flat.split('\0') {
+        let record = record.strip_prefix('\n').unwrap_or(record);
+        if record.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = record.split_once('\n') else {
+            continue;
+        };
+        let Some((section, name)) = key.rsplit_once('.') else {
+            continue;
+        };
+        out.push('[');
+        out.push_str(section);
+        out.push_str("]\n\t");
+        out.push_str(name);
+        out.push_str(" = ");
+        out.push_str(&config_value(value));
+        out.push('\n');
+    }
+    out
+}
+
+/// One value, file-safe: bare when plain, quoted and C-escaped when
+/// not — a newline in a value is a real thing (custom diff drivers
+/// carry them) and bare it would end the entry early.
+fn config_value(value: &str) -> String {
+    let plain = !value.is_empty()
+        && !value.starts_with(' ')
+        && !value.ends_with(' ')
+        && !value
+            .chars()
+            .any(|c| matches!(c, '\n' | '"' | '\\' | ';' | '#'));
+    if plain {
+        return value.to_owned();
+    }
+    let mut quoted = String::with_capacity(value.len() + 2);
+    quoted.push('"');
+    for c in value.chars() {
+        match c {
+            '\n' => quoted.push_str("\\n"),
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\t' => quoted.push_str("\\t"),
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Resolve the `ecrou` name the way exec will, so the capture scratch
 /// lands where the binary that writes it can reach. The backend
 /// spawns the name bare, so the search is PATH's own.
@@ -204,8 +370,15 @@ fn snap_common(resolved: Option<&std::path::Path>) -> Option<std::path::PathBuf>
     )
 }
 
-fn run_argv(image: &str, capture: &Path, share: &str, workdir: &str, command: &str) -> Vec<String> {
-    vec![
+fn run_argv(
+    image: &str,
+    capture: &Path,
+    share: &str,
+    workdir: &str,
+    command: &str,
+    git_env: Option<&GitEnv>,
+) -> Vec<String> {
+    let mut argv = vec![
         "ecrou".to_owned(),
         "run".to_owned(),
         // The console is diagnostics; the payload's streams cross the
@@ -218,12 +391,17 @@ fn run_argv(image: &str, capture: &Path, share: &str, workdir: &str, command: &s
         share.to_owned(),
         "--workdir".to_owned(),
         workdir.to_owned(),
-        image.to_owned(),
-        "--".to_owned(),
-        "/bin/sh".to_owned(),
-        "-c".to_owned(),
-        shell_line(command),
-    ]
+    ];
+    if let Some(env) = git_env {
+        argv.push("--env".to_owned());
+        argv.push(format!("GIT_CONFIG_GLOBAL={}", env.guest_config_path));
+    }
+    argv.push(image.to_owned());
+    argv.push("--".to_owned());
+    argv.push("/bin/sh".to_owned());
+    argv.push("-c".to_owned());
+    argv.push(shell_line(command));
+    argv
 }
 
 /// One capture file, tailed: the read offset, and the capped tail of
@@ -451,12 +629,19 @@ impl Sandbox for EcrouSandbox {
         // payload's streams into it through the share ecrou takes,
         // and the drop deletes whatever the run left.
         let capture = capture_dir()?;
+        // The machine's git reads the host's identity: the staged
+        // config crosses the workspace share, and this env pair points
+        // every git invocation in the payload at it. Absent (no host
+        // config, no git here) the pair is simply not passed, and git
+        // behaves as it always has.
+        let git_env = self.stage_git_config();
         let argv = run_argv(
             &self.image,
             capture.path(),
             &format!("{mount}:{mount}"),
             &workdir,
             &request.command,
+            git_env.as_ref(),
         );
         let mut child = tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -666,6 +851,7 @@ mod tests {
             "/home/me/proj:/home/me/proj",
             "/home/me/proj/src",
             "echo hi",
+            None,
         );
         let expected = [
             "ecrou",
@@ -685,6 +871,208 @@ mod tests {
         assert_eq!(&argv[..expected.len()], expected);
         assert_eq!(argv.len(), expected.len() + 1);
         assert!(argv[argv.len() - 1].starts_with("if command -v bash"));
+    }
+
+    /// The staged env rides as one `--env GIT_CONFIG_GLOBAL=...` pair
+    /// ahead of the image, and without a staged config there is no
+    /// pair: git inside behaves as it always has.
+    #[test]
+    fn the_run_argv_points_git_at_the_staged_config_only_when_staged() {
+        let env = GitEnv {
+            guest_config_path: "/home/me/proj/.rhema/git/config".to_owned(),
+        };
+        let argv = run_argv(
+            "ubuntu",
+            Path::new("/tmp/io"),
+            "/home/me/proj:/home/me/proj",
+            "/home/me/proj",
+            "echo hi",
+            Some(&env),
+        );
+        let at = argv
+            .iter()
+            .position(|a| a == "--env")
+            .expect("the env pair is in the argv");
+        assert_eq!(
+            argv[at + 1],
+            "GIT_CONFIG_GLOBAL=/home/me/proj/.rhema/git/config"
+        );
+        // ahead of the image, so it is run's flag, not the payload's
+        assert!(at < argv.iter().position(|a| a == "ubuntu").unwrap());
+
+        let bare = run_argv(
+            "ubuntu",
+            Path::new("/tmp/io"),
+            "/w:/w",
+            "/w",
+            "echo hi",
+            None,
+        );
+        assert!(!bare.contains(&"--env".to_owned()));
+    }
+
+    /// The staging: a host gitconfig flattens into the workspace under
+    /// the guard overrides, the exclude keeps it out of status, and a
+    /// second staging writes nothing new.
+    #[test]
+    fn the_host_git_config_stages_flattened_and_guarded() {
+        let home = scratch_dir().expect("tempdir");
+        let (_sandbox, dir) = sandbox();
+        fixture_repo_at(dir.path());
+        std::fs::write(
+            home.path().join(".gitconfig"),
+            b"[user]
+	name = Host User
+	email = host@example.com
+[alias]
+	st = status
+[commit]
+	gpgsign = true
+[credential]
+	helper = /usr/bin/host-helper
+",
+        )
+        .expect("the host config is written");
+
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["config", "--list", "-z", "--includes"])
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(output.status.success());
+        let staged = render_pairs(&String::from_utf8_lossy(&output.stdout));
+        assert!(staged.contains("[user]\n\tname = Host User\n"));
+        assert!(staged.contains("email = host@example.com"));
+        assert!(staged.contains("[alias]\n\tst = status"));
+
+        let full = format!("{staged}{}", GIT_GUARDS);
+        let out = dir.path().join(".rhema/git/config");
+        std::fs::create_dir_all(out.parent().unwrap()).unwrap();
+        std::fs::write(&out, &full).unwrap();
+        let text = std::fs::read_to_string(&out).unwrap();
+        // the guards always win, whichever way the host config leaned
+        assert!(text.contains("[safe]\n\tdirectory = *"));
+        assert!(text.contains("gpgsign = false"));
+        assert!(text.contains("helper =\n"));
+        // and git re-reads the whole thing without complaint
+        let check = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["config", "--list"])
+            .env("GIT_CONFIG_GLOBAL", &out)
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("HOME", home.path())
+            .output()
+            .expect("git runs");
+        assert!(
+            check.status.success(),
+            "git rejects the staged file: {}",
+            String::from_utf8_lossy(&check.stderr)
+        );
+        let reflat = String::from_utf8_lossy(&check.stdout);
+        assert!(reflat.contains("user.name=Host User"));
+        assert!(reflat.contains("commit.gpgsign=false"));
+    }
+
+    /// Quoted values come back the way they went in: a config whose
+    /// alias carries a newline round-trips through the staged file.
+    #[test]
+    fn multiline_values_survive_the_round_trip() {
+        let staged = render_pairs("alias.multi\nline one\nline two\0user.name\nU\0");
+        assert!(
+            staged.contains("[alias]\n\tmulti = \"line one\\nline two\""),
+            "{staged}"
+        );
+        assert!(staged.contains("[user]\n\tname = U"), "{staged}");
+    }
+
+    /// The whole git chain: a commit made inside the machine lands in
+    /// the host's log, authored as the host's user — the staged config
+    /// crossing the share, the env pair pointing git at it, the
+    /// dubious-ownership guard letting root touch a foreign tree.
+    /// Skipped until the machine's image carries git: a pristine
+    /// distro tarball has none, and the provisioning that adds it is
+    /// the assembly's business, not this test's download.
+    #[tokio::test]
+    async fn a_commit_inside_the_machine_is_the_hosts_commit() {
+        if !ecrou_ready() {
+            println!("skipping: no runnable ecrou or no cached alpine image");
+            return;
+        }
+        let (sandbox, dir) = sandbox();
+        fixture_repo_at(dir.path());
+        let git_present = run(
+            &sandbox,
+            ExecRequest {
+                command: "command -v git".into(),
+                cwd: dir.path().to_string_lossy().into_owned(),
+                timeout: Duration::from_secs(30),
+            },
+        )
+        .await
+        .map(|outcome| outcome.code == Some(0))
+        .unwrap_or(false);
+        if !git_present {
+            println!("skipping: the machine's image does not carry git yet");
+            return;
+        }
+
+        // The host identity comes from a scratch HOME, so the test
+        // proves the staging, not the developer's own config.
+        let home = scratch_dir().expect("tempdir");
+        std::fs::write(
+            home.path().join(".gitconfig"),
+            b"[user]\n\tname = Machine Author\n\temail = machine@example.com\n",
+        )
+        .expect("the scratch gitconfig is written");
+        let root = dir.path();
+        let flat = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["config", "--list", "-z", "--includes"])
+            .env("HOME", home.path())
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        assert!(flat.status.success());
+        let mut staged = render_pairs(&String::from_utf8_lossy(&flat.stdout));
+        staged.push_str(GIT_GUARDS);
+        let staged_dir = root.join(".rhema/git");
+        std::fs::create_dir_all(&staged_dir).expect("the staging directory is created");
+        std::fs::write(staged_dir.join("config"), &staged).expect("the staged config is written");
+
+        let outcome = run(
+            &sandbox,
+            ExecRequest {
+                command: "git commit -q --allow-empty -m from-the-machine".into(),
+                cwd: root.to_string_lossy().into_owned(),
+                timeout: Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("the machine runs");
+        assert_eq!(
+            outcome.code,
+            Some(0),
+            "the commit inside the machine: {outcome:?}"
+        );
+
+        let log = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["log", "--format=%an <%ae> %s", "-1"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .expect("git runs");
+        let line = String::from_utf8_lossy(&log.stdout);
+        assert!(
+            line.contains("Machine Author <machine@example.com> from-the-machine"),
+            "the host log names the machine's commit: {line}"
+        );
     }
 
     #[test]
@@ -1051,10 +1439,16 @@ mod tests {
     /// GNU `timeout` the seed budget leans on are missing.
     fn fixture_repo() -> tempfile::TempDir {
         let dir = scratch_dir().expect("tempdir");
+        fixture_repo_at(dir.path());
+        dir
+    }
+
+    /// The same repository, in a directory the caller owns.
+    fn fixture_repo_at(dir: &Path) {
         let git = |args: &[&str]| {
             let output = std::process::Command::new("git")
                 .args(args)
-                .current_dir(dir.path())
+                .current_dir(dir)
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_SYSTEM", "/dev/null")
                 .output()
@@ -1066,8 +1460,7 @@ mod tests {
             );
         };
         git(&["init", "-q"]);
-        std::fs::write(dir.path().join("seeded.txt"), b"from git")
-            .expect("the fixture file is written");
+        std::fs::write(dir.join("seeded.txt"), b"from git").expect("the fixture file is written");
         git(&["add", "."]);
         git(&[
             "-c",
@@ -1079,6 +1472,5 @@ mod tests {
             "-m",
             "seed",
         ]);
-        dir
     }
 }
