@@ -428,7 +428,19 @@ infrastructure); phase 9 is the one users see.
   host's `/tmp`, which is a private per-run tmpfs inside the snap, so
   the capture scratch roots in the snap's own durable area and any
   `/tmp`-rooted share is refused loudly rather than silently sharing
-  an empty tree. Availability
+  an empty tree.
+
+  The machine's tools are the image's business, not rhema's: the
+  sandbox consumes a rhema-ready base image — an OCI reference
+  built and hosted outside this tree, digest-pinned in the config —
+  and no assembly ever runs a package manager inside a machine. The
+  git identity is the one thing rhema stages per exec (the flattened
+  `.rhema/git/config` and its `GIT_CONFIG_GLOBAL` pair); it carries
+  the host's user across whatever image is named. Project-specific
+  dependencies are a planned layer: a spec file in the repo, keyed
+  by content hash into ecrou's cache so projects cannot inherit
+  each other's entries — decided, not yet built.
+  Availability
   is `ecrou probe` — the dlopen-and-KVM check — and a stale binary
   surfaces in-band at the first exec, as an unavailable sandbox.
 - **The settings page is an instance list** — the host's `local`
