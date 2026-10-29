@@ -15,12 +15,17 @@
 //!
 //! The discipline every holder follows:
 //!
-//! 1. [`InstanceLock::acquire`] — blocking exclusive — around the
-//!    whole assembly (launch, devices, idmap repair, provision, seed):
-//!    the mutation window, serialized across processes. The wait is
-//!    bounded by the work itself, every step of which already runs
-//!    under a timeout — a process assembling behind a cold first run
-//!    waits out the provision it would otherwise have raced.
+//! 1. [`InstanceLock::acquire`] — exclusive when free, otherwise a
+//!    join — around the whole assembly (launch, devices, idmap
+//!    repair, provision, seed). A free instance is the mutation
+//!    window, serialized across processes; a held one means a peer
+//!    has assembled it or is doing so, and the newcomer takes the
+//!    session posture directly, waiting out only a peer's mid-assembly
+//!    work. The wait is bounded by the work itself, every step of
+//!    which already runs under a timeout — a process assembling
+//!    behind a cold first run waits out the provision it would
+//!    otherwise have raced, and a process arriving behind a live
+//!    session does not wait at all.
 //! 2. [`InstanceLock::share`] — downgrade to shared — for the
 //!    session's life: use without exclusion.
 //! 3. On the way out, [`InstanceLock::is_sole`] — a non-blocking
@@ -97,10 +102,20 @@ impl InstanceLock {
                 .write(true)
                 .open(&path)?,
         );
-        // Outside the registry's lock: the blocking wait (a peer's cold
+        // Outside the registry's lock: the wait (a peer's cold
         // provision, minutes at worst) must not pin the registry and
         // stall an unrelated instance's assembly in this process.
-        file.lock()?;
+        if file.try_lock().is_err() {
+            // A peer holds the instance — either mid-assembly
+            // (exclusive, and the shared take below waits out exactly
+            // that work) or live in its session posture (shared, and
+            // the take lands at once). Either way the instance is
+            // assembled or becoming so: join it. Blocking on
+            // exclusive here would deadlock — a live peer never lifts
+            // its shared hold, and the mutation window is not this
+            // process's to retake.
+            file.lock_shared()?;
+        }
         registry()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -276,5 +291,44 @@ mod tests {
         );
         assert!(lock.is_sole(), "the acquired hold is exclusive");
         releaser.join().expect("the releaser joins");
+    }
+
+    #[test]
+    fn a_peer_session_posture_is_joined_not_waited_for() {
+        // The peer holds the session posture — shared, for its
+        // session's whole life. The second comer must join at once,
+        // not block on an exclusive window the peer will never offer.
+        // The peer is a raw descriptor, the way another process
+        // holds it: the registry must not shortcut the join into a
+        // same-process no-op.
+        let peer = open_direct("lxd", "join-test");
+        peer.lock_shared().expect("the peer's posture");
+
+        let started = std::time::Instant::now();
+        let joiner = InstanceLock::acquire("lxd", "join-test").expect("the join lands");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "joining a live peer must not wait"
+        );
+        // Both hold shared; the joiner's exit may not claim the
+        // instance while the peer lives.
+        assert!(!joiner.is_sole(), "the joiner is not the last holder");
+    }
+
+    #[test]
+    fn a_peer_mid_assembly_is_joined_once_it_lands() {
+        // The peer holds exclusive — mid-assembly. The joiner waits
+        // out the work and lands in the posture the peer downgrades
+        // to, never taking the mutation window itself.
+        let peer = open_direct("lxd", "join-mid-test");
+        peer.lock().expect("the peer's exclusive");
+        let downgrade = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            peer.lock_shared().expect("the peer's posture");
+            peer
+        });
+        let joiner = InstanceLock::acquire("lxd", "join-mid-test").expect("the join lands");
+        let _peer = downgrade.join().expect("the peer downgrades");
+        assert!(!joiner.is_sole(), "the joiner shares with the peer");
     }
 }
