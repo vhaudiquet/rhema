@@ -204,7 +204,8 @@ backend.
 | container, v1 | the `docker` CLI: bind-mount posture = `FsRoot` + `docker exec`; copied posture = `docker cp` | medium |
 | container, later | the Engine API over the unix socket, behind its own seam (the `SandboxApi` precedent) | medium |
 | LXD / Incus | `rhema-sandbox-lxd`: one driver, two instance types. A container takes the docker bind-mount posture (`lxc exec` prefix, a `disk` device mapping the host root in) or the fs-disjoint one via `lxc file`; a `--vm` instance is the same driver with a launch flag — and the first true isolation tier in the offer | medium |
-| VM / microVM | an image running `rhema-sandboxd` — packaging, not code | ~zero |
+| VM / microVM, hosted | an image running `rhema-sandboxd` — packaging, not code | ~zero |
+| microVM, local | `rhema-sandbox-ecrou`: one boot per command through the `ecrou` CLI, the workspace a 1:1 `--share`, output a `--capture` file pair tailed into the live-line pump | medium |
 | SSH | daemonless: exec = `ssh host -- bash -c` (live lines through the existing pump), files via `ssh cat`/`tee`, seed via `ssh git clone`; or `sandboxd` on the remote behind `ssh -L` — then it *is* `HttpSandbox` | medium / zero |
 | cloud sandboxes | `SandboxDo` (transport unchanged, types from `protocol.rs`); `VercelSandbox` (the vendor adapter, kept) | done |
 
@@ -224,7 +225,8 @@ The choice is the `ProviderChoice` pattern applied to machines: a
 remembered profile (`last_sandbox_in`/`note_sandbox_in`); a TUI picker
 cloned from `ProfileScreen`; and availability probing like
 `startup_profile` — the offered list depends on the machine (a docker
-socket present, `ssh` configured, a `sandboxd` reachable).
+socket present, `lxc` answering, `ecrou probe` green, `ssh`
+configured, a `sandboxd` reachable).
 `RHEMA_SANDBOX` overrides the stored kind, the env-wins convention
 `RHEMA_PROVIDER` set.
 
@@ -246,13 +248,19 @@ sessions` — verified, not workspace-relative), the clipboard, the TUI
 itself. That is the whole migration for `rhema-code`: no state moves;
 only the tool's executor and the prompt's workspace string change.
 
-The v1 set is `local | docker | lxd | ssh | http` — lxd landed as one
-driver and a launch flag, containers and `--vm` instances alike
-(§9): `rhema-sandbox-lxd` execs through `lxc exec`, mounts a `disk`
-device 1:1 for the container posture, and rides `lxc file` attached
-for the VM one. bubblewrap/nsjail and microVM images land later with
-zero trait change — that is the test the abstraction has to pass
-(§2). SSH ships daemonless first: zero setup on the far
+The v1 set is `local | docker | lxd | ecrou | ssh | http` — lxd
+landed as one driver and a launch flag, containers and `--vm`
+instances alike (§9): `rhema-sandbox-lxd` execs through `lxc exec`,
+mounts a `disk` device 1:1 for the container posture, and rides
+`lxc file` attached for the VM one. ecrou is the local microVM tier:
+`rhema-sandbox-ecrou` boots one machine per command, shares the
+workspace at its own host path 1:1, and tails the capture files for
+live lines — the machine exists for the length of the command, so
+there is nothing to stand up, provision, or stop; the seed is the
+whole assembly, and the timeout prefix is the kill (§9). ecrou
+landed with zero trait change — that is the test the abstraction has
+to pass (§2), now answered once. bubblewrap/nsjail land the same way.
+SSH ships daemonless first: zero setup on the far
 end is the mode's reason to exist; tunnel-plus-`sandboxd` is the
 documented fast path. The instance is prepared, not assumed: the
 ensure step provisions a standard tool set — git, ripgrep, fd-find,
@@ -268,8 +276,8 @@ lands at the workspace, not the instance's default directory.
 The choice UI is an instance list, not a kind list: the host's own
 `local` row, then the named instances the config stores — a user's
 name over a kind and that kind's one target — then the add row. The
-add dialog offers the ready kinds only (docker, lxd), ssh and http
-out of the picker — not absent from the contract, just honest about
+add dialog offers the ready kinds only (docker, lxd, ecrou), ssh
+and http out of the picker — not absent from the contract, just honest about
 their standing (ssh's working tree has no carry story yet, §8; http
 presumes a daemon to reach) — and asks nothing else: no target is
 collected, because the concrete name is the workspace's to set,
@@ -408,6 +416,17 @@ infrastructure); phase 9 is the one users see.
   vocabulary. The VM type is the point: local and mounts are process
   hygiene, and an LXD VM is the strongest isolation tier a
   `rhema-code` host can offer without a cloud.
+- **ecrou is a per-command machine, not a managed instance** — one
+  boot per exec makes the machine's whole lifecycle the exec's, so
+  the assembly has no ensure step, no provision, and no stop; the
+  cross-process lock only serializes the seed, and the derived
+  instance name keys that lock, not a listable instance. The workspace
+  share is 1:1 at its own host path (the model's absolute paths are
+  the same strings on both sides), and the skills ride the seed
+  instead of a read-only mount: the snap ecrou ships in is confined
+  and cannot see the config directory a mount would name. Availability
+  is `ecrou probe` — the dlopen-and-KVM check — and a stale binary
+  surfaces in-band at the first exec, as an unavailable sandbox.
 - **The settings page is an instance list** — the host's `local`
   row, the stored instances, the add row last. The add dialog
   advertises the ready set only (docker, lxd) while ssh and http
