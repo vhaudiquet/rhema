@@ -1733,11 +1733,10 @@ pub fn palette_rows(
             return rows;
         }
     }
-    // `/sandbox` completes from live rows first — the profile's
-    // configured instances — with the fixed kinds underneath, so a
-    // kind stays completable on a profile that named none. The same
-    // `/sandbox <name>` run handles both: a configured instance's name
-    // runs bash in it, anything else parses as a kind.
+    // `/sandbox` completes from the profile's configured instances
+    // alone. A bare kind still runs (`/sandbox <name>` falls back to
+    // parsing the word as a kind), but the palette names nothing the
+    // profile does not.
     if let Some(needle) = input.strip_prefix("/sandbox ") {
         let needle = needle.to_lowercase();
         let rows: Vec<PaletteRow> = sandboxes
@@ -1753,14 +1752,6 @@ pub fn palette_rows(
                 value: instance.name.clone(),
                 description: sandbox_description(instance),
             })
-            .chain(crate::commands::SANDBOX_KINDS.iter().filter_map(|choice| {
-                (needle.is_empty() || choice.name.starts_with(&needle)).then_some(
-                    PaletteRow::Sandbox {
-                        value: choice.name.to_owned(),
-                        description: choice.description.to_owned(),
-                    },
-                )
-            }))
             .collect();
         if !rows.is_empty() {
             return rows;
@@ -4480,7 +4471,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(values, ["build", "lxd"]);
+        assert_eq!(values, ["build"]);
     }
 
     // --- Path completion ---

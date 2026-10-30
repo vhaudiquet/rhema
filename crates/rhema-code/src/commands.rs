@@ -51,39 +51,6 @@ const THINKING_LEVELS: &[Choice] = &[
     },
 ];
 
-/// The kinds `/sandbox` takes, in the spec's canonical order. The
-/// picker shows only what this machine offered; the command's words
-/// are the whole v1 set, and an unoffered one is declined in-band.
-/// The palette lists these beneath the profile's configured instances
-/// — the argument's live rows — so a kind stays completable with none
-/// configured.
-pub(crate) const SANDBOX_KINDS: &[Choice] = &[
-    Choice {
-        name: "local",
-        description: "this host — the default",
-    },
-    Choice {
-        name: "docker",
-        description: "a container, when the docker CLI answers",
-    },
-    Choice {
-        name: "lxd",
-        description: "an LXD instance, when the lxc CLI answers",
-    },
-    Choice {
-        name: "ecrou",
-        description: "a microVM per command, when ecrou probes green",
-    },
-    Choice {
-        name: "ssh",
-        description: "a remote box, when a host is configured",
-    },
-    Choice {
-        name: "http",
-        description: "a rhema-sandboxd URL",
-    },
-];
-
 /// One row of the command table.
 #[derive(Debug, Clone, Copy)]
 pub struct CommandSpec {

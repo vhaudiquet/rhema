@@ -7505,7 +7505,7 @@ mod tests {
     }
 
     #[test]
-    fn the_sandbox_palette_completes_the_instances_then_the_kinds() {
+    fn the_sandbox_palette_completes_the_instances() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
         h.app.config.set_for_profile(Some("personal"), |profile| {
             profile.place_sandbox_instance(
@@ -7536,8 +7536,8 @@ mod tests {
                 &crate::icons::UNICODE,
             )
         };
-        // The empty argument lists the configured instances first, the
-        // fixed kinds beneath.
+        // The empty argument lists the configured instances and
+        // nothing else: the bare kinds never join the rows.
         let names: Vec<String> = rows("/sandbox ")
             .into_iter()
             .filter_map(|row| match row {
@@ -7546,9 +7546,7 @@ mod tests {
             })
             .collect();
         // Map order: sandbox_instances is a BTreeMap, alphabetical.
-        assert_eq!(names[..2], ["build".to_owned(), "dev".to_owned()]);
-        assert!(names.contains(&"docker".to_owned()));
-        assert!(names.contains(&"local".to_owned()));
+        assert_eq!(names, ["build".to_owned(), "dev".to_owned()]);
         // A stem narrows across the name, the kind, and the target.
         assert_eq!(
             rows("/sandbox dev")

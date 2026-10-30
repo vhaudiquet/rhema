@@ -229,8 +229,8 @@ socket present, `lxc` answering, `ecrou probe` green, `ssh`
 configured, a `sandboxd` reachable).
 `RHEMA_SANDBOX` overrides the stored kind, the env-wins convention
 `RHEMA_PROVIDER` set. The TUI's `/sandbox` completes the session
-profile's configured instances first (`sandbox_instances`, the same
-rows the Sandbox page edits) and the fixed kinds beneath; a profile
+profile's configured instances (`sandbox_instances`, the same rows
+the Sandbox page edits) and nothing else; a profile
 switch re-resolves `bash`'s home from the profile moving in — its own
 section, offered-gated, local when it names nothing, never the
 previous profile's choice or the workspace memory.
