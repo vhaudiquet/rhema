@@ -82,7 +82,8 @@ need it, and tolerating odd `n` keeps the tool honest about what it
 actually does.
 
 `zoom(id, 1)` is the ground truth: the message whole. Every larger `n`
-is a view of range text the model can always see through. This algebra
+returns content too, over a wider range, under the same cut; the
+summary lines belong to the view, never to zoom. This algebra
 is the only thing the model learns; a later compactor changes what lines
 say, never what they address.
 
@@ -199,15 +200,21 @@ zoom(id, n?, at?)
 ```
 
 - `id` — the range start (a message index).
-- `n` — the range length, default 1: the message whole.
-- `at` — a byte offset into the output, for paging a long message.
+- `n` — the range length, default 1: one message; a wider range
+  returns its messages.
+- `at` — a byte offset into the output, for paging long output.
 
-`n > 1` returns the two halves as their current lines. `n = 1` returns
-the message whole, rendered by role: user and assistant text verbatim,
-tool calls as `name(args)`, results as their content. Output past
-`ZOOM_MAX` bytes (8 KiB) is cut with the total named and the `at` to
-resume at. Errors — an id past the end of the log, `n = 0` — are
-in-band `is_error` results, per the resolver contract.
+The range returns its messages whole, rendered by role: user and
+assistant text verbatim, tool calls as `name(args)`, results as their
+content. One message returns alone; a wider range heads each message
+with its `id+1|` address, so a page of content is also a map of the
+range. Output past `ZOOM_MAX` bytes (8 KiB) is cut with the total
+named and the `at` to resume at — the same cap and path at every `n`,
+so paging a range and paging a message are one call shape. The
+halving algebra stays in §2: a narrower range is still the way to
+jump, and the addresses on a page name what to jump to. Errors — an
+id past the end of the log, `n = 0` — are in-band `is_error` results,
+per the resolver contract.
 
 The tool reads the **mirror**: the log as the last request carried it.
 The decorator refreshes the mirror on every request (requests always

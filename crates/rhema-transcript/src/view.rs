@@ -586,9 +586,10 @@ impl Transcript {
             "<transcript>\n\
              The blocks below cover this conversation's older messages,\n\
              oldest first. Each block is headed `id+n|`: the n messages\n\
-             from index id on, condensed. zoom(id, 1) returns message id\n\
-             whole; zoom(id, n) opens the block's range in halves. The\n\
-             messages after the blocks are recent; they are whole.\n\n",
+             from index id on, condensed. zoom(id, n) returns those n\n\
+             messages whole; long output is cut and the note names the\n\
+             `at` to resume at. The messages after the blocks are\n\
+             recent; they are whole.\n\n",
         );
         for section in &self.sections {
             text.push_str(&format!(
@@ -933,7 +934,7 @@ mod tests {
             panic!("text view message");
         };
         assert!(text.starts_with("<transcript>"), "{text}");
-        assert!(text.contains("zoom(id, 1)"), "{text}");
+        assert!(text.contains("zoom(id, n)"), "{text}");
         // Sections are addressed `id+n|`, tiling from the log's start.
         assert!(text.contains("0+"), "{text}");
 

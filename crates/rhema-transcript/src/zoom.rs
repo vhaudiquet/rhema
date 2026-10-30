@@ -15,8 +15,9 @@ use crate::summary;
 use crate::tree::Range;
 use crate::view::Transcript;
 
-/// Bytes `zoom(id, 1)` returns before cutting; the cut names the total
-/// and the `at` to resume at.
+/// Bytes one zoom call returns before cutting; the cut names the
+/// total and the `at` to resume at. The same cap and path at every
+/// `n`, so paging a range and paging a message are one call shape.
 pub const ZOOM_MAX_BYTES: usize = 8 * 1024;
 
 /// The `zoom` resolver over a shared mirror.
@@ -39,10 +40,10 @@ impl Zoom {
             "zoom",
             "Read older messages of this conversation whole. The \
              <transcript> block in the context summarizes old ranges as \
-             `id+n|text` lines; zoom opens them. zoom(id) returns message \
-             id whole; zoom(id, n) returns the two halves of the n \
-             messages from id on. Long output is cut: pass at (a byte \
-             offset) to page on. Before you guess, ask, or re-run a \
+             `id+n|text` lines; zoom opens them. zoom(id, n) returns the \
+             n messages from id whole, a wide range with each message \
+             headed by its id+1| address. Long output is cut: pass at (a \
+             byte offset) to page on. Before you guess, ask, or re-run a \
              command: if a summary line omits what you need, the \
              original is here.",
             serde_json::json!({
@@ -54,7 +55,7 @@ impl Zoom {
                     },
                     "n": {
                         "type": "integer",
-                        "description": "how many messages the range covers; 1 returns the message whole",
+                        "description": "how many messages the range covers; the messages come back whole",
                         "default": 1
                     },
                     "at": {
@@ -113,34 +114,29 @@ impl Zoom {
             );
         }
 
-        let text = if range.n == 1 {
-            let message = transcript.message(range.id).expect("the range was checked");
-            summary::render_message(message)
-        } else {
-            let (first, second) = range.halves();
-            let mut out = summary::line_for_range(
-                transcript.range(first).expect("the range was checked"),
-                first,
-            );
-            if let Some(second) = second {
-                out.push('\n');
-                out.push_str(&summary::line_for_range(
-                    transcript.range(second).expect("the range was checked"),
-                    second,
-                ));
+        let mut text = String::new();
+        for i in range.id..range.id + range.n {
+            if !text.is_empty() {
+                text.push('\n');
             }
-            out
-        };
+            if range.n > 1 {
+                // The addresses are the map: a page of content also
+                // names the messages it holds, so the model can zoom a
+                // neighbor or a narrower range without recomputing.
+                text.push_str(&format!("{i}+1|"));
+            }
+            let message = transcript.message(i).expect("the range was checked");
+            text.push_str(&summary::render_message(message));
+        }
 
         if at >= text.len() {
-            return ToolResult::failure(
-                &call.id,
-                format!(
-                    "zoom: `at` {at} is past the end ({} bytes); page from {}",
-                    text.len(),
-                    text.len().saturating_sub(ZOOM_MAX_BYTES)
-                ),
-            );
+            let mut msg = format!("zoom: `at` {at} is past the end ({} bytes)", text.len());
+            // Only a render bigger than one page has a tail worth
+            // pointing at.
+            if text.len() > ZOOM_MAX_BYTES {
+                msg.push_str(&format!("; page from {}", text.len() - ZOOM_MAX_BYTES));
+            }
+            return ToolResult::failure(&call.id, msg);
         }
         let start = snapped_back(&text, at);
         if text.len() <= ZOOM_MAX_BYTES {
@@ -230,20 +226,49 @@ mod tests {
     }
 
     #[test]
-    fn zoom_many_returns_two_range_lines() {
+    fn zoom_many_returns_the_messages_whole_and_addressed() {
         let zoom = Zoom::new(transcript_with(history()));
-        let out = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 2 })));
+        let out = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 3 })));
         assert!(!out.is_error);
         assert!(
-            out.content.contains("0+1|user: fix the login bug"),
+            out.content.contains("0+1|fix the login bug")
+                && out.content.contains("1+1|checking auth.rs")
+                && out.content.contains("2+1|the session one, not the api key"),
             "{}",
             out.content
         );
-        assert!(
-            out.content.contains("1+1|assistant: checking auth.rs"),
-            "{}",
-            out.content
-        );
+    }
+
+    #[test]
+    fn a_wide_range_pages_the_same_way_a_message_does() {
+        // Three messages of half the cap each: the range's content
+        // cannot fit one page, and the second page begins inside the
+        // second message, so the third one's address lands on it.
+        let chunk = "y".repeat(ZOOM_MAX_BYTES / 2);
+        let transcript = transcript_with(vec![
+            Message::text(Role::User, chunk.clone()),
+            Message::text(Role::Assistant, chunk.clone()),
+            Message::text(Role::User, chunk),
+        ]);
+        let zoom = Zoom::new(Arc::clone(&transcript));
+        let first = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 3 })));
+        assert!(first.content.contains("at="), "{}", first.content);
+        let resume_at: usize = first
+            .content
+            .split("at=")
+            .nth(1)
+            .unwrap()
+            .trim_end_matches(']')
+            .parse()
+            .unwrap();
+        let rest = zoom.zoom(&call(
+            serde_json::json!({ "id": 0, "n": 3, "at": resume_at }),
+        ));
+        assert!(!rest.is_error, "{:?}", rest);
+        // The last page reaches the range's final message and needs
+        // no further cut.
+        assert!(rest.content.contains("2+1|"), "{}", rest.content);
+        assert!(!rest.content.contains("at="), "{}", rest.content);
     }
 
     #[test]
@@ -308,6 +333,29 @@ mod tests {
         let out = zoom.zoom(&call(serde_json::json!({ "id": 1, "n": u64::MAX })));
         assert!(out.is_error);
         assert!(out.content.contains("past the log"), "{}", out.content);
+    }
+
+    #[test]
+    fn an_at_past_the_end_names_the_content_size() {
+        // The render is the content, so the byte count in the error
+        // must equal what a successful call over the same range
+        // returns, not the size of some condensation of it.
+        let zoom = Zoom::new(transcript_with(history()));
+        let whole = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 3 })));
+        assert!(!whole.is_error);
+        let out = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 3, "at": 10_000 })));
+        assert!(out.is_error);
+        let size: usize = out
+            .content
+            .split('(')
+            .nth(1)
+            .unwrap()
+            .split(" bytes")
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(size, whole.content.len(), "{}", out.content);
     }
 
     #[test]
