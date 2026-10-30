@@ -40,6 +40,10 @@ pub fn tighten_file(path: &Path) {
     if let Ok(file) = opened {
         #[cfg(unix)]
         tighten(&file);
+        // No permission model here: the open is only the existence
+        // check, and the handle closes unused.
+        #[cfg(not(unix))]
+        drop(file);
     }
 }
 
