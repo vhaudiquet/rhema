@@ -485,7 +485,7 @@ impl CodingAgent {
         // points; without one, the provided convenience runs unchanged.
         let result = match self.config.steering.clone() {
             Some(steering) => {
-                self.steered_turn(message, sink, &ctx, steering.as_ref())
+                self.steps(Some(message), sink, &ctx, Some(steering.as_ref()))
                     .await
             }
             None => {
@@ -504,30 +504,71 @@ impl CodingAgent {
         Ok(result?)
     }
 
-    /// The steered turn loop: the provided [`run_turn`]'s shape plus the
-    /// two drain points. Anything finished while no turn ran is
-    /// announced at turn start, before the user's input (consecutive
-    /// User messages are valid); between steps, what finished during the
-    /// last one is announced before the next. The append lands at a step
-    /// boundary, so the next commit hook persists it like any history.
-    async fn steered_turn(
+    /// The failed request again: no new input message — the step loop
+    /// runs on the history exactly as the failed turn left it, so the
+    /// same request goes out. A first-request failure re-issues the
+    /// identical request; a mid-turn failure re-issues the step that
+    /// failed, with the committed steps still in view (the model sees
+    /// what already ran and continues from there — no committed tool
+    /// call re-executes behind the model's back). A history entering
+    /// with unanswered calls — a commit-hook failure after an intent
+    /// landed — revives first, like any turn. Approval and cancel wire
+    /// in as in [`Self::turn_message_with_cancel`].
+    pub async fn retry_turn_with_cancel(
         &mut self,
-        input: Message,
+        sink: &mut dyn EventSink,
+        approval: Arc<dyn Approval>,
+        cancelled: Arc<AtomicBool>,
+    ) -> Result<ModelOutput, CodingAgentError> {
+        self.turns += 1;
+        let ctx = ToolContext {
+            cwd: self.tools.workspace().to_path_buf(),
+            run_id: format!("turn-{}", self.turns),
+            cancelled,
+        };
+        revive_dangling_calls(&mut self.session, self.tools.as_ref(), &ctx).await;
+        self.tools.install_approval(approval);
+        let steering = self.config.steering.clone();
+        let result = self.steps(None, sink, &ctx, steering.as_deref()).await;
+        self.tools.clear_approval();
+        Ok(result?)
+    }
+
+    /// The driver's own step loop: [`run_turn`]'s shape, generalized
+    /// over the two axes the turn shapes differ on — whether a new
+    /// input message is pushed (a retry pushes none; it re-requests on
+    /// the history as the last turn left it) and whether a steering
+    /// source drains between steps. With an input and no steering the
+    /// provided [`run_turn`] runs instead; this loop covers the shapes
+    /// it does not. Anything finished while no turn ran is announced at
+    /// loop start, before the input (consecutive User messages are
+    /// valid); between steps, what finished during the last one is
+    /// announced before the next. The append lands at a step boundary,
+    /// so the next commit hook persists it like any history.
+    async fn steps(
+        &mut self,
+        input: Option<Message>,
         sink: &mut dyn EventSink,
         ctx: &ToolContext,
-        steering: &dyn Steering,
+        steering: Option<&dyn Steering>,
     ) -> Result<ModelOutput, AgentError> {
         // Fresh per turn: a finish announced in an earlier turn is
         // announced again here while its report stays unfetched.
         let mut announced: Vec<String> = Vec::new();
-        self.append_notifications(steering, &mut announced);
-        self.session.history.push(input);
+        if let Some(steering) = steering {
+            self.append_notifications(steering, &mut announced);
+        }
+        if let Some(input) = input {
+            self.session.history.push(input);
+        }
         for _ in 0..self.config.max_turn_steps {
             let step = self.agent.step(&mut self.session, sink, ctx).await?;
             if step.output.stop_reason != StopReason::ToolUse {
                 return Ok(step.output);
             }
-            self.append_notifications(steering, &mut announced);
+            if let Some(steering) = steering {
+                self.append_notifications(steering, &mut announced);
+            }
         }
         Err(AgentError::MaxIterations(self.config.max_turn_steps))
     }
