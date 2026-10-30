@@ -1,9 +1,6 @@
 name: rhema
-base: core24
+base: core26
 title: Rhema
-# The version of record: the release workflow rewrites it from the tag
-# before building, so a tag ships exactly its number (the chart's pattern).
-version: "0.1.0"
 summary: Rhema Code, a terminal-based coding agent
 description: |
   Rhema Code is a terminal-based coding agent, built on the Rhema agent framework.
@@ -13,13 +10,7 @@ issues: https://github.com/vhaudiquet/rhema/issues
 source-code: https://github.com/vhaudiquet/rhema
 website: https://rhema.rs
 grade: stable
-confinement: classic
-# One platform per arch, each building only on its own arch: whatever
-# runs `snapcraft pack` produces its platform's snap, and an upload
-# from that machine adds the arch to the channel. Wire an arm64 or
-# riscv64 runner into the snap jobs (or pack on the board itself) and
-# the channels gain the arch — no cross-compiling anywhere. core24
-# ships all three, and rustup serves the pinned toolchain on each.
+confinement: strict
 platforms:
   amd64:
   arm64:
@@ -28,6 +19,13 @@ platforms:
 apps:
   rhema:
     command: bin/rhema
+    plugs:
+      - network
+      - network-bind
+      - home
+      - x11
+      - wayland
+      - kvm
 
 parts:
   rhema:
@@ -42,9 +40,9 @@ parts:
     # vendored crossterm ([patch.crates-io]) rides along.
     rust-path: [crates/rhema-code]
     # rust-toolchain.toml picks the toolchain; the plugin honors it.
-    # Point the ELF interpreter and rpath at the base: the binary links
-    # the core24 glibc, and a classic snap would otherwise look it up on
-    # the host and refuse to start where the host's is older.
+    # Point the ELF interpreter and rpath into the snap: the binary
+    # links the base's glibc and the staged libssl, and the patch is
+    # what makes both resolve from the confined root at run time.
     build-attributes: [enable-patchelf]
     # The banner's edge label (rhema-code's build.rs): an edge snap
     # reads v<version>-edge.<sha>. The release workflow deletes this
@@ -59,3 +57,5 @@ parts:
       - build-essential
       - pkg-config
       - libssl-dev
+    stage-packages:
+      - libssl3t64

@@ -3,9 +3,11 @@
 # chart, and the library closure to crates.io. Edge publishing on every
 # main push lives in ci.yml. Release candidates (a v* tag with a
 # prerelease suffix, v0.2.0-rc1) publish nothing, like pkh's release
-# jobs. The snap jobs are parked until the store approves classic
-# confinement (a forum request); the recipe in snap/snapcraft.yaml is
-# proven — the first run packed and the store rejected the upload.
+# jobs. The snap jobs are parked; the recipe in snap/snapcraft.yaml is
+# strict now, which needs no confinement approval from the store, so
+# the open ask is the kvm auto-connect assertion (a forum request).
+# The recipe is proven: the first run packed, and the store rejected
+# the classic upload before the switch.
 name: release
 on:
   push:
