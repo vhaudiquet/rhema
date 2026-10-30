@@ -412,7 +412,8 @@ async fn run_turn(
         let key = key.clone();
         let revision = revision.clone();
         Box::new(move |session: &Session| {
-            checkpoint(&store, &key, &revision, session).map_err(|err| err.to_string())
+            checkpoint(&store, &key, &revision, session)
+                .map_err(|err| rhema_core::CommitError(err.to_string()))
         }) as rhema_core::CommitHook
     };
     agent.set_commit_hook(Some(hook));

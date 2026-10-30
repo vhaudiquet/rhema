@@ -79,7 +79,7 @@ impl Transport for FetchTransport {
                     return;
                 }
             };
-            let headers: Vec<(String, String)> = response.headers().iter().collect();
+            let headers: Vec<(String, String)> = response.headers().entries().collect();
             let _ = head_slot.send(Some((response.status_code(), headers)));
             let mut body = match response.stream() {
                 Ok(body) => body,
