@@ -1,0 +1,15 @@
+- Forge-watching: do not use coding agent directly to answer, we need claw's accounts
+- why do we have forge.rs in rhema-claw?
+- rhema-claw: dynamic "plugins", "integrations"
+- rhema-claw: is it normal to have so many SQL requests embedded as strings in rust code?
+
+- rhema-claw: allow the claw to customize its UI color palette
+
+- rhema-claw: allow seeing context window
+  The WebUI and Android App should show the current context window for the session.
+
+- bash-intent-filter
+- web-search
+
+- sandbox: the copy-in story for ssh (specs/rhema-sandbox.md §8): what carries the working tree to the remote — git-remote sync, rsync/tar push, or sandboxd behind ssh -L
+- sandbox: the two postures stay first-class — copy-in (laptop folder carried over) vs native (DO storage IS the workspace, copying meaningless); ssh is copy-in with no mount today
