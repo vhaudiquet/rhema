@@ -5,9 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rhema_coding_agent::{Approval, CodingAgent, repair_dangling_calls};
-use rhema_core::{Event, EventSink, Image, Message, Role, Session};
+use rhema_coding_agent::{Approval, CodingAgent, CodingAgentError, repair_dangling_calls};
+use rhema_core::{Event, EventSink, Image, Message, ModelOutput, Role, Session};
 use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
+use std::future::Future;
+use std::pin::Pin;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -60,21 +62,28 @@ async fn next_steer(steer: &mut UnboundedReceiver<String>) -> Option<String> {
     }
 }
 
-/// The prompt a turn chain starts from: the text and the images beside
-/// it, in submission order. Every later prompt of the chain — a steered
-/// nudge — is text only.
-#[derive(Debug, Default)]
-pub struct Prompt {
-    /// The prompt's text.
-    pub text: String,
-    /// The images beside the text.
-    pub images: Vec<Image>,
+/// What a turn chain starts from. Every later turn of the chain — a
+/// steered nudge — is a text-only user message either way.
+#[derive(Debug)]
+pub enum Prompt {
+    /// A fresh prompt: the text and the images beside it, in submission
+    /// order, become the session's next user message.
+    User {
+        /// The prompt's text.
+        text: String,
+        /// The images beside the text.
+        images: Vec<Image>,
+    },
+    /// The failed request again: no new message — the turn re-issues
+    /// the step loop on the history as the failed turn left it (see
+    /// `CodingAgent::retry_turn_with_cancel`). `/retry` starts this.
+    Retry,
 }
 
 impl Prompt {
     /// A text-only prompt — every steered nudge's shape.
     pub fn text(text: impl Into<String>) -> Self {
-        Self {
+        Self::User {
             text: text.into(),
             images: Vec::new(),
         }
@@ -136,12 +145,14 @@ pub fn spawn_turn(
     });
     tokio::spawn(async move {
         let mut sink = ChannelSink { tx: events.clone() };
-        let Prompt { text, images } = prompt;
         // The images ride the first turn only: a steered nudge is a
         // sentence, and `text_with_images` with none folds to the plain
-        // text message.
-        let mut text = text;
-        let mut images = images;
+        // text message. A retry consumes no input at all; the flag
+        // flips after its one round.
+        let (mut text, mut images, mut retry) = match prompt {
+            Prompt::User { text, images } => (text, images, false),
+            Prompt::Retry => (String::new(), Vec::new(), true),
+        };
         // The chain's outcome: `None` once the cancel flag ended it, the
         // final turn's result otherwise. A steered interruption leaves it
         // alone — the chain just turns another round. An intermediate
@@ -149,18 +160,31 @@ pub fn spawn_turn(
         // turn proceeds, and only the final result is reported.
         let mut outcome = None;
         loop {
-            let message = Message::text_with_images(
-                Role::User,
-                std::mem::take(&mut text),
-                std::mem::take(&mut images),
-            );
-            let turn = agent.turn_message_with_cancel(
-                message,
-                &mut sink,
-                Arc::clone(&approval),
-                Arc::clone(&cancelled_flag),
-            );
-            tokio::pin!(turn);
+            // The retry round and the message rounds run different
+            // agent futures; the box gives them one type for the select
+            // below (and keeps the task Send).
+            let mut turn: Pin<
+                Box<dyn Future<Output = Result<ModelOutput, CodingAgentError>> + Send>,
+            > = if retry {
+                retry = false;
+                Box::pin(agent.retry_turn_with_cancel(
+                    &mut sink,
+                    Arc::clone(&approval),
+                    Arc::clone(&cancelled_flag),
+                ))
+            } else {
+                let message = Message::text_with_images(
+                    Role::User,
+                    std::mem::take(&mut text),
+                    std::mem::take(&mut images),
+                );
+                Box::pin(agent.turn_message_with_cancel(
+                    message,
+                    &mut sink,
+                    Arc::clone(&approval),
+                    Arc::clone(&cancelled_flag),
+                ))
+            };
             tokio::select! {
                 _ = cancelled(cancel.clone()) => break,
                 Some(nudge) = next_steer(&mut steer) => {
@@ -507,6 +531,115 @@ mod mock_tests {
         assert!(transcript.lines().is_empty());
         drop(cancel);
         // The returned receiver is drained: nothing was lost to the race.
+    }
+
+    /// The first call fails the way a dropped connection does; the
+    /// second answers and keeps the request it saw, so the test can
+    /// compare what the retry actually sent.
+    struct FailsThenSucceeds {
+        calls: std::sync::atomic::AtomicU32,
+        requests: std::sync::Mutex<Vec<rhema_core::ModelRequest>>,
+    }
+
+    impl Default for FailsThenSucceeds {
+        fn default() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicU32::new(0),
+                requests: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for FailsThenSucceeds {
+        async fn complete(
+            &self,
+            req: ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            self.requests.lock().unwrap().push(req);
+            if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                Err(ProviderError::Network("connection reset".into()))
+            } else {
+                Ok(scripted_output("recovered"))
+            }
+        }
+    }
+
+    /// The network drops the first request; the retry sends the same
+    /// one: no new user message is pushed, the history grows by the
+    /// answer alone, and the retried request carries the failed turn's
+    /// prompt exactly as it went out the first time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_retry_resends_the_failed_request_without_a_new_message() {
+        let (tx, mut rx) = unbounded_channel();
+        let (_, cancelled) = watch_cancel();
+        let provider = Arc::new(FailsThenSucceeds::default());
+        let agent = CodingAgent::new(
+            Arc::clone(&provider) as Arc<dyn ModelProvider>,
+            CodingAgentConfig::new("test-model", std::env::temp_dir()),
+        )
+        .unwrap();
+        let (_steer_tx, steered) = unbounded_channel();
+        spawn_turn(
+            agent,
+            Prompt::text("hi"),
+            Arc::new(AllowAll),
+            None,
+            cancelled,
+            steered,
+            tx,
+        );
+
+        let mut transcript = Transcript::new();
+        let (agent, result) = drive_turn_for_test(&mut rx, &mut transcript).await;
+        assert_eq!(
+            result,
+            Err("network error: connection reset".to_owned()),
+            "the first turn reports the failure"
+        );
+        assert_eq!(agent.session().history.len(), 1, "the prompt committed");
+
+        // /retry: the same request, no new message beside it.
+        let (tx, mut rx) = unbounded_channel();
+        let (_, cancelled) = watch_cancel();
+        let (_steer_tx, steered) = unbounded_channel();
+        spawn_turn(
+            *agent,
+            Prompt::Retry,
+            Arc::new(AllowAll),
+            None,
+            cancelled,
+            steered,
+            tx,
+        );
+        let mut transcript = Transcript::new();
+        let (agent, result) = drive_turn_for_test(&mut rx, &mut transcript).await;
+        assert!(result.is_ok(), "the retried request answers");
+        assert_eq!(provider.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+        // The retry added the answer only — the failed turn's prompt is
+        // not in the history twice.
+        let history = &agent.session().history;
+        assert_eq!(history.len(), 2);
+        assert!(matches!(history[0].role, Role::User));
+        assert!(matches!(history[1].role, Role::Assistant));
+        // And what went out was the identical conversation: one user
+        // message, "hi".
+        let requests = provider.requests.lock().unwrap();
+        let sent = requests.last().expect("the retry issued a request");
+        assert_eq!(sent.messages.len(), 1);
+        assert_eq!(
+            sent.messages[0]
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    Content::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+            "hi"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

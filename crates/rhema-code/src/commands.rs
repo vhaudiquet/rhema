@@ -122,6 +122,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: clear,
     },
     CommandSpec {
+        name: "/retry",
+        description: "re-send the failed turn",
+        argument: Argument::None,
+        handler: retry,
+    },
+    CommandSpec {
         name: "/resume",
         description: "continue a saved session",
         argument: Argument::None,
@@ -261,6 +267,43 @@ fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
         None => app.open_picker(),
         Some(needle) => app.choose_model_by_id(needle),
     }
+}
+
+fn retry(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    if app.turn.running {
+        app.push_notice("a turn is running; /retry waits for it to finish");
+        return Vec::new();
+    }
+    if app.assembling.is_some() {
+        app.push_notice("a sandbox is being stood up; /retry waits for it");
+        return Vec::new();
+    }
+    if !app.retryable {
+        app.push_notice("no failed turn to retry");
+        return Vec::new();
+    }
+    // The offer survives a model or instance switch on purpose; a
+    // keyless landing cannot run anything. The wording mirrors the
+    // submit path's.
+    if app.agent.is_none() {
+        if app.provider.is_none() {
+            app.push_notice("this profile has no API key; /login to add one");
+        } else {
+            app.push_notice("no model on this profile; /model to pick one");
+        }
+        return Vec::new();
+    }
+    // The retry rides no input: the history already holds the failed
+    // turn's prompt and everything committed before the failure. The
+    // notice is the record that a fresh block of output belongs to the
+    // retry, not the failed attempt.
+    app.transcript.push_notice("retrying");
+    app.turn.running = true;
+    app.turn.started_at = Some(std::time::Instant::now());
+    app.error = None;
+    app.retryable = false;
+    app.turn.decline_all = false;
+    vec![Effect::RetryTurn]
 }
 
 fn resume(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {

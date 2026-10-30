@@ -263,6 +263,15 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   exchange that "succeeds" empty — a provider that closed the stream before its first chunk —
   retries like any dead response and, if every attempt comes back empty, fails naming that
   fact instead of completing a turn nobody saw.
+- ~~**What a manual `/retry` re-sends**~~, **decided:** the failed request itself, not the
+  prompt text again. `CodingAgent::retry_turn_with_cancel` runs the step loop with no input
+  message on the history exactly as the failed turn left it — a first-request failure re-issues
+  the identical request, a mid-turn failure re-issues the step that failed with the committed
+  steps still in view — so nothing lands twice and no committed tool call re-executes behind
+  the model's back. The TUI gates it on "the last finished turn errored and nothing ran
+  since" (a submit, a cancel, a success, or a conversation swap clears the offer) and shows
+  `/retry re-sends it` under the error strip; the natural flow after a rate limit is
+  `/model` then `/retry` on the new model.
 - ~~**How a UI paste travels without flooding the session**~~, **decided:** embedded pastes in message text (`rhema-core::paste`). A frontend records a long paste as `U+FFFC`, payload, `U+FFFC` inside the user text it pushes to the session — the compact form is the session's record, so rebuilds and resumes render the same chip the live stream did. Expansion back to plain text rides the provider seam: the coding-agent driver wraps whatever `ModelProvider` it is built with, so the engine stays ignorant and the encoding never reaches an adapter. The engine's two-consumer discipline holds; a consumer that never mints marks is unaffected.
 - ~~**Where forge support lives**~~, **decided:** an integration, not a
   framework component: `integrations/rhema-forge-integration` (the

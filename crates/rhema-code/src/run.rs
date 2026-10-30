@@ -1186,7 +1186,26 @@ fn dispatch(
             app.begin_turn(cancel, steer, None);
             spawn_turn(
                 agent,
-                crate::turn::Prompt { text, images },
+                crate::turn::Prompt::User { text, images },
+                Arc::new(AllowAll),
+                app.checkpoint_target(),
+                cancelled,
+                steered,
+                tx.clone(),
+            );
+        }
+        Effect::RetryTurn => {
+            let Some(agent) = app.agent.take() else {
+                return;
+            };
+            let (cancel, cancelled) = tokio::sync::watch::channel(false);
+            let (steer, steered) = tokio::sync::mpsc::unbounded_channel();
+            // The strip names the rerun until a tool call takes over.
+            status.note_prompt("retrying");
+            app.begin_turn(cancel, steer, None);
+            spawn_turn(
+                agent,
+                crate::turn::Prompt::Retry,
                 Arc::new(AllowAll),
                 app.checkpoint_target(),
                 cancelled,

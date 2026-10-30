@@ -636,6 +636,10 @@ pub enum Effect {
         /// The images beside the text.
         images: Vec<Image>,
     },
+    /// Re-run the failed turn: no new prompt — the same request goes
+    /// back out (`Prompt::Retry`). The app marks the turn running and
+    /// clears the error strip before this fires.
+    RetryTurn,
     /// A steered prompt interrupted the running turn; the status strip
     /// names it until the next tool call takes over.
     SteerTurn(String),
@@ -810,6 +814,14 @@ pub struct App {
     /// The last turn's error, shown in the status line until the next
     /// submit.
     pub error: Option<String>,
+    /// Whether the failed turn can be re-run: the last finished turn
+    /// errored and nothing has run since. A submit, a cancel, a success,
+    /// and a conversation change (`/clear`, `/resume`) clear it — the
+    /// request `/retry` re-issues must be the last thing this
+    /// conversation did. An agent rebuild keeps it on purpose: a model,
+    /// instance, or profile switch carries the same conversation, and
+    /// "switch then retry" is half the point.
+    pub retryable: bool,
     /// The quit confirmation overlay is up.
     pub confirm_quit: bool,
     /// The cancel handle of the running login flow; `None` while idle.
@@ -1129,6 +1141,7 @@ impl App {
             transcript_stats: None,
             session_cost: 0.0,
             error: None,
+            retryable: false,
             confirm_quit: false,
             login_cancel: None,
             session_file: setup.checkpoint,
@@ -1650,6 +1663,7 @@ impl App {
         self.usage = None;
         self.session_cost = 0.0;
         self.error = None;
+        self.retryable = false;
         self.session_file = None;
         // The benchmark describes one conversation: cleared with it,
         // in the fallback snapshot and in the agent's mirror alike.
@@ -2259,6 +2273,7 @@ impl App {
         // The saved session carries what it spent; the footer continues
         // the story instead of quoting a fresh zero.
         self.session_cost = self.session.cost_usd;
+        self.retryable = false;
         self.chat.scroll = 0;
         self.screen = Screen::Chat;
         self.transcript
@@ -2724,6 +2739,7 @@ impl App {
                     self.turn.running = true;
                     self.turn.started_at = Some(std::time::Instant::now());
                     self.error = None;
+                    self.retryable = false;
                     self.turn.decline_all = false;
                     vec![Effect::StartTurn { text, images }]
                 }
@@ -3731,6 +3747,7 @@ impl App {
         self.transcript_stats = agent.transcript_stats();
         self.agent = Some(*agent);
         self.turn.finished();
+        self.retryable = false;
         self.transcript.push_notice("turn cancelled");
         // A steered message that raced the cancel goes back to the input:
         // the user stopped the turn, so the words are not spent.
@@ -3761,6 +3778,7 @@ impl App {
         self.turn.finished();
         match result {
             Ok(output) => {
+                self.retryable = false;
                 if let Some(pricing) = self.current_model_pricing() {
                     let usage = output.usage;
                     self.session_cost += pricing.cost(
@@ -3786,13 +3804,18 @@ impl App {
                     ));
                 }
             }
-            Err(message) => self.error = Some(message),
+            Err(message) => {
+                self.error = Some(message);
+                self.retryable = true;
+            }
         }
         // Messages sent in the finishing race sit in the returned
         // receiver: they run as the next turns, in order. The transcript
-        // already carries their user lines from submit time.
+        // already carries their user lines from submit time. The chain
+        // moves on, so its last request is no longer the failed one.
         let mut effects = Vec::new();
         while let Ok(text) = steer.try_recv() {
+            self.retryable = false;
             effects.push(Effect::StartTurn {
                 text,
                 images: Vec::new(),
@@ -9390,5 +9413,139 @@ mod tests {
             steering.drain(),
             vec!["Subagent reviewer (job-1) has finished.".to_owned()]
         );
+    }
+
+    /// A turn that failed with a network error leaves the offer up:
+    /// the error strip rides the hint, and `/retry` re-issues the same
+    /// request — no new prompt, the flag spent.
+    #[test]
+    fn a_failed_turn_offers_retry_and_retry_fires_it() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Err("network error: connection reset".to_owned()),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
+        });
+        assert!(h.app.retryable);
+        assert_eq!(
+            h.app.error.as_deref(),
+            Some("network error: connection reset")
+        );
+
+        let effects = crate::commands::dispatch(&mut h.app, "/retry");
+        assert_eq!(effects, vec![Effect::RetryTurn]);
+        assert!(h.app.turn.running, "the retry takes the turn slot");
+        assert!(!h.app.retryable, "the offer is spent");
+        assert!(h.app.error.is_none());
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .contains(&Line::Notice("retrying".into())),
+            "the notice marks the fresh output block"
+        );
+    }
+
+    /// Everything that moves the conversation on clears the offer: a
+    /// fresh submit, a finished turn, a cancel, and a cleared
+    /// conversation each leave `/retry` with nothing to re-issue.
+    #[test]
+    fn the_retry_offer_clears_when_the_conversation_moves_on() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let steer = tokio::sync::mpsc::unbounded_channel().1;
+
+        // Nothing failed yet.
+        assert!(!h.app.retryable);
+        let effects = crate::commands::dispatch(&mut h.app, "/retry");
+        assert!(effects.is_empty());
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .contains(&Line::Notice("no failed turn to retry".into()))
+        );
+
+        // The failed turn raises it; the next submit spends it.
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Err("network error: connection reset".to_owned()),
+            steer,
+        });
+        h.app.on_key(key(KeyCode::Char('a')));
+        let effects = h.app.on_key(key(KeyCode::Enter));
+        assert!(matches!(effects.as_slice(), [Effect::StartTurn { .. }]));
+        assert!(!h.app.retryable);
+        let effects = crate::commands::dispatch(&mut h.app, "/retry");
+        assert!(effects.is_empty());
+
+        // A finished turn's outcome rules the flag either way: success
+        // clears, failure raises again.
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
+        });
+        assert!(!h.app.retryable);
+
+        // A cancel is a choice, not a failure.
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnCancelled {
+            agent,
+            steer: tokio::sync::mpsc::unbounded_channel().1,
+        });
+        assert!(!h.app.retryable);
+        assert!(!matches!(
+            crate::commands::dispatch(&mut h.app, "/retry").as_slice(),
+            [Effect::RetryTurn]
+        ));
+
+        // Clearing the conversation retires it too.
+        h.app.retryable = true;
+        h.app.clear_session();
+        assert!(!h.app.retryable);
+    }
+
+    /// The offer survives an agent rebuild on purpose: a failed turn,
+    /// then a model switch, then `/retry` re-issues the request on the
+    /// new model — the rate-limit answer.
+    #[test]
+    fn a_model_switch_keeps_the_retry_offer() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.on_event(UiEvent::ModelsLoaded {
+            why: FetchWhy::Bootstrap,
+            result: loaded("google", models()),
+        });
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Err("provider api error: 429 (retry-after: 37)".to_owned()),
+            steer: tokio::sync::mpsc::unbounded_channel().1,
+        });
+        crate::commands::dispatch(&mut h.app, "/model m-b");
+        assert!(h.app.agent.is_some(), "the pick rebuilt the agent");
+        assert!(h.app.retryable, "the switch is not a conversation change");
+        assert_eq!(
+            crate::commands::dispatch(&mut h.app, "/retry"),
+            vec![Effect::RetryTurn]
+        );
+    }
+
+    /// While a turn runs — a retry included — `/retry` waits.
+    #[test]
+    fn retry_waits_while_a_turn_runs() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        h.app.turn.running = true;
+        let effects = crate::commands::dispatch(&mut h.app, "/retry");
+        assert!(effects.is_empty());
+        assert!(h.app.transcript.lines().contains(&Line::Notice(
+            "a turn is running; /retry waits for it to finish".into()
+        )));
     }
 }

@@ -166,15 +166,17 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         Screen::Resume(resume) => render_resume_picker(frame, resume, &theme),
         Screen::Settings(settings) => render_settings(frame, settings, &theme, icons, &mut hits),
         Screen::Chat => {
-            // An error wraps, so its strip grows to the wrapped height.
-            // Either strip — error or spinner — carries a blank row above
-            // it, so it never sits flush against the transcript's tail;
+            // An error wraps, so its strip grows to the wrapped height
+            // (plus the /retry hint's own row when one can run). Either
+            // strip — error or spinner — carries a blank row above it,
+            // so it never sits flush against the transcript's tail;
             // idle, the strip is just that single row of air between
             // transcript and input.
             let status_rows = match &app.error {
                 Some(error) => {
                     wrap_line(&Line::from(error.clone()), frame.area().width as usize).len() as u16
                         + 1
+                        + u16::from(app.retryable)
                 }
                 None if app.turn.running => {
                     2 + subagent_lines(app, &theme).len() as u16
@@ -2332,6 +2334,12 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
     } else {
         Vec::new()
     };
+    // A failed turn that can still be re-run names the way: the dim
+    // line rides the error until a submit, a cancel, or a retry clears
+    // both.
+    if app.retryable {
+        lines.push(Line::from("/retry re-sends it").fg(theme.text3));
+    }
     // Every live subagent job pins its own line right below the
     // spinner: the robot badge, its phase, spend, and age. The registry
     // is the single source — a job's line lives while it works; when it
@@ -4891,9 +4899,9 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // Fourteen commands, six visible rows: nine downs put the
-        // selection on /resume (the /sandbox row sits beside /profile
-        // now), and the window must have followed it.
+        // Sixteen commands, six visible rows: nine downs put the
+        // selection on /retry (the row /resume held before it joined
+        // the table), and the window must have followed it.
         for _ in 0..9 {
             app.chat
                 .handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
@@ -4907,7 +4915,7 @@ mod scroll_tests {
             .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
             .collect();
         assert!(
-            screen.contains("/resume"),
+            screen.contains("/retry"),
             "the selection is shown: {screen}"
         );
         assert!(!screen.contains("/help"), "the head scrolled out: {screen}");
