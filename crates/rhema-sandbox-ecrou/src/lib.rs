@@ -1155,6 +1155,111 @@ mod tests {
     /// distro tarball has none, and the provisioning that adds it is
     /// the assembly's business, not this test's download.
     #[tokio::test]
+    async fn a_persisted_state_carries_a_write_across_two_boots() {
+        if !ecrou_ready() {
+            println!("skipping: no runnable ecrou or no cached alpine image");
+            return;
+        }
+        let (dir, key) = {
+            let dir = scratch_dir().expect("tempdir");
+            let key = format!(
+                "rhema-test-{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            (dir, key)
+        };
+        // The state is the test's own; a killed run must not leave it
+        // behind for the next run of the suite.
+        // The state files carry an arch in their name; the prefix is
+        // the stable part, so cleanup walks the cache directory.
+        struct Cleanup(String);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let prefix = format!("persist-{}-", self.0);
+                if let Some(home) = std::env::var_os("HOME") {
+                    let cache = std::path::PathBuf::from(home).join(".cache/ecrou");
+                    if let Ok(entries) = std::fs::read_dir(&cache) {
+                        for entry in entries.flatten() {
+                            if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                                let _ = std::fs::remove_file(entry.path());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let _cleanup = Cleanup(key.clone());
+
+        let root = FsRoot::new(dir.path().to_path_buf()).expect("the sandbox root builds");
+        let ws = dir.path().to_string_lossy().into_owned();
+        let sandbox = EcrouSandbox::new("alpine:3.23", root, ws).with_persist(key);
+
+        // A rootfs write outside the workspace share, committed by a
+        // clean exit: the next boot starts from it.
+        let first = run(
+            &sandbox,
+            ExecRequest {
+                command: "mkdir -p /opt && echo persisted > /opt/marker && echo wrote".into(),
+                cwd: "/".into(),
+                timeout: Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("the first boot");
+        assert_eq!(first.code, Some(0), "first boot: {:?}", first.stderr);
+
+        let second = run(
+            &sandbox,
+            ExecRequest {
+                command: "cat /opt/marker".into(),
+                cwd: "/".into(),
+                timeout: Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("the second boot");
+        assert_eq!(second.code, Some(0), "second boot: {:?}", second.stderr);
+        assert!(
+            String::from_utf8_lossy(&second.stdout).contains("persisted"),
+            "the write crossed the boots: {:?}",
+            second.stdout
+        );
+
+        // A failed command drops its changes: the state stays what the
+        // last clean run left.
+        let dirty = run(
+            &sandbox,
+            ExecRequest {
+                command: "echo dirty > /opt/marker; exit 3".into(),
+                cwd: "/".into(),
+                timeout: Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("the dirty boot");
+        assert_eq!(dirty.code, Some(3));
+
+        let after = run(
+            &sandbox,
+            ExecRequest {
+                command: "cat /opt/marker".into(),
+                cwd: "/".into(),
+                timeout: Duration::from_secs(60),
+            },
+        )
+        .await
+        .expect("the boot after the dirty one");
+        assert!(
+            !String::from_utf8_lossy(&after.stdout).contains("dirty"),
+            "a failed command must not commit: {:?}",
+            after.stdout
+        );
+    }
+
+    #[tokio::test]
     async fn a_commit_inside_the_machine_is_the_hosts_commit() {
         if !ecrou_ready() {
             println!("skipping: no runnable ecrou or no cached alpine image");
