@@ -9,11 +9,17 @@
 //! up or stop: ecrou runs one-shot machines, so every exec boots a
 //! fresh VM from the image, runs the command with the workspace
 //! shared in, and powers the machine off when the command exits.
-//! Package installs and other rootfs state live exactly one command;
-//! the workspace is what persists, which is the seam's whole contract.
+//! By default rootfs state — package installs, daemons, `/tmp` —
+//! lives exactly one command and the workspace is what persists.
+//! With [`EcrouSandbox::with_persist`] the session names a persisted
+//! state (`--persist KEY`): the boots share one writable upper over a
+//! read-only base, so an install is the next command's starting
+//! point, and a command that fails or dies drops its changes. The
+//! workspace persists either way, which is the seam's whole contract.
 //!
 //! Exec is `ecrou run --quiet --capture <io> -v <ws>:<ws>
-//! --workdir <cwd> <image> -- /bin/sh -c <line>`: the workspace share
+//! [--persist KEY] --workdir <cwd> <image> -- /bin/sh -c <line>`: the
+//! workspace share
 //! mounts at its own host path (the docker 1:1 posture), the cwd
 //! rides `--workdir`, and the line runs the command through `bash -c`
 //! when the image carries bash, through its `sh` when it does not.
@@ -39,7 +45,11 @@
 //! ecrou cache, every command pays its extract-plus-boot (under 2 s
 //! on a warm alpine, more on a distro rootfs). Anything `ecrou`
 //! itself reports (`Error:` on its stderr) is an unavailable sandbox,
-//! not a guest result.
+//! not a guest result. One refusal is answered instead of reported:
+//! ecrou refuses to boot a persisted state against a base it was not
+//! built on (`persist base mismatch`), and the retry resets the state
+//! and says so through `progress` — the state is regenerable, the
+//! model should know its installs are gone.
 #![forbid(unsafe_code)]
 
 use std::path::Path;
@@ -51,6 +61,16 @@ use base64::Engine;
 use rhema_sandbox::exec_util::{self, MAX_STREAM_BYTES, STAGING, under_workspace};
 use rhema_sandbox::fsroot::FsRoot;
 use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSeed};
+
+/// The image a session boots when the profile names none:
+/// `ghcr.io/vhaudiquet/rhema-images:latest`, the rhema-ready base. The
+/// tools the shell session expects (`git`, `rg`, `fd`, `jq`, `yq`,
+/// `sd`, `curl`, `python3`) are baked in, because a one-shot machine
+/// cannot be provisioned after boot: the machine's tools are the
+/// image's business. `latest` floats with the base image's releases
+/// and refreshes through `ecrou pull`; a workspace that needs
+/// reproducibility pins the digest in the profile.
+pub const DEFAULT_IMAGE: &str = "ghcr.io/vhaudiquet/rhema-images:latest";
 
 /// The seed budget for both seed kinds, the siblings' number: the
 /// seed runs host-side, so the budget is the same `timeout` prefix
@@ -78,6 +98,11 @@ pub struct EcrouSandbox {
     /// names, stripped from sandbox paths before they map through
     /// [`FsRoot`] or join the guest's mount point.
     workspace: String,
+    /// The persist key, when the session keeps rootfs state between
+    /// commands: `--persist KEY` rides every exec, the base stays
+    /// read-only, and what the commands install survives them in the
+    /// key's upper. `None` is the one-command rootfs.
+    persist: Option<String>,
 }
 
 impl EcrouSandbox {
@@ -88,7 +113,16 @@ impl EcrouSandbox {
             image: image.into(),
             root,
             workspace: workspace.into(),
+            persist: None,
         }
+    }
+
+    /// Names the persisted state rootfs changes land in. The key is
+    /// the workspace's derivation — stable across sessions, so a
+    /// session's installs are its next command's starting point.
+    pub fn with_persist(mut self, key: impl Into<String>) -> Self {
+        self.persist = Some(key.into());
+        self
     }
 
     /// The guest path of the sandbox cwd: the workspace share mounts
@@ -370,6 +404,7 @@ fn snap_common(resolved: Option<&std::path::Path>) -> Option<std::path::PathBuf>
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_argv(
     image: &str,
     capture: &Path,
@@ -377,6 +412,8 @@ fn run_argv(
     workdir: &str,
     command: &str,
     git_env: Option<&GitEnv>,
+    persist: Option<&str>,
+    persist_reset: bool,
 ) -> Vec<String> {
     let mut argv = vec![
         "ecrou".to_owned(),
@@ -395,6 +432,14 @@ fn run_argv(
     if let Some(env) = git_env {
         argv.push("--env".to_owned());
         argv.push(format!("GIT_CONFIG_GLOBAL={}", env.guest_config_path));
+    }
+    if let Some(key) = persist {
+        if persist_reset {
+            argv.push("--persist-reset".to_owned());
+        } else {
+            argv.push("--persist".to_owned());
+        }
+        argv.push(key.to_owned());
     }
     argv.push(image.to_owned());
     argv.push("--".to_owned());
@@ -616,8 +661,6 @@ impl Sandbox for EcrouSandbox {
         cancelled: &AtomicBool,
         progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<ExecOutcome, SandboxError> {
-        use std::process::Stdio;
-
         // The trait's first observation point: a flip before the start
         // never boots a machine.
         if cancelled.load(Ordering::Relaxed) {
@@ -635,13 +678,110 @@ impl Sandbox for EcrouSandbox {
         // config, no git here) the pair is simply not passed, and git
         // behaves as it always has.
         let git_env = self.stage_git_config();
+        let outcome = self
+            .run_machine(
+                &workdir,
+                &mount,
+                &request,
+                cancelled,
+                progress,
+                &capture,
+                git_env.as_ref(),
+                false,
+            )
+            .await;
+        match outcome {
+            // The persisted state is the workspace's, and ecrou
+            // refuses to boot it against a base it was not built on.
+            // The state is regenerable and the refusal exists to be
+            // answered: reset and retry once, saying plainly what the
+            // reset costs — the session's installs are gone.
+            Err(SandboxError::Unavailable(detail))
+                if detail.contains("persist base mismatch") && self.persist.is_some() =>
+            {
+                progress(
+                    "# ecrou: the sandbox image changed since this workspace's state was saved; \
+                     the state was reset and this command starts fresh (reinstall anything missing)\n",
+                );
+                self.run_machine(
+                    &workdir,
+                    &mount,
+                    &request,
+                    cancelled,
+                    progress,
+                    &capture,
+                    git_env.as_ref(),
+                    true,
+                )
+                .await
+            }
+            other => other,
+        }
+    }
+
+    async fn seed(&self, seed: &WorkspaceSeed) -> Result<(), SandboxError> {
+        // The workspace is host fs: the seed needs no machine.
+        match seed {
+            WorkspaceSeed::GitClone(url) => self.run_host_seed(&["git", "clone", url, "."]).await,
+            WorkspaceSeed::Tarball { tar_gz_base64, .. } => {
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(tar_gz_base64)
+                    .map_err(|err| {
+                        SandboxError::Failed(format!("the seed tarball is not base64: {err}"))
+                    })?;
+                self.write_file(&format!("/{STAGING}"), &bytes).await?;
+                let unpacked = self.run_host_seed(&["tar", "-xzf", STAGING]).await;
+                // The staging file is not workspace content; a leftover
+                // one is harmless, so its removal is best-effort.
+                if let Ok(staged) = self.root.map(&format!("/{STAGING}")) {
+                    let _ = tokio::fs::remove_file(staged).await;
+                }
+                unpacked
+            }
+        }
+    }
+
+    async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
+        exec_util::read_through(&self.root, &under_workspace(&self.workspace, path)).await
+    }
+
+    async fn write_file(&self, path: &str, contents: &[u8]) -> Result<(), SandboxError> {
+        exec_util::write_through(
+            &self.root,
+            &under_workspace(&self.workspace, path),
+            contents,
+        )
+        .await
+    }
+}
+
+impl EcrouSandbox {
+    /// Boots one machine for `request` and sees it through: spawn,
+    /// the capture-file pump, the budget and cancel, the classify.
+    /// One call is one `ecrou run`; the reset retry calls this twice.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_machine(
+        &self,
+        workdir: &str,
+        mount: &str,
+        request: &ExecRequest,
+        cancelled: &AtomicBool,
+        progress: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        capture: &tempfile::TempDir,
+        git_env: Option<&GitEnv>,
+        persist_reset: bool,
+    ) -> Result<ExecOutcome, SandboxError> {
+        use std::process::Stdio;
+
         let argv = run_argv(
             &self.image,
             capture.path(),
             &format!("{mount}:{mount}"),
-            &workdir,
+            workdir,
             &request.command,
-            git_env.as_ref(),
+            git_env,
+            self.persist.as_deref(),
+            persist_reset,
         );
         let mut child = tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -711,44 +851,6 @@ impl Sandbox for EcrouSandbox {
             err.take(),
         )
     }
-
-    async fn seed(&self, seed: &WorkspaceSeed) -> Result<(), SandboxError> {
-        // The workspace is host fs: the seed needs no machine.
-        match seed {
-            WorkspaceSeed::GitClone(url) => self.run_host_seed(&["git", "clone", url, "."]).await,
-            WorkspaceSeed::Tarball { tar_gz_base64, .. } => {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(tar_gz_base64)
-                    .map_err(|err| {
-                        SandboxError::Failed(format!("the seed tarball is not base64: {err}"))
-                    })?;
-                self.write_file(&format!("/{STAGING}"), &bytes).await?;
-                let unpacked = self.run_host_seed(&["tar", "-xzf", STAGING]).await;
-                // The staging file is not workspace content; a leftover
-                // one is harmless, so its removal is best-effort.
-                if let Ok(staged) = self.root.map(&format!("/{STAGING}")) {
-                    let _ = tokio::fs::remove_file(staged).await;
-                }
-                unpacked
-            }
-        }
-    }
-
-    async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
-        exec_util::read_through(&self.root, &under_workspace(&self.workspace, path)).await
-    }
-
-    async fn write_file(&self, path: &str, contents: &[u8]) -> Result<(), SandboxError> {
-        exec_util::write_through(
-            &self.root,
-            &under_workspace(&self.workspace, path),
-            contents,
-        )
-        .await
-    }
-}
-
-impl EcrouSandbox {
     /// Runs one seed command on the host, at the root the machines
     /// share: the budget and kill are the same `timeout` prefix, and
     /// a nonzero exit surfaces the stderr tail, the way the shim's
@@ -835,6 +937,56 @@ mod tests {
     }
 
     #[test]
+    fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
+        let argv = run_argv(
+            "ubuntu",
+            Path::new("/tmp/io"),
+            "/w:/w",
+            "/w",
+            "echo hi",
+            None,
+            Some("proj-1"),
+            false,
+        );
+        let at = argv
+            .iter()
+            .position(|a| a == "--persist")
+            .expect("the persist pair is in the argv");
+        assert_eq!(argv[at + 1], "proj-1");
+        assert!(at < argv.iter().position(|a| a == "ubuntu").unwrap());
+
+        let reset = run_argv(
+            "ubuntu",
+            Path::new("/tmp/io"),
+            "/w:/w",
+            "/w",
+            "echo hi",
+            None,
+            Some("proj-1"),
+            true,
+        );
+        let at = reset
+            .iter()
+            .position(|a| a == "--persist-reset")
+            .expect("the reset flag is in the argv");
+        assert_eq!(reset[at + 1], "proj-1");
+        assert!(!reset.contains(&"--persist".to_owned()));
+
+        let none = run_argv(
+            "ubuntu",
+            Path::new("/tmp/io"),
+            "/w:/w",
+            "/w",
+            "echo hi",
+            None,
+            None,
+            false,
+        );
+        assert!(!none.contains(&"--persist".to_owned()));
+        assert!(!none.contains(&"--persist-reset".to_owned()));
+    }
+
+    #[test]
     fn the_command_is_quoted_inside_the_payload_line() {
         let line = shell_line("echo it's; rm -rf $HOME");
         assert!(
@@ -852,6 +1004,8 @@ mod tests {
             "/home/me/proj/src",
             "echo hi",
             None,
+            None,
+            false,
         );
         let expected = [
             "ecrou",
@@ -888,6 +1042,8 @@ mod tests {
             "/home/me/proj",
             "echo hi",
             Some(&env),
+            None,
+            false,
         );
         let at = argv
             .iter()
@@ -907,6 +1063,8 @@ mod tests {
             "/w",
             "echo hi",
             None,
+            None,
+            false,
         );
         assert!(!bare.contains(&"--env".to_owned()));
     }

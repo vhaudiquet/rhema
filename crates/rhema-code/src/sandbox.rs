@@ -30,7 +30,7 @@ use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_sandbox::{FsRoot, InstanceLock, Sandbox, ShellSandbox, seed_workspace};
 use rhema_sandbox_docker::DockerSandbox;
-use rhema_sandbox_ecrou::EcrouSandbox;
+use rhema_sandbox_ecrou::{DEFAULT_IMAGE, EcrouSandbox};
 use rhema_sandbox_http::HttpSandbox;
 use rhema_sandbox_lxd::LxdSandbox;
 use rhema_sandbox_ssh::SshSandbox;
@@ -242,12 +242,12 @@ pub async fn assemble(
         }
         SandboxChoice::Ecrou => {
             // One-shot machines: nothing to stand up, provision, or
-            // stop — every exec boots, and the workspace share is the
-            // whole persistence story. The lock serializes the seed
+            // stop — every exec boots. The lock serializes the seed
             // the way it serializes every other assembly's mutation
             // window; the name is the workspace's derivation, stable
             // across sessions, never a stoppable instance.
-            let image = sandbox_target(profile, "ecrou").unwrap_or_else(|| "ubuntu".to_owned());
+            let image =
+                sandbox_target(profile, "ecrou").unwrap_or_else(|| DEFAULT_IMAGE.to_owned());
             target = image.clone();
             let name = derived_ecrou_name(workspace);
             let lock = InstanceLock::acquire("ecrou", &name)
@@ -258,7 +258,18 @@ pub async fn assemble(
             // directory a skills mount would name.
             let root = FsRoot::new(workspace.to_path_buf())
                 .map_err(|err| anyhow::anyhow!("ecrou sandbox root: {err}"))?;
-            Arc::new(EcrouSandbox::new(image, root, host_workspace.clone()))
+            // Rootfs state survives between commands by default: the
+            // workspace's derived name keys ecrou's persisted upper,
+            // so a session's installs are its next command's starting
+            // point. `sandbox.persist: false` restores the one-command
+            // rootfs, where only the workspace persists.
+            let sandbox = EcrouSandbox::new(image, root, host_workspace.clone());
+            let sandbox = if profile.sandbox_persist() {
+                sandbox.with_persist(name)
+            } else {
+                sandbox
+            };
+            Arc::new(sandbox)
         }
         SandboxChoice::Ssh => {
             // Stored only, no env tier: a stray variable must not

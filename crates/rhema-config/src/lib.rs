@@ -169,8 +169,16 @@ pub struct SandboxSettings {
     pub vm: Option<bool>,
     /// The `ecrou` image every boot resolves: an ecrou distro name
     /// (`ubuntu`, `alpine:3.23`) or an OCI image reference. Unset is
-    /// the backend's default image.
+    /// the backend's default, the rhema base
+    /// (`ghcr.io/vhaudiquet/rhema-images:latest`); pin a digest for
+    /// reproducibility.
     pub image: Option<String>,
+    /// Whether the `ecrou` sandbox keeps rootfs state between
+    /// commands: installs, daemons, and everything else outside the
+    /// workspace survive from one exec to the next, per workspace.
+    /// Unset is on; `false` restores the one-command rootfs, where
+    /// only the workspace persists.
+    pub persist: Option<bool>,
 }
 
 impl fmt::Debug for SandboxSettings {
@@ -649,6 +657,17 @@ impl Profile {
             .and_then(|s| s.image.clone())
             .map(|image| image.trim().to_owned())
             .filter(|image| !image.is_empty())
+    }
+
+    /// Whether the `ecrou` sandbox keeps rootfs state between
+    /// commands. Default on: a session's installs survive its
+    /// commands, which is what an agent session expects of a machine.
+    /// `sandbox.persist: false` restores the one-command rootfs.
+    pub fn sandbox_persist(&self) -> bool {
+        self.sandbox
+            .as_ref()
+            .and_then(|s| s.persist)
+            .unwrap_or(true)
     }
 }
 
@@ -2076,6 +2095,18 @@ mod tests {
     }
 
     /// A profile carrying one sandbox section, and nothing else.
+    #[test]
+    fn ecrou_persist_defaults_on_and_stores_an_explicit_off() {
+        let profile = sandboxed_profile(SandboxSettings::default());
+        assert!(profile.sandbox_persist(), "unset keeps rootfs state");
+
+        let settings = SandboxSettings {
+            persist: Some(false),
+            ..SandboxSettings::default()
+        };
+        assert!(!sandboxed_profile(settings).sandbox_persist());
+    }
+
     fn sandboxed_profile(sandbox: SandboxSettings) -> Profile {
         Profile {
             sandbox: Some(sandbox),
@@ -2101,6 +2132,7 @@ mod tests {
                     instance: Some("dev-vm".into()),
                     vm: Some(true),
                     image: Some("alpine:3.23".into()),
+                    persist: None,
                 }),
             )]),
             last_sandbox_by_workspace: BTreeMap::from([(
@@ -2190,6 +2222,7 @@ mod tests {
             instance: Some(" dev-vm ".into()),
             vm: Some(true),
             image: Some(" alpine:3.23 ".into()),
+            persist: None,
         });
         assert_eq!(profile.sandbox_kind().as_deref(), Some("ssh"));
         assert_eq!(profile.sandbox_url().as_deref(), Some("http://box:7331"));

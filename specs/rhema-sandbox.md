@@ -442,9 +442,15 @@ infrastructure); phase 9 is the one users see.
   git identity is the one thing rhema stages per exec (the flattened
   `.rhema/git/config` and its `GIT_CONFIG_GLOBAL` pair); it carries
   the host's user across whatever image is named. Project-specific
-  dependencies are a planned layer: a spec file in the repo, keyed
-  by content hash into ecrou's cache so projects cannot inherit
-  each other's entries — decided, not yet built.
+  dependencies are the workspace's and the persisted state's
+  business: ecrou's `--persist` keeps a per-workspace writable upper
+  (default on, `sandbox.persist: false` for the one-command rootfs)
+  keyed by the workspace's derived name, so `apt install` survives
+  its command and stays inside the workspace's own state — no entry
+  is ever shared between workspaces, and a base refresh that moves
+  the image the state was built on makes the next exec refuse, reset
+  the state, and say so in the session. The machine stays per-command
+  through all of it: one boot per exec, the budget and kill unchanged.
   Availability
   is `ecrou probe` — the dlopen-and-KVM check — and a stale binary
   surfaces in-band at the first exec, as an unavailable sandbox.
