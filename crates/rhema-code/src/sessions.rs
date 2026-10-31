@@ -64,6 +64,12 @@ pub struct UsageStats {
     /// the session ran with the transcript off or saved none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transcript: Option<rhema_transcript::TranscriptStats>,
+    /// The transcript's committed sections (range, text, origin), so a
+    /// resumed session adopts the compaction the last session already
+    /// paid for instead of re-deriving and re-summarizing it. `None`
+    /// when the session ran with the transcript off or saved none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_sections: Option<Vec<rhema_transcript::Section>>,
     /// The last finished turn's token accounting, so the page's "last
     /// turn" row and the context gauge pick up where the save left
     /// off.
@@ -521,6 +527,13 @@ mod tests {
                 output_tokens: 30,
                 cached_input_tokens: 200,
             }),
+            // The compaction rides with the counters, so the resumed
+            // session adopts it instead of re-summarizing.
+            transcript_sections: Some(vec![rhema_transcript::Section {
+                range: rhema_transcript::tree::Range { id: 0, n: 12 },
+                text: "## Goals Met\n- earlier work".into(),
+                origin: rhema_transcript::SectionOrigin::Model,
+            }]),
         };
         stats.clone().write_into(&mut session);
         let path = save_session(&base, workspace, &session).unwrap().unwrap();

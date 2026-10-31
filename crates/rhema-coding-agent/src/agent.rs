@@ -405,6 +405,33 @@ impl CodingAgent {
         }
     }
 
+    /// The mirror's committed sections, oldest first: what a session
+    /// save carries so the next session adopts the compaction instead
+    /// of re-deriving it and re-paying the worker. Empty with the
+    /// transcript off.
+    pub fn transcript_sections(&self) -> Vec<rhema_transcript::Section> {
+        match &self.transcript {
+            Some(mirror) => mirror
+                .lock()
+                .expect("transcript lock poisoned")
+                .saved_sections(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Hands a saved session's sections to the mirror. They wait for
+    /// the first request, which adopts them when they tile the
+    /// resumed log and drops them for any rebuild. No-op with the
+    /// transcript off.
+    pub fn adopt_transcript_sections(&mut self, sections: Vec<rhema_transcript::Section>) {
+        if let Some(mirror) = &self.transcript {
+            mirror
+                .lock()
+                .expect("transcript lock poisoned")
+                .adopt_sections(sections);
+        }
+    }
+
     /// Zeroes the transcript's benchmark counters, when the transcript
     /// is on: a conversation cleared mid-agent starts its accounting
     /// over, and the stats describe one conversation, not the agent's

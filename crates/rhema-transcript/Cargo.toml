@@ -17,6 +17,8 @@ serde_json = { workspace = true }
 serde = { workspace = true }
 # ModelProvider is an async seam
 async-trait = { workspace = true }
+# The section fills run in background tasks
+tokio = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

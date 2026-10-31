@@ -26,6 +26,11 @@ use crate::compact::{self, PendingSummary, Section, SectionOrigin, Summarizer};
 use crate::summary;
 use crate::tree::Range;
 
+/// How many section fills the background worker runs at once. A flush
+/// can chunk a whole allowance into a dozen sections; the cap keeps
+/// one worker provider from seeing a stampede.
+const WORKER_CONCURRENCY: usize = 4;
+
 /// The view's settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TranscriptSettings {
@@ -264,6 +269,13 @@ pub struct Transcript {
     /// Per-message wire bytes, parallel to `log`: the budget's unit,
     /// counted once per message instead of per request.
     sizes: Vec<usize>,
+    /// [`Vec`]`sizes` summed once, maintained by `observe` and read by
+    /// the planner and the counters. The whole-log walk this replaces
+    /// re-serialized every tool call's arguments on every request.
+    total_bytes: usize,
+    /// The log's bytes by category, maintained by `observe` the same
+    /// way; `render` snapshots it into `stats.log_content`.
+    content: LogContent,
     /// First message not under the block: `[0, cut)` is sectioned,
     /// `[cut, len)` travels whole. Moves only at flushes.
     cut: usize,
@@ -278,6 +290,11 @@ pub struct Transcript {
     /// [`Transcript::record_usage`].
     pending_shares: Shares,
     stats: TranscriptStats,
+    /// A previous session's sections, handed over by the session save
+    /// and waiting for the resumed log. `observe` adopts them on the
+    /// resume's replace when they tile a prefix of the rebuilt log,
+    /// and drops them for anything else.
+    saved: Option<Vec<Section>>,
 }
 
 /// One request's wire bytes by category — the proportions the
@@ -291,6 +308,29 @@ struct Shares {
     tool_results: usize,
     user_text: usize,
     assistant_text: usize,
+}
+
+/// Adds one message's bytes by category into `content` — the
+/// per-message form of the split the counters and the usage shares
+/// both read. The same taxonomy the request shares spread the billed
+/// input over, minus the pieces that ride no message.
+fn add_message_content(content: &mut LogContent, message: &Message) {
+    for part in &message.content {
+        match part {
+            Content::Text(text) => match message.role {
+                Role::User => content.user_text += text.len(),
+                Role::Assistant => content.assistant_text += text.len(),
+                Role::System | Role::Tool => {}
+            },
+            Content::ToolCall(call) => {
+                content.tool_calls += call.name.len() + call.args.to_string().len();
+            }
+            Content::ToolResult(result) => {
+                content.tool_results += result.content.len();
+            }
+            Content::Image(_) => {}
+        }
+    }
 }
 
 impl Shares {
@@ -312,11 +352,14 @@ impl Transcript {
             settings,
             log: Vec::new(),
             sizes: Vec::new(),
+            total_bytes: 0,
+            content: LogContent::default(),
             cut: 0,
             sections: Vec::new(),
             skills_bytes: 0,
             pending_shares: Shares::default(),
             stats: TranscriptStats::default(),
+            saved: None,
         }
     }
 
@@ -328,14 +371,46 @@ impl Transcript {
     pub fn observe(&mut self, messages: &[Message]) {
         if messages.len() >= self.log.len() && messages[..self.log.len()] == self.log[..] {
             for message in &messages[self.log.len()..] {
-                self.sizes.push(summary::message_bytes(message));
+                let bytes = summary::message_bytes(message);
+                self.sizes.push(bytes);
+                self.total_bytes += bytes;
+                add_message_content(&mut self.content, message);
             }
             self.log.extend_from_slice(&messages[self.log.len()..]);
         } else {
             self.log = messages.to_vec();
-            self.sizes = self.log.iter().map(summary::message_bytes).collect();
+            self.sizes = Vec::with_capacity(self.log.len());
+            self.total_bytes = 0;
+            self.content = LogContent::default();
+            for message in &self.log {
+                let bytes = summary::message_bytes(message);
+                self.sizes.push(bytes);
+                self.total_bytes += bytes;
+                add_message_content(&mut self.content, message);
+            }
             self.cut = 0;
             self.sections.clear();
+        }
+        // The saved sections are adopted only when they tile a prefix
+        // of the log this mirror now holds: the resume then rides the
+        // compaction the previous session already paid for, dense
+        // from the first request. Anything else — a truncated log, an
+        // edited session — falls back to the rebuild. A fresh
+        // mirror's first observe lands here too: its log was empty,
+        // so the compare above took the extension branch.
+        if let Some(saved) = self.saved.take() {
+            let mut end = 0usize;
+            let tiles = !saved.is_empty()
+                && saved.iter().all(|section| {
+                    let contiguous = section.range.id == end;
+                    end = section.range.id + section.range.n;
+                    contiguous
+                })
+                && end <= self.log.len();
+            if tiles {
+                self.sections = saved;
+                self.cut = end;
+            }
         }
     }
 
@@ -370,6 +445,19 @@ impl Transcript {
     /// [`TranscriptStats::carry`] for what sums and what does not.
     pub fn carry(&mut self, saved: &TranscriptStats) {
         self.stats.carry(saved);
+    }
+
+    /// The committed sections, oldest first: what a session save
+    /// carries so the next session skips the re-fill.
+    pub fn saved_sections(&self) -> Vec<Section> {
+        self.sections.clone()
+    }
+
+    /// Hands a previous session's sections over. They are not adopted
+    /// on the spot: the resumed log is unknown until the first
+    /// request, and [`Transcript::observe`] validates them against it.
+    pub fn adopt_sections(&mut self, sections: Vec<Section>) {
+        self.saved = Some(sections);
     }
 
     /// Zeroes the benchmark counters; the log and the compaction state
@@ -466,8 +554,8 @@ impl Transcript {
         }
     }
 
-    /// Commits an upgraded section text from a [`PendingSummary`] the
-    /// decorator filled outside the lock. `false` when the section no
+    /// Commits an upgraded section text from a [`PendingSummary`] a
+    /// worker task filled outside the request. `false` when the section no
     /// longer matches — a concurrent plan rebuilt it — and the text is
     /// dropped: every intermediate state stays a valid view.
     pub fn commit_summary(&mut self, pending: &PendingSummary, text: String) -> bool {
@@ -494,7 +582,7 @@ impl Transcript {
     pub fn plan_flush(&mut self) -> Vec<PendingSummary> {
         self.sync_sizes();
         let len = self.log.len();
-        if summary::messages_bytes(&self.log) <= self.settings.max_view_bytes {
+        if self.total_bytes <= self.settings.max_view_bytes {
             return Vec::new();
         }
         let tail_start = self.tail_index();
@@ -553,8 +641,8 @@ impl Transcript {
     ///
     /// The one-stop form for callers without a summarizer:
     /// [`Transcript::plan_flush`] plus this, with the extractive
-    /// stand-ins final. The decorator runs the same steps with awaits
-    /// between, never under the lock.
+    /// stand-ins final. The decorator plans and renders under the
+    /// lock and hands the fill a background task.
     pub fn view(&mut self, messages: &[Message]) -> Option<Vec<Message>> {
         self.observe(messages);
         self.plan_flush();
@@ -566,8 +654,8 @@ impl Transcript {
     /// benchmark counters.
     pub fn render(&mut self) -> Option<Vec<Message>> {
         self.stats.requests += 1;
-        self.stats.log_bytes = self.bytes(0, self.log.len());
-        self.stats.log_content = self.log_content();
+        self.stats.log_bytes = self.total_bytes;
+        self.stats.log_content = self.content;
         if self.cut == 0 {
             self.stats.pass_through += 1;
             return None;
@@ -622,44 +710,28 @@ impl Transcript {
         self.sizes[from..to].iter().sum()
     }
 
-    /// The log's bytes by category, each message counted once — the
-    /// same taxonomy the request shares spread the billed input over,
-    /// minus the pieces that ride no message.
-    fn log_content(&self) -> LogContent {
-        let mut content = LogContent::default();
-        for message in &self.log {
-            for part in &message.content {
-                match part {
-                    Content::Text(text) => match message.role {
-                        Role::User => content.user_text += text.len(),
-                        Role::Assistant => content.assistant_text += text.len(),
-                        Role::System | Role::Tool => {}
-                    },
-                    Content::ToolCall(call) => {
-                        content.tool_calls += call.name.len() + call.args.to_string().len();
-                    }
-                    Content::ToolResult(result) => {
-                        content.tool_results += result.content.len();
-                    }
-                    Content::Image(_) => {}
-                }
-            }
-        }
-        content
-    }
-
     /// The block's bytes: every section's header plus text.
     fn block_bytes(&self) -> usize {
         self.sections.iter().map(Section::view_bytes).sum()
     }
 
     /// Realigns the size cache with the log; `observe` maintains it,
-    /// so this is a defensive no-op in normal flow.
+    /// so this is a defensive no-op in normal flow. When it does patch,
+    /// the running totals rebuild from scratch.
     fn sync_sizes(&mut self) {
         self.sizes.truncate(self.log.len());
+        let mut patched = false;
         while self.sizes.len() < self.log.len() {
             let id = self.sizes.len();
             self.sizes.push(summary::message_bytes(&self.log[id]));
+            patched = true;
+        }
+        if patched {
+            self.total_bytes = self.sizes.iter().sum();
+            self.content = LogContent::default();
+            for message in &self.log {
+                add_message_content(&mut self.content, message);
+            }
         }
     }
 
@@ -695,6 +767,10 @@ impl Transcript {
             };
             let messages = self.log[at..stop].to_vec();
             let text = compact::section_digest(&messages);
+            // The digest of whatever sits directly before this chunk:
+            // the stand-in committed for the previous chunk, or the
+            // block's last section for the first chunk of a flush.
+            let context = self.sections.last().map(|s| s.text.clone());
             self.sections.push(Section {
                 range,
                 text,
@@ -704,6 +780,7 @@ impl Transcript {
                 section: self.sections.len() - 1,
                 range,
                 messages,
+                context,
             });
             at = stop;
         }
@@ -734,10 +811,13 @@ impl Transcript {
                     origin: SectionOrigin::Extractive,
                 },
             );
+            // The union is the block's first section: nothing sits
+            // before it to resolve references against.
             pending.push(PendingSummary {
                 section: 0,
                 range,
                 messages,
+                context: None,
             });
             self.stats.consolidations += 1;
         }
@@ -748,8 +828,9 @@ impl Transcript {
 /// The transcript as a [`ModelProvider`]: wraps `inner`, rewrites every
 /// request's messages through the stepped view, and refreshes the
 /// shared mirror first. A configured [`Summarizer`] upgrades the new
-/// sections' stand-ins between plan and render — outside the mirror's
-/// lock, so the mirror is never held across a model call.
+/// sections' stand-ins in a background task after the request went
+/// out — never inside it, never under the mirror's lock, so a slow or
+/// failing worker delays nothing.
 pub struct TranscriptView {
     inner: Arc<dyn ModelProvider>,
     transcript: Arc<Mutex<Transcript>>,
@@ -770,7 +851,8 @@ impl TranscriptView {
     }
 
     /// The wrapper with a summarizer for the model fill of new
-    /// sections.
+    /// sections. The fill runs in tokio tasks: calling [`Self::complete`]
+    /// with a summarizer requires a running runtime.
     pub fn with_summarizer(
         inner: Arc<dyn ModelProvider>,
         transcript: Arc<Mutex<Transcript>>,
@@ -808,24 +890,15 @@ impl ModelProvider for TranscriptView {
             transcript.observe(&req.messages);
             transcript.plan_flush()
         };
-        // The worker runs outside the lock: a slow or failing summary
-        // delays this request at most, never the mirror's other
-        // readers, and the mirror's state stays valid the whole time.
-        if let Some(worker) = &self.summarizer {
-            for pending in &pending {
-                let outcome = worker.summarize(&pending.messages).await;
-                let mut transcript = self
-                    .transcript
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner);
-                match outcome {
-                    Ok(text) => {
-                        transcript.commit_summary(pending, text);
-                        transcript.record_worker_call(WorkerOutcome::Upgraded);
-                    }
-                    Err(_) => transcript.record_worker_call(WorkerOutcome::Failed),
-                }
-            }
+        // The fill runs after this request, outside it and outside the
+        // lock: the request goes out now with the extractive
+        // stand-ins, and the upgrades commit under the mirror's lock
+        // as they land. A slow or failing worker delays nothing and
+        // leaves the stand-in standing.
+        if let Some(worker) = &self.summarizer
+            && !pending.is_empty()
+        {
+            Self::spawn_worker_fill(Arc::clone(worker), Arc::clone(&self.transcript), pending);
         }
         let view = {
             let mut transcript = self
@@ -856,12 +929,85 @@ impl ModelProvider for TranscriptView {
     }
 }
 
+impl TranscriptView {
+    /// Dispatches one background fill over `pending`: chunks of
+    /// [`WORKER_CONCURRENCY`] summarize concurrently, and each chunk's
+    /// answers commit under the mirror's lock as they resolve. The
+    /// range check in [`Transcript::commit_summary`] rejects anything a
+    /// concurrent plan rebuilt in the meantime, so a commit that races
+    /// a flush or a consolidation drops its text and the stand-in
+    /// stands.
+    fn spawn_worker_fill(
+        worker: Arc<dyn Summarizer>,
+        mirror: Arc<Mutex<Transcript>>,
+        pending: Vec<PendingSummary>,
+    ) {
+        tokio::spawn(async move {
+            for chunk in pending.chunks(WORKER_CONCURRENCY) {
+                let mut fills = Vec::with_capacity(chunk.len());
+                for item in chunk {
+                    let worker = Arc::clone(&worker);
+                    let messages = item.messages.clone();
+                    let context = item.context.clone();
+                    let section = item.section;
+                    let range = item.range;
+                    fills.push(tokio::spawn(async move {
+                        (
+                            worker.summarize(&messages, context.as_deref()).await,
+                            section,
+                            range,
+                        )
+                    }));
+                }
+                for fill in fills {
+                    // A task that panicked or was cancelled counts as a
+                    // failure, like a provider error: the stand-in
+                    // stands either way.
+                    let outcome = match fill.await {
+                        Ok((Ok(text), section, range)) => Some((text, section, range)),
+                        _ => None,
+                    };
+                    let mut transcript = mirror.lock().unwrap_or_else(PoisonError::into_inner);
+                    match outcome {
+                        Some((text, section, range)) => {
+                            // `commit_summary` reads the address, not
+                            // the messages; the range check decides.
+                            let pending = PendingSummary {
+                                section,
+                                range,
+                                messages: Vec::new(),
+                                context: None,
+                            };
+                            transcript.commit_summary(&pending, text);
+                            transcript.record_worker_call(WorkerOutcome::Upgraded);
+                        }
+                        None => transcript.record_worker_call(WorkerOutcome::Failed),
+                    }
+                }
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rhema_core::{Content, ToolCall, ToolResult};
     use std::collections::HashSet;
     use std::sync::Mutex as StdMutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The test runtime is current-thread: spawned tasks run while the
+    /// test yields. Wait until `done` holds, then stop yielding.
+    async fn wait_for(done: impl Fn() -> bool) {
+        for _ in 0..10_000 {
+            if done() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+        panic!("the background fill never finished");
+    }
 
     /// A big tool result, in kilobytes.
     fn result_bytes(kb: usize) -> String {
@@ -1090,13 +1236,97 @@ mod tests {
         assert_eq!(transcript.sections[0].origin, SectionOrigin::Model);
 
         // A stale pending — the range moved on — is dropped.
+        // The context is irrelevant to the commit's range check.
         let stale = PendingSummary {
             section: pending[0].section,
             range: Range { id: 999, n: 1 },
             messages: Vec::new(),
+            context: None,
         };
         assert!(!transcript.commit_summary(&stale, "ghost".into()));
         assert_eq!(transcript.sections[0].text, "## Goals Met\n- all");
+    }
+
+    #[test]
+    fn a_resume_adopts_the_saved_sections_and_skips_the_refill() {
+        let log = long_history(30);
+        // The first session sections and upgrades the block.
+        let mut first = Transcript::new(settings(20_000));
+        first.observe(&log);
+        let pending = first.plan_flush();
+        assert!(!pending.is_empty());
+        for item in &pending {
+            assert!(first.commit_summary(item, format!("## Goals Met\n- model {}", item.section)));
+        }
+        let saved = first.saved_sections();
+        assert!(saved.iter().all(|s| s.origin == SectionOrigin::Model));
+
+        // The resumed session adopts them: the compaction the last
+        // session paid for rides as-is, dense from the first request.
+        let mut second = Transcript::new(settings(20_000));
+        second.adopt_sections(saved.clone());
+        second.observe(&log);
+        assert_eq!(second.cut, first.cut);
+        assert_eq!(second.sections, saved);
+        // No re-sectioning, no pending fill: nothing to re-pay.
+        assert!(second.plan_flush().is_empty());
+
+        // The band keeps growing from the adopted cut.
+        let mut extended = log.clone();
+        extended.push(Message::text(Role::User, "one more"));
+        second.observe(&extended);
+        let view = second.render().unwrap();
+        assert_eq!(view.last(), Some(&Message::text(Role::User, "one more")));
+    }
+
+    #[test]
+    fn tampered_saved_sections_fall_back_to_the_rebuild() {
+        let mut transcript = Transcript::new(settings(20_000));
+        transcript.adopt_sections(vec![Section {
+            range: Range { id: 5, n: 9 },
+            text: "## Goals Met\n- orphan".into(),
+            origin: SectionOrigin::Model,
+        }]);
+        transcript.observe(&long_history(30));
+        // The first id 5, not 0: the tiling rejects the adoption.
+        assert_eq!(transcript.cut, 0);
+        assert!(transcript.sections.is_empty());
+        // The next request rebuilds from nothing.
+        assert!(!transcript.plan_flush().is_empty());
+    }
+
+    #[test]
+    fn a_pending_summary_carries_the_adjacent_digest_as_context() {
+        let mut transcript = Transcript::new(settings(20_000));
+        transcript.observe(&long_history(30));
+        let pending = transcript.plan_flush();
+        assert!(pending.len() >= 2);
+        // The first section has no predecessor; every later one points
+        // at the stand-in committed for the section before it.
+        assert_eq!(pending[0].context, None);
+        for (prev, item) in pending.iter().zip(pending.iter().skip(1)) {
+            let expected = transcript.sections[prev.section].text.clone();
+            assert_eq!(item.context.as_deref(), Some(expected.as_str()));
+        }
+
+        // A later flush's first chunk inherits the block's last
+        // section as its context.
+        let first = pending[0].clone();
+        assert!(transcript.commit_summary(&first, "## Goals Met\n- model".into()));
+        let mut extended = long_history(30);
+        for i in 0..12 {
+            extended.push(Message::text(
+                Role::User,
+                format!("extra filler {i}: {}", "y".repeat(1024)),
+            ));
+        }
+        transcript.observe(&extended);
+        // Read the predecessor before planning: plan_flush itself
+        // pushes the new sections.
+        let expected = transcript.sections.last().unwrap().text.clone();
+        let pending = transcript.plan_flush();
+        assert!(!pending.is_empty());
+        assert_eq!(pending[0].context.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
@@ -1449,18 +1679,53 @@ mod tests {
         let mut sink = NoopSink;
         view.complete(req, &mut sink).await.unwrap();
 
-        let mirror = transcript.lock().unwrap();
-        let stats = mirror.stats();
-        assert!(stats.summarizer_calls > 0);
-        assert_eq!(stats.summarizer_failures, 0);
-        assert!(
-            mirror
+        // The request went out with the extractive stand-ins: the fill
+        // had not landed when it rendered.
+        {
+            let sent = recording.0.lock().unwrap();
+            let rhema_core::Content::Text(text) = &sent[0][0].content[0] else {
+                panic!("text view message");
+            };
+            assert!(!text.contains("worker wrote this"), "{text}");
+        }
+
+        // The background fill upgrades every section.
+        wait_for(|| {
+            transcript
+                .lock()
+                .unwrap()
                 .sections
                 .iter()
                 .all(|s| s.origin == SectionOrigin::Model)
-        );
+        })
+        .await;
+
+        // The guard drops at the brace: the runtime is current-thread,
+        // so the next request cannot take the lock while it is held.
+        {
+            let mirror = transcript.lock().unwrap();
+            let stats = mirror.stats();
+            assert!(stats.summarizer_calls > 0);
+            assert_eq!(stats.summarizer_failures, 0);
+            assert!(
+                mirror
+                    .sections
+                    .iter()
+                    .all(|s| s.text.contains("worker wrote this"))
+            );
+        }
+
+        // The next request carries the dense text.
+        let req = rhema_core::ModelRequest {
+            system: None,
+            messages: long_history(30),
+            tools: Vec::new(),
+            params: rhema_core::ChatParams::new("m"),
+        };
+        let mut sink = NoopSink;
+        view.complete(req, &mut sink).await.unwrap();
         let sent = recording.0.lock().unwrap();
-        let rhema_core::Content::Text(text) = &sent[0][0].content[0] else {
+        let rhema_core::Content::Text(text) = &sent[1][0].content[0] else {
             panic!("text view message");
         };
         assert!(text.contains("worker wrote this"), "{text}");
@@ -1494,10 +1759,17 @@ mod tests {
             params: rhema_core::ChatParams::new("m"),
         };
         let mut sink = NoopSink;
-        // The main call went out with the extractive stand-ins.
+        // The main call went out with the extractive stand-ins, and
+        // never waited on the worker: the failure is counted by the
+        // background fill, after the response.
         view.complete(req, &mut sink).await.unwrap();
-        let sent = recording.0.lock().unwrap();
-        assert_eq!(sent.len(), 1);
+        {
+            // The guard drops before the wait: no lock is held across
+            // an await.
+            let sent = recording.0.lock().unwrap();
+            assert_eq!(sent.len(), 1);
+        }
+        wait_for(|| transcript.lock().unwrap().stats().summarizer_calls > 0).await;
         let mirror = transcript.lock().unwrap();
         assert_eq!(
             mirror.stats().summarizer_failures,
@@ -1508,6 +1780,84 @@ mod tests {
                 .sections
                 .iter()
                 .all(|s| s.origin == SectionOrigin::Extractive)
+        );
+    }
+
+    /// A summarizer worker that answers only once its gate opens; it
+    /// spins on yields, so an inline await of it would hang the
+    /// current-thread runtime.
+    struct Gated(Arc<AtomicBool>);
+
+    #[async_trait]
+    impl ModelProvider for Gated {
+        async fn complete(
+            &self,
+            _req: rhema_core::ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            while !self.0.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+            Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "## Goals Met\n- late but dense"),
+                stop_reason: rhema_core::StopReason::EndTurn,
+                usage: Usage::default(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_summarizer_never_delays_the_request() {
+        let gate = Arc::new(AtomicBool::new(false));
+        let recording = Arc::new(Recording(StdMutex::new(Vec::new())));
+        let transcript = Arc::new(Mutex::new(Transcript::new(settings(20_000))));
+        let view = TranscriptView::with_summarizer(
+            recording.clone(),
+            transcript.clone(),
+            Arc::new(compact::ModelSummarizer::new(
+                Arc::new(Gated(Arc::clone(&gate))),
+                "cheap",
+            )),
+        );
+        let req = rhema_core::ModelRequest {
+            system: None,
+            messages: long_history(30),
+            tools: Vec::new(),
+            params: rhema_core::ChatParams::new("m"),
+        };
+        let turn = tokio::spawn(async move {
+            let mut sink = NoopSink;
+            view.complete(req, &mut sink).await.unwrap();
+        });
+
+        // The request goes out, and the turn finishes, while the worker
+        // is still gated: the fill never sat in the request path.
+        wait_for(|| !recording.0.lock().unwrap().is_empty()).await;
+        wait_for(|| turn.is_finished()).await;
+        assert!(
+            !gate.load(Ordering::SeqCst),
+            "the request waited on the gated worker"
+        );
+
+        // Then the fill lands, and the section upgrades.
+        gate.store(true, Ordering::SeqCst);
+        wait_for(|| {
+            transcript
+                .lock()
+                .unwrap()
+                .sections
+                .iter()
+                .all(|s| s.origin == SectionOrigin::Model)
+        })
+        .await;
+        let mirror = transcript.lock().unwrap();
+        assert!(
+            mirror
+                .sections
+                .iter()
+                .all(|s| s.text.contains("late but dense")),
+            "{:?}",
+            mirror.sections
         );
     }
 

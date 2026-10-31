@@ -33,11 +33,6 @@ pub fn message_bytes(message: &Message) -> usize {
         .sum()
 }
 
-/// The total wire size of a message list.
-pub fn messages_bytes(messages: &[Message]) -> usize {
-    messages.iter().map(message_bytes).sum()
-}
-
 /// `text` on one line, at most `cap` bytes, cut on a char boundary
 /// with an ellipsis when longer.
 pub fn head(text: &str, cap: usize) -> String {

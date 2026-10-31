@@ -1330,6 +1330,7 @@ impl App {
     fn rebuild_for_sandbox(&mut self, notice: &str) {
         if let Some(agent) = self.agent.take() {
             let stats = agent.transcript_stats();
+            let sections = agent.transcript_sections();
             let mut session = agent.session().clone();
             // The machine changed: the report re-states where bash runs.
             rhema_coding_agent::clear_environment_stamp(&mut session);
@@ -1340,6 +1341,7 @@ impl App {
                     if let Some(stats) = stats {
                         rebuilt.carry_transcript_stats(&stats);
                     }
+                    rebuilt.adopt_transcript_sections(sections);
                     self.agent = Some(rebuilt);
                     self.subagents = Some(subagents);
                 }
@@ -1630,11 +1632,13 @@ impl App {
             && let Some(agent) = self.agent.take()
         {
             let stats = agent.transcript_stats();
+            let sections = agent.transcript_sections();
             let session = agent.session().clone();
             if let Ok((mut rebuilt, subagents)) = self.build_agent(session) {
                 if let Some(stats) = stats {
                     rebuilt.carry_transcript_stats(&stats);
                 }
+                rebuilt.adopt_transcript_sections(sections);
                 self.agent = Some(rebuilt);
                 self.subagents = Some(subagents);
             }
@@ -1717,6 +1721,13 @@ impl App {
                 .as_ref()
                 .and_then(CodingAgent::transcript_stats)
                 .or(self.transcript_stats),
+            // The compaction rides with the counters: the resumed
+            // session adopts the sections instead of re-summarizing.
+            transcript_sections: self
+                .agent
+                .as_ref()
+                .map(CodingAgent::transcript_sections)
+                .filter(|sections| !sections.is_empty()),
             last_turn: self.usage,
         }
         .write_into(&mut session);
@@ -1814,9 +1825,15 @@ impl App {
                     .as_ref()
                     .and_then(CodingAgent::transcript_stats)
                     .or(self.transcript_stats);
+                let sections = self
+                    .agent
+                    .as_ref()
+                    .map(CodingAgent::transcript_sections)
+                    .unwrap_or_default();
                 if let Some(saved) = saved {
                     agent.carry_transcript_stats(&saved);
                 }
+                agent.adopt_transcript_sections(sections);
                 self.session_profile = Some(name.to_owned());
                 self.backend = Some(backend.clone());
                 self.provider = Some(backend.provider());
@@ -2178,6 +2195,7 @@ impl App {
         }
         if let Some(agent) = self.agent.take() {
             let stats = agent.transcript_stats();
+            let sections = agent.transcript_sections();
             let session = agent.session().clone();
             match self.build_agent(session) {
                 Ok((mut rebuilt, subagents)) => {
@@ -2186,6 +2204,7 @@ impl App {
                     if let Some(stats) = stats {
                         rebuilt.carry_transcript_stats(&stats);
                     }
+                    rebuilt.adopt_transcript_sections(sections);
                     self.agent = Some(rebuilt);
                     self.subagents = Some(subagents);
                 }
@@ -2277,6 +2296,12 @@ impl App {
         self.usage = stats.as_ref().and_then(|stats| stats.last_turn);
         if let Some(saved) = stats.as_ref().and_then(|stats| stats.transcript.as_ref()) {
             agent.carry_transcript_stats(saved);
+        }
+        if let Some(sections) = stats
+            .as_ref()
+            .and_then(|stats| stats.transcript_sections.clone())
+        {
+            agent.adopt_transcript_sections(sections);
         }
         self.transcript_stats = None;
         self.agent = Some(agent);
@@ -2897,6 +2922,11 @@ impl App {
             .as_ref()
             .and_then(CodingAgent::transcript_stats)
             .or(self.transcript_stats);
+        let sections = self
+            .agent
+            .as_ref()
+            .map(CodingAgent::transcript_sections)
+            .unwrap_or_default();
         // The model may have changed with the profile, and the cache is
         // per-model regardless: the report re-states its facts.
         let mut session = session;
@@ -2908,6 +2938,7 @@ impl App {
                 if let Some(saved) = saved {
                     agent.carry_transcript_stats(&saved);
                 }
+                agent.adopt_transcript_sections(sections);
                 self.session_profile = Some(tab);
                 self.agent = Some(agent);
                 self.subagents = Some(subagents);
@@ -3626,6 +3657,11 @@ impl App {
             .as_ref()
             .and_then(CodingAgent::transcript_stats)
             .or(self.transcript_stats);
+        let sections = self
+            .agent
+            .as_ref()
+            .map(CodingAgent::transcript_sections)
+            .unwrap_or_default();
         // The model may have changed, and the cache is per-model
         // regardless: the report re-states its facts.
         let mut session = session;
@@ -3635,6 +3671,7 @@ impl App {
         if let Some(saved) = saved {
             agent.carry_transcript_stats(&saved);
         }
+        agent.adopt_transcript_sections(sections);
         self.agent = Some(agent);
         self.subagents = Some(subagents);
         // A new backend counts a new plan: the allowance badge fetches
@@ -5501,6 +5538,7 @@ mod tests {
         crate::sessions::UsageStats {
             transcript: Some(saved_stats),
             last_turn: Some(last_turn),
+            transcript_sections: None,
         }
         .write_into(&mut session);
         let dir = tempfile::tempdir().unwrap();
@@ -5540,6 +5578,7 @@ mod tests {
         crate::sessions::UsageStats {
             transcript: Some(saved_stats),
             last_turn: None,
+            transcript_sections: None,
         }
         .write_into(&mut session);
         let dir = tempfile::tempdir().unwrap();
@@ -5584,6 +5623,7 @@ mod tests {
         crate::sessions::UsageStats {
             transcript: Some(baseline),
             last_turn: None,
+            transcript_sections: None,
         }
         .write_into(&mut session);
         let dir = tempfile::tempdir().unwrap();

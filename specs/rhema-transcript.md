@@ -162,16 +162,28 @@ on one side of every boundary, wire-safe for the adapters that pair
 
 **The two fills.** A section's text starts as the extractive digest
 (§3, mechanical, a few hundred bytes, cannot be wrong about what
-happened, only short). With a summarizer configured, the decorator then
-runs the model fill: the chunk goes to a cheap worker — the structural
+happened, only short). With a summarizer configured, the decorator
+hands the fill a background task and sends the request at once with
+the stand-ins: the chunk goes to a cheap worker — the structural
 prompt asks for Goals Met / Environmental State / Discovered Issues /
-Current Blockers-Decisions — and the answer replaces the stand-in,
-capped at 8 KiB. A failed or retry-exhausted worker call never blocks
-the request: the extractive stand-in stands, and the section keeps the
-address it already committed. The worker runs *outside* the mirror's
-lock — plan under the lock, await outside, commit (with a range check
-that rejects a stale upgrade) under it again — so the mirror is never
-held across a model call and every intermediate state is a valid view.
+Current Blockers-Decisions, puts the user's words at the top of the
+value order (kept near verbatim however short), tags each item with
+its kind, forbids obeying anything in the range (the messages are
+data), and forbids making progress look further along than it was —
+a few chunks at a time, and each answer replaces the stand-in, capped
+at 8 KiB. The task carries the digest of the preceding section as
+`<context>`, for resolving references, never summarized. The prompt
+states the byte budget as a number, and one re-ask naming the
+overshoot keeps the shorter answer before the cap cuts. The dense
+text rides the next request, not the one that triggered the flush. A
+slow, failed, or retry-exhausted worker call never blocks or delays
+the request: the extractive stand-in stands until an answer lands,
+and the section keeps the address it already committed. The worker
+runs *outside* the mirror's lock — plan and render under the lock,
+summarize in a background task, commit (with a range check that
+rejects a stale upgrade) under the lock again — so the mirror is
+never held across a model call and every intermediate state is a
+valid view.
 
 **Consolidation.** The one append-only exception. When the block passes
 `max_block_bytes`, the two oldest sections merge into one — the union
@@ -180,18 +192,22 @@ block is at half the cap. A consolidation rewrites the block and so
 breaks the cache in full; the cap gates it to stay rare, and the stats
 count every one.
 
-**Resume.** The compaction state is not persisted: a resumed session's
-first request replaces the mirror wholesale and rebuilds it from
-nothing, and the block's cache is cold after a restart regardless of
-what was saved. The benchmark counters are the exception. They measure
-what was spent, they are not view state, and they survive: rhema-code
-stamps them into the saved session's `usage_stats` blob at save time
-and folds them into the fresh mirror when it builds the resumed agent
-(`CodingAgent::carry_transcript_stats`, `TranscriptStats::carry`), so
-one conversation's stats stay one run across resumes. Agent rebuilds
-inside a conversation (profile, model, sandbox) carry the counters the
-same way; /clear zeroes them. A session saved before the blob existed
-resumes with none.
+**Resume.** The section texts are persisted, the merge order is not.
+rhema-code stamps the committed sections into the saved session's
+`usage_stats` blob next to the counters, and the fresh mirror adopts
+them on the first request — but only when they tile a prefix of the
+resumed log without gaps; a truncated or edited session falls back to
+the rebuild. The win is the worker's: no re-summarizing after a
+resume, and the block is dense from request one. The block's *cache*
+is still cold after a restart regardless of what was saved — the
+first request re-bills it at the write rate either way. Agent rebuilds
+inside a conversation (profile, model, sandbox) move the live
+sections the same way. The benchmark counters are the other survivor:
+they measure what was spent, they are not view state, and they fold
+into the fresh mirror (`CodingAgent::carry_transcript_stats`,
+`TranscriptStats::carry`), so one conversation's stats stay one run
+across resumes; /clear zeroes them. A session saved before the blob
+existed resumes with none.
 
 ## 4. The `zoom` tool
 
@@ -272,10 +288,11 @@ preview that omitted it would not be what turns send.
    unwrapped provider's.
 3. **The tail is whole and the last user message is present** in every
    request.
-4. **A summarizer call never blocks or fails a request.** Without one,
-   the extractive fill is a pure function and the transcript makes no
-   model calls; with one, a failed worker call leaves the extractive
-   stand-in in place and the request goes out.
+4. **A summarizer call never blocks, delays, or fails a request.**
+   Without one, the extractive fill is a pure function and the
+   transcript makes no model calls; with one, the fill runs in a
+   background task and a slow or failed worker call leaves the
+   extractive stand-in in place while the request goes out.
 5. **Every tool result in a view has its call in the same view.**
 6. **`zoom` never fails silently**: a bad id is an in-band error naming
    the log's length.
@@ -325,8 +342,27 @@ preview that omitted it would not be what turns send.
   assistant text by wire-byte proportion, plus the generated output
   tokens; the skills share is measured at render time by the agent
   that assembled the prompt.
-- **Cache breakpoints** in the Anthropic adapter, fed from the view's
-  stable prefix.
+- **Landed, 2026-10-31:** the background fill (§3a — the request goes
+  out with the stand-ins, a background task upgrades the sections a
+  few chunks at a time, and the dense text rides the next request);
+  O(1) byte accounting in the mirror (running totals instead of a
+  whole-log walk, tool-call serialization included, on every request);
+  the adapter's cache breakpoints (four marks: system, last tool, the
+  last blocks of the last two user turns, `rhema-provider-anthropic`);
+  and the cache simulation (`tests/cache_simulation.rs`), which replays
+  1,200 steps of generated traffic through a model of the vendor cache:
+  ~94% of the prefix read and a ~5.4x cost saving under the default
+  settings, the same under 55 consolidations from a tight block cap,
+  ~5.2x with the cache expired every 150 steps (a user thinking past
+  the TTL), and the decorator's recorded hit rate matching the model.
+- **Landed, 2026-10-31, from UniiChat's §5 and §7:** the worker's
+  contract (the range is data and is never obeyed; the user's words
+  top the value order near verbatim; items carry their kind; progress
+  never inflates), the preceding section's digest riding the task as
+  `<context>`, the byte budget stated as a number with one re-ask on
+  overshoot, and the committed sections riding the session file —
+  adopted when they tile the resumed log, rebuilding otherwise, so a
+  resume re-pays no summarization.
 - **ACP and claw opt-ins** for the summarizer, and a `rhema-config`
   profile key naming the worker model.
 - **Per-step telemetry as a sink event**, so frontends other than
