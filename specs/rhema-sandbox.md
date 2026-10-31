@@ -205,7 +205,7 @@ backend.
 | container, later | the Engine API over the unix socket, behind its own seam (the `SandboxApi` precedent) | medium |
 | LXD / Incus | `rhema-sandbox-lxd`: one driver, two instance types. A container takes the docker bind-mount posture (`lxc exec` prefix, a `disk` device mapping the host root in) or the fs-disjoint one via `lxc file`; a `--vm` instance is the same driver with a launch flag — and the first true isolation tier in the offer | medium |
 | VM / microVM, hosted | an image running `rhema-sandboxd` — packaging, not code | ~zero |
-| microVM, local | `rhema-sandbox-ecrou`: one boot per command through the `ecrou` CLI, the workspace a 1:1 `--share`, output a `--capture` file pair tailed into the live-line pump | medium |
+| microVM, local | `rhema-sandbox-ecrou`: one boot per command through the `ecrou` CLI, the workspace a 1:1 `-v`, output a `--capture` file pair tailed into the live-line pump | medium |
 | SSH | daemonless: exec = `ssh host -- bash -c` (live lines through the existing pump), files via `ssh cat`/`tee`, seed via `ssh git clone`; or `sandboxd` on the remote behind `ssh -L` — then it *is* `HttpSandbox` | medium / zero |
 | cloud sandboxes | `SandboxDo` (transport unchanged, types from `protocol.rs`); `VercelSandbox` (the vendor adapter, kept) | done |
 

@@ -12,7 +12,7 @@
 //! Package installs and other rootfs state live exactly one command;
 //! the workspace is what persists, which is the seam's whole contract.
 //!
-//! Exec is `ecrou run --quiet --capture <io> --share <ws>:<ws>
+//! Exec is `ecrou run --quiet --capture <io> -v <ws>:<ws>
 //! --workdir <cwd> <image> -- /bin/sh -c <line>`: the workspace share
 //! mounts at its own host path (the docker 1:1 posture), the cwd
 //! rides `--workdir`, and the line runs the command through `bash -c`
@@ -387,7 +387,7 @@ fn run_argv(
         "--quiet".to_owned(),
         "--capture".to_owned(),
         capture.to_string_lossy().into_owned(),
-        "--share".to_owned(),
+        "-v".to_owned(),
         share.to_owned(),
         "--workdir".to_owned(),
         workdir.to_owned(),
@@ -589,7 +589,7 @@ fn ecrou_ready() -> bool {
                 "--quiet",
                 "--capture",
                 smoke.path().join("io").to_str().unwrap_or_default(),
-                "--share",
+                "-v",
                 &format!("{share}:{share}"),
                 "--workdir",
                 &share,
@@ -859,7 +859,7 @@ mod tests {
             "--quiet",
             "--capture",
             "/tmp/io",
-            "--share",
+            "-v",
             "/home/me/proj:/home/me/proj",
             "--workdir",
             "/home/me/proj/src",
