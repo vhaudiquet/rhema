@@ -226,6 +226,10 @@ impl Transcript {
             // The running usage tally feeds the footer gauge, not the
             // transcript; the step's final usage rides `StepEnd`.
             OwnedEvent::Usage(_) => {}
+            // A retry wait is the status strip's countdown, not a
+            // transcript line; a recovery or the final error tells the
+            // story worth keeping.
+            OwnedEvent::RetryWait { .. } => {}
             OwnedEvent::TextDelta(delta) => self.append_assistant(delta),
             OwnedEvent::ToolCallStart { id, name } => {
                 self.lines.push(Line::ToolCall {

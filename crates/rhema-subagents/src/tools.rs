@@ -740,7 +740,8 @@ impl EventSink for Forwarder<'_> {
             // spend to accumulate; the accounting still rides `StepEnd`.
             Event::ToolStatus { .. }
             | Event::ToolCallArgsDelta { .. }
-            | Event::ToolOutputDelta { .. } => {}
+            | Event::ToolOutputDelta { .. }
+            | Event::RetryWait { .. } => {}
             Event::Usage(usage) => {
                 if self.context.as_ref() != Some(&usage) {
                     self.context = Some(usage);

@@ -68,6 +68,8 @@ enum Recorded {
         usage: Usage,
         stop_reason: StopReason,
     },
+    /// A retry wait; the mock never emits one.
+    RetryWait,
 }
 
 impl From<Event<'_>> for Recorded {
@@ -101,6 +103,7 @@ impl From<Event<'_>> for Recorded {
                 code,
             },
             Event::Usage(usage) => Self::Usage(usage),
+            Event::RetryWait { .. } => Self::RetryWait,
             Event::StepEnd { usage, stop_reason } => Self::StepEnd {
                 usage,
                 stop_reason: stop_reason.clone(),

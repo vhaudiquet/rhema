@@ -83,6 +83,20 @@ pub enum Event<'a> {
     /// chunk, so there the event adds nothing over [`Event::StepEnd`].
     /// Sinks that only need the final accounting may ignore it.
     Usage(crate::output::Usage),
+    /// A provider attempt failed transiently and the retry ladder is
+    /// waiting `delay` before the next one. Ephemeral like
+    /// [`Event::ThinkingDelta`]: sinks render it live — a countdown, a
+    /// notice — and it never reaches the session history.
+    RetryWait {
+        /// The failed attempt's own error text.
+        error: &'a str,
+        /// How long the ladder waits before the next attempt.
+        delay: std::time::Duration,
+        /// One-based number of the attempt that just failed.
+        attempt: u32,
+        /// Total attempts the policy will spend before giving up.
+        total: u32,
+    },
     /// The step ends.
     StepEnd {
         /// Token accounting for the model call.

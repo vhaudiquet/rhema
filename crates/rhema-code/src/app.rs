@@ -922,6 +922,25 @@ pub struct TurnState {
     /// preview stays hidden until the command has earned it — a second
     /// of runtime or a second line.
     pub tool_output_at: Option<std::time::Instant>,
+    /// The provider retry wait in flight, if one was announced: a
+    /// transient failure happened and the ladder is counting down to
+    /// the next attempt. Any further event ends it — the next attempt
+    /// is speaking — and `finished` clears it with the rest.
+    pub retry_wait: Option<TurnRetryWait>,
+}
+
+/// A provider retry wait the status strip counts down: one announced
+/// wait, carried from the engine's event to the next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TurnRetryWait {
+    /// The failed attempt's error text.
+    pub error: String,
+    /// When the next attempt fires; the strip counts down to it.
+    pub deadline: std::time::Instant,
+    /// One-based number of the attempt that just failed.
+    pub attempt: u32,
+    /// Total attempts the policy will spend.
+    pub total: u32,
 }
 
 impl TurnState {
@@ -939,6 +958,7 @@ impl TurnState {
             thinking: String::new(),
             tool_output: String::new(),
             tool_output_at: None,
+            retry_wait: None,
         }
     }
 
@@ -969,6 +989,7 @@ impl TurnState {
         self.steer = None;
         self.processing = false;
         self.thinking.clear();
+        self.retry_wait = None;
         self.decline_all = false;
         self.pending_approval = None;
         self.answers = None;
@@ -3747,6 +3768,11 @@ impl App {
     /// whole conversation, so the footer's gauge moves with the stream
     /// instead of waiting for `StepEnd`.
     fn track_phase(&mut self, owned: &OwnedEvent) {
+        // Any event ends a retry wait: the next attempt is speaking.
+        // The announcement itself is what sets one.
+        if !matches!(owned, OwnedEvent::RetryWait { .. }) {
+            self.turn.retry_wait = None;
+        }
         match owned {
             OwnedEvent::StepStart { .. } | OwnedEvent::TextDelta(_) => {
                 self.turn.processing = false;
@@ -3770,6 +3796,19 @@ impl App {
             // A zero tally is a placeholder frame, not a measurement:
             // keeping the stale figure beats dropping the gauge to 0.
             OwnedEvent::Usage(usage) if context_tokens(usage) > 0 => self.usage = Some(*usage),
+            OwnedEvent::RetryWait {
+                error,
+                delay,
+                attempt,
+                total,
+            } => {
+                self.turn.retry_wait = Some(TurnRetryWait {
+                    error: error.clone(),
+                    deadline: std::time::Instant::now() + *delay,
+                    attempt: *attempt,
+                    total: *total,
+                });
+            }
             _ => {}
         }
     }

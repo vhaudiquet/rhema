@@ -155,47 +155,58 @@ pub enum ServerMessage {
 
 impl ServerMessage {
     /// The wire form of one engine event — the sink's mapping, typed.
-    pub fn from_event(event: Event<'_>) -> Self {
+    /// `None` for the events the wire carries no frame for.
+    pub fn from_event(event: Event<'_>) -> Option<Self> {
         match event {
-            Event::StepStart { iteration } => Self::StepStart { iteration },
-            Event::ThinkingDelta(delta) => Self::ThinkingDelta {
+            Event::StepStart { iteration } => Some(Self::StepStart { iteration }),
+            Event::ThinkingDelta(delta) => Some(Self::ThinkingDelta {
                 delta: delta.to_owned(),
-            },
-            Event::TextDelta(delta) => Self::TextDelta {
+            }),
+            Event::TextDelta(delta) => Some(Self::TextDelta {
                 delta: delta.to_owned(),
-            },
-            Event::ToolCallStart { id, name } => Self::ToolCallStart {
+            }),
+            Event::ToolCallStart { id, name } => Some(Self::ToolCallStart {
                 id: id.to_owned(),
                 name: name.to_owned(),
-            },
-            Event::ToolCallArgsDelta { id, delta } => Self::ToolCallArgsDelta {
+            }),
+            Event::ToolCallArgsDelta { id, delta } => Some(Self::ToolCallArgsDelta {
                 id: id.to_owned(),
                 delta: delta.to_owned(),
-            },
-            Event::ToolOutputDelta { id, chunk } => Self::ToolOutputDelta {
+            }),
+            Event::ToolOutputDelta { id, chunk } => Some(Self::ToolOutputDelta {
                 id: id.to_owned(),
                 chunk: chunk.to_owned(),
-            },
-            Event::ToolStatus { id, status } => Self::ToolStatus {
+            }),
+            Event::ToolStatus { id, status } => Some(Self::ToolStatus {
                 id: id.to_owned(),
                 status: status.clone(),
-            },
+            }),
             Event::ToolResult {
                 id,
                 content,
                 is_error,
                 code,
-            } => Self::ToolResult {
+            } => Some(Self::ToolResult {
                 id: id.to_owned(),
                 content: content.to_owned(),
                 is_error,
                 code,
-            },
-            Event::StepEnd { usage, stop_reason } => Self::StepEnd {
+            }),
+            Event::StepEnd { usage, stop_reason } => Some(Self::StepEnd {
                 usage,
                 stop_reason: stop_reason.clone(),
-            },
-            Event::Usage(usage) => Self::Usage { usage },
+            }),
+            Event::Usage(usage) => Some(Self::Usage { usage }),
+            // The retry wait is the TUI's countdown material; the wire
+            // carries no frame for it, and the step's outcome — a
+            // recovery or the final error — reaches the client anyway.
+            Event::RetryWait { .. } => {
+                // The retry wait is the TUI's countdown material; the
+                // wire carries no frame for it, and the step's outcome —
+                // a recovery or the final error — reaches the client
+                // anyway.
+                None
+            }
         }
     }
 
@@ -267,7 +278,7 @@ mod tests {
             code: Some(0),
         };
         assert_eq!(
-            serde_json::to_value(ServerMessage::from_event(event)).unwrap(),
+            serde_json::to_value(ServerMessage::from_event(event).unwrap()).unwrap(),
             serde_json::json!({
                 "type": "tool_result", "id": "call-1", "content": "ok",
                 "is_error": false, "code": 0,

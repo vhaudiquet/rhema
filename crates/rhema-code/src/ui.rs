@@ -2305,9 +2305,29 @@ fn render_status(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
                 .map(|started| started.elapsed())
                 .unwrap_or_default(),
         );
-        // Two phases, two colors: the model streaming is thinking; a
-        // command executing is running.
-        let phase = if app.turn.processing {
+        // The phase slot, three states: a retry the ladder is counting
+        // down (the error in the strip's alarm color, the wait local —
+        // one event announced it, the strip ticks the clock), a command
+        // executing, the model streaming.
+        let phase = if let Some(wait) = &app.turn.retry_wait {
+            let remaining = wait
+                .deadline
+                .saturating_duration_since(std::time::Instant::now());
+            Line::from(vec![
+                Span::styled(
+                    SPINNER[spinner].to_string(),
+                    Style::default().fg(theme.error),
+                ),
+                Span::styled(format!(" {}", wait.error), Style::default().fg(theme.error)),
+                Span::raw(format!(
+                    " · attempt {} of {} failed · retrying in {}",
+                    wait.attempt,
+                    wait.total,
+                    elapsed_text(remaining)
+                ))
+                .fg(theme.text3),
+            ])
+        } else if app.turn.processing {
             Line::from(vec![
                 Span::styled(
                     SPINNER[spinner].to_string(),
@@ -4719,6 +4739,50 @@ mod scroll_tests {
         let screen = draw(&mut app);
         assert!(screen.contains("running"), "{screen}");
         assert!(!screen.contains("thinking"), "{screen}");
+    }
+
+    #[test]
+    fn the_retry_wait_counts_down_in_the_status_line() {
+        let mut app = chat_app();
+        app.turn.running = true;
+        // Wide enough that the wait's full line fits: error, attempt,
+        // countdown, and the cancel hint.
+        let draw = |app: &mut App| {
+            let backend = TestBackend::new(100, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .flat_map(|y| {
+                    (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned())
+                })
+                .collect::<String>()
+        };
+
+        // The provider died mid-turn: the strip names the error, the
+        // attempt the ladder is on, and the wait it announced.
+        app.on_event(crate::events::UiEvent::Engine(
+            crate::events::OwnedEvent::RetryWait {
+                error: "network error: dead link".into(),
+                delay: std::time::Duration::from_secs(30),
+                attempt: 1,
+                total: 6,
+            },
+        ));
+        let screen = draw(&mut app);
+        assert!(screen.contains("network error: dead link"), "{screen}");
+        assert!(screen.contains("attempt 1 of 6"), "{screen}");
+        assert!(screen.contains("retrying in"), "{screen}");
+        assert!(screen.contains("esc cancels"), "{screen}");
+
+        // The retry connects and streams: the wait is gone, the phase
+        // is back to thinking.
+        app.on_event(crate::events::UiEvent::Engine(
+            crate::events::OwnedEvent::TextDelta("back".into()),
+        ));
+        let screen = draw(&mut app);
+        assert!(screen.contains("thinking"), "{screen}");
+        assert!(!screen.contains("retrying in"), "{screen}");
     }
 
     #[test]

@@ -142,7 +142,9 @@ struct LiveSink {
 
 impl EventSink for LiveSink {
     fn emit(&mut self, event: rhema_core::Event<'_>) {
-        self.live.send(ServerMessage::from_event(event));
+        if let Some(message) = ServerMessage::from_event(event) {
+            self.live.send(message);
+        }
     }
 }
 
@@ -441,15 +443,15 @@ async fn run_turn(
     };
 
     // 2. The provider: the Anthropic dialect over reqwest, with the
-    //    retry ladder.
-    let provider: Arc<dyn ModelProvider> = Arc::new(Retrying::with_policy(
+    //    retry ladder. The short one on both classes: a hosted
+    //    function's request outlives no five-minute outage.
+    let provider: Arc<dyn ModelProvider> = Arc::new(Retrying::with_ladders(
         Arc::new(AnthropicProvider::new_with_transport(
             state.anthropic_key.clone(),
             Arc::new(ReqwestTransport::new()),
         )),
-        3,
-        Duration::from_secs(1),
-        Duration::from_secs(2),
+        vec![Duration::from_secs(1), Duration::from_secs(2)],
+        vec![Duration::from_secs(1), Duration::from_secs(2)],
     ));
 
     // 3. The sandbox of the same session name, seeded on first use.

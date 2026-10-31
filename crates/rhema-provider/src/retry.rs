@@ -3,9 +3,18 @@
 //! [`Retrying`] wraps any [`ModelProvider`]: a request that failed with a
 //! retryable error — a transport timeout, a network failure, or a
 //! server-side status (see [`ProviderError::is_retryable`]) — is
-//! re-issued with exponential backoff, a bounded number of times. Every
-//! turn provider the frontends assemble rides one, so a provider hiccup
-//! costs a pause instead of the whole turn.
+//! re-issued with backoff from a bounded ladder. Every turn provider the
+//! frontends assemble rides one, so a provider hiccup costs a pause
+//! instead of the whole turn.
+//!
+//! The ladder follows the failure. A dead link
+//! ([`ProviderError::Network`]) is the local machine's problem, and
+//! waiting long can fix it: the ladder runs from a second to five
+//! minutes. A struggling server fixes itself in seconds or not at all
+//! inside a turn, and every timeout attempt also burns the request's
+//! own timeout, so that ladder stays short. Each wait is announced to
+//! the sink as an [`Event::RetryWait`] before it runs, so a UI can
+//! count it down.
 //!
 //! Two guards keep a retry honest:
 //!
@@ -26,19 +35,36 @@ use std::time::Duration;
 use async_trait::async_trait;
 use rhema_core::{Event, EventSink, ModelOutput, ModelProvider, ModelRequest, ProviderError};
 
-/// Re-issues failed model requests with exponential backoff.
+/// The waits before each retry of a dead network link: two quick tries
+/// catch an instant recovery nearly free, and the tail — six and a half
+/// minutes all told, six attempts — rides out a reassociation or a real
+/// outage. The exchange fails when the ladder runs out.
+const DEFAULT_NETWORK_LADDER: &[Duration] = &[
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(300),
+];
+
+/// The waits before each retry of a struggling server: a transport
+/// timeout, a 408 or 5xx status, an exchange that closed before any
+/// content. Three attempts, three seconds all told.
+const DEFAULT_SERVER_LADDER: &[Duration] = &[Duration::from_secs(1), Duration::from_secs(2)];
+
+/// Re-issues failed model requests with backoff from a per-failure
+/// ladder.
 ///
-/// The pause before the first retry is one second; each later retry
-/// waits twice its predecessor, capped at two. No jitter: one process,
-/// one user, nothing to de-synchronize.
+/// No jitter: one process, one user, nothing to de-synchronize.
 pub struct Retrying {
     inner: Arc<dyn ModelProvider>,
-    /// Attempts per exchange, the first included.
-    attempts: u32,
-    /// The pause before the second attempt.
-    base_delay: Duration,
-    /// The longest pause any retry waits.
-    max_delay: Duration,
+    /// Waits before each retry of a dead link; the first entry follows
+    /// the second attempt. Its length sets the attempt count.
+    network_ladder: Vec<Duration>,
+    /// Waits before each retry of a struggling server, and of an
+    /// exchange that came back empty. Its length sets the attempt
+    /// count.
+    server_ladder: Vec<Duration>,
     /// The pause between attempts, injected so runtimes without tokio's
     /// timers (the wasm hosts) supply their own.
     sleeper: Arc<dyn Sleeper>,
@@ -49,55 +75,39 @@ impl std::fmt::Debug for Retrying {
         // The inner provider and sleeper are dyn seams: they print as
         // placeholders, the policy prints in full.
         f.debug_struct("Retrying")
-            .field("attempts", &self.attempts)
-            .field("base_delay", &self.base_delay)
-            .field("max_delay", &self.max_delay)
+            .field("network_ladder", &self.network_ladder)
+            .field("server_ladder", &self.server_ladder)
             .finish_non_exhaustive()
     }
 }
 
 impl Retrying {
-    /// The default policy: up to three attempts.
+    /// The default policy: the network ladder rides out a real outage,
+    /// the server ladder spends three quick tries.
     pub fn new(inner: Arc<dyn ModelProvider>) -> Self {
-        Self::with_policy(inner, 3, Duration::from_secs(1), Duration::from_secs(2))
+        Self::with_ladders(
+            inner,
+            DEFAULT_NETWORK_LADDER.to_vec(),
+            DEFAULT_SERVER_LADDER.to_vec(),
+        )
     }
 
-    /// An explicit policy, for tests: `attempts` counts the first try;
-    /// the pause starts at `base_delay`, doubling per retry up to
-    /// `max_delay`. A zero `attempts` is clamped to one — the exchange
-    /// always runs once — so the policy can never silently do nothing.
-    pub fn with_policy(
+    /// An explicit policy: `network_ladder` holds the waits between the
+    /// retries of a dead link, `server_ladder` those of a struggling
+    /// server and of an exchange that came back empty. Each ladder's
+    /// length sets its attempt count — the exchange always runs once,
+    /// and an empty ladder means no retries — so the policy can never
+    /// silently do nothing.
+    pub fn with_ladders(
         inner: Arc<dyn ModelProvider>,
-        attempts: u32,
-        base_delay: Duration,
-        max_delay: Duration,
+        network_ladder: Vec<Duration>,
+        server_ladder: Vec<Duration>,
     ) -> Self {
         Self {
             inner,
-            attempts: attempts.max(1),
-            base_delay,
-            max_delay,
+            network_ladder,
+            server_ladder,
             sleeper: Arc::new(TokioSleeper),
-        }
-    }
-
-    /// [`with_policy`](Self::with_policy) with the pause supplied — the
-    /// constructor for runtimes without tokio's timers. The policy is
-    /// unchanged (a zero `attempts` clamps to one, as there): the
-    /// sleeper only waits the ladder out.
-    pub fn policy_with_sleeper(
-        inner: Arc<dyn ModelProvider>,
-        attempts: u32,
-        base_delay: Duration,
-        max_delay: Duration,
-        sleeper: Arc<dyn Sleeper>,
-    ) -> Self {
-        Self {
-            inner,
-            attempts: attempts.max(1),
-            base_delay,
-            max_delay,
-            sleeper,
         }
     }
 
@@ -106,14 +116,6 @@ impl Retrying {
     pub fn with_sleeper(mut self, sleeper: Arc<dyn Sleeper>) -> Self {
         self.sleeper = sleeper;
         self
-    }
-
-    /// The pause before retry number `retry`, zero-based.
-    fn delay(&self, retry: u32) -> Duration {
-        // The shift is bounded so a large `attempts` cannot overflow the
-        // multiplication; the cap makes the exact bound irrelevant.
-        let doubling = 1u32 << retry.min(16);
-        self.base_delay.saturating_mul(doubling).min(self.max_delay)
     }
 }
 
@@ -149,7 +151,9 @@ struct CountingSink<'a> {
 
 impl EventSink for CountingSink<'_> {
     fn emit(&mut self, event: Event<'_>) {
-        if !matches!(event, Event::Usage(_)) {
+        // Usage and the retry announcement are tallies, not generation:
+        // neither is content the caller saw, so neither blocks a retry.
+        if !matches!(event, Event::Usage(_) | Event::RetryWait { .. }) {
             self.content += 1;
         }
         self.inner.emit(event);
@@ -163,10 +167,12 @@ impl ModelProvider for Retrying {
         req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        for attempt in 0..self.attempts {
-            if attempt > 0 {
-                self.sleeper.sleep(self.delay(attempt - 1)).await;
-            }
+        // Attempts spent, the first included. Each ladder indexes by it:
+        // entry `spent` is the wait that follows attempt `spent + 1`
+        // failing, and a miss means the policy is out of tries — so the
+        // ladder's length, not a separate count, bounds the exchange.
+        let mut spent = 0u32;
+        loop {
             let mut counted = CountingSink {
                 inner: &mut *sink,
                 content: 0,
@@ -178,19 +184,50 @@ impl ModelProvider for Retrying {
                 Ok(output) if counted.content > 0 || !output.message.content.is_empty() => {
                     return Ok(output);
                 }
-                Ok(_) => {}
-                Err(err) => {
-                    let last_attempt = attempt + 1 == self.attempts;
-                    if !last_attempt && counted.content == 0 && err.is_retryable() {
+                // An empty success carries no error to classify, so it
+                // rides the server ladder: a provider that closes its
+                // own stream early is a server-side oddity, not a dead
+                // local link.
+                Ok(_) => {
+                    if let Some(&delay) = self.server_ladder.get(spent as usize) {
+                        sink.emit(Event::RetryWait {
+                            error: "the provider closed the stream without content",
+                            delay,
+                            attempt: spent + 1,
+                            total: self.server_ladder.len() as u32 + 1,
+                        });
+                        self.sleeper.sleep(delay).await;
+                        spent += 1;
                         continue;
+                    }
+                    return Err(ProviderError::Other(
+                        "provider closed the stream without content".to_owned(),
+                    ));
+                }
+                Err(err) => {
+                    if counted.content == 0 && err.is_retryable() {
+                        let ladder = if matches!(err, ProviderError::Network(_)) {
+                            &self.network_ladder
+                        } else {
+                            &self.server_ladder
+                        };
+                        if let Some(&delay) = ladder.get(spent as usize) {
+                            let message = err.to_string();
+                            sink.emit(Event::RetryWait {
+                                error: &message,
+                                delay,
+                                attempt: spent + 1,
+                                total: ladder.len() as u32 + 1,
+                            });
+                            self.sleeper.sleep(delay).await;
+                            spent += 1;
+                            continue;
+                        }
                     }
                     return Err(err);
                 }
             }
         }
-        Err(ProviderError::Other(
-            "provider closed the stream without content".to_owned(),
-        ))
     }
 }
 
@@ -213,6 +250,8 @@ mod tests {
     enum Attempt {
         /// A transport timeout before any byte.
         Timeout,
+        /// The link itself died before any byte.
+        Network,
         /// A client error: never retryable.
         Auth,
         /// A quota wall: never retryable, whatever the status family.
@@ -248,6 +287,7 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             match self.steps.lock().unwrap().remove(0) {
                 Attempt::Timeout => Err(ProviderError::Timeout),
+                Attempt::Network => Err(ProviderError::Network("dead link".into())),
                 Attempt::Auth => Err(ProviderError::Api {
                     message: "anthropic api error (HTTP 401): bad key".into(),
                     status: Some(401),
@@ -310,11 +350,10 @@ mod tests {
 
     fn retried(provider: Arc<Scripted>) -> Retrying {
         // No real waiting: the ladder's shape is a separate test.
-        Retrying::with_policy(
+        Retrying::with_ladders(
             provider,
-            3,
-            Duration::from_millis(10),
-            Duration::from_millis(20),
+            vec![Duration::from_millis(10), Duration::from_millis(20)],
+            vec![Duration::from_millis(10), Duration::from_millis(20)],
         )
     }
 
@@ -443,13 +482,12 @@ mod tests {
         ]));
         let waits = Arc::new(Mutex::new(Vec::new()));
         let sleeper = Arc::new(RecordingShared(waits.clone()));
-        let retrying = Retrying::policy_with_sleeper(
+        let retrying = Retrying::with_ladders(
             scripted.clone(),
-            3,
-            Duration::from_millis(40),
-            Duration::from_millis(80),
-            sleeper,
-        );
+            vec![Duration::from_millis(40), Duration::from_millis(80)],
+            vec![Duration::from_millis(40), Duration::from_millis(80)],
+        )
+        .with_sleeper(sleeper);
         let mut sink = Deltas::default();
         retrying
             .complete(request(), &mut sink)
@@ -459,28 +497,107 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_backoff_doubles_and_caps() {
+    async fn a_dead_link_walks_the_whole_network_ladder() {
         let scripted = Arc::new(Scripted::new(vec![
-            Attempt::Timeout,
-            Attempt::Timeout,
-            Attempt::Timeout,
-            Attempt::Succeed("fourth time"),
+            Attempt::Network,
+            Attempt::Network,
+            Attempt::Network,
+            Attempt::Succeed("back"),
         ]));
-        // Ladder: 10ms, 20ms, then 20ms again — the doubling would
-        // reach 40ms, and the cap holds it.
-        let retrying = Retrying::with_policy(
+        // The waits sum to 70ms — the network ladder ran to its end and
+        // the fourth attempt answered. The server ladder here would
+        // have given up one attempt earlier.
+        let retrying = Retrying::with_ladders(
             scripted.clone(),
-            4,
-            Duration::from_millis(10),
-            Duration::from_millis(20),
+            vec![
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                Duration::from_millis(40),
+            ],
+            vec![Duration::from_millis(10), Duration::from_millis(20)],
         );
         let mut sink = Deltas::default();
         let started = tokio::time::Instant::now();
-        retrying
+        let out = retrying
             .complete(request(), &mut sink)
             .await
             .expect("the last attempt answers");
-        assert_eq!(started.elapsed(), Duration::from_millis(50));
+        assert_eq!(started.elapsed(), Duration::from_millis(70));
         assert_eq!(scripted.calls(), 4);
+        assert_eq!(out.message.content, vec![Content::Text("back".into())]);
+    }
+
+    #[tokio::test]
+    async fn a_struggling_server_gets_the_short_ladder() {
+        // Three timeouts burn the server ladder out — two waits, three
+        // attempts — where the same failures on a dead link would have
+        // had one more try coming.
+        let scripted = Arc::new(Scripted::new(vec![Attempt::Timeout; 3]));
+        let retrying = Retrying::with_ladders(
+            scripted.clone(),
+            vec![
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+                Duration::from_millis(40),
+            ],
+            vec![Duration::from_millis(10), Duration::from_millis(20)],
+        );
+        let mut sink = Deltas::default();
+        let err = retrying
+            .complete(request(), &mut sink)
+            .await
+            .expect_err("the short ladder runs out");
+        assert_eq!(err, ProviderError::Timeout);
+        assert_eq!(scripted.calls(), 3);
+    }
+
+    /// Records the retry announcements as they cross to the caller.
+    #[derive(Default)]
+    struct Announcements(Vec<(String, Duration, u32, u32)>);
+
+    impl EventSink for Announcements {
+        fn emit(&mut self, event: Event<'_>) {
+            if let Event::RetryWait {
+                error,
+                delay,
+                attempt,
+                total,
+            } = event
+            {
+                self.0.push((error.to_owned(), delay, attempt, total));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_wait_is_announced_before_it_runs() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::Network,
+            Attempt::Succeed("recovered"),
+        ]));
+        let sink = Announcements::default();
+        let retrying = Retrying::with_ladders(
+            scripted.clone(),
+            vec![Duration::from_secs(3), Duration::from_secs(30)],
+            vec![Duration::from_secs(1)],
+        );
+        let mut sink = sink;
+        retrying
+            .complete(request(), &mut sink)
+            .await
+            .expect("the second attempt answers");
+        assert_eq!(
+            sink.0,
+            vec![(
+                "network error: dead link".to_owned(),
+                Duration::from_secs(3),
+                1,
+                3,
+            )]
+        );
+        // Two calls: the announcement passed through the counting sink
+        // without counting as content, or the retry never would have
+        // run.
+        assert_eq!(scripted.calls(), 2);
     }
 }

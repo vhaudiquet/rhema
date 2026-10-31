@@ -108,6 +108,17 @@ pub enum OwnedEvent {
         /// The running cumulative tally for the in-flight call.
         Usage,
     ),
+    /// See [`Event::RetryWait`].
+    RetryWait {
+        /// The failed attempt's error text.
+        error: String,
+        /// How long the ladder waits before the next attempt.
+        delay: std::time::Duration,
+        /// One-based number of the attempt that just failed.
+        attempt: u32,
+        /// Total attempts the policy will spend.
+        total: u32,
+    },
     /// See [`Event::StepEnd`].
     StepEnd {
         /// Token accounting for the model call.
@@ -153,6 +164,17 @@ impl From<&Event<'_>> for OwnedEvent {
                 code: *code,
             },
             Event::Usage(usage) => Self::Usage(*usage),
+            Event::RetryWait {
+                error,
+                delay,
+                attempt,
+                total,
+            } => Self::RetryWait {
+                error: (*error).to_owned(),
+                delay: *delay,
+                attempt: *attempt,
+                total: *total,
+            },
             Event::StepEnd { usage, stop_reason } => Self::StepEnd {
                 usage: *usage,
                 stop_reason: (*stop_reason).clone(),

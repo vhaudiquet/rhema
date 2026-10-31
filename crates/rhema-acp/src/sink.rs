@@ -245,6 +245,9 @@ impl EventSink for AcpSink {
             // rides the step's close, where the tally is final.
             Event::Usage(_) => {}
             Event::StepStart { .. } => {}
+            // The retry wait is the TUI's countdown material; the
+            // client sees the step's outcome — recovery or final error.
+            Event::RetryWait { .. } => {}
         }
     }
 }

@@ -70,7 +70,9 @@ struct WsSink {
 
 impl EventSink for WsSink {
     fn emit(&mut self, event: Event<'_>) {
-        self.live.send(&ServerMessage::from_event(event));
+        if let Some(message) = ServerMessage::from_event(event) {
+            self.live.send(&message);
+        }
     }
 }
 
@@ -355,17 +357,19 @@ async fn run_turn(
     };
 
     // 2. The provider: the Anthropic dialect over host fetch, with the
-    //    retry ladder paused by workerd's timers.
-    let provider: Arc<dyn ModelProvider> = Arc::new(Retrying::policy_with_sleeper(
-        Arc::new(AnthropicProvider::new_with_transport(
-            api_key,
-            Arc::new(FetchTransport::new()),
-        )),
-        3,
-        Duration::from_secs(1),
-        Duration::from_secs(2),
-        Arc::new(DelaySleeper),
-    ));
+    //    retry ladder paused by workerd's timers. The short one on both
+    //    classes: a worker's request outlives no five-minute outage.
+    let provider: Arc<dyn ModelProvider> = Arc::new(
+        Retrying::with_ladders(
+            Arc::new(AnthropicProvider::new_with_transport(
+                api_key,
+                Arc::new(FetchTransport::new()),
+            )),
+            vec![Duration::from_secs(1), Duration::from_secs(2)],
+            vec![Duration::from_secs(1), Duration::from_secs(2)],
+        )
+        .with_sleeper(Arc::new(DelaySleeper)),
+    );
 
     // 3. The sandbox of the same session name, seeded on first use —
     //    the shim DO wrapper or the shared HTTP client, per the

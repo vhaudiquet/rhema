@@ -661,6 +661,7 @@ impl EventSink for HubSink {
             | ModelEvent::ToolOutputDelta { .. }
             | ModelEvent::ToolStatus { .. }
             | ModelEvent::Usage(_)
+            | ModelEvent::RetryWait { .. }
             | ModelEvent::StepEnd { .. } => return,
         };
         self.hub.emit(&self.key, turn);
