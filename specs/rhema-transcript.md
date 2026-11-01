@@ -192,6 +192,31 @@ block is at half the cap. A consolidation rewrites the block and so
 breaks the cache in full; the cap gates it to stay rare, and the stats
 count every one.
 
+**The skill pin.** A skill's body is instructions in force, not a
+tool step's outcome, and the digest reduces tool steps to counts — so
+a flushed skill read would otherwise vanish from every later request
+without a trace. Instead the mirror holds the skill list at wiring
+time (the same discovery the prompt rendered; `Skill` carries its
+body since discovery reads the file anyway), and `observe` detects
+each read as it arrives: a tool result whose text contains a known
+body. The match is by content, not by the command — any read that
+returned the whole file qualifies, `cat` or `sed` or a subagent's
+result, and no shell line is parsed; the gate is the result's length
+against the shortest body, then a 64-byte head needle, then the whole
+body. At a flush, a read pins its call-and-result span as its own
+section carrying the body whole, extractive, and never queued for the
+worker — no fill can rewrite the rules into a count line. The section
+still tiles `[0, cut)`, still zooms, still persists; the cost is one
+body's bytes in the block, once per skill: a re-read's section is a
+pointer to the copy already carried (`Section::pinned` names it, and
+the pin map rebuilds from the sections on every observe, so resume
+adoption keeps the dedupe true). Consolidation keeps the bodies of
+the sections it merges — re-appended after the digest — and the
+model fill re-appends them after its answer at commit, so the body
+may move sections but never drops out of the block. A turn carrying
+two calls digests normally rather than orphaning the second result
+behind the pin.
+
 **Resume.** The section texts are persisted, the merge order is not.
 rhema-code stamps the committed sections into the saved session's
 `usage_stats` blob next to the counters, and the fresh mirror adopts
@@ -318,6 +343,16 @@ preview that omitted it would not be what turns send.
 - **Tolerant `n`.** Power-of-two-only would encode the compactor's
   future tree into today's tool errors. Halves of any `n` degrade to
   the same thing a binary tree gives.
+- **The pin carries content, not commands.** A rule like "never
+  compact a `cat */SKILL.md` call" parses shell lines, misfires on
+  `sed`/`rg`/parallel calls, and pins vendored files that merely share
+  the name. Matching the result's content against the discovered
+  bodies needs no parsing, catches every read shape, and can only
+  match what discovery itself read from disk. And the pin is a
+  verbatim *section*, never a band member: pinning the band would
+  stall or breach the budget in a session that reads many skills,
+  while a verbatim section tiles like any other and costs one body
+  per skill.
 - **Default on, `None` the escape hatch.** First landed flag-gated:
   the view changes what the model sees past the threshold, and the
   mechanics were unproven at coding-traffic scale. The claw then ran
@@ -363,8 +398,17 @@ preview that omitted it would not be what turns send.
   overshoot, and the committed sections riding the session file —
   adopted when they tile the resumed log, rebuilding otherwise, so a
   resume re-pays no summarization.
+- **Landed, 2026-10-31:** the skill pin (§3a) — discovery carries
+  each `Skill`'s body, `observe` detects reads by content, a flushed
+  read pins the body whole in its own unsummarized section, re-reads
+  become pointers, and the body survives consolidation and the model
+  fill.
 - **ACP and claw opt-ins** for the summarizer, and a `rhema-config`
   profile key naming the worker model.
+- **Subagent runs pin nothing yet**: `rhema-subagents` attaches each
+  run's transcript directly (`attach`, no skills handed over). Runs
+  are short-lived so compaction rarely fires there; wire the parent's
+  skill list through when a run outgrows it.
 - **Per-step telemetry as a sink event**, so frontends other than
   rhema-code can show what the model saw; the in-memory
   `TranscriptStats` snapshot covers the session aggregate today.

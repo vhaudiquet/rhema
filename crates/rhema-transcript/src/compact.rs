@@ -61,6 +61,12 @@ pub struct Section {
     pub text: String,
     /// Who wrote `text`.
     pub origin: SectionOrigin,
+    /// The skills whose whole bodies this section carries verbatim —
+    /// the skill pin. Empty for digests. The pin survives the model
+    /// fill and consolidation: a body may move sections, but it never
+    /// drops out of the block.
+    #[serde(default)]
+    pub pinned: Vec<String>,
 }
 
 impl Section {
@@ -336,6 +342,22 @@ pub(crate) fn section_digest(messages: &[Message]) -> String {
     text
 }
 
+/// The verbatim text a pinned section carries: the skill's name and
+/// its whole body, so the block keeps the rules in force after the
+/// messages that read them are sectioned.
+pub(crate) fn skill_section_text(name: &str, body: &str) -> String {
+    format!("skill {name}, read whole and in force:\n\n{body}")
+}
+
+/// The text a re-read's section carries: a pointer to the section
+/// already holding the body, so the block never keeps two copies.
+pub(crate) fn skill_pointer_text(name: &str, carried: Range) -> String {
+    format!(
+        "skill {name} read again; its whole text is carried at {}+{}|",
+        carried.id, carried.n
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -589,11 +611,13 @@ mod tests {
                 range: Range { id: 0, n: 12 },
                 text: "## Goals Met\n- a".into(),
                 origin: SectionOrigin::Extractive,
+                pinned: Vec::new(),
             },
             Section {
                 range: Range { id: 12, n: 3 },
                 text: "## Environmental State\n- b".into(),
                 origin: SectionOrigin::Model,
+                pinned: vec!["unslop".into()],
             },
         ];
         let json = serde_json::to_string(&sections).unwrap();

@@ -15,11 +15,13 @@
 //! summarizer seam and the section writers live in
 //! [`crate::compact`].
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use async_trait::async_trait;
 use rhema_core::{
-    Content, EventSink, Message, ModelOutput, ModelProvider, ProviderError, Role, ToolSpec, Usage,
+    Content, EventSink, Message, ModelOutput, ModelProvider, ProviderError, Role, ToolResult,
+    ToolSpec, Usage,
 };
 
 use crate::compact::{self, PendingSummary, Section, SectionOrigin, Summarizer};
@@ -285,6 +287,19 @@ pub struct Transcript {
     /// The skills section's byte share of the system prompt, measured
     /// at render time by the agent that assembled it. Zero until set.
     skills_bytes: usize,
+    /// The skills whose bodies pin whole into the block. Empty, and
+    /// nothing pins.
+    skills: Vec<SkillText>,
+    /// The shortest pinned body: the detect gate, below which no
+    /// result can carry a body at all. `usize::MAX` with no skills.
+    min_skill_body: usize,
+    /// The skill reads found in the log, ordered by `call`.
+    reads: Vec<Read>,
+    /// The skill names a committed section carries whole, with that
+    /// section's range: the dedupe that turns re-reads into pointers.
+    /// Rebuilt from the sections on every observe, so resume adoption
+    /// keeps it true.
+    pinned: HashMap<String, Range>,
     /// The wire bytes the pending response's input tokens spread over:
     /// staged from the request before it goes out, consumed by
     /// [`Transcript::record_usage`].
@@ -295,6 +310,43 @@ pub struct Transcript {
     /// resume's replace when they tile a prefix of the rebuilt log,
     /// and drops them for anything else.
     saved: Option<Vec<Section>>,
+}
+
+/// A skill whose body pins: a tool result carrying one stays whole in
+/// the block instead of compacting to a digest. Set on the mirror at
+/// wiring time, from the same discovery the prompt renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkillText {
+    /// The skill's folder name.
+    pub name: String,
+    /// The whole `SKILL.md`, frontmatter included.
+    pub body: String,
+}
+
+/// One skill read found in the log: the call-and-result span and the
+/// skill the result carried.
+#[derive(Debug, Clone, Copy)]
+struct Read {
+    /// The log index of the assistant message holding the call.
+    call: usize,
+    /// The log index of the tool message carrying the body.
+    result: usize,
+    /// The skill's index in the mirror's skill list.
+    skill: usize,
+}
+
+/// The bytes of a detect needle: a body's head, distinct per skill,
+/// compared before the whole body is.
+const NEEDLE_BYTES: usize = 64;
+
+/// The body's head on a char boundary: the cheap prefilter a result
+/// must contain before the whole body is compared.
+fn needle(body: &str) -> &str {
+    let mut end = NEEDLE_BYTES.min(body.len());
+    while !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    &body[..end]
 }
 
 /// One request's wire bytes by category — the proportions the
@@ -357,6 +409,10 @@ impl Transcript {
             cut: 0,
             sections: Vec::new(),
             skills_bytes: 0,
+            skills: Vec::new(),
+            min_skill_body: usize::MAX,
+            reads: Vec::new(),
+            pinned: HashMap::new(),
             pending_shares: Shares::default(),
             stats: TranscriptStats::default(),
             saved: None,
@@ -370,13 +426,15 @@ impl Transcript {
     /// ever persisted).
     pub fn observe(&mut self, messages: &[Message]) {
         if messages.len() >= self.log.len() && messages[..self.log.len()] == self.log[..] {
-            for message in &messages[self.log.len()..] {
+            let first = self.log.len();
+            for message in &messages[first..] {
                 let bytes = summary::message_bytes(message);
                 self.sizes.push(bytes);
                 self.total_bytes += bytes;
                 add_message_content(&mut self.content, message);
             }
-            self.log.extend_from_slice(&messages[self.log.len()..]);
+            self.log.extend_from_slice(&messages[first..]);
+            self.scan_reads(first);
         } else {
             self.log = messages.to_vec();
             self.sizes = Vec::with_capacity(self.log.len());
@@ -390,6 +448,8 @@ impl Transcript {
             }
             self.cut = 0;
             self.sections.clear();
+            self.reads.clear();
+            self.scan_reads(0);
         }
         // The saved sections are adopted only when they tile a prefix
         // of the log this mirror now holds: the resume then rides the
@@ -412,6 +472,21 @@ impl Transcript {
                 self.cut = end;
             }
         }
+        // The pin map reads the committed state — which sections carry
+        // bodies whole decides verbatim versus pointer at the next
+        // flush — so it rebuilds whenever the sections can have
+        // changed, which includes resume adoption swapping all of
+        // them.
+        self.pinned = self
+            .sections
+            .iter()
+            .flat_map(|section| {
+                section
+                    .pinned
+                    .iter()
+                    .map(|name| (name.clone(), section.range))
+            })
+            .collect();
     }
 
     /// How many messages the log holds.
@@ -473,6 +548,99 @@ impl Transcript {
     /// whole system prompt into `system_prompt_tokens`.
     pub fn set_skills_bytes(&mut self, bytes: usize) {
         self.skills_bytes = bytes;
+    }
+
+    /// Sets the skills whose bodies pin whole into the block. A tool
+    /// result carrying one becomes its own verbatim section at flush
+    /// time instead of a digest; a re-read becomes a pointer to the
+    /// section already carrying the body. Safe to call at any point —
+    /// setting re-detects over the whole log — and normally called
+    /// once at wiring, from the same discovery the prompt rendered.
+    pub fn set_skills(&mut self, skills: Vec<SkillText>) {
+        self.skills = skills;
+        self.min_skill_body = self
+            .skills
+            .iter()
+            .map(|skill| skill.body.len())
+            .min()
+            .unwrap_or(usize::MAX);
+        self.reads.clear();
+        self.scan_reads(0);
+    }
+
+    /// The skill a tool result carries, if any: the length gate first
+    /// (a shorter result cannot contain a body), then the head needle,
+    /// then the whole body. Matching by content rather than by the
+    /// command means any read that returned the whole file qualifies —
+    /// `cat`, `sed`, a subagent's result — and no shell line is
+    /// parsed.
+    fn carried_skill(&self, result: &ToolResult) -> Option<usize> {
+        if result.content.len() < self.min_skill_body {
+            return None;
+        }
+        self.skills.iter().position(|skill| {
+            result.content.len() >= skill.body.len()
+                && result.content.contains(needle(&skill.body))
+                && result.content.contains(&skill.body)
+        })
+    }
+
+    /// Detects skill reads in the log from `from` on, appending to
+    /// [`Transcript::reads`] in order. A read needs the pair intact:
+    /// the result, and directly before it an assistant message
+    /// carrying exactly that one call. A multi-call turn digests
+    /// normally rather than splitting a section around one of its
+    /// results.
+    fn scan_reads(&mut self, from: usize) {
+        for index in from..self.log.len() {
+            if self.log[index].role != Role::Tool {
+                continue;
+            }
+            for part in &self.log[index].content {
+                let Content::ToolResult(result) = part else {
+                    continue;
+                };
+                let Some(skill) = self.carried_skill(result) else {
+                    continue;
+                };
+                // The call directly before: exactly one ToolCall in
+                // the turn (a second call's result would orphan behind
+                // the pin), and it must be this result's id. Leading
+                // text blocks are fine — a real turn narrates.
+                let calls = || {
+                    self.log[index - 1]
+                        .content
+                        .iter()
+                        .filter_map(|part| match part {
+                            Content::ToolCall(call) => Some(call),
+                            _ => None,
+                        })
+                };
+                let paired = index > 0
+                    && self.log[index - 1].role == Role::Assistant
+                    && match (calls().next(), calls().nth(1)) {
+                        (Some(call), None) => call.id == result.id,
+                        _ => false,
+                    };
+                if paired {
+                    self.reads.push(Read {
+                        call: index - 1,
+                        result: index,
+                        skill,
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    /// The read whose call sits at `index`, if any.
+    fn read_starting(&self, index: usize) -> Option<Read> {
+        let at = self.reads.partition_point(|read| read.call < index);
+        self.reads
+            .get(at)
+            .copied()
+            .filter(|read| read.call == index)
     }
 
     /// Stages the byte shares of the request about to go out: what the
@@ -566,7 +734,16 @@ impl Transcript {
             return false;
         }
         let section = &mut self.sections[pending.section];
-        section.text = compact::cap_summary(text);
+        let mut text = compact::cap_summary(text);
+        // Pinned bodies ride after the fill: the worker condenses the
+        // range's events, the skill text stays whole beneath it.
+        for name in &section.pinned {
+            if let Some(skill) = self.skills.iter().find(|skill| &skill.name == name) {
+                text.push_str("\n\n");
+                text.push_str(&compact::skill_section_text(name, &skill.body));
+            }
+        }
+        section.text = text;
         section.origin = SectionOrigin::Model;
         true
     }
@@ -743,6 +920,39 @@ impl Transcript {
         let mut pending = Vec::new();
         let mut at = start;
         while at < end {
+            // A skill read pins its call-and-result span as one
+            // section: the first read commits the body whole, a
+            // re-read a pointer to the section already carrying it.
+            // No pending goes out for it, so no model fill can rewrite
+            // the body into a count line.
+            if let Some(read) = self.read_starting(at) {
+                let range = Range {
+                    id: at,
+                    n: read.result + 1 - at,
+                };
+                let name = self.skills[read.skill].name.clone();
+                let section = match self.pinned.get(&name) {
+                    Some(carried) => Section {
+                        range,
+                        text: compact::skill_pointer_text(&name, *carried),
+                        origin: SectionOrigin::Extractive,
+                        pinned: Vec::new(),
+                    },
+                    None => {
+                        self.pinned.insert(name.clone(), range);
+                        let body = self.skills[read.skill].body.clone();
+                        Section {
+                            range,
+                            text: compact::skill_section_text(&name, &body),
+                            origin: SectionOrigin::Extractive,
+                            pinned: vec![name],
+                        }
+                    }
+                };
+                self.sections.push(section);
+                at = read.result + 1;
+                continue;
+            }
             let mut stop = at;
             let mut bytes = 0usize;
             let mut count = 0usize;
@@ -752,6 +962,11 @@ impl Transcript {
                     && (bytes + cost > self.settings.step_bytes
                         || count >= self.settings.max_section_messages)
                 {
+                    break;
+                }
+                // A read call opens its own section: close this chunk
+                // before it, whatever the budget says.
+                if count > 0 && self.read_starting(stop).is_some() {
                     break;
                 }
                 bytes += cost;
@@ -775,6 +990,7 @@ impl Transcript {
                 range,
                 text,
                 origin: SectionOrigin::Extractive,
+                pinned: Vec::new(),
             });
             pending.push(PendingSummary {
                 section: self.sections.len() - 1,
@@ -801,7 +1017,24 @@ impl Transcript {
                 n: self.sections[0].range.n + self.sections[1].range.n,
             };
             let messages = self.log[range.id..range.id + range.n].to_vec();
-            let text = compact::section_digest(&messages);
+            let mut text = compact::section_digest(&messages);
+            // The union keeps whatever bodies the merged sections
+            // carried: the pin outlives the merge, re-appended after
+            // the digest so the block never loses a skill's text. The
+            // model fill re-appends them again at commit.
+            let mut pinned: Vec<String> = Vec::new();
+            for old in [&self.sections[0], &self.sections[1]] {
+                for name in &old.pinned {
+                    if pinned.contains(name) {
+                        continue;
+                    }
+                    if let Some(skill) = self.skills.iter().find(|skill| &skill.name == name) {
+                        text.push_str("\n\n");
+                        text.push_str(&compact::skill_section_text(name, &skill.body));
+                    }
+                    pinned.push(name.clone());
+                }
+            }
             self.sections.drain(..2);
             self.sections.insert(
                 0,
@@ -809,6 +1042,7 @@ impl Transcript {
                     range,
                     text,
                     origin: SectionOrigin::Extractive,
+                    pinned,
                 },
             );
             // The union is the block's first section: nothing sits
@@ -1279,6 +1513,276 @@ mod tests {
         assert_eq!(view.last(), Some(&Message::text(Role::User, "one more")));
     }
 
+    // --- the skill pin ---
+
+    /// A skill body, frontmatter included, at a known size.
+    fn skill_body(name: &str, rules: usize) -> String {
+        let mut body = format!("---\nname: {name}\ndescription: the {name} trigger\n---\n\n");
+        for i in 0..rules {
+            body.push_str(&format!("Rule {i}: do the {name} thing.\n"));
+        }
+        body
+    }
+
+    /// The shell's wrapped form of a `cat` result: exit code, stdout,
+    /// stderr (shell.rs renders exactly this around a command's
+    /// output).
+    fn cat_result(id: &str, stdout: &str) -> Message {
+        Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(ToolResult::success(
+                id,
+                format!("exit code 0\n--- stdout ---\n{stdout}\n--- stderr ---\n"),
+            ))],
+        }
+    }
+
+    /// One turn reading a skill: the bash cat, then the wrapped body.
+    fn skill_round(id: &str, name: &str, rules: usize) -> Vec<Message> {
+        let body = skill_body(name, rules);
+        vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![
+                    Content::Text("loading the skill".into()),
+                    Content::ToolCall(ToolCall {
+                        id: id.into(),
+                        name: "bash".into(),
+                        args: serde_json::json!({
+                            "command": format!("cat .rhema/skills/{name}/SKILL.md")
+                        }),
+                        provider_data: serde_json::Value::Null,
+                    }),
+                ],
+            },
+            cat_result(id, &body),
+        ]
+    }
+
+    #[test]
+    fn a_flushed_skill_read_rides_the_block_whole_and_unsummarized() {
+        let mut transcript = Transcript::new(settings(40_000));
+        transcript.set_skills(vec![SkillText {
+            name: "unslop".into(),
+            body: skill_body("unslop", 40),
+        }]);
+        let mut messages = vec![Message::text(Role::User, "fix the build")];
+        messages.extend(skill_round("s1", "unslop", 40));
+        messages.extend(long_history(6));
+        messages.push(Message::text(Role::User, "and now summarize"));
+
+        transcript.observe(&messages);
+        let pending = transcript.plan_flush();
+        let body = skill_body("unslop", 40);
+
+        // The pinned span is its own two-message section, never queued
+        // for the worker: no fill can rewrite the body into a count
+        // line.
+        let pinned = transcript
+            .sections
+            .iter()
+            .find(|section| !section.pinned.is_empty())
+            .expect("one pinned section");
+        assert_eq!(pinned.pinned, ["unslop"]);
+        assert_eq!(pinned.range.n, 2);
+        assert!(pinned.text.contains(&body), "{}", pinned.text);
+        assert!(!pending.iter().any(|summary| summary.range == pinned.range));
+
+        // The rendered block carries the body verbatim, shell wrapper
+        // and all detection passing.
+        let view = transcript.render().unwrap();
+        let rhema_core::Content::Text(text) = &view[0].content[0] else {
+            panic!("text view message");
+        };
+        assert!(text.contains(&body), "{text}");
+    }
+
+    #[test]
+    fn a_reread_compacts_to_a_pointer_at_the_first_copy() {
+        let mut transcript = Transcript::new(settings(40_000));
+        transcript.set_skills(vec![SkillText {
+            name: "unslop".into(),
+            body: skill_body("unslop", 40),
+        }]);
+        let mut messages = vec![Message::text(Role::User, "fix the build")];
+        messages.extend(skill_round("s1", "unslop", 40));
+        messages.extend(skill_round("s2", "unslop", 40));
+        messages.extend(long_history(6));
+        messages.push(Message::text(Role::User, "and now summarize"));
+
+        transcript.observe(&messages);
+        transcript.plan_flush();
+
+        let pinned: Vec<_> = transcript
+            .sections
+            .iter()
+            .filter(|section| !section.pinned.is_empty())
+            .collect();
+        assert_eq!(pinned.len(), 1, "one carrier");
+        let carried = pinned[0].range;
+        let body = skill_body("unslop", 40);
+        let view = transcript.render().unwrap();
+        let rhema_core::Content::Text(text) = &view[0].content[0] else {
+            panic!("text view message");
+        };
+        assert_eq!(text.matches(&body).count(), 1, "one copy of the body");
+        assert!(
+            text.contains(&format!(
+                "skill unslop read again; its whole text is carried at {}+{}|",
+                carried.id, carried.n
+            )),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_multicall_turn_digests_normally_without_a_pin() {
+        let mut transcript = Transcript::new(settings(40_000));
+        transcript.set_skills(vec![SkillText {
+            name: "unslop".into(),
+            body: skill_body("unslop", 40),
+        }]);
+        let mut messages = vec![Message::text(Role::User, "fix the build")];
+        // One turn, two calls: the skill cat plus an unrelated command.
+        // Pinning would orphan the second result behind its call.
+        messages.push(Message {
+            role: Role::Assistant,
+            content: vec![
+                Content::ToolCall(ToolCall {
+                    id: "a".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({ "command": "cat the skill" }),
+                    provider_data: serde_json::Value::Null,
+                }),
+                Content::ToolCall(ToolCall {
+                    id: "b".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({ "command": "make test" }),
+                    provider_data: serde_json::Value::Null,
+                }),
+            ],
+        });
+        messages.push(cat_result("a", &skill_body("unslop", 40)));
+        messages.push(cat_result("b", "ok"));
+        messages.extend(long_history(6));
+        messages.push(Message::text(Role::User, "and now summarize"));
+
+        transcript.observe(&messages);
+        transcript.plan_flush();
+        assert!(
+            transcript.sections.iter().all(|s| s.pinned.is_empty()),
+            "{:?}",
+            transcript.sections
+        );
+    }
+
+    #[test]
+    fn consolidation_keeps_the_pinned_body_in_the_block() {
+        let mut transcript = Transcript::new(TranscriptSettings {
+            max_view_bytes: 40_000,
+            step_bytes: 4_000,
+            max_block_bytes: 1_000,
+            ..TranscriptSettings::default()
+        });
+        transcript.set_skills(vec![SkillText {
+            name: "unslop".into(),
+            body: skill_body("unslop", 40),
+        }]);
+        let mut messages = vec![Message::text(Role::User, "fix the build")];
+        messages.extend(skill_round("s1", "unslop", 40));
+        messages.extend(long_history(30));
+        messages.push(Message::text(Role::User, "and now summarize"));
+
+        transcript.observe(&messages);
+        transcript.plan_flush();
+        let body = skill_body("unslop", 40);
+        assert!(
+            transcript.stats.consolidations > 0,
+            "the fixture must consolidate"
+        );
+        let view = transcript.render().unwrap();
+        let rhema_core::Content::Text(text) = &view[0].content[0] else {
+            panic!("text view message");
+        };
+        assert!(text.contains(&body), "{text}");
+    }
+
+    #[test]
+    fn the_model_fill_leaves_the_pinned_body_beneath_it() {
+        let mut transcript = Transcript::new(TranscriptSettings {
+            max_view_bytes: 40_000,
+            step_bytes: 4_000,
+            max_block_bytes: 1_000,
+            ..TranscriptSettings::default()
+        });
+        transcript.set_skills(vec![SkillText {
+            name: "unslop".into(),
+            body: skill_body("unslop", 40),
+        }]);
+        let mut messages = vec![Message::text(Role::User, "fix the build")];
+        messages.extend(skill_round("s1", "unslop", 40));
+        messages.extend(long_history(30));
+        messages.push(Message::text(Role::User, "and now summarize"));
+
+        transcript.observe(&messages);
+        let pending = transcript.plan_flush();
+        let body = skill_body("unslop", 40);
+
+        // The consolidation's live union pending: its range still
+        // matches the section, and the section carries the pin.
+        let summary = pending
+            .iter()
+            .rev()
+            .find(|summary| {
+                transcript
+                    .sections
+                    .get(summary.section)
+                    .is_some_and(|section| {
+                        section.range == summary.range && !section.pinned.is_empty()
+                    })
+            })
+            .expect("a live union pending over a pinned section")
+            .clone();
+        assert!(transcript.commit_summary(&summary, "## Goals Met\n- dense fill".into()));
+        let text = &transcript.sections[summary.section].text;
+        assert!(text.starts_with("## Goals Met\n- dense fill"), "{text}");
+        assert!(text.contains(&body), "{text}");
+    }
+
+    #[test]
+    fn a_resume_keeps_deduplicating_rereads() {
+        let mut first = Transcript::new(settings(40_000));
+        first.set_skills(vec![SkillText {
+            name: "unslop".into(),
+            body: skill_body("unslop", 40),
+        }]);
+        let mut messages = vec![Message::text(Role::User, "fix the build")];
+        messages.extend(skill_round("s1", "unslop", 40));
+        messages.extend(long_history(8));
+        messages.push(Message::text(Role::User, "and now summarize"));
+        first.observe(&messages);
+        first.plan_flush();
+        let saved = first.saved_sections();
+        assert!(!saved.is_empty(), "the first session must have flushed");
+
+        // The resume adopts those sections, then a re-read of the same
+        // skill flushes to a pointer, not a second body.
+        let mut second = Transcript::new(settings(40_000));
+        second.adopt_sections(saved);
+        let mut resumed = messages.clone();
+        resumed.extend(skill_round("s2", "unslop", 40));
+        resumed.extend(long_history(2));
+        resumed.push(Message::text(Role::User, "one more"));
+        second.observe(&resumed);
+        second.plan_flush();
+        let body = skill_body("unslop", 40);
+        let view = second.render().unwrap();
+        let rhema_core::Content::Text(text) = &view[0].content[0] else {
+            panic!("text view message");
+        };
+        assert_eq!(text.matches(&body).count(), 1, "one copy after resume");
+    }
+
     #[test]
     fn tampered_saved_sections_fall_back_to_the_rebuild() {
         let mut transcript = Transcript::new(settings(20_000));
@@ -1286,6 +1790,7 @@ mod tests {
             range: Range { id: 5, n: 9 },
             text: "## Goals Met\n- orphan".into(),
             origin: SectionOrigin::Model,
+            pinned: Vec::new(),
         }]);
         transcript.observe(&long_history(30));
         // The first id 5, not 0: the tiling rejects the adoption.

@@ -533,6 +533,7 @@ mod tests {
                 range: rhema_transcript::tree::Range { id: 0, n: 12 },
                 text: "## Goals Met\n- earlier work".into(),
                 origin: rhema_transcript::SectionOrigin::Model,
+                pinned: Vec::new(),
             }]),
         };
         stats.clone().write_into(&mut session);
