@@ -16,13 +16,24 @@
 //! the sink as an [`Event::RetryWait`] before it runs, so a UI can
 //! count it down.
 //!
-//! Two guards keep a retry honest:
+//! Three rules keep an exchange honest:
 //!
-//! - A request whose stream already emitted content never retries. The
-//!   deltas reached the caller's sink, and a second attempt would stream
-//!   them again next to the first. A usage tally alone is not content —
-//!   the adapters report the prompt ahead of the first delta, and a
-//!   stream that dies between them is invisible enough to redo.
+//! - A request whose stream already streamed **text** never starts
+//!   over — it *continues*. The wire offers no resume: the next
+//!   attempt instead carries the streamed text back as a trailing
+//!   assistant message, the model writes on from where the link died,
+//!   and the answer the caller finally receives stitches the streamed
+//!   prefix ahead of the continuation's blocks. Nothing shown is ever
+//!   generated twice, so a flaky link costs a pause, not the answer.
+//!   The continuation rides the same ladder — a link too flaky to
+//!   finish still surfaces its error once the ladder runs out — and
+//!   the abandoned attempts' token tallies are lost with them (the
+//!   final attempt's usage is the turn's).
+//! - A stream that died before any durable text — thinking deltas and
+//!   half-parsed tool-call arguments only — has nothing to continue
+//!   from: no sentence exists for the model to take over, and an
+//!   empty assistant message is not an anchor. The exchange fails as
+//!   before, and the caller's `/retry` starts it over.
 //! - A request that "succeeds" without producing anything — a provider
 //!   that closed the stream before its first chunk — counts as dead like
 //!   any error and retries. If every attempt comes back empty, the
@@ -33,7 +44,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use rhema_core::{Event, EventSink, ModelOutput, ModelProvider, ModelRequest, ProviderError};
+use rhema_core::{
+    Content, Event, EventSink, Message, ModelOutput, ModelProvider, ModelRequest, ProviderError,
+    Role,
+};
 
 /// The waits before each retry of a dead network link: two quick tries
 /// catch an instant recovery nearly free, and the tail — six and a half
@@ -140,19 +154,30 @@ impl Sleeper for TokioSleeper {
     }
 }
 
-/// Counts the content events reaching the real sink; the retry guards
-/// read the count to know whether an attempt was seen. Content is every
-/// event but the usage tally — the adapters emit `Usage` ahead of the
-/// first delta, and a caller that watched only a tally watched nothing.
+/// Counts the content events reaching the real sink and keeps the text
+/// among them; the retry guards read the count to know whether an
+/// attempt was seen, and the continuation builds its anchor from the
+/// text. Content is every event but the usage tally — the adapters emit
+/// `Usage` ahead of the first delta, and a caller that watched only a
+/// tally watched nothing.
 struct CountingSink<'a> {
     inner: &'a mut dyn EventSink,
     content: usize,
+    /// The text deltas this attempt streamed, in order. Tool-call
+    /// argument deltas and thinking do not join: the first is a wire
+    /// fragment a model cannot resume, the second never rides history.
+    text: String,
 }
 
 impl EventSink for CountingSink<'_> {
     fn emit(&mut self, event: Event<'_>) {
         // Usage and the retry announcement are tallies, not generation:
         // neither is content the caller saw, so neither blocks a retry.
+        match &event {
+            Event::Usage(_) | Event::RetryWait { .. } => {}
+            Event::TextDelta(delta) => self.text.push_str(delta),
+            _ => {}
+        }
         if !matches!(event, Event::Usage(_) | Event::RetryWait { .. }) {
             self.content += 1;
         }
@@ -172,16 +197,50 @@ impl ModelProvider for Retrying {
         // failing, and a miss means the policy is out of tries — so the
         // ladder's length, not a separate count, bounds the exchange.
         let mut spent = 0u32;
+        // The text every attempt of this exchange has streamed: what
+        // the caller has already read, and what a continuation anchors
+        // on. `carried` is the part streamed before the current
+        // attempt — on a success it stitches back ahead of the
+        // attempt's own blocks, on a failure it rides the next request
+        // as the anchor.
+        let mut streamed = String::new();
+        let mut carried;
         loop {
             let mut counted = CountingSink {
                 inner: &mut *sink,
                 content: 0,
+                text: String::new(),
             };
-            match self.inner.complete(req.clone(), &mut counted).await {
+            carried = streamed.clone();
+            // The continuation's request: the caller's messages with
+            // everything streamed so far appended as a trailing
+            // assistant message. First attempt, nothing streamed: the
+            // request goes out as it came.
+            let mut attempt_req = req.clone();
+            if !carried.is_empty() {
+                attempt_req
+                    .messages
+                    .push(Message::text(Role::Assistant, carried.clone()));
+            }
+            let attempt = self.inner.complete(attempt_req, &mut counted).await;
+            streamed.push_str(&counted.text);
+            match attempt {
                 // A response with content answers; an empty one the
                 // caller never saw content from is a dead exchange,
-                // retried below.
-                Ok(output) if counted.content > 0 || !output.message.content.is_empty() => {
+                // retried below. A success after earlier attempts
+                // stitches their text ahead of this attempt's blocks:
+                // the caller read those deltas, the committed message
+                // must carry them.
+                Ok(mut output) if counted.content > 0 || !output.message.content.is_empty() => {
+                    if !carried.is_empty() {
+                        match output.message.content.first_mut() {
+                            Some(Content::Text(first)) => first.insert_str(0, &carried),
+                            _ => output
+                                .message
+                                .content
+                                .insert(0, Content::Text(carried.clone())),
+                        }
+                    }
                     return Ok(output);
                 }
                 // An empty success carries no error to classify, so it
@@ -205,26 +264,35 @@ impl ModelProvider for Retrying {
                     ));
                 }
                 Err(err) => {
-                    if counted.content == 0 && err.is_retryable() {
-                        let ladder = if matches!(err, ProviderError::Network(_)) {
-                            &self.network_ladder
-                        } else {
-                            &self.server_ladder
-                        };
-                        if let Some(&delay) = ladder.get(spent as usize) {
-                            let message = err.to_string();
-                            sink.emit(Event::RetryWait {
-                                error: &message,
-                                delay,
-                                attempt: spent + 1,
-                                total: ladder.len() as u32 + 1,
-                            });
-                            self.sleeper.sleep(delay).await;
-                            spent += 1;
-                            continue;
-                        }
+                    if !err.is_retryable() {
+                        return Err(err);
                     }
-                    return Err(err);
+                    // A cut the caller watched but that streamed no
+                    // durable text — thinking and half-parsed call
+                    // fragments only — has no anchor: nothing exists
+                    // for the model to take over. The exchange fails;
+                    // /retry starts it over. A cut before any content
+                    // at all is the plain retry below.
+                    if streamed.trim().is_empty() && counted.content > 0 {
+                        return Err(err);
+                    }
+                    let ladder = if matches!(err, ProviderError::Network(_)) {
+                        &self.network_ladder
+                    } else {
+                        &self.server_ladder
+                    };
+                    let Some(&delay) = ladder.get(spent as usize) else {
+                        return Err(err);
+                    };
+                    let message = err.to_string();
+                    sink.emit(Event::RetryWait {
+                        error: &message,
+                        delay,
+                        attempt: spent + 1,
+                        total: ladder.len() as u32 + 1,
+                    });
+                    self.sleeper.sleep(delay).await;
+                    spent += 1;
                 }
             }
         }
@@ -244,6 +312,10 @@ mod tests {
     struct Scripted {
         steps: Mutex<Vec<Attempt>>,
         calls: AtomicUsize,
+        /// The requests as each attempt received them, last attempt
+        /// last: a continuation is visible in the anchor its request
+        /// ends with.
+        requests: Mutex<Vec<ModelRequest>>,
     }
 
     #[derive(Clone, Copy)]
@@ -258,10 +330,16 @@ mod tests {
         RateLimit,
         /// One text delta, then a timeout mid-stream.
         DeltaThenTimeout,
+        /// Tool-call deltas, then the link died: the caller watched
+        /// content, but nothing durable to anchor on streamed.
+        CallThenNetwork,
         /// The prompt's usage tally, then a timeout before any content.
         UsageThenTimeout,
         /// Success; the string is the whole reply ("" = empty).
         Succeed(&'static str),
+        /// A success whose message is a tool call alone — no leading
+        /// text block for the stitch to merge into.
+        SucceedWithCalls,
     }
 
     impl Scripted {
@@ -269,11 +347,23 @@ mod tests {
             Self {
                 steps: Mutex::new(steps),
                 calls: AtomicUsize::new(0),
+                requests: Mutex::new(Vec::new()),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        /// The messages the final attempt received.
+        fn last_request_messages(&self) -> Vec<Message> {
+            self.requests
+                .lock()
+                .unwrap()
+                .last()
+                .expect("at least one attempt ran")
+                .messages
+                .clone()
         }
     }
 
@@ -281,10 +371,11 @@ mod tests {
     impl ModelProvider for Scripted {
         async fn complete(
             &self,
-            _req: ModelRequest,
+            req: ModelRequest,
             sink: &mut dyn EventSink,
         ) -> Result<ModelOutput, ProviderError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            self.requests.lock().unwrap().push(req);
             match self.steps.lock().unwrap().remove(0) {
                 Attempt::Timeout => Err(ProviderError::Timeout),
                 Attempt::Network => Err(ProviderError::Network("dead link".into())),
@@ -299,6 +390,17 @@ mod tests {
                 Attempt::DeltaThenTimeout => {
                     sink.emit(Event::TextDelta("partial "));
                     Err(ProviderError::Timeout)
+                }
+                Attempt::CallThenNetwork => {
+                    sink.emit(Event::ToolCallStart {
+                        id: "t1",
+                        name: "bash",
+                    });
+                    sink.emit(Event::ToolCallArgsDelta {
+                        id: "t1",
+                        delta: "{\"command\":",
+                    });
+                    Err(ProviderError::Network("mid-call cut".into()))
                 }
                 Attempt::UsageThenTimeout => {
                     // The adapters report the prompt this early; a
@@ -321,6 +423,19 @@ mod tests {
                         },
                     },
                     stop_reason: StopReason::EndTurn,
+                    usage: Usage::default(),
+                }),
+                Attempt::SucceedWithCalls => Ok(ModelOutput {
+                    message: Message {
+                        role: Role::Assistant,
+                        content: vec![Content::ToolCall(rhema_core::ToolCall {
+                            id: "t2".into(),
+                            name: "bash".into(),
+                            args: serde_json::json!({ "command": "make test" }),
+                            provider_data: serde_json::Value::Null,
+                        })],
+                    },
+                    stop_reason: StopReason::ToolUse,
                     usage: Usage::default(),
                 }),
             }
@@ -374,16 +489,110 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failure_after_streamed_text_never_retries() {
-        let scripted = Arc::new(Scripted::new(vec![Attempt::DeltaThenTimeout]));
+    async fn a_midstream_cut_continues_where_it_stopped() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::DeltaThenTimeout,
+            Attempt::Succeed("rest"),
+        ]));
         let mut sink = Deltas::default();
-        let err = retried(scripted.clone())
+        let out = retried(scripted.clone())
             .complete(request(), &mut sink)
             .await
-            .expect_err("a seen stream cannot be redone");
-        assert_eq!(err, ProviderError::Timeout);
+            .expect("the continuation answers");
+        // The committed message carries everything the caller read:
+        // the dead attempt's deltas stitched ahead of the rest.
+        assert_eq!(
+            out.message.content,
+            vec![Content::Text("partial rest".into())]
+        );
+        assert_eq!(out.stop_reason, StopReason::EndTurn);
+        assert_eq!(scripted.calls(), 2, "one continuation spent");
+        // The continuation's request anchored: the streamed text rides
+        // back as a trailing assistant message.
+        let messages = scripted.last_request_messages();
+        assert_eq!(
+            messages.last(),
+            Some(&Message::text(Role::Assistant, "partial "))
+        );
+        // Nothing replays: the dead attempt's only delta reached the
+        // sink once. (The scripted success is message-only; a real
+        // adapter would stream "rest" as a delta for the live pane,
+        // and the committed message above is what the session keeps.)
+        assert_eq!(sink.0, vec!["partial "]);
+    }
+
+    #[tokio::test]
+    async fn a_continuation_survives_repeated_cuts() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::DeltaThenTimeout,
+            Attempt::DeltaThenTimeout,
+            Attempt::Succeed("end"),
+        ]));
+        let mut sink = Deltas::default();
+        let out = retried(scripted.clone())
+            .complete(request(), &mut sink)
+            .await
+            .expect("the second continuation answers");
+        assert_eq!(
+            out.message.content,
+            vec![Content::Text("partial partial end".into())]
+        );
+        assert_eq!(scripted.calls(), 3);
+        // The anchor grows with every cut: the model continues after
+        // everything the caller has read, never from scratch.
+        let messages = scripted.last_request_messages();
+        assert_eq!(
+            messages.last(),
+            Some(&Message::text(Role::Assistant, "partial partial "))
+        );
+        assert_eq!(sink.0, vec!["partial ", "partial "], "no attempt replays");
+    }
+
+    #[tokio::test]
+    async fn a_link_too_flaky_to_finish_surfaces_the_error() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::DeltaThenTimeout,
+            Attempt::DeltaThenTimeout,
+            Attempt::DeltaThenTimeout,
+        ]));
+        let mut sink = Deltas::default();
+        let result = retried(scripted.clone())
+            .complete(request(), &mut sink)
+            .await;
+        assert!(result.is_err(), "the ladder runs out and the truth shows");
+        assert_eq!(scripted.calls(), 3, "two continuations, then out of ladder");
+    }
+
+    #[tokio::test]
+    async fn a_cut_before_any_durable_text_fails_the_exchange() {
+        // Tool-call fragments streamed but no sentence started: there
+        // is nothing for the model to take over, and an empty
+        // assistant message is not an anchor. The exchange fails as
+        // before rather than re-rendering the fragments.
+        let scripted = Arc::new(Scripted::new(vec![Attempt::CallThenNetwork]));
+        let mut sink = Deltas::default();
+        let result = retried(scripted.clone())
+            .complete(request(), &mut sink)
+            .await;
+        assert!(result.is_err(), "no anchor, no continuation");
         assert_eq!(scripted.calls(), 1, "one attempt only");
-        assert_eq!(sink.0, vec!["partial "], "the caller keeps what it saw");
+    }
+
+    #[tokio::test]
+    async fn a_stitch_lands_beside_calls_not_inside_them() {
+        // The continuation opened with a tool call (no leading text):
+        // the streamed prefix becomes its own text block ahead of it.
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::DeltaThenTimeout,
+            Attempt::SucceedWithCalls,
+        ]));
+        let mut sink = Deltas::default();
+        let out = retried(scripted.clone())
+            .complete(request(), &mut sink)
+            .await
+            .expect("the continuation answers");
+        assert_eq!(out.message.content.len(), 2, "text block, then the call");
+        assert_eq!(out.message.content[0], Content::Text("partial ".into()));
     }
 
     #[tokio::test]
