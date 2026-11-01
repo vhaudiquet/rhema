@@ -104,6 +104,7 @@ mod tests {
             description: description.into(),
             license: None,
             path: format!("/cfg/skills/{name}/SKILL.md").into(),
+            body: "the rules".into(),
         }
     }
 

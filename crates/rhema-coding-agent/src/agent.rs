@@ -986,6 +986,7 @@ mod extra_tools_tests {
             description: "Triggers on deploy tasks.".into(),
             license: None,
             path: workspace.join(".rhema/skills/deploy/SKILL.md"),
+            body: "the deploy rules".into(),
         };
         let prompt = stamped_system_with_skills(None, &workspace, &[], &[skill]).unwrap();
         assert!(prompt.contains("deploy"), "{prompt}");

@@ -305,6 +305,7 @@ mod tests {
             description: "does a thing".into(),
             license: None,
             path: root.join("SKILL.md"),
+            body: "the rules".into(),
         }]);
 
         let stamp = subagent_base_system(&config, &root);

@@ -92,6 +92,7 @@ impl SessionConfig {
                 description: seed.description.clone(),
                 license: seed.license.clone(),
                 path: format!("{}/.rhema/skills/{}/SKILL.md", self.workspace, seed.name).into(),
+                body: seed.body.clone(),
             })
             .collect()
     }

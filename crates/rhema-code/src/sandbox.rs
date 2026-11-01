@@ -743,9 +743,6 @@ fn discovered_skills(
     let mut bodies = Vec::new();
     let discovered = rhema_agent_tools::skills::discover(agents, global, workspace);
     for skill in discovered {
-        let Ok(body) = std::fs::read_to_string(&skill.path) else {
-            continue;
-        };
         // A mounted tree's skill needs no delivery; anything outside
         // the three trees travels as a body into the workspace seed.
         let on_a_mount = skill.path.starts_with(workspace)
@@ -755,6 +752,7 @@ fn discovered_skills(
             skills.push(skill);
             continue;
         }
+        bodies.push((skill.name.clone(), skill.body.clone()));
         skills.push(Skill {
             name: skill.name.clone(),
             description: skill.description,
@@ -763,8 +761,8 @@ fn discovered_skills(
                 "{sandbox_workspace}/.rhema/skills/{}/SKILL.md",
                 skill.name
             )),
+            body: skill.body,
         });
-        bodies.push((skill.name, body));
     }
     (skills, bodies)
 }
@@ -1949,6 +1947,7 @@ mod tests {
                 description: "trigger".into(),
                 license: None,
                 path: PathBuf::from("/workspace/.rhema/skills/review/SKILL.md"),
+                body: "---\ndescription: trigger\n---\nthe review rules".into(),
             }],
             instance_lock: None,
             managed: None,

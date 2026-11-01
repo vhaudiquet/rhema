@@ -366,6 +366,7 @@ async fn seeded_skills_reach_the_prompt_without_a_filesystem() {
         description: "Triggers on deploy tasks.".into(),
         license: None,
         path: "/workspace/.rhema/skills/deploy/SKILL.md".parse().unwrap(),
+        body: "---\ndescription: Triggers on deploy tasks.\n---\nRun the deploy.".into(),
     }];
     let assembly = AgentAssembly {
         model: "claude-sonnet-4-5".into(),

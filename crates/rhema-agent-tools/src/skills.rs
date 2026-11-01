@@ -29,6 +29,10 @@ pub struct Skill {
     pub license: Option<String>,
     /// Absolute path of the `SKILL.md` the model reads.
     pub path: PathBuf,
+    /// The whole `SKILL.md`, frontmatter included, as discovery read
+    /// it. Only the transcript's skill pinning consumes it today; the
+    /// prompt carries name, trigger, and path only.
+    pub body: String,
 }
 
 /// The `SKILL.md` frontmatter this crate reads. Everything else in the
@@ -85,6 +89,7 @@ fn collect_into(dir: &Path, by_name: &mut BTreeMap<String, Skill>) {
                 description,
                 license,
                 path: file,
+                body: raw,
             },
         );
     }
@@ -145,12 +150,14 @@ mod tests {
                     description: "the a trigger".into(),
                     license: None,
                     path: workspace.path().join(".rhema/skills/askill/SKILL.md"),
+                    body: "---\ndescription: the a trigger\n---\n\nDo the thing.\n".into(),
                 },
                 Skill {
                     name: "zskill".into(),
                     description: "the z trigger".into(),
                     license: None,
                     path: global.path().join("zskill/SKILL.md"),
+                    body: "---\ndescription: the z trigger\n---\n\nDo the thing.\n".into(),
                 },
             ]
         );
