@@ -206,36 +206,35 @@ impl CodingAgent {
             }
             None => (provider, resolver, None),
         };
+        // The skill list: pre-collected or discovered, minus the
+        // disabled names. The prompt renders it, and the transcript
+        // pins the bodies — the disabled names drop before either sees
+        // the list.
+        let mut skills = match &config.skills {
+            Some(skills) => skills.clone(),
+            None => {
+                let agents = rhema_config::Config::agents_skills_dir().ok();
+                let global = rhema_config::Config::skills_dir().ok();
+                rhema_agent_tools::skills::discover(
+                    agents.as_deref(),
+                    global.as_deref(),
+                    tools.workspace(),
+                )
+            }
+        };
+        skills.retain(|skill| !config.disabled_skills.contains(&skill.name));
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
             Some(system) => system,
-            None => {
-                // The disabled names drop from whichever list the prompt
-                // carries: the off switch applies to collected and
-                // discovered skills alike, before the template sees them.
-                let mut skills = match &config.skills {
-                    Some(skills) => skills.clone(),
-                    None => {
-                        let agents = rhema_config::Config::agents_skills_dir().ok();
-                        let global = rhema_config::Config::skills_dir().ok();
-                        rhema_agent_tools::skills::discover(
-                            agents.as_deref(),
-                            global.as_deref(),
-                            tools.workspace(),
-                        )
-                    }
-                };
-                skills.retain(|skill| !config.disabled_skills.contains(&skill.name));
-                stamped_system_with_sections(
-                    config.base_system.as_deref(),
-                    tools.workspace(),
-                    &extra,
-                    &skills,
-                    config.environment.as_deref(),
-                    config.user_preferences.as_deref(),
-                )?
-            }
+            None => stamped_system_with_sections(
+                config.base_system.as_deref(),
+                tools.workspace(),
+                &extra,
+                &skills,
+                config.environment.as_deref(),
+                config.user_preferences.as_deref(),
+            )?,
         };
         // The skills section's byte share of the system prompt: the
         // same render without the skills list, subtracted. The
@@ -268,10 +267,19 @@ impl CodingAgent {
             }
         };
         if let Some(mirror) = &transcript {
-            mirror
-                .lock()
-                .expect("transcript lock poisoned")
-                .set_skills_bytes(skills_bytes);
+            let mut mirror = mirror.lock().expect("transcript lock poisoned");
+            mirror.set_skills_bytes(skills_bytes);
+            // The bodies pin: a tool result carrying one stays whole in
+            // the block, so a compacted skill's rules stay in force.
+            mirror.set_skills(
+                skills
+                    .iter()
+                    .map(|skill| rhema_transcript::SkillText {
+                        name: skill.name.clone(),
+                        body: skill.body.clone(),
+                    })
+                    .collect(),
+            );
         }
         let agent = Agent::builder()
             .provider(provider)
