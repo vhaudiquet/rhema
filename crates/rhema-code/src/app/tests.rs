@@ -1,7 +1,6 @@
 //! The app's behavior tests: the `impl App` slices live beside the
 //! code they exercise, the tests share them from here.
 use super::*;
-use crate::approval::TuiApproval;
 use crate::events::OwnedEvent;
 use crate::screens::LoginProvider;
 use crate::store::MemoryStore;
@@ -190,6 +189,47 @@ fn keyed_profile(provider: &str, key: &str) -> rhema_config::Profile {
     };
     store_key(&mut profile, provider, key);
     profile
+}
+
+/// A test stand-in for a real approval hook: the parking half of the
+/// bridge — sends the request event, blocks on the answer, declines on
+/// any failure — without the production type nothing wires today.
+struct ScriptedApproval {
+    events: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    answers: std::sync::Mutex<std::sync::mpsc::Receiver<bool>>,
+}
+
+impl ScriptedApproval {
+    /// The hook and its answerer over one std channel.
+    fn pair(
+        events: tokio::sync::mpsc::UnboundedSender<UiEvent>,
+    ) -> (Self, crate::approval::ApprovalAnswerer) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (
+            Self {
+                events,
+                answers: std::sync::Mutex::new(rx),
+            },
+            crate::approval::ApprovalAnswerer::sender(tx),
+        )
+    }
+}
+
+impl Approval for ScriptedApproval {
+    fn approve(&self, call: &ToolCall) -> bool {
+        if self
+            .events
+            .send(UiEvent::ApprovalRequested { call: call.clone() })
+            .is_err()
+        {
+            return false;
+        }
+        self.answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .recv()
+            == Ok(true)
+    }
 }
 
 fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
@@ -2290,7 +2330,7 @@ fn esc_when_running_cancels_the_turn_and_flags_the_channel() {
 fn esc_with_a_pending_modal_cancels_and_releases_the_blocked_call() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (hook, answers) = TuiApproval::pair(tx);
+    let (hook, answers) = ScriptedApproval::pair(tx);
     let handle = std::thread::spawn(move || hook.approve(&test_call()));
     let (cancel, _cancelled) = tokio::sync::watch::channel(false);
     h.app.begin_turn(
@@ -2340,7 +2380,7 @@ fn the_cancelled_event_hands_the_agent_back_with_a_notice() {
 fn the_modal_answer_flows_back_to_the_blocked_turn() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let (hook, answers) = TuiApproval::pair(tx);
+    let (hook, answers) = ScriptedApproval::pair(tx);
     let handle = std::thread::spawn(move || hook.approve(&test_call()));
     let (cancel, _cancelled) = tokio::sync::watch::channel(false);
     h.app.begin_turn(

@@ -73,7 +73,7 @@ pub mod turn;
 pub mod ui;
 
 pub use app::{App, AppSetup, Effect, RunOptions, Screen};
-pub use approval::{ApprovalAnswerer, TuiApproval};
+pub use approval::ApprovalAnswerer;
 pub use args::Args;
 pub use events::{FetchWhy, OwnedEvent, UiEvent};
 pub use onboarding::{OnboardingAction, OnboardingScreen, OnboardingStep};
