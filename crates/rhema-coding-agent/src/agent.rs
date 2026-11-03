@@ -151,6 +151,11 @@ pub struct CodingAgent {
     config: CodingAgentConfig,
     session: Session,
     tools: Arc<ShellTools>,
+    /// The composed resolver — shell tools plus every extension (zoom,
+    /// subagents). Revive classifies dangling calls against it, so an
+    /// extension tool's replay-safety answer is honored; `tools` alone
+    /// would answer `Unsafe` for every name.
+    resolver: Arc<dyn ToolResolver>,
     /// The transcript's shared mirror, when the config enables it: the
     /// benchmark stats read from here.
     transcript: Option<Arc<Mutex<rhema_transcript::Transcript>>>,
@@ -283,7 +288,9 @@ impl CodingAgent {
         }
         let agent = Agent::builder()
             .provider(provider)
-            .resolver(resolver)
+            // The field keeps one side of the arc: revive must see the
+            // whole chain, not just the shell tools.
+            .resolver(resolver.clone())
             .system(system)
             .params(ChatParams {
                 thinking: config.thinking,
@@ -295,6 +302,7 @@ impl CodingAgent {
             config,
             session: Session::default(),
             tools,
+            resolver,
             transcript,
             turns: 0,
         };
@@ -520,8 +528,11 @@ impl CodingAgent {
             run_id: format!("turn-{}", self.turns),
             cancelled,
         };
-        revive_dangling_calls(&mut self.session, self.tools.as_ref(), &ctx).await;
+        // The hook goes on before revive: a replay-safe call re-runs
+        // here, and it must do so under this turn's approval, not with
+        // no hook answering "rejected" for a prompt nobody saw.
         self.tools.install_approval(approval);
+        revive_dangling_calls(&mut self.session, self.resolver.as_ref(), &ctx).await;
         // With a steering source the loop is this driver's own — the
         // same shape as the provided `run_turn` plus the two drain
         // points; without one, the provided convenience runs unchanged.
@@ -568,8 +579,11 @@ impl CodingAgent {
             run_id: format!("turn-{}", self.turns),
             cancelled,
         };
-        revive_dangling_calls(&mut self.session, self.tools.as_ref(), &ctx).await;
+        // The hook goes on before revive: a replay-safe call re-runs
+        // here, and it must do so under this turn's approval, not with
+        // no hook answering "rejected" for a prompt nobody saw.
         self.tools.install_approval(approval);
+        revive_dangling_calls(&mut self.session, self.resolver.as_ref(), &ctx).await;
         let steering = self.config.steering.clone();
         let result = self.steps(None, sink, &ctx, steering.as_deref()).await;
         self.tools.clear_approval();
@@ -635,11 +649,16 @@ impl CodingAgent {
             .push(Message::text(Role::User, lines.join("\n")));
     }
 
-    /// Writes the session as pretty JSON to `path`.
+    /// Writes the session as pretty JSON to `path`: `0600`, landed
+    /// through a temp file and renamed, so nothing conversation-shaped
+    /// is ever world-readable and a crash mid-save leaves the previous
+    /// checkpoint whole. This is the one store in the tree that holds
+    /// the full history; it rides the same privacy helpers as every
+    /// other (see `rhema_config::privacy`).
     pub fn save_session_to(&self, path: &impl AsRef<Path>) -> io::Result<()> {
         let json = serde_json::to_string_pretty(&self.session)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        std::fs::write(path, json)
+        rhema_config::privacy::private_write_atomic(path.as_ref(), json.as_bytes())
     }
 
     /// Reads a session written by [`CodingAgent::save_session_to`].

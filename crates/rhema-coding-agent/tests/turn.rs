@@ -209,3 +209,37 @@ async fn a_saved_session_round_trips_as_pretty_json() {
     let back: Session = serde_json::from_str(&raw).unwrap();
     assert_eq!(back, *agent.session());
 }
+
+#[tokio::test]
+async fn a_saved_session_lands_private_and_leaves_no_temp() {
+    let root = tempfile::tempdir().unwrap();
+    let provider = Arc::new(MockProvider::new(vec![end_turn_output("hi")]));
+    let mut agent =
+        CodingAgent::new(provider, CodingAgentConfig::new("mock-model", root.path())).unwrap();
+    let mut sink = NullSink;
+    agent
+        .turn("hello", &mut sink, Arc::new(AllowAll))
+        .await
+        .unwrap();
+
+    let path = root.path().join("session.json");
+    agent.save_session_to(&path).unwrap();
+    // Conversation content never lands world-readable: the file is
+    // 0600 (the privacy module's contract), and no temp file survives.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "a session file must not be group/world readable"
+        );
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(root.path())
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name != "session.json")
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
