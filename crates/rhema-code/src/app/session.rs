@@ -139,11 +139,7 @@ impl App {
     /// the transcript from its history, and lands in the chat. The
     /// current conversation is replaced — it keeps its own saved file
     /// from its own exit.
-    pub(crate) fn apply_resume(
-        &mut self,
-        path: &Path,
-        loaded: Result<Box<ResumedLoad>, String>,
-    ) {
+    pub(crate) fn apply_resume(&mut self, path: &Path, loaded: Result<Box<ResumedLoad>, String>) {
         let loaded = match loaded {
             Ok(loaded) => *loaded,
             Err(err) => {

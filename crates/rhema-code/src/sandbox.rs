@@ -161,7 +161,8 @@ pub async fn assemble(
                 &host_workspace,
                 skills.as_deref(),
                 agents.as_deref(),
-            )?;
+            )
+            .await?;
             instance_lock = Some(lock);
             managed = stored.is_none().then(|| ManagedInstance {
                 kind: ManagedKind::Docker,
@@ -203,7 +204,7 @@ pub async fn assemble(
                 // host path: the attached posture, the workspace
                 // carried in by the seed like ssh, exec through the
                 // same lxc argv.
-                ensure_lxd_instance(&instance, true, uid, gid)?;
+                ensure_lxd_instance(&instance, true, uid, gid).await?;
                 Arc::new(
                     LxdSandbox::attached(&instance)
                         .with_workspace(&host_workspace)
@@ -214,13 +215,14 @@ pub async fn assemble(
                 // host workspace at its own path, so the sandbox-side
                 // path is the host path itself and FsRoot's file
                 // routes are plain fs on the host side.
-                ensure_lxd_instance(&instance, false, uid, gid)?;
+                ensure_lxd_instance(&instance, false, uid, gid).await?;
                 ensure_lxd_mount(
                     &instance,
                     &host_workspace,
                     skills.as_deref(),
                     agents.as_deref(),
-                )?;
+                )
+                .await?;
                 let root = FsRoot::new(workspace.to_path_buf())
                     .map_err(|err| anyhow::anyhow!("lxd sandbox root: {err}"))?;
                 Arc::new(

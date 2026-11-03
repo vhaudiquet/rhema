@@ -81,7 +81,27 @@ pub(crate) fn docker_provision_argv(name: &str) -> Vec<String> {
 /// global skills trees read-only when they exist. Posture, plainly:
 /// process hygiene, not a security boundary — the container's commands
 /// reach the same fs the local path would.
-pub(crate) fn ensure_container(
+///
+/// The CLI's waits are blocking, so the work hops to the blocking
+/// pool; the assembly's scheduler keeps its worker.
+pub(crate) async fn ensure_container(
+    name: &str,
+    workspace: &str,
+    skills: Option<&std::path::Path>,
+    agents: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let name = name.to_owned();
+    let workspace = workspace.to_owned();
+    let skills = skills.map(std::path::PathBuf::from);
+    let agents = agents.map(std::path::PathBuf::from);
+    tokio::task::spawn_blocking(move || {
+        ensure_container_blocking(&name, &workspace, skills.as_deref(), agents.as_deref())
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("the docker ensure task failed: {err}"))?
+}
+
+fn ensure_container_blocking(
     name: &str,
     workspace: &str,
     skills: Option<&std::path::Path>,
@@ -296,7 +316,22 @@ pub(crate) fn lxc_output(args: &[&str]) -> anyhow::Result<std::process::Output> 
         .map_err(|err| anyhow::anyhow!("lxc {} failed: {err}", args.join(" ")))
 }
 
-pub(crate) fn ensure_lxd_instance(name: &str, vm: bool, uid: u32, gid: u32) -> anyhow::Result<()> {
+/// The lxc CLI's waits are blocking — `launch` can take minutes — so
+/// the work hops to the blocking pool; the assembly's scheduler keeps
+/// its worker.
+pub(crate) async fn ensure_lxd_instance(
+    name: &str,
+    vm: bool,
+    uid: u32,
+    gid: u32,
+) -> anyhow::Result<()> {
+    let name = name.to_owned();
+    tokio::task::spawn_blocking(move || ensure_lxd_instance_blocking(&name, vm, uid, gid))
+        .await
+        .map_err(|err| anyhow::anyhow!("the lxd ensure task failed: {err}"))?
+}
+
+fn ensure_lxd_instance_blocking(name: &str, vm: bool, uid: u32, gid: u32) -> anyhow::Result<()> {
     let output = lxc_output(&["list", "--format", "csv", "-c", "s", name])?;
     if !output.status.success() {
         anyhow::bail!(
@@ -388,7 +423,26 @@ pub(crate) fn idmap_of(name: &str) -> anyhow::Result<String> {
 /// that make the sandbox-side paths the host paths themselves.
 /// Containers only; a virtual machine takes no host-path mount and
 /// rides the attached posture instead.
-pub(crate) fn ensure_lxd_mount(
+/// The device attach is an lxc CLI wait — blocking, so it hops to the
+/// blocking pool like the rest of the ensure path.
+pub(crate) async fn ensure_lxd_mount(
+    name: &str,
+    workspace: &str,
+    skills: Option<&std::path::Path>,
+    agents: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let name = name.to_owned();
+    let workspace = workspace.to_owned();
+    let skills = skills.map(std::path::PathBuf::from);
+    let agents = agents.map(std::path::PathBuf::from);
+    tokio::task::spawn_blocking(move || {
+        ensure_lxd_mount_blocking(&name, &workspace, skills.as_deref(), agents.as_deref())
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("the lxd mount task failed: {err}"))?
+}
+
+fn ensure_lxd_mount_blocking(
     name: &str,
     workspace: &str,
     skills: Option<&std::path::Path>,
