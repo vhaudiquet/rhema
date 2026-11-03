@@ -51,11 +51,21 @@ const DONE_SENTINEL: &str = "[DONE]";
 const MODELS_PAGE_LIMIT: u32 = 1000;
 
 /// OpenRouter backend, speaking its OpenAI-compatible chat-completions API.
-#[derive(Debug)]
 pub struct OpenRouterProvider {
     base_url: String,
     api_key: String,
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for OpenRouterProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key never prints; the plain data does.
+        f.debug_struct("OpenRouterProvider")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("http", &self.http)
+            .finish()
+    }
 }
 
 impl OpenRouterProvider {
@@ -281,5 +291,20 @@ impl ModelProvider for OpenRouterProvider {
             feed_chunk(&payload, &mut assembler, sink)?;
         }
         Ok(assembler.finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_prints_presence_never_the_key() {
+        let provider = OpenRouterProvider::new("sk-or-secret");
+        let printed = format!("{provider:?}");
+        assert!(!printed.contains("sk-or-secret"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        // The plain data stays visible.
+        assert!(printed.contains("base_url"), "{printed}");
     }
 }
