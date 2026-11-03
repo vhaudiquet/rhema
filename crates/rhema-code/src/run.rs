@@ -951,6 +951,10 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     };
 
     enable_raw_mode().context("the rhema-tui binary needs a terminal; pipe output through a pty or use the rhema CLI instead")?;
+    // The hook goes on before anything else mutates the terminal: a
+    // panic from here to the loop's first frame must not strand the
+    // user's shell.
+    install_panic_hook();
     // Shift-enter is a distinct key only when the terminal encodes
     // every key: under the kitty protocol the disambiguate flag alone
     // leaves plain shift+key in legacy mode, so shift+enter would stay
@@ -970,22 +974,34 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // popped before it is left: the protocol's lifetime is paired with
     // the screen it was pushed on, and a terminal keeping per-screen
     // stacks would never see a pop issued across the swap.
-    crossterm::execute!(
-        stdout(),
-        EnterAlternateScreen,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_ASSOCIATED_TEXT
-        ),
-        EnableMouseCapture,
-        EnableBracketedPaste
-    )
-    .context("cannot enter the alternate screen")?;
-    install_panic_hook();
-    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))
-        .context("cannot initialize the terminal backend")?;
+    // Every plain `?` exit between raw mode and the first frame also
+    // has to restore: the shell must not keep raw mode on, or the
+    // alternate screen. `restore_terminal` is idempotent and swallows
+    // its own errors, so running it here is safe whatever landed.
+    let setup = (|| -> anyhow::Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
+        crossterm::execute!(
+            stdout(),
+            EnterAlternateScreen,
+            PushKeyboardEnhancementFlags(
+                KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS
+                    | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                    | KeyboardEnhancementFlags::REPORT_ASSOCIATED_TEXT
+            ),
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+        .context("cannot enter the alternate screen")?;
+        Terminal::new(CrosstermBackend::new(stdout()))
+            .context("cannot initialize the terminal backend")
+    })();
+    let mut terminal = match setup {
+        Ok(terminal) => terminal,
+        Err(error) => {
+            restore_terminal();
+            return Err(error);
+        }
+    };
 
     let (tx, mut rx) = unbounded_channel::<UiEvent>();
     let outcome = event_loop(&mut terminal, &mut app, &tx, &mut rx, &mut effects).await;
