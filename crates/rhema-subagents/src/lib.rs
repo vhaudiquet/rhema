@@ -16,7 +16,11 @@
 //! Jobs live in a [`registry`](crate::registry::Registry): ids, states,
 //! the capped report cache, one cancel flag per job (escape stops the
 //! main session, never a running subagent), and a concurrency cap
-//! past which starts queue. The registry is also the read surfaces:
+//! past which starts queue. A job that dies to the network fails
+//! **transiently** — the retry ladder the provider rides is
+//! background-tuned, and the frontend's retry command restarts what
+//! still fails, in place, under its own id (see
+//! [`registry::JobFailure`]). The registry is also the read surfaces:
 //! the status subscription the UI renders one working line per job
 //! from, the finish feed a frontend turns into transcript notices, and
 //! the notifications — the driver drains them at step boundaries while
@@ -51,6 +55,6 @@ pub mod tools;
 pub mod wire;
 
 pub use def::{SubagentDef, builtin, discover};
-pub use registry::{JobFinished, JobStatus};
+pub use registry::{JobFailure, JobFinished, JobStatus, Restarted};
 pub use tools::SubagentTools;
 pub use wire::{SubagentHandle, extra_specs, wire, wire_at};

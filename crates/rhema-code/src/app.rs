@@ -9608,6 +9608,126 @@ mod tests {
         );
     }
 
+    /// `/retry` restarts the subagent jobs the network killed, offer
+    /// or no offer: a job can die to an outage the parent turn
+    /// survived, and the notice names what came back. Nothing failed
+    /// elsewhere, so no turn starts; a second dispatch has nothing
+    /// left to restart and says so.
+    #[tokio::test]
+    async fn retry_restarts_transient_failed_subagents() {
+        use rhema_core::{EventSink, ProviderError};
+        use rhema_subagents::{SubagentDef, SubagentTools};
+
+        /// Fails the first call with a dead link, then answers.
+        struct Flaky(std::sync::atomic::AtomicBool);
+
+        #[async_trait::async_trait]
+        impl ModelProvider for Flaky {
+            async fn complete(
+                &self,
+                _req: rhema_core::ModelRequest,
+                _sink: &mut dyn EventSink,
+            ) -> Result<rhema_core::ModelOutput, ProviderError> {
+                if !self.0.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                    // Already spent: the link recovered.
+                    return Ok(rhema_core::ModelOutput {
+                        message: Message::text(Role::Assistant, "the report"),
+                        stop_reason: StopReason::EndTurn,
+                        usage: Usage::default(),
+                    });
+                }
+                Err(ProviderError::Network(
+                    "error decoding response body".into(),
+                ))
+            }
+        }
+
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let shell = Arc::new(rhema_coding_agent::ShellTools::new(std::env::temp_dir()));
+        let def = SubagentDef {
+            name: "scout".into(),
+            description: "looks around".into(),
+            model: None,
+            max_steps: None,
+            body: "Look.".into(),
+        };
+        let tools = Arc::new(
+            SubagentTools::new(Arc::new(Flaky(true.into())), vec![def], shell, "m")
+                .with_retry_ladders(vec![], vec![]),
+        );
+        h.app.subagents = Some(tools.handle());
+        let _ = rhema_core::ToolResolver::resolve(
+            tools.as_ref(),
+            ToolCall {
+                id: "c1".into(),
+                name: "subagent".into(),
+                args: serde_json::json!({"name": "scout", "prompt": "look"}),
+                ..ToolCall::default()
+            },
+            &rhema_core::ToolContext::default(),
+        )
+        .await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if h.app.subagents.as_ref().unwrap().status().is_empty() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the job never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        // The failure notice drains on the tick a real frontend runs;
+        // the test takes it by hand.
+        let _ = h.app.subagents.as_ref().unwrap().take_finished();
+
+        // The restart: no failed turn, so no turn, but the job comes
+        // back under its own id and the notice names it.
+        assert!(!h.app.retryable);
+        let effects = crate::commands::dispatch(&mut h.app, "/retry");
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(
+            h.app.transcript.lines().contains(&Line::Notice(
+                "restarted 1 subagent after network failures: scout (job-1)".into()
+            )),
+            "{:?}",
+            h.app.transcript.lines().last()
+        );
+
+        // The re-run answers: the finish announces into the same id.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let events = loop {
+            let events = h.app.subagents.as_ref().unwrap().take_finished();
+            if !events.is_empty() {
+                break events;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the re-run never finished"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        };
+        assert_eq!(events[0].line, "Subagent scout (job-1) has finished.");
+
+        // Spent: a second dispatch is the plain no-offer answer.
+        let effects = crate::commands::dispatch(&mut h.app, "/retry");
+        assert!(effects.is_empty());
+        assert!(
+            h.app
+                .transcript
+                .lines()
+                .contains(&Line::Notice("no failed turn to retry".into()))
+        );
+
+        // With a failed turn behind it as well, one dispatch restarts
+        // the jobs and fires the turn — the whole outage rewound.
+        h.app.retryable = true;
+        let effects = crate::commands::dispatch(&mut h.app, "/retry");
+        assert_eq!(effects, vec![Effect::RetryTurn]);
+    }
+
     /// Everything that moves the conversation on clears the offer: a
     /// fresh submit, a finished turn, a cancel, and a cleared
     /// conversation each leave `/retry` with nothing to re-issue.

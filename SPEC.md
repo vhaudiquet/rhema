@@ -262,7 +262,10 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   never retries (the caller saw the deltas; a second attempt would repeat them), and an
   exchange that "succeeds" empty — a provider that closed the stream before its first chunk —
   retries like any dead response and, if every attempt comes back empty, fails naming that
-  fact instead of completing a turn nobody saw.
+  fact instead of completing a turn nobody saw. Subagents ride a second, background-tuned
+  ladder on top of the frontend's (SPEC §13): a job's caller is not sitting behind the wait,
+  and a dead job loses every step it finished, so a job waits out an outage past the hour
+  where a turn gives up after minutes.
 - ~~**What a manual `/retry` re-sends**~~, **decided:** the failed request itself, not the
   prompt text again. `CodingAgent::retry_turn_with_cancel` runs the step loop with no input
   message on the history exactly as the failed turn left it — a first-request failure re-issues
@@ -271,7 +274,9 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   the model's back. The TUI gates it on "the last finished turn errored and nothing ran
   since" (a submit, a cancel, a success, or a conversation swap clears the offer) and shows
   `/retry re-sends it` under the error strip; the natural flow after a rate limit is
-  `/model` then `/retry` on the new model.
+  `/model` then `/retry` on the new model. `/retry` also restarts every transient-failed
+  subagent job in place (SPEC §13), whether or not the turn offer is up — a job can die to
+  an outage the parent turn survived, and nothing else would re-run it.
 - ~~**How a UI paste travels without flooding the session**~~, **decided:** embedded pastes in message text (`rhema-core::paste`). A frontend records a long paste as `U+FFFC`, payload, `U+FFFC` inside the user text it pushes to the session — the compact form is the session's record, so rebuilds and resumes render the same chip the live stream did. Expansion back to plain text rides the provider seam: the coding-agent driver wraps whatever `ModelProvider` it is built with, so the engine stays ignorant and the encoding never reaches an adapter. The engine's two-consumer discipline holds; a consumer that never mints marks is unaffected.
 - ~~**Where forge support lives**~~, **decided:** an integration, not a
   framework component: `integrations/rhema-forge-integration` (the
@@ -686,6 +691,41 @@ registry, not an execution.
   dropped, and is re-announced at every turn start while unfetched
   and untaken — an interactive frontend's idle prompt also counts as
   an announcement. There is no forced delivery at turn end.
+
+**Failure classes.** A job that ends without a report carries the
+class its step error names, decided where the error is known
+(`AgentError::is_retryable`, one question over
+`ProviderError::is_retryable`): **transient** — a dead link, a
+transport timeout, a struggling server, the failures the provider's
+retry ladder waits out — or **permanent** — no report written, a
+spent step budget, a rejected key. The class rides the finish, so
+nothing ever classifies from the reason text.
+
+**The background ladder.** The provider the inner agents run on is
+the frontend's turn provider wrapped once more in `Retrying` inside
+`rhema-subagents`, with its own ladders: the network one waits 1
+minute, 5, 10, 30 (46 minutes of waits, each attempt re-walking the
+frontend's ladder underneath, so the job's tolerance runs past the
+hour), the server one 30 seconds and 2 minutes. A turn ladder gives
+up after minutes because a user sits behind the wait; a job waits out
+an outage because its caller is not behind it, and a dead job loses
+every step it finished. The waits surface in the job's live line as a
+`retrying model call (attempt n/m)` phase, so a job riding out an
+outage reads as waiting, not hung.
+
+**Restart.** A start arms its job with the spawn ingredients — the
+definition, the prompt, the parent run id, the approval hook — and a
+transient failure keeps them; `/retry` restarts every
+transient-failed job in place, under its own id: the record returns
+to queued with a fresh clock and cancel flag, the pending failure
+announcements retire with the state they described (a model that read
+one would delegate the same task beside the re-run), and the report
+cache clears — a fetch reads "still running", and the re-run
+announces its finish into the id the model already knows. A re-run
+that fails transiently again keeps its ingredients and restarts
+again. Permanent failures never restart — re-running them repeats the
+failure at full cost — and a restart past the agent's drop is an
+empty answer, never a spawn into a gone agent.
 
 **Cancellation.** A job's `ToolContext.cancelled` is its own flag,
 minted at spawn — never the parent turn's. Escape flips only the

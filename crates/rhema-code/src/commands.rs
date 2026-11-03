@@ -278,8 +278,37 @@ fn retry(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
         app.push_notice("a sandbox is being stood up; /retry waits for it");
         return Vec::new();
     }
+    // The subagent half first: jobs the network killed re-run under
+    // their own ids, whether or not the parent turn has an offer up —
+    // a job can die to an outage the parent turn survived. The restart
+    // runs before the turn so the retried turn's start-of-turn drain
+    // never announces the stale failures the restart just retired.
+    let restarted: Vec<String> = app
+        .subagents
+        .as_ref()
+        .map(|handle| {
+            handle
+                .restart_failed_jobs()
+                .into_iter()
+                .map(|job| format!("{} ({})", job.name, job.id))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !restarted.is_empty() {
+        let count = if restarted.len() == 1 {
+            "1 subagent".to_owned()
+        } else {
+            format!("{} subagents", restarted.len())
+        };
+        app.push_notice(&format!(
+            "restarted {count} after network failures: {}",
+            restarted.join(", ")
+        ));
+    }
     if !app.retryable {
-        app.push_notice("no failed turn to retry");
+        if restarted.is_empty() {
+            app.push_notice("no failed turn to retry");
+        }
         return Vec::new();
     }
     // The offer survives a model or instance switch on purpose; a

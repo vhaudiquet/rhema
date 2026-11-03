@@ -11,6 +11,10 @@ authors.workspace = true
 [dependencies]
 # The step engine: a subagent is a fresh Agent on a fresh Session
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
+# The background-tuned retry wrapper: a job rides the frontend's turn
+# provider wrapped once more, so an outage waits out under the job
+# instead of killing it
+rhema-provider = { path = "../rhema-provider", version = "0.1.0" }
 # The toolkit: the inner shell, the overlay, the approval hook, the
 # renderer. Default features off so a wasm build (remote-shell sandbox,
 # no tokio processes) excludes them; the inner shell shares the parent

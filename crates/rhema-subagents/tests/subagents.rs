@@ -189,6 +189,46 @@ impl ModelProvider for Hanging {
     }
 }
 
+/// Fails its first `fails` calls with a dead-link error, then answers
+/// every call with the report. The shape an outage has to one job: a
+/// stretch of failures, then recovery.
+struct Flaky {
+    fails: AtomicUsize,
+    calls: AtomicUsize,
+}
+
+impl Flaky {
+    fn new(fails: usize) -> Arc<Self> {
+        Arc::new(Self {
+            fails: AtomicUsize::new(fails),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl ModelProvider for Flaky {
+    async fn complete(
+        &self,
+        _req: ModelRequest,
+        _sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let left = self.fails.load(Ordering::SeqCst);
+        if left > 0 {
+            self.fails.store(left - 1, Ordering::SeqCst);
+            return Err(ProviderError::Network(
+                "error decoding response body".into(),
+            ));
+        }
+        Ok(end_turn("the report"))
+    }
+}
+
 /// Answers its first call only after [`Self::release`] fires, then
 /// answers every call with a distinct text. Drives the cap test: the
 /// first job holds the slot until released, the second queues.
@@ -865,12 +905,13 @@ async fn engine_errors_surface_in_band() {
     }
 
     let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
-    let tools = Arc::new(SubagentTools::new(
-        Arc::new(Failing),
-        vec![worker_def()],
-        shell,
-        "m",
-    ));
+    // A 500 is retryable, so the background ladder would wait it out;
+    // this test is about the surfacing, and the empty ladder fails the
+    // first attempt at once.
+    let tools = Arc::new(
+        SubagentTools::new(Arc::new(Failing), vec![worker_def()], shell, "m")
+            .with_retry_ladders(vec![], vec![]),
+    );
     let handle = tools.handle();
     let id = job_id(
         &tools
@@ -1085,13 +1126,15 @@ async fn a_job_runs_under_the_supplied_base_prompt() {
         max_steps: None,
         body: "THE BODY TEXT with {{ braces }} that stay.".into(),
     };
-    let tools = SubagentTools::new(
-        capture.clone(),
-        vec![def],
-        Arc::new(ShellTools::new(std::env::temp_dir())),
-        "parent-model",
-    )
-    .with_base_system("THE STAMPED BASE".into());
+    let tools = Arc::new(
+        SubagentTools::new(
+            capture.clone(),
+            vec![def],
+            Arc::new(ShellTools::new(std::env::temp_dir())),
+            "parent-model",
+        )
+        .with_base_system("THE STAMPED BASE".into()),
+    );
     let handle = tools.handle();
 
     let result = tools
@@ -1105,4 +1148,96 @@ async fn a_job_runs_under_the_supplied_base_prompt() {
         ["THE STAMPED BASE\n\nTHE BODY TEXT with {{ braces }} that stay."],
         "{systems:?}"
     );
+}
+
+#[tokio::test]
+async fn a_dead_link_inside_a_job_retries_and_completes() {
+    // The job-tuned wrapper: the frontend's turn ladder never appears
+    // here — the provider is raw — so this retry is the subagents'
+    // own, and one failure plus a one-tick ladder still ends in a
+    // report, not a failed job.
+    let provider = Flaky::new(1);
+    let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
+    let tools = Arc::new(
+        SubagentTools::new(provider.clone(), vec![worker_def()], shell, "parent-model")
+            .with_retry_ladders(vec![Duration::from_millis(1)], vec![]),
+    );
+    let handle = tools.handle();
+    let id = job_id(
+        &tools
+            .resolve(call("worker", "go"), &ToolContext::default())
+            .await,
+    );
+    wait_finished(&handle, &id).await;
+
+    let events = handle.take_finished();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].line, "Subagent worker (job-1) has finished.");
+    assert_eq!(provider.calls(), 2, "one retry spent on the dead link");
+    let report = tools.resolve(fetch(&id), &ToolContext::default()).await;
+    assert!(!report.is_error, "{}", report.content);
+    assert_eq!(report.content, "the report");
+}
+
+#[tokio::test]
+async fn an_outage_that_outruns_the_ladder_fails_transiently_and_retry_restarts_it() {
+    // No ladder at all: the first attempt dies, the job fails with a
+    // transient error — the class the retry command picks up. The
+    // restart re-runs the same id from its start, and the recovered
+    // network answers.
+    let provider = Flaky::new(1);
+    let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
+    let tools = Arc::new(
+        SubagentTools::new(provider.clone(), vec![worker_def()], shell, "parent-model")
+            .with_retry_ladders(vec![], vec![]),
+    );
+    let handle = tools.handle();
+    let id = job_id(
+        &tools
+            .resolve(call("worker", "go"), &ToolContext::default())
+            .await,
+    );
+    wait_finished(&handle, &id).await;
+    assert_eq!(
+        handle.take_finished()[0].line,
+        "Subagent worker (job-1) has finished with an error: \
+         network error: error decoding response body."
+    );
+
+    // The restart keeps the id and re-runs from the start.
+    let restarted = handle.restart_failed_jobs();
+    assert_eq!(
+        restarted,
+        vec![rhema_subagents::Restarted {
+            id: id.clone(),
+            name: "worker".into(),
+        }]
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let report = loop {
+        let result = tools.resolve(fetch(&id), &ToolContext::default()).await;
+        if !result.is_error {
+            break result;
+        }
+        // A still-queued or running job fetches as "still running".
+        assert!(
+            result.content.contains("still running"),
+            "the failed cache must have cleared: {}",
+            result.content
+        );
+        assert!(
+            Instant::now() < deadline,
+            "the restart never finished: {}",
+            result.content
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    assert_eq!(report.content, "the report");
+
+    // The re-run announces itself into the id the model already knows.
+    let events = handle.take_finished();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].line, "Subagent worker (job-1) has finished.");
+    assert_eq!(provider.calls(), 2, "one attempt per run");
 }

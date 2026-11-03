@@ -54,6 +54,21 @@ pub struct CommitError(
     pub String,
 );
 
+impl AgentError {
+    /// Whether a retry could clear this failure: a model call that
+    /// failed with a retryable provider error — a dead link, a
+    /// transport timeout, a struggling server (see
+    /// [`ProviderError::is_retryable`]). Everything else — a rejected
+    /// key, an exhausted budget, a commit hook that would fail again —
+    /// repeats identically, and a caller that retries only burns the
+    /// attempt. This is the question a background runner asks when a
+    /// step dies: does the failure name the infrastructure, which may
+    /// come back, or the work itself, which will not.
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, AgentError::Provider(err) if err.is_retryable())
+    }
+}
+
 /// Forwards every event to the caller's sink while recording which tool
 /// calls the provider already announced, so the engine does not echo a
 /// streamed `ToolCallStart`.
@@ -374,4 +389,37 @@ pub async fn run_turn(
         }
     }
     Err(AgentError::MaxIterations(max_iterations))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_retryable_provider_failure_reads_retryable() {
+        assert!(AgentError::Provider(ProviderError::Network("dead link".into())).is_retryable());
+        assert!(AgentError::Provider(ProviderError::Timeout).is_retryable());
+        assert!(
+            AgentError::Provider(ProviderError::Api {
+                message: "server error (HTTP 502)".into(),
+                status: Some(502),
+            })
+            .is_retryable()
+        );
+    }
+
+    #[test]
+    fn everything_else_reads_permanent() {
+        assert_eq!(AgentError::MissingProvider, AgentError::MissingProvider);
+        assert!(!AgentError::MissingProvider.is_retryable());
+        assert!(
+            !AgentError::Provider(ProviderError::Api {
+                message: "rate limit".into(),
+                status: Some(429),
+            })
+            .is_retryable()
+        );
+        assert!(!AgentError::Commit(CommitError("disk full".into())).is_retryable());
+        assert!(!AgentError::MaxIterations(32).is_retryable());
+    }
 }

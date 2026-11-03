@@ -30,6 +30,22 @@
 //! turn the pending lines to run as the next turn's prompt, retiring
 //! them so the driver's drain does not repeat what the prompt already
 //! said.
+//!
+//! Failures split into two classes, and the class decides what a
+//! restart may do. A [`JobFailure::Transient`] names the
+//! infrastructure — the model call died on the network or the server,
+//! the same class the provider's retry ladder waits out — and the job
+//! carried everything it needs to run again, so the user's retry
+//! command restarts it in place: [`Registry::restart_failed`] moves
+//! every transient-failed job back to queued under its own id, with a
+//! fresh cancel flag and clock, and hands the spawn ingredients back
+//! to the tool. The pending failure announcements retire with the
+//! state they describe, the report cache clears, and the re-run
+//! finishes into the same id — the model sees the failure, then a
+//! finish, and fetches as it always did. A
+//! [`JobFailure::Permanent`] names the work itself — no report, a
+//! spent step budget — and never restarts: re-running it repeats the
+//! failure at full cost.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -102,6 +118,92 @@ pub enum Fetched {
     Unknown,
 }
 
+/// Why a job ended without a report, and whether a retry could clear
+/// it. The class is decided where the failure is known — the inner
+/// turn's step error — and rides the finish, so a restart never has to
+/// guess from the reason text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JobFailure {
+    /// The infrastructure failed: a dead link, a transport timeout, a
+    /// struggling server — every [`ProviderError`] a retry ladder
+    /// would wait out. The job may run again; the user's retry
+    /// command restarts it from its start.
+    Transient(String),
+    /// The work itself failed: no report was written, or the step
+    /// budget ran out. Re-running repeats the failure at full cost,
+    /// so the job never restarts; the model reads the reason and may
+    /// delegate differently.
+    Permanent(String),
+}
+
+impl JobFailure {
+    /// The failure worded for the model and the transcript.
+    pub fn reason(&self) -> &str {
+        match self {
+            JobFailure::Transient(reason) | JobFailure::Permanent(reason) => reason,
+        }
+    }
+
+    /// Whether the failure is one [`Registry::restart_failed`] picks
+    /// up.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, JobFailure::Transient(_))
+    }
+}
+
+/// What a job keeps so the user's retry command can run it again: the
+/// spawn ingredients, captured at start and held for the job's life.
+/// The tool reads them back on a restart; the record never re-runs a
+/// job on its own.
+#[derive(Clone)]
+pub struct JobRerun {
+    /// The subagent definition the job runs.
+    pub(crate) def: crate::def::SubagentDef,
+    /// The stamped parent prompt the job was started with.
+    pub(crate) prompt: String,
+    /// The parent turn's run id the job's own run id was built from.
+    pub(crate) parent_run: String,
+    /// The approval hook captured off the parent shell at spawn, held
+    /// for the job's lifetime.
+    pub(crate) hook: Option<std::sync::Arc<dyn rhema_agent_tools::Approval>>,
+}
+
+impl std::fmt::Debug for JobRerun {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The hook is a dyn seam; the ingredients that name the run
+        // print in full.
+        f.debug_struct("JobRerun")
+            .field("def", &self.def.name)
+            .field("prompt", &self.prompt)
+            .field("parent_run", &self.parent_run)
+            .field("hook", &self.hook.as_ref().map(|_| "<dyn Approval>"))
+            .finish()
+    }
+}
+
+/// One job [`Registry::restart_failed`] moved back to queued, with
+/// everything the tool needs to spawn its re-run.
+#[derive(Debug)]
+pub(crate) struct RestartJob {
+    /// The job's registry id, kept across the restart.
+    pub id: String,
+    /// The subagent definition the job runs.
+    pub name: String,
+    /// The spawn ingredients captured at start.
+    pub rerun: JobRerun,
+    /// The fresh cancel flag the re-run's task owns.
+    pub cancel: Arc<AtomicBool>,
+}
+
+/// A job the tool restarted, as the frontend's notice names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Restarted {
+    /// The job's registry id, kept across the restart.
+    pub id: String,
+    /// The subagent definition the job runs.
+    pub name: String,
+}
+
 /// One finished job, as the finish feed delivers it: the transcript
 /// notice a frontend pushes the moment a job ends. The `line` is the
 /// same announcement the driver steers with.
@@ -143,7 +245,7 @@ enum State {
     /// cache stays); `announced` retires the notification line for a
     /// frontend that took it to run as a prompt.
     Finished {
-        outcome: Result<String, String>,
+        outcome: Result<String, JobFailure>,
         fetched: bool,
         announced: bool,
     },
@@ -159,6 +261,10 @@ struct Job {
     cancel: Arc<AtomicBool>,
     started_at: Instant,
     state: State,
+    /// The spawn ingredients a restart needs; armed at start, kept
+    /// across restarts so a re-run that fails transiently can restart
+    /// again.
+    rerun: Option<JobRerun>,
 }
 
 /// The jobs of one agent: ids, states, the report cache, the cap.
@@ -213,9 +319,20 @@ impl Registry {
                 cancel: cancel.clone(),
                 started_at: Instant::now(),
                 state: State::Queued,
+                rerun: None,
             },
         );
         Minted { id, cancel }
+    }
+
+    /// Arms a minted job for a later restart: the spawn ingredients a
+    /// [`Self::restart_failed`] hands back. A start calls this right
+    /// after minting; a job never armed (none today — every start
+    /// arms) simply never restarts.
+    pub(crate) fn arm_restart(&self, id: &str, rerun: JobRerun) {
+        if let Some(job) = self.lock().jobs.get_mut(id) {
+            job.rerun = Some(rerun);
+        }
     }
 
     /// The job's task took a slot: the inner turn starts working.
@@ -254,9 +371,10 @@ impl Registry {
         }
     }
 
-    /// The job's run ended: its report or the reason it failed. The
-    /// report was capped at production; the cache is what was cut.
-    pub(crate) fn finish(&self, id: &str, outcome: Result<String, String>) {
+    /// The job's run ended: its report or the classified reason it
+    /// failed. The report was capped at production; the cache is what
+    /// was cut.
+    pub(crate) fn finish(&self, id: &str, outcome: Result<String, JobFailure>) {
         let mut inner = self.lock();
         let Some(job) = inner.jobs.get_mut(id) else {
             return;
@@ -296,9 +414,9 @@ impl Registry {
                     name: job.name.clone(),
                     report: report.clone(),
                 },
-                Err(reason) => Fetched::Failed {
+                Err(failure) => Fetched::Failed {
                     name: job.name.clone(),
-                    reason: reason.clone(),
+                    reason: failure.reason().to_owned(),
                 },
             },
         };
@@ -387,6 +505,54 @@ impl Registry {
         events
     }
 
+    /// Moves every transient-failed job back to queued, in mint
+    /// order, and hands the spawn ingredients back: the tool re-spawns
+    /// what this returns. A restart keeps the job's id and mint order,
+    /// refreshes the clock, and mints a fresh cancel flag — the old
+    /// task is gone, so the re-run's task owns its own. Leaving
+    /// `Finished` retires whatever was pending on it: the failure's
+    /// notification line (it described a state that no longer exists,
+    /// and a model that read it would delegate the same task beside
+    /// the re-run), and the report cache (a fetch now reads "still
+    /// running"). Finish events already in the feed stay — the failure
+    /// happened, the transcript may have shown it. Ok jobs and
+    /// permanent failures stay put; a re-run that fails transiently
+    /// again keeps its ingredients and restarts again.
+    pub(crate) fn restart_failed(&self) -> Vec<RestartJob> {
+        let mut inner = self.lock();
+        let mut ids: Vec<String> = inner
+            .jobs
+            .iter()
+            .filter(|(_, job)| {
+                matches!(
+                    &job.state,
+                    State::Finished {
+                        outcome: Err(failure),
+                        ..
+                    } if failure.is_transient()
+                )
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort_by_key(|id| inner.jobs.get(id).map(|job| job.seq).unwrap_or(0));
+        ids.into_iter()
+            .filter_map(|id| {
+                let job = inner.jobs.get_mut(&id)?;
+                let rerun = job.rerun.clone()?;
+                let cancel = Arc::new(AtomicBool::new(false));
+                job.cancel = cancel.clone();
+                job.started_at = Instant::now();
+                job.state = State::Queued;
+                Some(RestartJob {
+                    id,
+                    name: job.name.clone(),
+                    rerun,
+                    cancel,
+                })
+            })
+            .collect()
+    }
+
     /// The subscription the UI renders: one entry per working job —
     /// queued or running. A finished job leaves the snapshot at once
     /// (the finish notice carries the outcome) and its report stays on
@@ -443,10 +609,13 @@ impl Drop for Registry {
 
 /// The notification line for one finished job: the driver's steering
 /// vocabulary, and the finish notice's text.
-fn announcement(name: &str, id: &str, outcome: &Result<String, String>) -> String {
+fn announcement(name: &str, id: &str, outcome: &Result<String, JobFailure>) -> String {
     match outcome {
         Ok(_) => format!("Subagent {name} ({id}) has finished."),
-        Err(reason) => format!("Subagent {name} ({id}) has finished with an error: {reason}."),
+        Err(failure) => format!(
+            "Subagent {name} ({id}) has finished with an error: {}.",
+            failure.reason()
+        ),
     }
 }
 
@@ -480,6 +649,26 @@ mod tests {
 
     fn registry() -> Registry {
         Registry::new(2)
+    }
+
+    /// Arms `job` with placeholder spawn ingredients, the way a start
+    /// always does.
+    fn arm(registry: &Registry, id: &str) {
+        registry.arm_restart(
+            id,
+            JobRerun {
+                def: crate::def::SubagentDef {
+                    name: "scout".into(),
+                    description: "explores".into(),
+                    model: None,
+                    max_steps: None,
+                    body: "Explore.".into(),
+                },
+                prompt: "go".into(),
+                parent_run: "turn-1".into(),
+                hook: None,
+            },
+        );
     }
 
     #[test]
@@ -549,7 +738,12 @@ mod tests {
         let registry = registry();
         let ok = registry.mint("scout");
         let bad = registry.mint("reviewer");
-        registry.finish(&bad.id, Err("hit its step budget of 256".to_owned()));
+        registry.finish(
+            &bad.id,
+            Err(JobFailure::Permanent(
+                "hit its step budget of 256".to_owned(),
+            )),
+        );
         registry.finish(&ok.id, Ok("the report".to_owned()));
         assert_eq!(
             registry.take_finished(),
@@ -624,7 +818,12 @@ mod tests {
     fn a_failed_job_fetches_as_its_reason() {
         let registry = registry();
         let job = registry.mint("reviewer");
-        registry.finish(&job.id, Err("hit its step budget of 256".to_owned()));
+        registry.finish(
+            &job.id,
+            Err(JobFailure::Permanent(
+                "hit its step budget of 256".to_owned(),
+            )),
+        );
         // The failure announced itself before the fetch, notice
         // included.
         assert_eq!(
@@ -739,6 +938,121 @@ mod tests {
         let cancel = job.cancel.clone();
         drop(registry);
         assert!(cancel.load(Ordering::Relaxed), "the job stops");
+    }
+
+    #[test]
+    fn a_transient_failure_restarts_in_place_and_retires_the_announcements() {
+        let registry = registry();
+        let job = registry.mint("scout");
+        arm(&registry, &job.id);
+        registry.finish(
+            &job.id,
+            Err(JobFailure::Transient("network error: dead link".to_owned())),
+        );
+        assert_eq!(
+            registry.notifications(),
+            vec![
+                "Subagent scout (job-1) has finished with an error: network error: dead link."
+                    .to_owned()
+            ]
+        );
+
+        let restarted = registry.restart_failed();
+        assert_eq!(restarted.len(), 1);
+        assert_eq!(restarted[0].id, job.id);
+        assert_eq!(restarted[0].name, "scout");
+        assert_eq!(restarted[0].rerun.prompt, "go");
+
+        // Same id, back to queued, clock fresh, cancel flag fresh: the
+        // re-run is the job's own continuation.
+        let snapshot = registry.status();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].id, job.id);
+        assert_eq!(snapshot[0].phase, "queued");
+        assert_eq!(
+            registry.fetch(&job.id),
+            Fetched::Busy {
+                name: "scout".into()
+            },
+            "the failed report's cache cleared with the state it described"
+        );
+        assert!(
+            registry.notifications().is_empty(),
+            "the stale failure never steers: the model would delegate beside the re-run"
+        );
+        assert!(
+            !restarted[0].cancel.load(Ordering::Relaxed),
+            "the re-run's flag mints fresh"
+        );
+    }
+
+    #[test]
+    fn a_restarted_job_can_fail_transiently_and_restart_again() {
+        let registry = registry();
+        let job = registry.mint("scout");
+        arm(&registry, &job.id);
+        registry.finish(&job.id, Err(JobFailure::Transient("network".to_owned())));
+        assert_eq!(registry.restart_failed().len(), 1);
+        // The re-run failed the same way: the ingredients survive the
+        // restart, so the retry command keeps working.
+        registry.finish(&job.id, Err(JobFailure::Transient("network".to_owned())));
+        assert_eq!(registry.restart_failed().len(), 1);
+    }
+
+    #[test]
+    fn only_transient_failures_restart() {
+        let registry = registry();
+        let transient = registry.mint("scout");
+        arm(&registry, &transient.id);
+        let permanent = registry.mint("reviewer");
+        arm(&registry, &permanent.id);
+        let finished = registry.mint("writer");
+        arm(&registry, &finished.id);
+        registry.finish(
+            &transient.id,
+            Err(JobFailure::Transient("network".to_owned())),
+        );
+        registry.finish(
+            &permanent.id,
+            Err(JobFailure::Permanent(
+                "hit its step budget of 256".to_owned(),
+            )),
+        );
+        registry.finish(&finished.id, Ok("the report".to_owned()));
+
+        let restarted = registry.restart_failed();
+        assert_eq!(
+            restarted
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![transient.id],
+            "a spent budget and a finished report never re-run"
+        );
+    }
+
+    #[test]
+    fn a_job_never_armed_never_restarts() {
+        // Unreachable through the tool (every start arms), but the
+        // fail-safe is no restart, never a spawn without ingredients.
+        let registry = registry();
+        let job = registry.mint("scout");
+        registry.finish(&job.id, Err(JobFailure::Transient("network".to_owned())));
+        assert!(registry.restart_failed().is_empty());
+    }
+
+    #[test]
+    fn restarts_come_out_in_mint_order() {
+        let registry = registry();
+        let first = registry.mint("alpha");
+        let second = registry.mint("zeta");
+        arm(&registry, &first.id);
+        arm(&registry, &second.id);
+        registry.finish(&second.id, Err(JobFailure::Transient("network".to_owned())));
+        registry.finish(&first.id, Err(JobFailure::Transient("network".to_owned())));
+        let restarted = registry.restart_failed();
+        let ids: Vec<&str> = restarted.iter().map(|job| job.id.as_str()).collect();
+        assert_eq!(ids, vec![first.id, second.id]);
     }
 
     #[tokio::test]

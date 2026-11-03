@@ -32,12 +32,32 @@ use crate::tools::SubagentTools;
 #[derive(Clone)]
 pub struct SubagentHandle {
     registry: Arc<Registry>,
+    /// The tool that starts into the registry, held weakly like the
+    /// jobs hold their registry: the handle survives the tool, and a
+    /// restart past the drop is an empty answer, never a spawn into a
+    /// gone agent. [`Self::from_registry`] builds the registry-only
+    /// shape with no tool behind it.
+    tools: std::sync::Weak<SubagentTools>,
 }
 
 impl SubagentHandle {
-    /// The tool's handle constructor: one registry, one source.
+    /// The tool's handle constructor: one registry, one source. The
+    /// registry-only form (`from_registry`) carries no tool, so its
+    /// [`Self::restart_failed_jobs`] always restarts nothing.
     pub(crate) fn from_registry(registry: Arc<Registry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            tools: std::sync::Weak::new(),
+        }
+    }
+
+    /// The handle over `tools`: its registry, and the weak back-link a
+    /// restart spawns through.
+    pub(crate) fn from_tools(tools: &std::sync::Arc<SubagentTools>) -> Self {
+        Self {
+            registry: tools.registry(),
+            tools: std::sync::Arc::downgrade(tools),
+        }
     }
 
     /// The jobs' screen-facing state: one entry per working job —
@@ -72,6 +92,22 @@ impl SubagentHandle {
     pub fn steering(&self) -> Arc<dyn rhema_coding_agent::Steering> {
         Arc::clone(&self.registry) as Arc<dyn rhema_coding_agent::Steering>
     }
+
+    /// Restarts every transient-failed job in place — the retry
+    /// command's subagent half. A transient failure names the
+    /// infrastructure (a dead link, a struggling server): the job
+    /// carried everything it needs to run again, so it re-runs under
+    /// its own id, from its start, with a fresh cancel flag. The
+    /// restarts come back so a frontend can notice them; each re-run
+    /// announces itself when it finishes, into the id the model
+    /// already knows. Permanent failures — no report, a spent step
+    /// budget — stay failed.
+    pub fn restart_failed_jobs(&self) -> Vec<crate::registry::Restarted> {
+        match self.tools.upgrade() {
+            Some(tools) => tools.restart_failed_jobs(),
+            None => Vec::new(),
+        }
+    }
 }
 
 /// Wires discovered subagents into `config`, reading the global
@@ -98,20 +134,22 @@ pub fn wire_at(
         // Unreachable today (the built-in definition is always
         // discovered), but the config stays untouched rather than
         // advertising an empty catalog.
-        return SubagentHandle {
-            registry: Arc::new(Registry::new(crate::registry::DEFAULT_MAX_RUNNING)),
-        };
+        return SubagentHandle::from_registry(Arc::new(Registry::new(
+            crate::registry::DEFAULT_MAX_RUNNING,
+        )));
     }
     let shell = config
         .tools
         .clone()
         .unwrap_or_else(|| Arc::new(ShellTools::new(config.workspace.clone())));
-    let tools = SubagentTools::new(provider, defs, shell.clone(), config.model.clone())
-        .with_thinking(config.thinking)
-        .with_base_system(subagent_base_system(config, shell.workspace()));
+    let tools = Arc::new(
+        SubagentTools::new(provider, defs, shell.clone(), config.model.clone())
+            .with_thinking(config.thinking)
+            .with_base_system(subagent_base_system(config, shell.workspace())),
+    );
     let handle = tools.handle();
     config.tools = Some(shell);
-    config.extra_resolver = Some(Arc::new(tools));
+    config.extra_resolver = Some(tools);
     config.steering = Some(handle.steering());
     handle
 }

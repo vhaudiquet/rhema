@@ -35,10 +35,13 @@
 
 use std::sync::Arc;
 use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use serde_json::json;
+
+use std::time::Duration;
 
 use rhema_agent_tools::{Approval, Overlay, ShellTools};
 use rhema_core::request::ThinkingEffort;
@@ -46,21 +49,54 @@ use rhema_core::{
     Agent, ChatParams, Content, Event, EventSink, Message, ModelProvider, Role, Session, ToolCall,
     ToolContext, ToolProgress, ToolResolver, ToolResult, ToolSpec,
 };
+use rhema_provider::Retrying;
 
 use crate::def::SubagentDef;
-use crate::registry::{Fetched, Registry};
+use crate::registry::{Fetched, JobFailure, JobRerun, Registry, RestartJob};
 
 /// The report is cut at this size — in bytes and in char boundaries,
 /// whichever is hit first — keeping the tail: the conclusion of a report
 /// sits at its end, as an error sits at the end of a command's output.
 const REPORT_LIMIT: usize = 50 * 1024;
 
+/// The waits between a background job's retries of a dead link. The
+/// frontend's own ladder (~6½ minutes) rides underneath, so each of
+/// these attempts re-walks it: an outage that outlasts the turn
+/// ladder — minutes to hours — waits out under the job instead of
+/// killing it, because a background job's caller is not sitting
+/// behind the wait, while a dead job loses every step it finished.
+/// The ladder runs 46 minutes of waits all told; only an outage past
+/// the hour fails the job, and a transient failure is what the user's
+/// retry command restarts.
+const JOB_NETWORK_LADDER: &[Duration] = &[
+    Duration::from_secs(60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(10 * 60),
+    Duration::from_secs(30 * 60),
+];
+
+/// The waits between a background job's retries of a struggling
+/// server: server failures either clear in seconds (the frontend's
+/// short ladder rides underneath) or name an incident minutes cannot
+/// clear, so this ladder spends three attempts, two and a half
+/// minutes all told.
+const JOB_SERVER_LADDER: &[Duration] = &[Duration::from_secs(30), Duration::from_secs(120)];
+
 /// The machinery one inner run needs, shared by the background start
 /// path and the synchronous nested path.
 #[derive(Clone)]
 struct Inner {
-    /// The provider the inner agents run on; the parent's.
+    /// The provider the inner agents run on: the parent's, wrapped
+    /// once per run in a background-tuned [`Retrying`] — the frontend
+    /// already rides its own turn ladder underneath, and the two
+    /// compose into the job's tolerance (see [`JOB_NETWORK_LADDER`]).
     provider: Arc<dyn ModelProvider>,
+    /// The dead-link waits a run's retry wrapper walks; the default
+    /// is [`JOB_NETWORK_LADDER`], a test knob shortens it.
+    network_ladder: Vec<Duration>,
+    /// The struggling-server waits a run's retry wrapper walks; the
+    /// default is [`JOB_SERVER_LADDER`], a test knob shortens it.
+    server_ladder: Vec<Duration>,
     /// The discovered definitions; the tool's catalog.
     defs: Vec<SubagentDef>,
     /// The model identifier a definition without its own `model` runs
@@ -131,7 +167,7 @@ impl Inner {
         ctx: &ToolContext,
         inner_shell: &Arc<ShellTools>,
         progress: &mut dyn ToolProgress,
-    ) -> Result<String, String> {
+    ) -> Result<String, JobFailure> {
         // The inner system prompt: the stamp with this definition's
         // body appended verbatim. A body is plain text, never
         // rendered — template syntax in it reaches the model as the
@@ -144,15 +180,20 @@ impl Inner {
             format!("{}\n\n{}", self.base, def.body)
         };
         let resolver = self.inner_resolver(inner_shell);
-        // Each run wraps the provider in its own fresh transcript: the
-        // inner history lives and dies with the run, so there is no
-        // mirror to share and no per-definition settings to plumb. The
-        // `zoom` half of `attach` is dropped on purpose — the
-        // subagent's tool surface stays the shell alone.
-        let (provider, _zoom) = rhema_transcript::attach(
+        // Each run wraps the provider in its own fresh retry and
+        // transcript: the wrapper holds no state across requests, so a
+        // per-run instance is the shared one's exact equal, and the
+        // inner history lives and dies with the run — no mirror to
+        // share, no per-definition settings to plumb. The `zoom` half
+        // of `attach` is dropped on purpose — the subagent's tool
+        // surface stays the shell alone.
+        let retrying = Arc::new(Retrying::with_ladders(
             self.provider.clone(),
-            rhema_transcript::TranscriptSettings::default(),
-        );
+            self.network_ladder.clone(),
+            self.server_ladder.clone(),
+        ));
+        let (provider, _zoom) =
+            rhema_transcript::attach(retrying, rhema_transcript::TranscriptSettings::default());
         let mut agent = Agent::builder()
             .provider(provider)
             .resolver(resolver)
@@ -166,7 +207,7 @@ impl Inner {
                 )
             })
             .build()
-            .map_err(|err| format!("its engine failed to build: {err}"))?;
+            .map_err(|err| JobFailure::Permanent(format!("its engine failed to build: {err}")))?;
 
         let mut session = Session::default();
         session.history.push(Message::text(Role::User, prompt));
@@ -189,12 +230,21 @@ impl Inner {
 
         for _ in 0..def.max_steps() {
             if ctx.cancelled.load(Ordering::Relaxed) {
-                return Err("cancelled".to_owned());
+                return Err(JobFailure::Permanent("cancelled".to_owned()));
             }
             let step = agent
                 .step(&mut session, &mut sink, &inner_ctx)
                 .await
-                .map_err(|err| err.to_string())?;
+                .map_err(|err| {
+                    // The failure class is decided where the error is
+                    // known: a retryable provider failure names the
+                    // infrastructure, everything else names the work.
+                    if err.is_retryable() {
+                        JobFailure::Transient(err.to_string())
+                    } else {
+                        JobFailure::Permanent(err.to_string())
+                    }
+                })?;
             if step.output.stop_reason != rhema_core::StopReason::ToolUse {
                 let report: String = step
                     .output
@@ -207,12 +257,17 @@ impl Inner {
                     })
                     .collect();
                 if report.trim().is_empty() {
-                    return Err("finished without a report".to_owned());
+                    return Err(JobFailure::Permanent(
+                        "finished without a report".to_owned(),
+                    ));
                 }
                 return Ok(capped(report));
             }
         }
-        Err(format!("hit its step budget of {}", def.max_steps()))
+        Err(JobFailure::Permanent(format!(
+            "hit its step budget of {}",
+            def.max_steps()
+        )))
     }
 }
 
@@ -244,6 +299,8 @@ impl SubagentTools {
         Self {
             inner: Inner {
                 provider,
+                network_ladder: JOB_NETWORK_LADDER.to_vec(),
+                server_ladder: JOB_SERVER_LADDER.to_vec(),
                 defs,
                 default_model: default_model.into(),
                 thinking: ThinkingEffort::Default,
@@ -255,6 +312,20 @@ impl SubagentTools {
                 crate::registry::DEFAULT_MAX_RUNNING,
             ))),
         }
+    }
+
+    /// Replaces the retry ladders a run's wrapper walks — the
+    /// background-tuned defaults exist so a job waits out an outage,
+    /// and this knob exists for tests that cannot sit through one.
+    /// Call before the first job starts.
+    pub fn with_retry_ladders(
+        mut self,
+        network_ladder: Vec<Duration>,
+        server_ladder: Vec<Duration>,
+    ) -> Self {
+        self.inner.network_ladder = network_ladder;
+        self.inner.server_ladder = server_ladder;
+        self
     }
 
     /// The synchronous variant: a call runs the subagent to its report
@@ -304,13 +375,21 @@ impl SubagentTools {
     /// The status handle backed by this tool's registry: the UI's
     /// subscription, and — through [`Registry`]'s [`Steering`]
     /// implementation — the driver's notification source. The same
-    /// instance the tool resolver starts jobs into.
-    pub fn handle(&self) -> crate::wire::SubagentHandle {
-        crate::wire::SubagentHandle::from_registry(
-            self.registry
-                .clone()
-                .unwrap_or_else(|| Arc::new(Registry::new(1))),
-        )
+    /// instance the tool resolver starts jobs into, held weakly so the
+    /// handle never keeps the tool alive; a restart past the drop is
+    /// an empty answer.
+    pub fn handle(self: &Arc<Self>) -> crate::wire::SubagentHandle {
+        crate::wire::SubagentHandle::from_tools(self)
+    }
+
+    /// The registry, when this instance starts background jobs. A
+    /// synchronous (nested) instance registers nowhere and answers
+    /// with a one-slot stand-in, the shape [`Self::handle`] would have
+    /// built.
+    pub(crate) fn registry(&self) -> Arc<Registry> {
+        self.registry
+            .clone()
+            .unwrap_or_else(|| Arc::new(Registry::new(1)))
     }
 
     /// The `subagent` tool spec over `defs`: the catalog and the
@@ -459,7 +538,8 @@ impl SubagentTools {
 
     /// Starts one job: the id is minted and returned at once, the run
     /// rides a tokio task holding its own cancel flag and the approval
-    /// hook captured at spawn.
+    /// hook captured at spawn. The spawn ingredients arm the job for a
+    /// later restart.
     fn start(
         &self,
         call_id: &str,
@@ -477,22 +557,43 @@ impl SubagentTools {
         // turn's policy, never the fail-safe reject. No hook installed
         // means the inner tools reject — the fail-safe default.
         let hook = self.shell.current_approval();
-        let inner_shell = self.inner.inner_shell(&self.shell, hook);
-        let model = def
+        let rerun = JobRerun {
+            def: def.clone(),
+            prompt: prompt.to_owned(),
+            parent_run: ctx.run_id.clone(),
+            hook: hook.clone(),
+        };
+        registry.arm_restart(&minted.id, rerun.clone());
+        let id = minted.id.clone();
+        self.spawn(&registry, &minted.id, minted.cancel.clone(), rerun);
+        ToolResult::success(
+            call_id.to_owned(),
+            format!(
+                "started subagent {} as {id} in the background. When its \
+                 report is announced in a notification, fetch it by \
+                 calling this tool with id \"{id}\".",
+                def.name
+            ),
+        )
+    }
+
+    /// Spawns one job's run as a tokio task: the shared body of a
+    /// start and a restart. A restart passes the ingredients
+    /// [`Registry::restart_failed`] handed back and the job's fresh
+    /// cancel flag; the id stays the job's own.
+    fn spawn(&self, registry: &Arc<Registry>, id: &str, cancel: Arc<AtomicBool>, rerun: JobRerun) {
+        let inner = self.inner.clone();
+        let inner_shell = self.inner.inner_shell(&self.shell, rerun.hook.clone());
+        let model = rerun
+            .def
             .model
             .clone()
             .unwrap_or_else(|| self.inner.default_model.clone());
-        let inner = self.inner.clone();
-        let task_def = def.clone();
-        let prompt = prompt.to_owned();
-        let parent_run = ctx.run_id.clone();
-        let cancel = minted.cancel.clone();
-        let id = minted.id.clone();
-        let task_id = id.clone();
-        let task_name = def.name.clone();
-        let weak_registry = Arc::downgrade(&registry);
+        let task_id = id.to_owned();
+        let task_name = rerun.def.name.clone();
+        let weak_registry = Arc::downgrade(registry);
         let progress = StatusPump {
-            registry: Arc::downgrade(&registry),
+            registry: Arc::downgrade(registry),
             id: task_id.clone(),
         };
         tokio::spawn(async move {
@@ -511,27 +612,43 @@ impl SubagentTools {
             }
             let ctx = ToolContext {
                 cwd: inner_shell.workspace().to_path_buf(),
-                run_id: format!("{parent_run}/{task_id}/subagent:{task_name}"),
+                run_id: format!("{}/{}/subagent:{}", rerun.parent_run, task_id, task_name),
                 cancelled: cancel,
             };
             let mut progress = progress;
             let outcome = inner
-                .run(&task_def, &prompt, &ctx, &inner_shell, &mut progress)
+                .run(&rerun.def, &rerun.prompt, &ctx, &inner_shell, &mut progress)
                 .await;
             if let Some(registry) = weak_registry.upgrade() {
                 registry.finish(&task_id, outcome);
             }
             drop(permit);
         });
-        ToolResult::success(
-            call_id.to_owned(),
-            format!(
-                "started subagent {} as {id} in the background. When its \
-                 report is announced in a notification, fetch it by \
-                 calling this tool with id \"{id}\".",
-                def.name
-            ),
-        )
+    }
+
+    /// Restarts every transient-failed job: the registry resets the
+    /// records and hands back the ingredients, and this re-spawns each
+    /// run under its own id. The names come back for the frontend's
+    /// notice; the re-runs announce themselves when they finish, into
+    /// the same ids the model already knows.
+    pub fn restart_failed_jobs(&self) -> Vec<crate::registry::Restarted> {
+        let Some(registry) = &self.registry else {
+            return Vec::new();
+        };
+        registry
+            .restart_failed()
+            .into_iter()
+            .map(|job| {
+                let RestartJob {
+                    id,
+                    name,
+                    rerun,
+                    cancel,
+                } = job;
+                self.spawn(registry, &id, cancel, rerun);
+                crate::registry::Restarted { id, name }
+            })
+            .collect()
     }
 }
 
@@ -625,7 +742,9 @@ impl ToolResolver for SubagentTools {
                 inner_shell.clear_approval();
                 match outcome {
                     Ok(report) => ToolResult::success(id, report),
-                    Err(why) => ToolResult::failure(id, format!("subagent {}: {why}", def.name)),
+                    Err(why) => {
+                        ToolResult::failure(id, format!("subagent {}: {}", def.name, why.reason()))
+                    }
                 }
             }
         }
@@ -664,7 +783,7 @@ struct Forwarder<'a> {
     /// The model id the inner turn runs on, stamped into every status.
     model: String,
     /// The phase last reported; only transitions are sent.
-    phase: Option<&'static str>,
+    phase: Option<String>,
     /// The current model call's usage: the latest running tally, held
     /// past [`Event::StepEnd`](rhema_core::Event::StepEnd) until the
     /// next call's first frame replaces it — the reply rides into the
@@ -686,8 +805,9 @@ const WRITING: &str = "writing output";
 impl Forwarder<'_> {
     /// Reports a phase transition with the spend so far; a repeated
     /// phase sends nothing.
-    fn report(&mut self, phase: &'static str) {
-        if self.phase == Some(phase) {
+    fn report(&mut self, phase: impl Into<String>) {
+        let phase = phase.into();
+        if self.phase.as_deref() == Some(phase.as_str()) {
             return;
         }
         self.phase = Some(phase);
@@ -697,7 +817,7 @@ impl Forwarder<'_> {
     /// Sends the current phase, context, and spend.
     fn send(&mut self) {
         self.progress.status(rhema_core::ToolStatus {
-            phase: self.phase.unwrap_or(THINKING).to_owned(),
+            phase: self.phase.clone().unwrap_or_else(|| THINKING.to_owned()),
             context: self.context,
             spent: Some(self.spent),
             model: Some(self.model.clone()),
@@ -733,6 +853,14 @@ impl EventSink for Forwarder<'_> {
                 self.context = Some(usage);
                 self.send();
             }
+            // A retry announcement means the model call died and the
+            // ladder is waiting: the line names the wait, so a job
+            // riding out an outage reads as waiting, not hung. One
+            // report per announcement — the attempt number moves — and
+            // the next delta returns the flow phases.
+            Event::RetryWait { attempt, total, .. } => {
+                self.report(format!("retrying model call (attempt {attempt}/{total})"));
+            }
             // A nested subagent's status stays private to it, argument
             // streaming is not a phase of its own, and the inner
             // output's lines ride no channel. A running tally replaces
@@ -740,8 +868,7 @@ impl EventSink for Forwarder<'_> {
             // spend to accumulate; the accounting still rides `StepEnd`.
             Event::ToolStatus { .. }
             | Event::ToolCallArgsDelta { .. }
-            | Event::ToolOutputDelta { .. }
-            | Event::RetryWait { .. } => {}
+            | Event::ToolOutputDelta { .. } => {}
             Event::Usage(usage) => {
                 if self.context.as_ref() != Some(&usage) {
                     self.context = Some(usage);
@@ -893,6 +1020,53 @@ mod tests {
         // The inner output rides no channel: the subagent is its own
         // line, its report the result.
         assert!(collected.lines.is_empty());
+    }
+
+    /// A retry announcement is a phase of its own: a job riding out an
+    /// outage reads as waiting, with the attempt count, not hung.
+    #[test]
+    fn a_retry_wait_becomes_a_retrying_phase() {
+        let mut collected = Collector {
+            lines: Vec::new(),
+            statuses: Vec::new(),
+        };
+        let mut sink = Forwarder {
+            progress: &mut collected,
+            model: "m".into(),
+            phase: None,
+            context: None,
+            spent: rhema_core::Usage::default(),
+        };
+        sink.emit(Event::ThinkingDelta("hmm"));
+        sink.emit(Event::RetryWait {
+            error: "network error: dead link",
+            delay: Duration::from_secs(30),
+            attempt: 2,
+            total: 6,
+        });
+        sink.emit(Event::RetryWait {
+            error: "network error: dead link",
+            delay: Duration::from_secs(60),
+            attempt: 3,
+            total: 6,
+        });
+        sink.emit(Event::TextDelta("still here"));
+        drop(sink);
+
+        let phases: Vec<&str> = collected
+            .statuses
+            .iter()
+            .map(|status| status.phase.as_str())
+            .collect();
+        assert_eq!(
+            phases,
+            vec![
+                THINKING,
+                "retrying model call (attempt 2/6)",
+                "retrying model call (attempt 3/6)",
+                WRITING,
+            ]
+        );
     }
 
     #[test]
