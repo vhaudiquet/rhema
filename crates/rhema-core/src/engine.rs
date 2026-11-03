@@ -178,6 +178,13 @@ impl Agent {
         let iteration = self.steps;
         self.steps += 1;
 
+        // An interrupted predecessor — a cancelled turn dropped
+        // mid-await, a failed commit between the call's durable intent
+        // and its result — leaves dangling calls in the history, and
+        // the next request would be invalid carrying them. The repair
+        // rides this step's first commit like any result would.
+        close_orphaned_calls(&mut session.history);
+
         let mut events = ForwardingSink {
             inner: sink,
             announced: HashSet::new(),
@@ -370,6 +377,50 @@ impl AgentBuilder {
     }
 }
 
+/// Closes tool calls left dangling by an interrupted turn: an
+/// assistant message carrying tool calls must be answered by a result
+/// for every call before the next request is valid. A cancel (the
+/// turn future dropped mid-await — no code of the turn's runs on that
+/// path), a failed commit between the call's durable intent and its
+/// result, or a crash leaves exactly that shape. The repair appends
+/// one synthetic failure per unanswered call, at the tail, where the
+/// interrupted step's results would have sat; returns the call ids it
+/// answered.
+pub fn close_orphaned_calls(history: &mut Vec<Message>) -> Vec<String> {
+    let called: Vec<&String> = history
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            Content::ToolCall(call) => Some(&call.id),
+            _ => None,
+        })
+        .collect();
+    let answered: HashSet<&String> = history
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            Content::ToolResult(result) => Some(&result.id),
+            _ => None,
+        })
+        .collect();
+    let mut orphans: Vec<String> = Vec::new();
+    for id in called {
+        if !answered.contains(id) && !orphans.contains(id) {
+            orphans.push(id.clone());
+        }
+    }
+    for id in &orphans {
+        history.push(Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(ToolResult::failure(
+                id.clone(),
+                "the turn was interrupted before this call ran; nothing happened",
+            ))],
+        });
+    }
+    orphans
+}
+
 /// The provided coding-agent driver: push the user input, then loop steps
 /// until the model stops requesting tools. Not the primitive — the RSD
 /// driver (crate 2) has the same shape with different scaffolding.
@@ -394,6 +445,95 @@ pub async fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::ToolCall;
+
+    #[test]
+    fn a_dangling_call_is_answered_with_one_synthetic_failure() {
+        let mut history = vec![
+            Message::text(Role::User, "run it"),
+            Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolCall(ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "echo hi"}),
+                    provider_data: serde_json::Value::Null,
+                })],
+            },
+        ];
+        let answered = close_orphaned_calls(&mut history);
+        assert_eq!(answered, ["call-1"]);
+        assert_eq!(history.len(), 3);
+        let Some(Content::ToolResult(result)) = history[2].content.first() else {
+            panic!("the tail is the synthetic result");
+        };
+        assert_eq!(result.id, "call-1");
+        assert!(result.is_error, "an interrupted call reads as a failure");
+    }
+
+    #[test]
+    fn an_answered_history_is_left_alone() {
+        let mut history = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![Content::ToolCall(ToolCall {
+                    id: "call-1".into(),
+                    name: "bash".into(),
+                    args: serde_json::json!({"command": "echo hi"}),
+                    provider_data: serde_json::Value::Null,
+                })],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![Content::ToolResult(ToolResult::failure(
+                    "call-1",
+                    "already answered",
+                ))],
+            },
+        ];
+        let before = history.clone();
+        assert!(close_orphaned_calls(&mut history).is_empty());
+        assert_eq!(history.len(), before.len());
+    }
+
+    #[test]
+    fn only_the_unanswered_calls_are_repaired() {
+        let call = |id: &str| {
+            Content::ToolCall(ToolCall {
+                id: id.into(),
+                name: "bash".into(),
+                args: serde_json::json!({"command": "echo hi"}),
+                provider_data: serde_json::Value::Null,
+            })
+        };
+        let mut history = vec![
+            Message {
+                role: Role::Assistant,
+                content: vec![call("answered"), call("dangling"), call("duplicated")],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![Content::ToolResult(ToolResult::failure(
+                    "answered",
+                    "the one that ran",
+                ))],
+            },
+            Message {
+                role: Role::Tool,
+                content: vec![Content::ToolResult(ToolResult::failure(
+                    "duplicated",
+                    "the twin that ran",
+                ))],
+            },
+            Message {
+                role: Role::Assistant,
+                content: vec![Content::Text("done".into())],
+            },
+        ];
+        let answered = close_orphaned_calls(&mut history);
+        assert_eq!(answered, ["dangling"]);
+        assert_eq!(history.len(), 5);
+    }
 
     #[test]
     fn a_retryable_provider_failure_reads_retryable() {
