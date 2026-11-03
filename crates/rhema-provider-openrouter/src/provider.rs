@@ -282,6 +282,9 @@ impl ModelProvider for OpenRouterProvider {
                     return Ok(assembler.finish());
                 }
                 feed_chunk(&payload, &mut assembler, sink)?;
+                if let Some(err) = decoder.take_error() {
+                    return Err(ProviderError::Network(err));
+                }
             }
         }
         for payload in decoder.finish() {

@@ -234,6 +234,9 @@ impl ModelProvider for GoogleProvider {
             let bytes = item.map_err(network_error)?;
             for payload in decoder.push(&bytes) {
                 feed_chunk(&payload, &mut assembler, sink)?;
+                if let Some(err) = decoder.take_error() {
+                    return Err(ProviderError::Network(err));
+                }
             }
         }
         for payload in decoder.finish() {
