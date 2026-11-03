@@ -4,6 +4,19 @@
 use super::*;
 
 impl App {
+    /// Persists the config through the store. `false` means the store
+    /// refused and the error strip carries why — callers that must not
+    /// pretend success stop there.
+    pub(crate) fn save_config(&mut self) -> bool {
+        match self.store.save(&self.config) {
+            Ok(()) => true,
+            Err(err) => {
+                self.error = Some(format!("cannot save config: {err}"));
+                false
+            }
+        }
+    }
+
     /// Sets the session's thinking effort: persisted into the session's
     /// profile like a model pick, and the agent rebuilds carrying the
     /// conversation so the very next turn asks at the new level.
@@ -18,8 +31,7 @@ impl App {
             .set_for_profile(self.session_profile.as_deref(), |settings| {
                 settings.thinking = Some(effort.as_str().to_owned());
             });
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return;
         }
         if let Err(err) = self.rebuild_live_agent(false) {

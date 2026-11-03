@@ -9,7 +9,7 @@
 //! nothing is deleted anywhere, and `zoom` is the model's way back to
 //! any original.
 //!
-//! - [`tree`] — the slot algebra: ranges `(id, n)`, halves
+//! - [`tree`] — the slot algebra: message ranges `(id, n)`
 //! - [`summary`] — the extractive line text: heads and counts, no
 //!   model calls
 //! - [`compact`] — the stepped compaction engine: the append-only

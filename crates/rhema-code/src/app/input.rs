@@ -360,9 +360,7 @@ impl App {
             }
             OnboardingAction::Complete => {
                 self.config.onboarded = Some(true);
-                if let Err(err) = self.store.save(&self.config) {
-                    self.error = Some(format!("cannot save config: {err}"));
-                }
+                self.save_config();
                 self.screen = Screen::Chat;
                 self.transcript.push_notice(
                     "setup complete — /settings any time; rhema onboard runs it again",

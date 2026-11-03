@@ -76,55 +76,6 @@ fn role_label(role: Role) -> &'static str {
     }
 }
 
-/// One content block's contribution to a line, at `cap` bytes.
-fn block_line(content: &Content, cap: usize) -> String {
-    match content {
-        Content::Text(text) => head(text, cap),
-        Content::ToolCall(call) => format!(
-            "calls {}({})",
-            call.name,
-            head(
-                &call.args.to_string(),
-                cap.saturating_sub(call.name.len() + 8)
-            )
-        ),
-        Content::ToolResult(result) => format!(
-            "{}: {}",
-            if result.is_error { "failed" } else { "ok" },
-            head(&result.content, cap)
-        ),
-        Content::Image(image) => format!("[image: {}]", image.media_type.as_str()),
-    }
-}
-
-/// The line standing in for one message.
-pub fn line_for_message(message: &Message) -> String {
-    let parts: Vec<String> = message
-        .content
-        .iter()
-        .map(|content| block_line(content, HEAD_BYTES))
-        .collect();
-    format!("{}: {}", role_label(message.role), parts.join(" | "))
-}
-
-/// The line covering `range`: for one message, that message's line;
-/// for more, the structural summary — who spoke, what the tools were,
-/// what failed. `messages` starts at `range.id`: the positioned slice
-/// [`crate::view::Transcript::range`] returns, not the whole log.
-/// Tool counts carry the names, so the line tells the model what a
-/// zoom would dig through.
-pub fn line_for_range(messages: &[Message], range: Range) -> String {
-    if range.n == 1 {
-        let address = format!("{}+1|", range.id);
-        if let Some(message) = messages.first() {
-            return format!("{address}{}", line_for_message(message));
-        }
-    }
-    let range = summarize_range(messages, range);
-    let body = head(&range.1, RANGE_HEAD_BYTES);
-    format!("{}+{}|{}", range.0.0, range.0.1, body)
-}
-
 /// The aggregate parts of a multi-message range, before addressing.
 /// Also the body of the extractive section digest
 /// ([`crate::compact::section_digest`]).
@@ -296,38 +247,6 @@ mod tests {
         };
         // "running" (7) + "bash" (4) + {"command":"ls"} (16)
         assert_eq!(message_bytes(&call), 7 + 4 + 16);
-    }
-
-    #[test]
-    fn a_range_line_names_the_speakers_and_the_tools() {
-        let messages = vec![
-            Message::text(Role::User, "fix the login bug\nplease"),
-            Message {
-                role: Role::Assistant,
-                content: vec![
-                    Content::Text("looking".into()),
-                    Content::ToolCall(ToolCall {
-                        id: "c1".into(),
-                        name: "bash".into(),
-                        args: serde_json::json!({}),
-                        provider_data: serde_json::Value::Null,
-                    }),
-                ],
-            },
-            Message {
-                role: Role::Tool,
-                content: vec![Content::ToolResult(rhema_core::ToolResult::failure(
-                    "c1", "exit 1",
-                ))],
-            },
-        ];
-        let line = line_for_range(&messages, Range { id: 0, n: 3 });
-        assert!(line.starts_with("0+3|"), "{line}");
-        assert!(line.contains("user: fix the login bug please"), "{line}");
-        assert!(line.contains("bash\u{d7}1"), "{line}");
-        assert!(line.contains("1 failed"), "{line}");
-        assert!(line.contains("assistant: looking"), "{line}");
-        assert!(line.len() <= RANGE_HEAD_BYTES + 8);
     }
 
     #[test]

@@ -172,9 +172,7 @@ impl App {
         if let Screen::Settings(settings) = &mut self.screen {
             settings.theme_dark = !dark;
         }
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
-        }
+        self.save_config();
     }
 
     /// Cycles to the next palette and persists the choice, live like the
@@ -199,9 +197,7 @@ impl App {
         if let Screen::Settings(settings) = &mut self.screen {
             settings.colors = palette;
         }
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
-        }
+        self.save_config();
     }
 
     /// Flips the footer's icon flavor and persists the choice, live like
@@ -219,9 +215,7 @@ impl App {
         if let Screen::Settings(settings) = &mut self.screen {
             settings.icons_nerd = nerd;
         }
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
-        }
+        self.save_config();
     }
 
     /// Flips a skill's on/off state: the disabled set in the config
@@ -243,8 +237,7 @@ impl App {
         if turning_on && let Some(root) = self.config_root.clone() {
             let _ = crate::bundled::seed_one(&root.join("skills"), name);
         }
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return;
         }
         // The open screen's row follows: the settings page or the
@@ -292,9 +285,7 @@ impl App {
         self.config
             .last_profile_by_workspace
             .retain(|_, remembered| remembered != &old);
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
-        }
+        self.save_config();
     }
 
     /// The system prompt in the transcript, fenced so it reads verbatim.

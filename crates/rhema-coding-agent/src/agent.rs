@@ -341,19 +341,6 @@ impl CodingAgent {
         Ok(agent)
     }
 
-    /// Clears a session's stamped environment report — the transition
-    /// hook for rebuilds that change the facts the report carries: a
-    /// machine switch (a sandbox picked mid-conversation re-reports where
-    /// `bash` runs) or a model switch (the report names the model, and the
-    /// provider's cache is per-model regardless). Transitions that change
-    /// neither — a thinking level, a resume — keep the stamp: the report
-    /// is conversation state, and re-rendering it would rewrite the system
-    /// prompt and break the prefix cache for nothing.
-    pub fn clear_environment_stamp(session: &mut Session) {
-        if let Some(state) = session.driver_state.as_object_mut() {
-            state.remove(ENVIRONMENT_STATE_KEY);
-        }
-    }
 
     /// Writes the configured environment section into the session's
     /// driver state when none is stamped yet: the checkpoint paths

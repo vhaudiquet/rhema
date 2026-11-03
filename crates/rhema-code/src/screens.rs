@@ -2380,7 +2380,9 @@ impl ChatState {
     }
 
     /// The cursor's logical line index, 0-based — the input window's
-    /// anchor.
+    /// anchor. A test seam only: production observes the cursor through
+    /// the rendering, never through these.
+    #[cfg(test)]
     pub fn cursor_line_index(&self) -> usize {
         self.input
             .chars()
@@ -2390,6 +2392,7 @@ impl ChatState {
     }
 
     /// The cursor's column within its logical line.
+    #[cfg(test)]
     pub fn cursor_column(&self) -> usize {
         let (start, _) = self.cursor_line();
         self.cursor - start

@@ -532,16 +532,8 @@ pub struct SandboxAvailability {
 }
 
 impl SandboxAvailability {
-    /// Probes this machine and profile: one `docker info` run, one
-    /// `lxc info` run, one `PATH` scan for `ssh`, and the profile's
-    /// own `sandbox` section. Bounded work — each CLI probe at most
-    /// its budget — so startup waits seconds, never minutes.
-    pub fn probe(profile: &Profile) -> Self {
-        SandboxMachines::probe().offered_for(profile)
-    }
-
-    /// The offered set from injected machine facts: the testable seam
-    /// of [`Self::probe`]. `ssh` is offered only when the binary
+    /// The offered set from injected machine facts — the testable seam
+    /// the probe path goes through. `ssh` is offered only when the binary
     /// exists AND the profile names a host; `http` only when a URL is
     /// set (`RHEMA_SANDBOX_URL` included).
     fn from_parts(

@@ -118,8 +118,7 @@ impl App {
         // memory `begin_turn` writes.
         self.config
             .note_sandbox_in(&self.options.workspace, choice.stored_name());
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         // Enter selects and returns: the picker closes on an accepted
@@ -341,8 +340,7 @@ impl App {
         self.config
             .profiles
             .insert(name.clone(), rhema_config::Profile::default());
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         if let Screen::Settings(settings) = &mut self.screen {
@@ -392,8 +390,7 @@ impl App {
                     },
                 );
             });
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         if let Screen::Settings(settings) = &mut self.screen {
@@ -427,8 +424,7 @@ impl App {
         if removed.is_none() {
             return Vec::new();
         }
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         self.transcript
@@ -499,8 +495,7 @@ impl App {
             });
         self.config
             .note_sandbox_in(&self.options.workspace, choice.stored_name());
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         // Enter selects and returns: the page closes on an accepted
@@ -542,8 +537,7 @@ impl App {
         self.config
             .last_profile_by_workspace
             .retain(|_, remembered| remembered != &name);
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         self.sync_profile_rows();
@@ -579,8 +573,7 @@ impl App {
         self.config.set_for_profile(Some(&name), |profile| {
             profile.color = next.map(str::to_owned)
         });
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         self.sync_profile_rows();
@@ -640,8 +633,7 @@ impl App {
                 settings.model = None;
             }
         });
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         let effective = self.config.effective(Some(&tab));
@@ -729,8 +721,7 @@ impl App {
                 ));
             }
         }
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
+        if !self.save_config() {
             return Vec::new();
         }
         let mut effects = Vec::new();
@@ -786,8 +777,6 @@ impl App {
             return;
         }
         self.config.note_profile_in(&workspace, &profile);
-        if let Err(err) = self.store.save(&self.config) {
-            self.error = Some(format!("cannot save config: {err}"));
-        }
+        self.save_config();
     }
 }
