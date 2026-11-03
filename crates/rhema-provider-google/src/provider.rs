@@ -9,7 +9,17 @@
 //! failures to [`ProviderError::Network`], non-2xx responses (with the
 //! body's `error.message` when present) to [`ProviderError::Api`] with
 //! the HTTP status, and unparseable stream chunks to [`ProviderError::Api`]
-//! without one, as a protocol violation.
+//! without one, as a protocol violation. A stream can also die mid-turn:
+//! Gemini then sends a normal chunk-shaped `{"error": ...}` payload, which
+//! fails the same way, with the body's `error.message` when present.
+//!
+//! Timeouts are layered: the client bounds connection setup (10s) and each
+//! stream read (90s — a stall guard, not a duration cap, because a long
+//! generation is legitimate), and non-streaming calls (the models list)
+//! additionally carry a 20s overall request timeout. Streaming calls get no
+//! total timeout for the same reason.
+
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures_util::StreamExt;
@@ -26,12 +36,36 @@ use crate::wire::{
 /// The production Generative Language API base (v1beta).
 pub const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 
+/// The HTTP client every instance shares: connect capped, stream reads
+/// stall-guarded, never total-time capped.
+fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        // One connect attempt; a dead network fails fast instead of
+        // hanging the agent step.
+        .connect_timeout(Duration::from_secs(10))
+        // Per-read stall guard for streams: bounds the silence between
+        // chunks, never the total generation time.
+        .read_timeout(Duration::from_secs(90))
+        .build()
+        .expect("a client builder with only timeouts cannot fail")
+}
+
 /// Google Gemini model backend, speaking the Generative Language REST API.
-#[derive(Debug)]
 pub struct GoogleProvider {
     api_key: String,
     base_url: String,
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for GoogleProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key never prints; the plain data does.
+        f.debug_struct("GoogleProvider")
+            .field("api_key", &"<redacted>")
+            .field("base_url", &self.base_url)
+            .field("http", &self.http)
+            .finish()
+    }
 }
 
 impl GoogleProvider {
@@ -41,7 +75,7 @@ impl GoogleProvider {
         Self {
             api_key: api_key.into(),
             base_url: DEFAULT_BASE_URL.to_owned(),
-            http: reqwest::Client::new(),
+            http: http_client(),
         }
     }
 
@@ -71,6 +105,9 @@ impl GoogleProvider {
                 .http
                 .get(&url)
                 .header("x-goog-api-key", &self.api_key)
+                // The one overall timeout: a bounded listing call, not a
+                // stream of unbounded length.
+                .timeout(Duration::from_secs(20))
                 .send()
                 .await
                 .map_err(network_error)?;
@@ -91,6 +128,8 @@ impl GoogleProvider {
                 message: format!("malformed models page: {err}"),
                 status: None,
             })?;
+            // The row count before the models move out of the page.
+            let fetched = page.models.len();
             models.extend(
                 page.models
                     .into_iter()
@@ -103,10 +142,13 @@ impl GoogleProvider {
                     })
                     .filter(|card| card.supports_chat() && is_text(card)),
             );
-            match page.next_page_token {
-                Some(token) => page_token = Some(token),
-                None => return Ok(models),
+            // The zero-row guard keeps a misbehaving endpoint that keeps
+            // handing out a next token over empty pages from spinning this
+            // loop forever.
+            if fetched == 0 || page.next_page_token.is_none() {
+                return Ok(models);
             }
+            page_token = page.next_page_token;
         }
     }
 }
@@ -136,8 +178,7 @@ fn feed_chunk(
             message: format!("malformed SSE chunk: {err}"),
             status: None,
         })?;
-    assembler.push(chunk, sink);
-    Ok(())
+    assembler.push(chunk, sink)
 }
 
 #[async_trait]
@@ -148,7 +189,7 @@ impl ModelProvider for GoogleProvider {
     /// cannot map onto the wire, [`ProviderError::Network`]/[`ProviderError::Timeout`]
     /// when the transport fails, [`ProviderError::Api`] with the HTTP
     /// status on a non-2xx response, and [`ProviderError::Api`] without
-    /// one on a malformed stream chunk.
+    /// one on a malformed stream chunk or a mid-stream error chunk.
     async fn complete(
         &self,
         req: ModelRequest,
@@ -199,5 +240,20 @@ impl ModelProvider for GoogleProvider {
             feed_chunk(&payload, &mut assembler, sink)?;
         }
         Ok(assembler.finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_prints_presence_never_the_key() {
+        let provider = GoogleProvider::new("AIza-secret-key");
+        let printed = format!("{provider:?}");
+        assert!(!printed.contains("AIza-secret-key"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        // The plain data stays visible.
+        assert!(printed.contains("base_url"), "{printed}");
     }
 }

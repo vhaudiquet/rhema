@@ -30,6 +30,11 @@
 //!   media type and the bare base64 bytes, beside the text parts in the
 //!   order the user arranged them. The model never emits images, so the
 //!   response side of the mapping is untouched.
+//! - Errors: a non-2xx body is `{"error": {code, message, status}}`; the
+//!   mapper keeps `error.message` and falls back to the raw body. The
+//!   stream can also fail mid-turn with a `data: {"error": ...}` chunk
+//!   (then closing it), which surfaces as the same
+//!   [`ProviderError::Api`](rhema_core::ProviderError::Api).
 
 use std::collections::HashMap;
 
@@ -212,7 +217,9 @@ fn thinking_budget(thinking: ThinkingEffort) -> Option<u32> {
 
 // --- Response wire types (deserialize) ---
 
-/// One `GenerateContentResponse`: a full response, or one SSE chunk.
+/// One `GenerateContentResponse`: a full response, or one SSE chunk — or,
+/// on a stream aborted by a failure, the error object the API sends in
+/// place of one.
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerateContentResponse {
@@ -225,6 +232,12 @@ pub struct GenerateContentResponse {
     /// Prompt-level block feedback, when the request was refused outright.
     #[serde(default)]
     pub prompt_feedback: Option<WirePromptFeedback>,
+    /// The API's error detail, on a stream aborted by a failure: the
+    /// payload body is the whole `{"error": {...}}` wrapper, so this
+    /// field holds the detail directly and stays `None` on every normal
+    /// chunk.
+    #[serde(default)]
+    pub error: Option<WireErrorDetail>,
 }
 
 /// One response candidate.
@@ -626,7 +639,27 @@ impl ChunkAssembler {
     }
 
     /// Feeds one response chunk, emitting its parts' streaming events.
-    pub fn push(&mut self, chunk: GenerateContentResponse, sink: &mut dyn EventSink) {
+    /// Fails with [`ProviderError::Api`] when the chunk is the API's
+    /// mid-stream error object.
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Api`] (no status) when the chunk is
+    /// the API's mid-stream error.
+    pub fn push(
+        &mut self,
+        chunk: GenerateContentResponse,
+        sink: &mut dyn EventSink,
+    ) -> Result<(), ProviderError> {
+        if let Some(error) = &chunk.error {
+            return Err(ProviderError::Api {
+                message: error
+                    .message
+                    .clone()
+                    .unwrap_or_else(|| "mid-stream error".to_owned()),
+                status: None,
+            });
+        }
         if let Some(usage) = &chunk.usage_metadata {
             self.usage = Usage {
                 input_tokens: usage.prompt_token_count.unwrap_or(0),
@@ -683,6 +716,7 @@ impl ChunkAssembler {
                 }
             }
         }
+        Ok(())
     }
 
     /// Consumes the assembler into the final output. The message is always
@@ -1206,14 +1240,16 @@ mod tests {
     fn text_chunks_assemble_end_turn_with_usage() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
-                "[{\"text\":\"Hel\"},{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}],",
-                "\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2}}"
-            )),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
+                    "[{\"text\":\"Hel\"},{\"text\":\"lo\"}]},\"finishReason\":\"STOP\"}],",
+                    "\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":2}}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         assert_eq!(
@@ -1248,15 +1284,17 @@ mod tests {
     fn function_calls_assemble_tool_use_with_synthesized_ids() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
-                "[{\"functionCall\":{\"name\":\"echo\",\"args\":{\"x\":1}}}]},",
-                "\"finishReason\":\"STOP\"}],",
-                "\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":1}}"
-            )),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
+                    "[{\"functionCall\":{\"name\":\"echo\",\"args\":{\"x\":1}}}]},",
+                    "\"finishReason\":\"STOP\"}],",
+                    "\"usageMetadata\":{\"promptTokenCount\":5,\"candidatesTokenCount\":1}}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         assert_eq!(out.stop_reason, StopReason::ToolUse);
@@ -1285,14 +1323,16 @@ mod tests {
     fn wire_call_ids_win_and_call_indices_stay_positional() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[",
-                "{\"functionCall\":{\"id\":\"abc\",\"name\":\"a\"}},",
-                "{\"functionCall\":{\"name\":\"b\"}}]}}]}"
-            )),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[",
+                    "{\"functionCall\":{\"id\":\"abc\",\"name\":\"a\"}},",
+                    "{\"functionCall\":{\"name\":\"b\"}}]}}]}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         let ids: Vec<String> = out
@@ -1311,13 +1351,15 @@ mod tests {
     fn missing_call_args_default_to_an_empty_object() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
-                "[{\"functionCall\":{\"name\":\"bare\"}}]}}]}"
-            )),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
+                    "[{\"functionCall\":{\"name\":\"bare\"}}]}}]}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         assert_eq!(
@@ -1362,14 +1404,16 @@ mod tests {
     fn thought_parts_stream_but_never_reach_the_message() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[",
-                "{\"text\":\"thinking\",\"thought\":true},",
-                "{\"text\":\"\"},{\"text\":\"answer\"}]}}]}"
-            )),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[",
+                    "{\"text\":\"thinking\",\"thought\":true},",
+                    "{\"text\":\"\"},{\"text\":\"answer\"}]}}]}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         // The thought text streams live; the message carries only the
@@ -1388,15 +1432,17 @@ mod tests {
     fn thought_before_a_function_call_is_kept_for_replay() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[",
-                "{\"text\":\"I should check\",\"thought\":true},",
-                "{\"functionCall\":{\"name\":\"a\",\"args\":{}},",
-                "\"thoughtSignature\":\"sig1\"}]}}]}"
-            )),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[",
+                    "{\"text\":\"I should check\",\"thought\":true},",
+                    "{\"functionCall\":{\"name\":\"a\",\"args\":{}},",
+                    "\"thoughtSignature\":\"sig1\"}]}}]}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         // The thought rides in the call's provider data next to the
@@ -1439,22 +1485,26 @@ mod tests {
         for (reason, expected) in cases {
             let mut assembler = ChunkAssembler::new();
             let mut sink = Collector::new();
-            assembler.push(
-                chunk(&format!(
-                    "{{\"candidates\":[{{\"finishReason\":\"{reason}\"}}]}}"
-                )),
-                &mut sink,
-            );
+            assembler
+                .push(
+                    chunk(&format!(
+                        "{{\"candidates\":[{{\"finishReason\":\"{reason}\"}}]}}"
+                    )),
+                    &mut sink,
+                )
+                .expect("chunk is not an error");
             assert_eq!(assembler.finish().stop_reason, *expected, "for {reason}");
         }
 
         // No finish reason at all defaults to EndTurn.
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
+        assembler
+        .push(
             chunk("{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"x\"}]}}]}"),
             &mut sink,
-        );
+        )
+        .expect("chunk is not an error");
         assert_eq!(assembler.finish().stop_reason, StopReason::EndTurn);
     }
 
@@ -1462,10 +1512,12 @@ mod tests {
     fn a_blocked_prompt_yields_an_empty_message_and_other() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk("{\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}"),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk("{\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}"),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         assert_eq!(out.message.content, Vec::<Content>::new());
@@ -1479,22 +1531,26 @@ mod tests {
     fn last_finish_reason_and_usage_win() {
         let mut assembler = ChunkAssembler::new();
         let mut sink = Collector::new();
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
-                "[{\"text\":\"x\"}]}}],",
-                "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":0}}"
-            )),
-            &mut sink,
-        );
-        assembler.push(
-            chunk(concat!(
-                "{\"candidates\":[{\"finishReason\":\"MAX_TOKENS\"}],",
-                "\"usageMetadata\":{\"promptTokenCount\":9,\"candidatesTokenCount\":7,",
-                "\"cachedContentTokenCount\":3}}"
-            )),
-            &mut sink,
-        );
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":",
+                    "[{\"text\":\"x\"}]}}],",
+                    "\"usageMetadata\":{\"promptTokenCount\":1,\"candidatesTokenCount\":0}}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"candidates\":[{\"finishReason\":\"MAX_TOKENS\"}],",
+                    "\"usageMetadata\":{\"promptTokenCount\":9,\"candidatesTokenCount\":7,",
+                    "\"cachedContentTokenCount\":3}}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk is not an error");
         let out = assembler.finish();
 
         assert_eq!(out.stop_reason, StopReason::MaxTokens);
@@ -1504,6 +1560,43 @@ mod tests {
                 input_tokens: 9,
                 output_tokens: 7,
                 cached_input_tokens: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn a_mid_stream_error_chunk_fails_the_push() {
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        let err = assembler
+            .push(
+                chunk(concat!(
+                    "{\"error\":{\"code\":500,\"message\":\"inference failed\",",
+                    "\"status\":\"UNAVAILABLE\"}}"
+                )),
+                &mut sink,
+            )
+            .expect_err("mid-stream error is an error");
+        assert_eq!(
+            err,
+            ProviderError::Api {
+                message: "inference failed".into(),
+                status: None,
+            }
+        );
+        assert!(sink.0.is_empty());
+
+        // An unshaped error body falls back to the fixed raw text.
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        let err = assembler
+            .push(chunk("{\"error\":{}}"), &mut sink)
+            .expect_err("unshaped error is still an error");
+        assert_eq!(
+            err,
+            ProviderError::Api {
+                message: "mid-stream error".into(),
+                status: None,
             }
         );
     }

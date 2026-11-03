@@ -155,6 +155,38 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
 }
 
 #[tokio::test]
+async fn a_mid_stream_error_chunk_maps_to_an_api_error() {
+    let server = MockServer::start().await;
+    let body = "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"so f\"}]}}]}\n\n\
+                data: {\"error\":{\"code\":500,\"message\":\"inference failed\",\"status\":\"UNAVAILABLE\"}}\n\n";
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(body),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(
+            request("gemini-2.5-flash", vec![Message::text(Role::User, "hi")]),
+            &mut sink,
+        )
+        .await
+        .expect_err("a mid-stream error is an error");
+    assert_eq!(
+        err,
+        ProviderError::Api {
+            message: "inference failed".into(),
+            status: None,
+        }
+    );
+}
+
+#[tokio::test]
 async fn invalid_requests_fail_before_any_http() {
     // An unroutable address: only pre-wire validation can pass here.
     let provider = GoogleProvider::new("test-key").with_base_url("http://127.0.0.1:1");
@@ -256,4 +288,34 @@ async fn list_models_follows_pagination_and_strips_the_prefix() {
     assert!(models[0].supports_chat());
     // ListModels carries no prices; the curated table is baked in.
     assert_eq!(models[0].pricing, model_pricing("gemini-3.7-flash"));
+}
+
+// The zero-row guard: a page that carries a next token but no rows would
+// otherwise keep the loop asking forever.
+#[tokio::test]
+async fn an_empty_page_with_a_next_token_ends_the_pagination() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("x-goog-api-key", "test-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "models": [],
+            "nextPageToken": "next-1"
+        })))
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let models = provider
+        .list_models()
+        .await
+        .expect("an empty page ends the list");
+    assert!(models.is_empty());
+
+    // Exactly one request: the unusable token was not followed.
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 1);
 }
