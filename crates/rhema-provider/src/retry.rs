@@ -23,7 +23,7 @@
 //!   attempt instead carries the streamed text back as a trailing
 //!   assistant message, the model writes on from where the link died,
 //!   and the answer the caller finally receives stitches the streamed
-//!   prefix ahead of the continuation's blocks. Nothing shown is ever
+//!   prefix ahead of the continuation's blocks. Nothing durable is ever
 //!   generated twice, so a flaky link costs a pause, not the answer.
 //!   The continuation rides the same ladder — a link too flaky to
 //!   finish still surfaces its error once the ladder runs out — and
@@ -32,8 +32,11 @@
 //! - A stream that died before any durable text — thinking deltas and
 //!   half-parsed tool-call arguments only — has nothing to continue
 //!   from: no sentence exists for the model to take over, and an
-//!   empty assistant message is not an anchor. The exchange fails as
-//!   before, and the caller's `/retry` starts it over.
+//!   empty assistant message is not an anchor. The retry starts over
+//!   instead of failing: the next attempt re-issues the request as it
+//!   came, so what the caller watched but that never rides history may
+//!   be generated again. The durable answer still never repeats —
+//!   streamed text takes the continuation above, never a restart.
 //! - A request that "succeeds" without producing anything — a provider
 //!   that closed the stream before its first chunk — counts as dead like
 //!   any error and retries. If every attempt comes back empty, the
@@ -270,12 +273,13 @@ impl ModelProvider for Retrying {
                     // A cut the caller watched but that streamed no
                     // durable text — thinking and half-parsed call
                     // fragments only — has no anchor: nothing exists
-                    // for the model to take over. The exchange fails;
-                    // /retry starts it over. A cut before any content
-                    // at all is the plain retry below.
-                    if streamed.trim().is_empty() && counted.content > 0 {
-                        return Err(err);
-                    }
+                    // for the model to take over. It still retries, as
+                    // the plain restart below: no text streamed, so
+                    // `carried` stays empty and the next attempt
+                    // re-issues the request as it came, regenerating
+                    // what the caller watched but that never rides
+                    // history. A cut that streamed text takes the
+                    // anchored continuation instead.
                     let ladder = if matches!(err, ProviderError::Network(_)) {
                         &self.network_ladder
                     } else {
@@ -564,18 +568,30 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_cut_before_any_durable_text_fails_the_exchange() {
+    async fn a_cut_before_any_durable_text_restarts_the_exchange() {
         // Tool-call fragments streamed but no sentence started: there
-        // is nothing for the model to take over, and an empty
-        // assistant message is not an anchor. The exchange fails as
-        // before rather than re-rendering the fragments.
-        let scripted = Arc::new(Scripted::new(vec![Attempt::CallThenNetwork]));
+        // is nothing for the model to take over, so the retry starts
+        // over — the next attempt re-issues the request as it came,
+        // without an anchor. The fragments never ride history, so
+        // regenerating them costs a pause, not a corrupted answer.
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::CallThenNetwork,
+            Attempt::SucceedWithCalls,
+        ]));
         let mut sink = Deltas::default();
-        let result = retried(scripted.clone())
+        let out = retried(scripted.clone())
             .complete(request(), &mut sink)
-            .await;
-        assert!(result.is_err(), "no anchor, no continuation");
-        assert_eq!(scripted.calls(), 1, "one attempt only");
+            .await
+            .expect("the restart answers");
+        assert_eq!(
+            out.message.content.len(),
+            1,
+            "the restarted call, no leftover fragments"
+        );
+        assert_eq!(scripted.calls(), 2, "the exchange restarted once");
+        // The restart's request went out as it came: no trailing
+        // assistant message, nothing to anchor on.
+        assert!(scripted.last_request_messages().is_empty());
     }
 
     #[tokio::test]
