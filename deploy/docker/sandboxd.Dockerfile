@@ -42,7 +42,6 @@ COPY crates/rhema-sandbox-server/Cargo.toml crates/rhema-sandbox-server/Cargo.to
 COPY crates/rhema-sandbox-ssh/Cargo.toml crates/rhema-sandbox-ssh/Cargo.toml
 COPY crates/rhema-subagents/Cargo.toml crates/rhema-subagents/Cargo.toml
 COPY crates/rhema-transcript/Cargo.toml crates/rhema-transcript/Cargo.toml
-COPY crates/rhema-vercel-agent/Cargo.toml crates/rhema-vercel-agent/Cargo.toml
 COPY integrations/rhema-calendar-integration/Cargo.toml integrations/rhema-calendar-integration/Cargo.toml
 COPY integrations/rhema-forge-integration/Cargo.toml integrations/rhema-forge-integration/Cargo.toml
 # rhema-claw path-depends on the tools contract, which lives in its own

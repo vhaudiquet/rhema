@@ -8,8 +8,8 @@
 //! terminal and the ACP adapter. The frontend-independent harness —
 //! the filesystem-less assembly, the client approval gate, the sandbox
 //! seam, the per-session config — lives in
-//! [`rhema-cloud-agent`](../rhema-cloud-agent), shared with the other
-//! cloud frontends; this crate adds only what Cloudflare demands:
+//! [`rhema-cloud-agent`](../rhema-cloud-agent); this crate adds only
+//! what Cloudflare demands:
 //!
 //! - the model rides [`worker::FetchTransport`], a
 //!   [`Transport`](rhema_provider::Transport) over workerd's host
