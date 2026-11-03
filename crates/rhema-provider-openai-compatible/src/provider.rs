@@ -55,11 +55,21 @@ fn http_client() -> reqwest::Client {
 
 /// Any server speaking the OpenAI chat-completions dialect, addressed by
 /// its full versioned base URL.
-#[derive(Debug)]
 pub struct OpenAiCompatibleProvider {
     base_url: String,
     api_key: String,
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for OpenAiCompatibleProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key never prints; the plain data does.
+        f.debug_struct("OpenAiCompatibleProvider")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("http", &self.http)
+            .finish()
+    }
 }
 
 impl OpenAiCompatibleProvider {
@@ -333,6 +343,16 @@ impl ModelProvider for OpenAiCompatibleProvider {
 mod tests {
     use super::*;
     use crate::wire::normalize_models;
+
+    #[test]
+    fn debug_prints_presence_never_the_key() {
+        let provider = OpenAiCompatibleProvider::new("sk-live-secret");
+        let printed = format!("{provider:?}");
+        assert!(!printed.contains("sk-live-secret"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        // The plain data stays visible.
+        assert!(printed.contains("base_url"), "{printed}");
+    }
 
     #[test]
     fn deepseek_models_carry_the_published_facts() {
