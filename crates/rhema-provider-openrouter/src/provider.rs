@@ -1,15 +1,19 @@
-//! The [`OpenRouterProvider`]: HTTP and SSE transport for OpenRouter's
-//! OpenAI-compatible API.
+//! The [`OpenRouterProvider`]: HTTP transport for OpenRouter's catalog
+//! and account endpoints, with completions driven through the shared
+//! dialect core
+//! ([`rhema_provider_openai_compatible`]) speaking OpenRouter's
+//! [`crate::wire::OPENROUTER`] dialect.
 //!
 //! Auth is by API key in the `Authorization: Bearer` header — never a query
 //! parameter, so the key never lands in URLs or access logs. Every request
 //! also carries OpenRouter's recommended app-attribution headers
 //! ([`APP_REFERER`], [`APP_TITLE`]). Transport failures map onto
-//! [`ProviderError`]: timeouts to [`ProviderError::Timeout`], other network
-//! failures to [`ProviderError::Other`], non-2xx responses (with the
-//! body's `error.message` when present) to [`ProviderError::Api`],
-//! unparseable stream chunks and mid-stream error chunks to
-//! [`ProviderError::Api`] too.
+//! [`ProviderError`] exactly as the shared core completes: timeouts to
+//! [`ProviderError::Timeout`], other network failures to
+//! [`ProviderError::Network`], non-2xx responses (with the body's
+//! `error.message` when present) to [`ProviderError::Api`], unparseable
+//! stream chunks and mid-stream error chunks to [`ProviderError::Api`]
+//! too.
 //!
 //! Timeouts are layered: the client bounds connection setup (10s) and each
 //! stream read (90s — a stall guard, not a duration cap, because a long
@@ -20,18 +24,18 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{Allowance, ModelCard, SseDecoder};
+use rhema_provider::{Allowance, ModelCard};
+use rhema_provider_openai_compatible::provider::{
+    OpenAiCompatibleProvider, network_error as dialect_network_error,
+};
+use rhema_provider_openai_compatible::wire::WireErrorBody;
 use serde::de::DeserializeOwned;
 
-use crate::wire::{
-    ChatCompletionChunk, ChunkAssembler, WireCredits, WireErrorBody, WireKey, WireModelsPage,
-    is_text,
-};
+use crate::wire::{OPENROUTER, WireCredits, WireKey, WireModelsPage, is_text};
 
 /// The production OpenRouter API base.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -44,9 +48,6 @@ pub const APP_REFERER: &str = "https://rhema.rs";
 /// on openrouter.ai.
 pub const APP_TITLE: &str = "rhema";
 
-/// The SSE payload that ends every OpenAI-compatible chat stream.
-const DONE_SENTINEL: &str = "[DONE]";
-
 /// The largest page size OpenRouter's models endpoint honors.
 const MODELS_PAGE_LIMIT: u32 = 1000;
 
@@ -55,6 +56,9 @@ pub struct OpenRouterProvider {
     base_url: String,
     api_key: String,
     http: reqwest::Client,
+    /// The dialect-core transport carrying OpenRouter's dialect and
+    /// attribution headers; every completion goes through it.
+    transport: OpenAiCompatibleProvider,
 }
 
 impl std::fmt::Debug for OpenRouterProvider {
@@ -83,9 +87,11 @@ impl OpenRouterProvider {
             .read_timeout(Duration::from_secs(90))
             .build()
             .expect("a client builder with only timeouts cannot fail");
+        let api_key = api_key.into();
         Self {
+            transport: transport_for(DEFAULT_BASE_URL, &api_key),
             base_url: DEFAULT_BASE_URL.to_owned(),
-            api_key: api_key.into(),
+            api_key,
             http,
         }
     }
@@ -94,6 +100,7 @@ impl OpenRouterProvider {
     /// a mock server.
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into().trim_end_matches('/').to_owned();
+        self.transport = transport_for(&self.base_url, &self.api_key);
         self
     }
 
@@ -214,29 +221,19 @@ fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
 /// carried in [`ProviderError`] directly (it is `Clone + Eq`).
 fn network_error(err: reqwest::Error) -> ProviderError {
-    if err.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network(err.to_string())
-    }
+    dialect_network_error(err)
 }
 
-/// Parses one SSE payload as a chunk and folds it into the assembler. An
-/// empty payload (keep-alive) is skipped.
-fn feed_chunk(
-    payload: &str,
-    assembler: &mut ChunkAssembler,
-    sink: &mut dyn EventSink,
-) -> Result<(), ProviderError> {
-    if payload.trim().is_empty() {
-        return Ok(());
-    }
-    let chunk: ChatCompletionChunk =
-        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
-            message: format!("malformed SSE chunk: {err}"),
-            status: None,
-        })?;
-    assembler.push(chunk, sink)
+/// The dialect-core transport for one OpenRouter base: its dialect,
+/// its attribution headers, the bearer key.
+fn transport_for(base_url: &str, api_key: &str) -> OpenAiCompatibleProvider {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("HTTP-Referer", APP_REFERER.parse().expect("a header value"));
+    headers.insert("X-Title", APP_TITLE.parse().expect("a header value"));
+    OpenAiCompatibleProvider::new(api_key)
+        .with_base_url(base_url)
+        .with_dialect(OPENROUTER)
+        .with_extra_headers(headers)
 }
 
 #[async_trait]
@@ -252,48 +249,7 @@ impl ModelProvider for OpenRouterProvider {
         req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        let body = crate::wire::request_body(&req);
-        let url = format!("{}/chat/completions", self.base_url);
-
-        let response = self
-            .http
-            .post(&url)
-            .attributed(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(network_error)?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
-        }
-
-        // No overall timeout: a long generation is legitimate, and the
-        // client's read timeout already bounds stalls between chunks.
-        let mut stream = response.bytes_stream();
-        let mut decoder = SseDecoder::new();
-        let mut assembler = ChunkAssembler::new();
-        while let Some(item) = stream.next().await {
-            let bytes = item.map_err(network_error)?;
-            for payload in decoder.push(&bytes) {
-                if payload.trim() == DONE_SENTINEL {
-                    return Ok(assembler.finish());
-                }
-                feed_chunk(&payload, &mut assembler, sink)?;
-                if let Some(err) = decoder.take_error() {
-                    return Err(ProviderError::Network(err));
-                }
-            }
-        }
-        for payload in decoder.finish() {
-            if payload.trim() == DONE_SENTINEL {
-                break;
-            }
-            feed_chunk(&payload, &mut assembler, sink)?;
-        }
-        Ok(assembler.finish())
+        self.transport.complete(req, sink).await
     }
 }
 

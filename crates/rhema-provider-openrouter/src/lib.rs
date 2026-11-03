@@ -41,12 +41,11 @@
 //! ```
 //!
 //! Layout:
-//! - [`wire`] — serde wire types plus the pure mapping between
-//!   [`rhema_core::ModelRequest`] / SSE chunks and
-//!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
-//!   catalog mapping onto `ModelCard`
-//! - [`provider`] — the HTTP transport and the
-//!   [`ModelProvider`](rhema_core::ModelProvider) implementation
+//! - [`wire`] — OpenRouter's [`Dialect`], the paginated catalog with
+//!   per-token pricing, and the credits/auth-key allowance parsing
+//! - [`provider`] — the HTTP transport (catalog, allowance) and the
+//!   [`ModelProvider`](rhema_core::ModelProvider) implementation,
+//!   completing through the shared dialect core
 
 #![forbid(unsafe_code)]
 
@@ -54,4 +53,4 @@ pub mod provider;
 pub mod wire;
 
 pub use provider::{APP_REFERER, APP_TITLE, DEFAULT_BASE_URL, OpenRouterProvider};
-pub use wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler};
+pub use wire::{OPENROUTER, WireCredits, WireKey, WireModel, WireModelsPage, is_text};

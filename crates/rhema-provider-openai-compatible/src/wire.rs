@@ -113,6 +113,10 @@ pub struct Dialect {
     pub assistant_reasoning_key: Option<&'static str>,
     /// The key a thinking level is sent under.
     pub effort_key: &'static str,
+    /// Whether the dialect sends `stream_options: {include_usage: true}`.
+    /// OpenAI shapes do; OpenRouter's usage is unconditional and the
+    /// opt-in there is deprecated.
+    pub sends_stream_options: bool,
     /// The wire spelling of a thinking level; `None` sends nothing and
     /// the server's default stands.
     pub reasoning_effort: fn(ThinkingEffort) -> Option<Value>,
@@ -132,6 +136,7 @@ pub const OPENAI_COMPATIBLE: Dialect = Dialect {
     args_key: "_openai_args_text",
     assistant_reasoning_key: Some("reasoning_content"),
     effort_key: "reasoning_effort",
+    sends_stream_options: true,
     reasoning_effort: reasoning_effort_value,
 };
 
@@ -150,9 +155,11 @@ pub struct ChatCompletionRequest {
     pub tools: Option<Vec<WireTool>>,
     /// Always `true`: the provider only speaks the streaming dialect.
     pub stream: bool,
-    /// Always requests the usage-only final chunk; without it OpenAI-shaped
-    /// servers send no token accounting on a streamed call.
-    pub stream_options: WireStreamOptions,
+    /// Requests the usage-only final chunk where the dialect sends it;
+    /// without the flag those servers send no token accounting on a
+    /// streamed call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<WireStreamOptions>,
     /// Sampling temperature, when set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -657,9 +664,9 @@ pub fn request_body(req: &ModelRequest, dialect: &Dialect) -> ChatCompletionRequ
         messages,
         tools,
         stream: true,
-        stream_options: WireStreamOptions {
+        stream_options: dialect.sends_stream_options.then_some(WireStreamOptions {
             include_usage: true,
-        },
+        }),
         temperature: req.params.temperature,
         max_tokens: req.params.max_tokens,
         effort: effort_field(req.params.thinking, dialect),
