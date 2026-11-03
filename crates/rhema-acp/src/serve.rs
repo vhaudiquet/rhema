@@ -820,7 +820,15 @@ async fn serve_connection(
     transport: impl agent_client_protocol::ConnectTo<Agent>,
     options: AcpOptions,
 ) -> anyhow::Result<()> {
-    let app = Arc::new(App::new(options));
+    // Startup reads — the config file, the keychain behind the
+    // profile's `secret_ref`s, the user's SYSTEM.md — are blocking,
+    // and this async context owns a scheduler: the work hops to the
+    // blocking pool instead of parking a worker.
+    let app = Arc::new(
+        tokio::task::spawn_blocking(move || App::new(options))
+            .await
+            .context("the ACP app failed to start")?,
+    );
     let result = Agent
         .builder()
         .name("rhema")
