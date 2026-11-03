@@ -30,11 +30,21 @@ const DONE_SENTINEL: &str = "[DONE]";
 
 /// llama.cpp `llama-server` backend, speaking its OpenAI-compatible
 /// chat-completions API.
-#[derive(Debug)]
 pub struct LlamaCppProvider {
     base_url: String,
     api_key: Option<String>,
     http: reqwest::Client,
+}
+
+impl std::fmt::Debug for LlamaCppProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The key never prints; the plain data does.
+        f.debug_struct("LlamaCppProvider")
+            .field("base_url", &self.base_url)
+            .field("api_key", &"<redacted>")
+            .field("http", &self.http)
+            .finish()
+    }
 }
 
 impl LlamaCppProvider {
@@ -269,5 +279,21 @@ impl ModelProvider for LlamaCppProvider {
             feed_chunk(&payload, &mut assembler, sink)?;
         }
         Ok(assembler.finish())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn debug_prints_presence_never_the_key() {
+        let provider =
+            LlamaCppProvider::new("http://localhost:8080").with_api_key("sk-local-secret");
+        let printed = format!("{provider:?}");
+        assert!(!printed.contains("sk-local-secret"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        // The plain data stays visible.
+        assert!(printed.contains("base_url"), "{printed}");
     }
 }
