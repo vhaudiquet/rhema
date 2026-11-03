@@ -865,10 +865,9 @@ impl EcrouSandbox {
             .output()
             .await
             .map_err(|err| SandboxError::Unavailable(format!("{err}")))?;
-        let code = output.status.code();
-        if code == Some(124) || code == Some(137) {
-            return Err(SandboxError::Timeout(SEED_BUDGET.as_secs()));
-        }
+        // The prefix's own codes decide: budget expiry, or the
+        // external kill that must not read as one.
+        rhema_sandbox::exec_util::exit_status(output.status.code(), SEED_BUDGET.as_secs())?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
             let detail = detail.trim();
@@ -1630,8 +1629,21 @@ mod tests {
         );
     }
 
+    /// GNU `timeout` is a Linux tool: a machine without it in PATH
+    /// cannot exercise the seed route's prefix, and these tests skip.
+    fn have_timeout() -> bool {
+        std::process::Command::new("timeout")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
     #[tokio::test]
     async fn seeding_from_a_local_repository_populates_the_root() {
+        if !have_timeout() {
+            eprintln!("skipping: no GNU timeout on this machine");
+            return;
+        }
         let repo = fixture_repo();
         let (sandbox, dir) = sandbox();
         sandbox
@@ -1652,6 +1664,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_clone_fails_in_band() {
+        if !have_timeout() {
+            eprintln!("skipping: no GNU timeout on this machine");
+            return;
+        }
         let (sandbox, _dir) = sandbox();
         let error = sandbox
             .seed(&WorkspaceSeed::GitClone("/nonexistent-rhema-repo".into()))
@@ -1665,6 +1681,10 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_from_a_tarball_unpacks_into_the_root() {
+        if !have_timeout() {
+            eprintln!("skipping: no GNU timeout on this machine");
+            return;
+        }
         let payload = scratch_dir().expect("tempdir");
         std::fs::write(payload.path().join("packed.txt"), b"from tar")
             .expect("the payload file is written");
