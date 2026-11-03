@@ -173,10 +173,20 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             // idle, the strip is just that single row of air between
             // transcript and input.
             let status_rows = match &app.error {
+                // Mirror what `render_status` draws for an error: the
+                // text wrapped one cell short (its indent cannot push a
+                // wrap), the blank row above, the /retry hint, and every
+                // live subagent line — jobs outlive turns, so they ride
+                // under an error too.
                 Some(error) => {
-                    wrap_line(&Line::from(error.clone()), frame.area().width as usize).len() as u16
+                    wrap_line(
+                        &Line::from(error.clone()),
+                        frame.area().width.saturating_sub(1) as usize,
+                    )
+                    .len() as u16
                         + 1
                         + u16::from(app.retryable)
+                        + subagent_lines(app, &theme).len() as u16
                 }
                 None if app.turn.running => {
                     2 + subagent_lines(app, &theme).len() as u16

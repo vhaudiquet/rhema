@@ -57,7 +57,7 @@ pub fn supported() -> bool {
 /// the protocol: an unknown APC sequence is ignored by design.
 pub fn clear() {
     let mut out = std::io::stdout();
-    let _ = out.write_all(b"\x1b_Ga=d,d=a\x1b\\");
+    let _ = out.write_all(b"\x1b_Ga=d,d=a,q=2\x1b\\");
     let _ = out.flush();
 }
 
@@ -80,9 +80,9 @@ pub fn place(x: u16, y: u16, cols: u16, rows: u16) {
         let end = (offset + CHUNK).min(total);
         let more = end < total;
         let head = if offset == 0 {
-            format!("a=T,f=100,c={cols},r={rows}")
+            format!("a=T,f=100,c={cols},r={rows},q=2")
         } else {
-            "a=T".to_owned()
+            "a=T,q=2".to_owned()
         };
         let flags = if more { ",m=1" } else { "" };
         let _ = out.write_all(b"\x1b_G");

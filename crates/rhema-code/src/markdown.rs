@@ -11,7 +11,7 @@ use crate::palette::Theme;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Renders one assistant response (its full markdown source) into styled
 /// lines at `width` columns — tables lay their columns out against it.
@@ -341,13 +341,22 @@ fn wrap_cell(cell: &str, width: usize) -> Vec<String> {
     for word in cell.split_whitespace() {
         let mut word = word;
         loop {
-            if word.chars().count() > width {
-                // A word longer than the whole column hard-splits.
-                let cut = word
-                    .char_indices()
-                    .nth(width)
-                    .map(|(index, _)| index)
-                    .unwrap_or(word.len());
+            if word.width() > width {
+                // A word longer than the whole column hard-splits, at a
+                // display-width boundary: a wide character takes more
+                // than one cell, and a zero-width lead (a stray
+                // combining mark) must not stall the cut, so the first
+                // character always goes.
+                let mut cut = 0;
+                let mut used = 0;
+                for (index, ch) in word.char_indices() {
+                    let cells = ch.width().unwrap_or(0);
+                    if used + cells > width && cut > 0 {
+                        break;
+                    }
+                    used += cells;
+                    cut = index + ch.len_utf8();
+                }
                 if !row.is_empty() {
                     rows.push(std::mem::take(&mut row));
                 }
@@ -358,7 +367,7 @@ fn wrap_cell(cell: &str, width: usize) -> Vec<String> {
             if row.is_empty() {
                 // The hard-split above guarantees a bare word fits.
                 row.push_str(word);
-            } else if row.chars().count() + 1 + word.chars().count() <= width {
+            } else if row.width() + 1 + word.width() <= width {
                 row.push(' ');
                 row.push_str(word);
             } else {
@@ -389,7 +398,7 @@ fn render_table(header: &[String], rows: &[Vec<String>], width: usize) -> Vec<Li
         .map(|col| {
             std::iter::once(header)
                 .chain(rows.iter().map(Vec::as_slice))
-                .map(|row| cell_at(row, col).chars().count())
+                .map(|row| cell_at(row, col).width())
                 .max()
                 .unwrap_or(0)
         })
@@ -435,10 +444,11 @@ fn render_table(header: &[String], rows: &[Vec<String>], width: usize) -> Vec<Li
                 if col + 1 == widths.len() {
                     spans.push(Span::styled(text, style));
                 } else {
-                    spans.push(Span::styled(
-                        format!("{text:<width$}", width = widths[col]),
-                        style,
-                    ));
+                    // Pad by display width: format!'s `<` counts
+                    // characters, and a wide cell would under-pad and
+                    // leave the columns ragged.
+                    let pad = widths[col].saturating_sub(text.width());
+                    spans.push(Span::styled(format!("{text}{}", " ".repeat(pad)), style));
                     spans.push(Span::raw(" ".repeat(TABLE_COLUMN_GAP)));
                 }
             }
@@ -677,6 +687,20 @@ mod tests {
         // Nothing is lost: every x renders, and no ellipsis ever appears.
         assert_eq!(all.matches('x').count(), 40, "{all}");
         assert!(!all.contains('…'), "model output is never cut: {all}");
+    }
+
+    #[test]
+    fn table_columns_pad_by_display_width_for_wide_text() {
+        // CJK characters occupy two cells each: padding by character
+        // count would under-fill the column and leave the next one
+        // ragged, and the rule row would disagree with the data.
+        let source = "| \u{6f22} | x |\n|---|---|\n| \u{5b57} | y |";
+        let lines = render_markdown_d(source);
+        let rendered = plain(&lines);
+        assert_eq!(
+            rendered,
+            ["\u{6f22}  x", "\u{2500}\u{2500}  \u{2500}", "\u{5b57}  y"]
+        );
     }
 
     #[test]

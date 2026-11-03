@@ -269,7 +269,7 @@ impl Transcript {
             } => {
                 // Calls resolve sequentially, but match by id so a late
                 // result cannot mark the wrong line; without a match, the
-                // oldest unresolved call takes it.
+                // newest unresolved call takes it.
                 let has_call = self.lines.iter().rev().any(|line| {
                     matches!(
                         line,
@@ -355,6 +355,11 @@ pub fn describe(name: &str, args: &str) -> String {
 /// Cuts `text` to at most `max` characters, appending `…` when cut; never
 /// splits a multi-byte character.
 pub fn truncate_chars(text: &str, max: usize) -> String {
+    // A zero budget cuts to nothing: callers pass saturating width
+    // arithmetic, so 0 arrives on a pane too narrow to show one glyph.
+    if max == 0 {
+        return String::new();
+    }
     if text.chars().count() <= max {
         return text.to_owned();
     }
@@ -722,6 +727,12 @@ mod tests {
     #[test]
     fn truncation_stays_on_a_char_boundary() {
         assert_eq!(truncate_chars("héllo wörld", 4), "hé\u{2026}");
+    }
+
+    #[test]
+    fn truncation_with_a_zero_budget_cuts_to_nothing() {
+        assert_eq!(truncate_chars("hello", 0), "");
+        assert_eq!(truncate_chars("", 0), "");
     }
 
     #[test]
