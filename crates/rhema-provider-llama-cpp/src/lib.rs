@@ -34,12 +34,11 @@
 //! ```
 //!
 //! Layout:
-//! - [`wire`] — serde wire types plus the pure mapping between
-//!   [`rhema_core::ModelRequest`] / SSE chunks and
-//!   [`rhema_core::ModelOutput`] / [`rhema_core::Event`]s, and the models
-//!   mapping onto [`ModelCard`]
-//! - [`provider`] — the HTTP transport and the
-//!   [`ModelProvider`](rhema_core::ModelProvider) implementation
+//! - [`wire`] — llama.cpp's [`Dialect`], the models-page normalization,
+//!   and the `/props` context lookup
+//! - [`provider`] — the HTTP transport (models, props) and the
+//!   [`ModelProvider`](rhema_core::ModelProvider) implementation,
+//!   completing through the shared dialect core
 
 #![forbid(unsafe_code)]
 
@@ -47,7 +46,4 @@ pub mod provider;
 pub mod wire;
 
 pub use provider::{DEFAULT_BASE_URL, LlamaCppProvider};
-pub use wire::{
-    ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler, LlamaModel, context_from_props,
-    normalize_models,
-};
+pub use wire::{LLAMA_CPP, LlamaModel, context_from_props, normalize_models};

@@ -12,28 +12,30 @@
 //! [`ProviderError::Api`] without one.
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
+use rhema_provider::ModelCard;
+use rhema_provider_openai_compatible::provider::{
+    OpenAiCompatibleProvider, network_error as dialect_network_error,
+};
 
-use rhema_provider::{ModelCard, SseDecoder};
-
-use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireErrorBody};
+use crate::wire::LLAMA_CPP;
+use rhema_provider_openai_compatible::wire::WireErrorBody;
 
 /// The `llama-server` default listen address.
 pub const DEFAULT_BASE_URL: &str = "http://localhost:8080";
 
-/// The SSE payload that ends every OpenAI-compatible chat stream.
-const DONE_SENTINEL: &str = "[DONE]";
-
 /// llama.cpp `llama-server` backend, speaking its OpenAI-compatible
-/// chat-completions API.
+/// chat-completions API through the shared dialect core.
 pub struct LlamaCppProvider {
     base_url: String,
     api_key: Option<String>,
     http: reqwest::Client,
+    /// The dialect-core transport carrying llama.cpp's dialect; every
+    /// completion goes through it.
+    transport: OpenAiCompatibleProvider,
 }
 
 impl std::fmt::Debug for LlamaCppProvider {
@@ -51,9 +53,11 @@ impl LlamaCppProvider {
     /// A provider against `base_url` (trailing slashes trimmed) with no
     /// authentication — the default `llama-server` setup.
     pub fn new(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            transport: transport_for(&base_url, None),
             api_key: None,
+            base_url,
             // A dead server must fail fast: connects cap at 10s, and a
             // stream that stops producing bytes for 90s is dead too.
             // Streaming calls get no total timeout — generations can run
@@ -70,6 +74,7 @@ impl LlamaCppProvider {
     /// started with `--api-key`. Header only: the key never goes in a URL.
     pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
         self.api_key = Some(key.into());
+        self.transport = transport_for(&self.base_url, self.api_key.as_deref());
         self
     }
 
@@ -192,6 +197,7 @@ impl Authorized for reqwest::RequestBuilder {
 fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
     ProviderError::Api {
+        // The listing-side prefix names the server, not the dialect.
         message: format!(
             "llama.cpp api error (HTTP {}): {}",
             status.as_u16(),
@@ -204,84 +210,33 @@ fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
 /// carried in [`ProviderError`] directly (it is `Clone + Eq`).
 fn network_error(err: reqwest::Error) -> ProviderError {
-    if err.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network(err.to_string())
-    }
+    dialect_network_error(err)
 }
 
-/// Parses one SSE payload as a chunk and folds it into the assembler. An
-/// empty payload (keep-alive) is skipped.
-fn feed_chunk(
-    payload: &str,
-    assembler: &mut ChunkAssembler,
-    sink: &mut dyn EventSink,
-) -> Result<(), ProviderError> {
-    if payload.trim().is_empty() {
-        return Ok(());
-    }
-    let chunk: ChatCompletionChunk =
-        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
-            message: format!("malformed SSE chunk: {err}"),
-            status: None,
-        })?;
-    assembler.push(chunk, sink)
+/// The dialect-core transport for one llama.cpp server: its `/v1`
+/// base, its dialect, its optional bearer key.
+fn transport_for(base_url: &str, api_key: Option<&str>) -> OpenAiCompatibleProvider {
+    OpenAiCompatibleProvider::new(api_key.unwrap_or_default())
+        .with_base_url(format!("{base_url}/v1"))
+        .with_dialect(LLAMA_CPP)
 }
 
 #[async_trait]
 impl ModelProvider for LlamaCppProvider {
     /// # Errors
     ///
-    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
-    /// when the transport fails, [`ProviderError::Api`] with the HTTP
-    /// status on a non-2xx response, and [`ProviderError::Api`] without
-    /// one on a malformed stream chunk or a mid-stream error chunk.
+    /// Fails exactly as the shared dialect core completes: transport
+    /// failures map to [`ProviderError::Network`]/[`ProviderError::Timeout`],
+    /// non-2xx responses (with the body's `error.message` when present)
+    /// to [`ProviderError::Api`] with the HTTP status, and malformed
+    /// stream chunks or mid-stream error chunks to [`ProviderError::Api`]
+    /// without one.
     async fn complete(
         &self,
         req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        let body = crate::wire::request_body(&req);
-        let url = format!("{}/v1/chat/completions", self.base_url);
-
-        let response = self
-            .http
-            .post(&url)
-            .authorized(&self.api_key)
-            .json(&body)
-            .send()
-            .await
-            .map_err(network_error)?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
-        }
-
-        let mut stream = response.bytes_stream();
-        let mut decoder = SseDecoder::new();
-        let mut assembler = ChunkAssembler::new();
-        while let Some(item) = stream.next().await {
-            let bytes = item.map_err(network_error)?;
-            for payload in decoder.push(&bytes) {
-                if payload.trim() == DONE_SENTINEL {
-                    return Ok(assembler.finish());
-                }
-                feed_chunk(&payload, &mut assembler, sink)?;
-                if let Some(err) = decoder.take_error() {
-                    return Err(ProviderError::Network(err));
-                }
-            }
-        }
-        for payload in decoder.finish() {
-            if payload.trim() == DONE_SENTINEL {
-                break;
-            }
-            feed_chunk(&payload, &mut assembler, sink)?;
-        }
-        Ok(assembler.finish())
+        self.transport.complete(req, sink).await
     }
 }
 

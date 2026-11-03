@@ -118,6 +118,13 @@ pub struct Dialect {
     pub reasoning_effort: fn(ThinkingEffort) -> Option<Value>,
 }
 
+/// The effort spelling for dialects that never send one: the thinking
+/// level is a server-side knob there (a llama.cpp launch flag, say),
+/// not a request field.
+pub fn no_effort(_thinking: ThinkingEffort) -> Option<Value> {
+    None
+}
+
 /// The dialect this crate implements: the OpenAI-shaped chat
 /// completions API — OpenAI itself, DeepSeek-style servers, and the
 /// generic proxies that copy them.

@@ -77,7 +77,16 @@ async fn streams_sse_into_events_and_an_assembled_output() {
         }
     );
     // The stream ends at the [DONE] sentinel; keep-alives are ignored.
-    assert_eq!(sink.0, vec!["TextDelta(\"He\")", "TextDelta(\"llo\")"]);
+    // Usage rides the final chunk now: the shared assembler emits it,
+    // like every other provider in the family.
+    assert_eq!(
+        sink.0,
+        vec![
+            "TextDelta(\"He\")".to_owned(),
+            "TextDelta(\"llo\")".to_owned(),
+            "Usage(Usage { input_tokens: 9, output_tokens: 4, cached_input_tokens: 2 })".to_owned(),
+        ]
+    );
 
     let received = server
         .received_requests()
@@ -142,6 +151,9 @@ async fn tool_call_fragments_stream_into_events_and_a_tool_use_output() {
             "ToolCallStart { id: \"call_abc\", name: \"echo\" }".to_owned(),
             "ToolCallArgsDelta { id: \"call_abc\", delta: \"{\\\"x\\\":\" }".to_owned(),
             "ToolCallArgsDelta { id: \"call_abc\", delta: \"1}\" }".to_owned(),
+            // Usage rides the final chunk now: the shared assembler
+            // emits it, like every other provider in the family.
+            "Usage(Usage { input_tokens: 5, output_tokens: 3, cached_input_tokens: 0 })".to_owned(),
         ]
     );
 }

@@ -12,6 +12,8 @@ authors.workspace = true
 rhema-core = { path = "../rhema-core", version = "0.1.0" }
 # The shared SSE decoder
 rhema-provider = { path = "../rhema-provider", version = "0.1.0" }
+# The OpenAI chat-completions dialect core this adapter speaks
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.1.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
