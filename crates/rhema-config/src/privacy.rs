@@ -32,6 +32,35 @@ pub fn private_write(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> 
     file.write_all(contents.as_ref())
 }
 
+/// Writes `contents` to `path` atomically and `0600`: the bytes land
+/// in a private sibling temp file first, then rename over `path`. A
+/// crash mid-write leaves the previous file whole, and no reader sees
+/// a half-written state — the shape session stores need, where the
+/// file being replaced may be the only good copy. The temp file is
+/// removed when the rename fails.
+pub fn private_write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("file");
+    let temp = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!(".{name}.{}.tmp", std::process::id()));
+    let written = private_write(&temp, contents);
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+        return written;
+    }
+    match std::fs::rename(&temp, path) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let _ = std::fs::remove_file(&temp);
+            Err(err)
+        }
+    }
+}
+
 /// Best-effort `0600` on an existing file this crate did not create —
 /// a SQLite database another opener made, tightening whatever the
 /// umask left wide. Silent by contract; see the module docs.
@@ -139,6 +168,35 @@ mod tests {
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o700
+        );
+    }
+
+    #[test]
+    fn an_atomic_write_replaces_whole_and_leaves_no_temp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        std::fs::write(&path, b"old").unwrap();
+        private_write_atomic(&path, b"new").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "state.json")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_atomic_write_lands_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        private_write_atomic(&path, b"payload").unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
         );
     }
 }
