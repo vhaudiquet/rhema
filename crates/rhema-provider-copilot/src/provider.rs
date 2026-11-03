@@ -115,7 +115,6 @@ struct WireEndpoints {
 
 /// The GitHub Copilot chat models, driven by a GitHub OAuth token the
 /// provider exchanges for short-lived Copilot tokens as needed.
-#[derive(Debug)]
 pub struct CopilotProvider {
     github_url: String,
     api_base: String,
@@ -125,6 +124,20 @@ pub struct CopilotProvider {
     /// serialized on it — the lock is held across the exchange — so a
     /// burst of steps cannot stampede the endpoint.
     cached: AsyncMutex<Option<CopilotToken>>,
+}
+
+impl std::fmt::Debug for CopilotProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The OAuth token and the cached Copilot token both authenticate:
+        // neither prints; the plain data does.
+        f.debug_struct("CopilotProvider")
+            .field("github_url", &self.github_url)
+            .field("api_base", &self.api_base)
+            .field("github_token", &"<redacted>")
+            .field("http", &self.http)
+            .field("cached", &"<redacted>")
+            .finish()
+    }
 }
 
 impl CopilotProvider {
@@ -468,6 +481,26 @@ mod tests {
             api_base_from_token(token).as_deref(),
             Some("https://api.business.githubcopilot.com")
         );
+    }
+
+    #[tokio::test]
+    async fn debug_prints_neither_the_oauth_token_nor_the_cached_one() {
+        let provider = CopilotProvider::new("gho_long_lived_secret");
+        {
+            let mut cached = provider.cached.lock().await;
+            *cached = Some(CopilotToken {
+                token: "copilot_short_lived_secret".into(),
+                expires_at: u64::MAX,
+                api_base: "https://api.githubcopilot.com".into(),
+            });
+        }
+        let printed = format!("{provider:?}");
+        assert!(!printed.contains("gho_long_lived_secret"), "{printed}");
+        assert!(!printed.contains("copilot_short_lived_secret"), "{printed}");
+        assert!(printed.contains("<redacted>"), "{printed}");
+        // The plain data stays visible.
+        assert!(printed.contains("github_url"), "{printed}");
+        assert!(printed.contains("api_base"), "{printed}");
     }
 
     #[test]
