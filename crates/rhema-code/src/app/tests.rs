@@ -2227,6 +2227,23 @@ fn paste_lands_in_the_input_with_newlines() {
 }
 
 #[test]
+fn an_oversized_paste_is_cut_at_the_cap_and_noticed() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let big = "x".repeat(2 * 1024 * 1024);
+    h.app.on_paste(&big);
+    let input = h.app.chat.input.clone();
+    assert_eq!(input.len(), 1024 * 1024, "cut at the cap");
+    assert!(
+        h.app
+            .transcript
+            .lines()
+            .iter()
+            .any(|line| matches!(line, Line::Notice(text) if text.contains("truncated"))),
+        "the cut is noticed"
+    );
+}
+
+#[test]
 fn the_wheel_scrolls_the_same_step_as_the_page_keys() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.on_mouse_scroll(true);

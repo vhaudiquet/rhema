@@ -4,6 +4,10 @@
 
 use super::*;
 
+/// The most bytes one paste may carry. A clipboard can hold anything;
+/// the input is a prompt, not a file drop target.
+const MAX_PASTE_BYTES: usize = 1024 * 1024;
+
 impl App {
     /// In-band decline for a slash input no table row matches.
     pub fn unknown_command(&mut self, name: &str) {
@@ -18,8 +22,23 @@ impl App {
 
     /// A bracketed paste landed: into the input, newlines included —
     /// pasting multi-line text must not fire submits. The add-instance
-    /// dialog's credential line takes its own, single-line shape.
+    /// dialog's credential line takes its own, single-line shape. A
+    /// paste past [`MAX_PASTE_BYTES`] is cut there and noticed: the
+    /// input (and the turn it would ride) has no other bound.
     pub fn on_paste(&mut self, text: &str) {
+        if text.len() > MAX_PASTE_BYTES {
+            let mut cut = MAX_PASTE_BYTES;
+            while !text.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            let text = &text[..cut];
+            self.push_notice(&format!(
+                "paste truncated to {} MiB",
+                MAX_PASTE_BYTES / (1024 * 1024)
+            ));
+            self.on_paste(text);
+            return;
+        }
         match &mut self.screen {
             Screen::Chat => self.chat.paste(text),
             Screen::Settings(settings) => {
