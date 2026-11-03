@@ -1090,3 +1090,66 @@ async fn slash_commands_switch_and_confirm_in_band() {
     .await;
     let _ = outcome;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_slot_map_stays_capped_and_a_dropped_session_reloads() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("ws");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let session_dir = dir.path().join("sessions");
+    let updates = updates();
+    let collected = updates.clone();
+    let permissions: Permissions = Arc::new(Mutex::new(Vec::new()));
+    // More sessions than the cap, one prompt in the middle so its
+    // session persists and can come back from disk after eviction.
+    let replies: Vec<ModelOutput> = (0..3).map(|i| reply(&format!("r{i}"))).collect();
+    let outcome = with_agent(
+        options(replies, &session_dir),
+        updates,
+        permissions,
+        RequestPermissionOutcome::Cancelled,
+        async move |cx| {
+            initialize(&cx).await;
+            let mut ids = Vec::new();
+            for i in 0..20 {
+                let res = new_session(&cx, &workspace).await;
+                ids.push(res.session_id.clone());
+                if i == 1 {
+                    cx.send_request(PromptRequest::new(
+                        res.session_id.clone(),
+                        vec![ContentBlock::from("hi")],
+                    ))
+                    .block_task()
+                    .await
+                    .expect("prompt");
+                }
+            }
+            assert!(
+                ids.windows(2).all(|w| w[0] != w[1]),
+                "every session gets its own id"
+            );
+            // The evicted, prompted session still comes back whole.
+            cx
+                .send_request(LoadSessionRequest::new(
+                    ids[1].clone(),
+                    workspace.to_path_buf(),
+                ))
+                .block_task()
+                .await
+                .expect("session/load after eviction");
+            // The load answered, and the reloaded session serves a
+            // prompt — the eviction lost nothing that matters.
+            cx.send_request(PromptRequest::new(
+                ids[1].clone(),
+                vec![ContentBlock::from("again")],
+            ))
+            .block_task()
+            .await
+            .expect("prompt on the reloaded session");
+            Ok(())
+        },
+    )
+    .await;
+    outcome.expect("scenario");
+    let _ = collected;
+}

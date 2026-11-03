@@ -91,6 +91,11 @@ pub struct AcpOptions {
     pub config: Option<rhema_config::Config>,
 }
 
+/// The most live sessions one connection holds. Real clients keep a
+/// handful open; the cap is the server's guard, not a quota clients
+/// will feel.
+const MAX_SLOTS: usize = 16;
+
 /// One live session: the agent between turns, the cancel sender of the
 /// turn in flight, and the `always` answers the session has collected.
 pub(crate) struct SessionSlot {
@@ -103,6 +108,9 @@ pub(crate) struct SessionSlot {
     provider: Arc<dyn ModelProvider>,
     /// Gone while a turn runs; the prompt task puts it back after.
     agent: Option<CodingAgent>,
+    /// The last moment this slot served a request. Eviction reads it:
+    /// the oldest idle slot goes when the map passes its cap.
+    last_used: std::time::Instant,
     /// The model the agent runs on. A `session/set_config_option` that
     /// names a different model rebuilds the agent over the session's
     /// history; the slot's `model` is the current value the picker shows.
@@ -453,7 +461,31 @@ impl App {
         let mut sessions = self.lock();
         let slot = sessions.get_mut(id)?;
         let agent = slot.agent.take()?;
+        slot.last_used = std::time::Instant::now();
         Some((agent, slot.memory.clone()))
+    }
+
+    /// Drops idle slots past [`MAX_SLOTS`] — least recently used
+    /// first, never one whose turn is in flight (its agent is checked
+    /// out, its cancel armed). A session dropped here is not lost: any
+    /// session that ran a turn was persisted at the turn's end, and
+    /// `session/load` rebuilds the slot from disk. The map is a
+    /// server's whole working set; without this, one long-lived
+    /// connection holds every session's agent forever.
+    fn evict_idle(&self) {
+        let mut sessions = self.lock();
+        while sessions.len() > MAX_SLOTS {
+            let oldest = sessions
+                .iter()
+                .filter(|(_, slot)| slot.agent.is_some() && slot.cancel.is_none())
+                .min_by_key(|(_, slot)| slot.last_used)
+                .map(|(id, _)| id.clone());
+            let Some(oldest) = oldest else {
+                // Every slot is mid-turn; try again at the next install.
+                return;
+            };
+            sessions.remove(&oldest);
+        }
     }
 
     /// Installs a cancel sender for the turn about to run.
@@ -868,9 +900,11 @@ async fn serve_connection(
                         title: None,
                         titled: false,
                         cancel: None,
+                        last_used: std::time::Instant::now(),
                         memory: Arc::new(Mutex::new(AlwaysMemory::default())),
                     };
                     app.lock().insert(id.clone(), slot);
+                    app.evict_idle();
                     // The commands a prompt can name, before the
                     // response: the client renders them as the
                     // session's slash commands.
@@ -931,9 +965,11 @@ async fn serve_connection(
                         title: None,
                         titled: false,
                         cancel: None,
+                        last_used: std::time::Instant::now(),
                         memory: Arc::new(Mutex::new(AlwaysMemory::default())),
                     };
                     app.lock().insert(id.clone(), slot);
+                    app.evict_idle();
                     let _ = cx.send_notification(SessionNotification::new(
                         request.session_id.clone(),
                         SessionUpdate::AvailableCommandsUpdate(app.available_commands()),
