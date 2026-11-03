@@ -630,6 +630,9 @@ pub enum Effect {
     /// `UiEvent::SandboxAssembled`; the session keeps its current tools
     /// until then.
     AssembleSandbox(SandboxChoice),
+    /// Load this saved session off-thread for `/resume`; the parts
+    /// land as `UiEvent::SessionResumed` and the app applies them.
+    ResumeSession(PathBuf),
     /// Open this `SUBAGENT.md` in `$EDITOR`: the runner suspends the
     /// TUI around the blocking editor and re-enters after, and the
     /// Subagents page's rows refresh then — the edit happened behind

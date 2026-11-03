@@ -311,6 +311,20 @@ pub fn spawn_model_fetch(
     })
 }
 
+/// Spawns the `/resume` load on the blocking pool: the session file's
+/// read, parse, and usage derivation are blocking work the UI thread
+/// must not do. The parts land tagged with the path, so the apply
+/// re-checks what it was asked to load.
+pub fn spawn_session_resume(
+    path: std::path::PathBuf,
+    events: UnboundedSender<UiEvent>,
+) -> JoinHandle<()> {
+    tokio::task::spawn_blocking(move || {
+        let result = crate::app::App::load_resume_parts(&path).map_err(|err| err.to_string());
+        let _ = events.send(UiEvent::SessionResumed { path, result });
+    })
+}
+
 /// Spawns the subscription-allowance fetch on a tokio task. The result
 /// is tagged with the backend's config name, so a report of a backend
 /// the session has since switched away from never shows.
@@ -369,6 +383,7 @@ pub async fn drive_turn_for_test(
             | UiEvent::UsageLoaded { .. }
             | UiEvent::ApprovalRequested { .. }
             | UiEvent::SandboxAssembled { .. }
+            | UiEvent::SessionResumed { .. }
             | UiEvent::LoginUpdate(_) => {}
         }
     }

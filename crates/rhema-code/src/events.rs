@@ -247,4 +247,27 @@ pub enum UiEvent {
         /// why the choice could not be stood up.
         result: Result<crate::sandbox::Sandboxed, String>,
     },
+    /// A `/resume` pick finished loading off-thread. The session file
+    /// is a JSON read plus a parse, and the usage accounting it derives
+    /// is more of the same — neither belongs on the UI thread, which
+    /// the apply path (agent rebuild, transcript re-derivation) keeps.
+    SessionResumed {
+        /// The file the pick named, so the apply re-checks the path it
+        /// requested rather than trusting a stale screen's row.
+        path: std::path::PathBuf,
+        /// The loaded session and its derived usage accounting, or the
+        /// load's failure text. Boxed: a session is a large payload
+        /// next to the enum's other arms.
+        result: Result<Box<ResumedLoad>, String>,
+    },
+}
+
+/// The loaded parts of a `/resume`: everything the load task can
+/// compute before the UI thread applies it.
+pub struct ResumedLoad {
+    /// The session as saved.
+    pub session: rhema_core::Session,
+    /// The usage accounting derived from it once, at load: the last
+    /// turn's tokens and the transcript's counters.
+    pub stats: Option<crate::sessions::UsageStats>,
 }

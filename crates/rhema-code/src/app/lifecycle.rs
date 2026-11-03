@@ -25,6 +25,10 @@ impl App {
                 }
                 Vec::new()
             }
+            UiEvent::SessionResumed { path, result } => {
+                self.apply_resume(&path, result);
+                Vec::new()
+            }
             UiEvent::UsageLoaded { provider, result } => {
                 // Err or a switched-away backend both degrade to a
                 // smaller badge, never to a stale figure.

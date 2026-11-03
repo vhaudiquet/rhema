@@ -190,10 +190,7 @@ impl App {
                 self.screen = Screen::Chat;
                 Vec::new()
             }
-            Routed::Resume(crate::screens::ResumeAction::Pick(path)) => {
-                self.resume_session(&path);
-                Vec::new()
-            }
+            Routed::Resume(crate::screens::ResumeAction::Pick(path)) => self.request_resume(&path),
             Routed::Resume(crate::screens::ResumeAction::BackToChat) => {
                 self.screen = Screen::Chat;
                 Vec::new()

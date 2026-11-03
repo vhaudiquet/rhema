@@ -113,23 +113,45 @@ impl App {
         Vec::new()
     }
 
-    /// Loads a saved session: rebuilds the agent on it, re-derives the
-    /// transcript from its history, and lands in the chat. The current
-    /// conversation is replaced — it keeps its own saved file from its
-    /// own exit.
-    pub fn resume_session(&mut self, path: &Path) {
+    /// The `/resume` pick: refuses politely under a running turn, and
+    /// hands the load to the runner — the session file is a JSON read
+    /// plus a parse on the blocking pool, and the result lands as
+    /// [`UiEvent::SessionResumed`] for [`Self::apply_resume`].
+    pub fn request_resume(&mut self, path: &Path) -> Vec<Effect> {
         if self.turn.running {
             self.transcript
                 .push_notice("a turn is running; /resume waits for it to finish");
-            return;
+            return Vec::new();
         }
-        let session = match CodingAgent::load_session_from(&path.to_path_buf()) {
-            Ok(session) => session,
+        vec![Effect::ResumeSession(path.to_path_buf())]
+    }
+
+    /// Loads a saved session and applies it on the spot: the
+    /// synchronous path the tests drive and the headless runner keeps.
+    /// The interactive app goes through [`Self::request_resume`]
+    /// instead — the UI thread never reads the file.
+    pub fn resume_session(&mut self, path: &Path) {
+        let loaded = Self::load_resume_parts(path).map_err(|err| err.to_string());
+        self.apply_resume(path, loaded);
+    }
+
+    /// Applies a loaded resume: rebuilds the agent on it, re-derives
+    /// the transcript from its history, and lands in the chat. The
+    /// current conversation is replaced — it keeps its own saved file
+    /// from its own exit.
+    pub(crate) fn apply_resume(
+        &mut self,
+        path: &Path,
+        loaded: Result<Box<ResumedLoad>, String>,
+    ) {
+        let loaded = match loaded {
+            Ok(loaded) => *loaded,
             Err(err) => {
                 self.error = Some(format!("cannot load session: {err}"));
                 return;
             }
         };
+        let ResumedLoad { session, stats } = loaded;
         let (mut agent, subagents) = match self.build_agent(session.clone()) {
             Ok(built) => built,
             Err(err) => {
@@ -139,11 +161,10 @@ impl App {
         };
         let messages = session.history.len();
         self.session = session;
-        // The saved usage accounting comes with it: the last turn's
-        // tokens go straight to the gauge, and the transcript's
+        // The saved usage accounting came with the load: the last
+        // turn's tokens go straight to the gauge, and the transcript's
         // counters fold into the fresh mirror, so /settings's Usage
         // page keeps reading as one run.
-        let stats = crate::sessions::UsageStats::from_session(&self.session);
         self.usage = stats.as_ref().and_then(|stats| stats.last_turn);
         if let Some(saved) = stats.as_ref().and_then(|stats| stats.transcript.as_ref()) {
             agent.carry_transcript_stats(saved);
@@ -167,6 +188,16 @@ impl App {
         self.screen = Screen::Chat;
         self.transcript
             .push_notice(&format!("resumed {messages} messages"));
+    }
+
+    /// Reads and derives a resume's parts: the session file plus the
+    /// usage accounting computed from it — the work the UI thread must
+    /// not do. Runs on the blocking pool via
+    /// [`crate::turn::spawn_session_resume`].
+    pub(crate) fn load_resume_parts(path: &Path) -> std::io::Result<Box<ResumedLoad>> {
+        let session = CodingAgent::load_session_from(&path.to_path_buf())?;
+        let stats = crate::sessions::UsageStats::from_session(&session);
+        Ok(Box::new(ResumedLoad { session, stats }))
     }
 
     /// The settings that apply to this session's profile: field-wise, the

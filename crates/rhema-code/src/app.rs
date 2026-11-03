@@ -17,7 +17,7 @@ use rhema_provider::{Allowance, ModelCard};
 
 use crate::approval::ApprovalAnswerer;
 use crate::args::SandboxChoice;
-use crate::events::{FetchWhy, OwnedEvent, UiEvent};
+use crate::events::{FetchWhy, OwnedEvent, ResumedLoad, UiEvent};
 use crate::onboarding::{OnboardingAction, OnboardingScreen};
 use crate::screens::{
     AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, PickerStatus,

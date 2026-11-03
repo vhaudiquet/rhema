@@ -36,7 +36,7 @@ use crate::args::{Args, ProviderChoice, RunArgs, SystemCommand};
 use crate::sessions;
 use crate::status::{self, Status, Tracker, first_line};
 use crate::store::{ConfigStore, DiskStore};
-use crate::turn::{spawn_model_fetch, spawn_turn, spawn_usage_fetch};
+use crate::turn::{spawn_model_fetch, spawn_session_resume, spawn_turn, spawn_usage_fetch};
 use crate::{events::UiEvent, ui};
 
 mod headless;
@@ -614,6 +614,9 @@ fn dispatch(
                 return;
             }
             spawn_model_fetch(backends, why, tx.clone());
+        }
+        Effect::ResumeSession(path) => {
+            spawn_session_resume(path, tx.clone());
         }
         Effect::FetchUsage => {
             // One allowance per session: the active backend's only, and

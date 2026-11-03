@@ -1395,6 +1395,31 @@ fn a_resumed_session_continues_its_cost() {
 }
 
 #[test]
+fn a_resume_pick_under_a_running_turn_is_declined() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.turn.running = true;
+    assert!(h.app.request_resume(Path::new("/tmp/none.json")).is_empty());
+    assert!(matches!(h.app.screen, Screen::Chat));
+}
+
+#[test]
+fn a_failed_resume_load_lands_in_the_error_strip() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let path = Path::new("/tmp/rhema-test-no-such-session.json");
+    h.app.on_event(UiEvent::SessionResumed {
+        path: path.to_path_buf(),
+        result: Err("no such file".into()),
+    });
+    assert_eq!(
+        h.app.error.as_deref(),
+        Some("cannot load session: no such file")
+    );
+    // The screen held through the failure: no half-applied session —
+    // the harness's own agent is still the live one.
+    assert!(matches!(h.app.screen, Screen::Chat));
+}
+
+#[test]
 fn a_resumed_session_shows_its_saved_usage() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let mut session = Session::default();
@@ -4196,9 +4221,18 @@ fn slash_resume_opens_a_picker_and_picking_resumes() {
         _other => panic!("expected the resume picker"),
     }
 
-    // Down moves to the older session; enter loads it.
+    // Down moves to the older session; enter requests the load — the
+    // screen holds until the parts come back off the blocking pool.
     h.app.on_key(key(KeyCode::Down));
-    h.app.on_key(key(KeyCode::Enter));
+    let effects = h.app.on_key(key(KeyCode::Enter));
+    assert!(matches!(effects.as_slice(), [Effect::ResumeSession(_)]));
+    assert!(matches!(h.app.screen, Screen::Resume(_)));
+    let path = older.clone();
+    let loaded = crate::app::App::load_resume_parts(&path).unwrap();
+    h.app.on_event(UiEvent::SessionResumed {
+        path,
+        result: Ok(Box::new(*loaded)),
+    });
     assert!(matches!(h.app.screen, Screen::Chat));
     assert_eq!(
         h.app
