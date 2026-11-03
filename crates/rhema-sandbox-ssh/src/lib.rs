@@ -29,6 +29,12 @@ use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSe
 /// the local `ssh` is killed, the remote command may finish.
 const SEED_BUDGET: Duration = Duration::from_secs(300);
 
+/// The budget of one fs call (`ssh cat` / `ssh tee`): the exec routes
+/// carry their request's budget, the fs routes have none to carry, and
+/// a black-holed transport would hang `read_file` or `write_file`
+/// forever without a fixed one.
+const FS_BUDGET: Duration = Duration::from_secs(60);
+
 /// The SSH sandbox a session's commands run in: one remote login, and
 /// nothing installed on the far end — that is the mode's reason to
 /// exist.
@@ -141,15 +147,24 @@ impl SshSandbox {
     /// `ssh` is killed and the budget reads as a timeout; a nonzero
     /// remote exit surfaces the stderr tail.
     async fn run_seed(&self, argv: Vec<String>) -> Result<(), SandboxError> {
-        match tokio::time::timeout(SEED_BUDGET, self.capture(&argv)).await {
-            Err(_) => Err(SandboxError::Timeout(SEED_BUDGET.as_secs())),
-            Ok(answer) => {
-                let (_, code, stderr) = answer?;
-                match code {
-                    Some(0) => Ok(()),
-                    code => Err(ssh_failure(code, &stderr)),
-                }
-            }
+        let (_, code, stderr) = self.budgeted(SEED_BUDGET, self.capture(&argv)).await?;
+        match code {
+            Some(0) => Ok(()),
+            code => Err(ssh_failure(code, &stderr)),
+        }
+    }
+
+    /// One ssh call under a wall-clock budget: past it the future
+    /// drops, and with it the local ssh (`kill_on_drop`) — a
+    /// black-holed transport reads as a timeout, not a hang.
+    async fn budgeted<T>(
+        &self,
+        budget: Duration,
+        call: impl std::future::Future<Output = Result<T, SandboxError>>,
+    ) -> Result<T, SandboxError> {
+        match tokio::time::timeout(budget, call).await {
+            Ok(answer) => answer,
+            Err(_) => Err(SandboxError::Timeout(budget.as_secs())),
         }
     }
 }
@@ -358,7 +373,9 @@ impl Sandbox for SshSandbox {
 
     async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxError> {
         check_remote_path(path)?;
-        let (stdout, code, stderr) = self.capture(&read_argv(&self.host, path)).await?;
+        let (stdout, code, stderr) = self
+            .budgeted(FS_BUDGET, self.capture(&read_argv(&self.host, path)))
+            .await?;
         match code {
             Some(0) => Ok(stdout),
             code => Err(ssh_failure(code, &stderr)),
@@ -371,13 +388,18 @@ impl Sandbox for SshSandbox {
         // skills seeding writes two levels deep — one extra ssh call
         // when there is a parent above the root to make.
         if let Some(parent) = parent_of(path) {
-            let (_, code, stderr) = self.capture(&mkdir_argv(&self.host, &parent)).await?;
+            let (_, code, stderr) = self
+                .budgeted(FS_BUDGET, self.capture(&mkdir_argv(&self.host, &parent)))
+                .await?;
             if code != Some(0) {
                 return Err(ssh_failure(code, &stderr));
             }
         }
         let (code, stderr) = self
-            .feed(&tee_argv(&self.host, path), contents.to_vec())
+            .budgeted(
+                FS_BUDGET,
+                self.feed(&tee_argv(&self.host, path), contents.to_vec()),
+            )
             .await?;
         if code != Some(0) {
             return Err(ssh_failure(code, &stderr));

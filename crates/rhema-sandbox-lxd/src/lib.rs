@@ -56,6 +56,12 @@ use rhema_sandbox::{ExecOutcome, ExecRequest, Sandbox, SandboxError, WorkspaceSe
 /// The seed budget for both seed kinds, the shim's and the siblings'.
 const SEED_BUDGET: Duration = Duration::from_secs(300);
 
+/// The budget of one attached fs call (`lxc file pull` / `push`): the
+/// exec routes carry their request's budget, the fs routes have none
+/// to carry, and a black-holed transport would hang `read_file` or
+/// `write_file` forever without a fixed one.
+const FS_BUDGET: Duration = Duration::from_secs(60);
+
 /// The LXD sandbox a session's commands run in: one instance —
 /// container or virtual machine, the adapter never cares — driven
 /// through the `lxc` CLI.
@@ -201,6 +207,20 @@ impl LxdSandbox {
     /// Spawns one local `lxc` carrying `argv`, answering the stdout
     /// bytes, the exit code, and the stderr text — the file routes'
     /// and the attached seed's one-shot shape.
+    /// One lxc call under a wall-clock budget: past it the future
+    /// drops, and with it the local lxc (`kill_on_drop`) — a
+    /// black-holed transport reads as a timeout, not a hang.
+    async fn budgeted<T>(
+        &self,
+        budget: Duration,
+        call: impl std::future::Future<Output = Result<T, SandboxError>>,
+    ) -> Result<T, SandboxError> {
+        match tokio::time::timeout(budget, call).await {
+            Ok(answer) => answer,
+            Err(_) => Err(SandboxError::Timeout(budget.as_secs())),
+        }
+    }
+
     async fn capture(
         &self,
         argv: &[String],
@@ -512,7 +532,9 @@ impl Sandbox for LxdSandbox {
             Some(root) => read_through(root, &under_workspace(&self.workspace, path)).await,
             None => {
                 check_remote_path(path)?;
-                let (stdout, code, stderr) = self.capture(&read_argv(&self.instance, path)).await?;
+                let (stdout, code, stderr) = self
+                    .budgeted(FS_BUDGET, self.capture(&read_argv(&self.instance, path)))
+                    .await?;
                 match code {
                     Some(0) => Ok(stdout),
                     code => Err(lxd_failure(code, &stderr)),
@@ -545,7 +567,10 @@ impl Sandbox for LxdSandbox {
                 }
                 let stage_path = staged.path().to_string_lossy().into_owned();
                 let (_, code, stderr) = self
-                    .capture(&write_argv(&self.instance, &stage_path, path))
+                    .budgeted(
+                        FS_BUDGET,
+                        self.capture(&write_argv(&self.instance, &stage_path, path)),
+                    )
                     .await?;
                 staged.close().map_err(|err| {
                     SandboxError::Failed(format!("the staging file would not close: {err}"))
@@ -869,8 +894,21 @@ mod tests {
         dir
     }
 
+    /// GNU `timeout` is a Linux tool: a machine without it in PATH
+    /// cannot exercise the seed route's prefix, and these tests skip.
+    fn have_timeout() -> bool {
+        std::process::Command::new("timeout")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
     #[tokio::test]
     async fn seeding_from_a_repository_populates_the_mounted_root() {
+        if !have_timeout() {
+            eprintln!("skipping: no GNU timeout on this machine");
+            return;
+        }
         let repo = fixture_repo();
         let (sandbox, _guard) = mounted();
         sandbox
@@ -888,6 +926,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_clone_fails_in_band() {
+        if !have_timeout() {
+            eprintln!("skipping: no GNU timeout on this machine");
+            return;
+        }
         let (sandbox, _guard) = mounted();
         let err = sandbox
             .seed(&WorkspaceSeed::GitClone("/definitely/not/a/repo".into()))
@@ -898,6 +940,10 @@ mod tests {
 
     #[tokio::test]
     async fn seeding_from_a_tarball_unpacks_into_the_mounted_root() {
+        if !have_timeout() {
+            eprintln!("skipping: no GNU timeout on this machine");
+            return;
+        }
         let (sandbox, dir) = mounted();
         // A gzipped tarball built the ordinary way, at the staging
         // name the seed unpacks from.
