@@ -1196,7 +1196,7 @@ fn dispatch(
                 return;
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
-            let (steer, steered) = tokio::sync::mpsc::unbounded_channel();
+            let (steer, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
             // The status names the prompt until a tool call takes over.
             status.note_prompt(&text);
             // Auto-approved for now: the Approval seam — and the modal
@@ -1217,7 +1217,7 @@ fn dispatch(
                 return;
             };
             let (cancel, cancelled) = tokio::sync::watch::channel(false);
-            let (steer, steered) = tokio::sync::mpsc::unbounded_channel();
+            let (steer, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
             // The strip names the rerun until a tool call takes over.
             status.note_prompt("retrying");
             app.begin_turn(cancel, steer, None);

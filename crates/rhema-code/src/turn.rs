@@ -10,7 +10,7 @@ use rhema_core::{Event, EventSink, Image, Message, ModelOutput, Role, Session};
 use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -53,7 +53,7 @@ async fn cancelled(mut rx: watch::Receiver<bool>) {
 /// dropped the sender mid-chain, so nothing more can arrive — parks this
 /// future instead of resolving `None`, so the select's steer arm goes
 /// silent rather than spinning on an immediately-ready receive.
-async fn next_steer(steer: &mut UnboundedReceiver<String>) -> Option<String> {
+async fn next_steer(steer: &mut Receiver<String>) -> Option<String> {
     loop {
         match steer.recv().await {
             Some(text) => return Some(text),
@@ -108,7 +108,7 @@ pub fn spawn_turn(
     approval: Arc<dyn Approval>,
     save: Option<PathBuf>,
     cancel: watch::Receiver<bool>,
-    mut steer: UnboundedReceiver<String>,
+    mut steer: Receiver<String>,
     events: UnboundedSender<UiEvent>,
 ) -> JoinHandle<()> {
     // Commit at every stream boundary: when the session persists to a
@@ -384,7 +384,6 @@ mod mock_tests {
         StopReason, ToolCall, Usage,
     };
     use serde_json::json;
-    use tokio::sync::mpsc::unbounded_channel;
 
     fn scripted_output(text: &str) -> ModelOutput {
         ModelOutput {
@@ -457,9 +456,9 @@ mod mock_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_steered_message_interrupts_the_turn_and_runs_as_the_next_turn() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (cancel, cancelled) = watch_cancel();
-        let (steer_tx, steered) = unbounded_channel();
+        let (steer_tx, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
         let provider = Arc::new(HangsThenAnswers {
             entered: tokio::sync::Notify::new(),
             calls: std::sync::atomic::AtomicU32::new(0),
@@ -485,7 +484,9 @@ mod mock_tests {
         tokio::time::timeout(Duration::from_secs(5), provider.entered.notified())
             .await
             .expect("the first generation never started");
-        steer_tx.send("look at the tests instead".into()).unwrap();
+        steer_tx
+            .try_send("look at the tests instead".into())
+            .unwrap();
         let mut transcript = Transcript::new();
         let (agent, result) = loop {
             match rx.recv().await.expect("turn task still alive") {
@@ -572,7 +573,7 @@ mod mock_tests {
     /// prompt exactly as it went out the first time.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_retry_resends_the_failed_request_without_a_new_message() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (_, cancelled) = watch_cancel();
         let provider = Arc::new(FailsThenSucceeds::default());
         let agent = CodingAgent::new(
@@ -580,7 +581,7 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
-        let (_steer_tx, steered) = unbounded_channel();
+        let (_steer_tx, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
         spawn_turn(
             agent,
             Prompt::text("hi"),
@@ -601,9 +602,9 @@ mod mock_tests {
         assert_eq!(agent.session().history.len(), 1, "the prompt committed");
 
         // /retry: the same request, no new message beside it.
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (_, cancelled) = watch_cancel();
-        let (_steer_tx, steered) = unbounded_channel();
+        let (_steer_tx, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
         spawn_turn(
             *agent,
             Prompt::Retry,
@@ -644,7 +645,7 @@ mod mock_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_turn_streams_into_the_transcript_and_returns_the_agent() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (cancel, cancelled) = watch_cancel();
         let agent = CodingAgent::new(
             Arc::new(rhema_core::MockProvider::new([scripted_output(
@@ -653,7 +654,7 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
-        let (_steer_tx, steered) = unbounded_channel();
+        let (_steer_tx, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
         spawn_turn(
             agent,
             Prompt::text("hi"),
@@ -677,7 +678,7 @@ mod mock_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_completed_turn_checkpoints_the_session() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (cancel, cancelled) = watch_cancel();
         let dir = tempfile::tempdir().unwrap();
         let save = dir.path().join("session.json");
@@ -686,7 +687,7 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
-        let (_steer_tx, steered) = unbounded_channel();
+        let (_steer_tx, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
         spawn_turn(
             agent,
             Prompt::text("hi"),
@@ -706,14 +707,14 @@ mod mock_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn cancelling_mid_stream_returns_the_agent_with_the_prompt_only() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (cancel, cancelled) = watch_cancel();
         let agent = CodingAgent::new(
             Arc::new(HangingProvider),
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
-        let (_steer_tx, steered) = unbounded_channel();
+        let (_steer_tx, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
         spawn_turn(
             agent,
             Prompt::text("hi"),
@@ -755,7 +756,7 @@ mod mock_tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancel_inside_a_tool_leaves_the_committed_intent_in_the_file() {
-        let (tx, mut rx) = unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let (cancel, cancelled) = watch_cancel();
         let dir = tempfile::tempdir().unwrap();
         let save = dir.path().join("session.json");
@@ -764,7 +765,7 @@ mod mock_tests {
             CodingAgentConfig::new("test-model", std::env::temp_dir()),
         )
         .unwrap();
-        let (_steer_tx, steered) = unbounded_channel();
+        let (_steer_tx, steered) = tokio::sync::mpsc::channel(crate::app::STEER_QUEUE_CAP);
         spawn_turn(
             agent,
             Prompt::text("hi"),

@@ -766,6 +766,12 @@ pub struct App {
     pub config: Config,
     /// The backend resolved at login (or startup), if any.
     pub backend: Option<Backend>,
+    /// Steered nudges that raced a turn's finish and wait their turn:
+    /// one `StartTurn` leaves per turn finish (the dispatch takes the
+    /// agent once), so the rest chain through each finish. The
+    /// transcript showed every one as a sent user line at submit time;
+    /// this queue is the promise they reach the model in that order.
+    pending_prompts: std::collections::VecDeque<String>,
     /// The provider behind the backend.
     pub provider: Option<Arc<dyn ModelProvider>>,
     /// The startup flags.
@@ -880,6 +886,12 @@ pub struct App {
     pub logo_rect: Option<ratatui::layout::Rect>,
 }
 
+/// How many steered nudges may sit queued between the turn's step
+/// boundaries. The channel is bounded: nothing drains it mid-step, and
+/// a held key under repeat fires submits faster than any step — a full
+/// queue refuses the nudge instead of pinning an unbounded buffer.
+pub(crate) const STEER_QUEUE_CAP: usize = 64;
+
 /// The lifecycle state of the turn the UI thread handed to a task. The
 /// agent comes back in a `TurnFinished` or `TurnCancelled` event; this is
 /// what the keyboard, the renderer, and the status tracker need until
@@ -897,7 +909,7 @@ pub struct TurnState {
     /// it. The task returns the receiver in its final event, so a message
     /// sent in the finishing race sits buffered there instead of
     /// vanishing. `None` while no turn runs.
-    steer: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    steer: Option<tokio::sync::mpsc::Sender<String>>,
     /// The tool call currently awaiting the user's answer.
     pub pending_approval: Option<ToolCall>,
     /// Every future approval request is declined without a modal (the
@@ -967,7 +979,7 @@ impl TurnState {
     /// (a stale modal, a preview buffer) is gone.
     fn running(
         cancel: tokio::sync::watch::Sender<bool>,
-        steer: tokio::sync::mpsc::UnboundedSender<String>,
+        steer: tokio::sync::mpsc::Sender<String>,
         answers: Option<ApprovalAnswerer>,
     ) -> Self {
         Self {
@@ -1146,6 +1158,7 @@ impl App {
             config: setup.config,
             provider: setup.backend.as_ref().map(Backend::provider),
             backend: setup.backend,
+            pending_prompts: std::collections::VecDeque::new(),
             session_profile: Some(
                 setup
                     .options
@@ -2795,6 +2808,19 @@ impl App {
                     self.chat.cursor = 0;
                     self.chat.chips.clear();
                     self.transcript.push_user(&text, images.clone());
+                    // Queued nudges keep their transcript order ahead of
+                    // a text-only line: the new line waits its turn
+                    // behind them. A line carrying images runs now —
+                    // images ride the first turn only — and the chain
+                    // follows it through this turn's finish.
+                    let text = if images.is_empty() && !self.pending_prompts.is_empty() {
+                        self.pending_prompts.push_back(text);
+                        self.pending_prompts
+                            .pop_front()
+                            .expect("the queue was just filled")
+                    } else {
+                        text
+                    };
                     self.turn.running = true;
                     self.turn.started_at = Some(std::time::Instant::now());
                     self.error = None;
@@ -2813,15 +2839,27 @@ impl App {
     /// turn on the same agent. A send can only fail once the task has
     /// exited — the finishing race — and the receiver it returned holds
     /// the message buffered for the turn-end handler to run.
+    /// A submit while a turn runs: the text queues on the steer
+    /// channel, the task drops the in-flight step at its current await
+    /// and runs the text as the next turn on the same agent. A full
+    /// queue refuses the nudge with the line back in the input; a send
+    /// past task exit loses the race and the text waits in the input
+    /// the same way.
     fn steer_turn(&mut self, text: String) -> Vec<Effect> {
+        // A full queue refuses the nudge: the line goes back into the
+        // input, so nothing is lost and nothing invisible queues up.
+        if let Some(steer) = &self.turn.steer
+            && steer.try_send(text.clone()).is_err()
+        {
+            self.chat.input = text;
+            self.chat.cursor = self.chat.input.chars().count();
+            return Vec::new();
+        }
         self.chat.input.clear();
         self.chat.cursor = 0;
         self.chat.chips.clear();
         // A nudge carries no images: the steer channel is text-only.
         self.transcript.push_user(&text, Vec::new());
-        if let Some(steer) = &self.turn.steer {
-            let _ = steer.send(text.clone());
-        }
         vec![Effect::SteerTurn(text)]
     }
 
@@ -3042,9 +3080,17 @@ impl App {
                     effects.push(Effect::FetchUsage);
                 }
                 None => {
+                    // The agent drops with the provider, and its
+                    // session comes home before the drop: the live
+                    // history lands in `self.session`, so the exit
+                    // save keeps this checkpoint instead of clobbering
+                    // it with the stale copy held before the agent
+                    // existed.
+                    if let Some(agent) = self.agent.take() {
+                        self.session = agent.session().clone();
+                    }
                     self.backend = None;
                     self.provider = None;
-                    self.agent = None;
                 }
             }
         }
@@ -3730,7 +3776,7 @@ impl App {
     pub fn begin_turn(
         &mut self,
         cancel: tokio::sync::watch::Sender<bool>,
-        steer: tokio::sync::mpsc::UnboundedSender<String>,
+        steer: tokio::sync::mpsc::Sender<String>,
         answers: Option<ApprovalAnswerer>,
     ) {
         self.turn = TurnState::running(cancel, steer, answers);
@@ -3831,7 +3877,7 @@ impl App {
     fn cancel_finished(
         &mut self,
         agent: Box<CodingAgent>,
-        mut steer: tokio::sync::mpsc::UnboundedReceiver<String>,
+        mut steer: tokio::sync::mpsc::Receiver<String>,
     ) {
         self.transcript_stats = agent.transcript_stats();
         self.agent = Some(*agent);
@@ -3842,6 +3888,14 @@ impl App {
         // the user stopped the turn, so the words are not spent.
         let mut restore = String::new();
         while let Ok(text) = steer.try_recv() {
+            if !restore.is_empty() {
+                restore.push('\n');
+            }
+            restore.push_str(&text);
+        }
+        // The queued chain dies with the turn the same way: unspent
+        // words go back to the input, in order.
+        while let Some(text) = self.pending_prompts.pop_front() {
             if !restore.is_empty() {
                 restore.push('\n');
             }
@@ -3860,7 +3914,7 @@ impl App {
         &mut self,
         agent: Box<CodingAgent>,
         result: Result<ModelOutput, String>,
-        mut steer: tokio::sync::mpsc::UnboundedReceiver<String>,
+        mut steer: tokio::sync::mpsc::Receiver<String>,
     ) -> Vec<Effect> {
         self.transcript_stats = agent.transcript_stats();
         self.agent = Some(*agent);
@@ -3876,7 +3930,12 @@ impl App {
                         u64::from(usage.cached_input_tokens),
                     );
                 }
-                self.usage = Some(output.usage);
+                // A final tally of zeros is a proxy that never wired
+                // usage through, not a free turn: keep the previous
+                // gauge instead of pricing the turn at nothing.
+                if output.usage.input_tokens > 0 || output.usage.output_tokens > 0 {
+                    self.usage = Some(output.usage);
+                }
                 // Silence is a symptom, not an answer: the usual cause is
                 // a reasoning-only response — a thinking model spending
                 // its whole output budget before any text started — and
@@ -3900,10 +3959,15 @@ impl App {
         }
         // Messages sent in the finishing race sit in the returned
         // receiver: they run as the next turns, in order. The transcript
-        // already carries their user lines from submit time. The chain
-        // moves on, so its last request is no longer the failed one.
-        let mut effects = Vec::new();
+        // already carries their user lines from submit time. Only one
+        // turn leaves per finish — the dispatch takes the agent once,
+        // and a second StartTurn would find it gone — so the rest queue
+        // on the app and each finish chains the next one out.
         while let Ok(text) = steer.try_recv() {
+            self.pending_prompts.push_back(text);
+        }
+        let mut effects = Vec::new();
+        if let Some(text) = self.pending_prompts.pop_front() {
             self.retryable = false;
             effects.push(Effect::StartTurn {
                 text,
@@ -4164,17 +4228,24 @@ pub(crate) fn context_tokens(usage: &Usage) -> u64 {
 /// is no tokenizer this side of the wire, and the footer is a gauge,
 /// not an invoice.
 fn estimate_history_tokens(history: &[Message]) -> u64 {
-    let chars: usize = history
-        .iter()
-        .flat_map(|message| message.content.iter())
-        .map(|content| match content {
-            Content::Text(text) => text.len(),
-            Content::ToolCall(call) => call.args.to_string().len(),
-            Content::ToolResult(result) => result.content.len(),
-            Content::Image(image) => image.data.len(),
-        })
-        .sum();
-    (chars as u64) / 4
+    // Images ride the wire as base64 but price as vision tokens, not
+    // text: bytes-over-four priced one screenshot at ~260k fake
+    // tokens. A flat per-image figure keeps the gauge within sight of
+    // a real request's shape.
+    const IMAGE_TOKENS: u64 = 1_000;
+    let mut chars = 0usize;
+    let mut images = 0u64;
+    for message in history {
+        for content in &message.content {
+            match content {
+                Content::Text(text) => chars += text.len(),
+                Content::ToolCall(call) => chars += call.args.to_string().len(),
+                Content::ToolResult(result) => chars += result.content.len(),
+                Content::Image(_) => images += 1,
+            }
+        }
+    }
+    (chars as u64 / 4) + (images * IMAGE_TOKENS)
 }
 
 /// The profile a session runs on when no `--profile` names one: the
@@ -4693,6 +4764,74 @@ mod tests {
         assert!(h.app.subscription.is_none());
     }
 
+    #[test]
+    fn raced_nudges_chain_one_turn_per_finish_in_order() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let (steer, rx) = tokio::sync::mpsc::channel(STEER_QUEUE_CAP);
+        for text in ["first", "second", "third"] {
+            steer.blocking_send(text.into()).expect("queued");
+        }
+        drop(steer);
+        let agent = Box::new(h.app.agent.take().unwrap());
+        let effects = h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+            steer: rx,
+        });
+        // Exactly one turn leaves per finish; the rest wait their turn.
+        // (The finish also refreshes usage; that rides along.)
+        assert_eq!(
+            effects,
+            vec![
+                Effect::StartTurn {
+                    text: "first".into(),
+                    images: Vec::new()
+                },
+                Effect::FetchUsage,
+            ]
+        );
+        assert_eq!(
+            Vec::from_iter(h.app.pending_prompts.iter()),
+            ["second", "third"]
+        );
+
+        // The chained turn's finish sends the next one out.
+        let agent = Box::new(h.app.agent.take().unwrap());
+        let effects = h.app.on_event(UiEvent::TurnFinished {
+            agent,
+            result: Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "done"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
+        });
+        assert_eq!(
+            effects,
+            vec![
+                Effect::StartTurn {
+                    text: "second".into(),
+                    images: Vec::new()
+                },
+                Effect::FetchUsage,
+            ]
+        );
+        assert_eq!(Vec::from_iter(h.app.pending_prompts.iter()), ["third"]);
+
+        // A cancel spends no queued words: they return to the input.
+        let agent = Box::new(h.app.agent.take().unwrap());
+        h.app.on_event(UiEvent::TurnCancelled {
+            agent,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
+        });
+        assert!(h.app.pending_prompts.is_empty());
+        assert_eq!(h.app.chat.input, "third");
+    }
+
     /// The turn just moved the account's counters: finishing (or
     /// cancelling) one schedules the allowance refresh.
     #[test]
@@ -4706,7 +4845,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert_eq!(effects, vec![Effect::FetchUsage]);
     }
@@ -4728,7 +4867,7 @@ mod tests {
                 stop_reason: StopReason::MaxTokens,
                 usage: Usage::default(),
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(h.app.transcript.lines().contains(&Line::Notice(
             "the model returned no content (stopped: max tokens)".into()
@@ -4742,7 +4881,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         // The first turn's notice rightly persists; a real reply raised
         // no second one.
@@ -5686,7 +5825,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         let stats = h.app.transcript_stats.unwrap();
         assert_eq!(stats.requests, 9, "the run's requests, not the turn's");
@@ -5857,7 +5996,7 @@ mod tests {
                     cached_input_tokens: 400_000,
                 },
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         // 600k uncached in at $0.75/M + 400k cached in at a quarter of
         // that + 1M out at $3.75/M.
@@ -6310,6 +6449,24 @@ mod tests {
             .push(Message::text(Role::User, "12345678"));
         assert_eq!(h.app.context_used(), 2);
 
+        // An image prices as vision tokens, not as its base64 bytes:
+        // a megabyte of screenshot data is one image on the gauge.
+        h.app
+            .agent
+            .as_mut()
+            .unwrap()
+            .session_mut()
+            .history
+            .push(Message::text_with_images(
+                Role::User,
+                "see this",
+                vec![rhema_core::Image::new(
+                    rhema_core::ImageMediaType::Png,
+                    "A".repeat(1_000_000),
+                )],
+            ));
+        assert_eq!(h.app.context_used(), 2 + 2 + 1_000);
+
         // A reported turn wins over the estimate: prompt plus reply,
         // the shape of the next request.
         h.app.usage = Some(Usage {
@@ -6326,7 +6483,7 @@ mod tests {
         h.app.turn.running = true;
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
         h.app
-            .begin_turn(cancel, tokio::sync::mpsc::unbounded_channel().0, None);
+            .begin_turn(cancel, tokio::sync::mpsc::channel(STEER_QUEUE_CAP).0, None);
 
         // The provider's running tally lands as an engine event: its
         // prompt count already covers the whole conversation, so the
@@ -6362,7 +6519,7 @@ mod tests {
         h.app.turn.running = true;
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
         h.app
-            .begin_turn(cancel, tokio::sync::mpsc::unbounded_channel().0, None);
+            .begin_turn(cancel, tokio::sync::mpsc::channel(STEER_QUEUE_CAP).0, None);
 
         // The step begins: thinking.
         h.app
@@ -6393,7 +6550,7 @@ mod tests {
         .unwrap();
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(!h.app.turn.processing);
     }
@@ -6438,7 +6595,7 @@ mod tests {
         .unwrap();
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(!h.app.turn.running);
         assert!(h.app.turn.cancel.is_none());
@@ -6457,7 +6614,7 @@ mod tests {
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
         h.app.begin_turn(
             cancel,
-            tokio::sync::mpsc::unbounded_channel().0,
+            tokio::sync::mpsc::channel(STEER_QUEUE_CAP).0,
             Some(answers),
         );
         let (cancel, cancelled) = tokio::sync::watch::channel(false);
@@ -6487,7 +6644,7 @@ mod tests {
         .unwrap();
         h.app.on_event(UiEvent::TurnCancelled {
             agent: Box::new(agent),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(!h.app.turn.running);
         assert!(h.app.agent.is_some());
@@ -6507,7 +6664,7 @@ mod tests {
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
         h.app.begin_turn(
             cancel,
-            tokio::sync::mpsc::unbounded_channel().0,
+            tokio::sync::mpsc::channel(STEER_QUEUE_CAP).0,
             Some(answers),
         );
 
@@ -6543,7 +6700,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage,
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(!h.app.turn.running);
         assert!(h.app.error.is_none());
@@ -6553,7 +6710,7 @@ mod tests {
         h.app.on_event(UiEvent::TurnFinished {
             agent: make_agent(),
             result: Err("stopped after 4 steps without finishing; send a follow-up to keep going, or raise the step limit".into()),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(!h.app.turn.running);
         assert_eq!(
@@ -6665,6 +6822,29 @@ mod tests {
     /// Steering stays text: an image mid-turn keeps everything in the
     /// box for the next submit rather than stripping the image from a
     /// nudge.
+    #[test]
+    fn a_full_steer_queue_refuses_the_nudge_and_keeps_the_line() {
+        let mut h = harness(Some("k"), Some("m-a"), Session::default());
+        let (steer, _rx) = tokio::sync::mpsc::channel(STEER_QUEUE_CAP);
+        let (cancel, _cancelled) = tokio::sync::watch::channel(false);
+        h.app.begin_turn(cancel, steer, None);
+        for i in 0..STEER_QUEUE_CAP {
+            h.app.chat.input = format!("nudge {i}");
+            let effects = h.app.steer_turn(h.app.chat.input.clone());
+            assert_eq!(effects.len(), 1, "queued nudge {i} still steers");
+        }
+        // The queue is full: the next nudge returns to the input.
+        h.app.chat.input = "one too many".into();
+        let effects = h.app.steer_turn("one too many".into());
+        assert!(effects.is_empty(), "a full queue refuses: {effects:?}");
+        assert_eq!(h.app.chat.input, "one too many");
+        assert_eq!(
+            h.app.chat.cursor,
+            "one too many".chars().count(),
+            "the cursor rides the restored line"
+        );
+    }
+
     #[test]
     fn an_image_cannot_steer_a_running_turn() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
@@ -7819,7 +7999,7 @@ mod tests {
         h.app.session_profile = Some("work".to_owned());
         let (cancel, _cancelled) = tokio::sync::watch::channel(false);
         h.app
-            .begin_turn(cancel, tokio::sync::mpsc::unbounded_channel().0, None);
+            .begin_turn(cancel, tokio::sync::mpsc::channel(STEER_QUEUE_CAP).0, None);
         assert_eq!(
             h.app.config.last_profile_in(&workspace).as_deref(),
             Some("work"),
@@ -9194,7 +9374,7 @@ mod tests {
         tracker.observe(&UiEvent::TurnFinished {
             agent: Box::new(agent),
             result: Err("provider exploded\nwith detail".to_owned()),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         match tracker.status_for(&h.app) {
             crate::status::Status::Error { msg: Some(msg) } => {
@@ -9224,7 +9404,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(matches!(
             tracker.status_for(&h.app),
@@ -9586,7 +9766,7 @@ mod tests {
         h.app.on_event(UiEvent::TurnFinished {
             agent,
             result: Err("network error: connection reset".to_owned()),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(h.app.retryable);
         assert_eq!(
@@ -9734,7 +9914,7 @@ mod tests {
     #[test]
     fn the_retry_offer_clears_when_the_conversation_moves_on() {
         let mut h = harness(Some("k"), Some("m-a"), Session::default());
-        let steer = tokio::sync::mpsc::unbounded_channel().1;
+        let steer = tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1;
 
         // Nothing failed yet.
         assert!(!h.app.retryable);
@@ -9771,7 +9951,7 @@ mod tests {
                 stop_reason: StopReason::EndTurn,
                 usage: Usage::default(),
             }),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(!h.app.retryable);
 
@@ -9779,7 +9959,7 @@ mod tests {
         let agent = Box::new(h.app.agent.take().unwrap());
         h.app.on_event(UiEvent::TurnCancelled {
             agent,
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         assert!(!h.app.retryable);
         assert!(!matches!(
@@ -9807,7 +9987,7 @@ mod tests {
         h.app.on_event(UiEvent::TurnFinished {
             agent,
             result: Err("provider api error: 429 (retry-after: 37)".to_owned()),
-            steer: tokio::sync::mpsc::unbounded_channel().1,
+            steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
         });
         crate::commands::dispatch(&mut h.app, "/model m-b");
         assert!(h.app.agent.is_some(), "the pick rebuilt the agent");

@@ -224,7 +224,7 @@ pub enum UiEvent {
         /// the finishing race — after the task's last poll, before the UI
         /// saw this event — sits buffered here instead of vanishing. The
         /// app drains it and runs what it holds as the next turn.
-        steer: tokio::sync::mpsc::UnboundedReceiver<String>,
+        steer: tokio::sync::mpsc::Receiver<String>,
     },
     /// The turn was cancelled from the keyboard and hands the agent back.
     /// Whatever committed before the drop stays in the history; dangling
@@ -235,7 +235,7 @@ pub enum UiEvent {
         /// The steering channel's receiver, as in
         /// [`UiEvent::TurnFinished::steer`]; the app puts what it holds
         /// back in the input box, since the user stopped the turn.
-        steer: tokio::sync::mpsc::UnboundedReceiver<String>,
+        steer: tokio::sync::mpsc::Receiver<String>,
     },
     /// The sandbox assembly the picker's choice spawned finished: the
     /// assembled tool set, or the failure text. The session's current
