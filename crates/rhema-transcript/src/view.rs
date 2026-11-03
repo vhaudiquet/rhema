@@ -460,11 +460,18 @@ impl Transcript {
         // so the compare above took the extension branch.
         if let Some(saved) = self.saved.take() {
             let mut end = 0usize;
+            // The sections ride the session file: the arithmetic is
+            // checked, and a wrap — like a gap or a bad length — just
+            // fails the tiling and falls back to the rebuild.
             let tiles = !saved.is_empty()
                 && saved.iter().all(|section| {
-                    let contiguous = section.range.id == end;
-                    end = section.range.id + section.range.n;
-                    contiguous
+                    match section.range.id.checked_add(section.range.n) {
+                        Some(next) if section.range.id == end => {
+                            end = next;
+                            end <= self.log.len()
+                        }
+                        _ => false,
+                    }
                 })
                 && end <= self.log.len();
             if tiles {
@@ -505,9 +512,12 @@ impl Transcript {
     }
 
     /// The messages of `range`, as `zoom` reads them; `None` past the
-    /// log's end.
+    /// log's end. The range arrives from the model's tool call, so
+    /// the arithmetic is checked: a huge `n` is a malformed call
+    /// answered with nothing, not a panic.
     pub fn range(&self, range: Range) -> Option<&[Message]> {
-        self.log.get(range.id..range.id + range.n)
+        let end = range.id.checked_add(range.n)?;
+        self.log.get(range.id..end)
     }
 
     /// The compaction's benchmark snapshot.
@@ -1016,7 +1026,17 @@ impl Transcript {
                 id: self.sections[0].range.id,
                 n: self.sections[0].range.n + self.sections[1].range.n,
             };
-            let messages = self.log[range.id..range.id + range.n].to_vec();
+            let messages = match range
+                .id
+                .checked_add(range.n)
+                .and_then(|end| self.log.get(range.id..end))
+            {
+                Some(messages) => messages.to_vec(),
+                // Sections whose arithmetic does not hold against the
+                // log (file-derived, adopted past validation): skip
+                // the merge rather than panic on it.
+                None => return pending,
+            };
             let mut text = compact::section_digest(&messages);
             // The union keeps whatever bodies the merged sections
             // carried: the pin outlives the merge, re-appended after
