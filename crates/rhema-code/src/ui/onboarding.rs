@@ -24,7 +24,7 @@ pub(crate) fn render_onboarding(
     hits: &mut Vec<(Rect, crate::app::OnboardingHit)>,
 ) {
     let area = frame.area();
-    let block = crate::chrome::panel(Some(" welcome to rhema "), theme);
+    let block = super::chrome::panel(Some(" welcome to rhema "), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -60,7 +60,7 @@ pub(crate) fn render_onboarding(
     rail.push(Line::from(Span::raw("Rhema Code").bold()));
     rail.push(Line::from(Span::raw(crate::VERSION_LABEL).fg(theme.text3)));
     rail.push(Line::default());
-    rail.push(Line::from(crate::chrome::rule(
+    rail.push(Line::from(super::chrome::rule(
         rail_area.width.saturating_sub(2) as usize,
         theme,
     )));
@@ -76,7 +76,7 @@ pub(crate) fn render_onboarding(
             Style::default().fg(theme.text2)
         };
         rail.push(Line::from(vec![
-            crate::chrome::marker(current, theme),
+            super::chrome::marker(current, theme),
             Span::styled(step.label().to_owned(), style),
         ]));
         hits.push((
@@ -123,7 +123,7 @@ pub(crate) fn connected_lines(
         return lines;
     }
     lines.push(Line::from(Span::raw("currently configured").bold()));
-    lines.push(Line::from(crate::chrome::rule(width, theme)));
+    lines.push(Line::from(super::chrome::rule(width, theme)));
     let value = |text: String| Span::raw(text).fg(theme.text);
     if let Some(provider) = provider {
         lines.push(Line::from(vec![
@@ -158,7 +158,7 @@ pub(crate) fn onboarding_body(
     let footer = |hints: &str| vec![Span::raw(hints.to_owned()).fg(theme.text3)];
     let title = |text: &str, lines: &mut Vec<Line<'static>>| {
         lines.push(Line::from(Span::raw(text.to_owned()).bold()));
-        lines.push(Line::from(crate::chrome::rule(width, theme)));
+        lines.push(Line::from(super::chrome::rule(width, theme)));
         lines.push(Line::default());
     };
     let mut lines = Vec::new();
@@ -203,7 +203,7 @@ pub(crate) fn onboarding_body(
                                 Style::default().fg(theme.text2)
                             };
                             lines.push(Line::from(vec![
-                                crate::chrome::marker(selected, theme),
+                                super::chrome::marker(selected, theme),
                                 Span::styled(entry.name.to_owned(), style),
                             ]));
                         }
@@ -268,7 +268,7 @@ pub(crate) fn onboarding_body(
                 for (index, row) in rows.iter().enumerate() {
                     let selected = index == wizard.row;
                     lines.push(Line::from(vec![
-                        crate::chrome::marker(selected, theme),
+                        super::chrome::marker(selected, theme),
                         Span::raw((*row).to_owned()).fg(if selected {
                             theme.text
                         } else {
@@ -292,7 +292,7 @@ pub(crate) fn onboarding_body(
             if let Some((_, _, id)) = wizard.keep_current_model() {
                 let selected = index == wizard.row;
                 lines.push(Line::from(vec![
-                    crate::chrome::marker(selected, theme),
+                    super::chrome::marker(selected, theme),
                     Span::raw(id.clone()).fg(if selected { theme.text } else { theme.text2 }),
                     Span::raw("  · keep current").fg(theme.text3),
                 ]));
@@ -303,7 +303,7 @@ pub(crate) fn onboarding_body(
             }
             for entry in &wizard.models {
                 let selected = index == wizard.row;
-                let mut line = Line::from(vec![crate::chrome::marker(selected, theme)]);
+                let mut line = Line::from(vec![super::chrome::marker(selected, theme)]);
                 line.spans
                     .extend(model_row(entry.provider, &entry.model, icons, theme).spans);
                 if selected {
@@ -333,7 +333,7 @@ pub(crate) fn onboarding_body(
             for (index, palette) in crate::palette::Palette::ALL.iter().enumerate() {
                 let selected = index == wizard.row;
                 lines.push(Line::from(vec![
-                    crate::chrome::marker(selected, theme),
+                    super::chrome::marker(selected, theme),
                     Span::raw(palette.label().to_owned()).fg(if selected {
                         theme.text
                     } else {
@@ -359,7 +359,7 @@ pub(crate) fn onboarding_body(
                 let dot = if skill.enabled { "●" } else { "○" };
                 let dot_color = if skill.enabled { theme.ok } else { theme.text3 };
                 let line = Line::from(vec![
-                    crate::chrome::marker(selected, theme),
+                    super::chrome::marker(selected, theme),
                     Span::raw(dot).fg(dot_color),
                     Span::raw(" ").fg(theme.text3),
                     Span::raw(skill.name.clone()).fg(if skill.enabled {

@@ -20,7 +20,7 @@ pub(crate) fn render_settings(
     hits: &mut Vec<(Rect, SettingsHit)>,
 ) {
     let area = frame.area();
-    let block = crate::chrome::panel(None, theme);
+    let block = super::chrome::panel(None, theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -180,7 +180,7 @@ pub(crate) fn settings_page(
     // interactive row indices count these header lines in.
     let mut lines = vec![
         Line::from(Span::raw(settings.section.label()).bold()),
-        Line::from(crate::chrome::rule(width, theme)),
+        Line::from(super::chrome::rule(width, theme)),
         Line::default(),
     ];
     match settings.section {
@@ -403,7 +403,7 @@ pub(crate) fn settings_page(
                 let dot = if skill.enabled { "●" } else { "○" };
                 let dot_color = if skill.enabled { theme.ok } else { theme.text3 };
                 let line = Line::from(vec![
-                    crate::chrome::marker(selected, theme),
+                    super::chrome::marker(selected, theme),
                     Span::raw(dot).fg(dot_color),
                     Span::raw(" ").fg(theme.text3),
                     Span::raw(skill.name.clone()).fg(if skill.enabled {

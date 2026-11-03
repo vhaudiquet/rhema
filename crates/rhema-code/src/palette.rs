@@ -9,7 +9,7 @@
 //! selected with `theme: light`. Components reference tokens, never
 //! literal hex (rule 1); saturated color stays on the accent and the
 //! status set (rules 3-4). M3 You is the one generated palette: its
-//! tokens come from the tonal-spot scheme in [`crate::m3`], not from
+//! tokens come from the tonal-spot scheme in [`m3`], not from
 //! constants here.
 //!
 //! The Catppuccin palettes take their hexes from the official palette
@@ -21,6 +21,8 @@
 //! flavor, so every dark flavor resolves to it on `theme: light` —
 //! because the style guide forbids blending flavors inside one theme.
 
+mod hct;
+mod m3;
 use ratatui::style::Color;
 
 /// Which appearance of a palette paints the screen: its dark tokens or
@@ -743,9 +745,7 @@ impl Palette {
                 ThemeKind::Dark => SOLARIZED_DARK,
                 ThemeKind::Light => SOLARIZED_LIGHT,
             },
-            Self::M3You => {
-                crate::m3::theme(inputs.m3_source.unwrap_or(crate::m3::DEFAULT_SOURCE), kind)
-            }
+            Self::M3You => m3::theme(inputs.m3_source.unwrap_or(m3::DEFAULT_SOURCE), kind),
             Self::Custom => custom_theme(kind, inputs.custom),
         }
     }
@@ -901,7 +901,7 @@ mod tests {
         );
         assert_eq!(
             default.ground,
-            crate::m3::theme(crate::m3::DEFAULT_SOURCE, ThemeKind::Dark).ground
+            m3::theme(m3::DEFAULT_SOURCE, ThemeKind::Dark).ground
         );
         assert_ne!(default.accent, blue.accent);
         // The fixed palettes ignore the seed.

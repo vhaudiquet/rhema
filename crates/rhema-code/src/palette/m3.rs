@@ -9,7 +9,7 @@
 //! A terminal cannot see the wallpaper; the seed comes from the config
 //! (`m3_source`), and Material's baseline purple stands in when unset.
 
-use crate::hct::{Hct, TonalPalette};
+use super::hct::{Hct, TonalPalette};
 use crate::palette::{Theme, ThemeKind};
 use ratatui::style::Color;
 

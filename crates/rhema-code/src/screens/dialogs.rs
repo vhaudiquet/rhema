@@ -337,7 +337,7 @@ impl AddInstanceDialog {
                 DialogStage::NameInstance | DialogStage::EnterCredential
             )
         {
-            if let Some(text) = crate::clipboard::read() {
+            if let Some(text) = super::clipboard::read() {
                 self.paste(&text);
             }
             return DialogAction::None;
@@ -579,7 +579,7 @@ impl AddProfileDialog {
     /// inputs.
     pub fn handle_key(&mut self, key: KeyEvent) -> ProfileDialogAction {
         if key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(text) = crate::clipboard::read() {
+            if let Some(text) = super::clipboard::read() {
                 self.paste(&text);
             }
             return ProfileDialogAction::None;

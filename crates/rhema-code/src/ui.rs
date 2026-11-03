@@ -28,6 +28,8 @@ use pane::render_transcript;
 use settings::render_settings;
 use status::{render_status, subagent_lines, thinking_rows};
 
+pub(crate) mod chrome;
+
 mod dialogs;
 mod footer;
 mod input;

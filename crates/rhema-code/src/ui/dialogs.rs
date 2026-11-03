@@ -192,7 +192,7 @@ pub(crate) fn render_picker(
     theme: &Theme,
 ) {
     let area = frame.area();
-    let block = crate::chrome::panel(Some("select a model"), theme);
+    let block = super::chrome::panel(Some("select a model"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -266,7 +266,7 @@ pub(crate) fn render_profile_picker(
     theme: &Theme,
 ) {
     let area = frame.area();
-    let block = crate::chrome::panel(Some("select a profile"), theme);
+    let block = super::chrome::panel(Some("select a profile"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -337,7 +337,7 @@ pub(crate) fn render_resume_picker(
     theme: &Theme,
 ) {
     let area = frame.area();
-    let block = crate::chrome::panel(Some("resume a session"), theme);
+    let block = super::chrome::panel(Some("resume a session"), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

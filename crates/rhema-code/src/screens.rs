@@ -10,6 +10,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_provider::ModelCard;
 
 mod chat;
+pub(crate) mod clipboard;
 mod dialogs;
 mod palette;
 mod picker;

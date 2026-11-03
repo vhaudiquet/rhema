@@ -299,9 +299,9 @@ impl ChatState {
             && key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
         {
-            if let Some(image) = crate::clipboard::read_image() {
+            if let Some(image) = super::clipboard::read_image() {
                 self.paste_image(image);
-            } else if let Some(text) = crate::clipboard::read() {
+            } else if let Some(text) = super::clipboard::read() {
                 self.paste(&text);
             }
             return ChatAction::None;
