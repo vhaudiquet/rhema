@@ -95,7 +95,38 @@ use serde_json::Value;
 
 /// Marker key wrapping an unparseable streamed arguments payload so the
 /// call still round-trips through history.
-const WRAPPED_ARGS_KEY: &str = "_openai_args_text";
+/// The wire's per-dialect knobs: the name each server family spells its
+/// deviations under. The chat-completions vocabulary is shared; these
+/// keys — and only these keys — differ between the crates that speak it.
+/// `rhema-provider-openrouter`, `…-copilot`, and `…-llama-cpp` build
+/// their own [`Dialect`] from these fields and reuse everything else in
+/// this module.
+#[derive(Debug, Clone, Copy)]
+pub struct Dialect {
+    /// The key an unparseable tool-call argument string wraps under, so
+    /// a malformed call survives into the transcript instead of ending
+    /// the turn.
+    pub args_key: &'static str,
+    /// The key an assistant message replays its chain of thought under,
+    /// when the server wants it back to continue across tool calls;
+    /// `None` for servers that reject the field.
+    pub assistant_reasoning_key: Option<&'static str>,
+    /// The key a thinking level is sent under.
+    pub effort_key: &'static str,
+    /// The wire spelling of a thinking level; `None` sends nothing and
+    /// the server's default stands.
+    pub reasoning_effort: fn(ThinkingEffort) -> Option<Value>,
+}
+
+/// The dialect this crate implements: the OpenAI-shaped chat
+/// completions API — OpenAI itself, DeepSeek-style servers, and the
+/// generic proxies that copy them.
+pub const OPENAI_COMPATIBLE: Dialect = Dialect {
+    args_key: "_openai_args_text",
+    assistant_reasoning_key: Some("reasoning_content"),
+    effort_key: "reasoning_effort",
+    reasoning_effort: reasoning_effort_value,
+};
 
 // --- Request wire types (serialize) ---
 
@@ -121,10 +152,11 @@ pub struct ChatCompletionRequest {
     /// Output token ceiling, when set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    /// How much reasoning the model should do, when the driver named a
-    /// level; absent means the server's default stands.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<&'static str>,
+    /// The dialect's effort field — one entry under the server family's
+    /// own key. Flattened so the wire sees `{"…effort_key": …}` at the
+    /// top level, exactly where each family looks for it.
+    #[serde(flatten)]
+    pub effort: std::collections::BTreeMap<String, Value>,
 }
 
 /// The `stream_options` request field.
@@ -191,6 +223,9 @@ pub struct WireMessage {
     /// across tool calls instead of re-deriving it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+    /// The same trace where a dialect spells it `reasoning` (OpenRouter).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
     /// The answered call's id, on `role: "tool"` messages.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -286,6 +321,9 @@ pub struct WireDelta {
     /// into the message.
     #[serde(default)]
     pub reasoning_content: Option<String>,
+    /// The same trace where a dialect spells it `reasoning` (OpenRouter).
+    #[serde(default)]
+    pub reasoning: Option<String>,
     /// Tool-call fragments, keyed by their `index`.
     #[serde(default)]
     pub tool_calls: Option<Vec<WireToolCallDelta>>,
@@ -487,13 +525,16 @@ pub fn is_text(model: &ModelCard) -> bool {
 
 /// Builds the chat-completions request body for `req`. The model is passed
 /// through verbatim and nothing is validated: the server owns rejection.
-pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
+/// The request the dialect sends: the shared chat-completions
+/// vocabulary, with the effort and reasoning-replay spelled per dialect.
+pub fn request_body(req: &ModelRequest, dialect: &Dialect) -> ChatCompletionRequest {
     let mut messages: Vec<WireMessage> = Vec::new();
     if let Some(system) = req.system.as_deref().filter(|s| !s.trim().is_empty()) {
         messages.push(WireMessage {
             role: "system".into(),
             content: Some(WireContent::Text(system.to_owned())),
             reasoning_content: None,
+            reasoning: None,
             tool_calls: None,
             tool_call_id: None,
         });
@@ -507,6 +548,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                         role: "system".into(),
                         content: Some(WireContent::Text(text)),
                         reasoning_content: None,
+                        reasoning: None,
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -518,6 +560,7 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                         role: "user".into(),
                         content: Some(content),
                         reasoning_content: None,
+                        reasoning: None,
                         tool_calls: None,
                         tool_call_id: None,
                     });
@@ -542,20 +585,30 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                     })
                     .collect();
                 // The reasoning that led to the calls, replayed in order:
-                // the blocks must match what the model generated.
-                let reasoning = message
-                    .content
-                    .iter()
-                    .filter_map(|content| match content {
-                        Content::ToolCall(call) => call
-                            .provider_data
-                            .get("reasoning")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        _ => None,
-                    })
-                    .collect::<Vec<String>>()
-                    .join("\n\n");
+                // the blocks must match what the model generated. The key
+                // it rides on is dialect property — servers that reject
+                // the field get nothing.
+                let replay = || -> Option<String> {
+                    let reasoning = message
+                        .content
+                        .iter()
+                        .filter_map(|content| match content {
+                            Content::ToolCall(call) => call
+                                .provider_data
+                                .get("reasoning")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            _ => None,
+                        })
+                        .collect::<Vec<String>>()
+                        .join("\n\n");
+                    (!reasoning.is_empty()).then_some(reasoning)
+                };
+                let (reasoning_content, reasoning) = match dialect.assistant_reasoning_key {
+                    Some("reasoning_content") => (replay(), None),
+                    Some(_) => (None, replay()),
+                    None => (None, None),
+                };
                 // Servers reject an assistant message with neither content
                 // nor tool_calls.
                 if !text.is_empty() || !calls.is_empty() {
@@ -563,7 +616,8 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
                         role: "assistant".into(),
                         content: (!text.is_empty()).then_some(WireContent::Text(text)),
                         tool_calls: (!calls.is_empty()).then_some(calls),
-                        reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                        reasoning_content,
+                        reasoning,
                         tool_call_id: None,
                     });
                 }
@@ -601,18 +655,31 @@ pub fn request_body(req: &ModelRequest) -> ChatCompletionRequest {
         },
         temperature: req.params.temperature,
         max_tokens: req.params.max_tokens,
-        reasoning_effort: reasoning_effort(req.params.thinking),
+        effort: effort_field(req.params.thinking, dialect),
     }
 }
 
-/// The OpenAI `reasoning_effort` spelling of a thinking level; `None`
-/// sends nothing and the server's default stands.
-fn reasoning_effort(thinking: ThinkingEffort) -> Option<&'static str> {
+/// The dialect's effort field: one entry, keyed the way the server
+/// family spells it (`reasoning_effort` for OpenAI shapes, `reasoning`
+/// for OpenRouter), holding the wire spelling of the level.
+fn effort_field(
+    thinking: ThinkingEffort,
+    dialect: &Dialect,
+) -> std::collections::BTreeMap<String, Value> {
+    (dialect.reasoning_effort)(thinking)
+        .map(|value| BTreeMap::from([(dialect.effort_key.to_owned(), value)]))
+        .unwrap_or_default()
+}
+
+/// The OpenAI-shaped wire spelling of a thinking level, under the
+/// dialect's [`Dialect::effort_key`]; `None` sends nothing and the
+/// server's default stands.
+fn reasoning_effort_value(thinking: ThinkingEffort) -> Option<Value> {
     match thinking {
         ThinkingEffort::Default => None,
-        ThinkingEffort::Low => Some("low"),
-        ThinkingEffort::Medium => Some("medium"),
-        ThinkingEffort::High => Some("high"),
+        ThinkingEffort::Low => Some(Value::String("low".to_owned())),
+        ThinkingEffort::Medium => Some(Value::String("medium".to_owned())),
+        ThinkingEffort::High => Some(Value::String("high".to_owned())),
     }
 }
 
@@ -667,6 +734,7 @@ fn tool_results_of(message: &Message) -> impl Iterator<Item = WireMessage> + '_ 
             role: "tool".into(),
             content: Some(WireContent::Text(result.content.clone())),
             reasoning_content: None,
+            reasoning: None,
             tool_calls: None,
             tool_call_id: Some(result.id.clone()),
         }),
@@ -706,7 +774,7 @@ struct PartialCall {
 /// chunk); the last value seen wins. When the assembled message contains
 /// tool calls, the effective stop reason is
 /// [`StopReason::ToolUse`] regardless of the wire value.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ChunkAssembler {
     /// The assistant text streamed so far. One buffer, not one entry per
     /// chunk: a chunk boundary is a transport artifact, and a per-chunk
@@ -719,12 +787,30 @@ pub struct ChunkAssembler {
     calls: BTreeMap<u32, PartialCall>,
     finish_reason: Option<String>,
     usage: Usage,
+    /// The dialect's malformed-arguments wrapper key.
+    args_key: &'static str,
 }
 
 impl ChunkAssembler {
-    /// An assembler that has seen no chunks.
-    pub fn new() -> Self {
-        Self::default()
+    /// An assembler that has seen no chunks, wrapping malformed
+    /// arguments under `dialect`'s key.
+    pub fn new(dialect: &Dialect) -> Self {
+        Self {
+            args_key: dialect.args_key,
+            ..Self::with_defaults()
+        }
+    }
+
+    /// The field-default assembler, before a dialect's key is known.
+    fn with_defaults() -> Self {
+        Self {
+            text: String::new(),
+            reasoning: String::new(),
+            calls: BTreeMap::new(),
+            finish_reason: None,
+            usage: Usage::default(),
+            args_key: OPENAI_COMPATIBLE.args_key,
+        }
     }
 
     /// Feeds one chunk, emitting its streaming events. Fails with
@@ -770,7 +856,11 @@ impl ChunkAssembler {
             let Some(delta) = choice.delta else {
                 continue;
             };
-            if let Some(text) = delta.reasoning_content.filter(|text| !text.is_empty()) {
+            let reasoning_piece = delta
+                .reasoning_content
+                .or(delta.reasoning)
+                .filter(|text| !text.is_empty());
+            if let Some(text) = reasoning_piece {
                 sink.emit(Event::ThinkingDelta(&text));
                 self.reasoning.push_str(&text);
             }
@@ -855,7 +945,7 @@ impl ChunkAssembler {
             content.push(Content::ToolCall(ToolCall {
                 id: partial.id.unwrap_or_else(|| format!("call_{index}")),
                 name: partial.name.unwrap_or_default(),
-                args: parse_args(&partial.arguments),
+                args: parse_args(&partial.arguments, self.args_key),
                 provider_data,
             }));
         }
@@ -872,11 +962,11 @@ impl ChunkAssembler {
 
 /// Parses a call's assembled arguments text; an empty payload is `{}` and
 /// an unparseable one wraps under [`WRAPPED_ARGS_KEY`] so the turn survives.
-fn parse_args(raw: &str) -> Value {
+fn parse_args(raw: &str, args_key: &'static str) -> Value {
     if raw.trim().is_empty() {
         return Value::Object(serde_json::Map::new());
     }
-    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ WRAPPED_ARGS_KEY: raw }))
+    serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ args_key: raw }))
 }
 
 /// Maps the wire `finish_reason` onto rhema-core's stop reason; any tool
@@ -966,7 +1056,8 @@ mod tests {
             },
         };
 
-        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let json =
+            serde_json::to_value(request_body(&req, &OPENAI_COMPATIBLE)).expect("body serializes");
 
         assert_eq!(json["model"], "gpt-4o-mini");
         assert_eq!(json["stream"], json!(true));
@@ -1014,7 +1105,8 @@ mod tests {
             params: ChatParams::new("gpt-4o-mini"),
         };
 
-        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let json =
+            serde_json::to_value(request_body(&req, &OPENAI_COMPATIBLE)).expect("body serializes");
         let messages = json["messages"].as_array().expect("messages");
         assert_eq!(messages.len(), 3);
         assert_eq!(messages[0]["content"], "a");
@@ -1041,7 +1133,8 @@ mod tests {
             params: ChatParams::new("gpt-4o-mini"),
         };
 
-        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let json =
+            serde_json::to_value(request_body(&req, &OPENAI_COMPATIBLE)).expect("body serializes");
         let messages = json["messages"].as_array().expect("messages");
         assert_eq!(messages.len(), 1);
         assert!(messages[0].get("content").is_none());
@@ -1069,7 +1162,8 @@ mod tests {
             params: ChatParams::new("gpt-4o-mini"),
         };
 
-        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let json =
+            serde_json::to_value(request_body(&req, &OPENAI_COMPATIBLE)).expect("body serializes");
         let messages = json["messages"].as_array().expect("messages");
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "user");
@@ -1091,7 +1185,8 @@ mod tests {
             params: ChatParams::new("gpt-4o-mini"),
         };
 
-        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        let body = serde_json::to_string(&request_body(&req, &OPENAI_COMPATIBLE))
+            .expect("body serializes");
         assert!(
             body.contains(concat!(
                 r#""content":[{"type":"text","text":"what is this?"},"#,
@@ -1121,7 +1216,8 @@ mod tests {
             params: ChatParams::new("gpt-4o-mini"),
         };
 
-        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        let body = serde_json::to_string(&request_body(&req, &OPENAI_COMPATIBLE))
+            .expect("body serializes");
         assert!(
             body.contains(concat!(
                 r#""content":[{"type":"text","text":"first"},"#,
@@ -1149,7 +1245,8 @@ mod tests {
             params: ChatParams::new("gpt-4o-mini"),
         };
 
-        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        let body = serde_json::to_string(&request_body(&req, &OPENAI_COMPATIBLE))
+            .expect("body serializes");
         assert_eq!(body.matches(r#""type":"image_url""#).count(), 2, "{body}");
         assert!(
             body.contains(r#"{"url":"data:image/png;base64,cG5n"}"#),
@@ -1182,7 +1279,8 @@ mod tests {
 
         // Byte-identical to the pre-parts shape: every content is a JSON
         // string, on every role, and no parts machinery appears.
-        let body = serde_json::to_string(&request_body(&req)).expect("body serializes");
+        let body = serde_json::to_string(&request_body(&req, &OPENAI_COMPATIBLE))
+            .expect("body serializes");
         assert!(body.contains(r#""content":"be terse""#), "{body}");
         assert!(body.contains(r#""content":"list files""#), "{body}");
         assert!(body.contains(r#""content":"checking""#), "{body}");
@@ -1192,7 +1290,7 @@ mod tests {
 
     #[test]
     fn text_chunks_assemble_end_turn_with_usage() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1256,7 +1354,7 @@ mod tests {
     fn chunk_boundaries_never_reach_the_history_wire() {
         // The regression: per-chunk text parts replayed next request as
         // `Hel\n\nlo`, and the model mimicked the shredded format.
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         for piece in ["to", " re", " -add"] {
             assembler
@@ -1276,7 +1374,8 @@ mod tests {
             tools: Vec::new(),
             params: ChatParams::new("gpt-4o-mini"),
         };
-        let json = serde_json::to_value(request_body(&req)).expect("body serializes");
+        let json =
+            serde_json::to_value(request_body(&req, &OPENAI_COMPATIBLE)).expect("body serializes");
         let messages = json["messages"].as_array().expect("messages array");
         assert_eq!(messages[0]["role"], "assistant");
         assert_eq!(messages[0]["content"], "to re -add");
@@ -1286,7 +1385,7 @@ mod tests {
     fn a_stream_without_a_usage_chunk_degrades_to_zero_usage() {
         // A server that ignores stream_options sends no usage at all —
         // that is a degenerate but valid stream, not an error.
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1304,7 +1403,7 @@ mod tests {
 
     #[test]
     fn tool_call_fragments_assemble_tool_use() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         // First fragment: id + name; later fragments: argument text pieces.
         assembler
@@ -1359,7 +1458,7 @@ mod tests {
 
     #[test]
     fn parallel_calls_keep_their_index_order_and_first_seen_ids() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1389,7 +1488,7 @@ mod tests {
 
     #[test]
     fn an_idless_first_fragment_gets_a_synthesized_id_and_bad_args_are_wrapped() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1417,7 +1516,7 @@ mod tests {
 
     #[test]
     fn empty_arguments_become_an_empty_object() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1445,7 +1544,7 @@ mod tests {
     #[test]
     fn a_tool_call_beats_the_wire_finish_reason() {
         // Compatible servers disagree on the reason for tool-call turns.
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1473,7 +1572,7 @@ mod tests {
             ("server_error", StopReason::Other("server_error".into())),
         ];
         for (reason, expected) in cases {
-            let mut assembler = ChunkAssembler::new();
+            let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
             let mut sink = Collector::new();
             assembler
                 .push(
@@ -1487,7 +1586,7 @@ mod tests {
         }
 
         // No finish reason at all defaults to EndTurn.
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1500,7 +1599,7 @@ mod tests {
 
     #[test]
     fn deepseeks_top_level_cache_split_maps_to_cached_tokens() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1532,18 +1631,18 @@ mod tests {
                 thinking: ThinkingEffort::High,
             },
         };
-        let body = serde_json::to_string(&request_body(&req)).unwrap();
+        let body = serde_json::to_string(&request_body(&req, &OPENAI_COMPATIBLE)).unwrap();
         assert!(body.contains("\"reasoning_effort\":\"high\""), "{body}");
 
         // Default sends nothing: strict endpoints keep their shape.
         req.params.thinking = ThinkingEffort::Default;
-        let body = serde_json::to_string(&request_body(&req)).unwrap();
+        let body = serde_json::to_string(&request_body(&req, &OPENAI_COMPATIBLE)).unwrap();
         assert!(!body.contains("reasoning_effort"), "{body}");
     }
 
     #[test]
     fn reasoning_content_streams_but_never_reaches_the_message() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         // Both fields empty: nothing emits.
         assembler
@@ -1602,10 +1701,10 @@ mod tests {
                 thinking: ThinkingEffort::Default,
             },
         };
-        let body = serde_json::to_value(request_body(&req)).expect("body serializes");
-        let assistant = &body["messages"][0];
-        assert_eq!(assistant["role"], "assistant");
-        assert_eq!(assistant["reasoning_content"], reasoning);
+        let body = request_body(&req, &OPENAI_COMPATIBLE);
+        let assistant = &body.messages[0];
+        assert_eq!(assistant.role, "assistant");
+        assert_eq!(assistant.reasoning_content.as_deref(), Some(reasoning));
 
         // Without stored reasoning the field stays absent.
         let plain = ModelRequest {
@@ -1614,20 +1713,18 @@ mod tests {
             tools: Vec::new(),
             params: req.params.clone(),
         };
-        let body = serde_json::to_value(request_body(&plain)).expect("body serializes");
+        let body = request_body(&plain, &OPENAI_COMPATIBLE);
         assert!(
-            body["messages"]
-                .as_array()
-                .unwrap()
+            body.messages
                 .iter()
-                .all(|m| m.get("reasoning_content").is_none()),
-            "{body}"
+                .all(|m| m.reasoning_content.is_none() && m.reasoning.is_none()),
+            "{body:?}"
         );
     }
 
     #[test]
     fn reasoning_content_before_a_tool_call_is_kept_for_replay() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         for payload in [
             r#"{"choices":[{"delta":{"reasoning_content":"I should list "}}]}"#,
@@ -1659,7 +1756,7 @@ mod tests {
 
     #[test]
     fn last_finish_reason_and_usage_win() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         assembler
             .push(
@@ -1694,7 +1791,7 @@ mod tests {
 
     #[test]
     fn a_mid_stream_error_chunk_fails_the_push() {
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         let err = assembler
             .push(
@@ -1715,7 +1812,7 @@ mod tests {
         assert!(sink.0.is_empty());
 
         // An unshaped error body falls back to the fixed raw text.
-        let mut assembler = ChunkAssembler::new();
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
         let mut sink = Collector::new();
         let err = assembler
             .push(chunk("{\"error\":{}}"), &mut sink)

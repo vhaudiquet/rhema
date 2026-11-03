@@ -37,11 +37,11 @@ use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireBalance, WireErrorBod
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 /// The SSE payload that ends every OpenAI-compatible chat stream.
-const DONE_SENTINEL: &str = "[DONE]";
+pub const DONE_SENTINEL: &str = "[DONE]";
 
 /// The HTTP client every instance shares: connect capped, stream reads
 /// stall-guarded, never total-time capped.
-fn http_client() -> reqwest::Client {
+pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         // One connect attempt; a dead network fails fast instead of
         // hanging the agent step.
@@ -59,6 +59,13 @@ pub struct OpenAiCompatibleProvider {
     base_url: String,
     api_key: String,
     http: reqwest::Client,
+    /// The wire knobs: the shared vocabulary is this crate's; the
+    /// dialect names the keys where the addressed server family spells
+    /// its deviations.
+    dialect: crate::wire::Dialect,
+    /// Extra headers every request carries — routing metadata,
+    /// editor identification, whatever the service demands.
+    extra_headers: reqwest::header::HeaderMap,
 }
 
 impl std::fmt::Debug for OpenAiCompatibleProvider {
@@ -83,6 +90,8 @@ impl OpenAiCompatibleProvider {
             base_url: DEFAULT_BASE_URL.to_owned(),
             api_key: api_key.into(),
             http: http_client(),
+            dialect: crate::wire::OPENAI_COMPATIBLE,
+            extra_headers: reqwest::header::HeaderMap::new(),
         }
     }
 
@@ -96,6 +105,23 @@ impl OpenAiCompatibleProvider {
         self
     }
 
+    /// Speaks another [`Dialect`] — another server family's spelling of
+    /// the same chat-completions vocabulary. This is how
+    /// `rhema-provider-openrouter` and `…-llama-cpp` reuse this
+    /// transport: their providers hold one of these, dialed to their
+    /// dialect.
+    pub fn with_dialect(mut self, dialect: crate::wire::Dialect) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
+    /// Attaches headers every request carries. Called repeatedly, the
+    /// maps merge; later values win per header name.
+    pub fn with_extra_headers(mut self, headers: reqwest::header::HeaderMap) -> Self {
+        self.extra_headers.extend(headers);
+        self
+    }
+
     /// The text chat models the server can serve (`GET {base}/models` →
     /// `data[].id`, plus whatever metadata the entry carries). Sparse
     /// entries are the norm on generic servers; see
@@ -104,7 +130,7 @@ impl OpenAiCompatibleProvider {
         let response = self
             .http
             .get(format!("{}/models", self.base_url))
-            .authorized(&self.api_key)
+            .authorized(&self.api_key, &self.extra_headers)
             // The one overall timeout: a bounded listing call, not a stream
             // of unbounded length.
             .timeout(Duration::from_secs(20))
@@ -137,7 +163,7 @@ impl OpenAiCompatibleProvider {
         let response = self
             .http
             .get(format!("{base}/user/balance"))
-            .authorized(&self.api_key)
+            .authorized(&self.api_key, &self.extra_headers)
             // A bounded listing-style call, not a stream.
             .timeout(Duration::from_secs(20))
             .send()
@@ -228,23 +254,32 @@ fn decorate_deepseek(models: &mut [ModelCard]) {
 /// Attaches the bearer header when a key is configured; an empty key means
 /// an anonymous request (local servers).
 trait Authorized {
-    fn authorized(self, api_key: &str) -> reqwest::RequestBuilder;
+    fn authorized(
+        self,
+        api_key: &str,
+        extra: &reqwest::header::HeaderMap,
+    ) -> reqwest::RequestBuilder;
 }
 
 impl Authorized for reqwest::RequestBuilder {
-    fn authorized(self, api_key: &str) -> reqwest::RequestBuilder {
-        if api_key.is_empty() {
+    fn authorized(
+        self,
+        api_key: &str,
+        extra: &reqwest::header::HeaderMap,
+    ) -> reqwest::RequestBuilder {
+        let built = if api_key.is_empty() {
             self
         } else {
             self.bearer_auth(api_key)
-        }
+        };
+        built.headers(extra.clone())
     }
 }
 
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the OpenAI
 /// error shape's `error.message` when the body has it, and carrying the
 /// HTTP status structurally for [`ProviderError::is_retryable`].
-fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
+pub fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
     let parsed: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
     ProviderError::Api {
         message: format!(
@@ -258,7 +293,7 @@ fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
 
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
 /// carried in [`ProviderError`] directly (it is `Clone + Eq`).
-fn network_error(err: reqwest::Error) -> ProviderError {
+pub fn network_error(err: reqwest::Error) -> ProviderError {
     if err.is_timeout() {
         ProviderError::Timeout
     } else {
@@ -268,6 +303,40 @@ fn network_error(err: reqwest::Error) -> ProviderError {
 
 /// Parses one SSE payload as a chunk and folds it into the assembler. An
 /// empty payload (keep-alive) is skipped.
+/// Drains one chat-completions SSE response to its `[DONE]` sentinel,
+/// assembling the output and emitting streaming events along the way.
+/// The whole openai-dialect family completes through this: a provider
+/// acquires its own response (copilot's token dance, openrouter's
+/// routing headers) and hands it here.
+pub async fn drain_chat_stream(
+    response: reqwest::Response,
+    dialect: &crate::wire::Dialect,
+    sink: &mut dyn EventSink,
+) -> Result<ModelOutput, ProviderError> {
+    let mut stream = response.bytes_stream();
+    let mut decoder = SseDecoder::new();
+    let mut assembler = ChunkAssembler::new(dialect);
+    while let Some(item) = stream.next().await {
+        let bytes = item.map_err(network_error)?;
+        for payload in decoder.push(&bytes) {
+            if payload.trim() == DONE_SENTINEL {
+                return Ok(assembler.finish());
+            }
+            feed_chunk(&payload, &mut assembler, sink)?;
+            if let Some(err) = decoder.take_error() {
+                return Err(ProviderError::Network(err));
+            }
+        }
+    }
+    for payload in decoder.finish() {
+        if payload.trim() == DONE_SENTINEL {
+            break;
+        }
+        feed_chunk(&payload, &mut assembler, sink)?;
+    }
+    Ok(assembler.finish())
+}
+
 fn feed_chunk(
     payload: &str,
     assembler: &mut ChunkAssembler,
@@ -297,13 +366,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
         req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        let body = crate::wire::request_body(&req);
+        let body = crate::wire::request_body(&req, &self.dialect);
         let url = format!("{}/chat/completions", self.base_url);
 
         let response = self
             .http
             .post(&url)
-            .authorized(&self.api_key)
+            .authorized(&self.api_key, &self.extra_headers)
             .json(&body)
             .send()
             .await
@@ -317,28 +386,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
         // No overall timeout: a long generation is legitimate, and the
         // client's read timeout already bounds stalls between chunks.
-        let mut stream = response.bytes_stream();
-        let mut decoder = SseDecoder::new();
-        let mut assembler = ChunkAssembler::new();
-        while let Some(item) = stream.next().await {
-            let bytes = item.map_err(network_error)?;
-            for payload in decoder.push(&bytes) {
-                if payload.trim() == DONE_SENTINEL {
-                    return Ok(assembler.finish());
-                }
-                feed_chunk(&payload, &mut assembler, sink)?;
-                if let Some(err) = decoder.take_error() {
-                    return Err(ProviderError::Network(err));
-                }
-            }
-        }
-        for payload in decoder.finish() {
-            if payload.trim() == DONE_SENTINEL {
-                break;
-            }
-            feed_chunk(&payload, &mut assembler, sink)?;
-        }
-        Ok(assembler.finish())
+        drain_chat_stream(response, &self.dialect, sink).await
     }
 }
 
