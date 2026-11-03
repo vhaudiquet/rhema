@@ -33,7 +33,7 @@
 pub mod privacy;
 pub mod secrets;
 
-use crate::privacy::{private_dir, private_write};
+use crate::privacy::{private_dir, private_write_atomic};
 use crate::secrets::SecretStore;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -1123,7 +1123,7 @@ impl Config {
     /// handling.
     pub fn save_to(path: &impl AsRef<Path>, config: &Config) -> Result<(), ConfigError> {
         let yaml = serde_yaml::to_string(config)?;
-        private_write(path.as_ref(), yaml.as_bytes())?;
+        private_write_atomic(path.as_ref(), yaml.as_bytes())?;
         Ok(())
     }
 }
