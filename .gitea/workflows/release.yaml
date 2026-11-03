@@ -247,7 +247,7 @@ jobs:
         run: |
           version="${GITHUB_REF_NAME#v}"
           ok=yes
-          for crate in rhema-core rhema-config rhema-provider rhema-agent-tools rhema-coding-agent rhema-provider-anthropic rhema-provider-copilot rhema-provider-google rhema-provider-llama-cpp rhema-provider-openai-compatible rhema-provider-openrouter rhema-acp; do
+          for crate in rhema-core rhema-config rhema-provider rhema-agent-tools rhema-transcript rhema-coding-agent rhema-provider-anthropic rhema-provider-copilot rhema-provider-google rhema-provider-llama-cpp rhema-provider-openai-compatible rhema-provider-openrouter rhema-acp; do
             if curl -fsSL -A "rhema-release (git.vhaudiquet.fr/vhaudiquet/rhema)" "https://crates.io/api/v1/crates/$crate/$version" >/dev/null 2>&1; then
               echo "$crate v$version is already on crates.io — skipping"
               continue
