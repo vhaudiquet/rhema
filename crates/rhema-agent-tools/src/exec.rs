@@ -76,6 +76,22 @@ pub trait ShellExecutor: Send + Sync {
 #[cfg(feature = "local-shell")]
 const CANCEL_TICK: Duration = Duration::from_millis(100);
 
+/// One stream's capture window: everything the result renderer can
+/// show (`BASH_OUTPUT_LIMIT` of bytes, or the last `BASH_OUTPUT_LINES`
+/// rows — whichever cuts later) plus slack for line alignment, so the
+/// truncation the model sees matches an uncaptured run's. Bounds the
+/// memory a chatty command can pin: without it, `yes` streams through
+/// the channel into these buffers until the deadline.
+#[cfg(feature = "local-shell")]
+const CAPTURE_WINDOW: usize = 50 * 1024 + 1024 * 1024;
+
+/// The overshoot an eviction waits for: draining per line would shift
+/// the retained window on every line of a chatty stream (quadratic);
+/// waiting for a quarter-window of overshoot makes the cost
+/// amortized-linear. Peak residency is the window plus this.
+#[cfg(feature = "local-shell")]
+const CAPTURE_EVICT: usize = 256 * 1024;
+
 /// The local executor: commands run as `bash -c` child processes on this
 /// host, streamed line by line, killed past their timeout (`kill_on_drop`
 /// so the dropped child handle kills a still-running process).
@@ -152,6 +168,19 @@ impl ShellExecutor for LocalShell {
                         let sink = if is_stderr { &mut stderr } else { &mut stdout };
                         sink.extend_from_slice(line.as_bytes());
                         sink.push(b'\n');
+                        // Bound the capture: the renderer reads only
+                        // the tail, so past the window drop whole head
+                        // lines down to it. The cut lands on a newline
+                        // when there is one, keeping the retained bytes
+                        // line-framed for the renderer's tail logic.
+                        if sink.len() >= CAPTURE_WINDOW + CAPTURE_EVICT {
+                            let keep_from = sink.len() - CAPTURE_WINDOW;
+                            let boundary = sink[keep_from..]
+                                .iter()
+                                .position(|&byte| byte == b'\n')
+                                .map_or(keep_from, |position| keep_from + position + 1);
+                            sink.drain(..boundary);
+                        }
                         progress(&format!("{line}\n"));
                     }
                     // Both streams closed: only the exit status is left.
@@ -271,4 +300,43 @@ pub fn default_executor_with(_env: &BTreeMap<String, String>) -> std::sync::Arc<
 #[cfg(not(feature = "local-shell"))]
 pub fn default_executor() -> std::sync::Arc<dyn ShellExecutor> {
     std::sync::Arc::new(NoShell)
+}
+
+#[cfg(all(test, feature = "local-shell"))]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    fn silent(_line: &str) {}
+
+    #[tokio::test]
+    async fn a_chatty_command_cannot_grow_the_capture_without_bound() {
+        let shell = LocalShell::default();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        // ~1.8 MB of stdout: far past the capture window, far under
+        // the deadline, so the cap — not the timeout — is what held.
+        let executed = shell
+            .run(
+                "seq 1 300000",
+                Path::new("/tmp"),
+                Duration::from_secs(60),
+                &cancelled,
+                &mut silent,
+            )
+            .await
+            .unwrap();
+        assert_eq!(executed.code, Some(0));
+        assert!(
+            executed.stdout.len() < CAPTURE_WINDOW + CAPTURE_EVICT,
+            "capture must stay bounded, got {} bytes",
+            executed.stdout.len()
+        );
+        // The tail survives: the last lines are what the model reads.
+        let tail = String::from_utf8_lossy(&executed.stdout);
+        assert!(
+            tail.ends_with("300000\n"),
+            "tail lost: …{}",
+            &tail[tail.len().saturating_sub(40)..]
+        );
+    }
 }
