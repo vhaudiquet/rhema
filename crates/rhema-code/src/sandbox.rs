@@ -608,6 +608,9 @@ fn lxd_info_answers() -> bool {
             Ok(Some(status)) => return status.success(),
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
+                // Reap the killed child: the TUI is long-lived and an
+                // unreaped probe lingers as a zombie until exit.
+                let _ = child.wait();
                 return false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
@@ -635,6 +638,9 @@ fn ecrou_probe_answers() -> bool {
             Ok(Some(status)) => return status.success(),
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
+                // Reap the killed child: the TUI is long-lived and an
+                // unreaped probe lingers as a zombie until exit.
+                let _ = child.wait();
                 return false;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),

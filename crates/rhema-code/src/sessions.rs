@@ -156,26 +156,7 @@ pub fn save_session(
 pub fn write_session(path: &Path, session: &Session) -> io::Result<()> {
     let json = serde_json::to_string_pretty(session)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("session");
-    let temp = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!(".{name}.{}.tmp", std::process::id()));
-    let written = rhema_config::privacy::private_write(&temp, json.as_bytes());
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
-        return written;
-    }
-    match std::fs::rename(&temp, path) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let _ = std::fs::remove_file(&temp);
-            Err(err)
-        }
-    }
+    rhema_config::privacy::private_write_atomic(path, json.as_bytes())
 }
 
 /// The saved sessions for `workspace`, newest first. A missing directory
