@@ -1129,14 +1129,13 @@ async fn the_slot_map_stays_capped_and_a_dropped_session_reloads() {
                 "every session gets its own id"
             );
             // The evicted, prompted session still comes back whole.
-            cx
-                .send_request(LoadSessionRequest::new(
-                    ids[1].clone(),
-                    workspace.to_path_buf(),
-                ))
-                .block_task()
-                .await
-                .expect("session/load after eviction");
+            cx.send_request(LoadSessionRequest::new(
+                ids[1].clone(),
+                workspace.to_path_buf(),
+            ))
+            .block_task()
+            .await
+            .expect("session/load after eviction");
             // The load answered, and the reloaded session serves a
             // prompt — the eviction lost nothing that matters.
             cx.send_request(PromptRequest::new(

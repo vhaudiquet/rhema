@@ -29,7 +29,6 @@
 //! the answer always comes from the UI thread — a separate OS thread that
 //! does not depend on the runtime making progress.
 
-
 /// The UI-side half of the bridge: sends the user's answer for the request
 /// the turn task is currently blocked on. Dropping it declines every
 /// present and future request (fail-safe).
