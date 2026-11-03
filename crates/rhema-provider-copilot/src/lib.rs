@@ -57,4 +57,4 @@ pub mod wire;
 
 pub use login::{CopilotLogin, DEFAULT_CLIENT_ID};
 pub use provider::{CopilotProvider, DEFAULT_API_BASE, DEFAULT_GITHUB_URL};
-pub use wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler};
+pub use wire::{WireCopilotUser, allowance as wire_allowance};

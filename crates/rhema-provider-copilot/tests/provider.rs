@@ -96,7 +96,15 @@ async fn chat_completions_streams_through_the_sse_decoder() {
     assert_eq!(output.stop_reason, StopReason::EndTurn);
     assert_eq!(output.usage.input_tokens, 7);
     assert_eq!(output.message.content, vec![Content::Text("Hello".into())]);
-    assert_eq!(sink.0, vec!["TextDelta(\"Hel\")", "TextDelta(\"lo\")"]);
+    // Usage rides the final chunk: the shared assembler emits it.
+    assert_eq!(
+        sink.0,
+        vec![
+            "TextDelta(\"Hel\")".to_owned(),
+            "TextDelta(\"lo\")".to_owned(),
+            "Usage(Usage { input_tokens: 7, output_tokens: 2, cached_input_tokens: 0 })".to_owned(),
+        ]
+    );
 }
 
 #[tokio::test]

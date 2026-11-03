@@ -27,17 +27,20 @@
 use std::time::Duration;
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{Allowance, ModelCard, SseDecoder};
+use rhema_provider::{Allowance, ModelCard};
+use rhema_provider_openai_compatible::provider::{
+    drain_chat_stream, network_error as dialect_network_error,
+};
+use rhema_provider_openai_compatible::wire::{
+    ChatCompletionRequest, OPENAI_COMPATIBLE, WireErrorBody, request_body,
+};
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::wire::{
-    ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler, WireCopilotUser, WireErrorBody,
-};
+use crate::wire::WireCopilotUser;
 
 /// The GitHub host the OAuth token exchanges at.
 pub const DEFAULT_GITHUB_URL: &str = "https://github.com";
@@ -45,9 +48,6 @@ pub const DEFAULT_GITHUB_URL: &str = "https://github.com";
 /// The chat base assumed before the first exchange answers with the
 /// token's own serving host.
 pub const DEFAULT_API_BASE: &str = "https://api.githubcopilot.com";
-
-/// The SSE payload that ends every OpenAI-compatible chat stream.
-const DONE_SENTINEL: &str = "[DONE]";
 
 /// How long before a Copilot token's `expires_at` the cache treats it as
 /// spent: one margin refresh costs one exchange; a mid-turn 401 costs a
@@ -234,7 +234,7 @@ impl CopilotProvider {
     }
 
     /// The models the seat's Copilot subscription serves (`GET
-    /// {api}/models`), text chat models only — see
+    /// {api}/models`), chat-capable rows only — see
     /// [`crate::wire::normalize_models`].
     pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         let token = self.copilot_token().await?;
@@ -355,29 +355,7 @@ fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot
 /// be carried in [`ProviderError`] directly (it is `Clone + Eq`).
 fn network_error(err: reqwest::Error) -> ProviderError {
-    if err.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network(err.to_string())
-    }
-}
-
-/// Parses one SSE payload as a chunk and folds it into the assembler. An
-/// empty payload (keep-alive) is skipped.
-fn feed_chunk(
-    payload: &str,
-    assembler: &mut ChunkAssembler,
-    sink: &mut dyn EventSink,
-) -> Result<(), ProviderError> {
-    if payload.trim().is_empty() {
-        return Ok(());
-    }
-    let chunk: ChatCompletionChunk =
-        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
-            message: format!("malformed SSE chunk: {err}"),
-            status: None,
-        })?;
-    assembler.push(chunk, sink)
+    dialect_network_error(err)
 }
 
 /// Unix seconds now.
@@ -402,7 +380,7 @@ impl ModelProvider for CopilotProvider {
         req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        let body = crate::wire::request_body(&req);
+        let body = request_body(&req, &OPENAI_COMPATIBLE);
         let mut token = self.copilot_token().await?;
         let mut response = self.post_chat(&token, &body).await?;
 
@@ -423,28 +401,7 @@ impl ModelProvider for CopilotProvider {
 
         // No overall timeout: a long generation is legitimate, and the
         // client's read timeout already bounds stalls between chunks.
-        let mut stream = response.bytes_stream();
-        let mut decoder = SseDecoder::new();
-        let mut assembler = ChunkAssembler::new();
-        while let Some(item) = stream.next().await {
-            let bytes = item.map_err(network_error)?;
-            for payload in decoder.push(&bytes) {
-                if payload.trim() == DONE_SENTINEL {
-                    return Ok(assembler.finish());
-                }
-                feed_chunk(&payload, &mut assembler, sink)?;
-                if let Some(err) = decoder.take_error() {
-                    return Err(ProviderError::Network(err));
-                }
-            }
-        }
-        for payload in decoder.finish() {
-            if payload.trim() == DONE_SENTINEL {
-                break;
-            }
-            feed_chunk(&payload, &mut assembler, sink)?;
-        }
-        Ok(assembler.finish())
+        drain_chat_stream(response, &OPENAI_COMPATIBLE, sink).await
     }
 }
 
