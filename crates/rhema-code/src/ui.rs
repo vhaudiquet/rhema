@@ -2573,12 +2573,11 @@ fn thinking_rows(app: &App, width: usize) -> u16 {
 /// shared background, no panel. The command reads in accent, the
 /// description dim, and the highlighted row carries the elevated tone.
 /// Tab completes, enter runs.
-fn render_command_palette(frame: &mut Frame, app: &App, input_area: Rect, theme: &Theme) {
+fn render_command_palette(frame: &mut Frame, app: &mut App, input_area: Rect, theme: &Theme) {
     let profiles = app.palette_profiles();
     let sandboxes = app.palette_sandboxes();
-    let rows = crate::screens::palette_rows(
-        &app.chat.input,
-        app.chat.cursor,
+    let rows = crate::screens::palette_rows_cached(
+        &mut app.chat,
         &app.models,
         &profiles,
         &sandboxes,

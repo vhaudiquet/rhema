@@ -1798,6 +1798,33 @@ pub fn palette_rows(
 /// without the palette carrying every entry.
 const MAX_PATH_ROWS: usize = 256;
 
+/// The rows the popup shows, cached against `(input, cursor)` on the
+/// chat state. The render path runs every frame; the directory walk
+/// behind the path rows runs only when the query changes.
+pub fn palette_rows_cached(
+    chat: &mut ChatState,
+    models: &[CatalogModel],
+    profiles: &[PaletteProfile],
+    sandboxes: &[PaletteSandbox],
+    icons: &crate::icons::Icons,
+) -> Vec<PaletteRow> {
+    let fresh = match &chat.completion {
+        Some(cache) => cache.input == chat.input && cache.cursor == chat.cursor,
+        None => false,
+    };
+    if !fresh {
+        let rows = palette_rows(&chat.input, chat.cursor, models, profiles, sandboxes, icons);
+        chat.completion = Some(CompletionCache {
+            input: chat.input.clone(),
+            cursor: chat.cursor,
+            rows,
+        });
+    }
+    chat.completion
+        .as_ref()
+        .map_or_else(Vec::new, |c| c.rows.clone())
+}
+
 /// The path rows for the token under the cursor: the listed directory's
 /// entries whose name starts with the typed stem, case-insensitive,
 /// directories first. Hidden entries (a leading dot) stay hidden until
@@ -2216,6 +2243,18 @@ pub struct ChatState {
     /// Highlighted row of the command palette while a slash input filters
     /// it; meaningless otherwise.
     pub palette_index: usize,
+    /// The completion rows for the exact `(input, cursor)` they were
+    /// built from. The popup rebuilds every frame otherwise, and the
+    /// path rows behind it walk a directory each time.
+    pub(crate) completion: Option<CompletionCache>,
+}
+
+/// The path-completion rows and the input they answer.
+#[derive(Debug, Clone)]
+pub(crate) struct CompletionCache {
+    pub(crate) input: String,
+    pub(crate) cursor: usize,
+    pub(crate) rows: Vec<PaletteRow>,
 }
 
 impl ChatState {

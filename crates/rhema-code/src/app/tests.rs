@@ -3637,6 +3637,47 @@ fn the_sandbox_palette_completes_the_instances() {
 }
 
 #[test]
+fn the_completion_cache_answers_the_same_query_without_a_rewalk() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.chat.input = "./src/m".to_owned();
+    h.app.chat.cursor = h.app.chat.input.len();
+    let models: Vec<crate::screens::CatalogModel> = Vec::new();
+    let profiles: Vec<crate::screens::PaletteProfile> = Vec::new();
+    let sandboxes: Vec<crate::screens::PaletteSandbox> = Vec::new();
+    let first = crate::screens::palette_rows_cached(
+        &mut h.app.chat,
+        &models,
+        &profiles,
+        &sandboxes,
+        h.app.icons,
+    );
+    assert!(!first.is_empty(), "the src dir completes");
+    let cache = h.app.chat.completion.as_ref().unwrap();
+    assert_eq!(cache.input, "./src/m");
+    assert_eq!(
+        cache.rows.len(),
+        first.len(),
+        "the cache holds what it built"
+    );
+    assert_eq!(format!("{:?}", cache.rows), format!("{:?}", first));
+    // A changed query recomputes.
+    h.app.chat.input = "./no-such-dir-xyz".to_owned();
+    h.app.chat.cursor = h.app.chat.input.len();
+    let second = crate::screens::palette_rows_cached(
+        &mut h.app.chat,
+        &models,
+        &profiles,
+        &sandboxes,
+        h.app.icons,
+    );
+    assert!(second.is_empty(), "nothing completes under a missing dir");
+    assert_eq!(
+        h.app.chat.completion.as_ref().unwrap().input,
+        "./no-such-dir-xyz"
+    );
+}
+
+#[test]
 fn slash_thinking_persists_the_level_and_rebuilds_the_agent() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     crate::commands::dispatch(&mut h.app, "/thinking high");
