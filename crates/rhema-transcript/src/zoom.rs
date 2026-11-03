@@ -20,6 +20,14 @@ use crate::view::Transcript;
 /// `n`, so paging a range and paging a message are one call shape.
 pub const ZOOM_MAX_BYTES: usize = 8 * 1024;
 
+/// The most bytes one zoom call renders before it refuses. A range
+/// bigger than this cannot be paged — paging needs the bytes before
+/// `at` rendered too — and a narrower `n` is the way. Sixty-four
+/// pages: no honest range comes near it, and a model asking for the
+/// whole log in one call stops here instead of holding the mirror's
+/// lock while it all renders.
+const ZOOM_RENDER_CEILING: usize = 64 * ZOOM_MAX_BYTES;
+
 /// The `zoom` resolver over a shared mirror.
 #[derive(Debug, Clone)]
 pub struct Zoom {
@@ -114,8 +122,15 @@ impl Zoom {
             );
         }
 
+        // Render only what the requested page needs: everything up to
+        // one byte past `at + ZOOM_MAX_BYTES`, which is all the offset
+        // math reads. A page-1 call stops one message past its page
+        // instead of rendering the whole range under the lock.
+        let needed = at.saturating_add(ZOOM_MAX_BYTES).saturating_add(1);
+        let range_end = range.id + range.n;
         let mut text = String::new();
-        for i in range.id..range.id + range.n {
+        let mut covered = range.id;
+        for i in range.id..range_end {
             if !text.is_empty() {
                 text.push('\n');
             }
@@ -127,9 +142,34 @@ impl Zoom {
             }
             let message = transcript.message(i).expect("the range was checked");
             text.push_str(&summary::render_message(message));
+            covered = i + 1;
+            if text.len() >= needed && covered < range_end {
+                break;
+            }
+        }
+        let truncated = covered < range_end;
+        if truncated && text.len() > ZOOM_RENDER_CEILING {
+            return ToolResult::failure(
+                &call.id,
+                format!(
+                    "zoom: {id}+{} renders past the byte budget — \
+                     zoom a narrower range (smaller n)",
+                    range.n
+                ),
+            );
         }
 
         if at >= text.len() {
+            if truncated {
+                return ToolResult::failure(
+                    &call.id,
+                    format!(
+                        "zoom: `at` {at} lands past what was rendered \
+                         ({} bytes); zoom a narrower range (smaller n)",
+                        text.len()
+                    ),
+                );
+            }
             let mut msg = format!("zoom: `at` {at} is past the end ({} bytes)", text.len());
             // Only a render bigger than one page has a tail worth
             // pointing at.
@@ -146,13 +186,19 @@ impl Zoom {
         while end < text.len() && !text.is_char_boundary(end) {
             end -= 1;
         }
+        // The total is only known when the render reached the range's
+        // end; a page cut short of it reports its own size instead.
         let note = if end < text.len() {
-            format!(
-                "\n\n[{} of {} bytes; zoom again with at={}]",
-                end - start,
-                text.len(),
-                end
-            )
+            if truncated {
+                format!("\n\n[{} bytes; zoom again with at={end}]", end - start)
+            } else {
+                format!(
+                    "\n\n[{} of {} bytes; zoom again with at={}]",
+                    end - start,
+                    text.len(),
+                    end
+                )
+            }
         } else {
             String::new()
         };
@@ -305,6 +351,64 @@ mod tests {
             "{} bytes",
             rest.content.len()
         );
+    }
+
+    #[test]
+    fn a_wide_range_renders_one_page_and_names_its_own_size() {
+        let line = "x".repeat(600);
+        let messages: Vec<Message> = (0..200)
+            .map(|i| Message::text(Role::User, format!("msg {i} {line}")))
+            .collect();
+        let zoom = Zoom::new(transcript_with(messages));
+        let out = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 200 })));
+        assert!(!out.is_error, "{:?}", out);
+        // One page, not two hundred messages.
+        assert!(
+            out.content.len() < ZOOM_MAX_BYTES + 2048,
+            "{} bytes",
+            out.content.len()
+        );
+        // The render stopped early: the note carries no grand total.
+        assert!(
+            out.content.contains("zoom again with at="),
+            "{}",
+            out.content
+        );
+        assert!(!out.content.contains(" of "), "{}", out.content);
+        // Paging continues from the named offset.
+        let at: usize = out
+            .content
+            .rsplit("at=")
+            .next()
+            .unwrap()
+            .trim_end_matches(']')
+            .parse()
+            .unwrap();
+        let rest = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 200, "at": at })));
+        assert!(!rest.is_error, "{:?}", rest);
+    }
+
+    #[test]
+    fn a_range_past_the_ceiling_refuses_with_a_direction() {
+        let line = "x".repeat(2000);
+        let messages: Vec<Message> = (0..400)
+            .map(|i| Message::text(Role::User, format!("msg {i} {line}")))
+            .collect();
+        let zoom = Zoom::new(transcript_with(messages));
+        // Early pages are honest work: the ceiling refuses the deep
+        // ones, where honoring `at` means rendering half a megabyte to
+        // hand back eight kilobytes.
+        let deep = ZOOM_RENDER_CEILING - 2000;
+        let out = zoom.zoom(&call(serde_json::json!({ "id": 0, "n": 400, "at": deep })));
+        assert!(
+            out.is_error,
+            "the deep page does not render: {}",
+            &out.content[..200]
+        );
+        assert!(out.content.contains("narrower range"), "{}", out.content);
+        // A single message still reads: the ceiling is for ranges.
+        let one = zoom.zoom(&call(serde_json::json!({ "id": 399 })));
+        assert!(!one.is_error, "{:?}", one);
     }
 
     #[test]
