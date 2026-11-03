@@ -23,7 +23,7 @@ impl App {
     /// A bracketed paste landed: into the input, newlines included —
     /// pasting multi-line text must not fire submits. The add-instance
     /// dialog's credential line takes its own, single-line shape. A
-    /// paste past [`MAX_PASTE_BYTES`] is cut there and noticed: the
+    /// paste past `MAX_PASTE_BYTES` is cut there and noticed: the
     /// input (and the turn it would ride) has no other bound.
     pub fn on_paste(&mut self, text: &str) {
         if text.len() > MAX_PASTE_BYTES {

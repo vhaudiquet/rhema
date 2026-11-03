@@ -1,7 +1,7 @@
 //! Where `bash` runs: the sandbox choice's resolution and the assembly
 //! that turns a non-local choice into the agent's tool set.
 //!
-//! The choice is [`SandboxChoice`](crate::args::SandboxChoice), stored
+//! The choice is [`SandboxChoice`], stored
 //! per profile and overridden by `RHEMA_SANDBOX`
 //! (`specs/rhema-sandbox.md` §5). `local` is the zero-flag fast path:
 //! it constructs nothing here, and the agent builds

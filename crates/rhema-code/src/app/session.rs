@@ -116,7 +116,7 @@ impl App {
     /// The `/resume` pick: refuses politely under a running turn, and
     /// hands the load to the runner — the session file is a JSON read
     /// plus a parse on the blocking pool, and the result lands as
-    /// [`UiEvent::SessionResumed`] for [`Self::apply_resume`].
+    /// [`UiEvent::SessionResumed`] for `apply_resume`.
     pub fn request_resume(&mut self, path: &Path) -> Vec<Effect> {
         if self.turn.running {
             self.transcript

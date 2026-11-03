@@ -183,7 +183,7 @@ pub(crate) const STEER_QUEUE_CAP: usize = 64;
 /// The lifecycle state of the turn the UI thread handed to a task. The
 /// agent comes back in a `TurnFinished` or `TurnCancelled` event; this is
 /// what the keyboard, the renderer, and the status tracker need until
-/// then. Between turns everything rests at its [`TurnState::idle`] default.
+/// then. Between turns everything rests at its `TurnState::idle` default.
 pub struct TurnState {
     /// Whether a turn is in flight.
     pub running: bool,

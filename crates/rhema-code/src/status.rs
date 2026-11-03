@@ -14,7 +14,7 @@
 //! terminal, so the spec's hierarchical `id`s have nothing to address.
 //!
 //! TERMINAL OWNERSHIP: emissions happen on the UI thread — through the
-//! [`Tracker`] the event loop syncs — or in the headless runner, which
+//! `Tracker` the event loop syncs — or in the headless runner, which
 //! owns its stdout. The turn task reports through the event channel and
 //! never writes. The tracker derives the state from those events and the
 //! app, and re-emits only when the rendered report changed.

@@ -19,12 +19,12 @@
 //! too: context window, cost, and per-turn token totals.
 //!
 //! Layout:
-//! - [`serve`] — the agent surface: handlers, session slots, `serve()`
+//! - `serve` — the agent surface: handlers, session slots, `serve()`
 //! - [`backend`] — provider/model resolution from stored config + flags
 //! - [`store`] — session persistence keyed by the ACP session id
-//! - [`sink`] — engine events to `session/update`, and the session's
+//! - `sink` — engine events to `session/update`, and the session's
 //!   usage meter (crate-private)
-//! - [`approval`] — `Approval` to `session/request_permission`
+//! - `approval` — `Approval` to `session/request_permission`
 //!   (crate-private)
 //!
 //! Wire discipline: stdin/stdout carry only ACP frames (the SDK owns

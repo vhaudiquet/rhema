@@ -7,7 +7,7 @@
 //! and returns at once, so `session/cancel` and the client's permission
 //! answers keep flowing while the turn runs.
 //!
-//! Session state lives in [`App`]: one slot per session holding the
+//! Session state lives in `App`: one slot per session holding the
 //! [`CodingAgent`], a cancel sender, and the `always` permission memory.
 //! The prompt task *takes* the agent out for the turn's duration, which
 //! makes a second concurrent prompt for the same session a clean error

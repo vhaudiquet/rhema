@@ -9,7 +9,7 @@
 //! selected with `theme: light`. Components reference tokens, never
 //! literal hex (rule 1); saturated color stays on the accent and the
 //! status set (rules 3-4). M3 You is the one generated palette: its
-//! tokens come from the tonal-spot scheme in [`m3`], not from
+//! tokens come from the tonal-spot scheme in `m3`, not from
 //! constants here.
 //!
 //! The Catppuccin palettes take their hexes from the official palette

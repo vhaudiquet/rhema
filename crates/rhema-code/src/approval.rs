@@ -1,10 +1,11 @@
 //! The approval bridge between the turn task and the UI thread.
 //!
 //! Production runs every consumer with `AllowAll` by design, so no
-//! turn-side [`Approval`] hook is wired today; the modal, the answer
+//! turn-side [`rhema_coding_agent::Approval`] hook is wired today; the modal, the answer
 //! channel, and this module's UI-side half wait for the real flow.
 //!
-//! DEADLOCK CONSTRAINT for whoever wires it: [`Approval::approve`] is
+//! DEADLOCK CONSTRAINT for whoever wires it:
+//! [`rhema_coding_agent::Approval::approve`] is
 //! synchronous and runs on the turn task while the UI thread keeps
 //! rendering. The bridge must send an `UiEvent::ApprovalRequested`
 //! over the (unbounded) event channel and block on a std mpsc receiver
