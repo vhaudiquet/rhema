@@ -273,13 +273,22 @@ pub struct Registry {
     permits: Arc<tokio::sync::Semaphore>,
 }
 
+/// The most finished-but-untaken events one registry holds. The
+/// frontend drains [`Registry::take_finished`] every frame; the cap
+/// is the guard for a frontend that stops reading — each event names
+/// a finished job, so unbounded growth here is unbounded retention.
+const MAX_FINISHED: usize = 128;
+
 #[derive(Debug)]
 struct RegistryInner {
     next: u64,
     jobs: BTreeMap<String, Job>,
     /// Finished-but-untaken jobs, oldest first: the finish feed
-    /// [`Registry::take_finished`] drains.
+    /// [`Registry::take_finished`] drains. Capped at [`MAX_FINISHED`];
+    /// the overflow is counted and reported as a synthetic event.
     finished: Vec<JobFinished>,
+    /// Finished events dropped for nobody reading fast enough.
+    dropped: usize,
 }
 
 impl Registry {
@@ -291,6 +300,7 @@ impl Registry {
                 next: 0,
                 jobs: BTreeMap::new(),
                 finished: Vec::new(),
+                dropped: 0,
             }),
             permits: Arc::new(tokio::sync::Semaphore::new(max_running.max(1))),
         }
@@ -389,6 +399,10 @@ impl Registry {
             fetched: false,
             announced: false,
         };
+        while inner.finished.len() >= MAX_FINISHED {
+            let _ = inner.finished.remove(0);
+            inner.dropped += 1;
+        }
         inner.finished.push(JobFinished {
             id: id.to_owned(),
             name,
@@ -502,6 +516,24 @@ impl Registry {
         let mut inner = self.lock();
         let mut events = std::mem::take(&mut inner.finished);
         events.sort_by_key(|event| inner.jobs.get(&event.id).map_or(0, |job| job.seq));
+        if inner.dropped > 0 {
+            // The overflow speaks once, in the feed's own voice: a
+            // model reading it knows some outcomes never arrived.
+            events.insert(
+                0,
+                JobFinished {
+                    id: String::new(),
+                    name: String::new(),
+                    line: format!(
+                        "{} older subagent notice{} dropped — nobody was \
+                         reading them",
+                        inner.dropped,
+                        if inner.dropped == 1 { "" } else { "s" }
+                    ),
+                },
+            );
+            inner.dropped = 0;
+        }
         events
     }
 
@@ -731,6 +763,37 @@ mod tests {
         );
         assert!(registry.status().is_empty());
         assert!(registry.notifications().is_empty());
+    }
+
+    #[test]
+    fn an_unread_feed_drops_the_oldest_and_says_so_once() {
+        let registry = registry();
+        for _ in 0..(MAX_FINISHED + 8) {
+            let job = registry.mint("scout");
+            registry.finish(&job.id, Ok("the report".to_owned()));
+        }
+        let events = registry.take_finished();
+        assert!(
+            events.len() <= MAX_FINISHED + 1,
+            "the cap holds (plus the overflow marker): {}",
+            events.len()
+        );
+        assert!(
+            events[0].id.is_empty() && events[0].line.contains("dropped"),
+            "the overflow speaks first: {:?}",
+            events[0].line
+        );
+        // The marker speaks once: the next take is clean.
+        assert!(registry.take_finished().is_empty());
+        let job = registry.mint("scout");
+        registry.finish(&job.id, Ok("the report".to_owned()));
+        let events = registry.take_finished();
+        assert_eq!(events.len(), 1);
+        assert!(
+            events[0].id == job.id,
+            "no stale marker: {:?}",
+            events[0].line
+        );
     }
 
     #[test]
