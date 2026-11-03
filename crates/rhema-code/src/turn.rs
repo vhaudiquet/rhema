@@ -10,7 +10,7 @@ use rhema_core::{Event, EventSink, Image, Message, ModelOutput, Role, Session};
 use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
 use std::future::Future;
 use std::pin::Pin;
-use tokio::sync::mpsc::{Receiver, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{Receiver, UnboundedSender};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -357,7 +357,7 @@ impl LoginSink for FlowSink {
 /// `transcript`; used by tests to exercise a whole turn offline.
 #[cfg(feature = "mock")]
 pub async fn drive_turn_for_test(
-    events: &mut UnboundedReceiver<UiEvent>,
+    events: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
     transcript: &mut crate::transcript::Transcript,
 ) -> (Box<CodingAgent>, Result<rhema_core::ModelOutput, String>) {
     loop {
