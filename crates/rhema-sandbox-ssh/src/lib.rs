@@ -4,8 +4,9 @@
 //! [`SshSandbox`] is the fs-disjoint family's daemonless member (spec
 //! §4's SSH row, first variant): zero setup beyond an ssh login. Exec
 //! is `ssh <host> -- timeout --kill-after=5 <secs> bash -c <command>`
-//! — the same prefix, so the same budget knob and the same 124/137
-//! timeout reading, with the streams pumped live through the shared
+//! — the same prefix, so the same budget knob and the same timeout
+//! reading (124 at the budget; an external SIGKILL is a plain
+//! failure), with the streams pumped live through the shared
 //! `run_child` wiring (`exec_util`). Files cross as `ssh cat`
 //! and `ssh tee`; seeding is a remote `git clone` or a tarball
 //! streamed raw to a remote `tar -xzf -`. Every fs operation crosses
