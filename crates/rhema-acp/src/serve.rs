@@ -139,6 +139,25 @@ pub(crate) struct SessionSlot {
 }
 
 /// The connection-wide state every handler closes over.
+/// Puts a turn's agent back in its slot however the task ends. The
+/// outcome arms take the agent and restore it themselves; a panic
+/// unwinding past them is what the drop covers — without it, a slot
+/// whose agent never came home serves no further prompt.
+struct SlotRestore {
+    app: Arc<App>,
+    id: Arc<str>,
+    agent: Option<CodingAgent>,
+}
+
+impl Drop for SlotRestore {
+    fn drop(&mut self) {
+        if let Some(mut agent) = self.agent.take() {
+            repair_dangling_calls(agent.session_mut());
+            self.app.put_agent(&self.id, agent);
+        }
+    }
+}
+
 pub(crate) struct App {
     options: AcpOptions,
     /// The profile resolved once at startup: credentials, model, thinking.
@@ -975,7 +994,7 @@ async fn serve_connection(
                         let _ = responder.respond(PromptResponse::new(StopReason::EndTurn));
                         return Ok(());
                     }
-                    let Some((mut agent, memory)) = app.take_agent(&session_id.0) else {
+                    let Some((agent, memory)) = app.take_agent(&session_id.0) else {
                         return Err(Error::invalid_request()
                             .data("unknown session, or a turn is already running for it"));
                     };
@@ -1011,10 +1030,25 @@ async fn serve_connection(
                     // flowing. The connection survives the turn's end:
                     // every send below fails harmlessly once it closes.
                     tokio::spawn(async move {
-                        // The block ends the pin's borrow of `agent`
-                        // before the match moves it back into its slot.
+                        // The guard holds the agent while the turn runs:
+                        // the arms below take it out and restore it
+                        // themselves, and a panic unwinding past them —
+                        // the turn's own, most likely — is what the drop
+                        // covers, so the slot's agent always comes home
+                        // and the slot keeps serving prompts.
+                        let mut restore = SlotRestore {
+                            app: app.clone(),
+                            id: Arc::clone(&session_id.0),
+                            agent: Some(agent),
+                        };
+                        // The block ends the pin's borrow of the agent
+                        // before the match takes it out of the guard.
                         let outcome = {
-                            let turn = agent.turn(prompt, &mut sink, approval);
+                            let turn = restore
+                                .agent
+                                .as_mut()
+                                .expect("the guard was just filled")
+                                .turn(prompt, &mut sink, approval);
                             tokio::pin!(turn);
                             tokio::select! {
                                 _ = cancelled_turn(cancelled) => None,
@@ -1023,6 +1057,10 @@ async fn serve_connection(
                         };
                         match outcome {
                             Some(Ok(output)) => {
+                                let agent = restore
+                                    .agent
+                                    .take()
+                                    .expect("the guard still holds the agent");
                                 let stop = acp_stop(&output.stop_reason);
                                 app.persist(&session_id.0, agent.session());
                                 app.put_agent(&session_id.0, agent);
@@ -1034,6 +1072,10 @@ async fn serve_connection(
                                 // The budget ran out with calls possibly
                                 // left hanging; close them before the
                                 // session serves another turn.
+                                let mut agent = restore
+                                    .agent
+                                    .take()
+                                    .expect("the guard still holds the agent");
                                 repair_dangling_calls(agent.session_mut());
                                 app.put_agent(&session_id.0, agent);
                                 app.note_activity(&session_id.0, &cx);
@@ -1044,6 +1086,10 @@ async fn serve_connection(
                                 ));
                             }
                             Some(Err(err)) => {
+                                let mut agent = restore
+                                    .agent
+                                    .take()
+                                    .expect("the guard still holds the agent");
                                 repair_dangling_calls(agent.session_mut());
                                 app.put_agent(&session_id.0, agent);
                                 app.note_activity(&session_id.0, &cx);
@@ -1054,6 +1100,10 @@ async fn serve_connection(
                             // prompt, and the protocol asks for this
                             // stop reason even when the unwind errored.
                             None => {
+                                let mut agent = restore
+                                    .agent
+                                    .take()
+                                    .expect("the guard still holds the agent");
                                 repair_dangling_calls(agent.session_mut());
                                 app.put_agent(&session_id.0, agent);
                                 app.note_activity(&session_id.0, &cx);

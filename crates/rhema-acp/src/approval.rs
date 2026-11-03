@@ -17,6 +17,7 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use agent_client_protocol::schema::v1::{
     PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome,
@@ -26,6 +27,12 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Client, ConnectionTo};
 use rhema_coding_agent::Approval;
 use rhema_core::ToolCall;
+
+/// How long one permission request may sit unanswered before the call
+/// declines and the turn moves on. A modal nobody answers otherwise
+/// parks the slot's worker forever — `session/cancel` cannot reach a
+/// blocked future.
+const APPROVAL_BUDGET: Duration = Duration::from_secs(300);
 
 /// What the session remembers from past `always` answers: exact
 /// `name:argument` keys, allowed or rejected for the session's life.
@@ -159,9 +166,16 @@ impl Approval for AcpApproval {
         // Parks the prompt task's worker; the answer comes from the
         // SDK's dispatch task, which keeps running. Panics outside a
         // multi-thread runtime — `serve` builds the only runtime this
-        // hook ever runs under.
+        // hook ever runs under. The park is bounded: a client that
+        // opens the modal and never answers must not wedge the slot —
+        // past the budget the call declines, and the turn carries the
+        // in-band failure to the model.
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(self.request(call, &key))
+            tokio::runtime::Handle::current().block_on(async {
+                tokio::time::timeout(APPROVAL_BUDGET, self.request(call, &key))
+                    .await
+                    .unwrap_or_default()
+            })
         })
     }
 }
