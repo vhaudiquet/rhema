@@ -36,13 +36,31 @@ const CANCEL_TICK: Duration = Duration::from_millis(100);
 /// one fixed name nothing in the seed can steer.
 pub const STAGING: &str = ".rhema-seed.tar.gz";
 
+/// Reads the `timeout` prefix's exit status. 124 is the budget
+/// expiring — GNU timeout's own code, also when `--kill-after` had to
+/// escalate to a kill (it still exits 124) — and reads as
+/// [`SandboxError::Timeout`]. 137 is a SIGKILL from outside the
+/// budget, most often the machine's out-of-memory killer: reporting it
+/// as a timeout would have the model widen the budget and re-run the
+/// same memory-hungry command, so it reads as a plain failure. Any
+/// other exit, nonzero included, is the command's own result.
+pub fn exit_status(code: Option<i32>, budget_secs: u64) -> Result<Option<i32>, SandboxError> {
+    match code {
+        Some(124) => Err(SandboxError::Timeout(budget_secs)),
+        Some(137) => Err(SandboxError::Failed(
+            "the command was killed (SIGKILL, exit 137): most often the machine's out-of-memory killer, not the time budget"
+                .into(),
+        )),
+        other => Ok(other),
+    }
+}
+
 /// Runs one spawned child to completion: both pipes pumped (complete
 /// lines live through `progress`, a capped tail kept for each), a
 /// cancel observed before the start and between chunks with the local
-/// child killed on it, and the exit read through the `timeout` prefix's
-/// codes — 124 at the budget, 137 after `--kill-after` escalates — as
-/// [`SandboxError::Timeout`]. Any other exit, nonzero included, is the
-/// command's own result and rides to the caller.
+/// child killed on it, and the exit read through the `timeout`
+/// prefix's codes (see [`exit_status`]). Any other exit, nonzero
+/// included, is the command's own result and rides to the caller.
 pub async fn run_child(
     mut child: tokio::process::Child,
     request: &ExecRequest,
@@ -85,10 +103,7 @@ pub async fn run_child(
         .wait()
         .await
         .map_err(|err| SandboxError::Unavailable(format!("waiting for the command: {err}")))?;
-    let code = status.code();
-    if code == Some(124) || code == Some(137) {
-        return Err(SandboxError::Timeout(request.timeout.as_secs()));
-    }
+    let code = exit_status(status.code(), request.timeout.as_secs())?;
     Ok(ExecOutcome {
         stdout,
         stderr,
@@ -100,6 +115,12 @@ pub async fn run_child(
 /// with its stream — through `tx`, and keeping the capped tail for the
 /// result. A detached task: it ends with the pipe, whether the command
 /// finishes or is killed, and its tail joins at the end.
+///
+/// The lines are read as bytes and lossily decoded: a command whose
+/// output is not valid UTF-8 must degrade to replacement characters —
+/// `AsyncBufReadExt::lines` errors on the bad line and the `while let`
+/// would silently drop that line and every one after it, trading most
+/// of the output for one encoding slip.
 async fn pump<R>(
     stream: Option<R>,
     is_stderr: bool,
@@ -110,11 +131,26 @@ where
 {
     let mut tail = Vec::new();
     if let Some(stream) = stream {
-        let mut lines = BufReader::new(stream).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            let _ = tx.send((is_stderr, line.clone()));
-            append_capped(&mut tail, line.as_bytes());
-            append_capped(&mut tail, b"\n");
+        let mut reader = BufReader::new(stream);
+        let mut buffer = Vec::new();
+        loop {
+            buffer.clear();
+            match reader.read_until(b'\n', &mut buffer).await {
+                Ok(0) => break,
+                Ok(_) => {
+                    let text = String::from_utf8_lossy(&buffer);
+                    // Strip the terminator the way `lines` does: one
+                    // newline, then one carriage return. The
+                    // replacement characters stay where the bad bytes
+                    // were, so the tail still frames the output.
+                    let text = text.strip_suffix('\n').unwrap_or(&text);
+                    let text = text.strip_suffix('\r').unwrap_or(text);
+                    let _ = tx.send((is_stderr, text.to_string()));
+                    append_capped(&mut tail, text.as_bytes());
+                    append_capped(&mut tail, b"\n");
+                }
+                Err(_) => break,
+            }
         }
     }
     tail

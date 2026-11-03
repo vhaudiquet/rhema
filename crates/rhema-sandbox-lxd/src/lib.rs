@@ -30,7 +30,7 @@
 //! line; LXD does not) — so nothing here is quoted for a middle
 //! shell. The kill is
 //! the prefix's, as on every backend without a per-command kill —
-//! exits 124/137 read as a timeout. Streams pump live lines through
+//! the `timeout` prefix's codes (124 at the budget, an external SIGKILL reads as a plain failure) read through `rhema-sandbox`'s shared `exit_status`. Streams pump live lines through
 //! the shared `run_child` wiring (`exec_util`), caps included.
 //!
 //! Cancelling mid-run kills the local `lxc` process only; the command
@@ -157,10 +157,9 @@ impl LxdSandbox {
             .output()
             .await
             .map_err(|err| SandboxError::Unavailable(format!("{err}")))?;
-        let code = output.status.code();
-        if code == Some(124) || code == Some(137) {
-            return Err(SandboxError::Timeout(SEED_BUDGET.as_secs()));
-        }
+        // The prefix's own codes decide: budget expiry, or the
+        // external kill that must not read as one.
+        rhema_sandbox::exec_util::exit_status(output.status.code(), SEED_BUDGET.as_secs())?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
             let detail = detail.trim();

@@ -6,8 +6,9 @@
 //! `docker exec` prefix, no Engine API. The kill is the prefix's, as
 //! on every backend without a per-command kill —
 //! `timeout --kill-after=5` rides inside the container, `ExecRequest::
-//! timeout` stays the one budget knob, and exits 124/137 read as a
-//! timeout. Streams pump live lines through the shared `run_child`
+//! timeout` stays the one budget knob, and the prefix's codes read
+//! through the shared `exit_status` (124 at the budget; an external
+//! SIGKILL is a plain failure). Streams pump live lines through the shared `run_child`
 //! wiring (`exec_util`), caps included.
 #![forbid(unsafe_code)]
 
@@ -99,10 +100,9 @@ impl DockerSandbox {
             .output()
             .await
             .map_err(|err| SandboxError::Unavailable(format!("{err}")))?;
-        let code = output.status.code();
-        if code == Some(124) || code == Some(137) {
-            return Err(SandboxError::Timeout(SEED_BUDGET.as_secs()));
-        }
+        // The prefix's own codes decide: budget expiry, or the
+        // external kill that must not read as one.
+        rhema_sandbox::exec_util::exit_status(output.status.code(), SEED_BUDGET.as_secs())?;
         if !output.status.success() {
             let detail = String::from_utf8_lossy(&output.stderr);
             let detail = detail.trim();
