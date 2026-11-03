@@ -1362,28 +1362,10 @@ impl App {
     /// profile-switch idiom — so the session's sandbox state takes
     /// effect on the tool's executor at once, then notices.
     fn rebuild_for_sandbox(&mut self, notice: &str) {
-        if let Some(agent) = self.agent.take() {
-            let stats = agent.transcript_stats();
-            let sections = agent.transcript_sections();
-            let mut session = agent.session().clone();
-            // The machine changed: the report re-states where bash runs.
-            rhema_coding_agent::clear_environment_stamp(&mut session);
-            match self.build_agent(session) {
-                Ok((mut rebuilt, subagents)) => {
-                    // The counters survive the rebuild: same
-                    // conversation, new executor.
-                    if let Some(stats) = stats {
-                        rebuilt.carry_transcript_stats(&stats);
-                    }
-                    rebuilt.adopt_transcript_sections(sections);
-                    self.agent = Some(rebuilt);
-                    self.subagents = Some(subagents);
-                }
-                Err(err) => {
-                    self.error = Some(err.to_string());
-                    return;
-                }
-            }
+        // The machine changed: the report re-states where bash runs.
+        if let Err(err) = self.rebuild_live_agent(true) {
+            self.error = Some(err);
+            return;
         }
         self.transcript.push_notice(notice);
     }
@@ -1663,19 +1645,9 @@ impl App {
         // The prompt change rides the next agent build; mid-turn the
         // rebuild would race the running one, so it waits.
         if !self.turn.running
-            && let Some(agent) = self.agent.take()
+            && let Err(err) = self.rebuild_live_agent(false)
         {
-            let stats = agent.transcript_stats();
-            let sections = agent.transcript_sections();
-            let session = agent.session().clone();
-            if let Ok((mut rebuilt, subagents)) = self.build_agent(session) {
-                if let Some(stats) = stats {
-                    rebuilt.carry_transcript_stats(&stats);
-                }
-                rebuilt.adopt_transcript_sections(sections);
-                self.agent = Some(rebuilt);
-                self.subagents = Some(subagents);
-            }
+            self.error = Some(err);
         }
     }
 
@@ -2227,26 +2199,9 @@ impl App {
             self.error = Some(format!("cannot save config: {err}"));
             return;
         }
-        if let Some(agent) = self.agent.take() {
-            let stats = agent.transcript_stats();
-            let sections = agent.transcript_sections();
-            let session = agent.session().clone();
-            match self.build_agent(session) {
-                Ok((mut rebuilt, subagents)) => {
-                    // The counters survive the rebuild: same
-                    // conversation, new params.
-                    if let Some(stats) = stats {
-                        rebuilt.carry_transcript_stats(&stats);
-                    }
-                    rebuilt.adopt_transcript_sections(sections);
-                    self.agent = Some(rebuilt);
-                    self.subagents = Some(subagents);
-                }
-                Err(err) => {
-                    self.error = Some(err.to_string());
-                    return;
-                }
-            }
+        if let Err(err) = self.rebuild_live_agent(false) {
+            self.error = Some(err);
+            return;
         }
         self.transcript
             .push_notice(&format!("thinking effort set to {}", effort.as_str()));
@@ -2976,50 +2931,30 @@ impl App {
         // The agent builds on the new provider, so it installs first.
         self.provider = Some(backend.provider());
         self.backend = Some(backend);
-        let saved = self
-            .agent
-            .as_ref()
-            .and_then(CodingAgent::transcript_stats)
-            .or(self.transcript_stats);
-        let sections = self
-            .agent
-            .as_ref()
-            .map(CodingAgent::transcript_sections)
-            .unwrap_or_default();
+        let (saved, sections) = self.outgoing_transcript();
+        let saved = saved.or(self.transcript_stats);
         // The model may have changed with the profile, and the cache is
         // per-model regardless: the report re-states its facts.
         let mut session = session;
         rhema_coding_agent::clear_environment_stamp(&mut session);
-        match self.build_agent(session) {
-            Ok((mut agent, subagents)) => {
-                // The counters survive the swap: same conversation,
-                // new backend.
-                if let Some(saved) = saved {
-                    agent.carry_transcript_stats(&saved);
-                }
-                agent.adopt_transcript_sections(sections);
-                self.session_profile = Some(tab);
-                self.agent = Some(agent);
-                self.subagents = Some(subagents);
-                if let Some(model) = effective.model {
-                    self.screen = Screen::Chat;
-                    self.transcript
-                        .push_notice(&format!("switched to {label} · {model}"));
-                    // The session now rides the instance it activated:
-                    // that plan's numbers are the badge's to fetch.
-                    vec![Effect::FetchUsage]
-                } else {
-                    self.screen = Screen::Picker(PickerScreen {
-                        status: PickerStatus::Loading,
-                        ..PickerScreen::new(self.models.clone())
-                    });
-                    vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
-                }
-            }
-            Err(err) => {
-                self.error = Some(err.to_string());
-                Vec::new()
-            }
+        if let Err(err) = self.rebuild_agent(session, saved, sections) {
+            self.error = Some(err);
+            return Vec::new();
+        }
+        self.session_profile = Some(tab);
+        if let Some(model) = effective.model {
+            self.screen = Screen::Chat;
+            self.transcript
+                .push_notice(&format!("switched to {label} · {model}"));
+            // The session now rides the instance it activated:
+            // that plan's numbers are the badge's to fetch.
+            vec![Effect::FetchUsage]
+        } else {
+            self.screen = Screen::Picker(PickerScreen {
+                status: PickerStatus::Loading,
+                ..PickerScreen::new(self.models.clone())
+            });
+            vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
         }
     }
 
@@ -3719,31 +3654,73 @@ impl App {
         };
         self.backend = Some(backend.clone());
         self.provider = Some(backend.provider());
-        let saved = self
-            .agent
-            .as_ref()
-            .and_then(CodingAgent::transcript_stats)
-            .or(self.transcript_stats);
-        let sections = self
-            .agent
-            .as_ref()
-            .map(CodingAgent::transcript_sections)
-            .unwrap_or_default();
+        let (saved, sections) = self.outgoing_transcript();
+        let saved = saved.or(self.transcript_stats);
         // The model may have changed, and the cache is per-model
         // regardless: the report re-states its facts.
         let mut session = session;
         rhema_coding_agent::clear_environment_stamp(&mut session);
+        self.rebuild_agent(session, saved, sections)?;
+        // A new backend counts a new plan: the allowance badge fetches
+        // now, not at the first turn's end.
+        Ok(vec![Effect::FetchUsage])
+    }
+
+    /// The outgoing agent's counters and sections, read before a
+    /// rebuild: the pair [`Self::rebuild_agent`] carries onto the new
+    /// agent, so the settings pages keep reading as one run.
+    fn outgoing_transcript(
+        &self,
+    ) -> (
+        Option<rhema_transcript::TranscriptStats>,
+        Vec<rhema_transcript::Section>,
+    ) {
+        (
+            self.agent.as_ref().and_then(CodingAgent::transcript_stats),
+            self.agent
+                .as_ref()
+                .map(CodingAgent::transcript_sections)
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Swaps the session's agent for one built over `session` under
+    /// the current profile and flags — the rebuild idiom. The
+    /// transcript counters and sections given here ride along: same
+    /// conversation, new executor. `Err` carries the build failure's
+    /// text for the caller to notice with.
+    fn rebuild_agent(
+        &mut self,
+        session: Session,
+        stats: Option<rhema_transcript::TranscriptStats>,
+        sections: Vec<rhema_transcript::Section>,
+    ) -> Result<(), String> {
         let (mut agent, subagents) = self.build_agent(session).map_err(|err| err.to_string())?;
-        // The counters survive the swap: same conversation, new model.
-        if let Some(saved) = saved {
-            agent.carry_transcript_stats(&saved);
+        if let Some(stats) = &stats {
+            agent.carry_transcript_stats(stats);
         }
         agent.adopt_transcript_sections(sections);
         self.agent = Some(agent);
         self.subagents = Some(subagents);
-        // A new backend counts a new plan: the allowance badge fetches
-        // now, not at the first turn's end.
-        Ok(vec![Effect::FetchUsage])
+        Ok(())
+    }
+
+    /// Rebuilds the live agent in place: take it, carry its
+    /// transcript, build over its session, reinstall. `stamp` clears
+    /// the session's environment stamp first — for callers whose
+    /// change alters what the machine reports. No agent, nothing to
+    /// rebuild.
+    fn rebuild_live_agent(&mut self, stamp: bool) -> Result<(), String> {
+        let Some(agent) = self.agent.take() else {
+            return Ok(());
+        };
+        let stats = agent.transcript_stats();
+        let sections = agent.transcript_sections();
+        let mut session = agent.session().clone();
+        if stamp {
+            rhema_coding_agent::clear_environment_stamp(&mut session);
+        }
+        self.rebuild_agent(session, stats, sections)
     }
 
     /// Builds an agent over `session` with the current model and flags.
