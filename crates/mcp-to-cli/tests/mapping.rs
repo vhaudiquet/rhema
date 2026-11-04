@@ -925,6 +925,34 @@ fn required_flags_mark_help_and_enforce() {
     assert_eq!(help_of("tags").as_deref(), Some("(required, repeatable)"));
     assert_eq!(help_of("free").as_deref(), Some("The optional one"));
 
+    // Requiredness reads at a glance: mandatory flags lead the help,
+    // optionals follow, the override flag sits last.
+    let mut rendered = command(
+        "srv",
+        &[tool(
+            "t",
+            "d",
+            json!({
+                "type": "object",
+                "properties": {
+                    "must": {"type": "string", "description": "The mandatory one"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "free": {"type": "string", "description": "The optional one"},
+                },
+                "required": ["must", "tags"],
+            }),
+        )],
+    );
+    let text = rendered
+        .find_subcommand_mut("t")
+        .expect("subcommand")
+        .render_help()
+        .to_string();
+    let must_at = text.find("--must").expect("must in help");
+    let tags_at = text.find("--tags").expect("tags in help");
+    let free_at = text.find("--free").expect("free in help");
+    assert!(must_at < free_at && tags_at < free_at, "{text}");
+
     // clap enforces both, loudly, listing the missing flags.
     let err = parse(&cmd, &["t", "--free", "x"]);
     assert!(err.is_none(), "omitted required flags must not parse");

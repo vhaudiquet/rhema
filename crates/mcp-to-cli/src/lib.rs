@@ -362,6 +362,7 @@ fn override_arg() -> Arg {
     Arg::new("json")
         .long("json")
         .value_name("JSON")
+        .display_order(2)
         .help("Replace the whole payload with this JSON ('-' means stdin, read by the caller)")
 }
 
@@ -402,7 +403,13 @@ fn property_arg(
     let enforced = prop_required
         && !is_nullable(schema)
         && matches!(shape, Shape::Value(_) | Shape::Repeat(_));
-    let mut arg = Arg::new(arg_id(shape, index)).long(long);
+    // Help groups mandatory flags first: clap's usage line cannot
+    // spell out `required_unless_present` args, so the display order
+    // is where requiredness reads at a glance — the `(required)` mark
+    // is the second signal.
+    let mut arg = Arg::new(arg_id(shape, index))
+        .long(long)
+        .display_order(if enforced { 0 } else { 1 });
     match shape {
         Shape::SetTrue => arg = arg.action(ArgAction::SetTrue),
         Shape::Json => {
