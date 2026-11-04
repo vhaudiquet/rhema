@@ -2,20 +2,25 @@
 //! directory of real MCP tool definitions (wire-format JSON objects
 //! with `name`, `description`, `inputSchema` — e.g. github-mcp-server's
 //! `__toolsnaps__`), then behave like the other examples. Prints a
-//! render summary to stderr:
+//! render summary to stderr. Build once, drive it like a CLI:
 //!
 //! ```sh
-//! cargo run -p mcp-to-cli --example catalog -- /path/to/__toolsnaps__
-//! cargo run -p mcp-to-cli --example catalog -- /path/to/__toolsnaps__ -- list
-//! cargo run -p mcp-to-cli --example catalog -- /path/to/__toolsnaps__ -- create_issue --help
-//! cargo run -p mcp-to-cli --example catalog -- /path/to/__toolsnaps__ -- create_issue --owner acme --repo api --title hi
+//! cargo build -p mcp-to-cli --example catalog
+//! target/debug/examples/catalog github /path/to/__toolsnaps__
+//! target/debug/examples/catalog github /path/to/__toolsnaps__ list
+//! target/debug/examples/catalog github /path/to/__toolsnaps__ create_issue --help
+//! target/debug/examples/catalog github /path/to/__toolsnaps__ create_issue --owner acme --repo api --title hi
 //! ```
 use mcp_to_cli::{Payload, ToolInfo, args, command, list_json};
 
 fn main() {
     let mut argv = std::env::args().skip(1);
+    let name = argv.next().unwrap_or_else(|| {
+        eprintln!("usage: catalog <server-name> <dir-of-tool-json> [argv]");
+        std::process::exit(2);
+    });
     let dir = argv.next().unwrap_or_else(|| {
-        eprintln!("usage: catalog <dir-of-tool-json> [-- argv]");
+        eprintln!("usage: catalog <server-name> <dir-of-tool-json> [argv]");
         std::process::exit(2);
     });
     let argv: Vec<String> = argv.collect();
@@ -46,13 +51,17 @@ fn main() {
             }
         })
         .collect();
+    let rendered = command(&name, &catalog)
+        .get_subcommands()
+        .filter(|c| c.get_name() != "help")
+        .count();
     eprintln!(
         "{} tools loaded, {} rendered as subcommands",
         catalog.len(),
-        command("srv", &catalog).get_subcommands().count() - 1, // minus `help`
+        rendered,
     );
 
-    let mut cmd = command("srv", &catalog);
+    let mut cmd = command(&name, &catalog);
     if argv.as_slice() == ["list"] {
         println!("{}", list_json(&catalog));
         return;
@@ -61,7 +70,7 @@ fn main() {
         cmd.print_help().expect("help renders to stdout");
         return;
     }
-    let mut full = vec!["srv"];
+    let mut full = vec![name.as_str()];
     full.extend(argv.iter().map(String::as_str));
     let matches = cmd
         .clone()
