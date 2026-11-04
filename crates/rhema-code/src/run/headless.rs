@@ -214,6 +214,18 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     if let Some(assembled) = &sandboxed {
         assembled.apply_tools(&mut agent_config);
     }
+    // MCP: the same local-only gate the TUI applies — a sandboxed
+    // executor cannot reach the socket, so it advertises nothing.
+    if let Some(entry) = crate::mcp_wire::wire_for_session(
+        &profile,
+        &effective,
+        &config.disabled_mcp_servers,
+        sandboxed.as_ref(),
+    ) {
+        agent_config.shell_env.extend(entry.shell_env().clone());
+        agent_config.mcp_servers = entry.lines().to_vec();
+    }
+    agent_config.disabled_mcp_servers = config.disabled_mcp_servers.clone();
     // Subagents ride in as one tool: the built-in general-purpose
     // definition plus whatever the workspace defines.
     // The handle rides to the UI in the wire-up piece; the registry

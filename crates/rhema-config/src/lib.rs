@@ -904,6 +904,13 @@ pub struct Config {
     /// (greyed) everywhere; only the prompt filters them out.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub skills_disabled: BTreeSet<String>,
+    /// MCP server names held back from the manager, the prompt, and
+    /// the agent's shells: the off switch behind the settings MCP
+    /// page, the skills set's twin. Names are matched against every
+    /// scope's servers (the global file and each profile), so a name
+    /// another profile does not define is simply inert.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_mcp_servers: BTreeSet<String>,
 }
 
 /// The profile the flags and stores fall back to: fresh setups seed it,
@@ -934,6 +941,7 @@ impl Default for Config {
             last_sandbox_by_workspace: BTreeMap::new(),
             onboarded: None,
             skills_disabled: BTreeSet::new(),
+            disabled_mcp_servers: BTreeSet::new(),
         }
     }
 }
@@ -1448,6 +1456,7 @@ profiles:
             last_sandbox_by_workspace: BTreeMap::new(),
             onboarded: None,
             skills_disabled: BTreeSet::new(),
+            disabled_mcp_servers: BTreeSet::new(),
         };
         Config::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -1877,6 +1886,7 @@ profiles:
             last_sandbox_by_workspace: BTreeMap::new(),
             onboarded: None,
             skills_disabled: BTreeSet::new(),
+            disabled_mcp_servers: BTreeSet::new(),
         };
         let work = config.effective(Some("work"));
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
@@ -2104,6 +2114,7 @@ profiles:
             last_sandbox_by_workspace: BTreeMap::new(),
             onboarded: None,
             skills_disabled: BTreeSet::new(),
+            disabled_mcp_servers: BTreeSet::new(),
         };
         let store = VolatileSecretStore::new();
         assert_eq!(config.migrate_secrets(&store), 2);

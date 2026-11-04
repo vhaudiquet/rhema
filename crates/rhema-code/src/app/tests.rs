@@ -5990,9 +5990,15 @@ fn the_mcp_mute_round_trips() {
     assert!(settings.mcp[0].disabled, "the row marks the mute");
     assert!(
         h.app.transcript.lines().contains(&Line::Notice(
-            "the atlassian server is muted for this session".into()
+            "the atlassian server is muted — saved and applied to new turns".into()
         )),
         "the mute is noticed"
+    );
+    // The mute persists: the config field holds it, the same set the
+    // agent rebuild reads.
+    assert!(
+        h.app.config.disabled_mcp_servers.contains("atlassian"),
+        "the mute lands in the config"
     );
     // Enter again unmutes, back where it started.
     h.app.on_key(key(KeyCode::Enter));

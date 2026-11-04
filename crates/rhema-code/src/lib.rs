@@ -55,6 +55,7 @@ pub mod commands;
 pub mod events;
 pub mod icons;
 pub mod markdown;
+pub(crate) mod mcp_wire;
 pub mod onboarding;
 pub mod palette;
 pub mod run;

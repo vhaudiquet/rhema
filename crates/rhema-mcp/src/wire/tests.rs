@@ -79,8 +79,8 @@ fn config(servers: Vec<McpServer>) -> McpConfig {
     }
 }
 
-#[tokio::test]
-async fn wiring_produces_env_lines_and_a_live_bridge() {
+#[test]
+fn wiring_produces_env_lines_and_a_live_bridge() {
     let session = tempfile::tempdir().unwrap();
     let config = config(vec![
         counter_server("atlassian", Some("jira")),
@@ -89,9 +89,7 @@ async fn wiring_produces_env_lines_and_a_live_bridge() {
     let mut disabled = BTreeSet::new();
     disabled.insert("atlassian".to_owned());
 
-    let mut wiring = wire(&config, &disabled, session.path(), "wire-env", None)
-        .await
-        .unwrap();
+    let mut wiring = wire(&config, &disabled, session.path(), "wire-env", None).unwrap();
 
     // The disabled server left no trace: no line, no stub, no env var
     // pointing at a spawn.
@@ -126,56 +124,46 @@ async fn wiring_produces_env_lines_and_a_live_bridge() {
     let socket = wiring.socket().to_path_buf();
     let token = wiring.shell_env.get(provision::VAR_TOKEN).unwrap().clone();
     let tmp = session.path().to_path_buf();
-    let code = tokio::task::spawn_blocking(move || {
-        cli::run_with_env(
-            &socket,
-            &token,
-            Some(&tmp),
-            &["mcp", "tools", "counter"]
-                .iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>(),
-        )
-    })
-    .await
-    .unwrap();
+    let code = cli::run_with_env(
+        &socket,
+        &token,
+        Some(&tmp),
+        &["mcp", "tools", "counter"]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>(),
+    );
     assert_eq!(code, 0);
 
     wiring.shutdown_bridge();
 }
 
-#[tokio::test]
-async fn the_generated_command_mode_round_trips_through_the_bridge() {
+#[test]
+fn the_generated_command_mode_round_trips_through_the_bridge() {
     let session = tempfile::tempdir().unwrap();
     let config = config(vec![fake_command_server("counter")]);
-    let mut wiring = wire(&config, &BTreeSet::new(), session.path(), "wire-call", None)
-        .await
-        .unwrap();
+    let mut wiring = wire(&config, &BTreeSet::new(), session.path(), "wire-call", None).unwrap();
 
     // __server counter: the catalog, the clap tree, the call.
     let socket = wiring.socket().to_path_buf();
     let token = wiring.shell_env.get(provision::VAR_TOKEN).unwrap().clone();
     let tmp = session.path().to_path_buf();
-    let code = tokio::task::spawn_blocking(move || {
-        cli::run_with_env(
-            &socket,
-            &token,
-            Some(&tmp),
-            &["__server", "counter", "get"]
-                .iter()
-                .map(std::ffi::OsString::from)
-                .collect::<Vec<_>>(),
-        )
-    })
-    .await
-    .unwrap();
+    let code = cli::run_with_env(
+        &socket,
+        &token,
+        Some(&tmp),
+        &["__server", "counter", "get"]
+            .iter()
+            .map(std::ffi::OsString::from)
+            .collect::<Vec<_>>(),
+    );
     assert_eq!(code, 0, "the call exits ok");
 
     wiring.shutdown_bridge();
 }
 
-#[tokio::test]
-async fn an_inherited_bash_env_survives_the_map() {
+#[test]
+fn an_inherited_bash_env_survives_the_map() {
     let session = tempfile::tempdir().unwrap();
     let mut wiring = wire(
         &config(vec![fake_command_server("counter")]),
@@ -184,7 +172,6 @@ async fn an_inherited_bash_env_survives_the_map() {
         "wire-inh",
         Some("/etc/profile.d/agent.sh".into()),
     )
-    .await
     .unwrap();
     assert_eq!(
         wiring
@@ -196,8 +183,8 @@ async fn an_inherited_bash_env_survives_the_map() {
     wiring.shutdown_bridge();
 }
 
-#[tokio::test]
-async fn reserved_function_names_surface_as_notices() {
+#[test]
+fn reserved_function_names_surface_as_notices() {
     let session = tempfile::tempdir().unwrap();
     let mut server = fake_command_server("meta-server");
     server.command_name = "mcp".to_owned();
@@ -208,7 +195,6 @@ async fn reserved_function_names_surface_as_notices() {
         "wire-meta",
         None,
     )
-    .await
     .unwrap();
     assert_eq!(wiring.notices.len(), 1);
     assert!(wiring.notices[0].contains("reserved"));

@@ -83,6 +83,22 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
     // terminal detection may run — a served agent never has a tty.
     match args.command {
         Some(crate::args::Command::Acp(acp)) => return run_acp(acp),
+        // The MCP CLI owns the process: its exit code IS ours, and
+        // its stdout/stderr contract is the model's output contract —
+        // nothing rhema adds to either. The argv rides with the mode
+        // as element zero, the dispatch's convention.
+        Some(crate::args::Command::Mcp { args: rest }) => {
+            let mut argv = Vec::with_capacity(rest.len() + 1);
+            argv.push(std::ffi::OsString::from("mcp"));
+            argv.extend(rest);
+            std::process::exit(rhema_mcp::cli::run(&argv));
+        }
+        // The stubs' road: `rhema __server …` and every unrecognized
+        // subcommand go to the MCP CLI, whose exit code owns the
+        // process. An unknown mode is its exit-2 usage error.
+        Some(crate::args::Command::External(tokens)) => {
+            std::process::exit(rhema_mcp::cli::run(&tokens));
+        }
         Some(crate::args::Command::Run(run)) => return run_headless(run).await,
         Some(crate::args::Command::System { action }) => {
             return system_command(action, &args.workspace, args.profile.as_deref());

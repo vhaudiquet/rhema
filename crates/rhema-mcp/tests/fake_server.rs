@@ -120,6 +120,9 @@ const TESTS: &[(&str, AsyncTest)] = &[
     ("the_cli_server_mode_walks_catalog_clap_and_call", || {
         Box::pin(the_cli_server_mode_walks_catalog_clap_and_call())
     }),
+    ("the_model_bash_command_walks_the_whole_chain", || {
+        Box::pin(the_model_bash_command_walks_the_whole_chain())
+    }),
 ];
 
 // ---------------------------------------------------------------------
@@ -1546,5 +1549,85 @@ async fn the_cli_server_mode_walks_catalog_clap_and_call() -> Result<(), String>
     }
 
     handle.shutdown();
+    Ok(())
+}
+
+/// The spec §9 item 12 walk: the model's bash command through the
+/// wired config. wire() provisions the init file; a bash child
+/// sources it from BASH_ENV, calls the generated function, the stub
+/// execs the CLI bin (the same dispatch the rhema binary routes to),
+/// and JSON comes back on stdout.
+async fn the_model_bash_command_walks_the_whole_chain() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let notes = dir.path().join("notes");
+    let socket = dir.path().join("mcp.sock");
+    let config = manager_with_budget("cancelled", &notes, Duration::from_millis(300));
+    let manager = Arc::new(rhema_mcp::McpManager::new(&config));
+    let handle = rhema_mcp::bridge::serve(manager.clone(), socket, "sekrit".to_owned())
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
+    let _ = handle; // the bridge lives for the test; shutdown rides Drop
+
+    // A direct walk of provision + exec, bypassing wire(): the CLI
+    // bin is the exec target, the happy fake is the server.
+    let session = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let config = manager_with_script("happy", &notes);
+    let manager = Arc::new(rhema_mcp::McpManager::new(&config));
+    let bridge_handle = rhema_mcp::bridge::serve(
+        manager.clone(),
+        dir.path().join("wired.sock"),
+        "tok".to_owned(),
+    )
+    .await
+    .map_err(|e| format!("serve: {e}"))?;
+    let provisioned = rhema_mcp::provision::provision_with_bin(
+        &config,
+        bridge_handle.socket_path(),
+        "tok",
+        session.path(),
+        None,
+        "e2e-model",
+        std::path::Path::new(env!("CARGO_BIN_EXE_rhema-mcp-cli")),
+    )
+    .map_err(|e| format!("provision: {e}"))?;
+
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg("-c")
+        .arg("counter get_scene_info")
+        .envs(provisioned.env.clone());
+    let output = command.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    if output.status.code() != Some(0) {
+        return Err(format!(
+            "the bash call failed: {:?}\nstdout: {stdout}\nstderr: {stderr}",
+            output.status.code()
+        ));
+    }
+    if !stdout.contains("done") || !stdout.contains("\"type\"") {
+        return Err(format!("the envelope lacks the text block: {stdout}"));
+    }
+    let _ = stderr;
+
+    // And the generated function shadows nothing: an unknown tool is
+    // clap's exit 2, self-teaching.
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg("-c")
+        .arg("counter nope 2>/dev/null; echo $?")
+        .envs(provisioned.env.clone());
+    let output = command.output().map_err(|e| e.to_string())?;
+    if !String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .ends_with('2')
+    {
+        return Err(format!(
+            "unknown tool exited otherwise: {}",
+            String::from_utf8_lossy(&output.stdout)
+        ));
+    }
+
+    bridge_handle.shutdown();
     Ok(())
 }

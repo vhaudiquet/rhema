@@ -18,6 +18,7 @@ model calls like any other).
 ```sh
 rhema-claw                     # serve on 127.0.0.1:7799 (config: listen)
 rhema-claw --once              # one detect + one dispatch pass, then exit
+claw mcp servers               # the MCP meta surface (see rhema-mcp)
 ```
 
 ### Coding jobs: the `coding_agent` tool

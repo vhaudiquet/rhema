@@ -765,18 +765,32 @@ fn agent_config(
 /// sends. Returns the wire's handle beside the config: the
 /// registry-backed status subscription the status strip renders one
 /// live line per background subagent job from.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn session_agent_config(
     options: &RunOptions,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
     model: Option<String>,
     provider: Arc<dyn ModelProvider>,
     disabled_skills: &std::collections::BTreeSet<String>,
+    profile: &rhema_config::Profile,
+    session_key: &str,
+    disabled_mcp: &std::collections::BTreeSet<String>,
 ) -> (CodingAgentConfig, rhema_subagents::SubagentHandle) {
     let mut config = agent_config(options, model, disabled_skills);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_tools(&mut config);
     }
     apply_prompt_sections(&mut config, options, sandboxed);
+    // MCP: the local-only wire, gated on the sandbox — a session
+    // whose bash runs elsewhere never sees the section, because its
+    // executor could not reach the socket or the provisioned env.
+    if let Some(entry) =
+        crate::mcp_wire::wire_for_session(session_key, profile, disabled_mcp, sandboxed)
+    {
+        config.shell_env.extend(entry.shell_env().clone());
+        config.mcp_servers = entry.lines().to_vec();
+    }
+    config.disabled_mcp_servers = disabled_mcp.clone();
     let (mut config, subagents) = rhema_subagents::wire(provider, config);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_workspace(&mut config);

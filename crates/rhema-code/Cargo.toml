@@ -81,6 +81,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # The image block's data is bare base64
 base64 = "0.22"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
+rhema-mcp = { version = "0.1.0", path = "../rhema-mcp" }
+serde_yaml.workspace = true
 
 [dev-dependencies]
 # The sandbox tests drive the scripted sandbox

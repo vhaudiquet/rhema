@@ -150,16 +150,23 @@ impl App {
         settings.mcp_dialog = Some(crate::screens::AddMcpServerDialog::new(taken));
     }
 
-    /// Flips a server's muted state. The set lives on the session —
-    /// `skills_disabled` persists because it is a config field, and
-    /// its MCP twin is not one yet — so the mute holds for this
-    /// session and the open row follows it.
+    /// Flips a server's muted state: the config's
+    /// `disabled_mcp_servers` set flips with the session's live copy
+    /// (the `skills_disabled` twin, now a config field), the change
+    /// persists through save_config, and the running agent rebuilds
+    /// carrying the conversation over — the prompt carries the MCP
+    /// section, so the very next turn sees it. The open row follows.
     pub(crate) fn toggle_mcp_server(&mut self, name: &str) {
         let muted = !self.disabled_mcp_servers.contains(name);
         if muted {
             self.disabled_mcp_servers.insert(name.to_owned());
         } else {
             self.disabled_mcp_servers.remove(name);
+        }
+        if muted {
+            self.config.disabled_mcp_servers.insert(name.to_owned());
+        } else {
+            self.config.disabled_mcp_servers.remove(name);
         }
         if let Screen::Settings(settings) = &mut self.screen {
             for row in &mut settings.mcp {
@@ -169,11 +176,17 @@ impl App {
             }
         }
         let notice = if muted {
-            format!("the {name} server is muted for this session")
+            format!("the {name} server is muted — saved and applied to new turns")
         } else {
-            format!("the {name} server is unmuted")
+            format!("the {name} server is unmuted — saved and applied to new turns")
         };
         self.transcript.push_notice(&notice);
+        if self.save_config() {
+            // The prompt and the shell env both carry the wiring, so
+            // the running agent rebuilds exactly like a skill toggle;
+            // a running turn defers the rebuild to its end.
+            let _ = self.rebuild_live_agent(false);
+        }
     }
 
     /// The add-server dialog's accepted entry: it lands in the

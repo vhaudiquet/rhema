@@ -9,12 +9,20 @@
 //! `mcp` section. A sandboxed frontend wires nothing — it calls
 //! nothing here, so nothing advertises what cannot run.
 //!
+//! The bridge rides a dedicated thread with its own runtime, so
+//! [`wire`] is synchronous and safe to call from frontend code that
+//! never touches an async context — and the manager's MCP work never
+//! borrows the frontend's runtime, whose lifetime is the UI's, not
+//! the servers'. The manager's spawned children are stateful by
+//! design: they outlive any single call, and rewiring (a profile
+//! switch) leaves the previous session's servers idling rather than
+//! killing state a newer session might have wanted anyway.
+//!
 //! Teardown is drop-based and ordered by the ownership graph: dropping
-//! [`Wiring`] removes the init file and drops the manager, whose
-//! clients kill their stdio children on drop; call
-//! [`Wiring::shutdown_bridge`] (or let the handle drop its guard with
-//! the process) to stop the accept loop. HTTP servers hold no child
-//! to clean.
+//! [`Wiring`] removes the init file, stops the bridge, and the bridge
+//! thread unwinds with the aborted accept task; the manager drops
+//! with the wiring and its clients kill their stdio children on drop.
+//! HTTP servers hold no child to clean.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -39,6 +47,7 @@ pub struct Wiring {
     pub manager: std::sync::Arc<McpManager>,
     socket_path: PathBuf,
     bridge: Option<crate::bridge::BridgeHandle>,
+    _bridge_thread: Option<std::thread::JoinHandle<()>>,
     _provision: Provision,
 }
 
@@ -49,11 +58,19 @@ impl Wiring {
         if let Some(bridge) = self.bridge.take() {
             bridge.shutdown();
         }
+        // The thread unwinds once the aborted accept task surfaces;
+        // never join-block a session teardown on it.
     }
 
     /// The socket path the CLI's env points at.
     pub fn socket(&self) -> &Path {
         &self.socket_path
+    }
+}
+
+impl Drop for Wiring {
+    fn drop(&mut self) {
+        self.shutdown_bridge();
     }
 }
 
@@ -76,9 +93,8 @@ fn session_token() -> String {
 
 /// Wires MCP into an agent session: filter by `disabled`, bind the
 /// bridge in the session temp dir, provision the shell env and the
-/// prompt lines. Async because the bridge's accept loop must ride the
-/// caller's runtime — a dedicated runtime dropped at return would
-/// take the loop with it.
+/// prompt lines. Synchronous: the bridge runs on a dedicated thread
+/// (see the module docs), so frontend code needs no async context.
 ///
 /// `session_tmp` is the session's temp dir (the agent's `media/`
 /// rides under it); `agent_id` names the per-agent provision dir;
@@ -90,12 +106,38 @@ fn session_token() -> String {
 /// Filesystem failures from provisioning or socket binding. Config
 /// parsing never fails here: [`McpConfig::load`] is forgiving of the
 /// file and strict of the entry, returning notices instead.
-pub async fn wire(
+pub fn wire(
     config: &McpConfig,
     disabled: &BTreeSet<String>,
     session_tmp: &Path,
     agent_id: &str,
     bash_env: Option<std::ffi::OsString>,
+) -> std::io::Result<Wiring> {
+    wire_with_bin(
+        config,
+        disabled,
+        session_tmp,
+        agent_id,
+        bash_env,
+        &std::env::current_exe()?,
+    )
+}
+
+/// [`wire`] over an explicit exec target — the process-level test
+/// seam (see `provision_with_bin`). `#[doc(hidden)]` because nothing
+/// in production has a reason to call it.
+///
+/// # Errors
+///
+/// As [`wire`].
+#[doc(hidden)]
+pub fn wire_with_bin(
+    config: &McpConfig,
+    disabled: &BTreeSet<String>,
+    session_tmp: &Path,
+    agent_id: &str,
+    bash_env: Option<std::ffi::OsString>,
+    bin: &Path,
 ) -> std::io::Result<Wiring> {
     // Filter before anything spawns: a disabled server gets no
     // manager slot, no stub, no prompt line.
@@ -113,14 +155,54 @@ pub async fn wire(
     let socket = socket_path.clone();
     let token = session_token();
     let manager = std::sync::Arc::new(McpManager::new(&filtered));
-    let bridge = crate::bridge::serve(manager.clone(), socket, token.clone()).await?;
-    let provisioned = provision::provision(
+    // The bridge's runtime lives on its own thread for the wiring's
+    // lifetime: bind first, then keep the runtime parked forever. The
+    // shutdown aborts the accept task, which ends block_on, which
+    // ends the thread.
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let thread_manager = manager.clone();
+    let thread_socket = socket.clone();
+    let thread_token = token.clone();
+    let thread = std::thread::Builder::new()
+        .name("mcp-bridge".to_owned())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => {
+                    let _ = ready_tx.send(Err(std::io::Error::other(
+                        "the bridge runtime failed to build",
+                    )));
+                    return;
+                }
+            };
+            let result: std::io::Result<()> = runtime.block_on(async {
+                let bridge =
+                    crate::bridge::serve(thread_manager, thread_socket, thread_token).await?;
+                let _ = ready_tx.send(Ok(bridge));
+                // Park the runtime: the accept task and every handler
+                // the bridge spawns run here from now on.
+                std::future::pending::<()>().await;
+                #[allow(unreachable_code)]
+                Ok(())
+            });
+            if let Err(err) = result {
+                let _ = ready_tx.send(Err(err));
+            }
+        })?;
+    let bridge = ready_rx
+        .recv()
+        .map_err(|_| std::io::Error::other("the bridge thread died before binding"))??;
+    let provisioned = provision::provision_with_bin(
         &filtered,
         bridge.socket_path(),
         &token,
         session_tmp,
         bash_env.clone(),
         agent_id,
+        bin,
     )?;
 
     let skipped = provisioned.skipped.clone();
@@ -153,6 +235,7 @@ pub async fn wire(
         notices: skipped,
         manager,
         bridge: Some(bridge),
+        _bridge_thread: Some(thread),
         _provision: provisioned,
     })
 }

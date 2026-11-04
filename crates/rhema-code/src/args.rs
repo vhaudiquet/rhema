@@ -6,6 +6,7 @@
 //! `acp` serves the Agent Client Protocol; its flags mirror the run
 //! subset minus the workspace (the client names it per session).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
@@ -201,6 +202,25 @@ pub enum Command {
     /// profile, colors, skills. The terminal UI with the wizard forced
     /// on, whatever the config's marker says.
     Onboard,
+    /// The MCP meta surface (`mcp servers | tools | schema | call`),
+    /// plus the pass-through that makes the agent shell's generated
+    /// functions work: `rhema __server <name> …`. Everything after
+    /// the subcommand goes to the MCP CLI verbatim; it reads the
+    /// bridge env the init file set and exits 4 outside a wired
+    /// shell.
+    Mcp {
+        /// The CLI's own argv, passed through untouched.
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<std::ffi::OsString>,
+    },
+    /// The catch-all the init file's stubs land in: `rhema __server
+    /// <name> …` execs this binary with `__server` as the first
+    /// token, and any other unrecognized subcommand follows the same
+    /// road — the MCP CLI answers for the modes it knows and exits 2
+    /// for the ones it does not, preserving the old clap shape's
+    /// error exit.
+    #[command(external_subcommand)]
+    External(Vec<OsString>),
 }
 
 /// What `rhema system` does with the prompt. The edited file is the

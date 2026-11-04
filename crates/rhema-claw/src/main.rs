@@ -32,11 +32,38 @@ struct Args {
     /// debug backend. Requires the `mock` feature.
     #[arg(long)]
     mock: bool,
+
+    /// The MCP meta surface, the flat flags' first subcommand:
+    /// `claw mcp servers | tools | schema | call`. The rest goes to
+    /// the MCP CLI verbatim, which reads the bridge env the init
+    /// file set; outside a wired agent shell it exits 4 silently.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// The claw's subcommands.
+#[derive(Debug, clap::Subcommand)]
+enum Command {
+    /// The MCP meta surface, passed through to `rhema_mcp::cli`.
+    Mcp {
+        /// The CLI's own argv, passed through untouched.
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<std::ffi::OsString>,
+    },
 }
 
 #[tokio::main]
 async fn main() {
-    if let Err(err) = run(Args::parse()).await {
+    // The MCP CLI owns the process when dispatched: its exit code is
+    // ours, its stdout/stderr contract is the caller's output.
+    let args = Args::parse();
+    if let Some(Command::Mcp { args: rest }) = &args.command {
+        let mut argv = Vec::with_capacity(rest.len() + 1);
+        argv.push(std::ffi::OsString::from("mcp"));
+        argv.extend(rest.iter().cloned());
+        std::process::exit(rhema_mcp::cli::run(&argv));
+    }
+    if let Err(err) = run(args).await {
         eprintln!("error: {err}");
         let mut source: &dyn std::error::Error = &err;
         while let Some(cause) = source.source() {

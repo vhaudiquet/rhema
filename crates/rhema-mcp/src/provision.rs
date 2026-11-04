@@ -85,6 +85,34 @@ pub fn provision(
     bash_env: Option<OsString>,
     agent_id: &str,
 ) -> std::io::Result<Provision> {
+    provision_with_bin(
+        config,
+        bridge_socket,
+        token,
+        session_tmp,
+        bash_env,
+        agent_id,
+        &std::env::current_exe()?,
+    )
+}
+
+/// [`provision`] over an explicit bin — the process-level test seam:
+/// production always execs `current_exe()` (the rhema binary), while
+/// a test execs the crate's own CLI target.
+///
+/// # Errors
+///
+/// As [`provision`].
+#[allow(clippy::too_many_arguments)]
+pub fn provision_with_bin(
+    config: &McpConfig,
+    bridge_socket: &Path,
+    token: &str,
+    session_tmp: &Path,
+    bash_env: Option<OsString>,
+    agent_id: &str,
+    bin_source: &Path,
+) -> std::io::Result<Provision> {
     // The per-agent dir: 0700, unique per agent, under the system
     // temp dir — not under the session tmp, because RHEMA_MCP_TMP is
     // visible to the agent's commands and the init file is
@@ -101,15 +129,11 @@ pub fn provision(
     // install` mid-session (which renames over the installed file)
     // cannot pull the inode out from under running commands. A copy
     // when the temp dir sits on another filesystem.
-    let exe = std::env::current_exe()?;
-    let bin = dir.join(exe.file_name().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "current_exe has no file name",
-        )
+    let bin = dir.join(bin_source.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the bin has no file name")
     })?);
-    if std::fs::hard_link(&exe, &bin).is_err() {
-        std::fs::copy(&exe, &bin)?;
+    if std::fs::hard_link(bin_source, &bin).is_err() {
+        std::fs::copy(bin_source, &bin)?;
     }
 
     // One stub per server, in config order; name conflicts with the
