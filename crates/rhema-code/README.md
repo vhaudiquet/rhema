@@ -82,7 +82,7 @@ Skills are folders holding a `SKILL.md` whose frontmatter `description` is the t
 
 Rhema bundles two skills — `commit-message` and `unslop` — and seeds them into the global skills directory on start. A bundled skill you have edited is left alone, and a folder of the same name shadows it like any other. Toggle skills on and off from the Skills page (`enter`/`space`) or at onboarding; a switched-off skill's trigger leaves the system prompt but keeps its row, greyed, in the lists.
 
-Regular coding agent features are supported, while maintaining a simplicity balance. Right now, no MCPs.
+Regular coding agent features are supported, while maintaining a simplicity balance. MCP servers wire through bash: the global `~/.config/rhema/mcp.yaml` (or the profile's `mcp_servers`) names them, the prompt's `mcp` section discloses what survived, and the generated `atlassian create_issue --project ENG`-shaped commands call the bridge (`rhema mcp servers/tools/schema/call` is the same surface from your own shell; `specs/rhema-mcp.md` is the design).
 
 ### Subagents
 

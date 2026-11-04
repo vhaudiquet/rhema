@@ -60,12 +60,10 @@ Rules:
     (`crates/rhema-provider-copilot/`)
   - `mcp` — the MCP client extension: the protocol subset, the manager,
     the bridge, and the provisioned shell functions
-    (`crates/rhema-mcp/`; the crate does not exist yet — the scope is
-    declared ahead of it landing)
+    (`crates/rhema-mcp/`)
   - `mcp-to-cli` — the schema-to-CLI mapping crate: MCP tool catalogs
-    to clap commands, argv matches to JSON (`crates/mcp-to-cli/`; the
-    crate lands with the mapping commit, ahead of its consumer, and
-    carries zero rhema deps)
+    to clap commands, argv matches to JSON (`crates/mcp-to-cli/`; zero
+    rhema deps)
   - `memory` — the agent memory layer: the `MemoryStore` contract, its
     stores, and the memory tools (`crates/rhema-memory/`)
   - `identity` — the agent accounts layer: the `IdentityStore`
