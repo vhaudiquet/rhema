@@ -138,10 +138,26 @@ pub fn wire_at(
             crate::registry::DEFAULT_MAX_RUNNING,
         )));
     }
-    let shell = config
-        .tools
-        .clone()
-        .unwrap_or_else(|| Arc::new(ShellTools::new(config.workspace.clone())));
+    // The shared shell carries the config's env — the wiring's
+    // provisioned BASH_ENV and socket ride it. Building `ShellTools::new`
+    // here instead would strand the env in a config field nothing reads:
+    // agent.rs's own `with_env` fallback never runs once `tools` is
+    // `Some`, and every bash command would lose the functions the prompt
+    // advertises. (Regression shape: the prompt listed the MCP servers
+    // while `mcp` was `command not found` in the same session.)
+    // The shared shell carries the config's env — the wiring's
+    // provisioned BASH_ENV and socket ride it. Building `ShellTools::new`
+    // here instead would strand the env in a config field nothing reads:
+    // agent.rs's own `with_env` fallback never runs once `tools` is
+    // `Some`, and every bash command would lose the functions the prompt
+    // advertises. (Regression shape: the prompt listed the MCP servers
+    // while `mcp` was `command not found` in the same session.)
+    let shell = config.tools.clone().unwrap_or_else(|| {
+        Arc::new(ShellTools::with_env(
+            config.workspace.clone(),
+            &config.shell_env,
+        ))
+    });
     let tools = Arc::new(
         SubagentTools::new(provider, defs, shell.clone(), config.model.clone())
             .with_thinking(config.thinking)
@@ -256,6 +272,42 @@ mod tests {
         def_in(global.path(), "reviewer", "reviews diffs");
         let root = workspace.path().to_path_buf();
         (global, root)
+    }
+
+    #[tokio::test]
+    async fn the_shared_shell_carries_the_config_env() {
+        use rhema_core::{ToolCall, ToolResolver};
+        // The regression shape: the config's shell_env (the MCP wiring's
+        // provisioned BASH_ENV and socket among it) must reach the bash
+        // tool's children. wire_at used to rebuild the shell without it,
+        // and agent.rs's own with_env fallback never ran because tools
+        // was already Some — the prompt advertised functions the shell
+        // had never heard of.
+        let empty = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mut config = CodingAgentConfig::new("m", workspace.path());
+        config
+            .shell_env
+            .insert("RHEMA_WIRE_TEST".to_owned(), "seen".to_owned());
+        let handle = wire_at(Some(empty.path()), Arc::new(Never), &mut config);
+        let shell = config.tools.clone().expect("the shared shell");
+        shell.install_approval(std::sync::Arc::new(rhema_agent_tools::AllowAll));
+        let result = ToolResolver::resolve(
+            shell.as_ref(),
+            ToolCall {
+                id: "c1".into(),
+                name: "bash".into(),
+                args: serde_json::json!({ "command": "printf %s $RHEMA_WIRE_TEST" }),
+                provider_data: serde_json::Value::Null,
+            },
+            &rhema_core::tool::ToolContext::default(),
+        )
+        .await;
+        assert!(
+            result.content.contains("seen"),
+            "the env reached the child: {result:?}"
+        );
+        let _ = handle;
     }
 
     #[test]
