@@ -550,6 +550,10 @@ fn meta_mode(env: &CliEnv, argv: &[std::ffi::OsString]) -> Result<Exit, Outcome>
                 .map_err(|fault| Outcome::Exit(fault.report()))?;
             Ok(print_envelope(&event, &data, env))
         }
+        "" => {
+            eprintln!("expected a verb: servers, tools, schema, or call");
+            Ok(Exit::Usage)
+        }
         other => {
             eprintln!("unknown verb `{other}`; expected servers, tools, schema, or call");
             Ok(Exit::Usage)
