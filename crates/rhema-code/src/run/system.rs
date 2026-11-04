@@ -16,11 +16,10 @@ pub(crate) fn system_command(
         SystemCommand::Edit => system_edit_at(&Config::system_prompt_path()?, None),
         SystemCommand::Restore => system_restore_at(&Config::system_prompt_path()?),
         SystemCommand::Show => {
-            let prompt = system_show_at_with_mcp(
+            let prompt = system_show_at(
                 Config::system_prompt_path().ok().as_deref(),
                 workspace,
                 profile,
-                mcp_preview_lines(profile),
             )?;
             // Styled markdown on a terminal; the byte-exact prompt when
             // piped, the same contract the one-shot keeps.
