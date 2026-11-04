@@ -80,6 +80,7 @@ pub mod interactive;
 pub mod job_store;
 pub mod job_tools;
 pub mod jobs;
+pub mod mcp;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod notifications;

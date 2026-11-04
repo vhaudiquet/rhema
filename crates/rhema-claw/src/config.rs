@@ -150,6 +150,12 @@ pub struct ClawConfig {
     /// open on its interface; set it when the port is reachable from
     /// anywhere but loopback. `/healthz` stays open either way.
     pub token: Option<String>,
+    /// MCP server names held back from the claw's agents — the
+    /// off switch (the global `mcp.yaml` is the claw's config scope;
+    /// there are no profiles here). The wiring step filters before
+    /// anything spawns and the prompt carries only what survives.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub disabled_mcp_servers: std::collections::BTreeSet<String>,
     /// The scoped agent token the client tools hold: it answers only
     /// the data routes the tool contract allowlists — watches,
     /// notifications, tasks — never consents, sessions, or ingest, so
@@ -195,6 +201,7 @@ impl Default for ClawConfig {
             tools_bin: None,
             ingest_token: None,
             transcript: None,
+            disabled_mcp_servers: std::collections::BTreeSet::new(),
         }
     }
 }

@@ -59,6 +59,7 @@ fn config(dir: &tempfile::TempDir) -> ClawConfig {
         tools_bin: None,
         transcript: None,
         ingest_token: None,
+        disabled_mcp_servers: std::collections::BTreeSet::new(),
     }
 }
 
