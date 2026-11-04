@@ -1,0 +1,33 @@
+[package]
+name = "rhema-mcp"
+description = "The MCP client extension: protocol subset, connections, and the bridge turning configured servers into bash commands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "io-util", "net", "sync", "time"] }
+# The Streamable HTTP transport rides hyper, already in the tree under
+# axum: the legacy client connector plus the body utilities, not a
+# second HTTP stack
+hyper = { version = "1", default-features = false, features = ["http1", "client"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[[test]]
+name = "fake_server"
+harness = false
+
+[lints]
+workspace = true
