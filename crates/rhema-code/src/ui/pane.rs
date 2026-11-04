@@ -425,10 +425,12 @@ pub(crate) fn tool_row(
         None if ok == Some(false) => Some(("✗".to_owned(), theme.error)),
         None => None,
     };
-    let suffix_width = suffix
-        .as_ref()
-        .map_or(0, |(text, _)| text.chars().count() + 1);
-    let command = transcript::truncate_chars(
+    // Cells, not chars: the row is drawn by terminal cells, so a wide
+    // glyph in the command or the code shifts the alignment otherwise.
+    // The suffix is bare width — the cell it leaves for the gap is the
+    // budget's +1, counted once.
+    let suffix_width = suffix.as_ref().map_or(0, |(text, _)| text.width());
+    let command = transcript::truncate_width(
         &command,
         width.saturating_sub(prefix_width + suffix_width + 1),
     );
@@ -436,7 +438,7 @@ pub(crate) fn tool_row(
     spans.push(Span::raw(command.clone()));
     if let Some((text, color)) = suffix {
         let gap = width
-            .saturating_sub(prefix_width + command.chars().count() + suffix_width)
+            .saturating_sub(prefix_width + command.width() + suffix_width)
             .max(1);
         spans.push(Span::raw(" ".repeat(gap)));
         spans.push(Span::styled(text, Style::default().fg(color)));

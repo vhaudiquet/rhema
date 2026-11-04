@@ -337,8 +337,14 @@ pub fn describe(name: &str, args: &str) -> String {
     match name {
         // The shell command renders bare and in full: the transcript
         // cuts it at the terminal's width, not at an arbitrary count.
+        // Still one row: control characters — a heredoc's newlines —
+        // become spaces, because ratatui drops control glyphs when it
+        // draws, and the row's width math must count what shows.
         "bash" | "run_command" => match arg("command") {
-            Some(command) => command.to_owned(),
+            Some(command) => command
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect(),
             None => "(no command)".to_owned(),
         },
         // A subagent call reads as delegation: who was asked, then the
@@ -368,6 +374,31 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
         end -= 1;
     }
     format!("{}\u{2026}", &text[..end])
+}
+
+/// Cuts `text` to at most `max` terminal cells, appending `…` when cut;
+/// counts display width, so a wide glyph never overflows the budget.
+pub fn truncate_width(text: &str, max: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if max == 0 {
+        return String::new();
+    }
+    if text.width() <= max {
+        return text.to_owned();
+    }
+    let budget = max - 1; // the ellipsis takes the last cell
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = c.width().unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('\u{2026}');
+    out
 }
 
 /// Args as pretty JSON for the approval modal, cut to `max_lines` lines and
@@ -675,6 +706,25 @@ mod tests {
             long,
             "the command passes through uncut; the row cuts it"
         );
+    }
+
+    #[test]
+    fn describe_flattens_a_multiline_command_to_one_row() {
+        assert_eq!(
+            describe("bash", r#"{"command": "python3 - <<'EOF'\nprint(1)\nEOF"}"#),
+            "python3 - <<'EOF' print(1) EOF",
+            "newlines become the spaces ratatui would leave blank"
+        );
+    }
+
+    #[test]
+    fn truncate_width_counts_cells_not_chars() {
+        use unicode_width::UnicodeWidthStr;
+        assert_eq!(truncate_width("abcdef", 4), "abc\u{2026}");
+        assert_eq!(truncate_width("abc", 10), "abc", "short text passes whole");
+        assert_eq!(truncate_width("abc", 0), "");
+        let cut = truncate_width("\u{65e5}\u{672c}\u{8a9e}\u{8a9e}\u{8a9e}", 5);
+        assert_eq!(cut.width(), 5, "wide glyphs stay inside the budget: {cut}");
     }
 
     #[test]

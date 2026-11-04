@@ -673,6 +673,7 @@ mod scroll_tests {
     use crate::ui::{render, wrap_line};
     use ratatui::text::Line;
     use std::collections::BTreeMap;
+    use unicode_width::UnicodeWidthStr;
 
     use crate::screens::{CatalogModel, ChatState, Chip};
     use crate::store::MemoryStore;
@@ -2199,6 +2200,29 @@ mod scroll_tests {
             .find(|row| row.trim_start().starts_with("$ ") && row.contains('…'))
             .expect("the command cut to the row");
         assert!(row.trim_end().ends_with("[0]"), "code at the end: {row}");
+        // Flush right: one cell follows the code — the pane's right
+        // text padding. The old char-count math left the code a cell
+        // short for every newline it silently dropped.
+        let code_ends = row.rfind("[0]").unwrap() + "[0]".len();
+        let trailing = buffer.area.width as usize - code_ends;
+        assert_eq!(trailing, 1, "code flush at the text edge: {row}");
+    }
+
+    #[test]
+    fn a_multiline_command_still_right_aligns_the_code() {
+        let command = format!("python3 - <<'EOF'\n{}EOF", "print(1)\n".repeat(20));
+        // The wire carries the newlines escaped, as JSON requires.
+        let args = format!(r#"{{"command": "{}"}}"#, command.replace('\n', "\\n"));
+        let line = crate::ui::pane::tool_row(&args, Some(true), Some(0), 60, &DARK);
+        let drawn: usize = line
+            .spans
+            .iter()
+            .map(|span| span.content.to_string().width())
+            .sum();
+        assert_eq!(
+            drawn, 60,
+            "the code sits at the edge, not left of it: {line:?}"
+        );
     }
 
     #[test]
