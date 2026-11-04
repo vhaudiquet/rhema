@@ -1,0 +1,20 @@
+{
+  "type": "object",
+  "properties": {
+    "project_key": {
+      "type": "string",
+      "pattern": "[A-Z]+"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "additional_fields": {
+      "anyOf": [
+        { "type": "object" },
+        { "type": "string" },
+        { "type": "null" }
+      ]
+    }
+  },
+  "required": ["project_key", "summary"]
+}

@@ -1,0 +1,43 @@
+{
+  "type": "object",
+  "properties": {
+    "code": {
+      "description": "Execute arbitrary Blender Python code",
+      "type": "string"
+    },
+    "user_prompt": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "null" }
+      ],
+      "default": "",
+      "description": "Optional natural-language prompt the operator can add"
+    },
+    "query": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "null" }
+      ],
+      "description": "Optional substring to filter the reported objects"
+    },
+    "fields": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        { "type": "null" }
+      ],
+      "description": "Optional list of fields to report per object"
+    },
+    "limit": {
+      "anyOf": [
+        { "type": "integer" },
+        { "type": "null" }
+      ],
+      "default": 20,
+      "description": "Maximum number of objects to report"
+    }
+  },
+  "required": ["code"]
+}

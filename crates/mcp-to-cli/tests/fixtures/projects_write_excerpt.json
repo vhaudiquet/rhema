@@ -1,0 +1,73 @@
+{
+  "type": "object",
+  "required": [],
+  "properties": {
+    "iterations": {
+      "description": "Custom iterations for 'create_iteration_field' method. Only set this when you need iterations with varying durations, breaks between them, or specific titles. Otherwise omit it: GitHub auto-creates three iterations of 'iteration_duration' days starting on 'start_date', which is the right choice for most cases.",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "duration": {
+            "description": "Duration in days",
+            "type": "number"
+          },
+          "start_date": {
+            "description": "Start date in YYYY-MM-DD format",
+            "type": "string"
+          },
+          "title": {
+            "description": "Iteration title (e.g. 'Sprint 1')",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "start_date",
+          "duration"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "updated_field": {
+      "description": "The field/value to apply, using {\"id\": 123, \"value\": ...} or {\"name\": \"Status\", \"value\": ...}; null clears the field. Required for 'update_project_item' and 'update_project_items', where one top-level field/value applies to every item in a batch. For 'update_project_item' SINGLE_SELECT fields, the name form accepts option names; the ID form expects an option ID.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "description": "The numeric project field ID.",
+              "type": "integer"
+            },
+            "value": {
+              "description": "The value to apply. Any JSON value is accepted; use null to clear the field."
+            }
+          },
+          "required": [
+            "id",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "description": "The project field name. Matching is case-insensitive.",
+              "type": "string"
+            },
+            "value": {
+              "description": "The value to apply. Any JSON value is accepted; use null to clear the field."
+            }
+          },
+          "required": [
+            "name",
+            "value"
+          ],
+          "type": "object"
+        }
+      ],
+      "type": "object"
+    }
+  }
+}

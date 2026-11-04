@@ -1,0 +1,20 @@
+[package]
+name = "mcp-to-cli"
+description = "JSON Schema tool catalogs to clap commands for MCP servers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The builder API only: the derive feature stays for the crates that
+# define their own commands, and `string` lets flag names and help
+# text come from runtime schemas. Default features minus `color`.
+clap = { version = "4.5", default-features = false, features = ["std", "string", "help", "usage", "error-context", "suggestions"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

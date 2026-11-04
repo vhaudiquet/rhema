@@ -341,7 +341,6 @@ impl CodingAgent {
         Ok(agent)
     }
 
-
     /// Writes the configured environment section into the session's
     /// driver state when none is stamped yet: the checkpoint paths
     /// persist the session whole, so the stamp rides every save and the
