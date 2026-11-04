@@ -888,3 +888,79 @@ fn object_schema_without_properties_maps_an_empty_object() {
         r#"{"a": 1}"#
     );
 }
+
+// --- requiredness is visible where the model reads ---
+
+#[test]
+fn required_flags_mark_help_and_enforce() {
+    let cmd = command(
+        "srv",
+        &[tool(
+            "t",
+            "d",
+            json!({
+                "type": "object",
+                "properties": {
+                    "must": {"type": "string", "description": "The mandatory one"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "free": {"type": "string", "description": "The optional one"},
+                },
+                "required": ["must", "tags"],
+            }),
+        )],
+    );
+    let sc = cmd.find_subcommand("t").unwrap();
+    let help_of = |long: &str| {
+        sc.get_arguments()
+            .find(|a| a.get_long() == Some(long))
+            .unwrap_or_else(|| panic!("{long} flag exists"))
+            .get_help()
+            .map(|h| h.to_string())
+    };
+    assert_eq!(
+        help_of("must").as_deref(),
+        Some("The mandatory one (required)")
+    );
+    assert_eq!(help_of("tags").as_deref(), Some("(required, repeatable)"));
+    assert_eq!(help_of("free").as_deref(), Some("The optional one"));
+
+    // clap enforces both, loudly, listing the missing flags.
+    let err = parse(&cmd, &["t", "--free", "x"]);
+    assert!(err.is_none(), "omitted required flags must not parse");
+
+    // The override still relaxes them all.
+    assert_eq!(
+        overridden(run(&cmd, &["t", "--json", r#"{"must": "v"}"#]).unwrap()),
+        r#"{"must": "v"}"#
+    );
+}
+
+#[test]
+fn nullable_required_props_stay_optional_in_help() {
+    // A required property whose flag cannot say null stays
+    // clap-optional, and the help must not claim otherwise.
+    let cmd = command(
+        "srv",
+        &[tool(
+            "t",
+            "d",
+            json!({
+                "type": "object",
+                "properties": {
+                    "maybe": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                },
+                "required": ["maybe"],
+            }),
+        )],
+    );
+    let sc = cmd.find_subcommand("t").unwrap();
+    let arg = sc
+        .get_arguments()
+        .find(|a| a.get_long() == Some("maybe"))
+        .expect("maybe flag");
+    assert!(
+        arg.get_help().is_none(),
+        "no required mark on a nullable prop"
+    );
+    assert!(parse(&cmd, &["t"]).is_some(), "not clap-required");
+}

@@ -395,6 +395,13 @@ fn property_arg(
     used.push(long.clone());
 
     let help = schema.get("description").and_then(Value::as_str);
+    // clap-required only when the flags are the whole answer: JSON-flag
+    // properties and nullable ones stay optional. clap cannot spell
+    // `required_unless_present` args out in its usage line, so the
+    // required mark rides the help text instead.
+    let enforced = prop_required
+        && !is_nullable(schema)
+        && matches!(shape, Shape::Value(_) | Shape::Repeat(_));
     let mut arg = Arg::new(arg_id(shape, index)).long(long);
     match shape {
         Shape::SetTrue => arg = arg.action(ArgAction::SetTrue),
@@ -418,11 +425,14 @@ fn property_arg(
             // The enum values, where any, live on the items schema.
             let items = schema.get("items").unwrap_or(schema);
             arg = typed_arg(arg.action(ArgAction::Append), kind, items, prop);
-            arg = arg.help(repeat_help(help));
+            if enforced {
+                arg = arg.required_unless_present("json");
+            }
+            arg = arg.help(flag_help(help, enforced, true));
         }
     }
     if !matches!(shape, Shape::Repeat(_)) {
-        arg = with_help(arg, help);
+        arg = with_help(arg, help, enforced);
     }
     Some(arg)
 }
@@ -468,14 +478,29 @@ fn flag_name_ok(long: &str) -> bool {
 }
 
 /// Help text for a repeatable flag, stating so.
-fn repeat_help(help: Option<&str>) -> String {
+/// The flag's help text: the schema description, honest about what the
+/// flag demands (`required`, `repeatable`). clap renders neither mark
+/// in its usage line — our required flags are
+/// `required_unless_present`, so `--json` can carry the payload — and
+/// the help text is where the model reads.
+fn flag_help(help: Option<&str>, required: bool, repeatable: bool) -> String {
+    let mut marks = Vec::new();
+    if required {
+        marks.push("required");
+    }
+    if repeatable {
+        marks.push("repeatable");
+    }
     match help {
-        Some(h) if !h.is_empty() => format!("{h} (repeatable)"),
-        _ => "(repeatable)".to_owned(),
+        Some(h) if !h.is_empty() => format!("{h} ({})", marks.join(", ")),
+        _ => format!("({})", marks.join(", ")),
     }
 }
 
-fn with_help(arg: Arg, help: Option<&str>) -> Arg {
+fn with_help(arg: Arg, help: Option<&str>, enforced: bool) -> Arg {
+    if enforced {
+        return arg.help(flag_help(help, true, false));
+    }
     match help {
         Some(h) if !h.is_empty() => arg.help(h.to_owned()),
         _ => arg,
