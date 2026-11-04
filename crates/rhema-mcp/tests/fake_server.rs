@@ -107,6 +107,13 @@ const TESTS: &[(&str, AsyncTest)] = &[
     ("manager_statuses_never_spawn", || {
         Box::pin(manager_statuses_never_spawn())
     }),
+    ("bridge_serves_the_whole_surface", || {
+        Box::pin(bridge_serves_the_whole_surface())
+    }),
+    (
+        "bridge_cancellation_reaches_the_server_on_disconnect",
+        || Box::pin(bridge_cancellation_reaches_the_server_on_disconnect()),
+    ),
 ];
 
 // ---------------------------------------------------------------------
@@ -334,6 +341,17 @@ fn cancelled_scenario() {
                 &id.expect("id"),
                 handshake_result("2025-06-18"),
             ));
+        } else if method == "tools/list" {
+            let Some(id) = id else { continue };
+            send(result_envelope(&id, json!({"tools": []})));
+        } else if method == "tools/call" {
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&notes)
+            {
+                let _ = writeln!(file, "call arrived");
+            }
         } else if method == "notifications/cancelled" {
             let Ok(mut file) = std::fs::OpenOptions::new()
                 .append(true)
@@ -1022,10 +1040,20 @@ use rhema_config::mcp::{McpConfig, McpServer, McpTransport};
 /// A one-server config pointing at a fake scenario, with the marker
 /// file armed and the manager's call budget matched to the harness's.
 fn manager_with_script(script: &str, marker: &std::path::Path) -> McpConfig {
+    manager_with_budget(script, marker, call_timeout())
+}
+
+/// [`manager_with_script`] with an explicit per-call budget: the
+/// disconnect-cancellation test needs a budget long enough that only
+/// the disconnect can end the call.
+fn manager_with_budget(script: &str, marker: &std::path::Path, budget: Duration) -> McpConfig {
     let exe = std::env::current_exe().expect("current exe");
     let mut env = BTreeMap::new();
     env.insert(FAKE_ENV.to_owned(), script.to_owned());
     env.insert(MARKER_ENV.to_owned(), marker.to_string_lossy().into_owned());
+    // The cancellation-recording scenarios read their notes path from
+    // NOTES_ENV; give it the same file so one path arms either.
+    env.insert(NOTES_ENV.to_owned(), marker.to_string_lossy().into_owned());
     McpConfig {
         servers: vec![McpServer {
             name: "counter".to_owned(),
@@ -1035,7 +1063,7 @@ fn manager_with_script(script: &str, marker: &std::path::Path) -> McpConfig {
                 env,
             },
             startup_timeout: Duration::from_millis(2000),
-            timeout: call_timeout(),
+            timeout: budget,
             command_name: "counter".to_owned(),
         }],
         notices: Vec::new(),
@@ -1182,4 +1210,215 @@ async fn manager_statuses_never_spawn() -> Result<(), String> {
         return Err("statuses spawned the server".to_owned());
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Bridge integration: the Unix-socket HTTP face over real servers
+// ---------------------------------------------------------------------
+
+/// One raw HTTP/1.1 request over the bridge's socket; `Connection:
+/// close` plus a write half-close so `read_to_end` terminates.
+async fn uds_request(socket: &std::path::Path, raw: &str) -> Result<(u16, String), String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::UnixStream::connect(socket)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    stream
+        .write_all(raw.as_bytes())
+        .await
+        .map_err(|e| format!("write: {e}"))?;
+    // Note: tokio's UnixStream::shutdown would close the whole
+    // stream, not just the write half, so no half-close here — the
+    // requests carry `Connection: close` and the response's own
+    // content-length bounds the read.
+    let mut buf = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => return Err(format!("read: {e}")),
+        Err(_) => {
+            return Err(format!(
+                "read timed out, got {bytes_preview}",
+                bytes_preview = String::from_utf8_lossy(&buf)
+            ));
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let status: u16 = text
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(|| format!("no status line in {text:?}"))?;
+    let body = text.split("\r\n\r\n").nth(1).unwrap_or("").to_owned();
+    Ok((status, body))
+}
+
+fn uds_get(
+    socket: &std::path::Path,
+    path: &str,
+    token: Option<&str>,
+) -> impl Future<Output = Result<(u16, String), String>> {
+    let auth = token
+        .map(|t| format!("Authorization: Bearer {t}\r\n"))
+        .unwrap_or_default();
+    let raw = format!("GET {path} HTTP/1.1\r\nHost: mcp\r\n{auth}Connection: close\r\n\r\n");
+    let socket = socket.to_path_buf();
+    async move { uds_request(&socket, &raw).await }
+}
+
+fn uds_post(
+    socket: &std::path::Path,
+    path: &str,
+    body: &str,
+    token: &str,
+) -> impl Future<Output = Result<(u16, String), String>> {
+    let raw = format!(
+        "POST {path} HTTP/1.1\r\nHost: mcp\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let socket = socket.to_path_buf();
+    async move { uds_request(&socket, &raw).await }
+}
+
+/// Every route, the auth check, the size cap, and the error mapping,
+/// against a real child behind the manager.
+async fn bridge_serves_the_whole_surface() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let marker = dir.path().join("marker");
+    let socket = dir.path().join("mcp.sock");
+    let config = manager_with_script("happy", &marker);
+    let manager = Arc::new(rhema_mcp::McpManager::new(&config));
+    let handle = rhema_mcp::bridge::serve(manager.clone(), socket.clone(), "sekrit".to_owned())
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
+
+    // No token, no surface.
+    let (status, _) = uds_get(&socket, "/servers", None).await?;
+    if status != 401 {
+        return Err(format!("expected 401 without a token, got {status}"));
+    }
+
+    // /servers reports without spawning: the happy fake writes no
+    // marker, so absence proves no connect happened.
+    let (status, body) = uds_get(&socket, "/servers", Some("sekrit")).await?;
+    if status != 200 {
+        return Err(format!("/servers: {status} {body}"));
+    }
+    if !body.contains("\"counter\"") || !body.contains("\"idle\"") {
+        return Err(format!("/servers body wrong: {body}"));
+    }
+
+    // /catalog carries the schemas; /tools must not.
+    let (status, body) = uds_get(&socket, "/catalog/counter", Some("sekrit")).await?;
+    if status != 200 || !body.contains("inputSchema") {
+        return Err(format!("/catalog: {status} {body}"));
+    }
+    let (status, body) = uds_get(&socket, "/tools/counter", Some("sekrit")).await?;
+    if status != 200 || !body.contains("get_scene_info") {
+        return Err(format!("/tools: {status} {body}"));
+    }
+    if body.contains("inputSchema") {
+        return Err(format!("/tools leaked schemas: {body}"));
+    }
+
+    // One schema, and a clean miss.
+    let (status, body) = uds_get(&socket, "/schema/counter/get_scene_info", Some("sekrit")).await?;
+    if status != 200 || !body.contains("\"type\"") {
+        return Err(format!("/schema: {status} {body}"));
+    }
+    let (status, body) = uds_get(&socket, "/schema/counter/nope", Some("sekrit")).await?;
+    if status != 404 || !body.contains("unknown_tool") {
+        return Err(format!("/schema miss: {status} {body}"));
+    }
+
+    // A call round trip, and the unknown-server mapping.
+    let call_body =
+        json!({"server": "counter", "tool": "get_scene_info", "arguments": {}}).to_string();
+    let (status, body) = uds_post(&socket, "/call", &call_body, "sekrit").await?;
+    if status != 200 || !body.contains("event: result") || !body.contains("done") {
+        return Err(format!("/call: {status} {body}"));
+    }
+    // Unknown servers travel as an `error` event over the always-200
+    // SSE stream; the kind string is the CLI's exit-code mapping.
+    let unknown = json!({"server": "ghost", "tool": "x", "arguments": {}}).to_string();
+    let (status, body) = uds_post(&socket, "/call", &unknown, "sekrit").await?;
+    if status != 200 || !body.contains("event: error") || !body.contains("unknown_server") {
+        return Err(format!("/call unknown: {status} {body}"));
+    }
+
+    // The body cap: one byte over 1 MiB is refused.
+    let big = format!("{{\"j\": \"{}\"", "x".repeat(1024 * 1024));
+    let (status, _) = uds_post(&socket, "/call", &big, "sekrit").await?;
+    if status != 413 {
+        return Err(format!("expected 413 oversize, got {status}"));
+    }
+
+    handle.shutdown();
+    Ok(())
+}
+
+/// A caller hanging up mid-call cancels the request server-side: the
+/// fake records `notifications/cancelled` to the notes file. The call
+/// budget is the full default here, so only the disconnect can end
+/// it — a timeout would fire its own cancellation and muddle the
+/// proof.
+async fn bridge_cancellation_reaches_the_server_on_disconnect() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let notes = dir.path().join("notes");
+    let socket = dir.path().join("mcp.sock");
+    let config = manager_with_budget("cancelled", &notes, Duration::from_secs(120));
+    let manager = Arc::new(rhema_mcp::McpManager::new(&config));
+    let handle = rhema_mcp::bridge::serve(manager.clone(), socket.clone(), "sekrit".to_owned())
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
+
+    use tokio::io::AsyncWriteExt;
+    let mut stream = tokio::net::UnixStream::connect(&socket)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    let body = json!({"server": "counter", "tool": "never_answers", "arguments": {}}).to_string();
+    let raw = format!(
+        "POST /call HTTP/1.1\r\nHost: mcp\r\nAuthorization: Bearer sekrit\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream
+        .write_all(raw.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Wait for the call to actually reach the child: dropping earlier
+    // would cancel a handshake, not a call, which proves nothing.
+    wait_for_notes(&notes, "call arrived", Duration::from_secs(3)).await?;
+
+    // Hang up without reading: the handler future dies mid-call, the
+    // guard fires, and the cancellation reaches the child.
+    drop(stream);
+    wait_for_notes(&notes, "cancelled", Duration::from_secs(3)).await?;
+    handle.shutdown();
+    Ok(())
+}
+
+/// Polls the notes file until it contains `needle`, up to `budget`.
+async fn wait_for_notes(
+    notes: &std::path::Path,
+    needle: &str,
+    budget: Duration,
+) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + budget;
+    loop {
+        if std::fs::read_to_string(notes)
+            .map(|seen| seen.contains(needle))
+            .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!(
+                "`{needle}` never landed (notes: {:?})",
+                std::fs::read_to_string(notes)
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }

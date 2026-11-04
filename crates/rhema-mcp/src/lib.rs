@@ -3,8 +3,8 @@
 //!
 //! The protocol subset (`initialize`, `tools/list`, `tools/call`)
 //! rides two transports: a spawned stdio child and Streamable HTTP
-//! POSTs. One [`client::Client`] is one live connection; the manager
-//! (a later commit) owns one per configured server, and the bridge
+//! POSTs. One [`client::Client`] is one live connection; the
+//! [`manager`] owns one per configured server, and the [`bridge`]
 //! serves the `rhema mcp` CLI processes that turn tool catalogs into
 //! clap commands via [`mcp-to-cli`](https://docs.rs/mcp-to-cli).
 //!
@@ -20,11 +20,12 @@
 //!   pending map, per-request timeouts, cancellation, the HTTP
 //!   session dance
 //!
-//! Later commits add `manager.rs`, `bridge.rs`, `provision.rs`,
-//! `cli.rs`, and `wire.rs` per the spec's commit sequence.
+//! Later commits add `provision.rs`, `cli.rs`, and `wire.rs` per the
+//! spec's commit sequence.
 
 #![forbid(unsafe_code)]
 
+pub mod bridge;
 pub mod client;
 pub mod manager;
 pub mod protocol;

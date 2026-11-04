@@ -51,7 +51,7 @@ pub enum RequestId {
 }
 
 /// One tool definition from `tools/list`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDef {
     /// The tool's name, verbatim.
     pub name: String,
@@ -65,7 +65,7 @@ pub struct ToolDef {
 
 /// A content block from a `tools/call` result: the `type`
 /// discriminator plus the block verbatim, extra fields included.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContentBlock {
     /// The block type as the server sent it (`text`, `image`,
     /// `audio`, `resource_link`, or whatever the server invented).
@@ -78,7 +78,7 @@ pub struct ContentBlock {
 
 /// A `tools/call` result. `is_error` is data, not a transport error:
 /// the caller decides what a failed tool means.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallToolResult {
     /// The content blocks, in server order.
     #[serde(default)]
