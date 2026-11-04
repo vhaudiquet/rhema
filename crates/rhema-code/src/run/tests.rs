@@ -2,7 +2,9 @@
 //! prompt-section gate.
 
 use super::headless::failed_checkpoint_path;
-use super::system::{markdown_ansi, system_edit_at, system_restore_at, system_show_at};
+use super::system::{
+    markdown_ansi, system_edit_at, system_restore_at, system_show_at, system_show_at_with_mcp,
+};
 use super::*;
 
 #[cfg(test)]
@@ -132,6 +134,31 @@ mod system_tests {
         // test's own base never references it, so it stays empty — the
         // built-in template's preview below carries it instead.
         assert!(!prompt.contains("## Environment"), "{prompt}");
+    }
+
+    #[test]
+    fn show_renders_the_mcp_lines_the_session_would_disclose() {
+        // A template with the mcp block, the built-in section's own
+        // shape; the lines are injected, not read from the machine's
+        // mcp.yaml.
+        let base = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            base.path(),
+            "{% for n in mcp %}- {{ n.name }} (server: {{ n.server }}): {{ n.description }}\n{% endfor %}",
+        )
+        .unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mcp = vec![rhema_agent_tools::prompt::McpServerLine {
+            name: "blender".to_owned(),
+            server: "blender".to_owned(),
+            description: "Blender scene operations".to_owned(),
+        }];
+        let prompt =
+            system_show_at_with_mcp(Some(base.path()), workspace.path(), None, mcp).unwrap();
+        assert!(
+            prompt.contains("- blender (server: blender): Blender scene operations"),
+            "{prompt}"
+        );
     }
 
     #[test]

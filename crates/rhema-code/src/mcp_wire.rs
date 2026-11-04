@@ -74,6 +74,24 @@ pub(crate) fn merged_config(profile: &Profile) -> McpConfig {
     }
 }
 
+/// Drops one session's wiring: the bridge stops, its spawned servers
+/// die, the next `wire_for_session` on this key builds fresh. The
+/// settings screen calls this when a server is ADDED or REMOVED —
+/// the tool surface changed, so the cached wiring is stale by
+/// definition. (The mute toggle deliberately does NOT rewire: its
+/// prompt-side filter hides the row without killing every other
+/// server's state, which is the whole point of the registry cache.)
+pub(crate) fn rewire(session_key: &str) {
+    if let Ok(mut reg) = registry().lock() {
+        // Removing drops the Arc<Entry>; if the old agent held no
+        // other reference the bridge dies here, before the rebuild's
+        // wire_for_session spawns a fresh one. An in-flight turn's
+        // calls fail against the dead socket and the model retries —
+        // the same shape as any server death.
+        reg.remove(session_key);
+    }
+}
+
 /// The wiring for one session, reusing an existing one on the same
 /// key. `None` when nothing is configured, everything is muted, or
 /// the session is sandboxed — all three mean "advertise nothing".
@@ -154,6 +172,46 @@ mod tests {
                 .map(|s| s.name.clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn rewire_replaces_the_wiring_for_its_key() {
+        let mut profile = Profile::default();
+        profile
+            .mcp_servers
+            .insert("counter".to_owned(), entry("a counter"));
+        let key = "rewire-key";
+        let disabled = std::collections::BTreeSet::new();
+        let first = wire_for_session(key, &profile, &disabled, None).expect("wires");
+        let session = first.shell_env().get("RHEMA_MCP_TMP").cloned();
+        let token_one = first
+            .shell_env()
+            .get("RHEMA_MCP_TOKEN")
+            .cloned()
+            .expect("token");
+
+        rewire(key);
+
+        let second = wire_for_session(key, &profile, &disabled, None).expect("rewires");
+        let token_two = second
+            .shell_env()
+            .get("RHEMA_MCP_TOKEN")
+            .cloned()
+            .expect("token");
+        assert_ne!(
+            token_one, token_two,
+            "the rewire built a fresh wiring, not the cache"
+        );
+
+        // Drop both wirings; the session dirs go with them.
+        drop(first);
+        drop(second);
+        if let Some(tmp) = session {
+            assert!(
+                !tmp.is_empty(),
+                "the provision dir existed while the wiring lived"
+            );
+        }
     }
 
     #[test]

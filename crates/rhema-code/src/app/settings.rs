@@ -218,9 +218,24 @@ impl App {
             return Vec::new();
         }
         self.refresh_mcp_page();
-        self.transcript
-            .push_notice(&format!("added the {name} server to this profile"));
+        // The tool surface changed, so the cached wiring is stale:
+        // drop it and rebuild, and the very next turn's prompt lists
+        // the new server. Same shape as the mute toggle's rebuild —
+        // the conversation rides over.
+        crate::mcp_wire::rewire(self.mcp_session_key().as_str());
+        let _ = self.rebuild_live_agent(false);
+        self.transcript.push_notice(&format!(
+            "added the {name} server to this profile — the agent rebuilt with it"
+        ));
         Vec::new()
+    }
+
+    /// The MCP registry key for this session: the profile's name, the
+    /// same key `session_agent_config` wired under.
+    pub(crate) fn mcp_session_key(&self) -> String {
+        self.session_profile
+            .clone()
+            .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned())
     }
 
     /// `y` on the removal confirm: the entry leaves the profile's map
@@ -247,6 +262,10 @@ impl App {
         }
         self.disabled_mcp_servers.remove(&name);
         self.refresh_mcp_page();
+        // The surface shrank: drop the wiring so the rebuilt agent
+        // stops advertising the removed server.
+        crate::mcp_wire::rewire(self.mcp_session_key().as_str());
+        let _ = self.rebuild_live_agent(false);
         self.transcript
             .push_notice(&format!("removed the {name} server"));
         Vec::new()

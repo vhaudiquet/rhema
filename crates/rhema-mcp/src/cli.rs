@@ -163,6 +163,25 @@ fn exchange(
     path: &str,
     body: Option<&str>,
 ) -> Result<Answer, std::io::Error> {
+    let answer = exchange_inner(env, method, path, body);
+    // The agent-facing commands stay silent on transport faults (the
+    // spec's noise rule); RHEMA_MCP_DEBUG opt-in prints the reason,
+    // because a human poking the CLI from their own shell deserves
+    // more than an exit code.
+    if let (Err(err), Some(())) =
+        (&answer, std::env::var_os("RHEMA_MCP_DEBUG").map(|_| ()))
+    {
+        eprintln!("mcp: transport error: {err}");
+    }
+    answer
+}
+
+fn exchange_inner(
+    env: &CliEnv,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> Result<Answer, std::io::Error> {
     let mut stream = std::os::unix::net::UnixStream::connect(&env.socket)?;
     stream.set_read_timeout(Some(std::time::Duration::from_secs(180)))?;
     let mut request = format!(

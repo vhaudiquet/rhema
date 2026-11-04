@@ -16,10 +16,11 @@ pub(crate) fn system_command(
         SystemCommand::Edit => system_edit_at(&Config::system_prompt_path()?, None),
         SystemCommand::Restore => system_restore_at(&Config::system_prompt_path()?),
         SystemCommand::Show => {
-            let prompt = system_show_at(
+            let prompt = system_show_at_with_mcp(
                 Config::system_prompt_path().ok().as_deref(),
                 workspace,
                 profile,
+                mcp_preview_lines(profile),
             )?;
             // Styled markdown on a terminal; the byte-exact prompt when
             // piped, the same contract the one-shot keeps.
@@ -161,6 +162,19 @@ pub(crate) fn system_show_at(
     workspace: &std::path::Path,
     profile: Option<&str>,
 ) -> anyhow::Result<String> {
+    let mcp = mcp_preview_lines(profile);
+    system_show_at_with_mcp(path, workspace, profile, mcp)
+}
+
+/// The preview over explicit mcp lines — the test seam. Production
+/// derives them from config ([`mcp_preview_lines`]); a test injects
+/// its own rather than reading the machine's real `mcp.yaml`.
+pub(crate) fn system_show_at_with_mcp(
+    path: Option<&std::path::Path>,
+    workspace: &std::path::Path,
+    profile: Option<&str>,
+    mcp: Vec<rhema_agent_tools::prompt::McpServerLine>,
+) -> anyhow::Result<String> {
     let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
     let mut extra = rhema_subagents::extra_specs(&workspace);
     // The transcript is on by default, so the default preview names
@@ -195,6 +209,10 @@ pub(crate) fn system_show_at(
         model.as_deref().unwrap_or(""),
         HARNESS,
     );
+    // The mcp lines come from config alone — the same fold the wire
+    // step runs, minus the runtime: no bridge, no spawns. A preview
+    // must never have side effects, so the lines are what the
+    // session WOULD disclose, not what it has.
     Ok(rhema_coding_agent::stamped_system_with_sections(
         resolve_base_system(path).as_deref(),
         &workspace,
@@ -202,8 +220,34 @@ pub(crate) fn system_show_at(
         &skills,
         environment.as_deref(),
         user.as_deref(),
-        &[],
+        &mcp,
     )?)
+}
+
+/// The prompt's mcp lines as config would produce them: global file
+/// plus the profile's own entries, profile winning by name, the
+/// muted set filtered out, invalid entries skipped as the wire step
+/// skips them. No bridge, no spawns — a preview, not a wiring.
+fn mcp_preview_lines(profile: Option<&str>) -> Vec<rhema_agent_tools::prompt::McpServerLine> {
+    let config = match Config::load() {
+        Ok(config) => config,
+        Err(_) => return Vec::new(),
+    };
+    if config.disabled_mcp_servers.contains(&String::from("*")) {
+        return Vec::new();
+    }
+    let effective = config.effective(profile);
+    let merged = crate::mcp_wire::merged_config(&effective);
+    merged
+        .servers
+        .iter()
+        .filter(|server| !config.disabled_mcp_servers.contains(&server.name))
+        .map(|server| rhema_agent_tools::prompt::McpServerLine {
+            name: server.command_name.clone(),
+            server: server.name.clone(),
+            description: server.description.clone(),
+        })
+        .collect()
 }
 
 /// Writes the built-in default to `path`, creating the directory. The

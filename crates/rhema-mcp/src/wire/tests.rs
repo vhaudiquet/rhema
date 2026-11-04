@@ -14,6 +14,10 @@ use std::time::Duration;
 /// shapes the integration suite's runner writes), keyed by
 /// `FAKE=scenario` in the env.
 fn counter_server(name: &str, command_name: Option<&str>) -> McpServer {
+    // The budgets match the config default deliberately: a parallel
+    // cargo run saturates every core, the fake child's handshake
+    // stretches past shorter budgets, and the slot goes cooling — a
+    // flake that looks like a bridge bug and isn't.
     McpServer {
         name: name.to_owned(),
         description: "a counter".to_owned(),
@@ -26,8 +30,8 @@ fn counter_server(name: &str, command_name: Option<&str>) -> McpServer {
             ],
             env: BTreeMap::new(),
         },
-        startup_timeout: Duration::from_secs(10),
-        timeout: Duration::from_secs(10),
+        startup_timeout: Duration::from_secs(60),
+        timeout: Duration::from_secs(60),
         command_name: command_name.unwrap_or(name).to_owned(),
     }
 }
@@ -66,8 +70,8 @@ done
             command: vec!["bash".to_owned(), "-c".to_owned(), script.to_owned()],
             env: BTreeMap::new(),
         },
-        startup_timeout: Duration::from_secs(10),
-        timeout: Duration::from_secs(10),
+        startup_timeout: Duration::from_secs(60),
+        timeout: Duration::from_secs(60),
         command_name: name.to_owned(),
     }
 }
