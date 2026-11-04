@@ -196,10 +196,13 @@ servers:
   claiming it gets no generated function (a debug notice says so) and is
   reachable through `mcp call`.
 - Parsing is per-entry and forgiving of the file, strict of the entry:
-  `servers` reads as an ordered list of name/entry pairs folded
-  first-wins on duplicate names; a malformed entry or a whole-file parse
-  failure is skipped with a debug notice and **never fails agent
-  construction**. A dead server is `status: error` with a message, and
+  a malformed entry is skipped with a debug notice, a whole-file parse
+  failure is one notice with an empty result, and neither **ever fails
+  agent construction**. Duplicate server names have no first-wins rule
+  to reach: serde_yaml 0.9 rejects duplicate keys during the parse
+  itself (empirically pinned, not remembered — no visitor sees the
+  second one), so a name said twice skips the whole file with the
+  parser's message. A dead server is `status: error` with a message, and
   its calls fail in-band.
 - Disabling rides the frontends, like `disabled_skills`:
   `CodingAgentConfig` gains `disabled_mcp_servers: BTreeSet<String>`;
