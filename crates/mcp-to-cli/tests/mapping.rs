@@ -875,6 +875,20 @@ fn empty_schema_tool_maps_an_empty_object() {
     let cmd = command("srv", &[tool("t", "d", json!({}))]);
     assert!(cmd.find_subcommand("t").is_some());
     assert_eq!(mapped(run(&cmd, &["t"]).unwrap()), json!({}));
+    // Nothing mandatory: the usage line carries no flags. (Standalone
+    // subcommand renders have no bin path, so only the absence of
+    // flags is asserted, not the line's prefix.)
+    let mut rendered = command("srv", &[tool("t", "d", json!({}))]);
+    let text = rendered
+        .find_subcommand_mut("t")
+        .expect("subcommand")
+        .render_help()
+        .to_string();
+    let usage = text
+        .lines()
+        .find(|l| l.starts_with("Usage:"))
+        .expect("usage line");
+    assert!(!usage.contains("--"), "{text}");
 }
 
 #[test]
@@ -926,7 +940,9 @@ fn required_flags_mark_help_and_enforce() {
     assert_eq!(help_of("free").as_deref(), Some("The optional one"));
 
     // Requiredness reads at a glance: mandatory flags lead the help,
-    // optionals follow, the override flag sits last.
+    // optionals follow, the override flag sits last — and the usage
+    // line spells the mandatory flags out, synthesized since clap's
+    // own usage cannot render required_unless_present args.
     let mut rendered = command(
         "srv",
         &[tool(
@@ -952,6 +968,11 @@ fn required_flags_mark_help_and_enforce() {
     let tags_at = text.find("--tags").expect("tags in help");
     let free_at = text.find("--free").expect("free in help");
     assert!(must_at < free_at && tags_at < free_at, "{text}");
+    assert!(text.contains("Usage: srv t --must <MUST> --tags <TAGS> [OPTIONS]"));
+    assert!(
+        !text[..text.find("Options:").expect("options header")].contains("--free"),
+        "usage line lists mandatory flags only"
+    );
 
     // clap enforces both, loudly, listing the missing flags.
     let err = parse(&cmd, &["t", "--free", "x"]);

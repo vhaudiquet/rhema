@@ -278,7 +278,8 @@ github create_pull_request --owner acme --repo api --title "Add /health" \
 with clap's help built from the schema descriptions:
 
 ```
-Usage: github create_pull_request [OPTIONS]
+Usage: github create_pull_request --base <BASE> --head <HEAD> --owner <OWNER>
+       --repo <REPO> --title <TITLE> [OPTIONS]
 
 Options:
   --base <BASE>            Branch to merge into (required)
@@ -291,12 +292,15 @@ Options:
   --title <TITLE>          PR title (required)
 ```
 
-Required flags carry a `(required)` mark in their help text. clap's
-usage line cannot spell them out: the `--json` override makes every
-required flag conditional (`required_unless_present`), and clap only
-renders unconditional requireds there. The mark lives where the model
-reads, and the error path lists the missing flags by name when an
-invocation omits one.
+Requiredness reads in three places. The usage line is synthesized
+(`override_usage`): clap's own would render `[OPTIONS]` alone, since
+the `--json` override makes every required flag conditional
+(`required_unless_present`). Mandatory flags also lead the Options
+list (display order) and carry a `(required)` mark in their help
+text. The error path lists the missing flags by name when an
+invocation omits one. The usage order is schema order — the only
+order the schema actually carries; the `required` array's order is
+convention, not contract, and is not leaned on.
 
 The boolean that defaults true in the wild (`search_repositories`
 `minimal_output`) gets the explicit form, never a guess:

@@ -133,7 +133,7 @@ pub fn command(server_name: &str, catalog: &[ToolInfo]) -> Command {
         if !renderable(tool) || !seen.insert(tool.name.as_str()) {
             continue;
         }
-        root = root.subcommand(tool_subcommand(tool));
+        root = root.subcommand(tool_subcommand(server_name, tool));
     }
     root
 }
@@ -327,15 +327,16 @@ fn root_is_object(schema: &Value) -> bool {
     }
 }
 
-fn tool_subcommand(tool: &ToolInfo) -> Command {
+fn tool_subcommand(server_name: &str, tool: &ToolInfo) -> Command {
     let mut cmd = Command::new(tool.name.clone()).about(&tool.description);
     let mut used = vec!["help".to_owned(), "json".to_owned()];
     let mut demoted = false;
+    let mut mandatory = Vec::new();
 
     if let Some(props) = properties(&tool.input_schema) {
         let required = required_names(&tool.input_schema);
         for (index, (prop, schema)) in props.iter().enumerate() {
-            let Some(arg) = property_arg(
+            let Some((arg, enforced)) = property_arg(
                 prop,
                 schema,
                 index,
@@ -345,6 +346,9 @@ fn tool_subcommand(tool: &ToolInfo) -> Command {
                 demoted = true;
                 break;
             };
+            if enforced {
+                mandatory.push(arg.clone());
+            }
             cmd = cmd.arg(arg);
         }
     }
@@ -352,6 +356,25 @@ fn tool_subcommand(tool: &ToolInfo) -> Command {
         // Collision between derived flags: no property flags at all,
         // the tool stays reachable only through `--json`.
         cmd = Command::new(tool.name.clone()).about(&tool.description);
+    } else if !mandatory.is_empty() {
+        // clap's own usage line renders [OPTIONS] alone — our required
+        // flags are `required_unless_present` so `--json` can carry the
+        // payload — so the usage is synthesized: the mandatory flags,
+        // in schema order, where a usage line traditionally puts them.
+        let prefix = mandatory
+            .iter()
+            .map(|arg| {
+                let long = arg.get_long().expect("property args have longs");
+                let value = arg
+                    .get_value_names()
+                    .and_then(|names| names.first())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| long.to_uppercase());
+                format!("--{long} <{value}>")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        cmd = cmd.override_usage(format!("{server_name} {} {prefix} [OPTIONS]", tool.name));
     }
     cmd.arg(override_arg())
 }
@@ -366,15 +389,16 @@ fn override_arg() -> Arg {
         .help("Replace the whole payload with this JSON ('-' means stdin, read by the caller)")
 }
 
-/// The flag for one property, or `None` when the property would make
-/// derived flags collide — which demotes the whole tool.
+/// The flag for one property — with whether it is clap-required — or
+/// `None` when the property would make derived flags collide, which
+/// demotes the whole tool.
 fn property_arg(
     prop: &str,
     schema: &Value,
     index: usize,
     prop_required: bool,
     used: &mut Vec<String>,
-) -> Option<Arg> {
+) -> Option<(Arg, bool)> {
     let mut shape = classify(schema);
     if shape == Shape::Value(Kind::Bool)
         && !prop_required
@@ -441,7 +465,7 @@ fn property_arg(
     if !matches!(shape, Shape::Repeat(_)) {
         arg = with_help(arg, help, enforced);
     }
-    Some(arg)
+    Some((arg, enforced))
 }
 
 /// One raw JSON value; clap's parse step owns the rejection of bad

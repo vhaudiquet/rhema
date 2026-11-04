@@ -214,6 +214,20 @@ fn update_pull_request_state_enum_and_number() {
         .unwrap(),
     );
     assert_eq!(value["state"], "closed");
+    // The usage line spells the mandatory flags out.
+    let mut rendered = cmd.clone();
+    let text = rendered
+        .find_subcommand_mut("update_pull_request")
+        .expect("subcommand")
+        .render_help()
+        .to_string();
+    assert!(
+        text.contains(
+            "Usage: github update_pull_request --owner <OWNER> --pullNumber <NUMBER> \
+             --repo <REPO> [OPTIONS]",
+        ),
+        "{text}"
+    );
     // `pullNumber` is a schema number: whole values keep the integer
     // wire form strict parsers accept.
     assert_eq!(value["pullNumber"].as_i64(), Some(7));
