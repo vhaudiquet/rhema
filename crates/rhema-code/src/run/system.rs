@@ -202,6 +202,7 @@ pub(crate) fn system_show_at(
         &skills,
         environment.as_deref(),
         user.as_deref(),
+        &[],
     )?)
 }
 

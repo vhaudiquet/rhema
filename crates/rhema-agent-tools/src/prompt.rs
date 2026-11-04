@@ -23,6 +23,21 @@ use crate::skills::Skill;
 /// should not need a minijinja dependency to name it.
 pub use minijinja::Error as TemplateError;
 
+/// One wired MCP server, as the prompt's `mcp` section carries it: the
+/// stub's name, the command the model types, and the user-written
+/// description. Content comes from config only — an MCP server never
+/// gets prose into the system prompt beyond its own yaml line.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct McpServerLine {
+    /// The bash command and function name (`command_name` or the
+    /// server name).
+    pub name: String,
+    /// The server's config name, for `mcp tools <server>` style calls.
+    pub server: String,
+    /// The user-written description, verbatim.
+    pub description: String,
+}
+
 /// Renders a SYSTEM.md template: `{{ workspace }}` becomes the
 /// workspace path, `skills` holds the discovered skills as `name`,
 /// `description`, and `path` fields, and `tools` holds the advertised
@@ -40,7 +55,7 @@ pub fn render_system(
     skills: &[Skill],
     tools: &[ToolSpec],
 ) -> Result<String, TemplateError> {
-    render_system_with_sections(template, workspace, skills, tools, None, None)
+    render_system_with_sections(template, workspace, skills, tools, None, None, &[])
 }
 
 /// [`render_system`] with the two optional prompt sections: `environment`
@@ -56,6 +71,7 @@ pub fn render_system_with_sections(
     tools: &[ToolSpec],
     environment: Option<&str>,
     user: Option<&str>,
+    mcp: &[McpServerLine],
 ) -> Result<String, TemplateError> {
     let context = serde_json::json!({
         "workspace": workspace.display().to_string(),
@@ -63,6 +79,7 @@ pub fn render_system_with_sections(
         "tools": tools,
         "environment": environment,
         "user": user,
+        "mcp": mcp,
     });
     render_template(template, &context)
 }
@@ -163,6 +180,31 @@ mod tests {
     }
 
     #[test]
+    fn the_mcp_section_renders_lines_and_vanishes_when_empty() {
+        let template = "{% if mcp %}MCP:\n{% for server in mcp %}- {{ server.name }} (server: {{ server.server }}): {{ server.description }}\n{% endfor %}{% endif %}";
+        let lines = vec![McpServerLine {
+            name: "atlassian".into(),
+            server: "atlassian".into(),
+            description: "Jira and Confluence".into(),
+        }];
+        let out =
+            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None, &lines)
+                .unwrap();
+        assert_eq!(
+            out,
+            "MCP:\n- atlassian (server: atlassian): Jira and Confluence\n"
+        );
+        let out =
+            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None, &[])
+                .unwrap();
+        // A false block leaves a single newline behind (minijinja's
+        // trim_blocks keeps it); what matters is that the content
+        // vanishes, heading included.
+        assert!(!out.contains("atlassian"), "{out:?}");
+        assert!(!out.contains("MCP:"), "{out:?}");
+    }
+
+    #[test]
     fn an_if_around_the_skills_section_holds_a_vanishing_heading() {
         let template = "{% if skills %}Skills (name / trigger / file):\n{% for skill in skills %}{{ skill.name }} / {{ skill.description }} / {{ skill.path }}\n{% endfor %}{% endif %}";
         let with = render_system(template, Path::new("/ws"), &[skill("s", "d")], &[]).unwrap();
@@ -215,6 +257,7 @@ mod tests {
             &[],
             Some("- OS: linux"),
             Some("prefer short answers"),
+            &[],
         )
         .unwrap();
         assert_eq!(out, "open\nprefer short answers\n- OS: linux\nclose\n");
@@ -228,7 +271,8 @@ mod tests {
         // the sections produces.
         let template = "open\n{% if user %}{{ user }}\n{% endif %}close";
         let without =
-            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None).unwrap();
+            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None, &[])
+                .unwrap();
         assert_eq!(without, "open\nclose\n");
         assert_eq!(
             render_system(template, Path::new("/ws"), &[], &[]).unwrap(),

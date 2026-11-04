@@ -99,7 +99,7 @@ pub fn stamped_system(
     let global = rhema_config::Config::skills_dir().ok();
     let skills =
         rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), workspace);
-    stamped_system_with_sections(base, workspace, extra, &skills, None, None)
+    stamped_system_with_sections(base, workspace, extra, &skills, None, None, &[])
 }
 
 /// [`stamped_system`] over skills collected elsewhere — the input path
@@ -114,7 +114,7 @@ pub fn stamped_system_with_skills(
     extra: &[ToolSpec],
     skills: &[Skill],
 ) -> Result<String, CodingAgentError> {
-    stamped_system_with_sections(base, workspace, extra, skills, None, None)
+    stamped_system_with_sections(base, workspace, extra, skills, None, None, &[])
 }
 
 /// The full assembly: the template over `workspace`, the skills, the
@@ -130,6 +130,7 @@ pub fn stamped_system_with_sections(
     skills: &[Skill],
     environment: Option<&str>,
     user: Option<&str>,
+    mcp: &[rhema_agent_tools::prompt::McpServerLine],
 ) -> Result<String, CodingAgentError> {
     let mut tools = ShellTools::builtin_specs();
     tools.extend_from_slice(extra);
@@ -140,6 +141,7 @@ pub fn stamped_system_with_sections(
         &tools,
         environment,
         user,
+        mcp,
     )
     .map_err(CodingAgentError::from)
 }
@@ -228,6 +230,16 @@ impl CodingAgent {
             }
         };
         skills.retain(|skill| !config.disabled_skills.contains(&skill.name));
+        // The MCP section honors the same persisted off switch: the
+        // wire step already filtered before spawning; this is the
+        // prompt-side echo, so a frontend feeding lines directly is
+        // still governed by the switch.
+        let mcp: Vec<rhema_agent_tools::prompt::McpServerLine> = config
+            .mcp_servers
+            .iter()
+            .filter(|line| !config.disabled_mcp_servers.contains(&line.server))
+            .cloned()
+            .collect();
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
@@ -239,6 +251,7 @@ impl CodingAgent {
                 &skills,
                 config.environment.as_deref(),
                 config.user_preferences.as_deref(),
+                &mcp,
             )?,
         };
         // The skills section's byte share of the system prompt: the
@@ -266,6 +279,7 @@ impl CodingAgent {
                     &bare,
                     config.environment.as_deref(),
                     config.user_preferences.as_deref(),
+                    &[],
                 )
                 .map(|without| system.len().saturating_sub(without.len()))
                 .unwrap_or(0)
@@ -1033,6 +1047,7 @@ mod extra_tools_tests {
             &[],
             Some("## Environment\n\n- OS: test os"),
             Some("prefer concise answers"),
+            &[],
         )
         .unwrap();
         assert!(prompt.contains("- OS: test os"), "{prompt}");

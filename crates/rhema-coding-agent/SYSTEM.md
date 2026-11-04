@@ -45,6 +45,25 @@ Before you answer, check the skills list below in this priority order.
 - {% if 'Always apply' in skill.description or 'always apply' in skill.description %}[MUST LOAD NOW] {% endif %}{{ skill.name }} | trigger: {{ skill.description }} | file: {{ skill.path }}
 {% endfor %}
 {% endif %}
+{% if mcp %}
+
+## MCP servers
+
+Configured MCP servers are shell work, not advertised tools. Each
+server is a bash command; --help documents it, output is JSON, jq
+narrows it.
+
+    {{ mcp[0].name }} --help                       # a server's tools
+    {{ mcp[0].name }} <tool> --help                # one tool's arguments
+    {{ mcp[0].name }} <tool> --flag value          # a call
+    {{ mcp[0].name }} <tool> --json - < args.json  # raw JSON escape hatch
+    mcp servers | mcp tools <server> | mcp call <server> <tool> <json>
+
+Flat arguments are flags; nested values take --prop_json. One line
+per server follows.
+
+{% for server in mcp %}- {{ server.name }} (server: {{ server.server }}): {{ server.description }}
+{% endfor %}{% endif %}
 {% if user %}
 
 ## User-specific settings

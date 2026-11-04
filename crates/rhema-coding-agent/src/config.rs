@@ -97,6 +97,18 @@ pub struct CodingAgentConfig {
     /// the model. `None` — the default — runs the turn exactly as
     /// before: the loop is the provided `run_turn` with no injection.
     pub steering: Option<Arc<dyn Steering>>,
+    /// The wired MCP servers, as the prompt's `mcp` section carries
+    /// them — the lines a frontend's wire step produced (spec:
+    /// `specs/rhema-mcp.md` §10). Empty renders no section: a
+    /// frontend that wires nothing advertises nothing.
+    pub mcp_servers: Vec<rhema_agent_tools::prompt::McpServerLine>,
+    /// MCP server names to drop from the prompt's section — the
+    /// persisted off switch a frontend reads out of its stored
+    /// settings, the [`disabled_skills`](Self::disabled_skills)
+    /// mechanism. Applied at stamp time over
+    /// [`mcp_servers`](Self::mcp_servers) by config name; the wire
+    /// step filters the same set before anything spawns.
+    pub disabled_mcp_servers: std::collections::BTreeSet<String>,
     /// The environment section rendered into the system prompt: machine
     /// facts probed where commands run (see the [`environment`
     /// module](crate::environment)). `None` renders the section empty.
@@ -159,6 +171,8 @@ impl CodingAgentConfig {
             summary_worker: None,
             steering: None,
             shell_env: std::collections::BTreeMap::new(),
+            mcp_servers: Vec::new(),
+            disabled_mcp_servers: std::collections::BTreeSet::new(),
             environment: None,
             user_preferences: None,
         }

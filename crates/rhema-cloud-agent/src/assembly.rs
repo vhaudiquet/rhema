@@ -162,6 +162,8 @@ impl AgentAssembly {
             // Skill selection is the client's: the seeds it sends are
             // the whole list, nothing filtered here.
             disabled_skills: Default::default(),
+            mcp_servers: Vec::new(),
+            disabled_mcp_servers: std::collections::BTreeSet::new(),
             max_turn_steps: self.max_turn_steps,
             thinking: self.thinking,
             tools: Some(shell.clone()),

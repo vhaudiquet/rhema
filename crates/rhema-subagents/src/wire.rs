@@ -185,6 +185,7 @@ fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String 
         &skills,
         config.environment.as_deref(),
         config.user_preferences.as_deref(),
+        &[],
     )
     .unwrap_or_else(|err| {
         eprintln!(
