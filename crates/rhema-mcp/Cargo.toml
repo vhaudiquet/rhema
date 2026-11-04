@@ -20,6 +20,7 @@ hyper = { version = "1", default-features = false, features = ["http1", "client"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 bytes = "1"
+rhema-config = { version = "0.1.0", path = "../rhema-config" }
 
 [dev-dependencies]
 tempfile = "3"

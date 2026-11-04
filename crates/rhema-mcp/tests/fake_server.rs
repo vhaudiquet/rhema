@@ -98,6 +98,15 @@ const TESTS: &[(&str, AsyncTest)] = &[
         Box::pin(http_404_reinitializes_exactly_once())
     }),
     ("http_sse_answer", || Box::pin(http_sse_answer())),
+    ("manager_caches_the_catalog_per_connection", || {
+        Box::pin(manager_caches_the_catalog_per_connection())
+    }),
+    ("manager_cooldown_fails_fast_then_respawns", || {
+        Box::pin(manager_cooldown_fails_fast_then_respawns())
+    }),
+    ("manager_statuses_never_spawn", || {
+        Box::pin(manager_statuses_never_spawn())
+    }),
 ];
 
 // ---------------------------------------------------------------------
@@ -116,6 +125,8 @@ fn play(script: &str) {
         "die" => die_scenario(),
         "cancelled" => cancelled_scenario(),
         "marker" => marker_scenario(),
+        "counting" => counting_scenario(),
+        "dieaftertools" => die_after_tools_scenario(),
         _ => happy_scenario(),
     }
 }
@@ -333,6 +344,87 @@ fn cancelled_scenario() {
             };
             let _ = writeln!(file, "cancelled");
             return;
+        }
+    }
+}
+
+/// Happy behavior, plus a marker line (`tools_list <pid>`) appended
+/// on every tools/list: lets a test count catalog walks across
+/// respawns.
+fn counting_scenario() {
+    let marker = std::env::var(MARKER_ENV).unwrap_or_default();
+    loop {
+        let Some(msg) = read_request() else { return };
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        let id = msg.get("id").cloned();
+        match method {
+            "initialize" => {
+                let Some(id) = id else { continue };
+                send(result_envelope(&id, handshake_result("2025-06-18")));
+            }
+            "notifications/initialized" => {}
+            "tools/list" => {
+                let Some(id) = id else { continue };
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&marker)
+                {
+                    let _ = writeln!(file, "tools_list {}", std::process::id());
+                }
+                send(result_envelope(
+                    &id,
+                    json!({"tools": [
+                        {"name": "get_scene_info", "description": "Scene info", "inputSchema": {"type": "object"}}
+                    ]}),
+                ));
+            }
+            _ => {
+                let Some(id) = id else { continue };
+                send(error_envelope(&id, -32601, "method not found"));
+            }
+        }
+    }
+}
+
+/// Handshake, answer exactly one tools/list, then die loudly: the
+/// manager sees a working catalog followed by a death with a tail.
+fn die_after_tools_scenario() {
+    loop {
+        let Some(msg) = read_request() else { return };
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        let id = msg.get("id").cloned();
+        match method {
+            "initialize" => {
+                let Some(id) = id else { continue };
+                send(result_envelope(&id, handshake_result("2025-06-18")));
+            }
+            "notifications/initialized" => {}
+            "tools/list" => {
+                let Some(id) = id else { continue };
+                if let Ok(Ok(mut file)) = std::env::var(MARKER_ENV).map(|marker| {
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .create(true)
+                        .open(marker)
+                }) {
+                    let _ = writeln!(file, "tools_list {}", std::process::id());
+                }
+                send(result_envelope(
+                    &id,
+                    json!({"tools": [
+                        {"name": "get_scene_info", "description": "Scene info", "inputSchema": {"type": "object"}}
+                    ]}),
+                ));
+                let _ = std::io::stderr().flush();
+                eprintln!("boom: died after the catalog");
+                let _ = std::io::stderr().flush();
+                std::process::exit(1);
+            }
+            _ => {
+                let Some(id) = id else { continue };
+                send(error_envelope(&id, -32601, "method not found"));
+            }
         }
     }
 }
@@ -917,6 +1009,177 @@ async fn http_sse_answer() -> Result<(), String> {
     }
     if ledger.lock().expect("ledger").len() != 3 {
         return Err("unexpected request count".to_owned());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Manager integration: the slot machinery against real child processes
+// ---------------------------------------------------------------------
+
+use rhema_config::mcp::{McpConfig, McpServer, McpTransport};
+
+/// A one-server config pointing at a fake scenario, with the marker
+/// file armed and the manager's call budget matched to the harness's.
+fn manager_with_script(script: &str, marker: &std::path::Path) -> McpConfig {
+    let exe = std::env::current_exe().expect("current exe");
+    let mut env = BTreeMap::new();
+    env.insert(FAKE_ENV.to_owned(), script.to_owned());
+    env.insert(MARKER_ENV.to_owned(), marker.to_string_lossy().into_owned());
+    McpConfig {
+        servers: vec![McpServer {
+            name: "counter".to_owned(),
+            description: "the counting fake".to_owned(),
+            transport: McpTransport::Stdio {
+                command: vec![exe.to_string_lossy().into_owned()],
+                env,
+            },
+            startup_timeout: Duration::from_millis(2000),
+            timeout: call_timeout(),
+            command_name: "counter".to_owned(),
+        }],
+        notices: Vec::new(),
+    }
+}
+
+/// The marker file's line count, absent file counting as zero.
+fn marker_lines(marker: &std::path::Path) -> usize {
+    std::fs::read_to_string(marker)
+        .map(|body| body.lines().count())
+        .unwrap_or(0)
+}
+
+/// One connection walks the catalog once; refresh re-walks it over
+/// the same connection; death resets the cache and the respawn walks
+/// again.
+async fn manager_caches_the_catalog_per_connection() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let marker = dir.path().join("marker");
+    let config = manager_with_script("counting", &marker);
+    let manager =
+        rhema_mcp::McpManager::new(&config).with_respawn_cooldown(Duration::from_millis(200));
+
+    let first = manager
+        .catalog("counter")
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.len() != 1 || first[0].name != "get_scene_info" {
+        return Err(format!(
+            "catalog wrong: {:?}",
+            first.iter().map(|t| &t.name).collect::<Vec<_>>()
+        ));
+    }
+    if marker_lines(&marker) != 1 {
+        return Err(format!(
+            "expected one walk, got {} [{:?}]",
+            marker_lines(&marker),
+            std::fs::read_to_string(&marker)
+        ));
+    }
+
+    // The cache answers without touching the server.
+    let _ = manager
+        .catalog("counter")
+        .await
+        .map_err(|e| e.to_string())?;
+    if marker_lines(&marker) != 1 {
+        return Err("cached catalog spawned a walk".to_owned());
+    }
+
+    // refresh() re-walks over the live connection: one more line, no
+    // second child.
+    manager
+        .refresh("counter")
+        .await
+        .map_err(|e| e.to_string())?;
+    if marker_lines(&marker) != 2 {
+        return Err(format!(
+            "refresh did not re-walk: {}",
+            marker_lines(&marker)
+        ));
+    }
+    Ok(())
+}
+
+/// A death fails in-band with the tail, the cooldown fails fast, and
+/// the first call after the cooldown respawns through the same slot.
+async fn manager_cooldown_fails_fast_then_respawns() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let marker = dir.path().join("marker");
+    let config = manager_with_script("dieaftertools", &marker);
+    let manager =
+        rhema_mcp::McpManager::new(&config).with_respawn_cooldown(Duration::from_millis(400));
+
+    let first = manager
+        .catalog("counter")
+        .await
+        .map_err(|e| e.to_string())?;
+    if first.len() != 1 {
+        return Err("first catalog wrong".to_owned());
+    }
+    // The child died right after answering; once the reader notices
+    // the EOF, the death-marking call fails in-band with the tail and
+    // starts the cooldown.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let second = manager.catalog("counter").await;
+    match second {
+        Err(rhema_mcp::ManagerError::Cooling { tail, .. }) => {
+            if !tail.contains("boom") {
+                return Err(format!("the tail did not survive: {tail}"));
+            }
+        }
+        other => return Err(format!("expected Cooling, got {other:?}")),
+    }
+
+    // Still inside the cooldown: fail fast again, no respawn attempt
+    // (the marker gains nothing).
+    let third = manager.catalog("counter").await;
+    match third {
+        Err(rhema_mcp::ManagerError::Cooling { .. }) => {}
+        other => return Err(format!("expected Cooling again, got {other:?}")),
+    }
+    if marker_lines(&marker) != 1 {
+        return Err(format!(
+            "cooldown spawned a respawn [{:?}]",
+            std::fs::read_to_string(&marker)
+        ));
+    }
+
+    // After the cooldown: the slot respawns and the catalog works
+    // again; two processes have walked by now.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let fourth = manager.catalog("counter").await;
+    match fourth {
+        Ok(catalog) if catalog.len() == 1 => {}
+        other => return Err(format!("respawn failed: {other:?}")),
+    }
+    if marker_lines(&marker) != 2 {
+        return Err(format!("expected two walks, got {}", marker_lines(&marker)));
+    }
+    Ok(())
+}
+
+/// Statuses report without spawning: an idle stdio server reads idle
+/// and the marker file never appears.
+async fn manager_statuses_never_spawn() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let marker = dir.path().join("marker");
+    let config = manager_with_script("counting", &marker);
+    let manager = rhema_mcp::McpManager::new(&config);
+
+    let statuses = manager.statuses().await;
+    if statuses.len() != 1 {
+        return Err(format!("expected one status, got {}", statuses.len()));
+    }
+    let status = &statuses[0];
+    if status.state != rhema_mcp::SlotSummary::Idle {
+        return Err(format!("expected idle, got {:?}", status.state));
+    }
+    if status.name != "counter" || status.description != "the counting fake" {
+        return Err("status fields wrong".to_owned());
+    }
+    if marker_lines(&marker) != 0 {
+        return Err("statuses spawned the server".to_owned());
     }
     Ok(())
 }

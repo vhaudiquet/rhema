@@ -136,6 +136,127 @@ pub(crate) fn render_add_profile_dialog(
     frame.render_widget(Paragraph::new(status), status_area);
 }
 
+/// The add-server dialog: the stage's input line, the transport list,
+/// or the lines editor, over its status line — the MCP page's pop-in
+/// for installing a server.
+pub(crate) fn render_add_mcp_dialog(
+    frame: &mut Frame,
+    dialog: &crate::screens::AddMcpServerDialog,
+    theme: &Theme,
+) {
+    use crate::screens::McpDialogStage;
+    let rows = match dialog.stage {
+        McpDialogStage::Transport => crate::screens::MCP_TRANSPORTS.len(),
+        McpDialogStage::EnvLines => dialog.env.lines.len(),
+        McpDialogStage::HeaderLines => dialog.headers.lines.len(),
+        _ => 1,
+    } as u16;
+    let area = centered(58, rows + 3, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border))
+        .style(Style::default().bg(theme.sunken).fg(theme.text))
+        .title(" add an MCP server ");
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let [body_area, status_area] =
+        Layout::vertical([Constraint::Length(rows), Constraint::Length(1)]).areas(inner);
+
+    match dialog.stage {
+        McpDialogStage::Transport => {
+            let rows: Vec<Line> = crate::screens::MCP_TRANSPORTS
+                .iter()
+                .enumerate()
+                .map(|(index, (name, what))| {
+                    let selected = index == dialog.selected;
+                    let name_style = if selected {
+                        Style::default().fg(theme.text).bold()
+                    } else {
+                        Style::default().fg(theme.text2)
+                    };
+                    Line::from(vec![
+                        Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                        Span::styled((*name).to_owned(), name_style),
+                        Span::raw(format!("  {what}")).fg(theme.text3),
+                    ])
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(rows), body_area);
+        }
+        McpDialogStage::EnvLines | McpDialogStage::HeaderLines => {
+            let lines = match dialog.stage {
+                McpDialogStage::EnvLines => &dialog.env,
+                _ => &dialog.headers,
+            };
+            let rows: Vec<Line> = lines
+                .lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| {
+                    // The cursor line wears the caret: the other
+                    // dialogs' input line is always the only line, so
+                    // this stage needs the mark to say where typing
+                    // lands.
+                    let caret = if index == lines.cursor { "▌" } else { "" };
+                    Line::from(vec![
+                        Span::raw(line.clone()).fg(if index == lines.cursor {
+                            theme.text
+                        } else {
+                            theme.text2
+                        }),
+                        Span::raw(caret).fg(theme.text),
+                    ])
+                })
+                .collect();
+            frame.render_widget(Paragraph::new(rows), body_area);
+        }
+        _ => {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::raw(dialog.input_label()).fg(theme.text3),
+                    Span::raw(dialog.input.clone()).bold(),
+                ])),
+                body_area,
+            );
+        }
+    }
+
+    let status = match &dialog.error {
+        Some(error) => Line::from(error.clone()).fg(theme.error),
+        None => Line::from(dialog.input_hint()).fg(theme.text3),
+    };
+    frame.render_widget(Paragraph::new(status), status_area);
+}
+
+/// The removal confirm: one small box asking about the one server, in
+/// the quit confirm's shape — `y` answers, anything else leaves the
+/// row alone.
+pub(crate) fn render_mcp_confirm(frame: &mut Frame, name: &str, theme: &Theme) {
+    let width = (name.chars().count() + 24).max(34) as u16;
+    let area = centered(width, 3, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.border_strong))
+        .style(Style::default().bg(theme.surface).fg(theme.text))
+        .title(format!(" remove the {name} server? "));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("y").bold(),
+            Span::raw(" remove · "),
+            Span::raw("n").bold(),
+            Span::raw(" keep"),
+        ])),
+        inner,
+    );
+}
+
 pub(crate) fn render_add_sandbox_dialog(
     frame: &mut Frame,
     dialog: &crate::screens::AddSandboxDialog,

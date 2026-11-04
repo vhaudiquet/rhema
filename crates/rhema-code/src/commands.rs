@@ -105,7 +105,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/settings",
-        description: "providers, sandboxes, colors, skills, subagents, usage, about",
+        description: "providers, sandboxes, colors, skills, subagents, mcp, usage, about",
         argument: Argument::None,
         handler: settings,
     },
@@ -144,6 +144,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         description: "configure the subagent definitions",
         argument: Argument::None,
         handler: subagents,
+    },
+    CommandSpec {
+        name: "/mcp",
+        description: "this profile's MCP servers (add, mute, remove)",
+        argument: Argument::None,
+        handler: mcp,
     },
     CommandSpec {
         name: "/system",
@@ -347,6 +353,13 @@ fn skills(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     // The interactive page, not a transcript listing: skills are
     // toggled, not read.
     app.open_settings_at(crate::screens::SettingsSection::Skills);
+    Vec::new()
+}
+
+fn mcp(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    // The settings page, not a listing: adding, muting, and removing
+    // all live there.
+    app.open_settings_at(crate::screens::SettingsSection::Mcp);
     Vec::new()
 }
 

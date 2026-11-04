@@ -21,6 +21,8 @@ pub enum SettingsSection {
     Skills,
     /// The discovered subagent definitions, editable in `$EDITOR`.
     Subagents,
+    /// The active profile's MCP servers: list, add, mute, remove.
+    Mcp,
     /// The allowance, the session's cost, the last turn's tokens.
     Usage,
     /// Version, repository, paths.
@@ -37,6 +39,7 @@ impl SettingsSection {
         SettingsSection::Memory,
         SettingsSection::Skills,
         SettingsSection::Subagents,
+        SettingsSection::Mcp,
         SettingsSection::Usage,
         SettingsSection::About,
     ];
@@ -51,6 +54,7 @@ impl SettingsSection {
             SettingsSection::Memory => "Memory",
             SettingsSection::Skills => "Skills",
             SettingsSection::Subagents => "Subagents",
+            SettingsSection::Mcp => "MCP",
             SettingsSection::Usage => "Usage",
             SettingsSection::About => "About",
         }
@@ -113,6 +117,19 @@ pub enum SettingsAction {
     SubmitSandboxDialog,
     /// Esc left the add-sandbox dialog.
     CloseSandboxDialog,
+    /// Enter on the MCP page's add row: the add-server dialog opens.
+    OpenMcpDialog,
+    /// The add-server dialog built a valid entry: insert it and
+    /// persist.
+    SubmitMcpDialog,
+    /// Esc left the add-server dialog.
+    CloseMcpDialog,
+    /// Enter or Space on an MCP server row: flip the server's muted
+    /// state.
+    ToggleMcpServer,
+    /// `y` on the remove-server confirm: the entry goes from the
+    /// profile.
+    RemoveMcpServer,
 }
 
 /// One row of the Providers page's instance list: a stored instance, or
@@ -256,6 +273,15 @@ pub struct SettingsScreen {
     pub sandbox_remembered: Option<crate::args::SandboxChoice>,
     /// The add-sandbox dialog, when it is up.
     pub sandbox_dialog: Option<AddSandboxDialog>,
+    // The MCP page's snapshot.
+    /// The active profile's servers, muted flags included, synced
+    /// from the config whenever the app mutates it.
+    pub mcp: Vec<McpServerRow>,
+    /// The add-server dialog, when it is up.
+    pub mcp_dialog: Option<AddMcpServerDialog>,
+    /// The server name awaiting its removal confirmation — the `d`
+    /// key arms it, `y` confirms, `n` and esc leave the row alone.
+    pub mcp_confirm: Option<String>,
     // The Profiles page's snapshot.
     /// The config's profiles, sorted by name.
     pub profiles: Vec<ProfileRow>,
@@ -321,6 +347,9 @@ impl SettingsScreen {
             sandbox_active: crate::args::SandboxChoice::Local,
             sandbox_remembered: None,
             sandbox_dialog: None,
+            mcp: Vec::new(),
+            mcp_dialog: None,
+            mcp_confirm: None,
             profiles: Vec::new(),
             add_profile: None,
             skills: Vec::new(),
@@ -500,6 +529,19 @@ impl SettingsScreen {
         self.skills.get(self.row)
     }
 
+    /// The highlighted MCP server row's name; `None` on the add row,
+    /// with the dialog or the removal confirm up, or anywhere but the
+    /// MCP page.
+    pub fn selected_mcp_server(&self) -> Option<&str> {
+        if self.section != SettingsSection::Mcp
+            || self.mcp_dialog.is_some()
+            || self.mcp_confirm.is_some()
+        {
+            return None;
+        }
+        self.mcp.get(self.row).map(|row| row.name.as_str())
+    }
+
     /// How many interactive rows the page holds; zero means the arrows
     /// have nothing to move through.
     fn row_count(&self) -> usize {
@@ -510,6 +552,7 @@ impl SettingsScreen {
             SettingsSection::Appearance => 3,
             SettingsSection::Skills => self.skills.len(),
             SettingsSection::Subagents => self.subagents.len(),
+            SettingsSection::Mcp => self.mcp.len() + 1,
             _ => 0,
         }
     }
@@ -558,6 +601,10 @@ impl SettingsScreen {
             SettingsSection::Skills => match self.selected_skill() {
                 Some(_) => SettingsAction::ToggleSkill,
                 None => SettingsAction::None,
+            },
+            SettingsSection::Mcp => match self.selected_mcp_server() {
+                Some(_) => SettingsAction::ToggleMcpServer,
+                None => SettingsAction::OpenMcpDialog,
             },
             _ => SettingsAction::None,
         }
@@ -610,6 +657,35 @@ impl SettingsScreen {
                 SandboxDialogAction::None => SettingsAction::None,
                 SandboxDialogAction::Submit => SettingsAction::SubmitSandboxDialog,
                 SandboxDialogAction::Close => SettingsAction::CloseSandboxDialog,
+            };
+        }
+        if let Some(action) = self
+            .mcp_dialog
+            .as_mut()
+            .map(|dialog| dialog.handle_key(key))
+        {
+            if action == McpDialogAction::Close {
+                self.mcp_dialog = None;
+            }
+            return match action {
+                McpDialogAction::None => SettingsAction::None,
+                McpDialogAction::Submit => SettingsAction::SubmitMcpDialog,
+                McpDialogAction::Close => SettingsAction::CloseMcpDialog,
+            };
+        }
+        if self.mcp_confirm.is_some() {
+            // The removal confirm takes every key while it is up: esc
+            // must stay here, not back out of the screen behind it.
+            return match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.mcp_confirm = None;
+                    SettingsAction::RemoveMcpServer
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    self.mcp_confirm = None;
+                    SettingsAction::None
+                }
+                _ => SettingsAction::None,
             };
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {

@@ -1,7 +1,10 @@
 //! The settings screen: the section sidebar and the page forms, with the
 //! usage table and its k/M abbreviations.
 
-use super::dialogs::{render_add_dialog, render_add_profile_dialog, render_add_sandbox_dialog};
+use super::dialogs::{
+    render_add_dialog, render_add_mcp_dialog, render_add_profile_dialog, render_add_sandbox_dialog,
+    render_mcp_confirm,
+};
 use super::*;
 
 /// The settings screen: the sidebar of sections on the left, the selected
@@ -103,6 +106,12 @@ pub(crate) fn render_settings(
     }
     if let Some(dialog) = &settings.sandbox_dialog {
         render_add_sandbox_dialog(frame, dialog, theme);
+    }
+    if let Some(dialog) = &settings.mcp_dialog {
+        render_add_mcp_dialog(frame, dialog, theme);
+    }
+    if let Some(name) = &settings.mcp_confirm {
+        render_mcp_confirm(frame, name, theme);
     }
 }
 
@@ -490,6 +499,83 @@ pub(crate) fn settings_page(
             (
                 lines,
                 footer("enter/e - edit in $EDITOR; the built-in is copied to the global dir first"),
+                row_hits,
+            )
+        }
+        SettingsSection::Mcp => {
+            if settings.mcp.is_empty() {
+                lines.extend(settings_hint("no servers in this profile", theme, width));
+                lines.extend(settings_hint(
+                    "the add row below installs one",
+                    theme,
+                    width,
+                ));
+            }
+            let mut row_hits = Vec::new();
+            for (index, server) in settings.mcp.iter().enumerate() {
+                let selected = index == settings.row;
+                // The hit rect lands on the name line; the description
+                // and notice lines under it are detail, not a second
+                // target.
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                // The dot is the muted state: filled for a server the
+                // manager starts, hollow and dim for one the session
+                // mutes — the skills page's pair, meanings swapped.
+                let dot = if server.disabled { "○" } else { "●" };
+                let dot_color = if server.disabled {
+                    theme.text3
+                } else {
+                    theme.ok
+                };
+                let name_color = if server.disabled {
+                    theme.text3
+                } else {
+                    theme.text
+                };
+                let mut line = Line::from(vec![
+                    super::chrome::marker(selected, theme),
+                    Span::raw(dot).fg(dot_color),
+                    Span::raw(" ").fg(theme.text3),
+                    Span::raw(server.name.clone()).fg(name_color),
+                ]);
+                if let Some(transport) = server.transport {
+                    line.push_span(Span::raw(format!(" · {transport}")).fg(theme.text3));
+                } else {
+                    // No marker: the entry resolves to neither
+                    // transport, and the notice under the row says
+                    // what the assembly does about it.
+                    line.push_span(Span::raw(" · unresolvable").fg(theme.warn));
+                }
+                if server.disabled {
+                    line.push_span(Span::raw(" · muted").fg(theme.text3));
+                }
+                lines.push(settings_row(line, selected, theme));
+                lines.extend(wrap_line(
+                    &Line::from(Span::raw(format!("    {}", server.description))).fg(theme.text3),
+                    width,
+                ));
+                if let Some(notice) = &server.notice {
+                    lines.extend(wrap_line(
+                        &Line::from(Span::raw(format!("    {notice}"))).fg(theme.warn),
+                        width,
+                    ));
+                }
+            }
+            let add = settings.mcp.len();
+            let selected = settings.row == add;
+            row_hits.push((lines.len(), SettingsHit::PageRow(add)));
+            lines.push(settings_row(
+                Line::from(vec![
+                    super::chrome::marker(selected, theme),
+                    Span::raw("+ Add a server...").fg(theme.text2),
+                ]),
+                selected,
+                theme,
+            ));
+            lines.push(Line::default());
+            (
+                lines,
+                footer("enter mutes · d removes · the add row installs one"),
                 row_hits,
             )
         }

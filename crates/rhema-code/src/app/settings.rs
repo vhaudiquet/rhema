@@ -35,6 +35,10 @@ impl App {
             .last_sandbox_in(&self.options.workspace)
             .as_deref()
             .and_then(|kind| SandboxChoice::from_stored(Some(kind)));
+        settings.mcp = crate::screens::mcp_server_rows(
+            &settings.stored.mcp_servers,
+            &self.disabled_mcp_servers,
+        );
         self.screen = Screen::Settings(Box::new(settings));
     }
 
@@ -115,6 +119,124 @@ impl App {
         if settings.row >= settings.subagents.len() {
             settings.row = 0;
         }
+    }
+
+    /// Rebuilds the MCP page's snapshot from the config and the
+    /// session's muted set, keeping the selection inside the shrunken
+    /// list. A no-op when the settings screen is not open.
+    pub(crate) fn refresh_mcp_page(&mut self) {
+        let Screen::Settings(settings) = &mut self.screen else {
+            return;
+        };
+        settings.mcp_dialog = None;
+        settings.stored = self.config.effective(self.session_profile.as_deref());
+        settings.mcp = crate::screens::mcp_server_rows(
+            &settings.stored.mcp_servers,
+            &self.disabled_mcp_servers,
+        );
+        let rows = settings.mcp.len() + 1;
+        if settings.row >= rows {
+            settings.row = rows.saturating_sub(1);
+        }
+    }
+
+    /// Enter on the MCP page's add row: the dialog opens, refusing the
+    /// profile's current server names.
+    pub(crate) fn open_mcp_dialog(&mut self) {
+        let Screen::Settings(settings) = &mut self.screen else {
+            return;
+        };
+        let taken = settings.stored.mcp_servers.keys().cloned().collect();
+        settings.mcp_dialog = Some(crate::screens::AddMcpServerDialog::new(taken));
+    }
+
+    /// Flips a server's muted state. The set lives on the session —
+    /// `skills_disabled` persists because it is a config field, and
+    /// its MCP twin is not one yet — so the mute holds for this
+    /// session and the open row follows it.
+    pub(crate) fn toggle_mcp_server(&mut self, name: &str) {
+        let muted = !self.disabled_mcp_servers.contains(name);
+        if muted {
+            self.disabled_mcp_servers.insert(name.to_owned());
+        } else {
+            self.disabled_mcp_servers.remove(name);
+        }
+        if let Screen::Settings(settings) = &mut self.screen {
+            for row in &mut settings.mcp {
+                if row.name == name {
+                    row.disabled = muted;
+                }
+            }
+        }
+        let notice = if muted {
+            format!("the {name} server is muted for this session")
+        } else {
+            format!("the {name} server is unmuted")
+        };
+        self.transcript.push_notice(&notice);
+    }
+
+    /// The add-server dialog's accepted entry: it lands in the
+    /// profile's `mcp_servers` map through the same profile write the
+    /// other settings pages use, and the snapshot follows.
+    pub(crate) fn submit_mcp_server(&mut self) -> Vec<Effect> {
+        let built = match &self.screen {
+            Screen::Settings(settings) => settings
+                .mcp_dialog
+                .as_ref()
+                .and_then(|dialog| dialog.build().ok()),
+            _ => None,
+        };
+        let Some((name, entry)) = built else {
+            return Vec::new();
+        };
+        // The dialog dedupes against its opening snapshot; this is
+        // the belt for a path that should not exist.
+        if self.effective().mcp_servers.contains_key(&name) {
+            self.transcript
+                .push_notice(&format!("a server named {name} already exists"));
+            return Vec::new();
+        }
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |profile| {
+                profile.mcp_servers.insert(name.clone(), entry);
+            });
+        if !self.save_config() {
+            return Vec::new();
+        }
+        self.refresh_mcp_page();
+        self.transcript
+            .push_notice(&format!("added the {name} server to this profile"));
+        Vec::new()
+    }
+
+    /// `y` on the removal confirm: the entry leaves the profile's map
+    /// and the config persists, the way the sandbox instance removal
+    /// writes. A muted name dies with its server — nothing left to
+    /// mute.
+    pub(crate) fn remove_mcp_server(&mut self) -> Vec<Effect> {
+        let Some(name) = (match &self.screen {
+            Screen::Settings(settings) => settings.selected_mcp_server().map(str::to_owned),
+            _ => None,
+        }) else {
+            return Vec::new();
+        };
+        let mut removed = false;
+        self.config
+            .set_for_profile(self.session_profile.as_deref(), |profile| {
+                removed = profile.mcp_servers.remove(&name).is_some();
+            });
+        if !removed {
+            return Vec::new();
+        }
+        if !self.save_config() {
+            return Vec::new();
+        }
+        self.disabled_mcp_servers.remove(&name);
+        self.refresh_mcp_page();
+        self.transcript
+            .push_notice(&format!("removed the {name} server"));
+        Vec::new()
     }
 
     /// Opens the selected subagent definition in `$EDITOR`. The built-in

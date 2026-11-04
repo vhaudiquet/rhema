@@ -26,6 +26,8 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod manager;
 pub mod protocol;
 
 pub use client::{Cancel, Client, ClientError, HttpParams, StdioParams, Transport};
+pub use manager::{ManagerError, McpManager, ServerStatus, SlotSummary};

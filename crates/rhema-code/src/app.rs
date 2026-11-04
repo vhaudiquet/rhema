@@ -157,6 +157,12 @@ pub struct App {
     /// offered set re-derives from at every profile switch, without
     /// paying the CLI probes again.
     pub sandbox_machines: crate::sandbox::SandboxMachines,
+    /// The MCP server names this session muted: present in the
+    /// profile but held back from the manager. The skills' twin is
+    /// the config's `skills_disabled` set; a `disabled_mcp_servers`
+    /// field beside it needs a config-crate change, so the mute is
+    /// session-scoped until that field lands.
+    pub disabled_mcp_servers: std::collections::BTreeSet<String>,
     /// What this machine offers the session's current profile: the
     /// picker's rows and the select path's availability gate. Derived
     /// from the machine facts at startup and re-derived at every
@@ -483,6 +489,7 @@ impl App {
             transcript_cache: crate::ui::WrapCache::new(),
             sandboxed: setup.sandboxed,
             sandbox_machines: setup.sandbox_machines,
+            disabled_mcp_servers: std::collections::BTreeSet::new(),
             sandbox_offered: setup.sandbox_machines.offered_for(&effective),
             assembling: None,
             logo_rect: None,

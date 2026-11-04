@@ -2135,3 +2135,382 @@ fn the_add_profile_dialog_edits_refuses_and_closes() {
         ProfileDialogAction::None
     );
 }
+
+// --- MCP page ---
+
+/// A stdio entry under `name`, with one env pair.
+fn stdio_entry(description: &str, env: &[(&str, &str)]) -> rhema_config::mcp::McpServerEntry {
+    rhema_config::mcp::McpServerEntry {
+        description: description.to_owned(),
+        command: Some(vec!["npx".to_owned(), "-y".to_owned(), "server".to_owned()]),
+        url: None,
+        env: env
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect(),
+        headers: BTreeMap::new(),
+        startup_timeout: None,
+        timeout: None,
+        command_name: None,
+    }
+}
+
+/// A http entry under a url and one header.
+fn http_entry(description: &str) -> rhema_config::mcp::McpServerEntry {
+    rhema_config::mcp::McpServerEntry {
+        description: description.to_owned(),
+        command: None,
+        url: Some("http://127.0.0.1:9721/mcp".to_owned()),
+        env: BTreeMap::new(),
+        headers: BTreeMap::from([("Authorization".to_owned(), "Bearer t".to_owned())]),
+        startup_timeout: None,
+        timeout: None,
+        command_name: None,
+    }
+}
+
+/// A settings screen on the MCP page over `entries`, with `disabled`
+/// named muted.
+fn mcp_screen(
+    entries: BTreeMap<String, rhema_config::mcp::McpServerEntry>,
+    disabled: &[&str],
+) -> SettingsScreen {
+    let mut settings = SettingsScreen::new();
+    settings.section = SettingsSection::Mcp;
+    settings.mcp = crate::screens::mcp_server_rows(
+        &entries,
+        &disabled.iter().map(|n| (*n).to_owned()).collect(),
+    );
+    settings
+}
+
+#[test]
+fn the_mcp_screen_lists_the_active_profile_s_servers() {
+    // An empty map: no rows, the add row is the only target, and the
+    // renderer's hint carries the add nudge.
+    let empty = mcp_screen(BTreeMap::new(), &[]);
+    assert!(empty.mcp.is_empty());
+    assert_eq!(empty.selected_mcp_server(), None);
+    // Two servers in name order, each carrying its transport.
+    let entries = BTreeMap::from([
+        ("atlassian".to_owned(), stdio_entry("Jira and Confluence", &[("TOKEN", "t")])),
+        ("blender".to_owned(), http_entry("Blender scene operations")),
+    ]);
+    let settings = mcp_screen(entries.clone(), &["atlassian"]);
+    assert_eq!(
+        settings
+            .mcp
+            .iter()
+            .map(|row| (row.name.as_str(), row.transport))
+            .collect::<Vec<_>>(),
+        vec![("atlassian", Some("stdio")), ("blender", Some("http"))],
+        "the map's name order, the transport tagged"
+    );
+    assert_eq!(settings.mcp[0].description, "Jira and Confluence");
+    assert!(settings.mcp[0].disabled, "the muted name is marked");
+    assert!(!settings.mcp[1].disabled);
+    assert_eq!(settings.selected_mcp_server(), Some("atlassian"));
+    // A broken entry still lists, carrying the notice the assembly
+    // would report — the row text is from_entries' own wording.
+    let mut broken = entries;
+    broken.insert(
+        "both".to_owned(),
+        rhema_config::mcp::McpServerEntry {
+            description: "both transports named".to_owned(),
+            command: Some(vec!["true".to_owned()]),
+            url: Some("http://127.0.0.1:1/mcp".to_owned()),
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            startup_timeout: None,
+            timeout: None,
+            command_name: None,
+        },
+    );
+    let rows = mcp_server_rows(&broken, &[]);
+    let both = rows.iter().find(|row| row.name == "both").unwrap();
+    assert_eq!(both.transport, None, "neither transport wins");
+    assert_eq!(
+        both.notice,
+        rhema_config::mcp::McpConfig::from_entries(&broken)
+            .notices
+            .iter()
+            .find(|n| n.contains("`both`"))
+            .map(String::clone),
+        "the row quotes the fold's notice"
+    );
+    assert!(rows[0].notice.is_none(), "a kept entry shows no notice");
+}
+
+#[test]
+fn the_mcp_page_moves_over_the_rows_and_acts() {
+    let entries = BTreeMap::from([
+        ("atlassian".to_owned(), stdio_entry("Jira", &[])),
+        ("blender".to_owned(), http_entry("Blender")),
+    ]);
+    let mut screen = mcp_screen(entries, &[]);
+    // Rows: atlassian, blender, add. Down walks them and wraps.
+    screen.handle_key(key(KeyCode::Down));
+    assert_eq!(screen.selected_mcp_server(), Some("blender"));
+    screen.handle_key(key(KeyCode::Down));
+    assert_eq!(screen.selected_mcp_server(), None, "the add row");
+    screen.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        screen.selected_mcp_server(),
+        Some("atlassian"),
+        "the rows wrap"
+    );
+    // Enter on a server row mutes it; the add row's enter opens the
+    // dialog, which esc then closes.
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Enter)),
+        SettingsAction::ToggleMcpServer
+    );
+    screen.handle_key(key(KeyCode::Down));
+    screen.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Enter)),
+        SettingsAction::OpenMcpDialog
+    );
+    screen.mcp_dialog = Some(AddMcpServerDialog::new(BTreeSet::new()));
+    assert_eq!(screen.selected_mcp_server(), None, "the dialog blocks");
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Esc)),
+        SettingsAction::CloseMcpDialog
+    );
+    assert!(screen.mcp_dialog.is_none(), "esc closed the dialog");
+    // Space toggles like enter, the skills page's pair.
+    screen.handle_key(key(KeyCode::Up));
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char(' '))),
+        SettingsAction::ToggleMcpServer
+    );
+    // d arms the removal confirm; esc cancels it and stays on the
+    // page, y confirms and the action carries.
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char('d'))),
+        SettingsAction::None,
+        "d only arms the confirm"
+    );
+    assert_eq!(screen.mcp_confirm.as_deref(), Some("atlassian"));
+    assert_eq!(screen.selected_mcp_server(), None, "the confirm blocks");
+    screen.handle_key(key(KeyCode::Esc));
+    assert_eq!(screen.mcp_confirm, None, "esc left the row alone");
+    screen.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char('n'))),
+        SettingsAction::None
+    );
+    screen.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char('y'))),
+        SettingsAction::RemoveMcpServer
+    );
+    assert_eq!(screen.mcp_confirm, None, "the confirm spent itself");
+    // The other pages are untouched: selected_mcp_server is page-bound.
+    screen.section = SettingsSection::Providers;
+    assert_eq!(screen.selected_mcp_server(), None);
+}
+
+#[test]
+fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
+    let mut dialog = AddMcpServerDialog::new(BTreeSet::from(["taken".to_owned()]));
+    // Blank and badly-cased names stay on the stage, the error named.
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None
+    );
+    for c in "My Server".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None
+    );
+    assert!(dialog.error.is_some(), "the charset refuses: {:?}", dialog.error);
+    dialog.input.clear();
+    for c in "taken".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    assert!(
+        dialog
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("already exists")),
+        "the taken name refuses: {:?}",
+        dialog.error
+    );
+    // A fresh name lands on the description stage, which wants text.
+    dialog.input.clear();
+    dialog.error = None;
+    for c in "fresh".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None
+    );
+    assert_eq!(dialog.name, "fresh");
+    assert_eq!(dialog.handle_key(key(KeyCode::Enter)), McpDialogAction::None);
+    assert_eq!(dialog.error.as_deref(), Some("a description is required"));
+    for c in "Jira".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.stage, McpDialogStage::Transport);
+    // An empty argv and an empty url both hold their stage.
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.stage, McpDialogStage::Command);
+    dialog.handle_key(key(KeyCode::Enter));
+    assert!(dialog.error.is_some(), "the empty command holds");
+    dialog.handle_key(key(KeyCode::Esc));
+    dialog.handle_key(key(KeyCode::Down));
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.stage, McpDialogStage::Url);
+    dialog.handle_key(key(KeyCode::Enter));
+    assert!(dialog.error.is_some(), "the empty url holds");
+    // The belt: an entry with both transports rejects, whatever the
+    // stages would have allowed.
+    dialog.url = Some("http://127.0.0.1:1/mcp".to_owned());
+    dialog.command = Some(vec!["true".to_owned()]);
+    let built = dialog.build();
+    assert!(
+        built
+            .err()
+            .is_some_and(|e| e.contains("exclusive")),
+        "both transports reject: {built:?}"
+    );
+    // So does a command_name that is no bash identifier.
+    dialog.command = Some(vec!["true".to_owned()]);
+    dialog.url = None;
+    dialog.command_name = "2bad".to_owned();
+    assert!(
+        dialog.build().err().is_some_and(|e| e.contains("bash identifier")),
+        "{:?}",
+        dialog.build()
+    );
+    // Malformed and duplicated env lines reject at the stage's exit.
+    dialog.command_name.clear();
+    dialog.env = crate::screens::PairLines {
+        lines: vec!["TOKEN".to_owned(), String::new()],
+        cursor: 1,
+    };
+    dialog.handle_key(key(KeyCode::Enter));
+    assert!(
+        dialog
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("KEY=value")),
+        "the keyless line holds: {:?}",
+        dialog.error
+    );
+    dialog.env.lines[0] = "TOKEN=a".to_owned();
+    dialog.env.lines.insert(1, "TOKEN=b".to_owned());
+    dialog.handle_key(key(KeyCode::Enter));
+    assert!(
+        dialog
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("twice")),
+        "the doubled key holds: {:?}",
+        dialog.error
+    );
+}
+
+#[test]
+fn the_add_mcp_dialog_walks_the_stdio_flow_and_builds_the_entry() {
+    let mut dialog = AddMcpServerDialog::new(BTreeSet::new());
+    for c in "atlassian".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    for c in "Jira and Confluence".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    // stdio is the first row: enter takes it and the command stage.
+    dialog.handle_key(key(KeyCode::Enter));
+    for c in "npx -y @mcp/server".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.stage, McpDialogStage::EnvLines);
+    // One env pair, then enter on the blank line moves on.
+    for c in "JIRA_TOKEN=hunter2".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    assert_eq!(dialog.handle_key(key(KeyCode::Enter)), McpDialogAction::None);
+    assert_eq!(dialog.handle_key(key(KeyCode::Enter)), McpDialogAction::None);
+    assert_eq!(dialog.stage, McpDialogStage::CommandName);
+    // Esc steps back to the lines, then forward again; the empty
+    // override stores.
+    dialog.handle_key(key(KeyCode::Esc));
+    assert_eq!(dialog.stage, McpDialogStage::EnvLines);
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::Submit
+    );
+    let (name, entry) = dialog.build().expect("the entry builds");
+    assert_eq!(name, "atlassian");
+    assert_eq!(entry.description, "Jira and Confluence");
+    assert_eq!(entry.command.as_deref(), Some(&["npx", "-y", "@mcp/server"][..]));
+    assert_eq!(entry.env.get("JIRA_TOKEN").map(String::as_str), Some("hunter2"));
+    assert_eq!(entry.url, None);
+    assert_eq!(entry.command_name, None, "empty means none");
+    assert_eq!(entry.resolve(&name).map(|_| ()), Ok(()));
+}
+
+#[test]
+fn the_add_mcp_dialog_walks_the_http_flow_with_headers() {
+    let mut dialog = AddMcpServerDialog::new(BTreeSet::new());
+    for c in "blender".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    for c in "Blender scene operations".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    // Down to the http row, then in.
+    dialog.handle_key(key(KeyCode::Down));
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.stage, McpDialogStage::Url);
+    for c in "http://127.0.0.1:9721/mcp".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(dialog.stage, McpDialogStage::HeaderLines);
+    for c in "Authorization: Bearer t".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    dialog.handle_key(key(KeyCode::Enter));
+    // A second pair, then the blank line finishes.
+    for c in "X-Tenant=acme".chars() {
+        dialog.handle_key(key(KeyCode::Char(c)));
+    }
+    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::Submit
+    );
+    let (_, entry) = dialog.build().expect("the entry builds");
+    assert_eq!(entry.url.as_deref(), Some("http://127.0.0.1:9721/mcp"));
+    assert_eq!(entry.command, None);
+    assert_eq!(
+        entry.headers.get("Authorization").map(String::as_str),
+        Some("Bearer t")
+    );
+    assert_eq!(entry.headers.get("X-Tenant").map(String::as_str), Some("acme"));
+    assert_eq!(entry.env, BTreeMap::new(), "headers servers carry no env");
+    // A paste lands on the dialog's inputs, control characters and
+    // all dropped.
+    dialog.stage = McpDialogStage::CommandName;
+    dialog.paste("na\nme\u{7}");
+    assert_eq!(dialog.input, "name");
+    assert_eq!(
+        dialog.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+        McpDialogAction::None
+    );
+}

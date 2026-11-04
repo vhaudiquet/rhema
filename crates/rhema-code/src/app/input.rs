@@ -48,6 +48,9 @@ impl App {
                 if let Some(dialog) = &mut settings.add_profile {
                     dialog.paste(text);
                 }
+                if let Some(dialog) = &mut settings.mcp_dialog {
+                    dialog.paste(text);
+                }
             }
             Screen::Onboarding(wizard) => {
                 if let Some(dialog) = &mut wizard.dialog {
@@ -106,7 +109,11 @@ impl App {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();
                 };
-                if settings.dialog.is_some() || settings.add_profile.is_some() {
+                if settings.dialog.is_some()
+                    || settings.add_profile.is_some()
+                    || settings.mcp_dialog.is_some()
+                    || settings.mcp_confirm.is_some()
+                {
                     // A dialog is modal: clicks behind it do nothing.
                     return Vec::new();
                 }
@@ -121,6 +128,8 @@ impl App {
                 if settings.dialog.is_some()
                     || settings.add_profile.is_some()
                     || settings.sandbox_dialog.is_some()
+                    || settings.mcp_dialog.is_some()
+                    || settings.mcp_confirm.is_some()
                 {
                     return Vec::new();
                 }
@@ -273,6 +282,26 @@ impl App {
             }
             SettingsAction::SubmitSandboxDialog => self.submit_sandbox_instance(),
             SettingsAction::CloseSandboxDialog => Vec::new(),
+            SettingsAction::OpenMcpDialog => {
+                self.open_mcp_dialog();
+                Vec::new()
+            }
+            SettingsAction::SubmitMcpDialog => self.submit_mcp_server(),
+            SettingsAction::CloseMcpDialog => Vec::new(),
+            SettingsAction::ToggleMcpServer => {
+                let name = match &self.screen {
+                    Screen::Settings(settings) => settings.selected_mcp_server().map(str::to_owned),
+                    _ => None,
+                };
+                match name {
+                    Some(name) => {
+                        self.toggle_mcp_server(&name);
+                        Vec::new()
+                    }
+                    None => Vec::new(),
+                }
+            }
+            SettingsAction::RemoveMcpServer => self.remove_mcp_server(),
             SettingsAction::SelectSandboxInstance => {
                 let name = match &self.screen {
                     Screen::Settings(settings) => {

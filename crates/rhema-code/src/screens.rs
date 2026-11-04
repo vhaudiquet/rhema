@@ -12,6 +12,7 @@ use rhema_provider::ModelCard;
 mod chat;
 pub(crate) mod clipboard;
 mod dialogs;
+mod mcp;
 mod palette;
 mod picker;
 mod profiles;
@@ -24,6 +25,10 @@ pub use chat::{ChatAction, ChatState, Chip};
 pub use dialogs::{
     AddInstanceDialog, AddProfileDialog, AddSandboxDialog, DialogAction, DialogStage, DialogStatus,
     PendingInstance, ProfileDialogAction, SANDBOX_ADD_KINDS, SandboxDialogAction, SandboxRow,
+};
+pub use mcp::{
+    AddMcpServerDialog, MCP_TRANSPORTS, McpDialogAction, McpDialogStage, McpServerRow,
+    mcp_server_rows,
 };
 pub(crate) use palette::format_tokens;
 pub use palette::{
