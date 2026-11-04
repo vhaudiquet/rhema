@@ -30,7 +30,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::ConfigError;
 
@@ -109,6 +109,22 @@ impl McpConfig {
         Self::from_mapping(&doc)
     }
 
+    /// Builds from a profile's `mcp_servers` mapping: the same fold
+    /// rules as the file — per-entry validation, a notice per skipped
+    /// entry, never an error. Order is the map's (sorted by name).
+    pub fn from_entries(entries: &BTreeMap<String, McpServerEntry>) -> McpConfig {
+        let mut config = McpConfig::default();
+        for (name, entry) in entries {
+            match entry.resolve(name) {
+                Ok(server) => config.servers.push(server),
+                Err(reason) => config
+                    .notices
+                    .push(format!("mcp server `{name}` skipped: {reason}")),
+            }
+        }
+        config
+    }
+
     /// Folds the `servers` mapping in file order, skipping entries
     /// that fail validation with a notice each. Duplicate names
     /// cannot occur here: serde_yaml rejects duplicate keys before
@@ -134,7 +150,7 @@ impl McpConfig {
                     .push("mcp.yaml has a non-string server name; skipped".to_owned());
                 continue;
             };
-            let raw: RawServerEntry = match serde_yaml::from_value(entry) {
+            let raw: McpServerEntry = match serde_yaml::from_value(entry) {
                 Ok(raw) => raw,
                 Err(err) => {
                     config
@@ -143,7 +159,7 @@ impl McpConfig {
                     continue;
                 }
             };
-            match raw.validate(&name) {
+            match raw.resolve(&name) {
                 Ok(server) => config.servers.push(server),
                 Err(reason) => {
                     config
@@ -227,28 +243,61 @@ impl fmt::Debug for SecretMap<'_> {
     }
 }
 
-/// The yaml shape of one `servers` entry, before validation.
-#[derive(Debug, Deserialize)]
+/// The yaml shape of one MCP server entry, as both config scopes
+/// store it: the global `<config dir>/mcp.yaml` `servers` mapping and
+/// a profile's `mcp_servers` mapping. Validation happens at resolve
+/// time, never at deserialize time, so a stored entry round-trips even
+/// while invalid — the frontend can show and fix it.
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
-struct RawServerEntry {
-    description: String,
-    #[serde(default)]
-    command: Option<Vec<String>>,
-    #[serde(default)]
-    url: Option<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    #[serde(default)]
-    headers: BTreeMap<String, String>,
-    startup_timeout: Option<u64>,
-    timeout: Option<u64>,
-    command_name: Option<String>,
+pub struct McpServerEntry {
+    /// The user-written description feeding the prompt disclosure.
+    pub description: String,
+    /// The program and its arguments, argv style; stdio servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<Vec<String>>,
+    /// The Streamable HTTP endpoint URL; HTTP servers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Extra environment for stdio servers, layered over the
+    /// inherited environment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Headers sent verbatim with every HTTP request.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
+    /// Handshake seconds, overriding [`DEFAULT_STARTUP_TIMEOUT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_timeout: Option<u64>,
+    /// Per-call seconds, overriding [`DEFAULT_TIMEOUT`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u64>,
+    /// Override of the generated bash function's name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_name: Option<String>,
 }
 
-impl RawServerEntry {
+impl fmt::Debug for McpServerEntry {
+    /// `env` and `headers` values are secrets: keys print, values
+    /// redact, matching the crate's rule everywhere else.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("McpServerEntry")
+            .field("description", &self.description)
+            .field("command", &self.command)
+            .field("url", &self.url)
+            .field("env", &SecretMap(&self.env))
+            .field("headers", &SecretMap(&self.headers))
+            .field("startup_timeout", &self.startup_timeout)
+            .field("timeout", &self.timeout)
+            .field("command_name", &self.command_name)
+            .finish()
+    }
+}
+
+impl McpServerEntry {
     /// Validates into the manager-facing shape: transport XOR, name
     /// and command-name charsets, sane timeouts.
-    fn validate(self, name: &str) -> Result<McpServer, String> {
+    pub fn resolve(&self, name: &str) -> Result<McpServer, String> {
         if !server_name_ok(name) {
             return Err(format!(
                 "`{name}` does not match [a-z0-9_-]+; the name rides URLs \
@@ -256,13 +305,14 @@ impl RawServerEntry {
             ));
         }
         let command_name = self.command_name.clone().unwrap_or_else(|| name.to_owned());
+        let description = self.description.clone();
         if !command_name_ok(&command_name) {
             return Err(format!(
                 "`{command_name}` is not a bash identifier: it must match \
                  [a-zA-Z_][a-zA-Z0-9_-]*"
             ));
         }
-        let transport = match (self.command, self.url) {
+        let transport = match (self.command.clone(), self.url.clone()) {
             (Some(command), None) => {
                 if command.is_empty() {
                     return Err("`command` is empty".to_owned());
@@ -272,7 +322,7 @@ impl RawServerEntry {
                 }
                 McpTransport::Stdio {
                     command,
-                    env: self.env,
+                    env: self.env.clone(),
                 }
             }
             (None, Some(url)) => {
@@ -284,7 +334,7 @@ impl RawServerEntry {
                 }
                 McpTransport::Http {
                     url,
-                    headers: self.headers,
+                    headers: self.headers.clone(),
                 }
             }
             (Some(_), Some(_)) => {
@@ -298,7 +348,7 @@ impl RawServerEntry {
         let timeout = seconds(self.timeout, "timeout")?;
         Ok(McpServer {
             name: name.to_owned(),
-            description: self.description,
+            description,
             transport,
             startup_timeout: startup_timeout.unwrap_or(DEFAULT_STARTUP_TIMEOUT),
             timeout: timeout.unwrap_or(DEFAULT_TIMEOUT),

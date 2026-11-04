@@ -238,6 +238,17 @@ pub struct Profile {
     /// file while empty: most profiles never leave `local`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub sandbox_instances: BTreeMap<String, SandboxInstance>,
+    /// The MCP servers this profile exposes to its agents, keyed by a
+    /// user-chosen name matching `[a-z0-9_-]+`. Per profile by
+    /// design: work and personal carry different servers, and a
+    /// server installed through one profile's menu appears nowhere
+    /// else. Resolved through [`crate::mcp::McpConfig::from_entries`]
+    /// at agent-wiring time — a malformed entry is skipped with a
+    /// notice, never a config failure. Absent from the file while
+    /// empty; entries' `env` and `headers` values are secrets at rest
+    /// and redact in [`Debug`].
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub mcp_servers: BTreeMap<String, crate::mcp::McpServerEntry>,
 }
 
 impl fmt::Debug for Profile {
@@ -251,6 +262,7 @@ impl fmt::Debug for Profile {
             .field("thinking", &self.thinking)
             .field("sandbox", &self.sandbox)
             .field("sandbox_instances", &self.sandbox_instances)
+            .field("mcp_servers", &self.mcp_servers.keys().collect::<Vec<_>>())
             .finish()
     }
 }
@@ -1328,6 +1340,50 @@ mod tests {
     }
 
     #[test]
+    fn profile_mcp_servers_round_trip_and_resolve_and_redact() {
+        let yaml = r#"
+profiles:
+  personal:
+    provider: llama-cpp
+    mcp_servers:
+      atlassian:
+        description: Jira and Confluence
+        command: ["npx", "-y", "@modelcontextprotocol/server-atlassian"]
+        env: { JIRA_TOKEN: "hunter2" }
+      blender:
+        description: Blender scene operations
+        url: "http://127.0.0.1:9721/mcp"
+        headers: { Authorization: "Bearer hunter2" }
+      broken:
+        description: both transports named
+        command: ["true"]
+        url: "http://127.0.0.1:1/mcp"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("config parses");
+        let profile = &config.profiles["personal"];
+        assert_eq!(profile.mcp_servers.len(), 3);
+
+        // The round trip: serialize back, empty map absent, entry
+        // fields stable.
+        let round = serde_yaml::to_string(&config).unwrap();
+        assert!(!round.contains("mcp_servers: {}"));
+        assert!(round.contains("atlassian:"));
+
+        // Resolve: two valid servers, the transport-XOR entry skips
+        // with a notice naming it.
+        let resolved = crate::mcp::McpConfig::from_entries(&profile.mcp_servers);
+        assert_eq!(resolved.servers.len(), 2);
+        assert!(resolved.notices.iter().any(|n| n.contains("`broken`")));
+
+        // Secrets redact in the entry's Debug: values gone, keys
+        // present. The profile's own Debug names servers only.
+        let debug = format!("{:?}", profile.mcp_servers["atlassian"]);
+        assert!(!debug.contains("hunter2"));
+        assert!(debug.contains("JIRA_TOKEN"));
+        assert!(!format!("{profile:?}").contains("hunter2"));
+    }
+
+    #[test]
     fn config_round_trips_through_disk_as_yaml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -1336,6 +1392,7 @@ mod tests {
                 "personal".to_owned(),
                 Profile {
                     sandbox_instances: BTreeMap::new(),
+                    mcp_servers: BTreeMap::new(),
                     provider: Some("llama-cpp".into()),
                     instance: Some("home server".into()),
                     instances: BTreeMap::from([
