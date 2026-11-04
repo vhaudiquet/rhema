@@ -5800,3 +5800,213 @@ fn retry_waits_while_a_turn_runs() {
         "a turn is running; /retry waits for it to finish".into()
     )));
 }
+
+// --- MCP page ---
+
+/// A stdio server stored on the harness's profile.
+fn store_mcp_server(h: &mut Harness, name: &str) {
+    h.app.config.set_for_profile(Some("personal"), |profile| {
+        profile.mcp_servers.insert(
+            name.to_owned(),
+            rhema_config::mcp::McpServerEntry {
+                description: "Jira and Confluence".to_owned(),
+                command: Some(vec!["npx".to_owned(), "-y".to_owned(), "server".to_owned()]),
+                url: None,
+                env: BTreeMap::new(),
+                headers: BTreeMap::new(),
+                startup_timeout: None,
+                timeout: None,
+                command_name: None,
+            },
+        );
+    });
+    h.store.save(&h.app.config).unwrap();
+}
+
+/// The profile the store holds, reloaded.
+fn stored_profile(h: &Harness) -> rhema_config::Profile {
+    h.store.load().unwrap().effective(Some("personal"))
+}
+
+#[test]
+fn slash_mcp_opens_the_settings_mcp_page() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    store_mcp_server(&mut h, "atlassian");
+    crate::commands::dispatch(&mut h.app, "/mcp");
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.section, SettingsSection::Mcp);
+    assert_eq!(
+        settings
+            .mcp
+            .iter()
+            .map(|row| (row.name.as_str(), row.transport))
+            .collect::<Vec<_>>(),
+        vec![("atlassian", Some("stdio"))],
+        "the page opens over the profile's servers"
+    );
+    // An empty profile opens to the add row and nothing else.
+    let mut fresh = harness(Some("k"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut fresh.app, "/mcp");
+    let Screen::Settings(settings) = &fresh.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(settings.mcp.is_empty(), "the empty profile lists nothing");
+    assert_eq!(settings.row, 0, "the add row is the only row");
+}
+
+#[test]
+fn the_mcp_add_dialog_inserts_and_persists() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut h.app, "/mcp");
+    // The add row is the only row: enter opens the dialog.
+    h.app.on_key(key(KeyCode::Enter));
+    // Name.
+    for c in "atlassian".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    // Description.
+    for c in "Jira and Confluence".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    // stdio is the highlighted transport: enter takes it, then the
+    // argv line.
+    h.app.on_key(key(KeyCode::Enter));
+    for c in "npx -y @mcp/server".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    // One env pair, then the blank line's enter moves on.
+    for c in "JIRA_TOKEN=t".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    h.app.on_key(key(KeyCode::Enter));
+    // The bash-name stage: enter with nothing typed stores the entry
+    // unnamed.
+    let effects = h.app.on_key(key(KeyCode::Enter));
+    assert!(
+        effects.is_empty(),
+        "the store needs no effects: {effects:?}"
+    );
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(settings.mcp_dialog.is_none(), "the dialog spent itself");
+    let entry = &settings.stored.mcp_servers["atlassian"];
+    assert_eq!(entry.description, "Jira and Confluence");
+    assert_eq!(entry.env.get("JIRA_TOKEN").map(String::as_str), Some("t"));
+    // The store holds it: the profile write went through save_config.
+    let stored = stored_profile(&h);
+    assert_eq!(stored.mcp_servers.len(), 1);
+    assert_eq!(
+        stored.mcp_servers["atlassian"].command,
+        Some(vec![
+            "npx".to_owned(),
+            "-y".to_owned(),
+            "@mcp/server".to_owned()
+        ])
+    );
+    // The page's rows follow the config: one server and the add row.
+    assert_eq!(
+        settings
+            .mcp
+            .iter()
+            .map(|row| row.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["atlassian"]
+    );
+    assert!(
+        settings.row <= settings.mcp.len(),
+        "the selection stays inside"
+    );
+}
+
+#[test]
+fn the_mcp_remove_confirms_then_deletes_and_persists() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    store_mcp_server(&mut h, "atlassian");
+    crate::commands::dispatch(&mut h.app, "/mcp");
+    // d arms the confirm; the profile still holds the server.
+    h.app.on_key(key(KeyCode::Char('d')));
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.mcp_confirm.as_deref(), Some("atlassian"));
+    assert_eq!(
+        stored_profile(&h).mcp_servers.len(),
+        1,
+        "d alone removes nothing"
+    );
+    // Anything but y and n keeps asking.
+    h.app.on_key(key(KeyCode::Char('x')));
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.mcp_confirm.as_deref(), Some("atlassian"));
+    // n cancels, then d and y remove for real.
+    h.app.on_key(key(KeyCode::Char('n')));
+    h.app.on_key(key(KeyCode::Char('d')));
+    h.app.on_key(key(KeyCode::Char('y')));
+    let stored = stored_profile(&h);
+    assert!(
+        stored.mcp_servers.is_empty(),
+        "the confirm removed it: {:?}",
+        stored.mcp_servers.keys().collect::<Vec<_>>()
+    );
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.mcp_confirm, None, "the confirm spent itself");
+    assert!(settings.mcp.is_empty(), "the rows follow the config");
+    assert!(
+        h.app
+            .transcript
+            .lines()
+            .contains(&Line::Notice("removed the atlassian server".into())),
+        "the removal is noticed"
+    );
+}
+
+#[test]
+fn the_mcp_mute_round_trips() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    store_mcp_server(&mut h, "atlassian");
+    crate::commands::dispatch(&mut h.app, "/mcp");
+    // Enter on the row mutes: the set holds the name and the row
+    // marks it, while the profile keeps the entry.
+    h.app.on_key(key(KeyCode::Enter));
+    assert!(
+        h.app.disabled_mcp_servers.contains("atlassian"),
+        "the mute lands in the set"
+    );
+    assert_eq!(stored_profile(&h).mcp_servers.len(), 1, "the entry stays");
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(settings.mcp[0].disabled, "the row marks the mute");
+    assert!(
+        h.app.transcript.lines().contains(&Line::Notice(
+            "the atlassian server is muted for this session".into()
+        )),
+        "the mute is noticed"
+    );
+    // Enter again unmutes, back where it started.
+    h.app.on_key(key(KeyCode::Enter));
+    assert!(h.app.disabled_mcp_servers.is_empty(), "the mute lifts");
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(!settings.mcp[0].disabled, "the row clears its mark");
+    // A removed server cannot stay muted behind it.
+    h.app.disabled_mcp_servers.insert("atlassian".to_owned());
+    h.app.on_key(key(KeyCode::Char('d')));
+    h.app.on_key(key(KeyCode::Char('y')));
+    assert!(
+        !h.app.disabled_mcp_servers.contains("atlassian"),
+        "the mute dies with the server"
+    );
+}

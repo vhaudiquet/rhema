@@ -2350,3 +2350,85 @@ mod scroll_tests {
         assert_eq!(gamma_row, beta_row + 2, "one blank row after the reply");
     }
 }
+
+/// The MCP page lists the servers with their transport, the muted
+/// mark, the skip notice, and the empty state; every server row and
+/// the add row register click targets.
+#[test]
+fn the_mcp_page_lists_the_servers_and_their_marks() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.section = SettingsSection::Mcp;
+    settings.mcp = vec![
+        crate::screens::McpServerRow {
+            name: "atlassian".into(),
+            transport: Some("stdio"),
+            description: "Jira and Confluence".into(),
+            disabled: true,
+            notice: None,
+        },
+        crate::screens::McpServerRow {
+            name: "broken".into(),
+            transport: None,
+            description: "both transports named".into(),
+            disabled: false,
+            notice: Some(
+                "mcp server `broken` skipped: `command` and `url` are exclusive; pick one".into(),
+            ),
+        },
+    ];
+
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let text = (0..24)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("atlassian · stdio · muted"), "{text}");
+    assert!(text.contains("broken · unresolvable"), "{text}");
+    assert!(text.contains("Jira and Confluence"), "{text}");
+    assert!(
+        text.contains("mcp server `broken` skipped"),
+        "the notice shows under its row: {text}"
+    );
+    assert!(text.contains("+ Add a server..."), "the add row: {text}");
+    assert!(
+        text.contains("enter mutes · d removes"),
+        "the footer hints: {text}"
+    );
+    // Every sidebar row plus the two server rows and the add row are
+    // clickable.
+    assert_eq!(
+        hits.len(),
+        SettingsSection::ALL.len() + 3,
+        "sidebar, page, and add rows register: {hits:?}"
+    );
+
+    // An empty profile names the fact and the way out.
+    settings.mcp.clear();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let text = (0..24)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<Vec<_>>()
+                .join("")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("no servers in this profile"), "{text}");
+    assert!(
+        text.contains("the add row below installs one"),
+        "the empty state nudges at the add row: {text}"
+    );
+}

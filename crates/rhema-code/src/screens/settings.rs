@@ -728,6 +728,17 @@ impl SettingsScreen {
             KeyCode::Char(' ' | 't') if self.selected_skill().is_some() => {
                 SettingsAction::ToggleSkill
             }
+            KeyCode::Char(' ') if self.selected_mcp_server().is_some() => {
+                SettingsAction::ToggleMcpServer
+            }
+            KeyCode::Char('d') if self.selected_mcp_server().is_some() => {
+                // Removal asks first: the confirm modal arms here and
+                // the y that answers it carries the removal out.
+                if let Some(name) = self.selected_mcp_server() {
+                    self.mcp_confirm = Some(name.to_owned());
+                }
+                SettingsAction::None
+            }
             KeyCode::Char('c') if self.section == SettingsSection::Appearance => {
                 SettingsAction::CyclePalette
             }

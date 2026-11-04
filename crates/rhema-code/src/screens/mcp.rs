@@ -435,22 +435,39 @@ impl AddMcpServerDialog {
             KeyCode::Esc => {
                 self.error = None;
                 self.input.clear();
-                self.stage = match self.stage {
+                // The stage stepped back to restores its own text, so
+                // a retreat is a review, not a retyping.
+                match self.stage {
                     // Out of the first stage is out of the dialog.
                     McpDialogStage::Name => return McpDialogAction::Close,
-                    McpDialogStage::Description => McpDialogStage::Name,
-                    McpDialogStage::Command | McpDialogStage::Url => McpDialogStage::Transport,
+                    McpDialogStage::Description => {
+                        self.input = self.name.clone();
+                        self.stage = McpDialogStage::Name;
+                    }
+                    McpDialogStage::Command => {
+                        self.input = self
+                            .command
+                            .as_ref()
+                            .map(|argv| argv.join(" "))
+                            .unwrap_or_default();
+                        self.stage = McpDialogStage::Transport;
+                    }
+                    McpDialogStage::Url => {
+                        self.input = self.url.clone().unwrap_or_default();
+                        self.stage = McpDialogStage::Transport;
+                    }
                     // The bash-name stage's parent is wherever the
                     // lines were edited.
                     McpDialogStage::CommandName => {
-                        if self.url.is_some() {
+                        self.input = self.command_name.clone();
+                        self.stage = if self.url.is_some() {
                             McpDialogStage::HeaderLines
                         } else {
                             McpDialogStage::EnvLines
-                        }
+                        };
                     }
-                    _ => unreachable!("the text keys own the single-line stages"),
-                };
+                    _ => {}
+                }
             }
             _ => {}
         }

@@ -27,7 +27,7 @@ pub use dialogs::{
     PendingInstance, ProfileDialogAction, SANDBOX_ADD_KINDS, SandboxDialogAction, SandboxRow,
 };
 pub use mcp::{
-    AddMcpServerDialog, MCP_TRANSPORTS, McpDialogAction, McpDialogStage, McpServerRow,
+    AddMcpServerDialog, MCP_TRANSPORTS, McpDialogAction, McpDialogStage, McpServerRow, PairLines,
     mcp_server_rows,
 };
 pub(crate) use palette::format_tokens;

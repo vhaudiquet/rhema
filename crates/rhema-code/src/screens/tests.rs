@@ -2193,7 +2193,10 @@ fn the_mcp_screen_lists_the_active_profile_s_servers() {
     assert_eq!(empty.selected_mcp_server(), None);
     // Two servers in name order, each carrying its transport.
     let entries = BTreeMap::from([
-        ("atlassian".to_owned(), stdio_entry("Jira and Confluence", &[("TOKEN", "t")])),
+        (
+            "atlassian".to_owned(),
+            stdio_entry("Jira and Confluence", &[("TOKEN", "t")]),
+        ),
         ("blender".to_owned(), http_entry("Blender scene operations")),
     ]);
     let settings = mcp_screen(entries.clone(), &["atlassian"]);
@@ -2226,7 +2229,7 @@ fn the_mcp_screen_lists_the_active_profile_s_servers() {
             command_name: None,
         },
     );
-    let rows = mcp_server_rows(&broken, &[]);
+    let rows = mcp_server_rows(&broken, &BTreeSet::new());
     let both = rows.iter().find(|row| row.name == "both").unwrap();
     assert_eq!(both.transport, None, "neither transport wins");
     assert_eq!(
@@ -2235,7 +2238,7 @@ fn the_mcp_screen_lists_the_active_profile_s_servers() {
             .notices
             .iter()
             .find(|n| n.contains("`both`"))
-            .map(String::clone),
+            .cloned(),
         "the row quotes the fold's notice"
     );
     assert!(rows[0].notice.is_none(), "a kept entry shows no notice");
@@ -2291,7 +2294,7 @@ fn the_mcp_page_moves_over_the_rows_and_acts() {
         SettingsAction::None,
         "d only arms the confirm"
     );
-    assert_eq!(screen.mcp_confirm.as_deref(), Some("atlassian"));
+    assert_eq!(screen.mcp_confirm.as_deref(), Some("blender"));
     assert_eq!(screen.selected_mcp_server(), None, "the confirm blocks");
     screen.handle_key(key(KeyCode::Esc));
     assert_eq!(screen.mcp_confirm, None, "esc left the row alone");
@@ -2326,7 +2329,11 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
         dialog.handle_key(key(KeyCode::Enter)),
         McpDialogAction::None
     );
-    assert!(dialog.error.is_some(), "the charset refuses: {:?}", dialog.error);
+    assert!(
+        dialog.error.is_some(),
+        "the charset refuses: {:?}",
+        dialog.error
+    );
     dialog.input.clear();
     for c in "taken".chars() {
         dialog.handle_key(key(KeyCode::Char(c)));
@@ -2351,7 +2358,10 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
         McpDialogAction::None
     );
     assert_eq!(dialog.name, "fresh");
-    assert_eq!(dialog.handle_key(key(KeyCode::Enter)), McpDialogAction::None);
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None
+    );
     assert_eq!(dialog.error.as_deref(), Some("a description is required"));
     for c in "Jira".chars() {
         dialog.handle_key(key(KeyCode::Char(c)));
@@ -2375,9 +2385,7 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
     dialog.command = Some(vec!["true".to_owned()]);
     let built = dialog.build();
     assert!(
-        built
-            .err()
-            .is_some_and(|e| e.contains("exclusive")),
+        built.as_ref().is_err_and(|e| e.contains("exclusive")),
         "both transports reject: {built:?}"
     );
     // So does a command_name that is no bash identifier.
@@ -2385,13 +2393,17 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
     dialog.url = None;
     dialog.command_name = "2bad".to_owned();
     assert!(
-        dialog.build().err().is_some_and(|e| e.contains("bash identifier")),
+        dialog
+            .build()
+            .err()
+            .is_some_and(|e| e.contains("bash identifier")),
         "{:?}",
         dialog.build()
     );
     // Malformed and duplicated env lines reject at the stage's exit.
     dialog.command_name.clear();
-    dialog.env = crate::screens::PairLines {
+    dialog.stage = McpDialogStage::EnvLines;
+    dialog.env = PairLines {
         lines: vec!["TOKEN".to_owned(), String::new()],
         cursor: 1,
     };
@@ -2404,14 +2416,14 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
         "the keyless line holds: {:?}",
         dialog.error
     );
-    dialog.env.lines[0] = "TOKEN=a".to_owned();
-    dialog.env.lines.insert(1, "TOKEN=b".to_owned());
+    // One key said twice holds the stage at its exit.
+    dialog.env = PairLines {
+        lines: vec!["TOKEN=a".to_owned(), "TOKEN=b".to_owned(), String::new()],
+        cursor: 2,
+    };
     dialog.handle_key(key(KeyCode::Enter));
     assert!(
-        dialog
-            .error
-            .as_deref()
-            .is_some_and(|e| e.contains("twice")),
+        dialog.error.as_deref().is_some_and(|e| e.contains("twice")),
         "the doubled key holds: {:?}",
         dialog.error
     );
@@ -2439,8 +2451,14 @@ fn the_add_mcp_dialog_walks_the_stdio_flow_and_builds_the_entry() {
     for c in "JIRA_TOKEN=hunter2".chars() {
         dialog.handle_key(key(KeyCode::Char(c)));
     }
-    assert_eq!(dialog.handle_key(key(KeyCode::Enter)), McpDialogAction::None);
-    assert_eq!(dialog.handle_key(key(KeyCode::Enter)), McpDialogAction::None);
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None
+    );
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None
+    );
     assert_eq!(dialog.stage, McpDialogStage::CommandName);
     // Esc steps back to the lines, then forward again; the empty
     // override stores.
@@ -2454,8 +2472,18 @@ fn the_add_mcp_dialog_walks_the_stdio_flow_and_builds_the_entry() {
     let (name, entry) = dialog.build().expect("the entry builds");
     assert_eq!(name, "atlassian");
     assert_eq!(entry.description, "Jira and Confluence");
-    assert_eq!(entry.command.as_deref(), Some(&["npx", "-y", "@mcp/server"][..]));
-    assert_eq!(entry.env.get("JIRA_TOKEN").map(String::as_str), Some("hunter2"));
+    assert_eq!(
+        entry.command,
+        Some(vec![
+            "npx".to_owned(),
+            "-y".to_owned(),
+            "@mcp/server".to_owned()
+        ])
+    );
+    assert_eq!(
+        entry.env.get("JIRA_TOKEN").map(String::as_str),
+        Some("hunter2")
+    );
     assert_eq!(entry.url, None);
     assert_eq!(entry.command_name, None, "empty means none");
     assert_eq!(entry.resolve(&name).map(|_| ()), Ok(()));
@@ -2481,16 +2509,26 @@ fn the_add_mcp_dialog_walks_the_http_flow_with_headers() {
     }
     dialog.handle_key(key(KeyCode::Enter));
     assert_eq!(dialog.stage, McpDialogStage::HeaderLines);
-    for c in "Authorization: Bearer t".chars() {
+    // Two header pairs, each enter opening the next line, and the
+    // blank last line's enter finishing the stage.
+    for c in "Authorization=Bearer t".chars() {
         dialog.handle_key(key(KeyCode::Char(c)));
     }
     dialog.handle_key(key(KeyCode::Enter));
-    dialog.handle_key(key(KeyCode::Enter));
-    // A second pair, then the blank line finishes.
     for c in "X-Tenant=acme".chars() {
         dialog.handle_key(key(KeyCode::Char(c)));
     }
-    dialog.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None,
+        "the second pair opened a line"
+    );
+    assert_eq!(
+        dialog.handle_key(key(KeyCode::Enter)),
+        McpDialogAction::None,
+        "the blank line finished the stage"
+    );
+    assert_eq!(dialog.stage, McpDialogStage::CommandName);
     assert_eq!(
         dialog.handle_key(key(KeyCode::Enter)),
         McpDialogAction::Submit
@@ -2502,7 +2540,10 @@ fn the_add_mcp_dialog_walks_the_http_flow_with_headers() {
         entry.headers.get("Authorization").map(String::as_str),
         Some("Bearer t")
     );
-    assert_eq!(entry.headers.get("X-Tenant").map(String::as_str), Some("acme"));
+    assert_eq!(
+        entry.headers.get("X-Tenant").map(String::as_str),
+        Some("acme")
+    );
     assert_eq!(entry.env, BTreeMap::new(), "headers servers carry no env");
     // A paste lands on the dialog's inputs, control characters and
     // all dropped.
