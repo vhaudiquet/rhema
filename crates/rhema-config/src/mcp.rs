@@ -376,7 +376,11 @@ fn server_name_ok(name: &str) -> bool {
 
 /// Whether a generated function name is a legal bash identifier.
 /// Hyphens verified legal on bash 3.2 and 5.x (spec §2).
-fn command_name_ok(name: &str) -> bool {
+/// Whether `name` is a legal bash function name: an ASCII letter or
+/// underscore first, then letters, digits, underscores, hyphens
+/// (hyphens verified legal in bash 3.2 and 5.x). The config layer
+/// rejects entries that fail it; provision re-checks defensively.
+pub fn command_name_ok(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
         Some(first) if first.is_ascii_alphabetic() || first == '_' => {}

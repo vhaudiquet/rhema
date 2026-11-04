@@ -114,6 +114,12 @@ const TESTS: &[(&str, AsyncTest)] = &[
         "bridge_cancellation_reaches_the_server_on_disconnect",
         || Box::pin(bridge_cancellation_reaches_the_server_on_disconnect()),
     ),
+    ("the_cli_meta_verbs_walk_the_real_bridge", || {
+        Box::pin(the_cli_meta_verbs_walk_the_real_bridge())
+    }),
+    ("the_cli_server_mode_walks_catalog_clap_and_call", || {
+        Box::pin(the_cli_server_mode_walks_catalog_clap_and_call())
+    }),
 ];
 
 // ---------------------------------------------------------------------
@@ -1421,4 +1427,124 @@ async fn wait_for_notes(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+// ---------------------------------------------------------------------
+// CLI integration: the meta verbs and __server mode over the bridge
+// ---------------------------------------------------------------------
+
+fn cli_argv(args: &[&str]) -> Vec<std::ffi::OsString> {
+    args.iter().map(std::ffi::OsString::from).collect()
+}
+
+/// The meta verbs: servers never spawns, tools strips schemas,
+/// schema serves one tool, call round-trips, and every failure maps
+/// to its exit code.
+#[allow(static_mut_refs)]
+async fn the_cli_meta_verbs_walk_the_real_bridge() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let marker = dir.path().join("marker");
+    let socket = dir.path().join("mcp.sock");
+    let config = manager_with_script("happy", &marker);
+    let manager = Arc::new(rhema_mcp::McpManager::new(&config));
+    let handle = rhema_mcp::bridge::serve(manager.clone(), socket.clone(), "sekrit".to_owned())
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
+    let tmp = dir.path().join("session-tmp");
+    let run = |args: &[&str]| {
+        rhema_mcp::cli::run_with_env(&socket, "sekrit", Some(&tmp), &cli_argv(args))
+    };
+
+    // servers: reports without spawning (the happy fake writes no
+    // marker; the response still lists the server as idle).
+    let code = run(&["mcp", "servers"]);
+    if code != 0 {
+        return Err(format!("mcp servers exited {code}"));
+    }
+    // tools: the catalog walk happened, so a later call reuses it.
+    let code = run(&["mcp", "tools", "counter"]);
+    if code != 0 {
+        return Err(format!("mcp tools exited {code}"));
+    }
+    let code = run(&["mcp", "tools", "ghost"]);
+    if code != 3 {
+        return Err(format!("mcp tools ghost exited {code}, want 3"));
+    }
+    let code = run(&["mcp", "schema", "counter", "get_scene_info"]);
+    if code != 0 {
+        return Err(format!("mcp schema exited {code}"));
+    }
+    let code = run(&["mcp", "schema", "counter", "nope"]);
+    if code != 2 {
+        return Err(format!("mcp schema nope exited {code}, want 2"));
+    }
+    let code = run(&["mcp", "call", "counter", "get_scene_info", "{}"]);
+    if code != 0 {
+        return Err(format!("mcp call exited {code}"));
+    }
+    let code = run(&["mcp", "call", "ghost", "x", "{}"]);
+    if code != 3 {
+        return Err(format!("mcp call ghost exited {code}, want 3"));
+    }
+    // A broken socket is transport, not usage.
+    let dead = dir.path().join("absent.sock");
+    let code =
+        rhema_mcp::cli::run_with_env(&dead, "sekrit", Some(&tmp), &cli_argv(&["mcp", "servers"]));
+    if code != 4 {
+        return Err(format!("dead socket exited {code}, want 4"));
+    }
+
+    handle.shutdown();
+    Ok(())
+}
+
+/// The generated-command mode: bare lists the tools, --help exits ok,
+/// clap errors are usage, a real call round-trips, --json overrides
+/// the payload, and the timeout maps to its own code.
+#[allow(static_mut_refs)]
+async fn the_cli_server_mode_walks_catalog_clap_and_call() -> Result<(), String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let notes = dir.path().join("notes");
+    let socket = dir.path().join("mcp.sock");
+    let config = manager_with_budget("cancelled", &notes, Duration::from_millis(300));
+    let manager = Arc::new(rhema_mcp::McpManager::new(&config));
+    let handle = rhema_mcp::bridge::serve(manager.clone(), socket.clone(), "sekrit".to_owned())
+        .await
+        .map_err(|e| format!("serve: {e}"))?;
+    let tmp = dir.path().join("session-tmp");
+    let run = |args: &[&str]| {
+        rhema_mcp::cli::run_with_env(&socket, "sekrit", Some(&tmp), &cli_argv(args))
+    };
+
+    // Unknown server: the catalog 404s before any clap work.
+    let code = run(&["__server", "ghost"]);
+    if code != 3 {
+        return Err(format!("ghost exited {code}, want 3"));
+    }
+
+    // The cancelled fake answers tools/list with an empty catalog
+    // and never answers calls: a bare invocation lists zero tools;
+    // the call times out into exit 6.
+    let code = run(&["__server", "counter"]);
+    if code != 0 {
+        return Err(format!("bare invocation exited {code}, want 0"));
+    }
+    let code = run(&["__server", "counter", "--help"]);
+    if code != 0 {
+        return Err(format!("--help exited {code}, want 0"));
+    }
+    let code = run(&["__server", "counter", "nope"]);
+    if code != 2 {
+        return Err(format!("unknown subcommand exited {code}, want 2"));
+    }
+    // The timeout, through the meta call (an empty catalog gives
+    // clap no subcommand to hang --json on): the fake never answers
+    // tools/call, the 300ms budget ends it.
+    let code = run(&["mcp", "call", "counter", "anything", "{}"]);
+    if code != 6 {
+        return Err(format!("timed-out call exited {code}, want 6"));
+    }
+
+    handle.shutdown();
+    Ok(())
 }

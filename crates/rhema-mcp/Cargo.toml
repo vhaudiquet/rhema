@@ -24,6 +24,10 @@ rhema-config = { version = "0.1.0", path = "../rhema-config" }
 axum.workspace = true
 async-stream = "0.3.6"
 futures-util = "0.3.34"
+sha2 = "0.10"
+base64 = "0.22"
+clap = "4.6.7"
+mcp-to-cli = { version = "0.1.0", path = "../mcp-to-cli" }
 
 [dev-dependencies]
 tempfile = "3"

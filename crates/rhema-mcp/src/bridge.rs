@@ -268,8 +268,16 @@ async fn stream_state(
                         Ok(Ok(result)) => {
                             let body = serde_json::to_string(&result)
                                 .unwrap_or_else(|_| "{}".to_owned());
-                            let failed = result.is_error == Some(true);
-                            let event = if failed { "error" } else { "result" };
+                            // Three event names, three meanings: a
+                            // tool-reported failure keeps its
+                            // envelope (`tool_error`, the CLI prints
+                            // it and exits 5); manager errors carry
+                            // a kind string instead (`error`).
+                            let event = if result.is_error == Some(true) {
+                                "tool_error"
+                            } else {
+                                "result"
+                            };
                             yield Ok(Event::default().event(event).data(body));
                         }
                         Ok(Err(err)) => {

@@ -20,15 +20,16 @@
 //!   pending map, per-request timeouts, cancellation, the HTTP
 //!   session dance
 //!
-//! Later commits add `provision.rs`, `cli.rs`, and `wire.rs` per the
-//! spec's commit sequence.
+//! Later commits add `wire.rs` per the spec's commit sequence.
 
 #![forbid(unsafe_code)]
 
 pub mod bridge;
+pub mod cli;
 pub mod client;
 pub mod manager;
 pub mod protocol;
+pub mod provision;
 
 pub use client::{Cancel, Client, ClientError, HttpParams, StdioParams, Transport};
 pub use manager::{ManagerError, McpManager, ServerStatus, SlotSummary};
