@@ -443,6 +443,20 @@ fn json_value(raw: &str) -> Result<Value, serde_json::Error> {
     serde_json::from_str(raw)
 }
 
+/// The `number`-typed flag's value as a JSON number. Schemas say
+/// `number` for fields that are semantically integers (`issue_number`
+/// in github-mcp-server), and a bare `137.0` is JSON-valid but
+/// rejected by strict parsers — Go's unmarshaller, for one — so a
+/// whole-number float becomes a JSON integer and keeps its shortest
+/// representation. Non-finite values have no JSON form: `None`.
+fn number_of(v: f64) -> Option<Number> {
+    if v.fract() == 0.0 && v >= i64::MIN as f64 && v <= i64::MAX as f64 {
+        Some(Number::from(v as i64))
+    } else {
+        Number::from_f64(v)
+    }
+}
+
 /// The value name and parser for one scalar value flag.
 fn typed_arg(arg: Arg, kind: Kind, schema: &Value, prop: &str) -> Arg {
     let arg = arg.value_name(kind.value_name(prop));
@@ -678,7 +692,7 @@ fn single_value(sub: &ArgMatches, id: &str, kind: Kind) -> Option<Value> {
         Kind::Text | Kind::Enum => sub.get_one::<String>(id).map(|v| Value::String(v.clone())),
         Kind::Number => sub
             .get_one::<f64>(id)
-            .and_then(|v| Number::from_f64(*v))
+            .and_then(|v| number_of(*v))
             .map(Value::Number),
         Kind::Integer => sub.get_one::<i64>(id).map(|v| Value::Number((*v).into())),
         Kind::Bool => sub.get_one::<bool>(id).map(|v| Value::Bool(*v)),
@@ -695,7 +709,7 @@ fn append_value(sub: &ArgMatches, id: &str, kind: Kind) -> Option<Value> {
             .collect(),
         Kind::Number => sub
             .get_many::<f64>(id)?
-            .filter_map(|v| Number::from_f64(*v))
+            .filter_map(|v| number_of(*v))
             .map(Value::Number)
             .collect(),
         Kind::Integer => sub

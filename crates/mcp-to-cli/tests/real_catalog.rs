@@ -214,9 +214,10 @@ fn update_pull_request_state_enum_and_number() {
         .unwrap(),
     );
     assert_eq!(value["state"], "closed");
-    // `pullNumber` is a schema number: f64, not i64.
-    assert_eq!(value["pullNumber"].as_f64(), Some(7.0));
-    assert!(!value["pullNumber"].is_i64());
+    // `pullNumber` is a schema number: whole values keep the integer
+    // wire form strict parsers accept.
+    assert_eq!(value["pullNumber"].as_i64(), Some(7));
+    assert!(!value["pullNumber"].is_f64());
     // draft is an optional boolean: presence flag.
     assert!(parse(&cmd, &["update_pull_request", "--draft", "false"]).is_none());
 }

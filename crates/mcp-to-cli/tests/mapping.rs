@@ -37,7 +37,7 @@ fn property_names_pass_through_verbatim() {
 }
 
 #[test]
-fn numbers_map_as_f64() {
+fn numbers_map_as_the_shortest_wire_form() {
     let cmd = command(
         "srv",
         &[tool(
@@ -48,10 +48,11 @@ fn numbers_map_as_f64() {
     );
     let value = mapped(run(&cmd, &["t", "--ratio", "2.5"]).unwrap());
     assert_eq!(value["ratio"].as_f64(), Some(2.5));
-    // An integral float stays an f64, not an integer.
+    // An integral float keeps its shortest wire form: a JSON integer,
+    // which strict parsers (Go's unmarshaller) reject as `3.0`.
     let whole = mapped(run(&cmd, &["t", "--ratio", "3"]).unwrap());
-    assert!(whole["ratio"].is_f64());
-    assert!(!whole["ratio"].is_i64());
+    assert!(whole["ratio"].is_i64());
+    assert!(!whole["ratio"].is_f64());
     // clap owns the parse error, the usage path.
     assert!(parse(&cmd, &["t", "--ratio", "two"]).is_none());
 }
@@ -330,7 +331,7 @@ fn arrays_of_numbers_integers_and_booleans_repeat() {
     );
     assert_eq!(
         mapped(run(&cmd, &["t", "--weights", "1.5", "--weights", "2"]).unwrap()),
-        json!({"weights": [1.5, 2.0]})
+        json!({"weights": [1.5, 2]})
     );
     assert_eq!(
         mapped(run(&cmd, &["t", "--counts", "7", "--counts", "9"]).unwrap()),
@@ -671,7 +672,7 @@ fn constraint_keywords_are_ignored() {
     );
     assert_eq!(
         mapped(run(&cmd, &["t", "--key", "lower", "--n", "5000"]).unwrap()),
-        json!({"key": "lower", "n": 5000.0})
+        json!({"key": "lower", "n": 5000})
     );
 }
 
@@ -963,4 +964,35 @@ fn nullable_required_props_stay_optional_in_help() {
         "no required mark on a nullable prop"
     );
     assert!(parse(&cmd, &["t"]).is_some(), "not clap-required");
+}
+
+#[test]
+fn number_flags_whole_values_are_json_integers() {
+    let cmd = command(
+        "srv",
+        &[tool(
+            "t",
+            "d",
+            json!({
+                "type": "object",
+                "properties": {
+                    "n": {"type": "number"},
+                    "m": {"type": "number"},
+                    "many": {"type": "array", "items": {"type": "number"}},
+                },
+            }),
+        )],
+    );
+    assert_eq!(
+        mapped(
+            run(
+                &cmd,
+                &[
+                    "t", "--n", "137", "--m", "4.5", "--many", "1", "--many", "2.5"
+                ]
+            )
+            .unwrap()
+        ),
+        json!({"n": 137, "m": 4.5, "many": [1, 2.5]})
+    );
 }
