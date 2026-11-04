@@ -499,10 +499,11 @@ impl AddMcpServerDialog {
                 self.stage = McpDialogStage::Description;
             }
             McpDialogStage::Description => {
-                if text.is_empty() {
-                    self.error = Some("a description is required".to_owned());
-                    return McpDialogAction::None;
-                }
+                // Optional: empty advances, the fold substitutes a
+                // "no description; run --help" line at prompt time —
+                // the server cannot be asked (nothing is spawned
+                // until the first call) and the field is a hint, not
+                // an identity.
                 self.description = text;
                 self.input.clear();
                 self.stage = McpDialogStage::Transport;

@@ -2362,12 +2362,19 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
         dialog.handle_key(key(KeyCode::Enter)),
         McpDialogAction::None
     );
-    assert_eq!(dialog.error.as_deref(), Some("a description is required"));
+    // The description is optional: an empty one advances, and the
+    // fold substitutes the "--help lists its tools" line.
+    assert_eq!(dialog.stage, McpDialogStage::Transport);
+    assert_eq!(dialog.description, "");
+    // Esc back, type one, and it lands too.
+    dialog.handle_key(key(KeyCode::Esc));
+    assert_eq!(dialog.stage, McpDialogStage::Description);
     for c in "Jira".chars() {
         dialog.handle_key(key(KeyCode::Char(c)));
     }
     dialog.handle_key(key(KeyCode::Enter));
     assert_eq!(dialog.stage, McpDialogStage::Transport);
+    assert_eq!(dialog.description, "Jira");
     // An empty argv and an empty url both hold their stage.
     dialog.handle_key(key(KeyCode::Enter));
     assert_eq!(dialog.stage, McpDialogStage::Command);

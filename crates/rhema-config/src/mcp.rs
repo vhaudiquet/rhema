@@ -252,6 +252,11 @@ impl fmt::Debug for SecretMap<'_> {
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct McpServerEntry {
     /// The user-written description feeding the prompt disclosure.
+    /// Empty is legal — the fold substitutes a line that names the
+    /// discovery command — because the field is optional knowledge,
+    /// not identity: the server's own `--help` is the real
+    /// documentation and this is only the reason to run it.
+    #[serde(default)]
     pub description: String,
     /// The program and its arguments, argv style; stdio servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -305,7 +310,16 @@ impl McpServerEntry {
             ));
         }
         let command_name = self.command_name.clone().unwrap_or_else(|| name.to_owned());
-        let description = self.description.clone();
+        // An absent description is a fold-time default, not a parse
+        // failure: the disclosure line happens before any connection,
+        // so the server cannot be asked, and a forgotten yaml field
+        // must not drop the whole server. `--help` is the real
+        // documentation; the line's fallback points at it.
+        let description = if self.description.is_empty() {
+            format!("no description provided; {command_name} --help lists its tools")
+        } else {
+            self.description.clone()
+        };
         if !command_name_ok(&command_name) {
             return Err(format!(
                 "`{command_name}` is not a bash identifier: it must match \
@@ -501,6 +515,23 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_description_defaults_instead_of_dropping_the_server() {
+        // A forgotten yaml field is not a reason to skip the server:
+        // the entry parses with no description and the fold
+        // substitutes the --help pointer at disclosure time.
+        let config = load("servers:\n  blender:\n    command: [uvx, blender-mcp]\n");
+        assert!(config.notices.is_empty(), "{:?}", config.notices);
+        let server = config.servers.first().expect("the server survives");
+        assert_eq!(
+            server.description,
+            "no description provided; blender --help lists its tools"
+        );
+        // And an explicit one rides verbatim.
+        let config = load("servers:\n  b:\n    description: scene ops\n    command: [x]\n");
+        assert_eq!(config.servers[0].description, "scene ops");
+    }
+
+    #[test]
     fn misplaced_env_and_headers_reject() {
         let config = load(
             "servers:\n  \
@@ -560,7 +591,9 @@ mod tests {
         let config = load(
             "servers:\n  \
              broken:\n    \
-             url: \"http://127.0.0.1:9/mcp\"\n  \
+             description: d\n    \
+             startup_timeout: \"fast\"\n    \
+             command: [\"x\"]\n  \
              working:\n    \
              description: d\n    \
              command: [\"x\"]\n",
