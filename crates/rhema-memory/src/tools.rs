@@ -183,8 +183,15 @@ impl MemoryResolver {
                 let existing = self.store.get(&id)?.ok_or_else(|| {
                     format!("no record with id {id:?}; save without an id to create one")
                 })?;
+                // Absent tags keep the record's own: silence is not an
+                // instruction to wipe.
+                let carried = if args.get("tags").is_some() {
+                    tags.clone()
+                } else {
+                    existing.tags.clone()
+                };
                 MemoryDraft::new(existing.scope, body)
-                    .with_tags(tags.clone())
+                    .with_tags(carried)
                     .with_id(id)
             }
             None => MemoryDraft::new(self.scope.clone(), body).with_tags(tags.clone()),
@@ -214,7 +221,7 @@ impl MemoryResolver {
             &*self.store,
             self.search_scopes(),
             draft.subject.as_deref(),
-            &normalize_tags(&tags),
+            &normalize_tags(&draft.tags),
             draft.id.as_deref(),
         )?;
         let declared: Vec<&str> = supersedes
@@ -782,6 +789,32 @@ mod tests {
         assert!(found.contains("/w"), "{found}");
         assert!(found.contains("· age 0d"), "{found}");
         assert!(found.contains("· active"), "{found}");
+    }
+
+    #[test]
+    fn an_update_that_omits_tags_keeps_the_record_s_own() {
+        let resolver = resolver(Scope::Workspace(PathBuf::from("/w")));
+        let saved = resolver
+            .execute(
+                MEMORY_SAVE,
+                &json!({"body": "deploys go through just release", "tags": ["Deploy", "infra"]}),
+            )
+            .unwrap();
+        let id = saved.strip_prefix("saved ").unwrap().to_owned();
+
+        // A correction that doesn't mention tags keeps the record's
+        // own: silence is not an instruction to wipe.
+        resolver
+            .execute(
+                MEMORY_SAVE,
+                &json!({"id": id, "body": "deploys go through just deploy"}),
+            )
+            .unwrap();
+
+        let found = resolver
+            .execute(MEMORY_SEARCH, &json!({"query": "deploys"}))
+            .unwrap();
+        assert!(found.contains("tags deploy, infra"), "{found}");
     }
 
     #[test]
