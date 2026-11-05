@@ -133,28 +133,70 @@ where
     if let Some(stream) = stream {
         let mut reader = BufReader::new(stream);
         let mut buffer = Vec::new();
-        loop {
+        'lines: loop {
             buffer.clear();
-            match reader.read_until(b'\n', &mut buffer).await {
-                Ok(0) => break,
-                Ok(_) => {
-                    let text = String::from_utf8_lossy(&buffer);
-                    // Strip the terminator the way `lines` does: one
-                    // newline, then one carriage return. The
-                    // replacement characters stay where the bad bytes
-                    // were, so the tail still frames the output.
-                    let text = text.strip_suffix('\n').unwrap_or(&text);
-                    let text = text.strip_suffix('\r').unwrap_or(text);
-                    let _ = tx.send((is_stderr, text.to_string()));
-                    append_capped(&mut tail, text.as_bytes());
-                    append_capped(&mut tail, b"\n");
+            let mut dropped = 0u64;
+            let eof = loop {
+                match reader.fill_buf().await {
+                    // EOF: the pending bytes, if any, are a final line
+                    // without its newline — deliver them below.
+                    Ok([]) => break true,
+                    Ok(available) => {
+                        // The newline index and byte counts come out
+                        // as plain integers before `consume`: the
+                        // `fill_buf` borrow must end first.
+                        let newline = available.iter().position(|&byte| byte == b'\n');
+                        let chunk_len = newline.unwrap_or(available.len());
+                        let room = MAX_LINE_BYTES.saturating_sub(buffer.len());
+                        let take = chunk_len.min(room);
+                        buffer.extend_from_slice(&available[..take]);
+                        dropped += (chunk_len - take) as u64;
+                        let consumed = newline.map_or(available.len(), |pos| pos + 1);
+                        reader.consume(consumed);
+                        if newline.is_some() {
+                            break false;
+                        }
+                    }
+                    // A read error drops the pending bytes, the way
+                    // `read_until`'s error arm did.
+                    Err(_) => break 'lines,
                 }
-                Err(_) => break,
+            };
+            if eof && buffer.is_empty() && dropped == 0 {
+                break;
+            }
+            let text = String::from_utf8_lossy(&buffer);
+            // The newline is split off above; strip one carriage
+            // return the way `lines` does. The replacement characters
+            // stay where the bad bytes were, so the tail still frames
+            // the output.
+            let text = text.strip_suffix('\r').unwrap_or(&text);
+            let _ = tx.send((is_stderr, text.to_string()));
+            append_capped(&mut tail, text.as_bytes());
+            append_capped(&mut tail, b"\n");
+            if dropped > 0 {
+                // The overrun bytes were consumed but not kept: the
+                // stream stays framed and the elision is visible.
+                let marker = format!("[line truncated — {dropped} bytes dropped]");
+                let _ = tx.send((is_stderr, marker.clone()));
+                append_capped(&mut tail, marker.as_bytes());
+                append_capped(&mut tail, b"\n");
+            }
+            if eof {
+                break;
             }
         }
     }
     tail
 }
+
+/// The most bytes one delivered line may hold in memory. A command
+/// that never emits a newline — a spinner, `yes | tr -d '\n'` — would
+/// otherwise pin its whole output in the line buffer; [`read_until`]
+/// grows without bound. The overrun is consumed but not kept, and a
+/// marker line follows the truncated one, so framing survives and the
+/// elision is visible.
+pub const MAX_LINE_BYTES: usize = 1024 * 1024;
 
 /// Appends `bytes` to `tail`, keeping at most the last
 /// [`MAX_STREAM_BYTES`] — the cap is applied as the bytes land, so a
@@ -306,6 +348,28 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let tail = pump(Some(&payload[..]), false, tx).await;
         assert_eq!(tail, b"first\nsecond\n".as_slice());
+    }
+
+    #[tokio::test]
+    async fn a_newline_free_stream_is_capped_and_annotated() {
+        // Three MiB with no newline: the line buffer must not hold it
+        // all. One capped line rides through, then the elision marker
+        // carries the count.
+        let payload = vec![b'a'; 3 * 1024 * 1024];
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tail = pump(Some(&payload[..]), false, tx).await;
+        let (is_stderr, first) = rx.recv().await.expect("the truncated line arrives");
+        assert!(!is_stderr);
+        assert_eq!(first.len(), MAX_LINE_BYTES);
+        let (_, marker) = rx.recv().await.expect("the marker arrives");
+        assert_eq!(
+            marker,
+            format!("[line truncated — {} bytes dropped]", 2 * 1024 * 1024)
+        );
+        assert!(rx.try_recv().is_err(), "nothing else was delivered");
+        // The tail keeps the marker, not the whole line.
+        assert!(String::from_utf8_lossy(&tail).contains("bytes dropped]"));
+        assert!(tail.len() <= MAX_STREAM_BYTES + marker.len() + 1);
     }
 
     #[tokio::test]
