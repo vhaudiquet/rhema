@@ -14,8 +14,9 @@
 //! its own; every [`crate::CalendarEvent`] carries an id that stays
 //! the same across polls of the same occurrence, so any
 //! implementation re-polling on its own cadence never re-fires a
-//! reminder it already fed. The repetition is the consumer's
-//! dispatcher's dedup, not this crate's problem.
+//! reminder it already fed. The default source keeps that promise in
+//! its own fed-slot ledger; a custom source leans on the stable ids
+//! and its dispatcher's dedup.
 //!
 //! Recurrence is expanded before a poll answers, so a consumer never
 //! sees a rule, only starts it can compare against its clock:

@@ -6,10 +6,15 @@
 //! calendar for the occurrences starting within its horizon and
 //! ingests one event per due reminder slot, a (occurrence, lead time)
 //! pair whose moment has come. The dedup id carries all three facts
-//! (`{calendar}:{occurrence id}:{lead}`), so a slot feeds once and its
-//! repeats dedup away in the dispatcher, and the next lead's slot is a
-//! different id firing later. A slot whose start has passed is never
-//! fed: a reminder never fires after the fact. All-day occurrences
+//! (`{calendar}:{occurrence id}:{lead}`), and the next lead's slot is
+//! a different id firing later. A slot feeds once: the dispatcher
+//! dedups a fed id only while the slot sits in its pending inbox, so
+//! the source keeps its own ledger of fed slots in the calendar store
+//! and skips anything already there. The store-backed source's ledger
+//! survives a restart; a static-list source keeps its ledger in
+//! memory, so its slots dedup for the process's lifetime. A slot
+//! whose start has passed is never fed: a reminder never fires after
+//! the fact. All-day occurrences
 //! never fire: a lead in minutes against a midnight start is noise,
 //! and a date-shaped nudge is what the task tools are for.
 //!
@@ -35,6 +40,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::store::FedSlot;
 use crate::{
     CaldavCalendar, Calendar, CalendarError, CalendarEvent, GoogleCalendar, IcsCalendar, Window,
 };
@@ -245,6 +251,14 @@ pub struct CalendarSource {
     /// callers that hold the specs) or the calendar table, read fresh
     /// on every detect pass so a runtime add is live next tick.
     feeds: FeedSource,
+    /// The fed-slot ledger, the durable half of the reminder dedup:
+    /// the dispatcher forgets a fed id once its turn drains the
+    /// inbox, and without this the next tick would re-ingest the
+    /// identical id and re-dispatch the same reminder for the whole
+    /// lead window. The store-backed source shares the calendar
+    /// table's database; a static-list source keeps its ledger in
+    /// memory.
+    ledger: Arc<crate::store::CalendarStore>,
 }
 
 enum FeedSource {
@@ -271,20 +285,30 @@ impl CalendarSource {
                 horizon_hours: calendar.horizon(),
             });
         }
+        // A static-list source carries no database file, so its
+        // ledger lives in memory: slots dedup for the process's
+        // lifetime, and a restart re-feeds them.
+        let ledger = Arc::new(
+            crate::store::CalendarStore::in_memory()
+                .map_err(|err| CalendarError::Store(format!("fed-slot ledger: {err}")))?,
+        );
         dispatcher.register_source(CALENDARS_SOURCE, reminder_key_fn());
         Ok(Self {
             dispatcher: dispatcher.clone(),
             clock,
             feeds: FeedSource::Static(feeds),
+            ledger,
         })
     }
 
     /// Builds from the calendar table instead of a static list: the
     /// source reads it fresh every pass, so a calendar added over the
     /// HTTP route (or a chat tool) is live without a restart, and a
-    /// removed one stops polling on the next tick. Config validation
-    /// ran when the row landed; a calendar that still fails to resolve
-    /// here names itself and costs its tick, not the daemon.
+    /// removed one stops polling on the next tick. The same store
+    /// backs the fed-slot ledger, so dedup outlives a restart. Config
+    /// validation ran when the row landed; a calendar that still fails
+    /// to resolve here names itself and costs its tick, not the
+    /// daemon.
     pub fn from_store(
         dispatcher: &Arc<Dispatcher>,
         clock: Arc<dyn Clock>,
@@ -294,7 +318,8 @@ impl CalendarSource {
         Self {
             dispatcher: dispatcher.clone(),
             clock,
-            feeds: FeedSource::Store(store),
+            feeds: FeedSource::Store(store.clone()),
+            ledger: store,
         }
     }
 
@@ -306,19 +331,23 @@ impl CalendarSource {
         }
     }
 
-    /// A source over ready-made feeds. Tests use this; production
-    /// builds from the config with [`CalendarSource::new`].
+    /// A source over ready-made feeds, with the ledger passed in (a
+    /// fresh in-memory store per test, or a reopened one for the
+    /// restart tests). Tests use this; production builds from the
+    /// config with [`CalendarSource::new`] or [`CalendarSource::from_store`].
     #[cfg(test)]
     pub(crate) fn from_feeds(
         dispatcher: &Arc<Dispatcher>,
         clock: Arc<dyn Clock>,
         feeds: Vec<Feed>,
+        ledger: Arc<crate::store::CalendarStore>,
     ) -> Self {
         dispatcher.register_source(CALENDARS_SOURCE, reminder_key_fn());
         Self {
             dispatcher: dispatcher.clone(),
             clock,
             feeds: FeedSource::Static(feeds),
+            ledger,
         }
     }
 }
@@ -359,6 +388,12 @@ impl Source for CalendarSource {
         let now_ms = self.clock.now_millis() as i64;
         let now = OffsetDateTime::from_unix_timestamp_nanos(now_ms as i128 * 1_000_000)
             .map_err(|err| SourceError::Backend(format!("clock: {err}")))?;
+        // Housekeeping rides the pass it already needs: the prune
+        // never removes a slot that could still fire, and failing it
+        // costs table space, not correctness.
+        if let Err(err) = self.ledger.prune_fed_slots(now.unix_timestamp()) {
+            eprintln!("[calendar] warning: fed-slot prune failed: {err}");
+        }
         let mut fed = 0;
         let feeds = self.feeds_for_pass().map_err(SourceError::Backend)?;
         for feed in &feeds {
@@ -377,6 +412,19 @@ impl Source for CalendarSource {
                 }
             };
             for (event, lead) in due_slots(&events, &feed.leads, now) {
+                // A slot the ledger already fed is skipped, not
+                // re-ingested: the dispatcher's dedup only holds while
+                // the slot sits pending, so the ledger is what keeps
+                // the tick from re-firing it. A ledger read or write
+                // that fails fails loudly: a silently lost row is a
+                // re-fired reminder.
+                let already_fed = self
+                    .ledger
+                    .slot_is_fed(&feed.name, &event.id, lead)
+                    .map_err(|err| SourceError::Backend(format!("fed-slot ledger: {err}")))?;
+                if already_fed {
+                    continue;
+                }
                 self.dispatcher.ingest(reminder_event(
                     &feed.name,
                     event,
@@ -384,6 +432,15 @@ impl Source for CalendarSource {
                     now,
                     now_ms as u64,
                 ))?;
+                let slot = FedSlot {
+                    calendar: feed.name.clone(),
+                    occurrence: event.id.clone(),
+                    lead,
+                    starts_at: event.start.unix_timestamp(),
+                };
+                self.ledger
+                    .mark_slot_fed(&slot, now.unix_timestamp())
+                    .map_err(|err| SourceError::Backend(format!("fed-slot ledger: {err}")))?;
                 fed += 1;
             }
         }
@@ -395,6 +452,7 @@ impl Source for CalendarSource {
 mod tests {
     use super::*;
     use crate::CalendarError;
+    use crate::store::CalendarStore;
     use rhema_rsd::{DispatcherConfig, FixedClock, ResourceKey, SystemClock, VolatileStore};
 
     /// 2026-10-20T00:00:00Z, in milliseconds.
@@ -439,6 +497,11 @@ mod tests {
         }
     }
 
+    /// A fresh in-memory fed-slot ledger for one test's source.
+    fn ledger() -> Arc<CalendarStore> {
+        Arc::new(CalendarStore::in_memory().expect("ledger opens"))
+    }
+
     fn source(
         dispatcher: &Arc<Dispatcher>,
         clock: Arc<dyn Clock>,
@@ -453,6 +516,7 @@ mod tests {
                 leads: vec![60, 15],
                 horizon_hours: 24,
             }],
+            ledger(),
         )
     }
 
@@ -482,8 +546,10 @@ mod tests {
         assert_eq!(source.detect().await.expect("detect runs"), 1);
         assert_eq!(inbox_depth(&dispatcher), 1);
 
-        // The next pass replays the same dedup id: fed, deduped away.
-        assert_eq!(source.detect().await.expect("detect runs"), 1);
+        // The next pass finds the slot in the ledger and skips it:
+        // nothing re-fed, however many ticks remain in the lead
+        // window, and nothing re-dispatched once the inbox drains.
+        assert_eq!(source.detect().await.expect("detect runs"), 0);
         assert_eq!(inbox_depth(&dispatcher), 1);
     }
 
@@ -499,11 +565,11 @@ mod tests {
         clock.advance(30 * 60 * 1000);
         assert_eq!(source.detect().await.expect("detect runs"), 1);
 
-        // At 15 minutes out the second slot fires under its own id.
-        // The count includes the first slot's replay, which dedups:
-        // the inbox holds one event per lead, never more.
+        // At 15 minutes out the second slot fires under its own id;
+        // the first slot's ledger row keeps its replay out of the
+        // pass. One event per lead, never more.
         clock.advance(45 * 60 * 1000);
-        assert_eq!(source.detect().await.expect("detect runs"), 2);
+        assert_eq!(source.detect().await.expect("detect runs"), 1);
         assert_eq!(inbox_depth(&dispatcher), 2);
 
         // Past the start: nothing more, ever.
@@ -518,11 +584,80 @@ mod tests {
         let dispatcher = dispatcher();
         // The daemon only meets this event 15 minutes before it
         // starts: the 60 slot's moment came and went unseen, the 15
-        // slot is due. Both are fed on that first pass, then dedup.
+        // slot is due. Both are fed on that first pass; the second
+        // finds both rows in the ledger and feeds nothing.
         let source = source(&dispatcher, clock.clone(), vec![event("late", "late", 15)]);
         assert_eq!(source.detect().await.expect("detect runs"), 2);
-        assert_eq!(source.detect().await.expect("detect runs"), 2);
+        assert_eq!(source.detect().await.expect("detect runs"), 0);
         assert_eq!(inbox_depth(&dispatcher), 2);
+    }
+
+    #[tokio::test]
+    async fn a_reopened_store_still_suppresses_fed_slots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("calendars.db");
+        let clock = Arc::new(FixedClock::new(NOW_MS as u64));
+        let feeds = || {
+            vec![Feed {
+                name: "home".to_owned(),
+                client: Arc::new(Fixed(vec![event("standup", "standup", 90)])),
+                leads: vec![60],
+                horizon_hours: 24,
+            }]
+        };
+
+        // Sixty minutes out the slot is due and feeds, its row
+        // landing in the file-backed ledger.
+        clock.advance(30 * 60 * 1000);
+        {
+            let store = Arc::new(CalendarStore::open(&path).expect("store opens"));
+            let dispatcher = dispatcher();
+            let source = CalendarSource::from_feeds(&dispatcher, clock.clone(), feeds(), store);
+            assert_eq!(source.detect().await.expect("detect runs"), 1);
+        }
+
+        // A restart: the source, its dispatcher, and its pending
+        // inbox are all gone, and the slot is still due. The ledger
+        // is what survives, and it is what keeps the reminder from
+        // firing a second time.
+        clock.advance(30 * 60 * 1000);
+        let store = Arc::new(CalendarStore::open(&path).expect("store reopens"));
+        let dispatcher = dispatcher();
+        let source = CalendarSource::from_feeds(&dispatcher, clock.clone(), feeds(), store);
+        assert_eq!(source.detect().await.expect("detect runs"), 0);
+        assert_eq!(inbox_depth(&dispatcher), 0);
+    }
+
+    #[tokio::test]
+    async fn a_fed_slot_is_not_refed_when_the_inbox_has_drained() {
+        // The dispatcher dedups by (source, id) against pending items
+        // only, so a fresh dispatcher is a drained inbox: whatever it
+        // holds, the old behavior re-fed. The ledger, not the
+        // dispatcher, is the reason this stays quiet.
+        let clock = Arc::new(FixedClock::new(NOW_MS as u64));
+        let ledger = ledger();
+        let feeds = vec![Feed {
+            name: "home".to_owned(),
+            client: Arc::new(Fixed(vec![event("standup", "standup", 90)])),
+            leads: vec![60, 15],
+            horizon_hours: 24,
+        }];
+
+        // Sixty minutes out, the 60 slot feeds once.
+        clock.advance(30 * 60 * 1000);
+        let first = dispatcher();
+        let source =
+            CalendarSource::from_feeds(&first, clock.clone(), feeds.clone(), ledger.clone());
+        assert_eq!(source.detect().await.expect("detect runs"), 1);
+
+        // A second source over the same store and the same feed, with
+        // an empty dispatcher: the 60 slot is in the ledger, the 15
+        // slot is not yet due, so nothing feeds.
+        clock.advance(30 * 60 * 1000);
+        let second = dispatcher();
+        let source = CalendarSource::from_feeds(&second, clock.clone(), feeds, ledger);
+        assert_eq!(source.detect().await.expect("detect runs"), 0);
+        assert_eq!(inbox_depth(&second), 0);
     }
 
     #[tokio::test]
@@ -567,6 +702,7 @@ mod tests {
                     horizon_hours: 24,
                 },
             ],
+            ledger(),
         );
         assert_eq!(source.detect().await.expect("detect runs"), 1);
         assert_eq!(

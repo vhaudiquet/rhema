@@ -38,6 +38,11 @@ pub enum CalendarError {
     /// than poll an under-specified feed.
     #[error("calendar config: {0}")]
     Config(String),
+    /// The calendar store failed to open, migrate, or answer: a lost
+    /// fed-slot ledger row is a re-fired reminder, so this surfaces
+    /// instead of shrinking the ledger silently.
+    #[error("calendar store: {0}")]
+    Store(String),
 }
 
 /// The longest body snippet an [`CalendarError::Api`] keeps: enough for

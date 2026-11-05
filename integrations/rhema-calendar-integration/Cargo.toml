@@ -42,6 +42,9 @@ time = { version = "0.3", default-features = false, features = [
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 # In-process HTTP mocks for offline tests
 wiremock = "0.6"
+# File-backed stores in offline tests (the fed-slot ledger's restart
+# behavior)
+tempfile = "3"
 
 [lints]
 workspace = true
