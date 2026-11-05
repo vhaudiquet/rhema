@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
+# A deployment artifact, not a library: the worker feature only
+# compiles on wasm32, so crates.io has nothing it can serve. The
+# deployable ships from deploy/cloudflare instead.
+publish = false
 
 [features]
 default = []
