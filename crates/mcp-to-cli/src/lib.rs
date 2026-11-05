@@ -425,7 +425,11 @@ fn override_arg() -> Arg {
         .long("json")
         .value_name("JSON")
         .display_order(2)
-        .help("Replace the whole payload with this JSON ('-' means stdin, read by the caller)")
+        .help(
+            "Replace the whole payload with this JSON; '-' reads it from stdin. \
+             For anything beyond a one-liner, pipe or heredoc it: \
+             <tool> --json - <<'EOF' ... EOF",
+        )
 }
 
 /// The flag for one property — with whether it is clap-required — or

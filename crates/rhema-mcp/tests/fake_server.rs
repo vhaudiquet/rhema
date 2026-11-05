@@ -1610,6 +1610,32 @@ async fn the_model_bash_command_walks_the_whole_chain() -> Result<(), String> {
     }
     let _ = stderr;
 
+    // The stdin path — the heredoc, the shape a model reaches for
+    // when the payload outgrows quoting: no argument escapes, no
+    // temp file, the document verbatim.
+    let mut command = std::process::Command::new("bash");
+    command
+        .arg("-c")
+        .arg(
+            "counter get_scene_info --json - <<'EOF'
+{}
+EOF",
+        )
+        .envs(provisioned.env.clone());
+    let output = command.output().map_err(|e| e.to_string())?;
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    if output.status.code() != Some(0) {
+        return Err(format!(
+            "the heredoc call failed: {:?}\nstdout: {stdout}",
+            output.status.code()
+        ));
+    }
+    if !stdout.contains("done") {
+        return Err(format!(
+            "the heredoc envelope lacks the text block: {stdout}"
+        ));
+    }
+
     // And the generated function shadows nothing: an unknown tool is
     // clap's exit 2, self-teaching.
     let mut command = std::process::Command::new("bash");
