@@ -372,6 +372,16 @@ async fn no_system_file_seeds_no_system_md() {
 }
 
 #[test]
+fn the_http_session_derives_the_container_name() {
+    // The http session is the container derivation: bare basenames
+    // would collide on one daemon (two `repo` workspaces sharing a
+    // root directory).
+    let name = derived_container_name(Path::new("/home/me/proj"));
+    assert!(name.starts_with("rhema-sandbox-proj-"), "{name}");
+    assert_ne!(name, derived_container_name(Path::new("/home/me/other")));
+}
+
+#[test]
 fn the_derived_container_name_is_valid_stable_and_distinct() {
     let workspace = Path::new("/home/me/my proj");
     let name = derived_container_name(workspace);

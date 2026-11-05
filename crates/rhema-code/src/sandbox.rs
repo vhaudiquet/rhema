@@ -286,10 +286,10 @@ pub async fn assemble(
             })?;
             // One session per workspace, stable across runs: the
             // daemon multiplexes one root directory per session name.
-            let session = workspace
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "workspace".to_owned());
+            // The container derivation carries the path hash — a bare
+            // basename would collide (`repo` twice on one daemon
+            // would share a root).
+            let session = derived_container_name(workspace);
             // No token configured means no header value: a tokenless
             // daemon answers.
             let token = profile.sandbox_token(secrets).unwrap_or_default();
