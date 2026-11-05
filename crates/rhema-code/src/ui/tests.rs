@@ -360,7 +360,7 @@ fn the_wizard_renders_its_rail_and_welcome() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(text.contains("Rhema Code"), "the wordmark: {text}");
-    assert!(text.contains("welcome to rhema"), "the panel title: {text}");
+    assert!(text.contains("Welcome to rhema"), "the panel title: {text}");
     for step in crate::onboarding::OnboardingStep::ALL {
         assert!(
             text.contains(step.label()),

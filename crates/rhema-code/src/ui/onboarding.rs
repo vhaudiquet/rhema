@@ -24,7 +24,7 @@ pub(crate) fn render_onboarding(
     hits: &mut Vec<(Rect, crate::app::OnboardingHit)>,
 ) {
     let area = frame.area();
-    let block = super::chrome::panel(Some(" welcome to rhema "), theme);
+    let block = super::chrome::panel(Some(" Welcome to rhema "), theme);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -105,6 +105,16 @@ pub(crate) fn render_onboarding(
     );
 }
 
+/// The stored profile's provider as a label, the active instance's
+/// name in parens after it. Both the "currently configured" block and
+/// the finish summary name the provider this way.
+fn stored_provider(stored: &rhema_config::Profile) -> Option<String> {
+    stored.provider_name().map(|name| match &stored.instance {
+        Some(instance) => format!("{name} ({instance})"),
+        None => name,
+    })
+}
+
 /// The "currently configured" block the wizard shows on the Welcome
 /// and Login steps when a config already exists — a `rhema onboard`
 /// rerun must show what is connected, not start from a blank slate.
@@ -115,14 +125,11 @@ pub(crate) fn connected_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    let provider = stored.provider_name().map(|name| match &stored.instance {
-        Some(instance) => format!("{name} ({instance})"),
-        None => name.to_owned(),
-    });
+    let provider = stored_provider(stored);
     if provider.is_none() && stored.model.is_none() {
         return lines;
     }
-    lines.push(Line::from(Span::raw("currently configured").bold()));
+    lines.push(Line::from(Span::raw("Currently configured").bold()));
     lines.push(Line::from(super::chrome::rule(width, theme)));
     let value = |text: String| Span::raw(text).fg(theme.text);
     if let Some(provider) = provider {
@@ -182,7 +189,7 @@ pub(crate) fn onboarding_body(
                 width,
             ));
             for text in [
-                "A few choices set it up — a provider login, a model, a profile,",
+                "A few choices set it up: a provider login, a model, a profile,",
                 "the colors, and the skills rhema ships with. Everything is",
                 "revisitable later in /settings.",
             ] {
@@ -278,7 +285,7 @@ pub(crate) fn onboarding_body(
                 }
                 lines.push(Line::default());
                 let note = if wizard.backend_ready || !wizard.stored.instances.is_empty() {
-                    "a provider is already configured — adding another is optional"
+                    "a provider is already configured, so adding another is optional"
                 } else {
                     "the login validates by fetching the provider's model list"
                 };
@@ -323,7 +330,7 @@ pub(crate) fn onboarding_body(
             ]));
             lines.push(Line::default());
             lines.push(Line::from(
-                Span::raw("profiles keep settings apart — work and personal side by side")
+                Span::raw("profiles keep settings apart, so work and personal stay side by side")
                     .fg(theme.text3),
             ));
             footer("type to edit · enter continue · esc back")
@@ -389,14 +396,19 @@ pub(crate) fn onboarding_body(
         }
         Step::Finish => {
             title("Ready", &mut lines);
+            // The wizard's own login first, then the config's stored
+            // one: a rerun that skipped the login still has a provider
+            // to name.
             let provider = wizard
                 .chosen_provider
                 .clone()
-                .unwrap_or_else(|| "none yet — /login later".to_owned());
+                .or_else(|| stored_provider(&wizard.stored))
+                .unwrap_or_else(|| "none yet, /login later".to_owned());
             let model = wizard
                 .chosen_model
                 .clone()
-                .unwrap_or_else(|| "none yet — /model later".to_owned());
+                .or_else(|| wizard.stored.model.clone())
+                .unwrap_or_else(|| "none yet, /model later".to_owned());
             lines.push(Line::from(vec![
                 Span::raw("provider  ").fg(theme.text3),
                 Span::raw(provider).fg(theme.text),

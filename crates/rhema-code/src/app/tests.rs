@@ -4906,7 +4906,7 @@ fn a_rerun_shows_the_existing_configuration() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        text.contains("currently configured"),
+        text.contains("Currently configured"),
         "the welcome step names the config: {text}"
     );
     assert!(text.contains("google (google)"), "{text}");
@@ -4932,6 +4932,30 @@ fn a_rerun_shows_the_existing_configuration() {
         .join("\n");
     assert!(text.contains("google (google)"), "login lists it: {text}");
     assert!(text.contains("+ add a login"), "{text}");
+
+    // The finish summary names the stored provider and model too: a
+    // rerun that skipped the login is not told "none yet".
+    if let Screen::Onboarding(wizard) = &mut h.app.screen {
+        wizard.go(crate::onboarding::OnboardingStep::Finish);
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render(&mut h.app, frame))
+        .unwrap();
+    let text: String = (0..30)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_owned())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("google (google)"),
+        "the finish summary: {text}"
+    );
+    assert!(text.contains("gemini-x"), "{text}");
+    assert!(!text.contains("none yet"), "{text}");
 }
 
 #[test]
