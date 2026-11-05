@@ -195,11 +195,14 @@ impl ModelProvider for Retrying {
         req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        // Attempts spent, the first included. Each ladder indexes by it:
-        // entry `spent` is the wait that follows attempt `spent + 1`
-        // failing, and a miss means the policy is out of tries — so the
-        // ladder's length, not a separate count, bounds the exchange.
-        let mut spent = 0u32;
+        // Attempts spent per ladder, the first included. Entry `n` of
+        // a ladder is the wait that follows its own `n + 1`th failure,
+        // and a miss means the policy is out of tries on that ladder —
+        // so the ladder's length, not a separate count, bounds the
+        // exchange. The ladders stay independent: one network failure
+        // must not eat a server-ladder slot or its waits misread.
+        let mut network_spent = 0u32;
+        let mut server_spent = 0u32;
         // The text every attempt of this exchange has streamed: what
         // the caller has already read, and what a continuation anchors
         // on. `carried` is the part streamed before the current
@@ -251,15 +254,15 @@ impl ModelProvider for Retrying {
                 // own stream early is a server-side oddity, not a dead
                 // local link.
                 Ok(_) => {
-                    if let Some(&delay) = self.server_ladder.get(spent as usize) {
+                    if let Some(&delay) = self.server_ladder.get(server_spent as usize) {
                         sink.emit(Event::RetryWait {
                             error: "the provider closed the stream without content",
                             delay,
-                            attempt: spent + 1,
+                            attempt: network_spent + server_spent + 1,
                             total: self.server_ladder.len() as u32 + 1,
                         });
                         self.sleeper.sleep(delay).await;
-                        spent += 1;
+                        server_spent += 1;
                         continue;
                     }
                     return Err(ProviderError::Other(
@@ -280,10 +283,16 @@ impl ModelProvider for Retrying {
                     // what the caller watched but that never rides
                     // history. A cut that streamed text takes the
                     // anchored continuation instead.
-                    let ladder = if matches!(err, ProviderError::Network(_)) {
+                    let is_network = matches!(err, ProviderError::Network(_));
+                    let ladder = if is_network {
                         &self.network_ladder
                     } else {
                         &self.server_ladder
+                    };
+                    let spent = if is_network {
+                        network_spent
+                    } else {
+                        server_spent
                     };
                     let Some(&delay) = ladder.get(spent as usize) else {
                         return Err(err);
@@ -292,11 +301,15 @@ impl ModelProvider for Retrying {
                     sink.emit(Event::RetryWait {
                         error: &message,
                         delay,
-                        attempt: spent + 1,
+                        attempt: network_spent + server_spent + 1,
                         total: ladder.len() as u32 + 1,
                     });
                     self.sleeper.sleep(delay).await;
-                    spent += 1;
+                    if is_network {
+                        network_spent += 1;
+                    } else {
+                        server_spent += 1;
+                    }
                 }
             }
         }
@@ -719,6 +732,66 @@ mod tests {
             .await
             .expect("the second attempt answers");
         assert_eq!(*waits.lock().unwrap(), vec![Duration::from_millis(40)]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_ladders_count_their_own_tries() {
+        // One network failure and one server failure must each burn
+        // their own ladder's FIRST slot: a shared counter would have
+        // the server wait read the network failure's slot and emit
+        // 60ms instead of 30ms.
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::Network,
+            Attempt::Timeout,
+            Attempt::Succeed("back"),
+        ]));
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let sleeper = Arc::new(RecordingShared(waits.clone()));
+        let retrying = Retrying::with_ladders(
+            scripted.clone(),
+            vec![Duration::from_millis(10), Duration::from_millis(20)],
+            vec![Duration::from_millis(30), Duration::from_millis(60)],
+        )
+        .with_sleeper(sleeper);
+        let mut sink = Deltas::default();
+        retrying
+            .complete(request(), &mut sink)
+            .await
+            .expect("the third attempt answers");
+        assert_eq!(
+            *waits.lock().unwrap(),
+            vec![Duration::from_millis(10), Duration::from_millis(30)]
+        );
+        assert_eq!(scripted.calls(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_empty_success_leaves_the_network_ladder_alone() {
+        // The empty success rides the server ladder; the following
+        // network failure must still read the network ladder from its
+        // first slot.
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::Succeed(""),
+            Attempt::Network,
+            Attempt::Succeed("back"),
+        ]));
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let sleeper = Arc::new(RecordingShared(waits.clone()));
+        let retrying = Retrying::with_ladders(
+            scripted.clone(),
+            vec![Duration::from_millis(10), Duration::from_millis(20)],
+            vec![Duration::from_millis(30)],
+        )
+        .with_sleeper(sleeper);
+        let mut sink = Deltas::default();
+        retrying
+            .complete(request(), &mut sink)
+            .await
+            .expect("the third attempt answers");
+        assert_eq!(
+            *waits.lock().unwrap(),
+            vec![Duration::from_millis(30), Duration::from_millis(10)]
+        );
     }
 
     #[tokio::test(start_paused = true)]
