@@ -251,6 +251,22 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
 - ~~**Where the adapters' shared catalog types live**~~, **decided:** `rhema-provider`, the adapter-family base crate: `ModelCard` (the normalized listing row), `Pricing`, and the `SseDecoder`. What varies per backend stays in the adapter; each owns its text-chat filter over its own ids and bakes its prices into the rows it hands out, so `list_models` only ever returns models a coding agent can drive. No adapter depends on another.
 - ~~**How a provider runs an interactive login**~~, **decided:** the `InteractiveLogin` seam in `rhema-provider` (`login.rs`). An adapter declares the flow (device codes, polling, expiry, all inside the flow) and reports `LoginUpdate`s to a sink; a frontend renders the updates generically and persists the `Completed` credential, one opaque string, the same shape a static API key takes, into the profile field it maps the provider to. Cancellation is dropping the flow's task; the flow keeps no state a retry would trip over. First consumer: the GitHub Copilot device flow.
 - ~~**Where image input lives**~~, **decided:** the message seam, not a crate: a `Content::Image` block (`media_type` in the four formats every target provider accepts, bare-base64 `data`) rides `Message` beside the tool blocks, so sessions checkpoint it and every consumer speaks it. Each provider maps the block onto its own wire shape — OpenAI-dialect `image_url` data URIs, Anthropic base64 sources, Gemini `inlineData` — with the mapping documented as its wire contract. Vision support is a tri-state on `ModelCard` (`None` = unknown: most listings carry no modality field, and a curated verdict beats a guessed one only where the claim has a source — claude ids, Z.ai's GLM rows, DeepSeek's text-only facts, OpenRouter's published `input_modalities`). Frontends stage images as chips; claw stores inbound bytes in the attachment store and replays ids, never megabytes, over SSE.
+- ~~**How a command's output becomes an image the model sees**~~, **decided:** a provisioned bash
+  function, not a native tool — images are shell data, so the surface is `curl -sL url | see` (or
+  `see path.png`), piped into a `BASH_ENV`-sourced function the `vision` module of
+  `rhema-agent-tools` provisions the same way the MCP wire provisions its stubs. The function execs
+  the rhema binary's hidden `__vision` mode, which sniffs magic bytes, refuses anything over 5 MB
+  (Anthropic's per-image ceiling, the strictest target), and stages the bytes under a 0700
+  per-process dir; the shell tool drains that staging dir after every command and fills
+  `ToolResult::images`, a core field, so the image rides the result it came from and checkpoints
+  with it. Providers map the field onto their wire — Anthropic sends a `tool_result` content
+  block array, text first; OpenAI-dialect and Gemini tool messages carry text only, so each image
+  is named in a trailing note the model can act on. A session whose bash runs elsewhere (remote
+  sandbox, client-executed) wires nothing, the MCP gate's rule: the executor cannot write where
+  the drain reads. Two init files (this one and the MCP provision's) chain by literal path — each
+  sources its predecessor once, `|| true` — never by an env var: the executor layers the env map
+  onto every command, so an inherited var reaches every generated init in a chain and an outer
+  one re-sources itself until the shell dies by signal. The MCP provision carries the same fix.
 - ~~**How a hosted Anthropic-compatible endpoint is served**~~, **decided:** the same `AnthropicProvider` under a base override and bearer auth, not a new adapter: Z.ai's GLM Coding Plan (`ZAI_BASE_URL`) speaks the Messages dialect and only the header scheme differs (`with_bearer_auth`). It is its own provider kind (`zai`, `ZAI_API_KEY`) with an overridable stored route, and its traffic identifies honestly as `rhema` — never another client's mark; quota multipliers are a vendor conversation, not a header.
 - ~~**How transient provider failures retry**~~, **decided:** the `Retrying` decorator in
   `rhema-provider` (`retry.rs`), wrapped around every turn provider the frontends assemble —

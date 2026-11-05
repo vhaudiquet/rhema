@@ -100,6 +100,7 @@ pub(crate) fn wire_for_session(
     profile: &Profile,
     disabled: &BTreeSet<String>,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
+    bash_env: Option<std::ffi::OsString>,
 ) -> Option<Arc<Entry>> {
     if sandboxed.is_some() {
         return None;
@@ -127,9 +128,8 @@ pub(crate) fn wire_for_session(
         std::process::id()
     ));
     std::fs::create_dir_all(&session_dir).ok()?;
-    let inherited = std::env::var_os("BASH_ENV");
     let wiring =
-        rhema_mcp::wire(&merged, all_disabled, &session_dir, session_key, inherited).ok()?;
+        rhema_mcp::wire(&merged, all_disabled, &session_dir, session_key, bash_env).ok()?;
     for notice in &wiring.notices {
         eprintln!("· {notice}");
     }
@@ -182,7 +182,7 @@ mod tests {
             .insert("counter".to_owned(), entry("a counter"));
         let key = "rewire-key";
         let disabled = std::collections::BTreeSet::new();
-        let first = wire_for_session(key, &profile, &disabled, None).expect("wires");
+        let first = wire_for_session(key, &profile, &disabled, None, None).expect("wires");
         let session = first.shell_env().get("RHEMA_MCP_TMP").cloned();
         let token_one = first
             .shell_env()
@@ -192,7 +192,7 @@ mod tests {
 
         rewire(key);
 
-        let second = wire_for_session(key, &profile, &disabled, None).expect("rewires");
+        let second = wire_for_session(key, &profile, &disabled, None, None).expect("rewires");
         let token_two = second
             .shell_env()
             .get("RHEMA_MCP_TOKEN")
@@ -224,7 +224,8 @@ mod tests {
                 "empty-key",
                 &profile,
                 &BTreeSet::new(),
-                None as Option<&crate::sandbox::Sandboxed>
+                None as Option<&crate::sandbox::Sandboxed>,
+                None,
             )
             .is_none(),
             "nothing configured wires nothing"

@@ -49,6 +49,13 @@ pub struct ToolResult {
     /// `content`.
     #[serde(default)]
     pub code: Option<i32>,
+    /// Images the result carries beside its text, base64-encoded file
+    /// bytes. Empty for most tools; the shell tool fills it from the
+    /// images a command staged for viewing (rhema-agent-tools' `vision`
+    /// module). Every provider maps the field onto its wire — APIs whose
+    /// tool results carry text only state the withholding in the text.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::Image>,
 }
 
 impl ToolResult {
@@ -59,6 +66,7 @@ impl ToolResult {
             content: content.into(),
             is_error: false,
             code: None,
+            images: Vec::new(),
         }
     }
 
@@ -69,12 +77,20 @@ impl ToolResult {
             content: content.into(),
             is_error: true,
             code: None,
+            images: Vec::new(),
         }
     }
 
     /// Attaches the process exit code, for command results.
     pub fn with_code(mut self, code: i32) -> Self {
         self.code = Some(code);
+        self
+    }
+
+    /// Attaches images, replacing any already present — the staging
+    /// side's builder. An empty `images` changes nothing.
+    pub fn with_images(mut self, images: Vec<crate::Image>) -> Self {
+        self.images = images;
         self
     }
 }
@@ -225,6 +241,23 @@ mod tests {
         let raw = r#"{"id":"c1","content":"ok","is_error":false}"#;
         let result: ToolResult = serde_json::from_str(raw).unwrap();
         assert_eq!(result.code, None);
+        assert_eq!(result.images, Vec::new());
         assert_eq!(result.with_code(3).code, Some(3));
+    }
+
+    #[test]
+    fn images_round_trip_and_absent_images_stay_out_of_the_json() {
+        let result = ToolResult::success("c1", "here").with_images(vec![crate::Image::new(
+            crate::ImageMediaType::Png,
+            "aGVsbG8=",
+        )]);
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(text.contains("aGVsbG8="), "{text}");
+        let back: ToolResult = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, result);
+
+        // No images: the field vanishes, so old histories stay byte-stable.
+        let bare = serde_json::to_value(ToolResult::success("c1", "here")).unwrap();
+        assert!(bare.get("images").is_none(), "{bare}");
     }
 }

@@ -246,6 +246,7 @@ impl ClawHandler {
             .transcript
             .then(rhema_transcript::TranscriptSettings::default);
         config.shell_env = self.tool_env.clone();
+        crate::vision::apply(&mut config);
         crate::mcp::apply(&mut config);
         config
     }

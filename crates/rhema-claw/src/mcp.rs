@@ -34,14 +34,12 @@ fn wired() -> Option<&'static Wired> {
             }
             let dir = std::env::temp_dir().join(format!("rhema-claw-mcp-{}", std::process::id()));
             std::fs::create_dir_all(&dir).ok()?;
-            let wiring = rhema_mcp::wire(
-                &mcp,
-                &claw.disabled_mcp_servers,
-                &dir,
-                "claw",
-                std::env::var_os("BASH_ENV"),
-            )
-            .ok()?;
+            // The init chain: the vision wiring first, this one
+            // second — `BASH_ENV` names ours, whose inheritance guard
+            // sources the vision file, which sources the process's own.
+            let inherited = crate::vision::init_path().or_else(|| std::env::var_os("BASH_ENV"));
+            let wiring =
+                rhema_mcp::wire(&mcp, &claw.disabled_mcp_servers, &dir, "claw", inherited).ok()?;
             for notice in &wiring.notices {
                 eprintln!("· {notice}");
             }

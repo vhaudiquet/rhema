@@ -50,6 +50,15 @@ enum Command {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<std::ffi::OsString>,
     },
+    /// The vision CLI the agent shell's `see` macro execs: stages the
+    /// piped bytes (or the named files) into the session's staging
+    /// directory. Outside a wired shell it exits 4 with a hint.
+    #[command(name = "__vision")]
+    Vision {
+        /// The CLI's own argv, passed through untouched.
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<std::ffi::OsString>,
+    },
 }
 
 #[tokio::main]
@@ -62,6 +71,12 @@ async fn main() {
         argv.push(std::ffi::OsString::from("mcp"));
         argv.extend(rest.iter().cloned());
         std::process::exit(rhema_mcp::cli::run(&argv));
+    }
+    if let Some(Command::Vision { args: rest }) = &args.command {
+        let mut argv = Vec::with_capacity(rest.len() + 1);
+        argv.push(std::ffi::OsString::from(rhema_agent_tools::vision::MODE));
+        argv.extend(rest.iter().cloned());
+        std::process::exit(rhema_agent_tools::vision::cli_run(&argv));
     }
     if let Err(err) = run(args).await {
         eprintln!("error: {err}");

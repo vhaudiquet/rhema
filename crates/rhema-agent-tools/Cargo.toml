@@ -18,6 +18,8 @@ minijinja = { workspace = true }
 async-trait = { workspace = true }
 # Typed shell errors
 thiserror = { workspace = true }
+# Image bytes carry base64 into the session (the `see` staging)
+base64 = "0.22"
 # Subprocess execution for the shell (feature `local-shell`); its
 # streams read line by line (io-util) and hand their lines to the
 # resolver's progress callback across reader tasks (sync). Off in

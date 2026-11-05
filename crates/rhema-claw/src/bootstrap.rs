@@ -212,6 +212,7 @@ pub fn render_system(
     workspace: &Path,
     bootstrap: &Bootstrap,
     tools: &[ToolSpec],
+    vision: Option<&str>,
 ) -> Result<String, BootstrapError> {
     let soul = bootstrap.load(BootstrapKind::Soul)?;
     let user = bootstrap.load(BootstrapKind::User)?;
@@ -229,6 +230,7 @@ pub fn render_system(
         "environment": section("## ENVIRONMENT", environment.as_deref(), GENERATED_AT_BOOT),
         "onboarding": onboarding,
         "tools": tools,
+        "vision": vision,
     });
     render_template(template, &context).map_err(|err| {
         let line = err
@@ -424,6 +426,7 @@ mod tests {
             Path::new("/ws"),
             &bootstrap,
             &tools,
+            None,
         )
         .expect("renders");
         assert!(prompt.contains("## SOUL"), "{prompt}");
@@ -452,6 +455,7 @@ mod tests {
             Path::new("/ws"),
             &bootstrap,
             &[],
+            None,
         )
         .expect("renders");
         assert!(
@@ -479,6 +483,7 @@ mod tests {
             Path::new("/ws"),
             &bootstrap,
             &[],
+            None,
         )
         .expect("renders");
         assert!(prompt.contains(content), "{prompt}");
@@ -510,6 +515,7 @@ mod tests {
             Path::new("/ws"),
             &bootstrap,
             &tools,
+            None,
         )
         .expect("renders");
         assert!(prompt.contains("- my_tool | its purpose | "), "{prompt}");

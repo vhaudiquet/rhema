@@ -48,6 +48,12 @@ pub struct ShellTools {
     /// Where commands run: this host's processes by default, a remote
     /// host when the frontend installed one.
     exec: Arc<dyn ShellExecutor>,
+    /// The staging directory of a wired [`crate::vision`] macro: after
+    /// each command, images staged under it attach to the result. The
+    /// env map carries the path (`RHEMA_VISION_STAGING`), so a
+    /// frontend's wiring lights the inbox up through [`Self::with_env`]
+    /// alone.
+    vision_inbox: Option<PathBuf>,
     /// The approval hook installed for the current turn; `None` rejects
     /// calls.
     pending: Mutex<Option<Arc<dyn Approval>>>,
@@ -91,11 +97,14 @@ impl ShellTools {
     /// Tools rooted at `workspace` whose commands run with `env`
     /// layered over the inherited environment — how a frontend hands
     /// its agent's tools a connection (a daemon URL, a scoped token, a
-    /// PATH addition) without touching the process environment. A build
-    /// without the `local-shell` feature installs the no-shell executor
-    /// either way: the env has nothing to ride on.
+    /// PATH addition) without touching the process environment. A wired
+    /// [`crate::vision`] macro rides the same map: its staging
+    /// directory's var lights the inbox up. A build without the
+    /// `local-shell` feature installs the no-shell executor either way:
+    /// the env has nothing to ride on.
     pub fn with_env(workspace: impl Into<PathBuf>, env: &BTreeMap<String, String>) -> Self {
         Self::with_executor(workspace, crate::exec::default_executor_with(env))
+            .with_vision_inbox(env.get(crate::vision::VAR_STAGING).map(PathBuf::from))
     }
 
     /// Tools rooted at `workspace` whose commands run on `exec` — the
@@ -104,8 +113,24 @@ impl ShellTools {
         Self {
             workspace: canonicalized(workspace.into()),
             exec,
+            vision_inbox: None,
             pending: Mutex::new(None),
         }
+    }
+
+    /// Lights the vision inbox up explicitly — the seam a resolver that
+    /// runs its own inner `ShellTools` (the subagents extension) uses to
+    /// inherit its parent's inbox, since it builds on
+    /// [`Self::with_executor`], which reads no env map.
+    pub fn with_vision_inbox(mut self, inbox: Option<PathBuf>) -> Self {
+        self.vision_inbox = inbox;
+        self
+    }
+
+    /// The staging directory images attach from, when a frontend wired
+    /// the [`crate::vision`] macro for this shell.
+    pub fn vision_inbox(&self) -> Option<&Path> {
+        self.vision_inbox.as_deref()
     }
 
     /// The working directory every command starts in.
@@ -185,7 +210,13 @@ impl ShellTools {
             )
             .await
         {
-            Ok(executed) => finished(call.id, executed),
+            Ok(executed) => {
+                let mut result = finished(call.id, executed);
+                if let Some(staging) = &self.vision_inbox {
+                    crate::vision::attach(staging, &mut result);
+                }
+                result
+            }
             Err(ShellError::Timeout(secs)) => ToolResult::failure(
                 call.id,
                 format!("command timed out after {secs}s and was killed"),
@@ -487,6 +518,47 @@ mod executor_tests {
         let inner = ShellTools::with_executor(tools.workspace().to_path_buf(), tools.executor());
         assert_eq!(inner.workspace(), tools.workspace());
         assert!(Arc::ptr_eq(&inner.executor(), &tools.executor()));
+    }
+
+    #[tokio::test]
+    async fn staged_images_attach_to_the_command_that_staged_them() {
+        let staging = tempfile::tempdir().unwrap();
+        // What the `see` function leaves behind: one viewable image,
+        // one file the sniffer must refuse.
+        std::fs::write(staging.path().join("1.img"), b"\x89PNG\r\n\x1a\nrest").unwrap();
+        std::fs::write(staging.path().join("2.img"), b"not an image").unwrap();
+        let mut env = BTreeMap::new();
+        env.insert(
+            crate::vision::VAR_STAGING.to_owned(),
+            staging.path().display().to_string(),
+        );
+        let tools = ShellTools::with_env("/tmp", &env);
+        tools.install_approval(Arc::new(AllowAll));
+        let result = tools.resolve(call("see x"), &ToolContext::default()).await;
+
+        assert_eq!(result.images.len(), 1, "{}", result.content);
+        assert_eq!(result.images[0].media_type, rhema_core::ImageMediaType::Png);
+        assert!(
+            result
+                .content
+                .contains("1 image(s) attached and visible to you"),
+            "{}",
+            result.content
+        );
+        assert!(
+            result.content.contains("not a recognized image"),
+            "{}",
+            result.content
+        );
+        assert!(tools.vision_inbox().is_some());
+        assert!(
+            std::fs::read_dir(staging.path()).unwrap().next().is_none(),
+            "the staging dir drained"
+        );
+
+        // Without the var, no inbox: staged files stay untouched.
+        let tools = ShellTools::with_env("/tmp", &BTreeMap::new());
+        assert_eq!(tools.vision_inbox(), None);
     }
 }
 

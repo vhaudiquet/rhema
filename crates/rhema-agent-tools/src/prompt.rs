@@ -46,16 +46,16 @@ pub struct McpServerLine {
 /// `{% for %}`/`{% if %}`. Undefined variables render empty; syntax and
 /// filter errors return with template positions.
 ///
-/// The environment and user sections ([`render_system_with_sections`])
-/// are absent here: a template that references them renders those parts
-/// empty, exactly as a caller that passes `None` for both.
+/// The optional sections ([`render_system_with_sections`]) are absent
+/// here: a template that references them renders those parts empty,
+/// exactly as a caller that passes `None` for each.
 pub fn render_system(
     template: &str,
     workspace: &Path,
     skills: &[Skill],
     tools: &[ToolSpec],
 ) -> Result<String, TemplateError> {
-    render_system_with_sections(template, workspace, skills, tools, None, None, &[])
+    render_system_with_sections(template, workspace, skills, tools, None, None, &[], None)
 }
 
 /// [`render_system`] with the two optional prompt sections: `environment`
@@ -64,6 +64,10 @@ pub fn render_system(
 /// plain string variables (`{{ environment }}`, `{% if user %}`), so the
 /// template decides whether and where they appear; `None` renders the
 /// referencing parts empty, the same as an undefined variable.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per prompt section keeps the render's inputs flat"
+)]
 pub fn render_system_with_sections(
     template: &str,
     workspace: &Path,
@@ -72,6 +76,7 @@ pub fn render_system_with_sections(
     environment: Option<&str>,
     user: Option<&str>,
     mcp: &[McpServerLine],
+    vision: Option<&str>,
 ) -> Result<String, TemplateError> {
     let context = serde_json::json!({
         "workspace": workspace.display().to_string(),
@@ -80,6 +85,7 @@ pub fn render_system_with_sections(
         "environment": environment,
         "user": user,
         "mcp": mcp,
+        "vision": vision,
     });
     render_template(template, &context)
 }
@@ -187,16 +193,32 @@ mod tests {
             server: "atlassian".into(),
             description: "Jira and Confluence".into(),
         }];
-        let out =
-            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None, &lines)
-                .unwrap();
+        let out = render_system_with_sections(
+            template,
+            Path::new("/ws"),
+            &[],
+            &[],
+            None,
+            None,
+            &lines,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             out,
             "MCP:\n- atlassian (server: atlassian): Jira and Confluence\n"
         );
-        let out =
-            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None, &[])
-                .unwrap();
+        let out = render_system_with_sections(
+            template,
+            Path::new("/ws"),
+            &[],
+            &[],
+            None,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
         // A false block leaves a single newline behind (minijinja's
         // trim_blocks keeps it); what matters is that the content
         // vanishes, heading included.
@@ -258,6 +280,7 @@ mod tests {
             Some("- OS: linux"),
             Some("prefer short answers"),
             &[],
+            None,
         )
         .unwrap();
         assert_eq!(out, "open\nprefer short answers\n- OS: linux\nclose\n");
@@ -270,9 +293,17 @@ mod tests {
         // survive alone — the same render a template that never named
         // the sections produces.
         let template = "open\n{% if user %}{{ user }}\n{% endif %}close";
-        let without =
-            render_system_with_sections(template, Path::new("/ws"), &[], &[], None, None, &[])
-                .unwrap();
+        let without = render_system_with_sections(
+            template,
+            Path::new("/ws"),
+            &[],
+            &[],
+            None,
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
         assert_eq!(without, "open\nclose\n");
         assert_eq!(
             render_system(template, Path::new("/ws"), &[], &[]).unwrap(),

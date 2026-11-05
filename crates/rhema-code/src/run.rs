@@ -93,6 +93,14 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             argv.extend(rest);
             std::process::exit(rhema_mcp::cli::run(&argv));
         }
+        // The vision CLI owns the process: its exit code is ours, its
+        // stderr is the model's error text.
+        Some(crate::args::Command::Vision { args: rest }) => {
+            let mut argv = Vec::with_capacity(rest.len() + 1);
+            argv.push(std::ffi::OsString::from(rhema_agent_tools::vision::MODE));
+            argv.extend(rest);
+            std::process::exit(rhema_agent_tools::vision::cli_run(&argv));
+        }
         // The stubs' road: `rhema __server …` and every unrecognized
         // subcommand go to the MCP CLI, whose exit code owns the
         // process. An unknown mode is its exit-2 usage error.

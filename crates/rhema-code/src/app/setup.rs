@@ -781,11 +781,25 @@ pub(crate) fn session_agent_config(
         sandboxed.apply_tools(&mut config);
     }
     apply_prompt_sections(&mut config, options, sandboxed);
+    // Vision: the same local-only gate. The wiring lands first so the
+    // MCP wire can chain its init file through ours: `BASH_ENV` names
+    // the MCP file, whose guard sources ours by literal path, and both
+    // functions end up defined.
+    let vision_wiring = (sandboxed.is_none())
+        .then(|| rhema_agent_tools::vision::wire(std::env::var_os("BASH_ENV")))
+        .flatten();
+    if let Some(wiring) = &vision_wiring {
+        config.shell_env.extend(wiring.shell_env.clone());
+        config.vision = Some(wiring.section.to_owned());
+    }
+    let bash_env = vision_wiring
+        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
+        .or_else(|| std::env::var_os("BASH_ENV"));
     // MCP: the local-only wire, gated on the sandbox — a session
     // whose bash runs elsewhere never sees the section, because its
     // executor could not reach the socket or the provisioned env.
     if let Some(entry) =
-        crate::mcp_wire::wire_for_session(session_key, profile, disabled_mcp, sandboxed)
+        crate::mcp_wire::wire_for_session(session_key, profile, disabled_mcp, sandboxed, bash_env)
     {
         config.shell_env.extend(entry.shell_env().clone());
         config.mcp_servers = entry.lines().to_vec();

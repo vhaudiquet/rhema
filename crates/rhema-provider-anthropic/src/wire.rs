@@ -22,6 +22,9 @@
 //!   Models never emit image blocks, so the response side is untouched.
 //!   An image is a content block like any other: a turn's last image
 //!   carries the cache breakpoint like a text block would.
+//! - Images a tool result carries (`ToolResult::images`) ride inside
+//!   the `tool_result` block: the API's `tool_result.content` accepts
+//!   a block array, text first, one `image` source per image after.
 //! - `tool_use.input` must be a JSON object: objects pass through, absent
 //!   args become `{}`, anything else is wrapped under [`WRAPPED_ARGS_KEY`].
 //!   Call ids and names round-trip verbatim.
@@ -203,8 +206,10 @@ pub enum WireBlock {
     ToolResult {
         /// The answered call's id.
         tool_use_id: String,
-        /// Result payload as text.
-        content: String,
+        /// Result payload: bare text, or — when the result carries
+        /// images — a block array of the text and each image, the two
+        /// shapes the API's `tool_result.content` accepts.
+        content: WireToolContent,
         /// Whether the call failed; the model reacts to this in-band.
         is_error: bool,
         /// The cache breakpoint marker, when this block ends a cached
@@ -223,6 +228,35 @@ pub enum WireBlock {
         /// prefix.
         #[serde(skip_serializing_if = "Option::is_none")]
         cache_control: Option<WireCacheControl>,
+    },
+}
+
+/// The `content` of a [`WireBlock::ToolResult`]: bare text when the
+/// result carries no images, otherwise the block array the API accepts
+/// there — the text first, then one image block per result image, in
+/// order.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WireToolContent {
+    /// The result's text, sent as the API's plain string form.
+    Text(String),
+    /// Text plus images, sent as the API's block-array form.
+    Blocks(Vec<WireToolBlock>),
+}
+
+/// One block inside a [`WireToolContent::Blocks`] array.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum WireToolBlock {
+    /// The result's text.
+    Text {
+        /// The text, verbatim.
+        text: String,
+    },
+    /// One image, shaped exactly like a user-turn image source.
+    Image {
+        /// The base64 payload and its media type.
+        source: WireImageSource,
     },
 }
 
@@ -255,6 +289,27 @@ impl WireBlock {
             _ => {}
         }
     }
+}
+
+/// A result's wire content: bare text, or the text and each image as
+/// blocks. The text always leads — the model reads the result, then
+/// sees what it produced.
+fn tool_result_content(result: &rhema_core::tool::ToolResult) -> WireToolContent {
+    if result.images.is_empty() {
+        return WireToolContent::Text(result.content.clone());
+    }
+    let mut blocks = Vec::with_capacity(result.images.len() + 1);
+    blocks.push(WireToolBlock::Text {
+        text: result.content.clone(),
+    });
+    blocks.extend(result.images.iter().map(|image| WireToolBlock::Image {
+        source: WireImageSource {
+            kind: "base64",
+            media_type: image.media_type.as_str().to_owned(),
+            data: image.data.clone(),
+        },
+    }));
+    WireToolContent::Blocks(blocks)
 }
 
 /// A `tools[]` entry.
@@ -671,7 +726,7 @@ pub fn request_body(req: &ModelRequest) -> Result<MessagesRequest, ProviderError
                     .filter_map(|content| match content {
                         Content::ToolResult(result) => Some(WireBlock::ToolResult {
                             tool_use_id: result.id.clone(),
-                            content: result.content.clone(),
+                            content: tool_result_content(result),
                             is_error: result.is_error,
                             cache_control: None,
                         }),
@@ -1556,6 +1611,58 @@ mod tests {
             json["messages"][0]["content"],
             json!([{ "type": "text", "text": "hi",
                      "cache_control": { "type": "ephemeral" } }])
+        );
+    }
+
+    #[test]
+    fn a_tool_results_images_ride_its_tool_result_block_as_an_array() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![
+                Message::text(Role::User, "show me"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolCall(ToolCall {
+                        id: "call_0".into(),
+                        name: "bash".into(),
+                        args: json!({ "command": "curl x | see" }),
+                        provider_data: Value::Null,
+                    })],
+                },
+                Message {
+                    role: Role::Tool,
+                    content: vec![Content::ToolResult(
+                        ToolResult::success("call_0", "out").with_images(vec![
+                            Image::new(ImageMediaType::Png, "cG5n"),
+                            Image::new(ImageMediaType::Gif, "aGlm"),
+                        ]),
+                    )],
+                },
+            ],
+            tools: Vec::new(),
+            params: ChatParams::new("claude-sonnet-4-5"),
+        };
+
+        let json = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        let messages = json["messages"].as_array().expect("messages");
+        // The result and its images stay one tool_result block, inside
+        // the user turn the API requires.
+        assert_eq!(messages.len(), 3);
+        let content = messages[2]["content"].as_array().expect("blocks");
+        let block = &content[0];
+        assert_eq!(block["type"], "tool_result");
+        assert_eq!(block["tool_use_id"], "call_0");
+        let blocks = block["content"].as_array().expect("tool_result blocks");
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "out" }));
+        assert_eq!(
+            blocks[1],
+            json!({ "type": "image",
+                    "source": { "type": "base64", "media_type": "image/png", "data": "cG5n" } })
+        );
+        assert_eq!(
+            blocks[2],
+            json!({ "type": "image",
+                    "source": { "type": "base64", "media_type": "image/gif", "data": "aGlm" } })
         );
     }
 

@@ -120,6 +120,13 @@ pub struct CodingAgentConfig {
     /// frontend that has one reads it and passes it here. `None`
     /// renders nothing.
     pub user_preferences: Option<String>,
+    /// The prompt section documenting the wired
+    /// [`vision`](rhema_agent_tools::vision) macro — the `see` bash
+    /// function's documentation, produced by the frontend's
+    /// provisioning and passed verbatim. `None` renders no section: a
+    /// frontend that wired nothing advertises nothing, the same rule
+    /// the `mcp_servers` section follows.
+    pub vision: Option<String>,
 }
 
 impl std::fmt::Debug for CodingAgentConfig {
@@ -175,6 +182,7 @@ impl CodingAgentConfig {
             disabled_mcp_servers: std::collections::BTreeSet::new(),
             environment: None,
             user_preferences: None,
+            vision: None,
         }
     }
 }

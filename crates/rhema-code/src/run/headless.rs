@@ -214,6 +214,19 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     if let Some(assembled) = &sandboxed {
         assembled.apply_tools(&mut agent_config);
     }
+    // Vision: the same local-only gate. The wiring lands before the
+    // MCP wire so its init file chains through ours (see the TUI's
+    // assembly).
+    let vision_wiring = (sandboxed.is_none())
+        .then(|| rhema_agent_tools::vision::wire(std::env::var_os("BASH_ENV")))
+        .flatten();
+    if let Some(wiring) = &vision_wiring {
+        agent_config.shell_env.extend(wiring.shell_env.clone());
+        agent_config.vision = Some(wiring.section.to_owned());
+    }
+    let bash_env = vision_wiring
+        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
+        .or_else(|| std::env::var_os("BASH_ENV"));
     // MCP: the same local-only gate the TUI applies — a sandboxed
     // executor cannot reach the socket, so it advertises nothing.
     if let Some(entry) = crate::mcp_wire::wire_for_session(
@@ -221,6 +234,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         &effective,
         &config.disabled_mcp_servers,
         sandboxed.as_ref(),
+        bash_env,
     ) {
         agent_config.shell_env.extend(entry.shell_env().clone());
         agent_config.mcp_servers = entry.lines().to_vec();

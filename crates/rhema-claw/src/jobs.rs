@@ -207,6 +207,7 @@ impl CodingJobHandler {
         config.transcript = self
             .transcript
             .then(rhema_transcript::TranscriptSettings::default);
+        crate::vision::apply(&mut config);
         crate::mcp::apply(&mut config);
         let stashed = self
             .store

@@ -27,7 +27,14 @@ pub fn message_bytes(message: &Message) -> usize {
         .map(|content| match content {
             Content::Text(text) => text.len(),
             Content::ToolCall(call) => call.name.len() + call.args.to_string().len(),
-            Content::ToolResult(result) => result.content.len(),
+            Content::ToolResult(result) => {
+                result.content.len()
+                    + result
+                        .images
+                        .iter()
+                        .map(|image| image.data.len())
+                        .sum::<usize>()
+            }
             Content::Image(image) => image.data.len(),
         })
         .sum()
@@ -194,6 +201,9 @@ pub fn render_message(message: &Message) -> String {
                     if result.is_error { "failed" } else { "ok" },
                     result.content
                 ));
+                for image in &result.images {
+                    out.push_str(&format!("\n[image: {}]", image.media_type.as_str()));
+                }
             }
             Content::Image(image) => {
                 if !out.is_empty() {
@@ -212,7 +222,24 @@ pub fn render_message(message: &Message) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rhema_core::ToolCall;
+    use rhema_core::{ToolCall, ToolResult};
+
+    #[test]
+    fn a_results_images_count_and_describe() {
+        let message = Message {
+            role: Role::Tool,
+            content: vec![Content::ToolResult(
+                ToolResult::success("c1", "out").with_images(vec![rhema_core::Image::new(
+                    rhema_core::ImageMediaType::Png,
+                    "cG5n",
+                )]),
+            )],
+        };
+        // "out" plus the base64 data's four bytes.
+        assert_eq!(message_bytes(&message), 7);
+        let rendered = render_message(&message);
+        assert!(rendered.contains("[image: image/png]"), "{rendered}");
+    }
 
     #[test]
     fn heads_cut_on_char_boundaries() {

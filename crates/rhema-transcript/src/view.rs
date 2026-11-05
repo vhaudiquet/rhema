@@ -379,6 +379,12 @@ fn add_message_content(content: &mut LogContent, message: &Message) {
             }
             Content::ToolResult(result) => {
                 content.tool_results += result.content.len();
+                // Result-embedded images are wire bytes like any other.
+                content.tool_results += result
+                    .images
+                    .iter()
+                    .map(|image| image.data.len())
+                    .sum::<usize>();
             }
             Content::Image(_) => {}
         }
@@ -688,6 +694,13 @@ impl Transcript {
                     }
                     Content::ToolResult(result) => {
                         shares.tool_results += result.content.len();
+                        // Result-embedded images are wire bytes like any
+                        // other; the message budgets count their data.
+                        shares.tool_results += result
+                            .images
+                            .iter()
+                            .map(|image| image.data.len())
+                            .sum::<usize>();
                     }
                     // Shares spreads tokens over the categories it names;
                     // image bytes are the message budgets' to count.

@@ -202,6 +202,10 @@ fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String 
         config.environment.as_deref(),
         config.user_preferences.as_deref(),
         &[],
+        // The subagent's own prompt carries no vision section: the
+        // function rides its env either way, and the section documents
+        // the parent shell's tool surface.
+        None,
     )
     .unwrap_or_else(|err| {
         eprintln!(

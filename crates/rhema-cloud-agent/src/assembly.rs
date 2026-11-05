@@ -188,6 +188,9 @@ impl AgentAssembly {
             // No filesystem to read a USER.md from; a per-session
             // preference file is a later SessionConfig decision.
             user_preferences: None,
+            // The commands run in the remote sandbox; no local
+            // provision means no `see` function, so no section.
+            vision: None,
         };
         (config, shell)
     }

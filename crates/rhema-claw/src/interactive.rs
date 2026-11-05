@@ -222,6 +222,10 @@ pub struct InteractiveHandler {
     /// decorator refreshes it per request, `zoom` reads it, and it
     /// lives here — the agent rebuilds per dispatch, the log must not.
     transcript_mirror: Option<Arc<std::sync::Mutex<rhema_transcript::Transcript>>>,
+    /// The wired [`vision`](rhema_agent_tools::vision) section for the
+    /// prompt, when provisioning succeeded — the same wiring whose env
+    /// map lights the shell's inbox up.
+    vision: Option<String>,
 }
 
 impl InteractiveHandler {
@@ -247,7 +251,15 @@ impl InteractiveHandler {
         transcript: bool,
     ) -> Self {
         let workspace = workspace.into();
-        let tools = Arc::new(ShellTools::new(&workspace));
+        // The vision wiring rides the shell's env: `see` exists in the
+        // chat's commands, and its staged images attach to their
+        // results. Local shells only — the interactive handler's
+        // executor is this host's by construction.
+        let vision = rhema_agent_tools::vision::wire(std::env::var_os("BASH_ENV"));
+        let tools = Arc::new(match vision {
+            Some(wiring) => ShellTools::with_env(&workspace, &wiring.shell_env),
+            None => ShellTools::new(&workspace),
+        });
         tools.install_approval(Arc::new(AllowAll));
         let bootstrap_resolver =
             crate::bootstrap::registry(bootstrap.clone()).resolver_for(&Allowlist::permissive());
@@ -268,6 +280,7 @@ impl InteractiveHandler {
                     rhema_transcript::TranscriptSettings::default(),
                 )))
             }),
+            vision: vision.map(|wiring| wiring.section.to_owned()),
         }
     }
 
@@ -302,6 +315,7 @@ impl InteractiveHandler {
             &self.workspace,
             &self.bootstrap,
             &resolver.specs(),
+            self.vision.as_deref(),
         )
         .map_err(|err| format!("cannot render the bootstrap system prompt: {err}"))?;
         Agent::builder()
@@ -1063,6 +1077,7 @@ mod tests {
             Path::new("/state/claw/workspaces/interactive"),
             &handler.bootstrap,
             &specs,
+            None,
         )
         .expect("renders");
         assert!(

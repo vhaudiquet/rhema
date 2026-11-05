@@ -237,7 +237,7 @@ impl App {
         model: &str,
         workspace: &std::path::Path,
     ) -> CodingAgentConfig {
-        CodingAgentConfig {
+        let mut config = CodingAgentConfig {
             max_turn_steps: self
                 .options
                 .max_steps
@@ -245,7 +245,16 @@ impl App {
             thinking,
             base_system: self.base_system.clone(),
             ..CodingAgentConfig::new(model, workspace)
+        };
+        // The `bash` tool does its own I/O here (no fs/terminal
+        // callbacks), so commands run on this host and the vision
+        // wiring works; the map carries it to the shell and the prompt
+        // section documents the function.
+        if let Some(wiring) = rhema_agent_tools::vision::wire(std::env::var_os("BASH_ENV")) {
+            config.shell_env.extend(wiring.shell_env.clone());
+            config.vision = Some(wiring.section.to_owned());
         }
+        config
     }
 
     /// The card of the model a session runs on, from its catalog rows.

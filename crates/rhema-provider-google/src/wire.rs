@@ -5,7 +5,9 @@
 //! - Only `user` and `model` roles exist on the wire. `Role::Assistant` maps
 //!   to `model`; `Role::User` and `Role::Tool` map to `user`, with tool
 //!   results carried as `functionResponse` parts (matched by tool *name*,
-//!   never by id).
+//!   never by id). A result's images (`ToolResult::images`) have no wire
+//!   home in a function response — it is text — so each is named in a
+//!   trailing note.
 //! - `Role::System` messages and `ModelRequest.system` fold together into a
 //!   single `systemInstruction` text, joined by a blank line.
 //! - Gemini tool-call ids are optional on the wire: when the model sends one
@@ -511,12 +513,22 @@ fn object_args(args: &Value) -> Value {
 }
 
 /// `functionResponse.response` must be a JSON object; the content rides
-/// under `output` on success and `error` on failure.
+/// under `output` on success and `error` on failure. A result's images
+/// have no wire home there — a function response is text — so each is
+/// named in a note the model can act on, instead of vanishing.
 fn response_object(result: &ToolResult) -> Value {
+    let mut content = result.content.clone();
+    if !result.images.is_empty() {
+        content.push_str(&format!(
+            "\n[{} image(s) attached in this result were not delivered: \
+             function responses carry text only]",
+            result.images.len()
+        ));
+    }
     if result.is_error {
-        serde_json::json!({ "error": result.content })
+        serde_json::json!({ "error": content })
     } else {
-        serde_json::json!({ "output": result.content })
+        serde_json::json!({ "output": content })
     }
 }
 
@@ -1277,6 +1289,35 @@ mod tests {
                 "TextDelta(\"Hel\")",
                 "TextDelta(\"lo\")",
             ]
+        );
+    }
+
+    #[test]
+    fn a_tool_results_images_become_a_withholding_note_in_the_response() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message {
+                role: Role::Tool,
+                content: vec![rhema_core::Content::ToolResult(
+                    ToolResult::success("call_0", "out")
+                        .with_images(vec![Image::new(ImageMediaType::Png, "cG5n")]),
+                )],
+            }],
+            tools: vec![],
+            params: ChatParams::new("gemini-2.5-pro"),
+        };
+
+        let body = serde_json::to_value(request_body(&req).unwrap()).expect("body serializes");
+        let text = body["contents"][0]["parts"][0]["functionResponse"]["response"]["output"]
+            .as_str()
+            .expect("output is text");
+        assert!(text.starts_with("out"), "{text}");
+        assert!(
+            text.contains(
+                "[1 image(s) attached in this result were not delivered: \
+                 function responses carry text only]"
+            ),
+            "{text}"
         );
     }
 

@@ -99,7 +99,7 @@ pub fn stamped_system(
     let global = rhema_config::Config::skills_dir().ok();
     let skills =
         rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), workspace);
-    stamped_system_with_sections(base, workspace, extra, &skills, None, None, &[])
+    stamped_system_with_sections(base, workspace, extra, &skills, None, None, &[], None)
 }
 
 /// [`stamped_system`] over skills collected elsewhere — the input path
@@ -114,7 +114,7 @@ pub fn stamped_system_with_skills(
     extra: &[ToolSpec],
     skills: &[Skill],
 ) -> Result<String, CodingAgentError> {
-    stamped_system_with_sections(base, workspace, extra, skills, None, None, &[])
+    stamped_system_with_sections(base, workspace, extra, skills, None, None, &[], None)
 }
 
 /// The full assembly: the template over `workspace`, the skills, the
@@ -123,6 +123,10 @@ pub fn stamped_system_with_skills(
 /// `user` (the user's preferences file, verbatim). The template decides
 /// whether and where the sections appear; `None` is the section-less
 /// render the older constructors name.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one parameter per prompt section keeps the render's inputs flat"
+)]
 pub fn stamped_system_with_sections(
     base: Option<&str>,
     workspace: &Path,
@@ -131,6 +135,7 @@ pub fn stamped_system_with_sections(
     environment: Option<&str>,
     user: Option<&str>,
     mcp: &[rhema_agent_tools::prompt::McpServerLine],
+    vision: Option<&str>,
 ) -> Result<String, CodingAgentError> {
     let mut tools = ShellTools::builtin_specs();
     tools.extend_from_slice(extra);
@@ -142,6 +147,7 @@ pub fn stamped_system_with_sections(
         environment,
         user,
         mcp,
+        vision,
     )
     .map_err(CodingAgentError::from)
 }
@@ -252,6 +258,7 @@ impl CodingAgent {
                 config.environment.as_deref(),
                 config.user_preferences.as_deref(),
                 &mcp,
+                config.vision.as_deref(),
             )?,
         };
         // The skills section's byte share of the system prompt: the
@@ -280,6 +287,7 @@ impl CodingAgent {
                     config.environment.as_deref(),
                     config.user_preferences.as_deref(),
                     &[],
+                    config.vision.as_deref(),
                 )
                 .map(|without| system.len().saturating_sub(without.len()))
                 .unwrap_or(0)
@@ -1048,15 +1056,18 @@ mod extra_tools_tests {
             Some("## Environment\n\n- OS: test os"),
             Some("prefer concise answers"),
             &[],
+            Some("pipe bytes into `see`"),
         )
         .unwrap();
         assert!(prompt.contains("- OS: test os"), "{prompt}");
         assert!(prompt.contains("prefer concise answers"), "{prompt}");
+        assert!(prompt.contains("pipe bytes into `see`"), "{prompt}");
         // The section-less constructors render neither: an absent
         // section is the render a template without the blocks makes.
         let bare = stamped_system_with_skills(None, &workspace, &[], &[]).unwrap();
         assert!(!bare.contains("- OS: test os"), "{bare}");
         assert!(!bare.contains("prefer concise answers"), "{bare}");
+        assert!(!bare.contains("pipe bytes into `see`"), "{bare}");
     }
 }
 

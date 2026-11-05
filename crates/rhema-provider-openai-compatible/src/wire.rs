@@ -28,8 +28,10 @@
 //!   assistant turn is dropped from history.
 //! - Tool results become `{role: "tool", tool_call_id, content}` messages,
 //!   one per result block, matched by id — whichever rhema message carries
-//!   them. `ToolResult::is_error` has no wire representation; the content
-//!   text alone must tell the model the call failed.
+//!   them. A result's images (`ToolResult::images`) have no wire home
+//!   — tool messages accept text parts only — so each is named in a
+//!   trailing note. `ToolResult::is_error` has no wire representation;
+//!   the content text alone must tell the model the call failed.
 //! - `ToolCall::provider_data` carries only the reasoning the call claims
 //!   from the stream; OpenAI-style call ids are plain strings that
 //!   round-trip on the wire, so there is nothing else opaque to carry.
@@ -741,17 +743,30 @@ fn joined_texts(message: &Message) -> String {
         .join("\n\n")
 }
 
-/// One `role: "tool"` wire message per result block of `message`.
+/// One `role: "tool"` wire message per result block of `message`. A
+/// result's images cannot ride along — this API's tool messages accept
+/// text parts only — so each image is named in a note the model can
+/// act on, instead of vanishing.
 fn tool_results_of(message: &Message) -> impl Iterator<Item = WireMessage> + '_ {
     message.content.iter().filter_map(|content| match content {
-        Content::ToolResult(result) => Some(WireMessage {
-            role: "tool".into(),
-            content: Some(WireContent::Text(result.content.clone())),
-            reasoning_content: None,
-            reasoning: None,
-            tool_calls: None,
-            tool_call_id: Some(result.id.clone()),
-        }),
+        Content::ToolResult(result) => {
+            let mut text = result.content.clone();
+            if !result.images.is_empty() {
+                text.push_str(&format!(
+                    "\n[{} image(s) attached in this result were not delivered: \
+                     tool results carry text only on this API]",
+                    result.images.len()
+                ));
+            }
+            Some(WireMessage {
+                role: "tool".into(),
+                content: Some(WireContent::Text(text)),
+                reasoning_content: None,
+                reasoning: None,
+                tool_calls: None,
+                tool_call_id: Some(result.id.clone()),
+            })
+        }
         _ => None,
     })
 }
@@ -1270,6 +1285,36 @@ mod tests {
             body.contains(r#"{"url":"data:image/webp;base64,d2VicA=="}"#),
             "{body}"
         );
+    }
+
+    #[test]
+    fn a_tool_results_images_become_a_withholding_note() {
+        let req = ModelRequest {
+            system: None,
+            messages: vec![Message {
+                role: Role::Tool,
+                content: vec![Content::ToolResult(
+                    ToolResult::success("call_0", "out").with_images(vec![
+                        Image::new(ImageMediaType::Png, "cG5n"),
+                        Image::new(ImageMediaType::Jpeg, "anM="),
+                    ]),
+                )],
+            }],
+            tools: vec![],
+            params: ChatParams::new("gpt-4o-mini"),
+        };
+
+        let body = serde_json::to_string(&request_body(&req, &OPENAI_COMPATIBLE))
+            .expect("body serializes");
+        // The text rides; the images cannot, and the note says so.
+        assert!(
+            body.contains(
+                "[2 image(s) attached in this result were not delivered: \
+                 tool results carry text only on this API]"
+            ),
+            "{body}"
+        );
+        assert!(!body.contains("cG5n"), "{body}");
     }
 
     #[test]

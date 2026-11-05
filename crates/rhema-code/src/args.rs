@@ -213,6 +213,16 @@ pub enum Command {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<std::ffi::OsString>,
     },
+    /// The pass-through that makes the agent shell's `see` macro work:
+    /// `rhema __vision …` execs this binary in the vision CLI, which
+    /// stages the piped bytes (or the named files) into the session's
+    /// staging directory. Outside a wired shell it exits 4 with a hint.
+    #[command(name = "__vision")]
+    Vision {
+        /// The CLI's own argv, passed through untouched.
+        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
+        args: Vec<std::ffi::OsString>,
+    },
     /// The catch-all the init file's stubs land in: `rhema __server
     /// <name> …` execs this binary with `__server` as the first
     /// token, and any other unrecognized subcommand follows the same

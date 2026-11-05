@@ -88,7 +88,8 @@ Rules:
   - `config` — stored settings and credentials (`crates/rhema-config/`)
   - `agent-tools` — the shared toolkit: the approval-gated shell, the
     `Approval` and `Overlay` seams, skills, paste expansion, revive,
-    the prompt renderer (`crates/rhema-agent-tools/`)
+    the `see` vision macro, the prompt renderer
+    (`crates/rhema-agent-tools/`)
   - `sandbox` — the sandbox seam: the `Sandbox` contract, the
     `ShellSandbox` adapter, the wire protocol, the HTTP client and
     `rhema-sandboxd`, and the local sandbox (`crates/rhema-sandbox/`)

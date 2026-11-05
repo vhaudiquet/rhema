@@ -27,6 +27,13 @@ arguments are the JSON schema a call must satisfy.
 {% endfor %}
 {% endif %}
 
+{% if vision %}
+
+## Viewing images
+
+{{ vision }}
+{% endif %}
+
 ## Memory
 
 You keep persistent memory across sessions. memory_save stores what is

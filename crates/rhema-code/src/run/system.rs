@@ -220,6 +220,10 @@ pub(crate) fn system_show_at_with_mcp(
         environment.as_deref(),
         user.as_deref(),
         &mcp,
+        // The vision section is static text a local session always
+        // carries; the preview never provisions, it just shows the
+        // block the template would render.
+        Some(rhema_agent_tools::vision::PROMPT_SECTION),
     )?)
 }
 

@@ -15,6 +15,8 @@
 //! - [`paste`] — `ExpandPastes`, paste expansion at the provider seam
 //! - [`revive`] — `repair_dangling_calls`, `revive_dangling_calls`
 //! - [`prompt`] — the Jinja system-prompt renderer
+//! - [`vision`] — the `see` macro: a bash command's staged images
+//!   become [`ToolResult`] image blocks
 //!
 //! # Skills
 //!
@@ -41,6 +43,7 @@ pub mod prompt;
 pub mod revive;
 pub mod shell;
 pub mod skills;
+pub mod vision;
 
 pub use approval::{AllowAll, Approval, DenyAll};
 #[cfg(feature = "local-shell")]
