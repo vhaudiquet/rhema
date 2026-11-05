@@ -48,6 +48,13 @@ pub enum Payload {
     /// The raw `--json` string, verbatim. `-` means stdin and is the
     /// caller's to read; this crate never touches I/O.
     Overridden(String),
+    /// A discovery request: the caller should print this tool's
+    /// `input_schema` and exit. The value is the subcommand's tool
+    /// name; [`schema_of`] is the lookup that matches it.
+    Schema {
+        /// The tool whose schema the caller should print.
+        tool: String,
+    },
 }
 
 /// Why parsed argv could not be mapped to tool arguments.
@@ -147,6 +154,8 @@ pub fn command(server_name: &str, catalog: &[ToolInfo]) -> Command {
 /// A lone `--json` wins as [`Payload::Overridden`], carrying the raw
 /// string untouched; `-` means stdin and is never read here. `--json`
 /// next to any of the tool's own flags is [`MappingError::JsonConflict`].
+/// `--schema` short-circuits everything as [`Payload::Schema`]: a
+/// question about the shape, not a call.
 ///
 /// # Errors
 ///
@@ -163,6 +172,13 @@ pub fn args(cmd: &Command, matches: &ArgMatches) -> Result<Payload, MappingError
         .ok_or_else(|| MappingError::UnknownSubcommand {
             name: name.to_owned(),
         })?;
+    // Discovery first: `--schema` is a question about the tool, not a
+    // call, so it wins over everything else the command line carries.
+    if sub.get_flag("schema") {
+        return Ok(Payload::Schema {
+            tool: name.to_owned(),
+        });
+    }
 
     let mut object = Map::new();
     for arg in sc.get_arguments() {
@@ -198,6 +214,18 @@ pub fn cli_safe(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// One tool's `input_schema`, by the command tree's own rules:
+/// renderable tools only, first name wins. The caller behind
+/// [`Payload::Schema`] looks the schema up here so the printed shape
+/// is exactly the one the subcommand's flags were built from.
+#[must_use]
+pub fn schema_of<'a>(catalog: &'a [ToolInfo], tool: &str) -> Option<&'a Value> {
+    catalog
+        .iter()
+        .find(|info| info.name == tool && renderable(info))
+        .map(|info| &info.input_schema)
 }
 
 /// Render the bare-invocation tool list: `[{name, description}]`.
@@ -329,7 +357,7 @@ fn root_is_object(schema: &Value) -> bool {
 
 fn tool_subcommand(server_name: &str, tool: &ToolInfo) -> Command {
     let mut cmd = Command::new(tool.name.clone()).about(&tool.description);
-    let mut used = vec!["help".to_owned(), "json".to_owned()];
+    let mut used = vec!["help".to_owned(), "json".to_owned(), "schema".to_owned()];
     let mut demoted = false;
     let mut mandatory = Vec::new();
 
@@ -376,7 +404,18 @@ fn tool_subcommand(server_name: &str, tool: &ToolInfo) -> Command {
             .join(" ");
         cmd = cmd.override_usage(format!("{server_name} {} {prefix} [OPTIONS]", tool.name));
     }
-    cmd.arg(override_arg())
+    cmd.arg(override_arg()).arg(schema_arg())
+}
+
+/// The per-tool `--schema` discovery flag: the caller prints the
+/// tool's `input_schema` and exits. The one answer to "what shape
+/// does this payload take" that needs no guessing.
+fn schema_arg() -> Arg {
+    Arg::new("schema")
+        .long("schema")
+        .action(ArgAction::SetTrue)
+        .display_order(3)
+        .help("Print this tool's input schema as JSON and exit")
 }
 
 /// The per-tool `--json` whole-payload override, present on every
@@ -437,7 +476,16 @@ fn property_arg(
     match shape {
         Shape::SetTrue => arg = arg.action(ArgAction::SetTrue),
         Shape::Json => {
+            // The shape rides the help: the model reading
+            // `--help` learns the payload's structure here, without a
+            // second round trip to `--schema`.
+            let shaped = format!(
+                "{} JSON shape: {}",
+                flag_help(help, false, false),
+                shape_of(schema, 4)
+            );
             arg = arg
+                .help(shaped)
                 .value_name("JSON")
                 .value_parser(clap::builder::ValueParser::new(json_value));
         }
@@ -549,6 +597,64 @@ fn with_help(arg: Arg, help: Option<&str>, enforced: bool) -> Arg {
     match help {
         Some(h) if !h.is_empty() => arg.help(h.to_owned()),
         _ => arg,
+    }
+}
+
+/// A compact structural summary of one schema: the shape a caller
+/// needs to build a matching payload, depth-limited so pathological
+/// schemas cannot flood the help. `!` marks required properties.
+#[must_use]
+pub fn shape_of(schema: &Value, depth: usize) -> String {
+    if depth == 0 {
+        return String::from("...");
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(alts) = schema.get(key).and_then(Value::as_array) {
+            let parts = alts
+                .iter()
+                .map(|alt| shape_of(alt, depth.saturating_sub(1)))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            return format!("{key} {parts}");
+        }
+    }
+    match schema.get("type").and_then(Value::as_str) {
+        Some("object") => match properties(schema) {
+            Some(props) if !props.is_empty() => {
+                let required = required_names(schema);
+                let parts = props
+                    .iter()
+                    .map(|(name, sub)| {
+                        let mark = if required.contains(&name.as_str()) {
+                            "!"
+                        } else {
+                            ""
+                        };
+                        format!("{name}{mark}: {}", shape_of(sub, depth - 1))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{parts}}}")
+            }
+            _ => String::from("object"),
+        },
+        Some("array") => schema
+            .get("items")
+            .map(|items| format!("array of {}", shape_of(items, depth - 1)))
+            .unwrap_or_else(|| String::from("array")),
+        Some("string") => match schema.get("enum").and_then(Value::as_array) {
+            Some(values) if !values.is_empty() => {
+                let names = values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("|");
+                format!("string, one of {names}")
+            }
+            _ => String::from("string"),
+        },
+        Some(other) => other.to_owned(),
+        None => String::from("any"),
     }
 }
 
@@ -759,48 +865,172 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn shape_of(schema: Value) -> Shape {
+    fn classified(schema: Value) -> Shape {
         classify(&schema)
     }
 
     #[test]
     fn nullable_anyof_unwraps_recursively() {
         let optional_string = json!({"anyOf": [{"type": "string"}, {"type": "null"}]});
-        assert_eq!(shape_of(optional_string), Shape::Value(Kind::Text));
+        assert_eq!(classified(optional_string), Shape::Value(Kind::Text));
         let optional_array = json!({
             "anyOf": [
                 {"type": "array", "items": {"anyOf": [{"type": "integer"}, {"type": "null"}]}},
                 {"type": "null"},
             ]
         });
-        assert_eq!(shape_of(optional_array), Shape::Repeat(Kind::Integer));
+        assert_eq!(classified(optional_array), Shape::Repeat(Kind::Integer));
     }
 
     #[test]
     fn nullable_oneof_and_type_arrays_unwrap() {
         let oneof = json!({"oneOf": [{"type": "null"}, {"type": "boolean"}]});
-        assert_eq!(shape_of(oneof), Shape::Value(Kind::Bool));
+        assert_eq!(classified(oneof), Shape::Value(Kind::Bool));
         let type_array = json!({"type": ["integer", "null"], "default": 7});
-        assert_eq!(shape_of(type_array), Shape::Value(Kind::Integer));
+        assert_eq!(classified(type_array), Shape::Value(Kind::Integer));
     }
 
     #[test]
     fn three_variant_unions_and_multi_type_arrays_stay_json() {
         let three = json!({"anyOf": [{"type": "object"}, {"type": "string"}, {"type": "null"}]});
-        assert_eq!(shape_of(three), Shape::Json);
+        assert_eq!(classified(three), Shape::Json);
         let multi = json!({"type": ["string", "number"]});
-        assert_eq!(shape_of(multi), Shape::Json);
+        assert_eq!(classified(multi), Shape::Json);
     }
 
     #[test]
     fn non_string_enums_and_nested_arrays_stay_json() {
         let numeric_enum = json!({"type": "integer", "enum": [1, 2, 3]});
-        assert_eq!(shape_of(numeric_enum), Shape::Json);
+        assert_eq!(classified(numeric_enum), Shape::Json);
         let nested =
             json!({"type": "array", "items": {"type": "array", "items": {"type": "string"}}});
-        assert_eq!(shape_of(nested), Shape::Json);
+        assert_eq!(classified(nested), Shape::Json);
         let items_missing = json!({"type": "array"});
-        assert_eq!(shape_of(items_missing), Shape::Json);
+        assert_eq!(classified(items_missing), Shape::Json);
+    }
+
+    #[test]
+    fn shape_summary_describes_structure() {
+        // The batch shape the shiba session fumbled: an array of
+        // objects under a required key.
+        let steps = json!({
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["command"],
+                "properties": {
+                    "command": {"type": "string"},
+                    "params": {"type": "object"}
+                }
+            }
+        });
+        assert_eq!(
+            shape_of(&steps, 4),
+            "array of {command!: string, params: object}"
+        );
+
+        let flat = json!({"type": "object", "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}});
+        // serde_json maps sort properties; the summary follows the
+        // map's order, which is also the flag order clap renders.
+        assert_eq!(shape_of(&flat, 4), "{height: integer, width: integer}");
+
+        let enum_ = json!({"type": "string", "enum": ["circle", "rect"]});
+        assert_eq!(shape_of(&enum_, 4), "string, one of circle|rect");
+
+        let union = json!({"anyOf": [{"type": "string"}, {"type": "integer"}]});
+        assert_eq!(shape_of(&union, 4), "anyOf string | integer");
+
+        // Depth-limited: deep schemas end in an ellipsis, not a flood.
+        let mut deep = json!({"type": "string"});
+        for _ in 0..8 {
+            deep = json!({"type": "object", "properties": {"inner": deep}});
+        }
+        let summary = shape_of(&deep, 4);
+        assert!(summary.contains("..."), "{summary}");
+        assert!(summary.ends_with('}'), "{summary}");
+
+        assert_eq!(shape_of(&json!({}), 4), "any");
+    }
+
+    #[test]
+    fn the_schema_flag_short_circuits_to_discovery() {
+        let tool = ToolInfo {
+            name: "doc_execute".to_owned(),
+            description: "run batch steps".to_owned(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"steps": {"type": "array", "items": {"type": "object"}}}
+            }),
+        };
+        let tree = command("vectorcraft-cli", &[tool]);
+
+        // `--schema` wins even beside other flags and the override:
+        // it is a question, not a call.
+        for argv in [
+            vec!["vectorcraft-cli", "doc_execute", "--schema"],
+            vec!["vectorcraft-cli", "doc_execute", "--schema", "--json", "-"],
+            vec!["vectorcraft-cli", "doc_execute", "--json", "-", "--schema"],
+        ] {
+            let matches = tree.clone().try_get_matches_from(argv).unwrap();
+            let payload = args(&tree, &matches).unwrap();
+            assert_eq!(
+                payload,
+                Payload::Schema {
+                    tool: "doc_execute".to_owned()
+                }
+            );
+        }
+
+        // And the lookup returns the same schema the flags were built
+        // from.
+        let catalog = [ToolInfo {
+            name: "doc_execute".to_owned(),
+            description: String::new(),
+            input_schema: json!({"type": "object"}),
+        }];
+        assert_eq!(
+            schema_of(&catalog, "doc_execute"),
+            Some(&json!({"type": "object"}))
+        );
+        assert_eq!(schema_of(&[], "doc_execute"), None);
+    }
+
+    #[test]
+    fn a_property_named_schema_demotes_the_tool() {
+        let tool = ToolInfo {
+            name: "colliding".to_owned(),
+            description: String::new(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {"schema": {"type": "string"}}
+            }),
+        };
+        let tree = command("srv", &[tool]);
+        let matches = tree
+            .clone()
+            .try_get_matches_from(vec!["srv", "colliding", "--json", "{}"])
+            .unwrap();
+        // The tool survives, reachable through the override only.
+        assert_eq!(
+            args(&tree, &matches).unwrap(),
+            Payload::Overridden("{}".to_owned())
+        );
+        let matches = tree
+            .clone()
+            .try_get_matches_from(vec!["srv", "colliding", "--schema"])
+            .unwrap();
+        assert_eq!(
+            args(&tree, &matches).unwrap(),
+            Payload::Schema {
+                tool: "colliding".to_owned()
+            }
+        );
+        assert_eq!(
+            args(&tree, &matches).unwrap(),
+            Payload::Schema {
+                tool: "colliding".to_owned()
+            }
+        );
     }
 
     #[test]

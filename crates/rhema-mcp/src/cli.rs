@@ -168,9 +168,7 @@ fn exchange(
     // spec's noise rule); RHEMA_MCP_DEBUG opt-in prints the reason,
     // because a human poking the CLI from their own shell deserves
     // more than an exit code.
-    if let (Err(err), Some(())) =
-        (&answer, std::env::var_os("RHEMA_MCP_DEBUG").map(|_| ()))
-    {
+    if let (Err(err), Some(())) = (&answer, std::env::var_os("RHEMA_MCP_DEBUG").map(|_| ())) {
         eprintln!("mcp: transport error: {err}");
     }
     answer
@@ -681,6 +679,21 @@ fn server_mode(env: &CliEnv, argv: &[std::ffi::OsString]) -> Result<Exit, Outcom
         Payload::Overridden(text) => serde_json::from_str(&text)
             .map_err(|e| fault_exit(Fault::usage(format!("--json payload: {e}"))))?,
         Payload::Mapped(value) => value,
+        // Discovery: print the exact schema the flags were built
+        // from, and stop. No call, no bridge traffic.
+        Payload::Schema { tool } => {
+            let schema = mcp_to_cli::schema_of(&infos, &tool);
+            return match schema {
+                Some(schema) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(schema).unwrap_or_else(|_| "{}".to_owned())
+                    );
+                    Ok(Exit::Ok)
+                }
+                None => Ok(Exit::Usage),
+            };
+        }
         // `#[non_exhaustive]`: a future payload kind is a usage
         // error until this CLI grows with the crate.
         _ => {

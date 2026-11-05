@@ -143,6 +143,29 @@ fn wiring_produces_env_lines_and_a_live_bridge() {
 }
 
 #[test]
+fn the_schema_flag_prints_the_input_schema_and_stops() {
+    let session = tempfile::tempdir().unwrap();
+    let mut wiring = wire(
+        &config(vec![fake_command_server("counter")]),
+        &std::collections::BTreeSet::new(),
+        session.path(),
+        "schema-flag",
+        None,
+    )
+    .unwrap();
+    let socket = wiring.socket().to_path_buf();
+    let token = wiring.shell_env.get(provision::VAR_TOKEN).unwrap().clone();
+    let tmp = session.path().to_path_buf();
+    let argv: Vec<std::ffi::OsString> = ["__server", "counter", "get", "--schema"]
+        .iter()
+        .map(std::ffi::OsString::from)
+        .collect();
+    let code = cli::run_with_env(&socket, &token, Some(&tmp), &argv);
+    assert_eq!(code, 0, "--schema is a question, answered without a call");
+    wiring.shutdown_bridge();
+}
+
+#[test]
 fn the_generated_command_mode_round_trips_through_the_bridge() {
     let session = tempfile::tempdir().unwrap();
     let config = config(vec![fake_command_server("counter")]);

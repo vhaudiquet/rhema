@@ -786,8 +786,8 @@ fn json_override_serves_a_demoted_tool() {
         .filter_map(|a| a.get_long())
         .collect();
     // The property named `json` collides with the override: the whole
-    // tool is demoted to `--json` only.
-    assert_eq!(longs, ["json"]);
+    // tool is demoted to `--json` and the discovery flag.
+    assert_eq!(longs, ["json", "schema"]);
     assert!(parse(&cmd, &["t", "--other", "x"]).is_none());
     assert_eq!(mapped(run(&cmd, &["t"]).unwrap()), json!({}));
     assert_eq!(
@@ -819,7 +819,7 @@ fn derived_flag_collision_demotes_the_tool() {
         .get_arguments()
         .filter_map(|a| a.get_long())
         .collect();
-    assert_eq!(longs, ["json"]);
+    assert_eq!(longs, ["json", "schema"]);
     assert!(parse(&cmd, &["t", "--a_json", "x"]).is_none());
     assert!(parse(&cmd, &["t", "--a", "x"]).is_none());
     assert_eq!(
@@ -864,7 +864,7 @@ fn unusable_property_name_demotes_the_tool() {
         .get_arguments()
         .filter_map(|a| a.get_long())
         .collect();
-    assert_eq!(longs, ["json"]);
+    assert_eq!(longs, ["json", "schema"]);
     assert!(parse(&cmd, &["t", "--ok", "x"]).is_none());
 }
 
