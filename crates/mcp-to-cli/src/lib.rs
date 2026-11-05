@@ -933,9 +933,12 @@ mod tests {
             "array of {command!: string, params: object}"
         );
 
-        let flat = json!({"type": "object", "properties": {"width": {"type": "integer"}, "height": {"type": "integer"}}});
-        // serde_json maps sort properties; the summary follows the
-        // map's order, which is also the flag order clap renders.
+        // Properties inserted in sorted order: with serde_json's
+        // default BTreeMap the map sorts anyway, and when feature
+        // unification brings `preserve_order` in (an insertion-ordered
+        // map), the summary follows the insertion — so the fixture
+        // must not rely on sorting the input itself.
+        let flat = json!({"type": "object", "properties": {"height": {"type": "integer"}, "width": {"type": "integer"}}});
         assert_eq!(shape_of(&flat, 4), "{height: integer, width: integer}");
 
         let enum_ = json!({"type": "string", "enum": ["circle", "rect"]});
