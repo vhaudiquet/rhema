@@ -244,6 +244,59 @@ fn the_agent_exposes_its_rendered_system_prompt() {
     assert_eq!(agent.system(), Some("custom prompt"));
 }
 
+#[test]
+fn the_skills_share_excludes_the_mcp_section() {
+    // The transcript's skills share is the system render minus the
+    // same render without the skills list. The MCP section must ride
+    // BOTH renders (agent.rs passes the same slice to each), or its
+    // bytes get billed to skills. Growing the MCP description must
+    // not move the measured share.
+    let root = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(root.path()).unwrap();
+    let skills = vec![rhema_agent_tools::Skill {
+        name: "demo".into(),
+        description: "a demo skill".into(),
+        license: None,
+        path: workspace.join("SKILL.md"),
+        body: String::new(),
+    }];
+    let mcp = |description: &str| {
+        vec![rhema_agent_tools::prompt::McpServerLine {
+            name: "atlassian".into(),
+            server: "atlassian".into(),
+            description: description.into(),
+        }]
+    };
+    let render = |skills: &[rhema_agent_tools::Skill],
+                  mcp: &[rhema_agent_tools::prompt::McpServerLine]| {
+        rhema_agent_tools::render_system_with_sections(
+            rhema_coding_agent::DEFAULT_SYSTEM_MD,
+            &workspace,
+            skills,
+            &[],
+            None,
+            None,
+            mcp,
+            None,
+        )
+        .unwrap()
+    };
+    let short = render(&skills, &mcp("Jira"));
+    let bare_short = render(&[], &mcp("Jira"));
+    let long = render(&skills, &mcp("Jira and Confluence and much more prose"));
+    let bare_long = render(&[], &mcp("Jira and Confluence and much more prose"));
+    // The skills section is the only delta in both pairs.
+    assert!(bare_short.contains("atlassian"), "{bare_short}");
+    assert!(bare_long.contains("atlassian"), "{bare_long}");
+    let share = short.len().saturating_sub(bare_short.len());
+    assert!(share > 0, "the skills section must measure nonzero");
+    assert_eq!(
+        share,
+        long.len().saturating_sub(bare_long.len()),
+        "the MCP section's bytes must not land in the skills share"
+    );
+}
+
 #[tokio::test]
 async fn the_stamped_prompt_is_what_the_agent_sends() {
     // The anti-drift contract: a preview through stamped_system is

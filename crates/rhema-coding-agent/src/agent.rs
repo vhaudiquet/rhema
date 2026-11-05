@@ -286,7 +286,7 @@ impl CodingAgent {
                     &bare,
                     config.environment.as_deref(),
                     config.user_preferences.as_deref(),
-                    &[],
+                    &mcp,
                     config.vision.as_deref(),
                 )
                 .map(|without| system.len().saturating_sub(without.len()))
