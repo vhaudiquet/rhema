@@ -26,7 +26,7 @@ use onboarding::render_onboarding;
 use overlay::render_command_palette;
 use pane::render_transcript;
 use settings::render_settings;
-use status::{render_status, subagent_lines, thinking_rows};
+use status::{render_status, spinner_char, subagent_lines, thinking_rows};
 
 pub(crate) mod chrome;
 
@@ -226,6 +226,20 @@ fn dialog_flow_lines(
                     line
                 }),
         );
+    } else if dialog.flow_instruction.is_none() {
+        // The flow is off and its first update has not landed — the
+        // provider round-trip (Copilot's device-code registration) is
+        // in flight. A spinner over a dim note covers the silence; the
+        // frame animates off the stage's clock, the redraw loop keeps
+        // it stepping.
+        let elapsed = dialog
+            .flow_started
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::raw(spinner_char(elapsed).to_string()).fg(theme.accent_text),
+            Span::raw(" loading…").fg(theme.text3),
+        ]));
     }
     lines
 }

@@ -659,6 +659,62 @@ fn wrap_breaks_at_word_boundaries_in_order() {
     );
 }
 
+/// Before the flow's first update lands, the dialog names the wait:
+/// a spinner over "loading…", not an empty box.
+#[test]
+fn the_flow_stage_shows_a_spinner_before_its_first_update() {
+    let mut dialog = crate::screens::AddInstanceDialog::new(&rhema_config::Profile::default());
+    dialog.stage = crate::screens::DialogStage::Flow;
+    dialog.flow_started = Some(std::time::Instant::now());
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::ui::dialogs::render_add_dialog(
+                frame,
+                &dialog,
+                &crate::palette::DARK,
+                &mut Vec::new(),
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let screen: String = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+        .collect();
+    // Frame zero of the braille spinner, the note beside it.
+    assert!(screen.contains('⠋'), "{screen}");
+    assert!(screen.contains("loading…"), "{screen}");
+}
+
+/// Once the flow reports, the loading line steps aside: the
+/// instruction and the progress note are the only body.
+#[test]
+fn the_loading_line_leaves_once_the_flow_reports() {
+    let mut dialog = crate::screens::AddInstanceDialog::new(&rhema_config::Profile::default());
+    dialog.stage = crate::screens::DialogStage::Flow;
+    dialog.flow_started = Some(std::time::Instant::now());
+    dialog.flow_waiting = Some("waiting for you to finish in the browser".into());
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            crate::ui::dialogs::render_add_dialog(
+                frame,
+                &dialog,
+                &crate::palette::DARK,
+                &mut Vec::new(),
+            )
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let screen: String = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+        .collect();
+    assert!(!screen.contains("loading…"), "{screen}");
+    assert!(screen.contains("waiting for you to finish"), "{screen}");
+}
+
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
     use crate::app::{App, AppSetup, RunOptions};

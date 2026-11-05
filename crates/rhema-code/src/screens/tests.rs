@@ -632,6 +632,9 @@ fn the_copilot_row_starts_the_flow_and_esc_closes_the_dialog() {
     let dialog = settings.dialog.as_ref().unwrap();
     assert_eq!(dialog.stage, DialogStage::Flow);
     assert_eq!(dialog.status, DialogStatus::Validating);
+    // The stage stamped its clock: the spinner animates off it
+    // until the flow's first update lands.
+    assert!(dialog.flow_started.is_some());
     // A running flow swallows every key but esc.
     assert_eq!(
         settings.handle_key(key(KeyCode::Char('x'))),

@@ -139,7 +139,7 @@ impl std::fmt::Debug for CopilotProvider {
         // The OAuth token and the cached Copilot token both authenticate:
         // neither prints; the plain data does.
         f.debug_struct("CopilotProvider")
-            .field("github_url", &self.github_url)
+            .field("github_api_url", &self.github_api_url)
             .field("api_base", &self.api_base)
             .field("github_token", &"<redacted>")
             .field("http", &self.http)
@@ -467,7 +467,7 @@ mod tests {
         assert!(!printed.contains("copilot_short_lived_secret"), "{printed}");
         assert!(printed.contains("<redacted>"), "{printed}");
         // The plain data stays visible.
-        assert!(printed.contains("github_url"), "{printed}");
+        assert!(printed.contains("github_api_url"), "{printed}");
         assert!(printed.contains("api_base"), "{printed}");
     }
 

@@ -121,6 +121,12 @@ pub(crate) fn spinner_frame(elapsed: std::time::Duration) -> usize {
     (elapsed.as_millis() / 80) as usize % SPINNER.len()
 }
 
+/// The spinner's current character for an elapsed time — the frame the
+/// status strip and the flow dialog both draw.
+pub(crate) fn spinner_char(elapsed: std::time::Duration) -> char {
+    SPINNER[spinner_frame(elapsed)]
+}
+
 /// An elapsed time as a clock reads it: seconds under the minute,
 /// minutes and seconds under the hour, hours and minutes beyond —
 /// `2055s` is unreadable where `34min 15s` reads at a glance.

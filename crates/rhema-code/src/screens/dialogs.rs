@@ -195,6 +195,10 @@ pub struct AddInstanceDialog {
     pub flow_instruction: Option<rhema_provider::LoginInstruction>,
     /// The flow's latest progress note, when it has sent one.
     pub flow_waiting: Option<String>,
+    /// When the flow stage began — the clock the progress spinner
+    /// animates off, and the marker for "contacting the provider"
+    /// before the flow's first update lands.
+    pub flow_started: Option<std::time::Instant>,
     /// The instance names taken when the dialog opened: the name
     /// suggestion dedupes against them. A snapshot, not a window — the
     /// dialog is modal, nothing else can rename under it.
@@ -214,6 +218,7 @@ impl AddInstanceDialog {
             second_input: false,
             flow_instruction: None,
             flow_waiting: None,
+            flow_started: None,
             instances: stored.instances.clone(),
         }
     }
@@ -397,6 +402,7 @@ impl AddInstanceDialog {
                     self.status = DialogStatus::Validating;
                     self.flow_instruction = None;
                     self.flow_waiting = None;
+                    self.flow_started = Some(std::time::Instant::now());
                     self.stage = DialogStage::Flow;
                     return DialogAction::StartFlow;
                 }
