@@ -540,12 +540,17 @@ fn parse_event<'a>(block: &[ContentLine], provider: &'a str) -> Result<Parsed<'a
 
     let text = |name: &str| first(name).map(|line| unescape(&line.value));
     // `mailto:` is the scheme ICS addresses ride; strip it wherever it
-    // appears, case-insensitively.
-    let bare_address = |value: &str| match value.trim() {
-        trimmed if trimmed.len() >= 7 && trimmed[..7].eq_ignore_ascii_case("mailto:") => {
-            trimmed[7..].trim().to_owned()
+    // appears, case-insensitively. `get` over indexing: the prefix can
+    // end inside a multi-byte character, and a slice there would panic
+    // on a remote feed's value.
+    let bare_address = |value: &str| {
+        let trimmed = value.trim();
+        match trimmed.get(..7) {
+            Some(prefix) if prefix.eq_ignore_ascii_case("mailto:") => {
+                trimmed[7..].trim().to_owned()
+            }
+            _ => trimmed.to_owned(),
         }
-        trimmed => trimmed.to_owned(),
     };
 
     let mut raw = Map::new();
@@ -981,6 +986,36 @@ mod tests {
         assert_eq!(
             events[0].attendees,
             vec!["alice@example.net".to_owned(), "bob@example.net".to_owned()]
+        );
+    }
+
+    #[test]
+    fn a_multibyte_address_prefix_parses_without_panicking() {
+        // The first seven bytes of `üüüüüüüü:x` end inside a
+        // character, so a plain seven-byte slice would panic on a
+        // remote feed's deterministic value.
+        let raw = "BEGIN:VEVENT\nUID:a@x\nDTSTART:20261020T140000Z\n\
+                   ORGANIZER:üüüüüüüü:x\n\
+                   ATTENDEE:üüüüüüüü:x\n\
+                   ATTENDEE:üüüx:alice@example.net\n\
+                   ATTENDEE:mailto:alice@example.net\n\
+                   ATTENDEE:MAILTO:Bob@Example.net\n\
+                   END:VEVENT\n";
+        let events = expand(raw, &window("2026-10-20T00:00:00Z", 24)).expect("expands");
+        assert_eq!(
+            events[0].organizer.as_deref(),
+            Some("üüüüüüüü:x"),
+            "no mailto: prefix reads verbatim"
+        );
+        assert_eq!(
+            events[0].attendees,
+            vec![
+                "üüüüüüüü:x".to_owned(),
+                "üüüx:alice@example.net".to_owned(),
+                "alice@example.net".to_owned(),
+                "Bob@Example.net".to_owned(),
+            ],
+            "the mailto: strip is case-insensitive; anything else is kept whole"
         );
     }
 
