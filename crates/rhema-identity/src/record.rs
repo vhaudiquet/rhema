@@ -303,12 +303,25 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let mp = (5 * doy + 2) / 153; // [1, 12]
     let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (year, month, day)
+    // Hinnant's year correction: the era math lines the civil year up
+    // with March, so January and February belong to the NEXT year of
+    // the computed pair. Without it every Jan/Feb stamp reads a year
+    // early (rhema-memory's copy carries the same line).
+    (year + i64::from(month <= 2), month, day)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn january_and_february_stamps_read_their_own_year() {
+        // 20468 days after the epoch is 2026-01-15; the era math
+        // alone answers (2025, 1, 15) and needs Hinnant's correction.
+        assert_eq!(civil_from_days(20_468), (2026, 1, 15));
+        // March needs no correction: 20513 days is 2026-03-01.
+        assert_eq!(civil_from_days(20_513), (2026, 3, 1));
+    }
 
     #[test]
     fn ids_accept_only_the_generated_shape() {

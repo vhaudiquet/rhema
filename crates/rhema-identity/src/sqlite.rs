@@ -295,7 +295,12 @@ fn fresh_id() -> String {
         let mp = (5 * doy + 2) / 153;
         let day = (doy - (153 * mp + 2) / 5 + 1) as u32;
         let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-        (year, month, day)
+        // Hinnant's year correction: the era math lines the civil year
+        // up with March, so January and February belong to the NEXT
+        // year of the computed pair. Without it every Jan/Feb id
+        // reads a year early (record.rs and rhema-memory carry the
+        // same line).
+        (year + i64::from(month <= 2), month, day)
     };
     format!(
         "{y:04}{m:02}{d:02}T{:02}{:02}{:02}-{n:08x}",
