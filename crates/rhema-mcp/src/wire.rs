@@ -31,7 +31,7 @@ use rhema_agent_tools::prompt::McpServerLine;
 use rhema_config::mcp::McpConfig;
 
 use crate::manager::McpManager;
-use crate::provision::{self, Provision, VAR_INHERITED};
+use crate::provision::{self, Provision};
 
 /// What wiring produced, held together so teardown is one drop.
 pub struct Wiring {
@@ -206,17 +206,7 @@ pub fn wire_with_bin(
     )?;
 
     let skipped = provisioned.skipped.clone();
-    let mut shell_env = provisioned.env.clone();
-    // The inherited BASH_ENV must survive into the map even when
-    // provision had nothing to inherit: the init file's guard reads
-    // it, and the executor's env layering may carry its own — keep
-    // the caller's value authoritative.
-    if let Some(inherited) = bash_env {
-        shell_env.insert(
-            VAR_INHERITED.to_owned(),
-            inherited.to_string_lossy().into_owned(),
-        );
-    }
+    let shell_env = provisioned.env.clone();
 
     let lines = filtered
         .servers

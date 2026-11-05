@@ -190,7 +190,7 @@ fn the_generated_command_mode_round_trips_through_the_bridge() {
 }
 
 #[test]
-fn an_inherited_bash_env_survives_the_map() {
+fn an_inherited_bash_env_is_baked_into_the_init_not_the_map() {
     let session = tempfile::tempdir().unwrap();
     let mut wiring = wire(
         &config(vec![fake_command_server("counter")]),
@@ -200,12 +200,19 @@ fn an_inherited_bash_env_survives_the_map() {
         Some("/etc/profile.d/agent.sh".into()),
     )
     .unwrap();
-    assert_eq!(
-        wiring
-            .shell_env
-            .get(provision::VAR_INHERITED)
-            .map(String::as_str),
-        Some("/etc/profile.d/agent.sh")
+    assert!(
+        !wiring.shell_env.contains_key("RHEMA_INHERITED_BASH_ENV"),
+        "{:?}",
+        wiring.shell_env.keys().collect::<Vec<_>>()
+    );
+    let init = wiring
+        .shell_env
+        .get(provision::VAR_BASH_ENV)
+        .expect("init path");
+    let text = std::fs::read_to_string(init).expect("init file");
+    assert!(
+        text.contains("source '/etc/profile.d/agent.sh' || true\n"),
+        "{text}"
     );
     wiring.shutdown_bridge();
 }
