@@ -29,12 +29,12 @@ import kotlinx.serialization.json.put
 // WorkManager's exponential backoff (up to hours), the exact silence the
 // fleet reads as "last seen hours ago".
 //
-// Two kinds of topic leave this worker. Battery, network, and DND posts are
-// conversation: the claw dispatches them and the agent hears the flip. The
-// rest — location, app, device, wifi, alarm, heartbeat — are snapshot-only on
-// the claw
-// (its ingest door answers "observed" and never runs a turn), so their rules
-// only bound write traffic, not model traffic.
+// Every post here is topic-keyed (`phone:<device>:<topic>`), so every
+// post is snapshot-only on the claw: the payload lands in the phone
+// tables, the ingest door answers "observed", and no turn runs — the
+// topic rate rules only bound write traffic, not model traffic. A
+// dispatch to a device goes through its bare `phone:<device>` key,
+// which this worker never posts to.
 class PhoneStatusWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 
     override suspend fun doWork(): Result = try {

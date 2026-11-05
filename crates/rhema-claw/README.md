@@ -235,10 +235,13 @@ reaches the chat as something to view or download rather than a
 truncated snippet.
 
 The phone is reachable too. Its status reports (`/v1/ingest`, source
-`phone`, keys `phone:<device>:<topic>`) are conversation *and* state:
-the payload lands in the phone tables, so the `phone` tool's
+`phone`, keys `phone:<device>:<topic>`) are state, not conversation:
+the payload lands in the phone tables and stops there — no turn runs,
+no push notification goes out per flip — so the `phone` tool's
 `status`/`devices` actions read the latest battery, charging, network,
-and DND observations without asking anyone. Acting on the phone —
+and DND observations without asking anyone. A bare `phone:<device>`
+key is the device's resident dispatch key: a message posted to it runs
+a turn like any resident key's. Acting on the phone —
 `dnd_on`, `dnd_off`, `alert` — is consent-gated end to end: the tool
 raises a consent card, the human approves or denies, and only then does
 the command join `GET /v1/phone/commands?device=`, the poll list the
