@@ -4,7 +4,9 @@
 //! Copilot's chat endpoint does not take a personal token. The caller
 //! hands the constructor a long-lived GitHub OAuth token (the device
 //! flow's output — see [`crate::login`]); the provider exchanges it at
-//! `{github}/copilot_internal/v2/token` for a Copilot token that lives
+//! `{api}/copilot_internal/v2/token` — the internal endpoints answer on
+//! GitHub's REST API host ([`DEFAULT_GITHUB_API_URL`], not github.com,
+//! which serves only the device flow) — for a Copilot token that lives
 //! minutes, and re-exchanges ahead of expiry — a small margin before
 //! `expires_at`, and once more immediately when the chat endpoint
 //! answers 401, because a cached token can expire mid-turn. The chat
@@ -42,8 +44,14 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use crate::wire::WireCopilotUser;
 
-/// The GitHub host the OAuth token exchanges at.
+/// The GitHub host the OAuth device flow ([`crate::login`]) runs
+/// against.
 pub const DEFAULT_GITHUB_URL: &str = "https://github.com";
+
+/// The GitHub REST API host the internal Copilot endpoints answer on:
+/// the token exchange and the user lookup live on api.github.com, and
+/// github.com serves none of them.
+pub const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
 /// The chat base assumed before the first exchange answers with the
 /// token's own serving host.
@@ -116,7 +124,7 @@ struct WireEndpoints {
 /// The GitHub Copilot chat models, driven by a GitHub OAuth token the
 /// provider exchanges for short-lived Copilot tokens as needed.
 pub struct CopilotProvider {
-    github_url: String,
+    github_api_url: String,
     api_base: String,
     github_token: String,
     http: reqwest::Client,
@@ -142,10 +150,10 @@ impl std::fmt::Debug for CopilotProvider {
 
 impl CopilotProvider {
     /// A provider exchanging `github_token` — the device flow's
-    /// long-lived output — against [`DEFAULT_GITHUB_URL`].
+    /// long-lived output — against [`DEFAULT_GITHUB_API_URL`].
     pub fn new(github_token: impl Into<String>) -> Self {
         Self {
-            github_url: DEFAULT_GITHUB_URL.to_owned(),
+            github_api_url: DEFAULT_GITHUB_API_URL.to_owned(),
             api_base: DEFAULT_API_BASE.to_owned(),
             github_token: github_token.into(),
             http: http_client(),
@@ -153,11 +161,11 @@ impl CopilotProvider {
         }
     }
 
-    /// Targets `github_url` for the token exchange instead of
-    /// [`DEFAULT_GITHUB_URL`] (trailing slashes trimmed). A test seam:
-    /// production code never calls this.
-    pub fn with_github_url(mut self, github_url: impl Into<String>) -> Self {
-        self.github_url = github_url.into().trim_end_matches('/').to_owned();
+    /// Targets `github_api_url` for the internal endpoints instead of
+    /// [`DEFAULT_GITHUB_API_URL`] (trailing slashes trimmed). A test
+    /// seam: production code never calls this.
+    pub fn with_github_api_url(mut self, github_api_url: impl Into<String>) -> Self {
+        self.github_api_url = github_api_url.into().trim_end_matches('/').to_owned();
         self
     }
 
@@ -190,7 +198,7 @@ impl CopilotProvider {
     async fn exchange(&self) -> Result<CopilotToken, ProviderError> {
         let response = self
             .http
-            .get(format!("{}/copilot_internal/v2/token", self.github_url))
+            .get(format!("{}/copilot_internal/v2/token", self.github_api_url))
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("token {}", self.github_token),
@@ -262,14 +270,14 @@ impl CopilotProvider {
     }
 
     /// The seat's premium-request allowance (`GET
-    /// {github}/copilot_internal/user`, authenticated with the OAuth
+    /// {api}/copilot_internal/user`, authenticated with the OAuth
     /// token — no Copilot-token exchange needed). The endpoint is
     /// GitHub's internal one, outside any contract; a drifted shape
     /// maps to an error and the badge simply never shows.
     pub async fn allowance(&self) -> Result<Allowance, ProviderError> {
         let response = self
             .http
-            .get(format!("{}/copilot_internal/user", self.github_url))
+            .get(format!("{}/copilot_internal/user", self.github_api_url))
             .header(
                 reqwest::header::AUTHORIZATION,
                 format!("token {}", self.github_token),

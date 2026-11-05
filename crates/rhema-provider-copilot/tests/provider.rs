@@ -44,7 +44,7 @@ async fn mount_exchange(server: &MockServer, api: &str, expires_at: u64, times: 
 /// server itself).
 fn provider(server_uri: &str) -> CopilotProvider {
     CopilotProvider::new("gho_test")
-        .with_github_url(server_uri)
+        .with_github_api_url(server_uri)
         .with_api_base(server_uri)
 }
 

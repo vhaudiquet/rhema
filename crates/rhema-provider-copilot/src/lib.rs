@@ -56,5 +56,7 @@ pub mod provider;
 pub mod wire;
 
 pub use login::{CopilotLogin, DEFAULT_CLIENT_ID};
-pub use provider::{CopilotProvider, DEFAULT_API_BASE, DEFAULT_GITHUB_URL};
+pub use provider::{
+    CopilotProvider, DEFAULT_API_BASE, DEFAULT_GITHUB_API_URL, DEFAULT_GITHUB_URL,
+};
 pub use wire::{WireCopilotUser, allowance as wire_allowance};

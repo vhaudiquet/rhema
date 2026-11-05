@@ -10,7 +10,7 @@
 //! tool-call fragment assembly, the `[DONE]` sentinel — is the shared
 //! dialect's behavior, documented there.
 //!
-//! What remains here is the seat side: `GET {github}/copilot_internal/user`,
+//! What remains here is the seat side: `GET {api}/copilot_internal/user`,
 //! GitHub's internal (undocumented, editor-load-bearing) seat endpoint,
 //! from which only the premium quota this crate needs is parsed — every
 //! field defaulting, so a shape drift maps to no allowance, never to a
@@ -22,7 +22,7 @@ use serde_json::Value;
 
 // --- Allowance: the internal user endpoint -> normalized ---
 
-/// The `GET {github}/copilot_internal/user` response. The endpoint is
+/// The `GET {api}/copilot_internal/user` response. The endpoint is
 /// GitHub's internal one — undocumented, but stable enough that editor
 /// integrations build on it — so only the premium quota this crate
 /// needs is parsed, every field defaulting: a shape drift maps to no
