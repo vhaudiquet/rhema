@@ -298,9 +298,12 @@ fn render_truncated(bytes: &[u8], limit: usize, max_lines: usize) -> String {
         return String::from_utf8_lossy(bytes).into_owned();
     }
     let byte_cut = bytes.len().saturating_sub(limit);
+    // No newline in the elided head means the whole output is one
+    // line longer than the budget: cut at the raw byte boundary so
+    // only the tail rides through, past the marker.
     let byte_cut = match bytes[..byte_cut].iter().rposition(|&byte| byte == b'\n') {
         Some(pos) => pos + 1,
-        None => 0,
+        None => byte_cut,
     };
     // The line cut: the start of the row that begins the last
     // `max_lines` rows.
@@ -345,6 +348,21 @@ mod truncation_tests {
         assert!(text.contains("error: the real failure"), "{text}");
         // The cut lands on a line start: the first kept row is whole.
         assert!(!text.contains("head line"), "{text}");
+    }
+
+    #[test]
+    fn a_single_line_longer_than_the_budget_is_kept_partially() {
+        // Newline-free output: `yes | tr -d '\n'` shape. The whole
+        // buffer must not ride through under a "0 bytes elided"
+        // marker; the doc promises a partial keep past the marker.
+        let bytes = vec![b'a'; 100_000];
+        let text = render_truncated(&bytes, 1024, 2000);
+        assert!(
+            text.starts_with("[output truncated — 98976 bytes elided]"),
+            "{text}"
+        );
+        let kept = text.split_once('\n').map(|(_, tail)| tail).unwrap_or("");
+        assert_eq!(kept.len(), 1024, "kept tail: {} bytes", kept.len());
     }
 
     #[test]
