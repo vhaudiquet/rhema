@@ -83,9 +83,12 @@ export class SandboxShim {
       exit_code: output.exitCode,
       stdout: cap(decoder.decode(output.stdout)),
       stderr: cap(decoder.decode(output.stderr)),
-      // `timeout` exits 124 when it kills; with --kill-after the kill
-      // lands as SIGKILL, which the shell reports as 137.
-      timed_out: output.exitCode === 124 || output.exitCode === 137,
+      // Only GNU timeout's own 124 means a budget kill. 137 is an
+      // external SIGKILL (OOM most often): reporting it as a timeout
+      // teaches the model to widen the budget and re-run the same
+      // command, which dies the same way — so it surfaces as a plain
+      // failure instead.
+      timed_out: output.exitCode === 124,
     };
   }
 
