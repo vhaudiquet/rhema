@@ -125,7 +125,7 @@ async fn one_pass_polls_reasons_and_posts() {
         Arc::new(SystemClock),
         Arc::new(store),
     );
-    let key = ResourceKey::from("github:acme/widgets#7");
+    let key = ResourceKey::from("github:issue:acme/widgets#7");
     let status = dispatcher.status(&key).expect("status reads");
     assert_eq!(status.state, KeyState::Idle);
     assert_eq!(status.inbox_depth, 0);

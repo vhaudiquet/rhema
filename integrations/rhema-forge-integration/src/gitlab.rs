@@ -9,9 +9,12 @@
 //!   `updated_after=<RFC 3339>&order_by=updated_at&sort=asc`: two separate
 //!   feeds, since GitLab has no combined thread feed.
 //! - Issue iids and merge-request iids are separate sequences: a number
-//!   can exist as both. Wherever a bare number must resolve, the issue
-//!   feed is tried first and the merge-request feed is the 404 fallback;
-//!   an iid that is neither surfaces the merge-request 404.
+//!   can exist as both. Every bare number arrives with its
+//!   [`ForgeThreadKind`] (the resource key carries it, and the
+//!   [`Forge`] write methods take it), and the kind picks the
+//!   `{issues,merge_requests}` path outright — there is no
+//!   try-issues-then-fallback guessing, so a reply meant for one
+//!   sequence can never land on the other.
 //! - GitLab has no repo-wide notes feed and the per-thread notes endpoint
 //!   has no updated filter, so every updated thread gets one paginated
 //!   `GET .../{issues,merge_requests}/{iid}/notes?sort=asc&order_by=created_at`
@@ -41,8 +44,8 @@ use serde_json::Value;
 
 use crate::error::{ForgeError, ensure_success, required};
 use crate::event::{
-    EventKind, ForgeEvent, Notification, NotificationPage, NotificationReason, RepoRef, Snapshot,
-    ThreadState, Timestamp,
+    EventKind, ForgeEvent, ForgeThreadKind, Notification, NotificationPage, NotificationReason,
+    RepoRef, Snapshot, ThreadState, Timestamp,
 };
 use crate::forge::{Forge, ForgePage};
 
@@ -167,6 +170,15 @@ async fn decode<T: DeserializeOwned>(response: reqwest::Response) -> Result<T, F
         .json()
         .await
         .map_err(|err| ForgeError::Parse(format!("malformed forge response: {err}")))
+}
+
+/// The URL path segment GitLab addresses `kind`'s sequence with:
+/// `issues` or `merge_requests`.
+fn thread_segment(kind: ForgeThreadKind) -> &'static str {
+    match kind {
+        ForgeThreadKind::Issue => "issues",
+        ForgeThreadKind::PullRequest => "merge_requests",
+    }
 }
 
 /// The project path (`owner/name`, possibly with subgroups) as GitLab's
@@ -488,53 +500,45 @@ impl Forge for GitLabForge {
         Ok(ForgePage::finish(events, since))
     }
 
-    async fn comment(&self, repo: &RepoRef, number: u64, body: &str) -> Result<(), ForgeError> {
+    async fn comment(
+        &self,
+        repo: &RepoRef,
+        kind: ForgeThreadKind,
+        number: u64,
+        body: &str,
+    ) -> Result<(), ForgeError> {
         let project = encode_project_path(&repo.path());
-        // Issue iids and MR iids are separate sequences: try the issue
-        // feed first, fall back on its 404. An iid that is neither
-        // surfaces the merge-request 404.
-        let notes_path = |segment: &str| format!("/projects/{project}/{segment}/{number}/notes");
+        // The kind names the sequence outright: iid sequences are
+        // independent, so guessing (issues first, 404 fallback) could
+        // land a merge-request reply on the same-numbered issue.
+        let segment = thread_segment(kind);
+        let notes_path = format!("/projects/{project}/{segment}/{number}/notes");
         let response = self
-            .post(&notes_path("issues"))
+            .post(&notes_path)
             .json(&serde_json::json!({ "body": body }))
             .send()
             .await
             .map_err(ForgeError::network)?;
-        let response = if response.status() == reqwest::StatusCode::NOT_FOUND {
-            self.post(&notes_path("merge_requests"))
-                .json(&serde_json::json!({ "body": body }))
-                .send()
-                .await
-                .map_err(ForgeError::network)?
-        } else {
-            response
-        };
         ensure_success(response).await?;
         Ok(())
     }
 
-    async fn snapshot(&self, repo: &RepoRef, number: u64) -> Result<Snapshot, ForgeError> {
+    async fn snapshot(
+        &self,
+        repo: &RepoRef,
+        kind: ForgeThreadKind,
+        number: u64,
+    ) -> Result<Snapshot, ForgeError> {
         let project = encode_project_path(&repo.path());
-        let resource = |segment: &str| format!("/projects/{project}/{segment}/{number}");
+        // Same sequences as `comment`: the kind picks the path.
+        let is_pr = kind == ForgeThreadKind::PullRequest;
+        let resource = format!("/projects/{project}/{}/{number}", thread_segment(kind));
         let response = self
-            .get(&resource("issues"))
+            .get(&resource)
             .send()
             .await
             .map_err(ForgeError::network)?;
-        // Same iid sequences as `comment`: issues first, 404 fallback.
-        let (row, is_pr) = match decode::<WireThread>(response).await {
-            Ok(row) => (row, false),
-            Err(ForgeError::Api { status: 404, .. }) => {
-                let response = self
-                    .get(&resource("merge_requests"))
-                    .send()
-                    .await
-                    .map_err(ForgeError::network)?;
-                let row: WireThread = decode(response).await?;
-                (row, true)
-            }
-            Err(other) => return Err(other),
-        };
+        let row: WireThread = decode(response).await?;
         Ok(snapshot_from_row(&row, is_pr)?)
     }
 

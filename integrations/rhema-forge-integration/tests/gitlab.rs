@@ -2,7 +2,8 @@
 //! wiremock server. Zero network.
 
 use rhema_forge_integration::{
-    EventKind, Forge, ForgeError, GitLabForge, NotificationReason, RepoRef, Timestamp,
+    EventKind, Forge, ForgeError, ForgeThreadKind, GitLabForge, NotificationReason, RepoRef,
+    Timestamp,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
@@ -328,7 +329,7 @@ async fn poll_normalizes_state_kinds_and_notes_on_both_feeds() {
 }
 
 #[tokio::test]
-async fn posting_a_comment_falls_back_from_issues_to_merge_requests() {
+async fn an_issue_comment_posts_to_the_issues_path() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/api/v4/projects/acme%2Fwidgets/issues/4/notes"))
@@ -336,46 +337,72 @@ async fn posting_a_comment_falls_back_from_issues_to_merge_requests() {
         .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 42 })))
         .mount(&server)
         .await;
-    // An iid that is not an issue falls through to the MR feed.
-    Mock::given(method("POST"))
-        .and(path("/api/v4/projects/acme%2Fwidgets/issues/9/notes"))
-        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
-            "message": "404 Issue Not Found"
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(
-            "/api/v4/projects/acme%2Fwidgets/merge_requests/9/notes",
-        ))
-        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 43 })))
-        .mount(&server)
-        .await;
 
-    let repo = RepoRef::new("acme", "widgets");
     forge(&server)
-        .comment(&repo, 4, "on it")
+        .comment(
+            &RepoRef::new("acme", "widgets"),
+            ForgeThreadKind::Issue,
+            4,
+            "on it",
+        )
         .await
         .expect("the issue comment posts");
-    forge(&server)
-        .comment(&repo, 9, "on the MR")
-        .await
-        .expect("the MR comment posts via the fallback");
 
     let received = server
         .received_requests()
         .await
         .expect("request recording is on");
-    assert_eq!(received.len(), 3);
-    let first_body: Value = serde_json::from_slice(&received[0].body).expect("json body");
-    assert_eq!(first_body, json!({ "body": "on it" }));
-    let last_body: Value = serde_json::from_slice(&received[2].body).expect("json body");
-    assert_eq!(last_body, json!({ "body": "on the MR" }));
-    assert!(received[2].url.path() == "/api/v4/projects/acme%2Fwidgets/merge_requests/9/notes");
+    // One request, to the named sequence only: the merge-requests path
+    // is never probed for an issue iid.
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].url.path(),
+        "/api/v4/projects/acme%2Fwidgets/issues/4/notes"
+    );
+    let body: Value = serde_json::from_slice(&received[0].body).expect("json body");
+    assert_eq!(body, json!({ "body": "on it" }));
 }
 
 #[tokio::test]
-async fn snapshot_prefers_issues_and_falls_back_to_merge_requests() {
+async fn a_merge_request_comment_posts_to_the_merge_requests_path() {
+    let server = MockServer::start().await;
+    // Only the merge-requests path is mounted: an issues-first probe
+    // would 404 here and fail the test, which is the point — the kind
+    // must route outright, with no fallback guessing.
+    Mock::given(method("POST"))
+        .and(path(
+            "/api/v4/projects/acme%2Fwidgets/merge_requests/9/notes",
+        ))
+        .and(header("private-token", "tok"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({ "id": 43 })))
+        .mount(&server)
+        .await;
+
+    forge(&server)
+        .comment(
+            &RepoRef::new("acme", "widgets"),
+            ForgeThreadKind::PullRequest,
+            9,
+            "on the MR",
+        )
+        .await
+        .expect("the MR comment posts");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].url.path(),
+        "/api/v4/projects/acme%2Fwidgets/merge_requests/9/notes"
+    );
+    let body: Value = serde_json::from_slice(&received[0].body).expect("json body");
+    assert_eq!(body, json!({ "body": "on the MR" }));
+}
+
+#[tokio::test]
+async fn an_issue_snapshot_reads_the_issues_path() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v4/projects/acme%2Fwidgets/issues/7"))
@@ -385,13 +412,32 @@ async fn snapshot_prefers_issues_and_falls_back_to_merge_requests() {
         )
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v4/projects/acme%2Fwidgets/issues/3"))
-        .respond_with(
-            ResponseTemplate::new(404).set_body_json(json!({ "message": "404 Issue Not Found" })),
-        )
-        .mount(&server)
-        .await;
+
+    let issue = forge(&server)
+        .snapshot(&RepoRef::new("acme", "widgets"), ForgeThreadKind::Issue, 7)
+        .await
+        .expect("issue snapshot");
+    assert_eq!(issue.state, rhema_forge_integration::ThreadState::Open);
+    assert!(!issue.is_pr);
+    assert_eq!(issue.labels, vec!["bug".to_owned(), "critical".to_owned()]);
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].url.path(),
+        "/api/v4/projects/acme%2Fwidgets/issues/7"
+    );
+}
+
+#[tokio::test]
+async fn a_merge_request_snapshot_reads_the_merge_requests_path() {
+    let server = MockServer::start().await;
+    // Only the merge-requests path is mounted: the issues path would 404
+    // and a fallback would still pass — so the request count pins the
+    // no-fallback behavior.
     Mock::given(method("GET"))
         .and(path("/api/v4/projects/acme%2Fwidgets/merge_requests/3"))
         .respond_with(ResponseTemplate::new(200).set_body_json(mr_row(
@@ -405,22 +451,27 @@ async fn snapshot_prefers_issues_and_falls_back_to_merge_requests() {
         .mount(&server)
         .await;
 
-    let repo = RepoRef::new("acme", "widgets");
-    let issue = forge(&server)
-        .snapshot(&repo, 7)
-        .await
-        .expect("issue snapshot");
-    assert_eq!(issue.state, rhema_forge_integration::ThreadState::Open);
-    assert!(!issue.is_pr);
-    assert_eq!(issue.labels, vec!["bug".to_owned(), "critical".to_owned()]);
-
     let mr = forge(&server)
-        .snapshot(&repo, 3)
+        .snapshot(
+            &RepoRef::new("acme", "widgets"),
+            ForgeThreadKind::PullRequest,
+            3,
+        )
         .await
         .expect("mr snapshot");
     assert_eq!(mr.state, rhema_forge_integration::ThreadState::Merged);
     assert!(mr.is_pr);
     assert_eq!(mr.title, "fix crash");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].url.path(),
+        "/api/v4/projects/acme%2Fwidgets/merge_requests/3"
+    );
 }
 
 #[tokio::test]

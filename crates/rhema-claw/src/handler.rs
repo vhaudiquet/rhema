@@ -95,8 +95,9 @@ impl ClawHandler {
         }
     }
 
-    /// The forge client a dispatch key answers to: `"github:acme/widgets#7"`
-    /// resolves its watch record from the table at dispatch time — the
+    /// The forge client a dispatch key answers to:
+    /// `"github:issue:acme/widgets#7"` resolves its watch record from the
+    /// table at dispatch time — the
     /// table is the source of truth, not a boot-time snapshot — and the
     /// client is cached per `(forge, host, token)` so one poll pool serves
     /// every thread of a watch.
@@ -141,12 +142,12 @@ impl ClawHandler {
         // Owned: the key names the run through every step, while `ctx`
         // itself goes mutable for the inbox drain.
         let key = ctx.key.as_str().to_owned();
-        let (repo, number) = parse_key(&ctx.key)
+        let (repo, thread_kind, number) = parse_key(&ctx.key)
             .ok_or_else(|| format!("resource key {key} is not a forge thread key"))?;
         let forge = self.watch_forge(&ctx.key)?;
 
         let snapshot = forge
-            .snapshot(&repo, number)
+            .snapshot(&repo, thread_kind, number)
             .await
             .map_err(|err| format!("snapshot of {key} failed: {err}"))?;
         let news = self.drain_news(ctx, &key).await?;
@@ -183,7 +184,7 @@ impl ClawHandler {
         let reply = final_text(&output.message)
             .ok_or_else(|| format!("the model returned no text to post for {key}"))?;
         forge
-            .comment(&repo, number, &reply)
+            .comment(&repo, thread_kind, number, &reply)
             .await
             .map_err(|err| format!("comment on {key} failed: {err}"))?;
         Ok(Outcome::Handled)
@@ -273,15 +274,18 @@ impl Handler for ClawHandler {
     }
 }
 
-/// The watch-table key of a resource key: `"github:acme/widgets#7"` builds
-/// `"github:acme/widgets"`. `None` for a key that is not a forge thread
-/// key at all.
+/// The watch-table key of a resource key:
+/// `"github:issue:acme/widgets#7"` builds `"github:acme/widgets"` — the
+/// thread kind between source and path is key identity, not watch
+/// identity. `None` for a key that is not a forge thread key at all.
 pub fn watch_key(key: &ResourceKey) -> Option<String> {
     let (head, _) = key.as_str().rsplit_once('#')?;
-    head.contains(':').then(|| head.to_owned())
+    let (source, rest) = head.split_once(':')?;
+    let (_, path) = rest.split_once(':')?;
+    Some(format!("{source}:{path}"))
 }
 
-/// The watch-table entry for a repo: `{kind}:{owner}/{name}` — the value
+/// The watch-table entry for a repo: `{forge}:{owner}/{name}` — the value
 /// [`watch_key`] parses back out of a dispatch key. The pair is the
 /// key-parse-to-watch-lookup seam.
 pub fn watch_entry(kind: &str, repo: &RepoRef) -> String {
@@ -547,7 +551,7 @@ fn first_line(content: &str) -> String {
 mod tests {
     use super::*;
     use rhema_core::ModelProvider;
-    use rhema_forge_integration::NotificationReason;
+    use rhema_forge_integration::{ForgeThreadKind, NotificationReason, resource_key};
 
     fn snapshot() -> Snapshot {
         serde_json::from_value(serde_json::json!({
@@ -582,7 +586,7 @@ mod tests {
     #[test]
     fn the_prompt_carries_the_thread_the_events_and_the_contract() {
         let prompt = build_prompt(
-            "github:acme/widgets#7",
+            "github:issue:acme/widgets#7",
             &snapshot(),
             &[InboxNews::Event(event(
                 EventKind::Comment,
@@ -592,7 +596,10 @@ mod tests {
             Path::new("/tmp/workspaces/github-acme-widgets-7"),
             None,
         );
-        assert!(prompt.contains("github:acme/widgets#7"), "key: {prompt}");
+        assert!(
+            prompt.contains("github:issue:acme/widgets#7"),
+            "key: {prompt}"
+        );
         assert!(prompt.contains("crash on save"), "title: {prompt}");
         assert!(prompt.contains("state: open"), "state: {prompt}");
         assert!(prompt.contains("Labels: bug, cli"), "labels: {prompt}");
@@ -609,7 +616,7 @@ mod tests {
     #[test]
     fn thread_level_events_carry_no_body_and_the_prompt_says_so() {
         let prompt = build_prompt(
-            "github:acme/widgets#7",
+            "github:issue:acme/widgets#7",
             &snapshot(),
             &[InboxNews::Event(event(EventKind::Opened, "alice", None))],
             Path::new("/tmp/w"),
@@ -725,7 +732,7 @@ mod tests {
     #[test]
     fn a_reviewer_dispatch_frames_the_prompt_as_a_review() {
         let prompt = build_prompt(
-            "github:acme/widgets#142",
+            "github:issue:acme/widgets#142",
             &snapshot(),
             &[InboxNews::Notified {
                 role: Role::Reviewer,
@@ -793,12 +800,16 @@ mod tests {
 
         // A watch added to the table AFTER the handler was built resolves:
         // the table is the source of truth, not a boot-time snapshot.
-        let key = ResourceKey::from("github:acme/widgets#7");
+        let key = ResourceKey::from("github:issue:acme/widgets#7");
         assert_eq!(watch_key(&key).as_deref(), Some("github:acme/widgets"));
+        // The kind segment is key identity, not watch identity: an MR
+        // dispatch resolves the same watch row.
+        let mr_key = ResourceKey::from("github:pull:acme/widgets#7");
+        assert_eq!(watch_key(&mr_key).as_deref(), Some("github:acme/widgets"));
         assert!(handler.watch_forge(&key).is_ok(), "the watch resolves");
         assert!(
             handler
-                .watch_forge(&ResourceKey::from("gitea:acme/widgets#7"))
+                .watch_forge(&ResourceKey::from("gitea:issue:acme/widgets#7"))
                 .is_err(),
             "another forge's key does not"
         );
@@ -855,7 +866,11 @@ mod tests {
     #[test]
     fn the_workspace_name_flattens_to_filesystem_safe_characters() {
         assert_eq!(
-            workspace_name("github:acme/widgets#7", &RepoRef::new("acme", "widgets"), 7),
+            workspace_name(
+                "github:issue:acme/widgets#7",
+                &RepoRef::new("acme", "widgets"),
+                7
+            ),
             "github-acme-widgets-7"
         );
         assert_eq!(
@@ -872,8 +887,13 @@ mod tests {
     fn the_table_entry_round_trips_through_the_dispatch_key() {
         let repo = RepoRef::new("acme", "widgets");
         let entry = watch_entry("github", &repo);
-        let key = ResourceKey::from(format!("{entry}#7"));
+        // Built the way dispatches are: the canonical key builder, with
+        // the thread kind in place — which must not reach the lookup.
+        let key = resource_key("github", &repo, ForgeThreadKind::PullRequest, 7);
+        assert_eq!(key.as_str(), "github:pull:acme/widgets#7");
         assert_eq!(watch_key(&key).as_deref(), Some(entry.as_str()));
+        // A pre-kind key is not a thread key at all anymore.
+        assert_eq!(watch_key(&ResourceKey::from("github:acme/widgets#7")), None);
     }
 
     /// Stands in for the provider in pure-lookup tests; nothing calls it.

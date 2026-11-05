@@ -137,7 +137,7 @@ async fn the_second_dispatch_resumes_the_first_conversation() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = config(&dir);
     seed_watch(&dir, &server.uri());
-    let key = ResourceKey::from("github:acme/widgets#7");
+    let key = ResourceKey::from("github:issue:acme/widgets#7");
 
     // Pass one: the opened event alone. The cron shape — a fresh process,
     // a fresh watcher, the same db.

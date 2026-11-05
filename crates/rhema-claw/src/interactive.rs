@@ -1116,8 +1116,8 @@ mod tests {
             assert!(is_resident_key(key), "{key} is resident");
         }
         for key in [
-            "github:acme/widgets#7",
-            "gitea:acme/barn#1",
+            "github:issue:acme/widgets#7",
+            "gitea:pull:acme/barn#1",
             "interactive",
             "tasks",
             "task",

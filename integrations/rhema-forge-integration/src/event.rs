@@ -55,8 +55,26 @@ pub enum ThreadState {
     Merged,
 }
 
-/// Repository coordinates. `owner` + `name` + a thread [`ForgeEvent::number`]
-/// is the resource key the RSD dispatcher forms (`host:owner/repo#number`).
+/// Which of a forge's thread sequences a number names. GitLab numbers
+/// issues and merge requests from separate sequences, so the kind is part
+/// of the thread's identity there; GitHub and Gitea share one sequence,
+/// where the kind rides along for a uniform vocabulary.
+///
+/// `PullRequest` is the crate's umbrella term for the issue's
+/// counterpart: GitHub's and Gitea's pull request, GitLab's merge
+/// request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ForgeThreadKind {
+    /// A thread in the forge's issue sequence.
+    Issue,
+    /// A thread in the forge's pull/merge-request sequence.
+    PullRequest,
+}
+
+/// Repository coordinates. `owner` + `name` + a thread's [`ForgeEvent::number`]
+/// and [`ForgeThreadKind`] are the resource key the RSD dispatcher forms
+/// (`host:issue:owner/repo#number`).
 ///
 /// GitLab's `owner` is the whole namespace path (`group/subgroup`), so
 /// [`RepoRef::path`] is always the full project path the forge addresses.

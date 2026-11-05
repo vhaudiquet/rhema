@@ -345,14 +345,17 @@ impl ForgeSource {
                 }
                 Triage::Agent(role) => {
                     // The key function reads `repo` (as the
-                    // `{owner, name}` row RepoRef serializes to) and
-                    // `number` off the payload's top level, so the
-                    // thread key is the same `forge:owner/repo#n` shape
-                    // the repo watches use — one session per thread,
-                    // whatever fed it.
+                    // `{owner, name}` row RepoRef serializes to),
+                    // `number`, and `is_pr` (the thread kind, since
+                    // GitLab numbers the two sequences separately) off
+                    // the payload's top level, so the thread key is the
+                    // same `forge:kind:owner/repo#n` shape the repo
+                    // watches use — one session per thread, whatever fed
+                    // it.
                     let payload = serde_json::json!({
                         "repo": notification.repo,
                         "number": notification.number,
+                        "is_pr": notification.is_pr,
                         "role": role.as_str(),
                         "notification": notification,
                     });
@@ -582,31 +585,45 @@ mod tests {
         // The key function must fold the triaged payload onto the thread
         // key: build a payload the way `poll_account` does and run it
         // through the registered `forge_key_fn`.
-        let notification = Notification {
-            id: "github:notification:7@2026-10-08T00:00:00Z".to_owned(),
+        let notification = |is_pr: bool, number: u64| Notification {
+            id: format!("github:notification:{number}@2026-10-08T00:00:00Z"),
             reason: NotificationReason::ReviewRequested,
             repo: RepoRef::new("acme", "widgets"),
-            number: 142,
-            is_pr: true,
+            number,
+            is_pr,
             actor: None,
             title: Some("Add the flange".to_owned()),
             url: None,
             timestamp: Timestamp::parse("2026-10-08T00:00:00Z").expect("parses"),
             raw: serde_json::json!({}),
         };
-        let payload = serde_json::json!({
-            "repo": notification.repo,
-            "number": notification.number,
-            "role": "reviewer",
-            "notification": notification,
-        });
+        let payload = |notification: &Notification| {
+            serde_json::json!({
+                "repo": notification.repo,
+                "number": notification.number,
+                "is_pr": notification.is_pr,
+                "role": "reviewer",
+                "notification": notification,
+            })
+        };
         let key_fn = forge_key_fn("github");
+        // The pull request and the same-numbered issue land on distinct
+        // keys — GitLab numbers the sequences separately.
+        let pull = notification(true, 142);
         let key = key_fn(&Event {
-            id: notification.id.clone(),
+            id: pull.id.clone(),
             source: "github".to_owned(),
-            payload,
+            payload: payload(&pull),
             received_at: 0,
         });
-        assert_eq!(key.as_str(), "github:acme/widgets#142");
+        assert_eq!(key.as_str(), "github:pull:acme/widgets#142");
+        let issue = notification(false, 142);
+        let key = key_fn(&Event {
+            id: issue.id.clone(),
+            source: "github".to_owned(),
+            payload: payload(&issue),
+            received_at: 0,
+        });
+        assert_eq!(key.as_str(), "github:issue:acme/widgets#142");
     }
 }

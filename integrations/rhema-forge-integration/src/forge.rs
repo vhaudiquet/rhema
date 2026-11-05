@@ -16,7 +16,7 @@
 use async_trait::async_trait;
 
 use crate::error::ForgeError;
-use crate::event::{ForgeEvent, NotificationPage, RepoRef, Snapshot, Timestamp};
+use crate::event::{ForgeEvent, ForgeThreadKind, NotificationPage, RepoRef, Snapshot, Timestamp};
 
 /// One poll's worth of activity, with the cursor to continue from.
 #[derive(Debug, Clone, PartialEq)]
@@ -61,12 +61,33 @@ pub trait Forge: Send + Sync {
         since: Option<&Timestamp>,
     ) -> Result<ForgePage, ForgeError>;
 
-    /// Posts `body` as a new comment on thread `number`.
-    async fn comment(&self, repo: &RepoRef, number: u64, body: &str) -> Result<(), ForgeError>;
+    /// Posts `body` as a new comment on the thread `kind` + `number`
+    /// name.
+    ///
+    /// On GitLab the kind picks the sequence the iid is read against:
+    /// issues and merge requests are numbered independently, and only
+    /// the named one is addressed — a miss surfaces as a 404, never a
+    /// silent post to the other sequence. GitHub and Gitea share one
+    /// number space across issues and pull requests (every pull request
+    /// is an issue there), so they accept the kind for signature
+    /// uniformity and either value addresses the same thread.
+    async fn comment(
+        &self,
+        repo: &RepoRef,
+        kind: ForgeThreadKind,
+        number: u64,
+        body: &str,
+    ) -> Result<(), ForgeError>;
 
     /// The thread's current state, so a handler can orient without a
-    /// second API round-trip.
-    async fn snapshot(&self, repo: &RepoRef, number: u64) -> Result<Snapshot, ForgeError>;
+    /// second API round-trip. `kind` selects the sequence `number` is
+    /// read against, under the same rules as [`Forge::comment`].
+    async fn snapshot(
+        &self,
+        repo: &RepoRef,
+        kind: ForgeThreadKind,
+        number: u64,
+    ) -> Result<Snapshot, ForgeError>;
 
     /// The account's notification feed: everything addressed to the
     /// account this client authenticates as, across every repository it

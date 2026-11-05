@@ -8,8 +8,8 @@
 //! [`crate::Watcher`] polls a [`crate::Forge`] for activity and feeds
 //! the events to a [`rhema_rsd::Dispatcher`](rhema_rsd) (the forge's
 //! stable dedup id becomes the event id, and the resource key is spec
-//! §8's `host:owner/repo#number` shape, so re-polling unchanged history
-//! dedups away and a changed row re-dispatches), and a dispatched
+//! §8's `host:kind:owner/repo#number` shape, so re-polling unchanged
+//! history dedups away and a changed row re-dispatches), and a dispatched
 //! thread is answered through the same [`crate::Forge`] capabilities,
 //! with [`crate::decode`] recovering the event behind an inbox item.
 //! Polling cadence, handler policy, and the loop itself are the
@@ -63,8 +63,8 @@ pub mod watcher;
 pub use async_trait::async_trait;
 pub use error::ForgeError;
 pub use event::{
-    EventKind, ForgeEvent, Notification, NotificationPage, NotificationReason, RepoRef, Snapshot,
-    ThreadState, Timestamp,
+    EventKind, ForgeEvent, ForgeThreadKind, Notification, NotificationPage, NotificationReason,
+    RepoRef, Snapshot, ThreadState, Timestamp,
 };
 pub use forge::{Forge, ForgePage};
 pub use gitea::GiteaForge;

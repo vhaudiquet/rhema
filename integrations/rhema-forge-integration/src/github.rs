@@ -41,8 +41,8 @@ use serde_json::Value;
 
 use crate::error::{ForgeError, ensure_success, required};
 use crate::event::{
-    EventKind, ForgeEvent, Notification, NotificationPage, NotificationReason, RepoRef, Snapshot,
-    ThreadState, Timestamp,
+    EventKind, ForgeEvent, ForgeThreadKind, Notification, NotificationPage, NotificationReason,
+    RepoRef, Snapshot, ThreadState, Timestamp,
 };
 use crate::forge::{Forge, ForgePage};
 
@@ -620,8 +620,18 @@ impl Forge for GitHubForge {
         Ok(ForgePage::finish(events, since))
     }
 
-    async fn comment(&self, repo: &RepoRef, number: u64, body: &str) -> Result<(), ForgeError> {
+    async fn comment(
+        &self,
+        repo: &RepoRef,
+        _kind: ForgeThreadKind,
+        number: u64,
+        body: &str,
+    ) -> Result<(), ForgeError> {
         // The issues endpoint covers PRs too: every PR is an issue here.
+        // Issues and pull requests share one number space, so `_kind`
+        // cannot change the route — either value addresses the same
+        // thread, and the parameter exists only for the trait's uniform
+        // signature (GitLab is the forge whose sequences differ).
         let path = format!(
             "/repos/{}/{}/issues/{number}/comments",
             repo.owner, repo.name
@@ -636,7 +646,14 @@ impl Forge for GitHubForge {
         Ok(())
     }
 
-    async fn snapshot(&self, repo: &RepoRef, number: u64) -> Result<Snapshot, ForgeError> {
+    async fn snapshot(
+        &self,
+        repo: &RepoRef,
+        _kind: ForgeThreadKind,
+        number: u64,
+    ) -> Result<Snapshot, ForgeError> {
+        // One number space across issues and pulls: `_kind` cannot
+        // change the route (see `comment`).
         let issue_path = format!("/repos/{}/{}/issues/{number}", repo.owner, repo.name);
         let response = self
             .get(&issue_path)

@@ -2,7 +2,8 @@
 //! wiremock server. Zero network.
 
 use rhema_forge_integration::{
-    EventKind, Forge, ForgeError, GitHubForge, NotificationReason, RepoRef, Timestamp,
+    EventKind, Forge, ForgeError, ForgeThreadKind, GitHubForge, NotificationReason, RepoRef,
+    Timestamp,
 };
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};
@@ -306,7 +307,12 @@ async fn posting_a_comment_uses_the_bearer_header_and_the_issues_endpoint() {
         .await;
 
     forge(&server)
-        .comment(&RepoRef::new("acme", "widgets"), 7, "on it")
+        .comment(
+            &RepoRef::new("acme", "widgets"),
+            ForgeThreadKind::Issue,
+            7,
+            "on it",
+        )
         .await
         .expect("comment posts");
 
@@ -357,7 +363,7 @@ async fn snapshot_reads_prs_through_the_pulls_row() {
 
     let repo = RepoRef::new("acme", "widgets");
     let issue = forge(&server)
-        .snapshot(&repo, 7)
+        .snapshot(&repo, ForgeThreadKind::Issue, 7)
         .await
         .expect("issue snapshot");
     assert_eq!(issue.state, rhema_forge_integration::ThreadState::Open);
@@ -366,7 +372,7 @@ async fn snapshot_reads_prs_through_the_pulls_row() {
     assert_eq!(issue.author.as_deref(), Some("alice"));
 
     let pull = forge(&server)
-        .snapshot(&repo, 8)
+        .snapshot(&repo, ForgeThreadKind::PullRequest, 8)
         .await
         .expect("pull snapshot");
     assert_eq!(pull.state, rhema_forge_integration::ThreadState::Merged);
@@ -385,7 +391,7 @@ async fn trailing_slashes_in_the_base_url_are_trimmed() {
 
     let forge = GitHubForge::new("tok").with_base_url(format!("{}/", server.uri()));
     forge
-        .snapshot(&RepoRef::new("acme", "widgets"), 7)
+        .snapshot(&RepoRef::new("acme", "widgets"), ForgeThreadKind::Issue, 7)
         .await
         .expect("the trimmed base reaches the same path");
 }
