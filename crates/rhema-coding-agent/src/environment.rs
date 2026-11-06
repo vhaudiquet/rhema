@@ -109,7 +109,8 @@ const OUTPUT_CAP: usize = 4 * 1024;
 
 /// The probe script: OS, shell, one presence line per manifest entry —
 /// versions stay out; presence is the fact that changes how the model
-/// should work — and the workspace's git branch when it is a checkout.
+/// should work — and the workspace's git branch when it is a checkout,
+/// `detached` when HEAD is detached: the shape a PR checkout lands in.
 /// POSIX sh throughout — every executor in the tree runs `bash -c`.
 fn probe_script(manifest: &Manifest) -> String {
     let tools: Vec<&str> = manifest
@@ -130,7 +131,12 @@ for t in {tools}; do
   fi
 done
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  printf 'git branch: %s\n' "$(git branch --show-current 2>/dev/null || printf detached)"
+  # `git branch --show-current` answers empty, and exits 0, on a
+  # detached HEAD (a PR checkout, a tag, a bisect), so the name is
+  # captured first: a blank one means detached, not "no branch line".
+  b=$(git branch --show-current 2>/dev/null)
+  [ -n "$b" ] || b=detached
+  printf 'git branch: %s\n' "$b"
 fi
 "#,
         tools = tools.join(" ")
@@ -492,6 +498,17 @@ mod tests {
         assert!(
             !report.contains("version"),
             "presence, not versions: {report}"
+        );
+
+        // Detached, the branch line still stands: `git branch
+        // --show-current` answers empty there, and a PR checkout is
+        // exactly that shape - the line used to vanish and take the
+        // suite with it.
+        run(&["checkout", "--detach"]);
+        let report = host_report(&repo, "glm-5.3", "rhema test");
+        assert!(
+            report.contains("- git branch: detached"),
+            "a detached HEAD says so: {report}"
         );
         let _ = std::fs::remove_dir_all(&repo);
     }
