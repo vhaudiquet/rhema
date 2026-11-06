@@ -61,6 +61,25 @@ pub(crate) fn footer_folder(
     (prefix, parents, (*folder).to_owned())
 }
 
+/// The terminal window title: the mark, then the workspace folder as
+/// the footer spells it — the home trim and the capped parents — so
+/// the tab reads like the bar's own start. The folder badge glyph
+/// stays out: title bars draw plain text, and a badge that renders on
+/// the screen arrives as tofu in a macOS tab. Color and the folder's
+/// bold are lost with it; the bar's leading margin space does not
+/// ride along either.
+pub(crate) fn window_title(app: &App) -> String {
+    let (prefix, parents, folder) = footer_folder(&app.options.workspace, app.home.as_deref());
+    let mut title = String::from("ῥ · ");
+    title.push_str(&prefix);
+    for parent in &parents {
+        title.push_str(parent);
+        title.push('/');
+    }
+    title.push_str(&folder);
+    title
+}
+
 /// The thinking badge's letter: the glyph reads with one letter beside
 /// it, L for low through H for high.
 pub(crate) fn effort_letter(effort: rhema_core::request::ThinkingEffort) -> &'static str {

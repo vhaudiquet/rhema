@@ -411,6 +411,26 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // panic from here to the loop's first frame must not strand the
     // user's shell.
     install_panic_hook();
+    // The window title: the mark, the workspace folder as the footer
+    // spells it. `CSI 22;0t` saves the terminal's previous title on its
+    // title stack (xterm, kitty, WezTerm keep one), and the matching pop
+    // in `restore_terminal` hands it back on exit; a terminal without a
+    // stack ignores both and keeps the rhema title until the shell's
+    // next prompt overwrites it. The set itself rides OSC 0, the
+    // spelling every terminal takes. Decoration, not function: write
+    // failures are ignored, and a piped stdout takes no sequence at all.
+    {
+        use std::io::Write;
+        let mut out = stdout();
+        if out.is_terminal() {
+            let _ = write!(
+                out,
+                "\x1b[22;0t\x1b]0;{}\x07",
+                crate::ui::footer::window_title(&app)
+            );
+            let _ = out.flush();
+        }
+    }
     // Shift-enter is a distinct key only when the terminal encodes
     // every key: under the kitty protocol the disambiguate flag alone
     // leaves plain shift+key in legacy mode, so shift+enter would stay
@@ -524,6 +544,12 @@ fn restore_terminal() {
     // interactive rhema leaves no badge behind (terminals that already
     // dropped the record on exit ignore this).
     status::clear();
+    // The title stack pops with it: the pre-rhema title comes back on
+    // the terminals that keep one (the push in run_tui paired this), a
+    // terminal without one ignores the pop and leaves the title for the
+    // shell to overwrite.
+    let _ = write!(stdout(), "\x1b[23;0t");
+    let _ = stdout().flush();
 }
 
 /// Installs a panic hook that restores the terminal before the original

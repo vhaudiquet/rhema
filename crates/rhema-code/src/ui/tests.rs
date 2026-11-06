@@ -1163,6 +1163,21 @@ mod scroll_tests {
         );
     }
 
+    /// The window title: the mark, then the workspace as the footer
+    /// spells it — the home trim, the capped parents. No badge glyph:
+    /// title bars render plain text, and the badge arrives as tofu.
+    #[test]
+    fn the_window_title_reads_like_the_footer() {
+        use crate::ui::footer::window_title;
+        let mut app = chat_app();
+        app.home = Some(PathBuf::from("/home/u"));
+        app.options.workspace = PathBuf::from("/home/u/Documents/prjs/rhema");
+        assert_eq!(window_title(&app), "ῥ · prjs/rhema");
+        // Deeper than the footer's three folders: the ellipsis rides.
+        app.options.workspace = PathBuf::from("/home/u/prjs/a/b/c/d/e");
+        assert_eq!(window_title(&app), "ῥ · …/c/d/e");
+    }
+
     /// The footer carries the folder badge: the trimmed workspace path
     /// with its folder at the end, the model a separator behind it.
     #[test]

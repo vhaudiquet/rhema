@@ -31,7 +31,7 @@ use status::{render_status, spinner_char, subagent_lines, thinking_rows};
 pub(crate) mod chrome;
 
 mod dialogs;
-mod footer;
+pub(crate) mod footer;
 mod input;
 mod onboarding;
 mod overlay;
