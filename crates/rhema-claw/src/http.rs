@@ -49,7 +49,7 @@ use rhema_rsd::{
 use rhema_tools_contract::Auth;
 use rhema_tools_contract::CONTRACT_HEADER;
 use rhema_tools_contract::CONTRACT_VERSION;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 use tokio_stream::wrappers::ReceiverStream;
@@ -640,12 +640,44 @@ async fn messages(
         .into_response()
 }
 
+/// Reads a query parameter the way a JSON body reads `null`: a blank
+/// value (`?since=`) means "not set", not "unparseable".
+///
+/// `Option<T>` alone only forgives a *missing* key. Axum's `Query`
+/// hands a present-but-empty parameter through as an empty string, and
+/// parsing that into `T` fails the whole request with a 400 — which is
+/// what the Android client hit on its first notification poll: it sent
+/// its cursor unconditionally, and before the first ack the cursor is
+/// empty, so the poll answered
+/// `Failed to deserialize query string: since: cannot parse integer from empty string`
+/// and the phone showed an error instead of an empty queue. The client
+/// now omits the parameter when it has nothing to say, and the door
+/// forgives the shape anyway: a query string is a text form, and an
+/// empty `since` reads as "from the start" however it got there.
+fn blank_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let raw = Option::<String>::deserialize(deserializer)?;
+    match raw.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(value) => value
+            .parse::<T>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 /// The events route's query: `since` counts how many of the record's
 /// oldest events the client already holds in its local transcript cache,
 /// and those are skipped in the replay. Absent (the web UI keeps no
-/// cache) the replay stays whole.
+/// cache) the replay stays whole; a blank `since` is absent, see
+/// [`blank_as_none`].
 #[derive(Debug, Deserialize)]
 struct EventStreamQuery {
+    #[serde(default, deserialize_with = "blank_as_none")]
     since: Option<usize>,
 }
 
@@ -1465,7 +1497,10 @@ async fn ingest(State(state): State<ClawState>, Json(body): Json<IngestBody>) ->
 pub struct NotificationQuery {
     /// The device queue to read; the phone when unset.
     pub device: Option<String>,
-    /// Only notifications with a greater id; `0` when unset.
+    /// Only notifications with a greater id; `0` when unset, and a
+    /// blank value counts as unset (the poll may send `?since=` before
+    /// its first ack).
+    #[serde(default, deserialize_with = "blank_as_none")]
     pub since: Option<i64>,
 }
 

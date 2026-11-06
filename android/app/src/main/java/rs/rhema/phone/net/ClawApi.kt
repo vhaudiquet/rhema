@@ -138,12 +138,21 @@ class ClawApi(
         return execute(builder.delete().build()) { }
     }
 
+    // GET /v1/notifications?device=&since=N. `since` is the last id the
+    // device has acked; before the first ack there is no cursor at all,
+    // and an empty `since=` came back
+    // "HTTP 400 — Failed to deserialize query string: since: cannot
+    // parse integer from empty string", which failed the whole poll.
+    // So the parameter is sent only when there is a positive id to send:
+    // absent and blank mean the same thing to the claw, and the shorter
+    // request is the honest one.
     suspend fun notifications(deviceId: String, since: String): ClawResult<List<RhemaNotification>> {
         val base = baseOrNull() ?: return ClawResult.Network("no base URL configured")
+        val cursor = since.trim().toLongOrNull()?.takeIf { it > 0 }
         val url = base.toHttpUrlOrNull()?.newBuilder()
             ?.addPathSegments("v1/notifications")
             ?.addQueryParameter("device", deviceId)
-            ?.addQueryParameter("since", since)
+            ?.apply { cursor?.let { addQueryParameter("since", it.toString()) } }
             ?.build()
             ?: return ClawResult.Network("bad base URL")
         val request = Request.Builder().url(url).header("Authorization", bearer()).build()
