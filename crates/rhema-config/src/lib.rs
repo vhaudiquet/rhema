@@ -974,16 +974,21 @@ impl Settings {
 /// The directory conventions a session reads: where the settings
 /// file, the user-wide skills, the subagent definitions, and the base
 /// system prompt live — plus the user home, because the `.agents`
-/// skills-sharing convention lives there and nowhere else.
+/// skills-sharing convention lives there and nowhere else. The state
+/// and cache roots ride along: runtime artifacts (a daemon's sqlite,
+/// saved sessions) belong to the same family and the same bases.
 ///
-/// The reference layout resolves both roots from the environment
-/// ([`Home::discover`]). A frontend that owns its own directory keeps
-/// its settings — and everything derived from them — under that
-/// directory instead ([`Home::relocated`]): `~/.godcode/config.yaml`,
-/// `~/.godcode/skills`, while the cross-agent convention stays at
-/// `~/.agents/skills`, where every tool shares it. Nothing downstream
-/// reaches for the environment again; it asks the [`Home`] it was
-/// handed.
+/// The family rule: the products of the rhema family share the XDG
+/// bases and nest below the family name — the reference frontend at
+/// `<config-base>/rhema`, the claw below it (`claw.yaml`,
+/// `state/rhema/claw`), the ACP adapter's session cache below that.
+/// A frontend from outside the family relocates the whole set
+/// ([`Home::relocated`]): `~/.godcode` for its config, and its own
+/// name under the state and cache bases — nothing of godcode's lands
+/// under `rhema/`. The cross-agent convention stays machine-global
+/// either way: `~/.agents/skills` is every tool's, not any frontend's.
+/// Nothing downstream reaches for the environment again; it asks the
+/// [`Home`] it was handed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Home {
     /// The user's home directory: where the `.agents/skills` sharing
@@ -992,42 +997,88 @@ pub struct Home {
     /// The config base: `<config-base>/rhema` for the reference
     /// layout, the frontend's own directory for a relocated one.
     pub config: PathBuf,
+    /// The state root: `$XDG_STATE_HOME/rhema`, else
+    /// `~/.local/state/rhema` — runtime artifacts the user expects to
+    /// survive a restart, the family's own directory of them.
+    pub state: PathBuf,
+    /// The cache root: `$XDG_CACHE_HOME/rhema`, else `~/.cache/rhema`
+    /// — artifacts that may be lost without grief, saved sessions
+    /// among them.
+    pub cache: PathBuf,
 }
 
 impl Home {
     /// The reference layout: `config` under `XDG_CONFIG_HOME` (or
-    /// `~/.config`), `home` under `HOME`. The shape a machine running
-    /// the rhema frontend presents.
+    /// `~/.config`), `state` under `XDG_STATE_HOME` (or
+    /// `~/.local/state`), `cache` under `XDG_CACHE_HOME` (or
+    /// `~/.cache`), each under the family name; `home` under `HOME`.
+    /// The shape a machine running the rhema frontend presents.
     pub fn discover() -> Result<Self, ConfigError> {
+        let state_base = match std::env::var("XDG_STATE_HOME") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => user_home()?.join(".local").join("state"),
+        };
+        let cache_base = match std::env::var("XDG_CACHE_HOME") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => user_home()?.join(".cache"),
+        };
         Ok(Self {
             home: user_home()?,
             config: reference_config_base()?,
+            state: state_base.join("rhema"),
+            cache: cache_base.join("rhema"),
         })
     }
 
     /// A relocated config base under the discovered home: the seam
-    /// for a frontend whose settings live in their own directory.
-    /// Skills, subagents, and the base prompt follow the config base;
-    /// the `.agents` convention stays machine-global.
+    /// for a frontend from outside the family. Skills, subagents, and
+    /// the base prompt follow the config base; its state and cache
+    /// take the frontend's own name under their bases — the config
+    /// base's final component, leading dot stripped (`~/.godcode`
+    /// keeps godcode out of `rhema/`) — and the `.agents` convention
+    /// stays machine-global.
     pub fn relocated(config: PathBuf) -> Result<Self, ConfigError> {
+        let name = frontend_name(&config);
+        let state_base = match std::env::var("XDG_STATE_HOME") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => user_home()?.join(".local").join("state"),
+        };
+        let cache_base = match std::env::var("XDG_CACHE_HOME") {
+            Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
+            _ => user_home()?.join(".cache"),
+        };
         Ok(Self {
             home: user_home()?,
+            state: state_base.join(&name),
+            cache: cache_base.join(name),
             config,
         })
     }
 
-    /// Both roots explicit — containers and tests, where no
-    /// environment variable may answer.
+    /// All roots explicit — containers and tests, where no
+    /// environment variable may answer. State and cache take the
+    /// config base's name under the home's default XDG shapes, the
+    /// same derivation [`Self::relocated`] applies to bases it
+    /// resolves itself.
     pub fn at(home: PathBuf, config: PathBuf) -> Self {
-        Self { home, config }
+        let name = frontend_name(&config);
+        Self {
+            state: home.join(".local").join("state").join(&name),
+            cache: home.join(".cache").join(name),
+            home,
+            config,
+        }
     }
 
     /// The reference layout under an explicit home — the seam for a
     /// test isolating itself from the machine: `config` under
-    /// `<home>/.config/rhema`, the same shape [`Self::discover`]
-    /// resolves, no environment variable consulted.
+    /// `<home>/.config/rhema`, state under `<home>/.local/state/rhema`,
+    /// cache under `<home>/.cache/rhema` — the shapes
+    /// [`Self::discover`] resolves, no environment variable consulted.
     pub fn under_home(home: &Path) -> Self {
         Self {
+            state: home.join(".local").join("state").join("rhema"),
+            cache: home.join(".cache").join("rhema"),
             home: home.to_path_buf(),
             config: home.join(".config").join("rhema"),
         }
@@ -1075,6 +1126,17 @@ fn user_home() -> Result<PathBuf, ConfigError> {
         Ok(home) if !home.trim().is_empty() => Ok(PathBuf::from(home)),
         _ => Err(ConfigError::NoHome),
     }
+}
+
+/// The frontend's own name, derived from its config base's final
+/// component with any leading dot stripped (`~/.godcode` names
+/// `godcode`); a base with no usable component keeps the family name.
+fn frontend_name(config_base: &Path) -> String {
+    config_base
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.strip_prefix('.').unwrap_or(name).to_owned())
+        .unwrap_or_else(|| "rhema".to_owned())
 }
 
 /// The reference config base (`$XDG_CONFIG_HOME/rhema`, or
@@ -2336,6 +2398,19 @@ profiles:
             home.agents_skills(),
             PathBuf::from("/home/u/.agents/skills")
         );
+        // State and cache take the frontend's own name — a dot dir
+        // names it without the dot — so nothing of godcode's lands
+        // under the family's `rhema/`.
+        assert_eq!(home.state, PathBuf::from("/home/u/.local/state/godcode"));
+        assert_eq!(home.cache, PathBuf::from("/home/u/.cache/godcode"));
+    }
+
+    #[test]
+    fn the_reference_layout_nests_the_family_under_rhema() {
+        let home = Home::under_home(Path::new("/home/u"));
+        assert_eq!(home.config, PathBuf::from("/home/u/.config/rhema"));
+        assert_eq!(home.state, PathBuf::from("/home/u/.local/state/rhema"));
+        assert_eq!(home.cache, PathBuf::from("/home/u/.cache/rhema"));
     }
 
     #[test]

@@ -2,10 +2,12 @@
 //! saved [`Session`] file, so `session/load` can restore a conversation
 //! across agent restarts.
 //!
-//! LAYOUT: `<base>/<session-id>.json`, where base is
-//! [`base_dir`] — `$XDG_CACHE_HOME/rhema/acp-sessions`, or under
-//! `~/.cache` when unset. A cache, like the TUI's saved sessions:
-//! losing it loses history, never settings. The file is a bare
+//! LAYOUT: `<base>/<session-id>.json`, where base is the rhema
+//! family's cache root plus `acp-sessions` ([`base_dir`] resolves it
+//! through rhema-config's `Home`) — the same nesting the TUI's saved
+//! sessions use. A frontend outside the family names its own base
+//! through `AcpOptions::session_dir`. A cache, like the TUI's saved
+//! sessions: losing it loses history, never settings. The file is a bare
 //! `Session` in the same JSON `--resume` takes — one format, every
 //! reader. Client-supplied ids are validated before they ever touch a
 //! path: only `[-._0-9A-Za-z]` passes, so an id is a file name, never a
@@ -18,19 +20,14 @@ use rhema_core::Session;
 
 /// The saved-session base for ACP sessions.
 pub fn base_dir() -> io::Result<PathBuf> {
-    let cache = match std::env::var("XDG_CACHE_HOME") {
-        Ok(dir) if !dir.trim().is_empty() => PathBuf::from(dir),
-        _ => match std::env::var("HOME") {
-            Ok(home) if !home.trim().is_empty() => PathBuf::from(home).join(".cache"),
-            _ => {
-                return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "neither XDG_CACHE_HOME nor HOME is set",
-                ));
-            }
-        },
-    };
-    Ok(cache.join("rhema").join("acp-sessions"))
+    match rhema_config::Home::discover() {
+        // The family's cache root, the ACP adapter's directory below
+        // it — the claw's nest under `rhema/` is deliberate; an
+        // embedder from outside the family names its own base through
+        // `AcpOptions::session_dir`.
+        Ok(home) => Ok(home.cache.join("acp-sessions")),
+        Err(err) => Err(io::Error::new(io::ErrorKind::NotFound, err.to_string())),
+    }
 }
 
 /// Whether `id` is a safe file-name component: every byte inside

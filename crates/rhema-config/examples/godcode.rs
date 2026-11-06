@@ -91,8 +91,10 @@ fn main() -> Result<(), ConfigError> {
     // `godcode` service, invisible to the rhema frontend's store.
     let probe_reachable = secrets.reachable();
     println!(
-        "godcode: settings at {}, keychain service `godcode` ({})",
+        "godcode: settings at {}, state at {}, cache at {}, keychain service `godcode` ({})",
         home.config_file().display(),
+        home.state.display(),
+        home.cache.display(),
         if probe_reachable {
             "reachable"
         } else {

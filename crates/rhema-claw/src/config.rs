@@ -44,14 +44,11 @@ pub enum ConfigError {
     /// The YAML file is not valid or not the expected shape.
     #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
-    /// The stored-rhema config dir (`~/.config/rhema`) could not be
-    /// located for the default claw.yaml path.
+    /// The rhema family's directories (the config base, the state
+    /// root) could not be located — `HOME` unset — for the default
+    /// claw.yaml path or the state dir.
     #[error(transparent)]
     Stored(#[from] rhema_config::ConfigError),
-    /// Neither `XDG_STATE_HOME` nor `HOME` is set, so the default SQLite
-    /// path or workspace root cannot be located.
-    #[error("cannot locate the state directory: neither XDG_STATE_HOME nor HOME is set")]
-    NoStateHome,
     /// The agent token is the human token: boot refuses, because the
     /// agent token's safety is that it is scoped, and this copy is not.
     #[error(
@@ -207,26 +204,20 @@ impl Default for ClawConfig {
 }
 
 impl ClawConfig {
-    /// The default config path: `<config-base>/rhema/claw.yaml`, the same
-    /// base the stored rhema config lives under.
+    /// The default config path: `<config-base>/rhema/claw.yaml` —
+    /// claw nests below the rhema family's config base, a deliberate
+    /// part of that family, not a tenant of it.
     pub fn default_path() -> Result<PathBuf, ConfigError> {
         Ok(rhema_config::Home::discover()?.config.join("claw.yaml"))
     }
 
-    /// The state dir: `$XDG_STATE_HOME/rhema/claw`, else
-    /// `$HOME/.local/state/rhema/claw`.
+    /// The state dir: the rhema family's state root with claw's own
+    /// directory below it (`$XDG_STATE_HOME/rhema/claw`, else
+    /// `$HOME/.local/state/rhema/claw`) — the same family nesting the
+    /// config path applies, resolved by rhema-config's `Home` so
+    /// the XDG rules live in one crate.
     pub fn state_dir() -> Result<PathBuf, ConfigError> {
-        match std::env::var("XDG_STATE_HOME") {
-            Ok(dir) if !dir.trim().is_empty() => Ok(PathBuf::from(dir).join("rhema").join("claw")),
-            _ => match std::env::var("HOME") {
-                Ok(home) if !home.trim().is_empty() => Ok(PathBuf::from(home)
-                    .join(".local")
-                    .join("state")
-                    .join("rhema")
-                    .join("claw")),
-                _ => Err(ConfigError::NoStateHome),
-            },
-        }
+        Ok(rhema_config::Home::discover()?.state.join("claw"))
     }
 
     /// The dispatcher's SQLite path, defaulted under the state dir.

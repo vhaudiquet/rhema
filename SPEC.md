@@ -318,6 +318,20 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   thread — and the triaged role (reviewer, implementer) selects the
   dispatch's persona framing at handler time; mentions surface to the
   human instead of dispatching an agent.
+- ~~**Where the rhema family's directories live**~~, **decided:** the
+  products of the rhema family share the XDG bases and nest below the
+  family name — the reference frontend at
+  `<config-base>/rhema`, the claw below it (`rhema/claw.yaml`,
+  `state/rhema/claw`), the ACP adapter's session cache below that
+  (`cache/rhema/acp-sessions`). `rhema-config`'s `Home` resolves all
+  four roots once (`discover`) and hands them down; nothing downstream
+  reads an XDG variable. A frontend from outside the family relocates
+  the whole set instead (`Home::relocated`): its config base as given,
+  and its own name — the base's final component, dot stripped — under
+  the state and cache bases, so godcode's artifacts never land under
+  `rhema/`. The credential separation matches: the keychain namespace
+  is per frontend, the directory nesting is per family, and both are
+  decisions a frontend states once at its construction site.
 - ~~**Where provider API keys live**~~, **decided:** the OS keychain
   behind a tiny `SecretStore` seam in `rhema-config` (`secrets`):
   get/set/delete of one opaque value per id, over the `keyring` crate
