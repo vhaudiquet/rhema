@@ -374,9 +374,11 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         .as_deref()
         .and_then(crate::icons::Flavor::parse)
         .unwrap_or_default();
+    let background = crate::palette::Background::parse(config.background.as_deref());
     let options = RunOptions {
         colors,
         theme,
+        background,
         m3_source,
         custom,
         icons,

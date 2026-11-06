@@ -294,6 +294,7 @@ fn harness_inner(
         options: RunOptions {
             colors: crate::palette::Palette::Rhema,
             theme: crate::palette::ThemeKind::Dark,
+            background: crate::palette::Background::Rhema,
             m3_source: None,
             custom: None,
             thinking: rhema_core::request::ThinkingEffort::Default,
@@ -3837,6 +3838,7 @@ fn a_logged_in_profile_opens_the_chat_without_the_login_screen() {
         options: RunOptions {
             colors: crate::palette::Palette::Rhema,
             theme: crate::palette::ThemeKind::Dark,
+            background: crate::palette::Background::Rhema,
             m3_source: None,
             custom: None,
             thinking: rhema_core::request::ThinkingEffort::Default,
@@ -4997,6 +4999,44 @@ fn a_click_on_the_sidebar_switches_sections_and_a_row_acts() {
     h.app.on_click(row_x, row_y);
     assert_eq!(h.app.theme, crate::palette::LIGHT);
     assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("light"));
+}
+
+#[test]
+fn settings_toggles_the_background_live_and_persists_it() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    assert_eq!(h.app.theme, crate::palette::DARK);
+    crate::commands::dispatch(&mut h.app, "/settings");
+    // Three tabs: Profiles and Sandbox sit between Providers and
+    // Appearance.
+    h.app.on_key(key(KeyCode::Tab));
+    h.app.on_key(key(KeyCode::Tab));
+    h.app.on_key(key(KeyCode::Tab));
+    // Row 2 is the background row; enter and `b` both flip it.
+    h.app.on_key(key(KeyCode::Down));
+    h.app.on_key(key(KeyCode::Down));
+    h.app.on_key(key(KeyCode::Char('b')));
+    assert_eq!(
+        h.app.options.background,
+        crate::palette::Background::Native,
+        "rhema flips to native"
+    );
+    assert_eq!(
+        h.app.theme.sunken,
+        ratatui::style::Color::Reset,
+        "the fills hand back to the terminal"
+    );
+    assert_eq!(h.app.theme.text, crate::palette::DARK.text, "the ink keeps");
+    assert_eq!(
+        h.store.load().unwrap().background.as_deref(),
+        Some("native")
+    );
+    if let Screen::Settings(settings) = &h.app.screen {
+        assert!(settings.background_native, "the page follows the toggle");
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    assert_eq!(h.app.options.background, crate::palette::Background::Rhema);
+    assert_eq!(h.app.theme, crate::palette::DARK, "the fills come back");
+    assert_eq!(h.store.load().unwrap().background.as_deref(), Some("rhema"));
 }
 
 #[test]

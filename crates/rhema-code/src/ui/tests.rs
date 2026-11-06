@@ -47,6 +47,36 @@ fn the_picker_row_names_the_vision_verdict_only_when_known() {
     );
 }
 
+/// The Appearance page's toggles: the label column holds a space
+/// between the longest label (`Background`, ten cells) and its value.
+#[test]
+fn the_appearance_labels_keep_a_gap_before_their_values() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.section = SettingsSection::Appearance;
+    settings.background_native = true;
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let text: String = (0..40)
+        .map(|y| {
+            (0..80)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    // Four toggles render, all values one aligned column over; the
+    // longest label (`Background`, ten cells) keeps a space before its
+    // value instead of swallowing it.
+    let row = |label: &str, value: &str| format!("{:<11}{value}", label);
+    assert!(text.contains(&row("Background", "Native")), "{text}");
+    assert!(text.contains(&row("Colors", "Rhema")), "{text}");
+    assert!(text.contains(&row("Theme", "Dark")), "{text}");
+    assert!(text.contains(&row("Icons", "Unicode")), "{text}");
+    assert!(!text.contains("BackgroundNative"), "{text}");
+}
+
 /// The Usage page's detailed split: the subtitle, the six rows as
 /// percentages of the total with their kilo-scaled amounts.
 #[test]
@@ -773,6 +803,7 @@ mod scroll_tests {
             options: RunOptions {
                 colors: crate::palette::Palette::Rhema,
                 theme: ThemeKind::Dark,
+                background: crate::palette::Background::Rhema,
                 m3_source: None,
                 custom: None,
                 icons: crate::icons::Flavor::Unicode,

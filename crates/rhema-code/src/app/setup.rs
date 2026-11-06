@@ -516,6 +516,9 @@ pub struct RunOptions {
     pub colors: crate::palette::Palette,
     /// The palette's appearance: its dark tokens or its light ones.
     pub theme: crate::palette::ThemeKind,
+    /// What paints behind the ink: the palette's fills or the
+    /// terminal's own background.
+    pub background: crate::palette::Background,
     /// The M3 You seed, `0xRRGGBB`; `None` is Material's baseline
     /// purple. Every palette but M3 You ignores it.
     pub m3_source: Option<u32>,
@@ -544,6 +547,16 @@ pub struct RunOptions {
 }
 
 impl RunOptions {
+    /// The resolved design tokens: the palette's appearance with the
+    /// background choice painted on — the one theme the screens read.
+    /// Every resolution site (startup, the live toggles) lands here, so
+    /// a background flip and a palette flip can never disagree.
+    pub(crate) fn resolved_theme(&self) -> crate::palette::Theme {
+        self.colors
+            .theme(self.theme, self.palette_inputs())
+            .painted(self.background)
+    }
+
     /// The per-startup inputs the generated palettes read.
     pub(crate) fn palette_inputs(&self) -> crate::palette::PaletteInputs<'_> {
         crate::palette::PaletteInputs {

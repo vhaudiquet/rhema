@@ -70,6 +70,7 @@ impl App {
         settings.colors = options.colors;
         settings.theme_dark = options.theme == crate::palette::ThemeKind::Dark;
         settings.icons_nerd = options.icons == crate::icons::Flavor::Nerd;
+        settings.background_native = options.background == crate::palette::Background::Native;
         settings.profile = session_profile
             .unwrap_or(rhema_config::DEFAULT_PROFILE)
             .to_owned();
@@ -318,13 +319,30 @@ impl App {
             crate::palette::ThemeKind::Dark
         };
         self.options.theme = kind;
-        self.theme = self
-            .options
-            .colors
-            .theme(kind, self.options.palette_inputs());
+        self.theme = self.options.resolved_theme();
         self.config.theme = Some(if dark { "light" } else { "dark" }.to_owned());
         if let Screen::Settings(settings) = &mut self.screen {
             settings.theme_dark = !dark;
+        }
+        self.save_config();
+    }
+
+    /// Flips the background source and persists the choice, live like
+    /// the theme toggle: `native` hands the screen's background back to
+    /// the terminal, `rhema` paints the palette's fills again. The open
+    /// settings page follows.
+    pub(crate) fn toggle_background(&mut self) {
+        let native = self.options.background == crate::palette::Background::Native;
+        let background = if native {
+            crate::palette::Background::Rhema
+        } else {
+            crate::palette::Background::Native
+        };
+        self.options.background = background;
+        self.theme = self.options.resolved_theme();
+        self.config.background = Some(background.stored_name().to_owned());
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.background_native = background == crate::palette::Background::Native;
         }
         self.save_config();
     }
@@ -346,7 +364,7 @@ impl App {
     /// follows, so the rows keep telling the truth.
     pub(crate) fn set_palette(&mut self, palette: crate::palette::Palette) {
         self.options.colors = palette;
-        self.theme = palette.theme(self.options.theme, self.options.palette_inputs());
+        self.theme = self.options.resolved_theme();
         self.config.colors = Some(palette.stored_name().to_owned());
         if let Screen::Settings(settings) = &mut self.screen {
             settings.colors = palette;

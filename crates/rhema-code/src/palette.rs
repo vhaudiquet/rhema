@@ -36,6 +36,39 @@ pub enum ThemeKind {
     Light,
 }
 
+/// What paints behind the ink: the palette's own fills, or the
+/// terminal's background showing through. Parsed from the stored config
+/// (`background: rhema|native`), not a flag — a machine choice, not a
+/// per-invocation one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Background {
+    /// The palette's fills paint every slot: the drawn design.
+    #[default]
+    Rhema,
+    /// The terminal's own background shows through: the fill slots read
+    /// as the terminal default, and only the ink keeps rhema's colors.
+    Native,
+}
+
+impl Background {
+    /// Parses the stored config value; unset or unparseable reads as
+    /// the default.
+    pub fn parse(text: Option<&str>) -> Self {
+        match text {
+            Some("native") => Self::Native,
+            _ => Self::default(),
+        }
+    }
+
+    /// The value the config stores.
+    pub fn stored_name(self) -> &'static str {
+        match self {
+            Self::Rhema => "rhema",
+            Self::Native => "native",
+        }
+    }
+}
+
 /// One palette appearance's tokens, resolved to terminal colors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
@@ -82,6 +115,22 @@ impl Theme {
     /// so generated palettes answer without a side channel.
     pub fn is_dark(&self) -> bool {
         relative_luminance(self.ground) < relative_luminance(self.text)
+    }
+
+    /// Paints the background choice onto the tokens. `Native` hands the
+    /// fill slots (`sunken`, `surface`, `elevated`) back to the
+    /// terminal: `Color::Reset` leaves each cell on the terminal's own
+    /// background, and the ink — text, borders, accents — keeps the
+    /// palette's colors. `ground` never paints a cell (only
+    /// [`Theme::is_dark`] reads it), so the appearance checks stay
+    /// exact either way.
+    pub fn painted(mut self, background: Background) -> Self {
+        if background == Background::Native {
+            self.sunken = Color::Reset;
+            self.surface = Color::Reset;
+            self.elevated = Color::Reset;
+        }
+        self
     }
 }
 
@@ -850,6 +899,32 @@ mod tests {
                     .is_dark()
             );
         }
+    }
+
+    #[test]
+    fn the_native_background_clears_the_fills_and_keeps_the_ink() {
+        let painted = DARK.painted(Background::Native);
+        assert_eq!(painted.sunken, Color::Reset);
+        assert_eq!(painted.surface, Color::Reset);
+        assert_eq!(painted.elevated, Color::Reset);
+        // The ink keeps the palette's colors, and the appearance check
+        // stays exact — `ground` never paints a cell.
+        assert_eq!(painted.text, DARK.text);
+        assert_eq!(painted.accent, DARK.accent);
+        assert_eq!(painted.ground, DARK.ground);
+        assert!(painted.is_dark());
+        // The default paints nothing over.
+        assert_eq!(DARK.painted(Background::Rhema), DARK);
+    }
+
+    #[test]
+    fn the_background_spellings_round_trip() {
+        assert_eq!(Background::parse(Some("native")), Background::Native);
+        assert_eq!(Background::parse(Some("rhema")), Background::Rhema);
+        assert_eq!(Background::parse(Some("bogus")), Background::Rhema);
+        assert_eq!(Background::parse(None), Background::Rhema);
+        assert_eq!(Background::Rhema.stored_name(), "rhema");
+        assert_eq!(Background::Native.stored_name(), "native");
     }
 
     #[test]

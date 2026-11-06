@@ -450,10 +450,7 @@ impl App {
         Ok(Self {
             secrets: setup.secrets,
             // Read before `options` moves into the struct.
-            theme: setup
-                .options
-                .colors
-                .theme(setup.options.theme, setup.options.palette_inputs()),
+            theme: setup.options.resolved_theme(),
             icons: setup.options.icons.set(),
             store: setup.store,
             config: setup.config,

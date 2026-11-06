@@ -345,6 +345,14 @@ pub(crate) fn settings_page(
                 ("Colors", settings.colors.label()),
                 ("Theme", if settings.theme_dark { "Dark" } else { "Light" }),
                 (
+                    "Background",
+                    if settings.background_native {
+                        "Native"
+                    } else {
+                        "Rhema"
+                    },
+                ),
+                (
                     "Icons",
                     if settings.icons_nerd {
                         "Nerd"
@@ -358,13 +366,17 @@ pub(crate) fn settings_page(
                 row_hits.push((lines.len(), SettingsHit::PageRow(index)));
                 let line = Line::from(vec![
                     Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
-                    Span::raw(format!("{:<10}", label)).fg(theme.text3),
+                    Span::raw(format!("{:<11}", label)).fg(theme.text3),
                     Span::raw((*value).to_owned()).fg(theme.text),
                 ]);
                 lines.push(settings_row(line, selected, theme));
             }
             lines.push(Line::default());
-            (lines, footer("c - colors, t - theme, i - icons"), row_hits)
+            (
+                lines,
+                footer("c - colors, t - theme, b - background, i - icons"),
+                row_hits,
+            )
         }
         SettingsSection::Memory => {
             lines.extend(wrap_line(

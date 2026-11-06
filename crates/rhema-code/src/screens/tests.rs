@@ -471,11 +471,21 @@ fn settings_appearance_rows_toggle_and_carry_the_shortcuts() {
     assert_eq!(settings.row, 2);
     assert_eq!(
         settings.handle_key(key(KeyCode::Enter)),
+        SettingsAction::ToggleBackground
+    );
+    settings.handle_key(key(KeyCode::Down));
+    assert_eq!(settings.row, 3);
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Enter)),
         SettingsAction::ToggleIcons
     );
     assert_eq!(
         settings.handle_key(key(KeyCode::Char('t'))),
         SettingsAction::ToggleTheme
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char('b'))),
+        SettingsAction::ToggleBackground
     );
     assert_eq!(
         settings.handle_key(key(KeyCode::Char('i'))),

@@ -269,6 +269,10 @@ impl App {
                 self.toggle_theme();
                 Vec::new()
             }
+            SettingsAction::ToggleBackground => {
+                self.toggle_background();
+                Vec::new()
+            }
             SettingsAction::ToggleIcons => {
                 self.toggle_icons();
                 Vec::new()
