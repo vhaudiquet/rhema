@@ -59,24 +59,6 @@ pub struct Resolved {
     pub model: String,
 }
 
-/// The per-kind model fallback when neither the flag nor the config
-/// names one — the same defaults the headless one-shot uses.
-pub fn default_model_for(provider: &str) -> &'static str {
-    match provider {
-        "llama-cpp" => "local",
-        "anthropic" => "claude-sonnet-4-5",
-        "openai" => "gpt-5",
-        "deepseek" => "deepseek-chat",
-        // The Coding Plan's flagship, as Z.ai's own client spells it.
-        "zai" => "GLM-5.3",
-        // The proxy's long-running default workhorse.
-        "copilot" => "gpt-4.1",
-        // Google and OpenRouter share the Gemini fallback; OpenRouter
-        // routes it.
-        _ => "gemini-3.8-flash",
-    }
-}
-
 /// One model a client's picker may pick: the provider kind it rides on
 /// (a [`PROVIDERS`] name) and the catalog row. A choice's select value
 /// is `<provider>/<card id>`.
@@ -226,7 +208,8 @@ pub fn resolve(
     let model = model
         .map(str::to_owned)
         .or_else(|| profile.model.clone())
-        .unwrap_or_else(|| default_model_for(kind).to_owned());
+        // The registry owns the fallback: one table, every frontend.
+        .unwrap_or_else(|| rhema_config::default_model(kind).to_owned());
     let provider = provider_for(kind, profile, llama_url, secrets)?;
     Ok(provider.map(|provider| Resolved {
         kind,

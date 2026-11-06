@@ -17,9 +17,11 @@
 //! file, persisted in the settings store, changeable over `/v1/providers`
 //! — the chart pins nothing.
 //!
-//! The per-kind default models are fallbacks only, in one place here:
-//! openrouter's `openrouter/auto` deliberately replaces the old
-//! copy-pasted google default — a router deserves its own router id.
+//! The per-kind default models are fallbacks only, owned by
+//! rhema-config's provider registry (`PROVIDERS`): one table, every
+//! frontend. openrouter's `openrouter/auto` deliberately replaces the
+//! old copy-pasted google default — a router deserves its own router
+//! id — and that decision now lives in the row, not in this crate.
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -61,22 +63,6 @@ pub enum BackendError {
     /// The kind is keyed and the params carry no usable `api_key`.
     #[error("{0} needs an api_key")]
     MissingKey(String),
-}
-
-/// The default model per backend kind, when neither the operator nor the
-/// settings store names one.
-pub fn default_model_for(kind: &str) -> &'static str {
-    match kind {
-        "llama-cpp" => "local",
-        "anthropic" => "claude-sonnet-4-5",
-        "openai" => "gpt-5",
-        "openrouter" => "openrouter/auto",
-        "deepseek" => "deepseek-chat",
-        // The Coding Plan's flagship, as Z.ai's own client spells it.
-        "zai" => "GLM-5.3",
-        "copilot" => "gpt-4.1",
-        _ => "gemini-3.8-flash",
-    }
 }
 
 /// The listing of a card-backed backend, boxed for the registry; a
@@ -526,7 +512,7 @@ pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, Backend
         }
         _ => return Err(BackendError::UnknownKind(kind.to_owned())),
     };
-    let default_model = default_model_for(kind).to_owned();
+    let default_model = rhema_config::default_model(kind).to_owned();
     let provider = Arc::new(provider);
     Ok(Backend {
         id: kind.to_owned(),
@@ -707,7 +693,7 @@ mod tests {
             id: kind.to_owned(),
             kind: kind.to_owned(),
             provider: Arc::new(Stub),
-            default_model: default_model_for(kind).to_owned(),
+            default_model: rhema_config::default_model(kind).to_owned(),
             list_models: None,
         }
     }

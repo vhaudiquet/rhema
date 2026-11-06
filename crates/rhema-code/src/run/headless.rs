@@ -7,36 +7,6 @@ use super::*;
 
 /// The model used headless when neither `--model` nor the stored config
 /// names one.
-const DEFAULT_MODEL: &str = "gemini-3.8-flash";
-/// The model string sent to a llama.cpp server when none is set. The
-/// server typically ignores it, but OpenAI-shaped APIs require the field.
-const DEFAULT_LLAMA_MODEL: &str = "local";
-/// The headless Anthropic model when neither `--model` nor the stored
-/// config names one: the mid-tier Claude the adapter's own docs use as
-/// its example id. This fallback is a safety net, not the normal path —
-/// the login and picker flow always stores a model — so it only has to
-/// be an id the API keeps answering for.
-const DEFAULT_ANTHROPIC_MODEL: &str = "claude-sonnet-4-5";
-/// The headless OpenAI model when neither `--model` nor the stored
-/// config names one, chosen with the same reasoning as
-/// [`DEFAULT_ANTHROPIC_MODEL`]: the GPT-5 family id, current at the time
-/// of writing.
-const DEFAULT_OPENAI_MODEL: &str = "gpt-5";
-/// The headless DeepSeek model when neither `--model` nor the stored
-/// config names one: the non-thinking chat model — `deepseek-reasoner`
-/// thinks by default and is the slower choice.
-const DEFAULT_DEEPSEEK_MODEL: &str = "deepseek-chat";
-/// The headless Z.ai Coding Plan model when neither `--model` nor the
-/// stored config names one, chosen with the same reasoning as
-/// [`DEFAULT_ANTHROPIC_MODEL`]: the plan's flagship id, as Z.ai's own
-/// client spells it.
-const DEFAULT_ZAI_MODEL: &str = "GLM-5.3";
-/// The headless Copilot model when neither `--model` nor the stored
-/// config names one, chosen with the same reasoning as
-/// [`DEFAULT_ANTHROPIC_MODEL`]: the GPT-4.1 id, the proxy's long-running
-/// default workhorse.
-const DEFAULT_COPILOT_MODEL: &str = "gpt-4.1";
-
 /// The headless event sink: reply text streams raw to stdout (so pipes
 /// capture exactly the reply), tool traffic goes to stderr, and the
 /// program-status record follows the turn.
@@ -165,18 +135,13 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let backend = Backend::from_profile_or_help(&effective, Some(&secrets))
         .map_err(|message| anyhow::anyhow!("{message}"))?;
     let model = args.model.clone().unwrap_or_else(|| {
-        effective
-            .model
-            .clone()
-            .unwrap_or_else(|| match provider_choice {
-                ProviderChoice::LlamaCpp => DEFAULT_LLAMA_MODEL.to_owned(),
-                ProviderChoice::Anthropic => DEFAULT_ANTHROPIC_MODEL.to_owned(),
-                ProviderChoice::OpenAi => DEFAULT_OPENAI_MODEL.to_owned(),
-                ProviderChoice::DeepSeek => DEFAULT_DEEPSEEK_MODEL.to_owned(),
-                ProviderChoice::Zai => DEFAULT_ZAI_MODEL.to_owned(),
-                ProviderChoice::Copilot => DEFAULT_COPILOT_MODEL.to_owned(),
-                ProviderChoice::Google | ProviderChoice::OpenRouter => DEFAULT_MODEL.to_owned(),
-            })
+        effective.model.clone().unwrap_or_else(|| {
+            // The provider registry owns the fallback: one table,
+            // every frontend, the id the adapter keeps answering for.
+            // openrouter rides its own router id here, no longer the
+            // copy-pasted google default.
+            rhema_config::default_model(provider_choice.stored_name()).to_owned()
+        })
     });
 
     let thinking = args

@@ -289,20 +289,13 @@ impl ClawConfig {
     }
 
     /// The model identifier the handler runs: the config's, or the
-    /// provider's headless default (the same fallbacks the rhema
-    /// frontend's one-shot uses). An unknown provider string reads as
-    /// google here; the binary rejects it when it resolves the backend.
+    /// provider registry's default. An unknown provider string reads
+    /// as google here; the binary rejects it when it resolves the
+    /// backend.
     pub fn resolved_model(&self) -> String {
         self.model.clone().unwrap_or_else(|| {
-            match self.provider.as_deref().unwrap_or("google") {
-                "llama-cpp" => "local",
-                "anthropic" => "claude-sonnet-4-5",
-                "openai" => "gpt-5",
-                // The Coding Plan's flagship, as Z.ai's own client spells it.
-                "zai" => "GLM-5.3",
-                _ => "gemini-3.8-flash",
-            }
-            .to_owned()
+            let provider = self.provider.as_deref().unwrap_or("google");
+            rhema_config::default_model(provider).to_owned()
         })
     }
 
@@ -577,6 +570,19 @@ ingest_token: door-key
             "claude-sonnet-4-5"
         );
         assert_eq!(config(Some("openai"), None).resolved_model(), "gpt-5");
+        // The arms the old inline match dropped: the registry answers
+        // for the whole fleet, so a provider cannot silently read as
+        // google's default.
+        assert_eq!(
+            config(Some("deepseek"), None).resolved_model(),
+            "deepseek-chat"
+        );
+        assert_eq!(config(Some("copilot"), None).resolved_model(), "gpt-4.1");
+        assert_eq!(
+            config(Some("openrouter"), None).resolved_model(),
+            "openrouter/auto"
+        );
+        assert_eq!(config(Some("zai"), None).resolved_model(), "GLM-5.3");
         // An explicit model always wins, whatever the provider.
         assert_eq!(
             config(Some("openrouter"), Some("x/y")).resolved_model(),

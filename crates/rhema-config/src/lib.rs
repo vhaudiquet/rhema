@@ -736,59 +736,83 @@ pub struct ProviderInfo {
     /// The fix a frontend without a login screen names when no
     /// credential resolves for this provider.
     pub missing_key_help: &'static str,
+    /// The model the provider runs when neither the user nor the
+    /// frontend names one: an id the adapter keeps answering for,
+    /// chosen once here so every frontend falls back the same way.
+    /// A safety net, not the normal path — the login and picker
+    /// flows store a model.
+    pub default_model: &'static str,
 }
 
-/// The provider registry, in the order the pickers list them.
+/// The provider registry, in the order the pickers list them. A
+/// provider joins with all of itself: spelling, credential rule,
+/// default model — the facts every frontend needs, written once.
 pub const PROVIDERS: &[ProviderInfo] = &[
     ProviderInfo {
         name: "google",
         env_keys: &["GEMINI_API_KEY", "GOOGLE_API_KEY"],
         login: true,
         missing_key_help: "missing API key: set GEMINI_API_KEY (or log in once interactively)",
+        default_model: "gemini-3.8-flash",
     },
     ProviderInfo {
         name: "llama-cpp",
         env_keys: &["LLAMA_CPP_API_KEY"],
         login: false,
         missing_key_help: "missing API key: set LLAMA_CPP_API_KEY",
+        default_model: "local",
     },
     ProviderInfo {
         name: "openrouter",
         env_keys: &["OPENROUTER_API_KEY"],
         login: true,
         missing_key_help: "missing API key: set OPENROUTER_API_KEY",
+        default_model: "openrouter/auto",
     },
     ProviderInfo {
         name: "anthropic",
         env_keys: &["ANTHROPIC_API_KEY"],
         login: true,
         missing_key_help: "missing API key: set ANTHROPIC_API_KEY (or log in once interactively)",
+        default_model: "claude-sonnet-4-5",
     },
     ProviderInfo {
         name: "openai",
         env_keys: &["OPENAI_API_KEY"],
         login: true,
         missing_key_help: "missing API key: set OPENAI_API_KEY (or log in once interactively)",
+        default_model: "gpt-5",
     },
     ProviderInfo {
         name: "deepseek",
         env_keys: &["DEEPSEEK_API_KEY"],
         login: true,
         missing_key_help: "missing API key: set DEEPSEEK_API_KEY (or log in once interactively)",
+        default_model: "deepseek-chat",
     },
     ProviderInfo {
         name: "zai",
         env_keys: &["ZAI_API_KEY", "Z_AI_API_KEY"],
         login: true,
         missing_key_help: "missing API key: set ZAI_API_KEY (or log in once interactively)",
+        default_model: "GLM-5.3",
     },
     ProviderInfo {
         name: "copilot",
         env_keys: &["GITHUB_COPILOT_TOKEN"],
         login: true,
         missing_key_help: "missing API key: set GITHUB_COPILOT_TOKEN (or log in once interactively)",
+        default_model: "gpt-4.1",
     },
 ];
+
+/// The model a provider runs when nothing stored names one — the
+/// registry row's [`ProviderInfo::default_model`]. A name no row
+/// answers to reads as google's, the same default an unset provider
+/// gets; callers that reject unknown spellings do so before asking.
+pub fn default_model(name: &str) -> &'static str {
+    provider_info(name).unwrap_or(&PROVIDERS[0]).default_model
+}
 
 /// Looks a provider up by config spelling; `None` for anything no row
 /// answers to.
@@ -1173,6 +1197,19 @@ fn resolve_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_model_answers_the_registry_and_reads_unknowns_as_google() {
+        assert_eq!(default_model("anthropic"), "claude-sonnet-4-5");
+        assert_eq!(default_model("openrouter"), "openrouter/auto");
+        assert_eq!(default_model("llama-cpp"), "local");
+        // An unknown spelling is the unset-provider case: google's
+        // default, the same fallback every caller used to hand-roll.
+        assert_eq!(default_model("mistral"), "gemini-3.8-flash");
+        // Every row carries one, so a new provider cannot join
+        // without it.
+        assert!(PROVIDERS.iter().all(|info| !info.default_model.is_empty()));
+    }
 
     #[test]
     fn debug_prints_presence_never_the_key() {
