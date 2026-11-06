@@ -3508,7 +3508,6 @@ dependencies = [
  "hyper-util",
  "mcp-to-cli",
  "rhema-agent-tools",
- "rhema-coding-agent",
  "rhema-config",
  "serde",
  "serde_json",
