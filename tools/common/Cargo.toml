@@ -9,7 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rhema-tools-contract = { path = "../contract" }
+rhema-claw-tools-contract = { path = "../contract" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

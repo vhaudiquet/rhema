@@ -301,14 +301,14 @@ after a mid-command crash converges instead of duplicating. The manifests'
 
 New project — `rhema-tools`:
 
-- `rhema-tools-contract` — route constants, JSON payload types, a mock router,
+- `rhema-claw-tools-contract` — route constants, JSON payload types, a mock router,
   and the conformance suite. Depends on nothing.
 - one crate per domain — the binary and its skills directory.
 - one thin shared client crate — base-URL/token env handling, the HTTP calls,
   the error printing every binary shares.
 
 Dependency arrows, both enforced in CI: the claw depends on
-`rhema-tools-contract` (to run the conformance suite against its real router)
+`rhema-claw-tools-contract` (to run the conformance suite against its real router)
 and never on the domain crates; the tools project depends on nothing of
 rhema-claw.
 

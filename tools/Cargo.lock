@@ -466,8 +466,8 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "rhema-claw-tools-contract",
  "rhema-tools-common",
- "rhema-tools-contract",
  "serde",
  "serde_json",
  "tokio",
@@ -525,23 +525,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhema-tools-common"
-version = "0.1.0"
-dependencies = [
- "rhema-tools-contract",
- "serde",
- "serde_json",
- "thiserror",
- "ureq",
-]
-
-[[package]]
-name = "rhema-tools-contract"
+name = "rhema-claw-tools-contract"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "rhema-tools-common"
+version = "0.1.0"
+dependencies = [
+ "rhema-claw-tools-contract",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ureq",
 ]
 
 [[package]]

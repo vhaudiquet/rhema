@@ -2,7 +2,7 @@
 //! The daemon's real router runs the same suite in its test tree —
 //! same results is the definition of implementing the contract.
 
-use rhema_tools_contract::{CallRequest, MockClaw, conformance};
+use rhema_claw_tools_contract::{CallRequest, MockClaw, conformance};
 
 #[tokio::test]
 async fn the_suite_passes_against_the_mock_router() {
@@ -28,31 +28,40 @@ async fn an_open_mock_fails_the_suite() {
 
 #[tokio::test]
 async fn the_agent_allowlist_reads_the_documented_routes() {
-    assert!(rhema_tools_contract::agent_allowed("GET", "/v1/watches"));
-    assert!(rhema_tools_contract::agent_allowed(
+    assert!(rhema_claw_tools_contract::agent_allowed(
+        "GET",
+        "/v1/watches"
+    ));
+    assert!(rhema_claw_tools_contract::agent_allowed(
         "DELETE",
         "/v1/watches/github/acme/widgets"
     ));
-    assert!(rhema_tools_contract::agent_allowed(
+    assert!(rhema_claw_tools_contract::agent_allowed(
         "POST",
         "/v1/notifications"
     ));
-    assert!(rhema_tools_contract::agent_allowed(
+    assert!(rhema_claw_tools_contract::agent_allowed(
         "DELETE",
         "/v1/tasks/12"
     ));
-    assert!(!rhema_tools_contract::agent_allowed("POST", "/v1/ingest"));
-    assert!(!rhema_tools_contract::agent_allowed(
+    assert!(!rhema_claw_tools_contract::agent_allowed(
+        "POST",
+        "/v1/ingest"
+    ));
+    assert!(!rhema_claw_tools_contract::agent_allowed(
         "POST",
         "/v1/consents/c-1"
     ));
-    assert!(!rhema_tools_contract::agent_allowed("GET", "/v1/consents"));
-    assert!(!rhema_tools_contract::agent_allowed(
+    assert!(!rhema_claw_tools_contract::agent_allowed(
+        "GET",
+        "/v1/consents"
+    ));
+    assert!(!rhema_claw_tools_contract::agent_allowed(
         "DELETE",
         "/v1/phones/p1"
     ));
     assert!(
-        !rhema_tools_contract::agent_allowed("GET", "/v1/watches/github/acme/widgets"),
+        !rhema_claw_tools_contract::agent_allowed("GET", "/v1/watches/github/acme/widgets"),
         "only DELETE reaches subpaths of /v1/watches"
     );
 }

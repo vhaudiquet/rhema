@@ -1483,42 +1483,44 @@ async fn the_surface_speaks_the_tool_contract() {
     .expect("the daemon assembles");
     let base = serve(&daemon).await;
     let client = reqwest::Client::new();
-    let result = rhema_tools_contract::conformance(|request: rhema_tools_contract::CallRequest| {
-        let client = client.clone();
-        let base = base.clone();
-        async move {
-            let method = reqwest::Method::from_bytes(request.method.as_bytes())
-                .map_err(|e| e.to_string())?;
-            let builder = client.request(method, format!("{base}{}", request.path));
-            let builder = match request.auth {
-                rhema_tools_contract::Auth::None => builder,
-                rhema_tools_contract::Auth::Human => {
-                    builder.header(reqwest::header::AUTHORIZATION, "Bearer human-token")
-                }
-                rhema_tools_contract::Auth::Agent => {
-                    builder.header(reqwest::header::AUTHORIZATION, "Bearer agent-token")
-                }
-                rhema_tools_contract::Auth::Invalid => {
-                    builder.header(reqwest::header::AUTHORIZATION, "Bearer a-stranger")
-                }
-                rhema_tools_contract::Auth::Ingest => {
-                    builder.header(reqwest::header::AUTHORIZATION, "Bearer ingest-token")
-                }
-            };
-            let builder = match request.contract {
-                Some(version) => builder.header("x-rhema-contract", version.to_string()),
-                None => builder,
-            };
-            let builder = match request.body {
-                Some(body) => builder.json(&body),
-                None => builder,
-            };
-            let response = builder.send().await.map_err(|e| e.to_string())?;
-            let status = response.status().as_u16();
-            let body = response.json().await.unwrap_or(serde_json::json!({}));
-            Ok(rhema_tools_contract::CallResponse { status, body })
-        }
-    })
+    let result = rhema_claw_tools_contract::conformance(
+        |request: rhema_claw_tools_contract::CallRequest| {
+            let client = client.clone();
+            let base = base.clone();
+            async move {
+                let method = reqwest::Method::from_bytes(request.method.as_bytes())
+                    .map_err(|e| e.to_string())?;
+                let builder = client.request(method, format!("{base}{}", request.path));
+                let builder = match request.auth {
+                    rhema_claw_tools_contract::Auth::None => builder,
+                    rhema_claw_tools_contract::Auth::Human => {
+                        builder.header(reqwest::header::AUTHORIZATION, "Bearer human-token")
+                    }
+                    rhema_claw_tools_contract::Auth::Agent => {
+                        builder.header(reqwest::header::AUTHORIZATION, "Bearer agent-token")
+                    }
+                    rhema_claw_tools_contract::Auth::Invalid => {
+                        builder.header(reqwest::header::AUTHORIZATION, "Bearer a-stranger")
+                    }
+                    rhema_claw_tools_contract::Auth::Ingest => {
+                        builder.header(reqwest::header::AUTHORIZATION, "Bearer ingest-token")
+                    }
+                };
+                let builder = match request.contract {
+                    Some(version) => builder.header("x-rhema-contract", version.to_string()),
+                    None => builder,
+                };
+                let builder = match request.body {
+                    Some(body) => builder.json(&body),
+                    None => builder,
+                };
+                let response = builder.send().await.map_err(|e| e.to_string())?;
+                let status = response.status().as_u16();
+                let body = response.json().await.unwrap_or(serde_json::json!({}));
+                Ok(rhema_claw_tools_contract::CallResponse { status, body })
+            }
+        },
+    )
     .await;
     assert_eq!(result, Ok(()), "the daemon speaks the tool contract");
 }

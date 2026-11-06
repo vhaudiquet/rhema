@@ -49,7 +49,7 @@ rhema-rsd = { path = "../rhema-rsd" }
 # The tool contract: the agent-token allowlist and version the auth
 # middleware enforces (rhema-tools spec). The arrow runs claw ->
 # contract only — never the reverse.
-rhema-tools-contract = { path = "../../tools/contract" }
+rhema-claw-tools-contract = { path = "../../tools/contract" }
 # The resident tier's durable memory: its tools join the resolver chain
 rhema-memory = { path = "../rhema-memory" }
 # The shared ModelCard the backend registry's listings return

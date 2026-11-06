@@ -1,5 +1,5 @@
 [package]
-name = "rhema-tools-contract"
+name = "rhema-claw-tools-contract"
 description = "The wire contract between the rhema claw daemon and its thin client tools: routes, shapes, the agent-token allowlist, and the conformance suite"
 version.workspace = true
 edition.workspace = true

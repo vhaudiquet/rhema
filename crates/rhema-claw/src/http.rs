@@ -42,13 +42,13 @@ use axum::routing::put;
 use axum::routing::{delete, get, post};
 use axum::{Router, middleware};
 use rhema_autonomous_agent::Driver;
+use rhema_claw_tools_contract::Auth;
+use rhema_claw_tools_contract::CONTRACT_HEADER;
+use rhema_claw_tools_contract::CONTRACT_VERSION;
 use rhema_core::ImageMediaType;
 use rhema_rsd::{
     DispatchError, Dispatcher, IngestResult, KeyRecord, KeyState, ResourceKey, SqliteStore, Store,
 };
-use rhema_tools_contract::Auth;
-use rhema_tools_contract::CONTRACT_HEADER;
-use rhema_tools_contract::CONTRACT_VERSION;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
@@ -401,8 +401,10 @@ async fn require_auth(State(state): State<ClawState>, request: Request, next: Ne
                 )
                     .into_response();
             }
-            if rhema_tools_contract::agent_allowed(request.method().as_str(), request.uri().path())
-            {
+            if rhema_claw_tools_contract::agent_allowed(
+                request.method().as_str(),
+                request.uri().path(),
+            ) {
                 next.run(request).await
             } else {
                 (
@@ -427,8 +429,10 @@ async fn require_auth(State(state): State<ClawState>, request: Request, next: Ne
                 )
                     .into_response();
             }
-            if rhema_tools_contract::ingest_allowed(request.method().as_str(), request.uri().path())
-            {
+            if rhema_claw_tools_contract::ingest_allowed(
+                request.method().as_str(),
+                request.uri().path(),
+            ) {
                 next.run(request).await
             } else {
                 (

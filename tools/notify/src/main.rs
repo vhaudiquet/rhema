@@ -5,7 +5,7 @@
 
 use clap::{Parser, Subcommand};
 use rhema_tools_common::{Client, Config, fail, print};
-use rhema_tools_contract::NotificationPush;
+use rhema_claw_tools_contract::NotificationPush;
 
 /// Push a notification to the user's devices.
 #[derive(Parser)]
@@ -49,7 +49,7 @@ fn main() {
                 body,
                 device,
             };
-            match client.call("POST", rhema_tools_contract::NOTIFICATIONS, Some(&push)) {
+            match client.call("POST", rhema_claw_tools_contract::NOTIFICATIONS, Some(&push)) {
                 Ok(record) => print(&record),
                 Err(error) => fail(error),
             }

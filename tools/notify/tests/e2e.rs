@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::get;
 use rhema_tools_common::{Client, Config, ToolError};
-use rhema_tools_contract::NotificationPush;
+use rhema_claw_tools_contract::NotificationPush;
 use serde_json::{Value, json};
 
 /// What the fake daemon recorded, for the test to assert on.
@@ -82,7 +82,7 @@ async fn a_push_rides_the_contract_and_prints_the_row() {
     let row = client
         .call(
             "POST",
-            rhema_tools_contract::NOTIFICATIONS,
+            rhema_claw_tools_contract::NOTIFICATIONS,
             Some(&NotificationPush {
                 title: "CI is red".into(),
                 body: "main failed".into(),
@@ -111,7 +111,7 @@ async fn a_refused_call_maps_to_denied() {
     let error = client
         .call(
             "POST",
-            rhema_tools_contract::NOTIFICATIONS,
+            rhema_claw_tools_contract::NOTIFICATIONS,
             Some(&NotificationPush {
                 title: "x".into(),
                 body: "y".into(),

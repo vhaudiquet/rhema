@@ -7,7 +7,7 @@
 
 use std::io::Write;
 
-use rhema_tools_contract::{ApiError, CONTRACT_HEADER, CONTRACT_VERSION};
+use rhema_claw_tools_contract::{ApiError, CONTRACT_HEADER, CONTRACT_VERSION};
 use serde::Serialize;
 use serde_json::Value;
 
