@@ -59,7 +59,7 @@ pub fn discover(agents: Option<&Path>, global: Option<&Path>, workspace: &Path) 
     if let Some(global) = global {
         collect_into(global, &mut by_name);
     }
-    collect_into(&workspace.join(".rhema").join("skills"), &mut by_name);
+    collect_into(&rhema_core::workspace::skills_dir(workspace), &mut by_name);
     by_name.into_values().collect()
 }
 

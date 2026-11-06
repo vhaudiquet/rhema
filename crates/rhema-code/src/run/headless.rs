@@ -336,8 +336,5 @@ pub(crate) fn failed_checkpoint_path(workspace: &std::path::Path) -> std::path::
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or_default();
-    workspace
-        .join(".rhema")
-        .join("runs")
-        .join(format!("failed-{secs}.json"))
+    rhema_core::workspace::runs_dir(workspace).join(format!("failed-{secs}.json"))
 }

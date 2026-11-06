@@ -505,7 +505,10 @@ async fn ensure_seeded(
             .map_err(TurnStateError::from)?;
     }
     for skill in &config.skills {
-        let path = format!("{}/.rhema/skills/{}/SKILL.md", config.workspace, skill.name);
+        let path = rhema_core::workspace::skills_dir(std::path::Path::new(&config.workspace))
+            .join(&skill.name)
+            .join("SKILL.md");
+        let path = path.display().to_string();
         sandbox
             .write_file(&path, skill.body.as_bytes())
             .await

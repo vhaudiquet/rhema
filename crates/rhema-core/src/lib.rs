@@ -11,6 +11,8 @@
 //! - [`message`] — `Role`, `Content`, `Message`, the `Image` block
 //! - [`paste`] — embedded pastes in message text: the chip codec
 //! - [`session`] — the caller-owned, serializable `Session`
+//! - [`workspace`] — the checkout's directory conventions: `.rhema`
+//!   and the tiers under it
 //! - [`request`] — `ModelRequest`, `ChatParams`, `ToolSpec`
 //! - [`output`] — `ModelOutput`, `StopReason`, `Usage`, `Step`
 //! - [`provider`] — the `ModelProvider` seam
@@ -32,6 +34,7 @@ pub mod provider;
 pub mod request;
 pub mod session;
 pub mod tool;
+pub mod workspace;
 
 // Re-exported so implementors of the async seams can apply #[async_trait]
 // without adding the crate themselves.
@@ -49,3 +52,4 @@ pub use tool::{
     OutputOnly, ReplaySafety, ToolCall, ToolContext, ToolProgress, ToolResolver, ToolResult,
     ToolStatus,
 };
+pub use workspace::{rhema_dir, runs_dir, skills_dir, subagents_dir};

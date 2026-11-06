@@ -41,6 +41,8 @@ Rules:
     (`src/output.rs`)
   - `provider` — the `ModelProvider` seam (`src/provider.rs`)
   - `tool` — the `ToolResolver` seam (`src/tool.rs`)
+  - `workspace` — the checkout's directory conventions: `.rhema` and
+    the tiers under it (`src/workspace.rs`)
   - `event` — `Event`, `EventSink` (`src/event.rs`)
   - `engine` — the `Agent` step engine and `run_turn`
     (`src/engine.rs`)

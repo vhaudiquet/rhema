@@ -93,7 +93,10 @@ pub fn discover(global: Option<&Path>, workspace: &Path) -> Vec<SubagentDef> {
     if let Some(global) = global {
         collect_into(global, &mut by_name);
     }
-    collect_into(&workspace.join(".rhema").join("subagents"), &mut by_name);
+    collect_into(
+        &rhema_core::workspace::subagents_dir(workspace),
+        &mut by_name,
+    );
     by_name.into_values().collect()
 }
 

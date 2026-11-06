@@ -9,6 +9,15 @@ use super::*;
 /// `workspace:seeded` meta row.
 const SEED_MARKER: &str = ".seeded";
 
+/// A path inside the sandbox's workspace, as the wire wants it: the
+/// guest path is a string, the convention lives in rhema-core.
+fn guest_path(workspace: &str, relative: &str) -> String {
+    rhema_core::workspace::rhema_dir(Path::new(workspace))
+        .join(relative)
+        .display()
+        .to_string()
+}
+
 /// The user's global skills directory, when it exists on disk — the
 /// read-only `skills` mount's source. Absent, nothing is mounted and
 /// discovery sees workspace skills only, as it always has.
@@ -42,7 +51,7 @@ pub(crate) async fn ensure_seeded(
     base_system: Option<&str>,
 ) -> anyhow::Result<()> {
     if sandbox
-        .read_file(&format!("{workspace}/.rhema/{SEED_MARKER}"))
+        .read_file(&guest_path(workspace, SEED_MARKER))
         .await
         .is_ok()
     {
@@ -53,12 +62,12 @@ pub(crate) async fn ensure_seeded(
         .context("seeding the sandbox workspace")?;
     if let Some(system) = base_system {
         sandbox
-            .write_file(&format!("{workspace}/.rhema/SYSTEM.md"), system.as_bytes())
+            .write_file(&guest_path(workspace, "SYSTEM.md"), system.as_bytes())
             .await
             .context("seeding SYSTEM.md")?;
     }
     sandbox
-        .write_file(&format!("{workspace}/.rhema/{SEED_MARKER}"), b"1")
+        .write_file(&guest_path(workspace, SEED_MARKER), b"1")
         .await
         .context("writing the seed marker")?;
     Ok(())
@@ -105,10 +114,9 @@ pub(crate) fn discovered_skills(
             name: skill.name.clone(),
             description: skill.description,
             license: skill.license,
-            path: PathBuf::from(format!(
-                "{sandbox_workspace}/.rhema/skills/{}/SKILL.md",
-                skill.name
-            )),
+            path: rhema_core::workspace::skills_dir(Path::new(&sandbox_workspace))
+                .join(&skill.name)
+                .join("SKILL.md"),
             body: skill.body,
         });
     }

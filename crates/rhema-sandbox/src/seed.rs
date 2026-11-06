@@ -24,8 +24,12 @@ pub async fn seed_workspace(
             .seed(&WorkspaceSeed::GitClone(url.to_owned()))
             .await?;
     }
+    let workspace = std::path::Path::new(workspace);
     for (name, body) in skills {
-        let path = format!("{workspace}/.rhema/skills/{name}/SKILL.md");
+        let path = rhema_core::workspace::skills_dir(workspace)
+            .join(name)
+            .join("SKILL.md");
+        let path = path.display().to_string();
         sandbox
             .write_file(&path, body.as_bytes())
             .await
