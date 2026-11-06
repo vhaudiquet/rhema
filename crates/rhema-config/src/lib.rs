@@ -859,6 +859,12 @@ pub struct Config {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
+    /// What paints behind the ink: `rhema` (the default) paints the
+    /// palette's fills over the whole screen, `native` leaves the
+    /// terminal's own background in place. Validated by the consumer,
+    /// not here — anything unparseable reads as the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
     /// The UI color palette: `rhema` (the default), `aquamarine`,
     /// `black-and-white`, `dracula`, `catppuccin-frappe`,
     /// `catppuccin-macchiato`, `catppuccin-mocha`, `nord`, `gruvbox`,
@@ -935,6 +941,7 @@ impl Default for Config {
             icons: None,
             theme: None,
             colors: None,
+            background: None,
             m3_source: None,
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
@@ -1450,6 +1457,7 @@ profiles:
             icons: None,
             theme: Some("light".into()),
             colors: Some("rhema".into()),
+            background: None,
             m3_source: Some("#6750A4".into()),
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
@@ -1797,6 +1805,19 @@ profiles:
     }
 
     #[test]
+    fn the_background_choice_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(&path, "background: native\n").unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.background.as_deref(), Some("native"));
+        // Unset reads as None, the rhema fills.
+        std::fs::write(&path, "theme: dark\n").unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.background, None);
+    }
+
+    #[test]
     fn the_custom_palette_round_trips_and_rejects_typos() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
@@ -1880,6 +1901,7 @@ profiles:
             icons: None,
             theme: None,
             colors: None,
+            background: None,
             m3_source: None,
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
@@ -2108,6 +2130,7 @@ profiles:
             icons: None,
             theme: None,
             colors: None,
+            background: None,
             m3_source: None,
             custom: None,
             last_profile_by_workspace: BTreeMap::new(),
