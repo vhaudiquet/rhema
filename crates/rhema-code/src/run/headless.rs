@@ -141,7 +141,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         }
     };
     migrate_stored_keys(&mut config);
-    let secrets = KeyringSecretStore::new();
+    let secrets = KeyringSecretStore::named(rhema_config::secrets::RHEMA_SERVICE);
     // Same profile resolution as the TUI: an explicit --profile is
     // honored as named, a directory with a remembered profile reopens on
     // it, an absent one starts on a profile that can serve turns. No
@@ -183,7 +183,12 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)
         .unwrap_or_else(|| effective.thinking_effort());
-    let base_system = resolve_base_system(Config::system_prompt_path().ok().as_deref());
+    let base_system = resolve_base_system(
+        rhema_config::Home::discover()
+            .ok()
+            .map(|home| home.system_prompt())
+            .as_deref(),
+    );
     let mut agent_config = rhema_coding_agent::CodingAgentConfig {
         max_turn_steps: args.max_steps,
         transcript: (!args.no_transcript).then(rhema_transcript::TranscriptSettings::default),

@@ -80,5 +80,5 @@ pub use screens::{
     AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, ResumeAction,
     ResumeScreen, SettingsAction, SettingsScreen, SettingsSection,
 };
-pub use store::{ConfigStore, DiskStore, MemoryStore};
+pub use store::{ConfigStore, CustomPalette, CustomTokens, DiskStore, Document, MemoryStore};
 pub use transcript::{Line, Transcript};

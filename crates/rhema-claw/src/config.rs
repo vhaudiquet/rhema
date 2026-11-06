@@ -210,7 +210,7 @@ impl ClawConfig {
     /// The default config path: `<config-base>/rhema/claw.yaml`, the same
     /// base the stored rhema config lives under.
     pub fn default_path() -> Result<PathBuf, ConfigError> {
-        Ok(rhema_config::Config::dir()?.join("claw.yaml"))
+        Ok(rhema_config::Home::discover()?.config.join("claw.yaml"))
     }
 
     /// The state dir: `$XDG_STATE_HOME/rhema/claw`, else

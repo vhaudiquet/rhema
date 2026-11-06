@@ -271,7 +271,10 @@ fn harness_inner(
         );
     }
     let config = Config {
-        profiles: BTreeMap::from([("personal".to_owned(), personal)]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([("personal".to_owned(), personal)]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     let store = Arc::new(MemoryStore::new(config.clone()));
@@ -2781,10 +2784,13 @@ fn startup_without_a_flag_starts_on_a_ready_profile() {
     // personal is empty, work is logged in: the session starts on
     // work instead of the login screen.
     let config = Config {
-        profiles: BTreeMap::from([
-            ("personal".to_owned(), rhema_config::Profile::default()),
-            ("work".to_owned(), work_ready.clone()),
-        ]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), rhema_config::Profile::default()),
+                ("work".to_owned(), work_ready.clone()),
+            ]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     assert_eq!(
@@ -2793,10 +2799,13 @@ fn startup_without_a_flag_starts_on_a_ready_profile() {
     );
     // personal can serve turns: the default stands.
     let config = Config {
-        profiles: BTreeMap::from([
-            ("personal".to_owned(), keyed_profile("google", "k")),
-            ("work".to_owned(), work_ready.clone()),
-        ]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), keyed_profile("google", "k")),
+                ("work".to_owned(), work_ready.clone()),
+            ]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     assert_eq!(
@@ -2815,10 +2824,13 @@ fn startup_without_a_flag_starts_on_a_ready_profile() {
     let mut keyed = rhema_config::Profile::default();
     store_key(&mut keyed, "google", "k");
     let config = Config {
-        profiles: BTreeMap::from([
-            ("personal".to_owned(), keyed),
-            ("work".to_owned(), work_ready),
-        ]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), keyed),
+                ("work".to_owned(), work_ready),
+            ]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     assert_eq!(
@@ -2831,10 +2843,13 @@ fn startup_without_a_flag_starts_on_a_ready_profile() {
 fn a_workspace_reopens_on_the_profile_it_last_used() {
     let ready = |key: &str| keyed_profile("google", key);
     let mut config = Config {
-        profiles: BTreeMap::from([
-            ("personal".to_owned(), ready("k")),
-            ("work".to_owned(), ready("w")),
-        ]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), ready("k")),
+                ("work".to_owned(), ready("w")),
+            ]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     // Both profiles can serve turns, and proj last ran on work: the
@@ -2889,10 +2904,13 @@ fn offered(
 #[test]
 fn startup_sandbox_prefers_the_stored_kind_while_it_is_offered() {
     let config = Config {
-        profiles: BTreeMap::from([(
-            rhema_config::DEFAULT_PROFILE.to_owned(),
-            sandbox_kind_profile("docker"),
-        )]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([(
+                rhema_config::DEFAULT_PROFILE.to_owned(),
+                sandbox_kind_profile("docker"),
+            )]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     let profile = config.effective(None);
@@ -2934,7 +2952,10 @@ fn startup_sandbox_prefers_the_stored_kind_while_it_is_offered() {
 #[test]
 fn startup_sandbox_falls_through_an_unoffered_stored_kind_to_the_remembered_one() {
     let mut config = Config {
-        profiles: BTreeMap::from([("default".to_owned(), sandbox_kind_profile("docker"))]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([("default".to_owned(), sandbox_kind_profile("docker"))]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     config.note_sandbox_in(Path::new("/proj"), "ssh");
@@ -3032,10 +3053,13 @@ fn startup_sandbox_reads_the_real_env_through_sandbox_kind() {
         return;
     }
     let config = Config {
-        profiles: BTreeMap::from([(
-            rhema_config::DEFAULT_PROFILE.to_owned(),
-            sandbox_kind_profile("docker"),
-        )]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([(
+                rhema_config::DEFAULT_PROFILE.to_owned(),
+                sandbox_kind_profile("docker"),
+            )]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     let profile = config.effective(None);
@@ -3810,16 +3834,19 @@ fn a_logged_in_profile_opens_the_chat_without_the_login_screen() {
     // backend from its section, and hand both to App::new. personal
     // is empty, work is ready with a model.
     let config = Config {
-        profiles: BTreeMap::from([
-            ("personal".to_owned(), rhema_config::Profile::default()),
-            (
-                "work".to_owned(),
-                rhema_config::Profile {
-                    model: Some("work-model".into()),
-                    ..keyed_profile("openrouter", "work-key")
-                },
-            ),
-        ]),
+        settings: rhema_config::Settings {
+            profiles: BTreeMap::from([
+                ("personal".to_owned(), rhema_config::Profile::default()),
+                (
+                    "work".to_owned(),
+                    rhema_config::Profile {
+                        model: Some("work-model".into()),
+                        ..keyed_profile("openrouter", "work-key")
+                    },
+                ),
+            ]),
+            ..rhema_config::Settings::default()
+        },
         ..Default::default()
     };
     let profile = startup_profile(&config, Path::new("/nowhere"), None);

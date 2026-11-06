@@ -176,6 +176,10 @@ impl AgentAssembly {
             // handle, and a cheap second one is a later decision.
             summary_worker: None,
             steering: None,
+            // The sandbox is the only filesystem the agent sees: no
+            // directory conventions to discover, the seeds it was
+            // sent are the whole story.
+            home: None,
             // Commands run in the deployment's remote sandbox, so the
             // environment section claims no host facts — the notice
             // names where bash runs and defers to the sandbox itself.

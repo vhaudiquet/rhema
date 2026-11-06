@@ -85,7 +85,10 @@ Rules:
     autonomous-agent consumer (`crates/rhema-claw/`)
   - `acp` — the Agent Client Protocol adapter and the `rhema acp`
     subcommand (`crates/rhema-acp/`)
-  - `config` — stored settings and credentials (`crates/rhema-config/`)
+  - `config` — the framework's stored section (profiles, the
+    credentials rule, the persisted off switches), the directory
+    conventions (`Home`), and the `Store` seam a frontend implements
+    (`crates/rhema-config/`)
   - `agent-tools` — the shared toolkit: the approval-gated shell, the
     `Approval` and `Overlay` seams, skills, paste expansion, revive,
     the `see` vision macro, the prompt renderer

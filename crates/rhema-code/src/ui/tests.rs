@@ -783,8 +783,11 @@ mod scroll_tests {
                 base_url: None,
             },
         );
-        let config = rhema_config::Config {
-            profiles: BTreeMap::from([("personal".to_owned(), personal)]),
+        let config = crate::store::Config {
+            settings: rhema_config::Settings {
+                profiles: BTreeMap::from([("personal".to_owned(), personal)]),
+                ..rhema_config::Settings::default()
+            },
             ..Default::default()
         };
         App::new(AppSetup {

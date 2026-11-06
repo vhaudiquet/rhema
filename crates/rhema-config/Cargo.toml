@@ -20,6 +20,9 @@ keyring = { version = "4", default-features = false, features = ["v1"] }
 
 [dev-dependencies]
 tempfile = "3"
+# The foreign-format example and its test: the Store seam over a
+# JSON envelope, the GodCode story in miniature
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

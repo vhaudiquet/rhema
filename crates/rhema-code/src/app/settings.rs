@@ -55,7 +55,7 @@ impl App {
         let effective = config.effective(session_profile);
         let workspace =
             std::fs::canonicalize(&options.workspace).unwrap_or_else(|_| options.workspace.clone());
-        let agents_dir = home.map(rhema_config::Config::agents_dir_under);
+        let agents_dir = home.map(|home| rhema_config::Home::under_home(home).agents_skills());
         let global_skills = config_root.map(|root| root.join("skills"));
         let skills = skill_rows(
             agents_dir.as_deref(),
@@ -92,7 +92,8 @@ impl App {
             .join("subagents")
             .to_string_lossy()
             .into_owned();
-        settings.config_path = rhema_config::Config::path()
+        settings.config_path = rhema_config::Home::discover()
+            .map(|home| home.config_file())
             .ok()
             .map(|path| path.to_string_lossy().into_owned());
         settings.workspace = workspace.to_string_lossy().into_owned();
@@ -289,7 +290,7 @@ impl App {
         }
         // Only the built-in row reaches here; its shadow lands in the
         // global directory discovery reads first.
-        match rhema_config::Config::dir() {
+        match rhema_config::Home::discover().map(|home| home.config) {
             Ok(dir) => match shadow_builtin(&dir, &row.name) {
                 Ok(path) => vec![Effect::EditSubagent(path)],
                 Err(err) => {

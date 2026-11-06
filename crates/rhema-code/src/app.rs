@@ -6,9 +6,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::store::Config;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig, CodingAgentError};
-use rhema_config::Config;
 use rhema_core::{
     AgentError, Content, Image, Message, ModelOutput, ModelProvider, Session, StopReason, ToolCall,
     Usage,
@@ -380,17 +380,15 @@ impl App {
         // Startup reads straight off the config: App::effective exists on
         // the struct, which does not exist yet.
         let effective = setup.config.effective(setup.options.profile.as_deref());
-        let config_root = match setup.home.clone() {
-            Some(home) => Some(rhema_config::Config::dir_under(&home)),
-            None => rhema_config::Config::dir().ok(),
+        let rhema_home = match setup.home.clone() {
+            Some(home) => Some(rhema_config::Home::under_home(&home)),
+            None => rhema_config::Home::discover().ok(),
         };
+        let config_root = rhema_home.as_ref().map(|home| home.config.clone());
         let screen = if setup.onboard {
             let workspace = std::fs::canonicalize(&setup.options.workspace)
                 .unwrap_or_else(|_| setup.options.workspace.clone());
-            let agents = setup
-                .home
-                .as_deref()
-                .map(rhema_config::Config::agents_dir_under);
+            let agents = rhema_home.as_ref().map(|home| home.agents_skills());
             let skills = skill_rows(
                 agents.as_deref(),
                 config_root

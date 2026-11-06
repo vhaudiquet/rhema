@@ -100,16 +100,18 @@ impl App {
     /// The config in force: the test override when one is injected,
     /// the stored file otherwise.
     #[cfg(feature = "mock")]
-    pub(crate) fn load_config(options: &AcpOptions) -> Result<Config, rhema_config::ConfigError> {
+    pub(crate) fn load_config(options: &AcpOptions) -> Result<Settings, rhema_config::ConfigError> {
         if let Some(config) = &options.config {
             return Ok(config.clone());
         }
-        Config::load()
+        Settings::load()
     }
 
     #[cfg(not(feature = "mock"))]
-    pub(crate) fn load_config(_options: &AcpOptions) -> Result<Config, rhema_config::ConfigError> {
-        Config::load()
+    pub(crate) fn load_config(
+        _options: &AcpOptions,
+    ) -> Result<Settings, rhema_config::ConfigError> {
+        Settings::load()
     }
 
     pub(crate) fn new(options: AcpOptions) -> Self {
@@ -117,12 +119,13 @@ impl App {
             Ok(config) => config,
             Err(err) => {
                 eprintln!("rhema-acp: warning: ignoring unreadable rhema config: {err}");
-                Config::default()
+                Settings::default()
             }
         };
         let effective = config.effective(options.profile.as_deref());
-        let base_system = Config::system_prompt_path()
+        let base_system = rhema_config::Home::discover()
             .ok()
+            .map(|home| home.system_prompt())
             .and_then(|path| std::fs::read_to_string(path).ok());
         let base = options
             .session_dir
@@ -131,7 +134,9 @@ impl App {
         Self {
             options,
             effective,
-            secrets: rhema_config::secrets::KeyringSecretStore::new(),
+            secrets: rhema_config::secrets::KeyringSecretStore::named(
+                rhema_config::secrets::RHEMA_SERVICE,
+            ),
             base_system,
             base,
             sessions: Mutex::new(HashMap::new()),

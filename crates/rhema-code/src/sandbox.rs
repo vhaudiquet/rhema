@@ -302,8 +302,9 @@ pub async fn assemble(
         // The mount and ssh postures see the workspace at its own path.
         _ => host_workspace,
     };
-    let agents = rhema_config::Config::agents_skills_dir().ok();
-    let global = rhema_config::Config::skills_dir().ok();
+    let home = rhema_config::Home::discover().ok();
+    let agents = home.as_ref().map(|home| home.agents_skills());
+    let global = home.as_ref().map(|home| home.skills());
     let (skills, owned_bodies) = discovered_skills(
         agents.as_deref(),
         global.as_deref(),

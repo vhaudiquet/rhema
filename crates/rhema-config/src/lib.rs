@@ -1,24 +1,39 @@
-//! Persistent rhema settings: the registry of named profiles.
+//! The settings contract between rhema and its frontends.
 //!
-//! The file lives at `$XDG_CONFIG_HOME/rhema/config.yaml`, written with
-//! `0600` permissions since it holds credentials. Which profile a session
-//! runs under is chosen per invocation (`--profile`) or per session
-//! (`/profile`) — it is never stored as a global switch, so parallel
-//! instances (work and personal side by side) never fight over one
-//! toggle. What is kept, per workspace, is the last profile that served
-//! it a turn — a directory reopens on the profile it last used, never
-//! overriding an explicit flag.
+//! rhema is a framework: the agent driver, the providers, the sandbox
+//! and MCP wiring — and any number of frontends built on top, each one
+//! owning the user-facing product. This crate is what they agree on:
+//! the [`Settings`] every frontend must be able to store and read,
+//! whatever file, directory, or format it keeps them in; the [`Store`]
+//! seam a frontend implements to put them wherever it likes; the
+//! [`Home`] of directory conventions; and the [`secrets`] seam, whose
+//! OS keychain backend is namespaced per frontend, so two frontends
+//! never share credentials by accident.
+//!
+//! The reference frontend keeps its whole file — the [`Settings`]
+//! section beside its own UI section — at
+//! `$XDG_CONFIG_HOME/rhema/config.yaml`, written with `0600`
+//! permissions since the section can hold credentials. A different
+//! frontend keeps them under its own directory, in its own format: it
+//! embeds [`Settings`] as one serde field, implements [`Store`], and
+//! the framework itself reads no path and parses no format. See
+//! `examples/godcode.rs` for that story in one runnable file.
+//!
+//! Which profile a session runs under is chosen per invocation
+//! (`--profile`) or per session (`/profile`) — it is never stored as a
+//! global switch, so parallel instances (work and personal side by
+//! side) never fight over one toggle.
 //!
 //! A profile holds any number of named [`ProviderInstance`]s — two
 //! llama.cpp servers, a work and a personal Copilot sub — with one of
 //! them active (`provider` + `instance`).
 //!
-//! A key lives in one of two places: the OS keychain, which the file
-//! references by an opaque `secret_ref` ([`secrets`]), or the file
-//! itself as the literal `api_key` — the fallback on machines with no
-//! reachable keychain. [`Profile::place_key`] and
-//! [`Config::migrate_secrets`] prefer the keychain and only fall back
-//! to the literal when the store refuses; resolution reads the
+//! A key lives in one of two places: the OS keychain, which the
+//! settings reference by an opaque `secret_ref` ([`secrets`]), or the
+//! store itself as the literal `api_key` — the fallback on machines
+//! with no reachable keychain. [`Profile::place_key`] and
+//! [`Settings::migrate_secrets`] prefer the keychain and only fall
+//! back to the literal when the store refuses; resolution reads the
 //! keychain first on every tier.
 //!
 //! Environment variables (`RHEMA_PROVIDER`, `GEMINI_API_KEY`,
@@ -53,9 +68,9 @@ fn redacted(value: &Option<String>) -> Option<&'static str> {
 /// Why a config operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
-    /// Neither `XDG_CONFIG_HOME` nor `HOME` is set, so the config directory
-    /// cannot be located.
-    #[error("cannot locate the config directory: neither XDG_CONFIG_HOME nor HOME is set")]
+    /// `HOME` is not set, so the user home — and every convention that
+    /// hangs off it, the config base included — cannot be located.
+    #[error("cannot locate the home directory: HOME is not set")]
     NoHome,
     /// Reading or writing the file failed.
     #[error(transparent)]
@@ -63,6 +78,10 @@ pub enum ConfigError {
     /// The YAML file is not valid or not the expected shape.
     #[error(transparent)]
     Yaml(#[from] serde_yaml::Error),
+    /// A foreign [`Store`] refused the section: its own parse or
+    /// format error, carried verbatim.
+    #[error("settings store: {0}")]
+    Store(String),
 }
 
 /// One logged-in provider instance: a named credential set for a single
@@ -82,10 +101,11 @@ pub struct ProviderInstance {
     /// Environment variables still win at use time.
     pub api_key: Option<String>,
     /// The keychain entry holding the key, when it is not in this
-    /// file: an opaque id under the `rhema` service, resolved through
-    /// the [`secrets`] seam. Written by [`Profile::place_key`] and
-    /// [`Config::migrate_secrets`]; a literal `api_key` and a live
-    /// `secret_ref` never hold the same key at rest.
+    /// file: an opaque id under the frontend's keychain service,
+    /// resolved through the [`secrets`] seam. Written by
+    /// [`Profile::place_key`] and [`Settings::migrate_secrets`]; a
+    /// literal `api_key` and a live `secret_ref` never hold the same
+    /// key at rest.
     pub secret_ref: Option<String>,
     /// The server base URL: the llama.cpp address, an OpenAI-compatible
     /// endpoint's base, or a Z.ai route override. Unset means the
@@ -128,8 +148,8 @@ pub struct SandboxInstance {
 /// Where `bash` runs when a frontend honors the stored choice: the
 /// [`Profile`] section behind the sandbox kinds `local`, `docker`,
 /// `ssh`, and `http`. Every field is stored as a string and validated
-/// by the consumer — the same stance as `provider`, `icons`, and
-/// `colors`: rhema-config stores, the frontend parses. A profile
+/// by the consumer — the same stance as every stored name:
+/// rhema-config stores, the frontend parses. A profile
 /// without this section and a `kind: local` section are the same
 /// behavior: today's local process executor.
 #[derive(Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -782,67 +802,19 @@ fn provider_env_names(provider: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
-/// The `custom` palette's token overrides, per appearance. A shell
-/// process (a wallpaper watcher, a pywal-style generator) writes these;
-/// the TUI reads them at startup. Any token left out — or written in a
-/// form that is not a `#RRGGBB` color — reads as the rhema default for
-/// that slot, so a partial file is an overlay, not a broken theme.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct CustomPalette {
-    /// The dark appearance's tokens.
-    pub dark: Option<CustomTokens>,
-    /// The light appearance's tokens.
-    pub light: Option<CustomTokens>,
-}
-
-/// One appearance of the `custom` palette: the design tokens by name,
-/// each an optional `#RRGGBB` (or `RRGGBB`) string. Unknown keys are
-/// rejected: a typo'd token must not silently read as unset.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct CustomTokens {
-    /// Page canvas.
-    pub ground: Option<String>,
-    /// Panels and cards.
-    pub surface: Option<String>,
-    /// Popovers, hovered rows.
-    pub elevated: Option<String>,
-    /// Code blocks, log view, the transcript well.
-    pub sunken: Option<String>,
-    /// Hairlines.
-    pub border: Option<String>,
-    /// Dividers that must read.
-    pub border_strong: Option<String>,
-    /// Body text.
-    pub text: Option<String>,
-    /// Secondary text.
-    pub text2: Option<String>,
-    /// Hints only.
-    pub text3: Option<String>,
-    /// Fills, rules, the mark.
-    pub accent: Option<String>,
-    /// Accent as text or icon.
-    pub accent_text: Option<String>,
-    /// Labels ON an accent fill.
-    pub on_accent: Option<String>,
-    /// A call in flight.
-    pub running: Option<String>,
-    /// Success.
-    pub ok: Option<String>,
-    /// Caution.
-    pub warn: Option<String>,
-    /// A real failure.
-    pub error: Option<String>,
-    /// Queued, idle, neutral notice.
-    pub info: Option<String>,
-}
-
-/// The persisted settings: the registry of named profiles. Unknown keys
-/// are rejected: a typo'd key must not silently read as its default.
+/// The framework's own section of the settings: what any frontend
+/// built on rhema must be able to store and read, whatever document
+/// it co-locates them in. Everything beyond this — themes, palettes,
+/// onboarding state, per-workspace reopen memory — is the frontend's
+/// own section, in the frontend's own file.
+///
+/// Unknown keys are rejected: a typo'd key must not silently read as
+/// its default. A frontend embedding the section into a bigger
+/// document inherits the same strictness for these keys — a typo in
+/// the framework's vocabulary is loud wherever it lands.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
-pub struct Config {
+pub struct Settings {
     /// Named profiles; each stands alone. Fresh setups ship `personal`
     /// and `work`.
     #[serde(
@@ -850,71 +822,18 @@ pub struct Config {
         skip_serializing_if = "BTreeMap::is_empty"
     )]
     pub profiles: BTreeMap<String, Profile>,
-    /// The footer's icon flavor: `unicode` (the default) or `nerd` for
-    /// Nerd Font glyphs. Anything unparseable reads as the default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub icons: Option<String>,
-    /// The color theme: `dark` (the default) or `light`. Validated by
-    /// the consumer, not here — anything unparseable reads as the
-    /// default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
-    /// What paints behind the ink: `rhema` (the default) paints the
-    /// palette's fills over the whole screen, `native` leaves the
-    /// terminal's own background in place. Validated by the consumer,
-    /// not here — anything unparseable reads as the default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub background: Option<String>,
-    /// The UI color palette: `rhema` (the default), `aquamarine`,
-    /// `black-and-white`, `dracula`, `catppuccin-frappe`,
-    /// `catppuccin-macchiato`, `catppuccin-mocha`, `nord`, `gruvbox`,
-    /// `solarized`, `m3-you`, or `custom`. Validated by the consumer,
-    /// not here — anything unparseable reads as the default.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub colors: Option<String>,
-    /// The seed color of the `m3-you` palette, `#RRGGBB`: pick one from
-    /// your wallpaper (a terminal cannot see it). Unset means Material's
-    /// baseline purple. Ignored by every other palette.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub m3_source: Option<String>,
-    /// The `custom` palette's token overrides, per appearance: the hook
-    /// a wallpaper watcher or scheme generator writes. Read by the
-    /// consumer when `colors` is `custom`; anything it leaves out reads
-    /// as the rhema default for that slot.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub custom: Option<CustomPalette>,
-    /// The last profile that served each workspace a turn, keyed by the
-    /// workspace's absolute path. Startup reopens a directory on its
-    /// last-used profile — a per-directory memory, never a global
-    /// switch, so parallel instances in different directories stay
-    /// independent.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub last_profile_by_workspace: BTreeMap<String, String>,
-    /// The last sandbox kind each workspace ran `bash` under, keyed by
-    /// the workspace's absolute path — the sandbox twin of
-    /// `last_profile_by_workspace`. A directory reopens on the kind it
-    /// last used, never overriding an explicit flag or `RHEMA_SANDBOX`.
-    /// The kind is stored as given; whether this machine still offers
-    /// it is the consumer's question.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub last_sandbox_by_workspace: BTreeMap<String, String>,
-    /// Where the first-run onboarding stands. `Some(false)` — the
-    /// wizard opened but did not finish — reopens it on the next
-    /// start; `Some(true)` never shows it again. `None`, the default,
-    /// is a config that predates the wizard and reads as onboarded.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub onboarded: Option<bool>,
     /// Skill folder names whose triggers must not reach the system
-    /// prompt: the off switch behind the settings Skills page and the
-    /// onboarding step. Discovered-but-disabled skills still list
-    /// (greyed) everywhere; only the prompt filters them out.
+    /// prompt: the persisted off switch a frontend's skill management
+    /// writes and the agent assembly honors. Discovered-but-disabled
+    /// skills may still be listed by the frontend, greyed out; only
+    /// the prompt filters them out.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub skills_disabled: BTreeSet<String>,
     /// MCP server names held back from the manager, the prompt, and
-    /// the agent's shells: the off switch behind the settings MCP
-    /// page, the skills set's twin. Names are matched against every
-    /// scope's servers (the global file and each profile), so a name
-    /// another profile does not define is simply inert.
+    /// the agent's shells: the persisted off switch, the skills set's
+    /// twin. Names are matched against every scope's servers (the
+    /// global file and each profile), so a name another profile does
+    /// not define is simply inert.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub disabled_mcp_servers: BTreeSet<String>,
 }
@@ -931,35 +850,26 @@ fn default_profiles() -> BTreeMap<String, Profile> {
     ])
 }
 
-impl Default for Config {
-    /// Fresh setups ship with the two everyday profiles. Loaded files
-    /// missing the key get the same treatment via the field-level serde
-    /// default.
+impl Default for Settings {
+    /// Fresh setups ship with the two everyday profiles. Loaded
+    /// documents missing the key get the same treatment via the
+    /// field-level serde default.
     fn default() -> Self {
         Self {
             profiles: default_profiles(),
-            icons: None,
-            theme: None,
-            colors: None,
-            background: None,
-            m3_source: None,
-            custom: None,
-            last_profile_by_workspace: BTreeMap::new(),
-            last_sandbox_by_workspace: BTreeMap::new(),
-            onboarded: None,
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
         }
     }
 }
 
-impl Config {
+impl Settings {
     /// The settings that apply for `flag` (or `personal` when absent).
     ///
     /// ISOLATION: a profile's section is authoritative — work never
     /// inherits personal's model or keys. An unknown name resolves to an
-    /// empty profile; the caller decides how to present that (the TUI
-    /// says "no provider; use /login").
+    /// empty profile; the caller decides how to present that (the
+    /// frontend says "no provider; log in").
     pub fn effective(&self, flag: Option<&str>) -> Profile {
         self.profiles
             .get(flag.unwrap_or(DEFAULT_PROFILE))
@@ -974,133 +884,6 @@ impl Config {
             .map(str::to_owned)
             .unwrap_or_else(|| DEFAULT_PROFILE.to_owned());
         apply(self.profiles.entry(name).or_default());
-    }
-
-    /// The profile `workspace` last served a turn under, when one was
-    /// recorded. The name is returned as stored — the caller decides
-    /// whether that profile still exists and can serve turns.
-    pub fn last_profile_in(&self, workspace: &Path) -> Option<String> {
-        self.last_profile_by_workspace
-            .get(&workspace.to_string_lossy().into_owned())
-            .cloned()
-    }
-
-    /// Records `profile` as the last one `workspace` served a turn
-    /// under. A no-op when the map already holds the name, so a turn per
-    /// keystroke never rewrites the file.
-    pub fn note_profile_in(&mut self, workspace: &Path, profile: &str) {
-        let changed = self.last_profile_in(workspace).as_deref() != Some(profile);
-        if changed {
-            self.last_profile_by_workspace
-                .insert(workspace.to_string_lossy().into_owned(), profile.to_owned());
-        }
-    }
-
-    /// The sandbox kind `workspace` last ran `bash` under, when one was
-    /// recorded. The kind is returned as stored — the caller decides
-    /// whether this machine still offers it.
-    pub fn last_sandbox_in(&self, workspace: &Path) -> Option<String> {
-        self.last_sandbox_by_workspace
-            .get(&workspace.to_string_lossy().into_owned())
-            .cloned()
-    }
-
-    /// Records `kind` as the last one `workspace` ran `bash` under. A
-    /// no-op when the map already holds the kind, so a turn per
-    /// keystroke never rewrites the file.
-    pub fn note_sandbox_in(&mut self, workspace: &Path, kind: &str) {
-        let changed = self.last_sandbox_in(workspace).as_deref() != Some(kind);
-        if changed {
-            self.last_sandbox_by_workspace
-                .insert(workspace.to_string_lossy().into_owned(), kind.to_owned());
-        }
-    }
-
-    /// The config directory under an explicit home — the seam for a
-    /// caller that resolves machine-global paths under a root of its
-    /// own (a test isolating itself from the machine, a frontend with
-    /// a relocated home). Unlike [`Self::dir`], no environment
-    /// variable redirects it.
-    pub fn dir_under(home: &Path) -> PathBuf {
-        home.join(".config").join("rhema")
-    }
-
-    /// The config directory (`<config-base>/rhema`).
-    pub fn dir() -> Result<PathBuf, ConfigError> {
-        match std::env::var("XDG_CONFIG_HOME") {
-            Ok(dir) if !dir.trim().is_empty() => Ok(PathBuf::from(dir).join("rhema")),
-            _ => match std::env::var("HOME") {
-                Ok(home) if !home.trim().is_empty() => {
-                    Ok(PathBuf::from(home).join(".config").join("rhema"))
-                }
-                _ => Err(ConfigError::NoHome),
-            },
-        }
-    }
-
-    /// The config file path (`<dir>/config.yaml`).
-    pub fn path() -> Result<PathBuf, ConfigError> {
-        Ok(Self::dir()?.join("config.yaml"))
-    }
-
-    /// The global skills directory (`<dir>/skills`), where user-wide
-    /// skills live; a workspace can add more under its own root.
-    pub fn skills_dir() -> Result<PathBuf, ConfigError> {
-        Ok(Self::dir()?.join("skills"))
-    }
-
-    /// The cross-agent skills directory under an explicit home — the
-    /// seam pairing [`Self::dir_under`]. The `.agents` convention is
-    /// fixed at the home root: other tools' skills live there, not
-    /// under any config base, so no environment variable redirects it.
-    pub fn agents_dir_under(home: &Path) -> PathBuf {
-        home.join(".agents").join("skills")
-    }
-
-    /// The cross-agent skills directory (`<home>/.agents/skills`),
-    /// where the skill-sharing convention keeps user-wide skills.
-    /// Discovery reads it at the bottom of the shadowing order, so a
-    /// rhema skill of the same name always wins.
-    pub fn agents_skills_dir() -> Result<PathBuf, ConfigError> {
-        match std::env::var("HOME") {
-            Ok(home) if !home.trim().is_empty() => Ok(Self::agents_dir_under(&PathBuf::from(home))),
-            _ => Err(ConfigError::NoHome),
-        }
-    }
-
-    /// The global subagent definitions directory (`<dir>/subagents`),
-    /// where user-wide subagents live; a workspace can add more under
-    /// its own `.rhema/subagents`.
-    pub fn subagents_dir() -> Result<PathBuf, ConfigError> {
-        Ok(Self::dir()?.join("subagents"))
-    }
-
-    /// The system prompt file (`<dir>/SYSTEM.md`), the editable base
-    /// prompt. `rhema system edit` seeds it with the built-in default,
-    /// `rhema system restore` restores it; nothing is ever written at
-    /// runtime — the file is an opt-in override.
-    pub fn system_prompt_path() -> Result<PathBuf, ConfigError> {
-        Ok(Self::dir()?.join("SYSTEM.md"))
-    }
-
-    /// Loads the config; a missing file is the default config, not an
-    /// error.
-    pub fn load() -> Result<Config, ConfigError> {
-        match Self::path() {
-            Ok(path) => Self::load_from(&path),
-            Err(ConfigError::NoHome) => Ok(Config::default()),
-            Err(err) => Err(err),
-        }
-    }
-
-    /// Persists the config, creating the directory `0700` and the file
-    /// `0600` on Unix because it holds credentials. Both modes are
-    /// re-asserted on every save, so a config that predates the rule —
-    /// or was widened elsewhere — tightens again.
-    pub fn save(&self) -> Result<(), ConfigError> {
-        let dir = Self::dir()?;
-        private_dir(&dir)?;
-        Self::save_to(&dir.join("config.yaml"), self)
     }
 
     /// Moves every stored literal key into the keychain, instance by
@@ -1134,25 +917,239 @@ impl Config {
         moved
     }
 
-    /// [`Config::load`] against an explicit file (missing file is the
-    /// default config).
-    pub fn load_from(path: &impl AsRef<Path>) -> Result<Config, ConfigError> {
-        let raw = match std::fs::read_to_string(path) {
+    /// Loads the settings from the reference file; a missing file is
+    /// the default settings, not an error. A frontend with a file of
+    /// its own parses its document and hands the framework its
+    /// section — [`Store`] is the seam.
+    pub fn load() -> Result<Settings, ConfigError> {
+        YamlStore::discover()?.load()
+    }
+
+    /// Persists to the reference file, creating the directory `0700`
+    /// and the file `0600` on Unix because the section can hold
+    /// credentials. Both modes are re-asserted on every save, so a
+    /// file that predates the rule — or was widened elsewhere —
+    /// tightens again.
+    pub fn save(&self) -> Result<(), ConfigError> {
+        YamlStore::discover()?.save(self)
+    }
+
+    /// [`Settings::load`] against an explicit file (missing file is the
+    /// default settings).
+    pub fn load_from(path: &impl AsRef<Path>) -> Result<Settings, ConfigError> {
+        YamlStore::at(path.as_ref()).load()
+    }
+
+    /// [`Settings::save`] to an explicit file, with the same `0600`
+    /// handling.
+    pub fn save_to(path: &impl AsRef<Path>, settings: &Settings) -> Result<(), ConfigError> {
+        YamlStore::at(path.as_ref()).save(settings)
+    }
+}
+
+/// The directory conventions a session reads: where the settings
+/// file, the user-wide skills, the subagent definitions, and the base
+/// system prompt live — plus the user home, because the `.agents`
+/// skills-sharing convention lives there and nowhere else.
+///
+/// The reference layout resolves both roots from the environment
+/// ([`Home::discover`]). A frontend that owns its own directory keeps
+/// its settings — and everything derived from them — under that
+/// directory instead ([`Home::relocated`]): `~/.godcode/config.yaml`,
+/// `~/.godcode/skills`, while the cross-agent convention stays at
+/// `~/.agents/skills`, where every tool shares it. Nothing downstream
+/// reaches for the environment again; it asks the [`Home`] it was
+/// handed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Home {
+    /// The user's home directory: where the `.agents/skills` sharing
+    /// convention lives — every tool's skills, not any frontend's.
+    pub home: PathBuf,
+    /// The config base: `<config-base>/rhema` for the reference
+    /// layout, the frontend's own directory for a relocated one.
+    pub config: PathBuf,
+}
+
+impl Home {
+    /// The reference layout: `config` under `XDG_CONFIG_HOME` (or
+    /// `~/.config`), `home` under `HOME`. The shape a machine running
+    /// the rhema frontend presents.
+    pub fn discover() -> Result<Self, ConfigError> {
+        Ok(Self {
+            home: user_home()?,
+            config: reference_config_base()?,
+        })
+    }
+
+    /// A relocated config base under the discovered home: the seam
+    /// for a frontend whose settings live in their own directory.
+    /// Skills, subagents, and the base prompt follow the config base;
+    /// the `.agents` convention stays machine-global.
+    pub fn relocated(config: PathBuf) -> Result<Self, ConfigError> {
+        Ok(Self {
+            home: user_home()?,
+            config,
+        })
+    }
+
+    /// Both roots explicit — containers and tests, where no
+    /// environment variable may answer.
+    pub fn at(home: PathBuf, config: PathBuf) -> Self {
+        Self { home, config }
+    }
+
+    /// The reference layout under an explicit home — the seam for a
+    /// test isolating itself from the machine: `config` under
+    /// `<home>/.config/rhema`, the same shape [`Self::discover`]
+    /// resolves, no environment variable consulted.
+    pub fn under_home(home: &Path) -> Self {
+        Self {
+            home: home.to_path_buf(),
+            config: home.join(".config").join("rhema"),
+        }
+    }
+
+    /// The settings file (`<config>/config.yaml`) under the reference
+    /// YAML store; another format keeps its own name beside it.
+    pub fn config_file(&self) -> PathBuf {
+        self.config.join("config.yaml")
+    }
+
+    /// The user-wide skills directory (`<config>/skills`); a workspace
+    /// can add more under its own root.
+    pub fn skills(&self) -> PathBuf {
+        self.config.join("skills")
+    }
+
+    /// The cross-agent skills directory (`<home>/.agents/skills`),
+    /// where the skill-sharing convention keeps user-wide skills.
+    /// Discovery reads it at the bottom of the shadowing order, so a
+    /// rhema skill of the same name always wins.
+    pub fn agents_skills(&self) -> PathBuf {
+        self.home.join(".agents").join("skills")
+    }
+
+    /// The user-wide subagent definitions directory
+    /// (`<config>/subagents`); a workspace can add more under its own
+    /// `.rhema/subagents`.
+    pub fn subagents(&self) -> PathBuf {
+        self.config.join("subagents")
+    }
+
+    /// The editable base system prompt (`<config>/SYSTEM.md`). A
+    /// `system edit` command seeds it with the built-in default,
+    /// a `system restore` restores it; nothing is ever written at
+    /// runtime — the file is an opt-in override.
+    pub fn system_prompt(&self) -> PathBuf {
+        self.config.join("SYSTEM.md")
+    }
+}
+
+/// The user's home directory (`$HOME`).
+fn user_home() -> Result<PathBuf, ConfigError> {
+    match std::env::var("HOME") {
+        Ok(home) if !home.trim().is_empty() => Ok(PathBuf::from(home)),
+        _ => Err(ConfigError::NoHome),
+    }
+}
+
+/// The reference config base (`$XDG_CONFIG_HOME/rhema`, or
+/// `~/.config/rhema`).
+fn reference_config_base() -> Result<PathBuf, ConfigError> {
+    match std::env::var("XDG_CONFIG_HOME") {
+        Ok(dir) if !dir.trim().is_empty() => Ok(PathBuf::from(dir).join("rhema")),
+        _ => Ok(user_home()?.join(".config").join("rhema")),
+    }
+}
+
+/// The settings-storage seam: where the [`Settings`] section comes
+/// from and goes. The framework ships the YAML file store; a frontend
+/// that owns its own document — its own directory, its own format —
+/// implements this over its embed of the section, and nothing
+/// downstream knows a file or a format exists.
+pub trait Store: Send + Sync {
+    /// The stored settings; a missing store is the default settings,
+    /// not an error.
+    fn load(&self) -> Result<Settings, ConfigError>;
+    /// Persists the settings. A frontend co-locating the section with
+    /// its own keys re-serializes its whole document around it, so the
+    /// document's other sections survive — best effort, as file
+    /// semantics allow.
+    fn save(&self, settings: &Settings) -> Result<(), ConfigError>;
+}
+
+/// The reference [`Store`]: `config.yaml` in YAML, the shape the file
+/// has always had. Atomic and `0600` — the section can hold literal
+/// credentials — with the directory created `0700`; both modes are
+/// re-asserted on every save, so a file that predates the rule — or
+/// was widened elsewhere — tightens again.
+#[derive(Debug, Clone)]
+pub struct YamlStore {
+    /// The file the section round-trips through.
+    pub path: PathBuf,
+}
+
+impl YamlStore {
+    /// A store over an explicit file.
+    pub fn at(path: impl Into<PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The reference file under the discovered [`Home`].
+    pub fn discover() -> Result<Self, ConfigError> {
+        Ok(Self::at(Home::discover()?.config_file()))
+    }
+}
+
+impl Store for YamlStore {
+    fn load(&self) -> Result<Settings, ConfigError> {
+        let raw = match std::fs::read_to_string(&self.path) {
             Ok(raw) => raw,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Config::default());
+                return Ok(Settings::default());
             }
             Err(err) => return Err(err.into()),
         };
         Ok(serde_yaml::from_str(&raw)?)
     }
 
-    /// [`Config::save`] to an explicit file, with the same `0600`
-    /// handling.
-    pub fn save_to(path: &impl AsRef<Path>, config: &Config) -> Result<(), ConfigError> {
-        let yaml = serde_yaml::to_string(config)?;
-        private_write_atomic(path.as_ref(), yaml.as_bytes())?;
+    fn save(&self, settings: &Settings) -> Result<(), ConfigError> {
+        if let Some(parent) = self.path.parent() {
+            private_dir(parent)?;
+        }
+        let yaml = serde_yaml::to_string(settings)?;
+        private_write_atomic(&self.path, yaml.as_bytes())?;
         Ok(())
+    }
+}
+
+/// The platform a frontend hands the framework: the directory
+/// conventions, the settings store, and the keychain namespace — the
+/// three decisions that belong to the frontend, collected at one
+/// construction site so nothing downstream resolves a path, a file,
+/// or a service name on its own.
+pub struct Platform {
+    /// The directory conventions.
+    pub home: Home,
+    /// The settings store.
+    pub store: std::sync::Arc<dyn Store>,
+    /// The credential store: entries live under the frontend's own
+    /// service name, so two frontends never share credentials by
+    /// accident.
+    pub secrets: std::sync::Arc<dyn secrets::SecretStore>,
+}
+
+impl Platform {
+    /// The reference frontend's platform: the discovered [`Home`],
+    /// the YAML file, and the `rhema` keychain namespace.
+    pub fn rhema() -> Result<Self, ConfigError> {
+        Ok(Self {
+            home: Home::discover()?,
+            store: std::sync::Arc::new(YamlStore::discover()?),
+            secrets: std::sync::Arc::new(secrets::KeyringSecretStore::named(
+                secrets::RHEMA_SERVICE,
+            )),
+        })
     }
 }
 
@@ -1204,32 +1201,26 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_and_disabled_skills_round_trip_and_default_to_quiet() {
-        // The defaults are the pre-wizard quiet state: an old config
-        // reads as onboarded, and no skill is off.
-        let fresh = Config::default();
-        assert_eq!(fresh.onboarded, None);
-        assert!(fresh.skills_disabled.is_empty());
+    fn disabled_skills_round_trip_and_default_to_quiet() {
+        // No skill is off by default.
+        assert!(Settings::default().skills_disabled.is_empty());
 
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        let config = Config {
-            onboarded: Some(false),
+        let settings = Settings {
             skills_disabled: BTreeSet::from(["commit".to_owned(), "review".to_owned()]),
-            ..Config::default()
+            ..Settings::default()
         };
-        Config::save_to(&path, &config).unwrap();
-        let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.onboarded, Some(false));
+        Settings::save_to(&path, &settings).unwrap();
+        let loaded = Settings::load_from(&path).unwrap();
         assert_eq!(
             loaded.skills_disabled,
             BTreeSet::from(["commit".to_owned(), "review".to_owned()])
         );
-        // A file written before either field existed keeps reading as
-        // the quiet state, not as an unfinished wizard.
+        // A file written before the field existed keeps reading as the
+        // quiet state.
         std::fs::write(&path, "profiles: {}\n").unwrap();
-        let old = Config::load_from(&path).unwrap();
-        assert_eq!(old.onboarded, None);
+        let old = Settings::load_from(&path).unwrap();
         assert!(old.skills_disabled.is_empty());
     }
 
@@ -1374,13 +1365,13 @@ profiles:
         command: ["true"]
         url: "http://127.0.0.1:1/mcp"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).expect("config parses");
-        let profile = &config.profiles["personal"];
+        let settings: Settings = serde_yaml::from_str(yaml).expect("settings parse");
+        let profile = &settings.profiles["personal"];
         assert_eq!(profile.mcp_servers.len(), 3);
 
         // The round trip: serialize back, empty map absent, entry
         // fields stable.
-        let round = serde_yaml::to_string(&config).unwrap();
+        let round = serde_yaml::to_string(&settings).unwrap();
         assert!(!round.contains("mcp_servers: {}"));
         assert!(round.contains("atlassian:"));
 
@@ -1402,7 +1393,7 @@ profiles:
     fn config_round_trips_through_disk_as_yaml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        let config = Config {
+        let config = Settings {
             profiles: BTreeMap::from([(
                 "personal".to_owned(),
                 Profile {
@@ -1454,26 +1445,17 @@ profiles:
                     sandbox: None,
                 },
             )]),
-            icons: None,
-            theme: Some("light".into()),
-            colors: Some("rhema".into()),
-            background: None,
-            m3_source: Some("#6750A4".into()),
-            custom: None,
-            last_profile_by_workspace: BTreeMap::new(),
-            last_sandbox_by_workspace: BTreeMap::new(),
-            onboarded: None,
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
         };
-        Config::save_to(&path, &config).unwrap();
+        Settings::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         assert!(raw.contains("instances:"), "yaml on disk: {raw}");
         assert!(raw.contains("sk-ant-123"), "yaml on disk: {raw}");
         assert!(raw.contains("gho-123"), "yaml on disk: {raw}");
         assert!(raw.contains("sk-dsk-123"), "yaml on disk: {raw}");
         assert!(!raw.contains('{'), "not json: {raw}");
-        let loaded = Config::load_from(&path).unwrap();
+        let loaded = Settings::load_from(&path).unwrap();
         assert_eq!(loaded, config);
 
         // The thinking level parses; unset and junk read as the medium
@@ -1772,7 +1754,7 @@ profiles:
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "stale").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        Config::save_to(&path, &Config::default()).unwrap();
+        Settings::save_to(&path, &Settings::default()).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "credentials file must be 0600");
     }
@@ -1781,69 +1763,24 @@ profiles:
     fn a_missing_file_loads_as_the_default_config() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.yaml");
-        assert_eq!(Config::load_from(&path).unwrap(), Config::default());
+        assert_eq!(Settings::load_from(&path).unwrap(), Settings::default());
     }
 
     #[test]
     fn fresh_setups_ship_personal_and_work_profiles() {
-        let config = Config::default();
+        let config = Settings::default();
         assert!(config.profiles.contains_key("personal"));
         assert!(config.profiles.contains_key("work"));
         // A loaded file missing the key gets the same seeding.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        std::fs::write(
-            &path,
-            "theme: light\ncolors: dracula\nm3_source: \"#4285F4\"\n",
-        )
-        .unwrap();
-        let loaded = Config::load_from(&path).unwrap();
+        std::fs::write(&path, "skills_disabled: [commit]\n").unwrap();
+        let loaded = Settings::load_from(&path).unwrap();
         assert!(loaded.profiles.contains_key("work"));
-        assert_eq!(loaded.theme.as_deref(), Some("light"));
-        assert_eq!(loaded.colors.as_deref(), Some("dracula"));
-        assert_eq!(loaded.m3_source.as_deref(), Some("#4285F4"));
-    }
-
-    #[test]
-    fn the_background_choice_round_trips() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        std::fs::write(&path, "background: native\n").unwrap();
-        let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.background.as_deref(), Some("native"));
-        // Unset reads as None, the rhema fills.
-        std::fs::write(&path, "theme: dark\n").unwrap();
-        let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded.background, None);
-    }
-
-    #[test]
-    fn the_custom_palette_round_trips_and_rejects_typos() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        std::fs::write(
-            &path,
-            "colors: custom\ncustom:\n  dark:\n    accent: \"#FF8800\"\n",
-        )
-        .unwrap();
-        let loaded = Config::load_from(&path).unwrap();
         assert_eq!(
-            loaded
-                .custom
-                .as_ref()
-                .and_then(|c| c.dark.as_ref())
-                .and_then(|t| t.accent.as_deref()),
-            Some("#FF8800")
+            loaded.skills_disabled,
+            BTreeSet::from(["commit".to_owned()])
         );
-        assert!(loaded.custom.as_ref().unwrap().light.is_none());
-        // A typo'd token name is an error, not a silent default.
-        std::fs::write(
-            &path,
-            "colors: custom\ncustom:\n  dark:\n    graond: \"#FF8800\"\n",
-        )
-        .unwrap();
-        let err = Config::load_from(&path).expect_err("a typo'd token must not read as unset");
-        assert!(err.to_string().contains("graond"), "names the key: {err}");
     }
 
     #[test]
@@ -1851,7 +1788,7 @@ profiles:
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
         std::fs::write(&path, "modle: claude-sonnet-4-5\n").unwrap();
-        let err = Config::load_from(&path).expect_err("a typo'd key must not read as a default");
+        let err = Settings::load_from(&path).expect_err("a typo'd key must not read as a default");
         let message = err.to_string();
         assert!(
             message.contains("modle") && message.contains("expected one of"),
@@ -1859,7 +1796,7 @@ profiles:
         );
         // The same strictness inside a profile.
         std::fs::write(&path, "profiles:\n  personal:\n    provder: anthropic\n").unwrap();
-        let err = Config::load_from(&path).expect_err("a typo'd profile key is loud too");
+        let err = Settings::load_from(&path).expect_err("a typo'd profile key is loud too");
         assert!(err.to_string().contains("provder"), "got: {err}");
     }
 
@@ -1881,7 +1818,7 @@ profiles:
             );
             profile
         };
-        let config = Config {
+        let config = Settings {
             profiles: BTreeMap::from([
                 (
                     "personal".to_owned(),
@@ -1898,15 +1835,6 @@ profiles:
                     },
                 ),
             ]),
-            icons: None,
-            theme: None,
-            colors: None,
-            background: None,
-            m3_source: None,
-            custom: None,
-            last_profile_by_workspace: BTreeMap::new(),
-            last_sandbox_by_workspace: BTreeMap::new(),
-            onboarded: None,
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
         };
@@ -1934,7 +1862,7 @@ profiles:
 
     #[test]
     fn set_for_profile_writes_the_named_section() {
-        let mut config = Config::default();
+        let mut config = Settings::default();
         config.set_for_profile(Some("work"), |p| {
             p.upsert_instance(
                 "google",
@@ -1957,36 +1885,6 @@ profiles:
         assert_eq!(config.profiles["personal"].model.as_deref(), Some("m"));
         // work's section is untouched by personal's writes.
         assert_eq!(config.profiles["work"].model, None);
-    }
-
-    #[test]
-    fn workspaces_remember_their_last_profile_and_survive_a_round_trip() {
-        let mut config = Config::default();
-        assert_eq!(config.last_profile_in(Path::new("/home/u/proj")), None);
-
-        config.note_profile_in(Path::new("/home/u/proj"), "work");
-        assert_eq!(
-            config.last_profile_in(Path::new("/home/u/proj")).as_deref(),
-            Some("work")
-        );
-        // Another directory stays untouched: the memory is per workspace.
-        assert_eq!(config.last_profile_in(Path::new("/home/u/other")), None);
-
-        config.note_profile_in(Path::new("/home/u/proj"), "personal");
-        assert_eq!(
-            config.last_profile_in(Path::new("/home/u/proj")).as_deref(),
-            Some("personal")
-        );
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        Config::save_to(&path, &config).unwrap();
-        let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded, config);
-        assert_eq!(
-            loaded.last_profile_in(Path::new("/home/u/proj")).as_deref(),
-            Some("personal")
-        );
     }
 
     /// A store that answers nothing: the shape a machine without a
@@ -2122,20 +2020,11 @@ profiles:
             );
             profile
         };
-        let mut config = Config {
+        let mut config = Settings {
             profiles: BTreeMap::from([
                 ("personal".to_owned(), keyed("google", "personal-key")),
                 ("work".to_owned(), keyed("openrouter", "work-key")),
             ]),
-            icons: None,
-            theme: None,
-            colors: None,
-            background: None,
-            m3_source: None,
-            custom: None,
-            last_profile_by_workspace: BTreeMap::new(),
-            last_sandbox_by_workspace: BTreeMap::new(),
-            onboarded: None,
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
         };
@@ -2157,15 +2046,15 @@ profiles:
         // The refs survive the file round trip.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        Config::save_to(&path, &config).unwrap();
-        let mut loaded = Config::load_from(&path).unwrap();
+        Settings::save_to(&path, &config).unwrap();
+        let mut loaded = Settings::load_from(&path).unwrap();
         assert_eq!(loaded, config);
         assert_eq!(loaded.migrate_secrets(&store), 0);
     }
 
     #[test]
     fn a_store_that_refuses_everything_keeps_the_literals() {
-        let mut config = Config::default();
+        let mut config = Settings::default();
         config.set_for_profile(Some("personal"), |p| {
             p.upsert_instance(
                 "google",
@@ -2210,7 +2099,7 @@ profiles:
     fn a_profile_round_trips_with_a_full_sandbox_section() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.yaml");
-        let config = Config {
+        let config = Settings {
             profiles: BTreeMap::from([(
                 "personal".to_owned(),
                 sandboxed_profile(SandboxSettings {
@@ -2227,13 +2116,9 @@ profiles:
                     persist: None,
                 }),
             )]),
-            last_sandbox_by_workspace: BTreeMap::from([(
-                "/home/u/proj".to_owned(),
-                "docker".to_owned(),
-            )]),
-            ..Config::default()
+            ..Settings::default()
         };
-        Config::save_to(&path, &config).unwrap();
+        Settings::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
         for key in [
             "sandbox:",
@@ -2243,11 +2128,10 @@ profiles:
             "token_ref:",
             "host:",
             "container:",
-            "last_sandbox_by_workspace:",
         ] {
             assert!(raw.contains(key), "missing `{key}` in yaml on disk: {raw}");
         }
-        let loaded = Config::load_from(&path).unwrap();
+        let loaded = Settings::load_from(&path).unwrap();
         assert_eq!(loaded, config);
 
         // A typo'd sandbox key is loud, the file-wide strictness.
@@ -2257,7 +2141,7 @@ profiles:
         )
         .unwrap();
         let err =
-            Config::load_from(&path).expect_err("a typo'd sandbox key must not read as unset");
+            Settings::load_from(&path).expect_err("a typo'd sandbox key must not read as unset");
         assert!(err.to_string().contains("knd"), "names the key: {err}");
     }
 
@@ -2394,37 +2278,94 @@ profiles:
     }
 
     #[test]
-    fn workspaces_remember_their_last_sandbox_and_survive_a_round_trip() {
-        let mut config = Config::default();
-        assert_eq!(config.last_sandbox_in(Path::new("/home/u/proj")), None);
-
-        config.note_sandbox_in(Path::new("/home/u/proj"), "docker");
+    fn home_points_every_convention_at_its_root() {
+        let home = Home::at("/home/u".into(), "/home/u/.godcode".into());
         assert_eq!(
-            config.last_sandbox_in(Path::new("/home/u/proj")).as_deref(),
-            Some("docker")
+            home.config_file(),
+            PathBuf::from("/home/u/.godcode/config.yaml")
         );
-        // Another directory stays untouched: the memory is per workspace.
-        assert_eq!(config.last_sandbox_in(Path::new("/home/u/other")), None);
-
-        // The unchanged write is a no-op: however many turns re-note
-        // the same kind, the map still holds one row.
-        config.note_sandbox_in(Path::new("/home/u/proj"), "docker");
-        assert_eq!(config.last_sandbox_by_workspace.len(), 1);
-
-        config.note_sandbox_in(Path::new("/home/u/proj"), "http");
+        assert_eq!(home.skills(), PathBuf::from("/home/u/.godcode/skills"));
         assert_eq!(
-            config.last_sandbox_in(Path::new("/home/u/proj")).as_deref(),
-            Some("http")
+            home.subagents(),
+            PathBuf::from("/home/u/.godcode/subagents")
         );
+        assert_eq!(
+            home.system_prompt(),
+            PathBuf::from("/home/u/.godcode/SYSTEM.md")
+        );
+        // The cross-agent convention stays machine-global: every
+        // frontend shares `~/.agents/skills`, whatever its config base.
+        assert_eq!(
+            home.agents_skills(),
+            PathBuf::from("/home/u/.agents/skills")
+        );
+    }
 
+    #[test]
+    fn settings_round_trip_through_a_foreign_store() {
+        // The seam a second frontend implements: the section moves in
+        // and out of any document, here a JSON envelope — the
+        // framework never sees the format.
+        struct GodCodeStore(std::sync::Mutex<String>);
+
+        impl Store for GodCodeStore {
+            fn load(&self) -> Result<Settings, ConfigError> {
+                let doc = self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if doc.is_empty() {
+                    return Ok(Settings::default());
+                }
+                let envelope: serde_json::Value = serde_json::from_str(&doc)
+                    .map_err(|err| ConfigError::Store(err.to_string()))?;
+                serde_json::from_value(envelope.get("rhema").cloned().unwrap_or_default())
+                    .map_err(|err| ConfigError::Store(err.to_string()))
+            }
+
+            fn save(&self, settings: &Settings) -> Result<(), ConfigError> {
+                let envelope = serde_json::json!({ "rhema": settings, "accent": "#00ff00" });
+                *self
+                    .0
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    serde_json::to_string(&envelope)
+                        .map_err(|err| ConfigError::Store(err.to_string()))?;
+                Ok(())
+            }
+        }
+
+        let store = GodCodeStore(std::sync::Mutex::new(String::new()));
+        // An empty document is the default settings.
+        assert_eq!(store.load().unwrap(), Settings::default());
+
+        let mut settings = Settings::default();
+        settings.set_for_profile(Some("work"), |p| p.model = Some("m".into()));
+        store.save(&settings).unwrap();
+        // The frontend's own key rode along, untouched by the reload.
+        let raw = store
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        assert!(raw.contains("accent"));
+        assert_eq!(store.load().unwrap(), settings);
+    }
+
+    #[test]
+    fn the_yaml_store_creates_the_directory_and_keeps_the_file_private() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.yaml");
-        Config::save_to(&path, &config).unwrap();
-        let loaded = Config::load_from(&path).unwrap();
-        assert_eq!(loaded, config);
-        assert_eq!(
-            loaded.last_sandbox_in(Path::new("/home/u/proj")).as_deref(),
-            Some("http")
-        );
+        let path = dir.path().join("nested").join("config.yaml");
+        YamlStore::at(&path).save(&Settings::default()).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(dir.path().join("nested"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o700, "the directory must be 0700");
+        }
+        assert_eq!(YamlStore::at(&path).load().unwrap(), Settings::default());
     }
 }

@@ -127,6 +127,13 @@ pub struct CodingAgentConfig {
     /// frontend that wired nothing advertises nothing, the same rule
     /// the `mcp_servers` section follows.
     pub vision: Option<String>,
+    /// The directory conventions skill discovery reads when
+    /// [`skills`](Self::skills) is `None`: the user-wide skills directory
+    /// and the cross-agent `.agents/skills` convention. `None` — the
+    /// default — discovers the reference layout
+    /// ([`Home::discover`](rhema_config::Home::discover)); a frontend
+    /// that owns its own directory hands a relocated `Home` instead.
+    pub home: Option<rhema_config::Home>,
 }
 
 impl std::fmt::Debug for CodingAgentConfig {
@@ -149,6 +156,7 @@ impl std::fmt::Debug for CodingAgentConfig {
             .field("shell_env", &self.shell_env.len())
             .field("environment", &self.environment.is_some())
             .field("user_preferences", &self.user_preferences.is_some())
+            .field("home", &self.home.is_some())
             .finish()
     }
 }
@@ -183,6 +191,7 @@ impl CodingAgentConfig {
             environment: None,
             user_preferences: None,
             vision: None,
+            home: None,
         }
     }
 }

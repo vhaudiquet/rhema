@@ -116,7 +116,7 @@ pub fn wire(
     provider: Arc<dyn ModelProvider>,
     mut config: CodingAgentConfig,
 ) -> (CodingAgentConfig, SubagentHandle) {
-    let global = rhema_config::Config::subagents_dir().ok();
+    let global = rhema_config::Home::discover().ok().map(|h| h.subagents());
     let handle = wire_at(global.as_deref(), provider, &mut config);
     (config, handle)
 }
@@ -187,8 +187,12 @@ fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String 
     let mut skills = match &config.skills {
         Some(skills) => skills.clone(),
         None => {
-            let agents = rhema_config::Config::agents_skills_dir().ok();
-            let global = rhema_config::Config::skills_dir().ok();
+            let home = config
+                .home
+                .clone()
+                .or_else(|| rhema_config::Home::discover().ok());
+            let agents = home.as_ref().map(|h| h.agents_skills());
+            let global = home.as_ref().map(|h| h.skills());
             rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), workspace)
         }
     };
@@ -219,7 +223,7 @@ fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String 
 /// preview passes this to `stamped_system` so the preview matches what
 /// turns send.
 pub fn extra_specs(workspace: &Path) -> Vec<ToolSpec> {
-    let global = rhema_config::Config::subagents_dir().ok();
+    let global = rhema_config::Home::discover().ok().map(|h| h.subagents());
     extra_specs_at(global.as_deref(), workspace)
 }
 

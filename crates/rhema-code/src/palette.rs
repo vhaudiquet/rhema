@@ -476,7 +476,7 @@ pub struct PaletteInputs<'a> {
     /// The M3 You seed, `0xRRGGBB`; `None` is its default seed.
     pub m3_source: Option<u32>,
     /// The custom palette's token overrides; `None` reads as rhema.
-    pub custom: Option<&'a rhema_config::CustomPalette>,
+    pub custom: Option<&'a crate::store::CustomPalette>,
 }
 
 /// The Nord appearance: the official sixteen colors in the roles the
@@ -806,7 +806,7 @@ impl Palette {
 /// `dark` paints its whole scheme, never a half-light hybrid — and an
 /// unparseable value reads as the rhema default for its slot, matching
 /// the other look-and-feel keys.
-fn custom_theme(kind: ThemeKind, custom: Option<&rhema_config::CustomPalette>) -> Theme {
+fn custom_theme(kind: ThemeKind, custom: Option<&crate::store::CustomPalette>) -> Theme {
     let base = match kind {
         ThemeKind::Dark => DARK,
         ThemeKind::Light => LIGHT,
@@ -998,16 +998,16 @@ mod tests {
 
     #[test]
     fn the_custom_palette_overlays_the_rhema_defaults() {
-        let tokens = rhema_config::CustomTokens {
+        let tokens = crate::store::CustomTokens {
             accent: Some("#FF8800".into()),
             ground: Some("nothex".into()),
-            ..rhema_config::CustomTokens::default()
+            ..crate::store::CustomTokens::default()
         };
-        let custom = rhema_config::CustomPalette {
+        let custom = crate::store::CustomPalette {
             dark: Some(tokens),
             light: None,
         };
-        fn inputs(custom: &rhema_config::CustomPalette) -> PaletteInputs<'_> {
+        fn inputs(custom: &crate::store::CustomPalette) -> PaletteInputs<'_> {
             PaletteInputs {
                 custom: Some(custom),
                 ..PaletteInputs::default()

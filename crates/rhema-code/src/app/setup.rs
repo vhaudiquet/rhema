@@ -524,7 +524,7 @@ pub struct RunOptions {
     pub m3_source: Option<u32>,
     /// The custom palette's token overrides; every palette but Custom
     /// ignores it.
-    pub custom: Option<rhema_config::CustomPalette>,
+    pub custom: Option<crate::store::CustomPalette>,
     /// Which icon flavor the footer draws with.
     pub icons: crate::icons::Flavor,
     /// The config profile this session runs under.
@@ -895,7 +895,7 @@ pub(crate) fn estimate_history_tokens(history: &[Message]) -> u64 {
 /// only picks the section up front, and nothing reads across profiles
 /// afterwards. An explicit flag never reaches here.
 pub(crate) fn startup_profile(
-    config: &rhema_config::Config,
+    config: &crate::store::Config,
     workspace: &Path,
     secrets: Option<&dyn rhema_config::secrets::SecretStore>,
 ) -> String {
@@ -932,7 +932,7 @@ pub(crate) fn startup_profile(
 /// assembly reads the profile itself afterwards. An explicit pick
 /// never reaches here.
 pub(crate) fn startup_sandbox(
-    config: &rhema_config::Config,
+    config: &crate::store::Config,
     profile: &rhema_config::Profile,
     workspace: &Path,
     offered: &crate::sandbox::SandboxAvailability,

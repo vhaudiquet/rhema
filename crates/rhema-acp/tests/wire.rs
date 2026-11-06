@@ -568,7 +568,7 @@ async fn authenticate_reports_unresolvable_credentials() {
     let options = AcpOptions {
         session_dir: Some(session_dir),
         provider: Some("openrouter".to_owned()),
-        config: Some(rhema_config::Config::default()),
+        config: Some(rhema_config::Settings::default()),
         ..AcpOptions::default()
     };
     if std::env::var_os("OPENROUTER_API_KEY").is_some() {

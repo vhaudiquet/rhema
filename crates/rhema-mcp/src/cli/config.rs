@@ -30,7 +30,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use rhema_config::mcp::{McpConfig, McpServerEntry, McpTransport};
-use rhema_config::{Config, DEFAULT_PROFILE};
+use rhema_config::{DEFAULT_PROFILE, Settings};
 
 /// Answers `mcp add|list|remove` when the invocation is one of them,
 /// `None` for everything else (the bridge verbs keep their dispatch).
@@ -56,7 +56,7 @@ fn is_config_verb(argv: &[OsString]) -> bool {
 /// Runs the verb with the real config path; `1` when there is no home
 /// to resolve it against.
 fn run(argv: &[OsString]) -> i32 {
-    match Config::path() {
+    match rhema_config::Home::discover().map(|home| home.config_file()) {
         Ok(path) => run_at(&path, argv),
         Err(err) => {
             eprintln!("mcp: {err}");
@@ -90,20 +90,20 @@ fn global_path(config_path: &Path) -> PathBuf {
 
 /// Loads the config file, a missing file included: the reason a load
 /// can fail is always the caller's to print.
-fn load_config(config_path: &Path) -> Result<Config, String> {
-    Config::load_from(&config_path.to_path_buf())
+fn load_config(config_path: &Path) -> Result<Settings, String> {
+    Settings::load_from(&config_path.to_path_buf())
         .map_err(|err| format!("reading {}: {err}", config_path.display()))
 }
 
 /// Persists the config: the directory `0700` first (it may not exist
 /// yet — a first `add` on a fresh machine), the file through
-/// [`Config::save_to`]'s atomic `0600` write.
-fn save_config(config_path: &Path, config: &Config) -> Result<(), String> {
+/// [`Settings::save_to`]'s atomic `0600` write.
+fn save_config(config_path: &Path, config: &Settings) -> Result<(), String> {
     if let Some(dir) = config_path.parent() {
         rhema_config::privacy::private_dir(dir)
             .map_err(|err| format!("creating {}: {err}", dir.display()))?;
     }
-    Config::save_to(&config_path.to_path_buf(), config).map_err(|err| err.to_string())
+    Settings::save_to(&config_path.to_path_buf(), config).map_err(|err| err.to_string())
 }
 
 fn print_usage() {
@@ -544,7 +544,7 @@ mod tests {
             run(&config, &["add", "lightcraft", "--", "/bin/echo", "mcp"]),
             0
         );
-        let stored = Config::load_from(&config).expect("loads");
+        let stored = Settings::load_from(&config).expect("loads");
         let entry = &stored.effective(None).mcp_servers["lightcraft"];
         assert_eq!(
             entry.command,
@@ -589,7 +589,7 @@ mod tests {
             ),
             0
         );
-        let stored = Config::load_from(&config).expect("loads");
+        let stored = Settings::load_from(&config).expect("loads");
         let atlassian = &stored.effective(Some("work")).mcp_servers["atlassian"];
         assert_eq!(atlassian.description, "Jira and Confluence");
         assert_eq!(
@@ -612,14 +612,14 @@ mod tests {
         let (_dir, config, _global) = setup();
         assert_eq!(run(&config, &["add", "x", "--", "true"]), 0);
         assert_eq!(run(&config, &["add", "x", "--", "false"]), 2);
-        let stored = Config::load_from(&config).expect("loads");
+        let stored = Settings::load_from(&config).expect("loads");
         assert_eq!(
             stored.effective(None).mcp_servers["x"].command,
             Some(vec!["true".to_owned()]),
             "the failed add did not touch the entry"
         );
         assert_eq!(run(&config, &["add", "--force", "x", "--", "false"]), 0);
-        let stored = Config::load_from(&config).expect("loads");
+        let stored = Settings::load_from(&config).expect("loads");
         assert_eq!(
             stored.effective(None).mcp_servers["x"].command,
             Some(vec!["false".to_owned()])
@@ -642,7 +642,7 @@ mod tests {
         assert_eq!(run(&config, &["add", "n", "-H", "K: V", "--", "c"]), 2);
         assert_eq!(run(&config, &["add", "n", "c1", "c2"]), 2);
         // Nothing was stored by any of the failures.
-        let stored = Config::load_from(&config).expect("loads");
+        let stored = Settings::load_from(&config).expect("loads");
         assert!(stored.effective(None).mcp_servers.is_empty());
     }
 
@@ -653,7 +653,7 @@ mod tests {
             run(&config, &["add", "--profile", "farm", "x", "--", "true"]),
             0
         );
-        let stored = Config::load_from(&config).expect("loads");
+        let stored = Settings::load_from(&config).expect("loads");
         assert!(stored.profiles["farm"].mcp_servers.contains_key("x"));
     }
 
@@ -691,7 +691,7 @@ mod tests {
         let (_dir, config, global) = setup();
         assert_eq!(run(&config, &["add", "x", "--", "true"]), 0);
         assert_eq!(run(&config, &["remove", "x"]), 0);
-        let stored = Config::load_from(&config).expect("loads");
+        let stored = Settings::load_from(&config).expect("loads");
         assert!(stored.effective(None).mcp_servers.is_empty());
         // Unknown in the profile, present in the global file: named.
         std::fs::write(&global, "servers:\n  g:\n    command: [true]\n").expect("writes global");

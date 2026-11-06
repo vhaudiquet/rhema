@@ -25,8 +25,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The keychain service name every entry of this crate lives under.
-const SERVICE: &str = "rhema";
+/// The reference frontend's keychain service name: the namespace the
+/// rhema frontend's credentials live under. Another frontend names
+/// its own — two frontends sharing a namespace would share
+/// credentials by accident, and the OS keeps its per-binary access
+/// lists either way.
+pub const RHEMA_SERVICE: &str = "rhema";
 
 /// Why a secret-store operation failed. Resolution treats every error
 /// as "not in the store"; the variants exist for callers that want to
@@ -69,23 +73,29 @@ pub trait SecretStore: Send + Sync {
     }
 }
 
-/// The OS keychain backend: every id is an entry under the `rhema`
-/// service, holding the key as its secret. The struct is stateless —
-/// availability is decided per operation by the platform, so one value
-/// serves a whole process.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct KeyringSecretStore;
+/// The OS keychain backend: every id is an entry under the service
+/// name the store was built with — [`RHEMA_SERVICE`] for the
+/// reference frontend, the frontend's own name otherwise, so two
+/// frontends keep separate credential namespaces. Availability is
+/// decided per operation by the platform, so one value serves a whole
+/// process.
+#[derive(Debug, Clone)]
+pub struct KeyringSecretStore {
+    service: std::borrow::Cow<'static, str>,
+}
 
 impl KeyringSecretStore {
-    /// The process-wide store.
-    pub fn new() -> Self {
-        Self
+    /// The store for one frontend's namespace.
+    pub fn named(service: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        Self {
+            service: service.into(),
+        }
     }
 }
 
 impl SecretStore for KeyringSecretStore {
     fn get(&self, id: &str) -> Result<Option<String>, SecretError> {
-        let entry = open(id)?;
+        let entry = self.open(id)?;
         match entry.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::v1::Error::NoEntry) => Ok(None),
@@ -94,11 +104,11 @@ impl SecretStore for KeyringSecretStore {
     }
 
     fn set(&self, id: &str, value: &str) -> Result<(), SecretError> {
-        open(id)?.set_password(value).map_err(translate)
+        self.open(id)?.set_password(value).map_err(translate)
     }
 
     fn delete(&self, id: &str) -> Result<bool, SecretError> {
-        let entry = open(id)?;
+        let entry = self.open(id)?;
         match entry.delete_credential() {
             Ok(()) => Ok(true),
             Err(keyring::v1::Error::NoEntry) => Ok(false),
@@ -120,9 +130,11 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
-/// Opens the id's entry under the `rhema` service.
-fn open(id: &str) -> Result<keyring::v1::Entry, SecretError> {
-    keyring::v1::Entry::new(SERVICE, id).map_err(translate)
+impl KeyringSecretStore {
+    /// Opens the id's entry under this store's service.
+    fn open(&self, id: &str) -> Result<keyring::v1::Entry, SecretError> {
+        keyring::v1::Entry::new(self.service.as_ref(), id).map_err(translate)
+    }
 }
 
 /// The keyring crate's errors, cut to the two this crate's callers can

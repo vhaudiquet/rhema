@@ -324,12 +324,15 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   (macOS Keychain, Windows Credential Manager, the Linux Secret
   Service). An instance holds either the literal `api_key` — the
   fallback where no keychain answers (containers, headless boxes) — or
-  an opaque `secret_ref` naming its entry under the `rhema` service;
-  resolution reads the environment, then the keychain, then the
-  literal, and an unreachable store reads as "not in the store",
-  never as a lost key. `Profile::place_key` (logins) and
-  `Config::migrate_secrets` (frontend startup) prefer the chain and
-  fall back to the file; forgetting an instance deletes its entry.
+  an opaque `secret_ref` naming its entry under the frontend's
+  keychain namespace (the reference frontend's is `rhema`; a second
+  frontend names its own, so two frontends sharing a machine never
+  share credentials by accident); resolution reads the environment,
+  then the keychain, then the literal, and an unreachable store reads
+  as "not in the store", never as a lost key. `Profile::place_key`
+  (logins) and `Settings::migrate_secrets` (frontend startup) prefer
+  the chain and fall back to the file; forgetting an instance deletes
+  its entry.
   `rhema-identity` is deliberately not the home: its accounts are the
   deployment's identities behind use-never-read, its SQLite backend
   stores secrets as plaintext columns, and a provider key is the

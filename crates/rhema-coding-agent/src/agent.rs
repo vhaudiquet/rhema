@@ -95,8 +95,9 @@ pub fn stamped_system(
 ) -> Result<String, CodingAgentError> {
     // Either global directory may be missing (no HOME) — as normal as
     // an empty one.
-    let agents = rhema_config::Config::agents_skills_dir().ok();
-    let global = rhema_config::Config::skills_dir().ok();
+    let home = rhema_config::Home::discover().ok();
+    let agents = home.as_ref().map(|h| h.agents_skills());
+    let global = home.as_ref().map(|h| h.skills());
     let skills =
         rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), workspace);
     stamped_system_with_sections(base, workspace, extra, &skills, None, None, &[], None)
@@ -226,8 +227,12 @@ impl CodingAgent {
         let mut skills = match &config.skills {
             Some(skills) => skills.clone(),
             None => {
-                let agents = rhema_config::Config::agents_skills_dir().ok();
-                let global = rhema_config::Config::skills_dir().ok();
+                let home = config
+                    .home
+                    .clone()
+                    .or_else(|| rhema_config::Home::discover().ok());
+                let agents = home.as_ref().map(|h| h.agents_skills());
+                let global = home.as_ref().map(|h| h.skills());
                 rhema_agent_tools::skills::discover(
                     agents.as_deref(),
                     global.as_deref(),

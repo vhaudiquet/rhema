@@ -13,11 +13,20 @@ pub(crate) fn system_command(
     profile: Option<&str>,
 ) -> anyhow::Result<()> {
     match action {
-        SystemCommand::Edit => system_edit_at(&Config::system_prompt_path()?, None),
-        SystemCommand::Restore => system_restore_at(&Config::system_prompt_path()?),
+        SystemCommand::Edit => {
+            let path = rhema_config::Home::discover()?.system_prompt();
+            system_edit_at(&path, None)
+        }
+        SystemCommand::Restore => {
+            let path = rhema_config::Home::discover()?.system_prompt();
+            system_restore_at(&path)
+        }
         SystemCommand::Show => {
             let prompt = system_show_at(
-                Config::system_prompt_path().ok().as_deref(),
+                rhema_config::Home::discover()
+                    .ok()
+                    .map(|home| home.system_prompt())
+                    .as_deref(),
                 workspace,
                 profile,
             )?;
@@ -179,11 +188,12 @@ pub(crate) fn system_show_at_with_mcp(
     // The transcript is on by default, so the default preview names
     // zoom, exactly as the agent's prompt does.
     extra.push(rhema_transcript::Zoom::spec());
-    let agents = Config::agents_skills_dir().ok();
-    let global = Config::skills_dir().ok();
+    let home = rhema_config::Home::discover().ok();
+    let agents = home.as_ref().map(|home| home.agents_skills());
+    let global = home.as_ref().map(|home| home.skills());
     let disabled = Config::load()
         .ok()
-        .map(|c| c.skills_disabled)
+        .map(|c| c.settings.skills_disabled.clone())
         .unwrap_or_default();
     let mut skills =
         rhema_agent_tools::skills::discover(agents.as_deref(), global.as_deref(), &workspace);

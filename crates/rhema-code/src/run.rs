@@ -12,6 +12,7 @@ use std::io::{IsTerminal, stdout};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::store::Config;
 use anyhow::Context;
 use crossterm::event::{
     DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture, Event,
@@ -25,7 +26,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rhema_acp::AcpOptions;
 use rhema_coding_agent::{AllowAll, Approval, CodingAgent};
-use rhema_config::Config;
 use rhema_config::secrets::KeyringSecretStore;
 use rhema_core::{Event as ModelEvent, EventSink, Session};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -65,7 +65,9 @@ fn resolve_base_system(path: Option<&std::path::Path>) -> Option<String> {
 /// without a keychain keep their literals — the pre-keychain behavior,
 /// retried here on every start.
 fn migrate_stored_keys(config: &mut Config) {
-    let moved = config.migrate_secrets(&KeyringSecretStore::new());
+    let moved = config.migrate_secrets(&KeyringSecretStore::named(
+        rhema_config::secrets::RHEMA_SERVICE,
+    ));
     if moved == 0 {
         return;
     }
@@ -156,9 +158,9 @@ pub(crate) fn prompt_sections(
     model: &str,
     harness: &str,
 ) -> (Option<String>, Option<String>) {
-    let user = Config::dir()
+    let user = rhema_config::Home::discover()
         .ok()
-        .and_then(|dir| std::fs::read_to_string(dir.join("USER.md")).ok())
+        .and_then(|home| std::fs::read_to_string(home.config.join("USER.md")).ok())
         .filter(|text| !text.trim().is_empty());
     let environment = match sandbox_kind {
         None | Some("local") => rhema_coding_agent::host_report(workspace, model, harness),
@@ -197,7 +199,9 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // reads as onboarded — upgrading never replays it. The marker is
     // written up front so a wizard abandoned halfway (a key added, then
     // a ctrl-c) reopens here next start instead of reading as complete.
-    let config_existed = Config::path().map(|path| path.exists()).unwrap_or(true);
+    let config_existed = rhema_config::Home::discover()
+        .map(|home| home.config_file().exists())
+        .unwrap_or(true);
     let mut config = store.load().unwrap_or_else(|err| {
         eprintln!("warning: ignoring unreadable rhema config: {err}");
         Config::default()
@@ -222,14 +226,16 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // discovers them — the wizard's skills step and the agent's prompt
     // both read the same folders. Best effort: a read-only config
     // directory only means fewer skills.
-    if let Ok(dir) = Config::skills_dir()
+    if let Ok(dir) = rhema_config::Home::discover().map(|home| home.skills())
         && let Err(err) = crate::bundled::seed(&dir, &config.skills_disabled)
     {
         eprintln!("warning: the bundled skills were not seeded: {err}");
     }
     // The session's keychain: startup resolution reads it, and the app
     // places fresh logins in it and cleans up after removals.
-    let secrets: Arc<dyn rhema_config::secrets::SecretStore> = Arc::new(KeyringSecretStore::new());
+    let secrets: Arc<dyn rhema_config::secrets::SecretStore> = Arc::new(KeyringSecretStore::named(
+        rhema_config::secrets::RHEMA_SERVICE,
+    ));
     // Without an explicit --profile the session starts on the profile
     // this workspace last used, or on the default/first one that can
     // serve turns — a logged-in profile never opens the login screen.
@@ -319,7 +325,12 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             }
         },
     };
-    let agent_base = resolve_base_system(Config::system_prompt_path().ok().as_deref());
+    let agent_base = resolve_base_system(
+        rhema_config::Home::discover()
+            .ok()
+            .map(|home| home.system_prompt())
+            .as_deref(),
+    );
     let thinking = args
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)

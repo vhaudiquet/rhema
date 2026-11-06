@@ -47,7 +47,7 @@ use agent_client_protocol::{
 };
 use anyhow::Context;
 use rhema_coding_agent::{CodingAgent, CodingAgentConfig, CodingAgentError, repair_dangling_calls};
-use rhema_config::Config;
+use rhema_config::Settings;
 use rhema_core::request::ThinkingEffort;
 use rhema_core::{AgentError, Content, ModelProvider, Role, Session, StopReason as EngineStop};
 use tokio::sync::watch;
@@ -94,7 +94,7 @@ pub struct AcpOptions {
     /// A config replacing the stored one, so tests exercise credential
     /// resolution without reading (or depending on) the user's file.
     #[cfg(feature = "mock")]
-    pub config: Option<rhema_config::Config>,
+    pub config: Option<rhema_config::Settings>,
 }
 
 /// Serves one ACP connection over stdin/stdout until the client hangs

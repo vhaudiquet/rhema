@@ -13,7 +13,9 @@ const SEED_MARKER: &str = ".seeded";
 /// read-only `skills` mount's source. Absent, nothing is mounted and
 /// discovery sees workspace skills only, as it always has.
 pub(crate) fn global_skills_dir() -> Option<PathBuf> {
-    let dir = rhema_config::Config::skills_dir().ok()?;
+    let dir = rhema_config::Home::discover()
+        .ok()
+        .map(|home| home.skills())?;
     dir.is_dir().then_some(dir)
 }
 
@@ -21,7 +23,9 @@ pub(crate) fn global_skills_dir() -> Option<PathBuf> {
 /// disk — the read-only `agents` mount's source, the same 1:1 posture
 /// the rhema skills bind takes.
 pub(crate) fn agents_skills_dir() -> Option<PathBuf> {
-    let dir = rhema_config::Config::agents_skills_dir().ok()?;
+    let dir = rhema_config::Home::discover()
+        .ok()
+        .map(|home| home.agents_skills())?;
     dir.is_dir().then_some(dir)
 }
 
@@ -73,8 +77,8 @@ pub(crate) async fn ensure_seeded(
 /// is copied, and a skill edited mid-session is simply the new text
 /// the next read sees. Only a skill outside all three trees rides the
 /// seed, which on the mountless postures is the whole list anyway. The
-/// two global directories arrive resolved — `Config::agents_skills_dir`
-/// and `Config::skills_dir` at the call site — so a test points them
+/// two global directories arrive resolved — `Home::agents_skills` and
+/// `Home::skills` at the call site — so a test points them
 /// at scratch paths instead of the machine's own.
 pub(crate) fn discovered_skills(
     agents: Option<&Path>,

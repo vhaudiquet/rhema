@@ -169,11 +169,11 @@ fn mock_backends() -> Arc<rhema_claw::BackendRegistry> {
 /// the keyless llama-cpp backend is always constructible — and a
 /// dispatch against an unreachable provider fails loudly per turn.
 fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegistry>, ClawError> {
-    let stored = match rhema_config::Config::load() {
+    let stored = match rhema_config::Settings::load() {
         Ok(stored) => stored,
         Err(err) => {
             eprintln!("warning: ignoring unreadable rhema config: {err}");
-            rhema_config::Config::default()
+            rhema_config::Settings::default()
         }
     };
     let profile = stored.effective(None);
@@ -205,7 +205,7 @@ fn resolve_backends(config: &ClawConfig) -> Result<Arc<rhema_claw::BackendRegist
     // included; it never writes it, so no migration runs here — the
     // file's logins belong to the frontends. In a container the
     // keychain is unreachable and the literal tier serves.
-    let secrets = rhema_config::secrets::KeyringSecretStore::new();
+    let secrets = rhema_config::secrets::KeyringSecretStore::named("claw");
     let backends =
         rhema_claw::backends::discover(config, &profile, &env, &claw_rows, Some(&secrets));
     // The config's provider/model pair seeds the active backend when it

@@ -45,13 +45,14 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The `<config dir>/mcp.yaml` path.
 pub fn config_path() -> Result<PathBuf, ConfigError> {
-    Ok(crate::Config::dir()?.join("mcp.yaml"))
+    Ok(crate::Home::discover()?.config.join("mcp.yaml"))
 }
 
 /// The validated MCP configuration: the servers to expose and why any
 /// others were left out.
 ///
-/// Construction is infallible by design; loading is too ([`load`]).
+/// Construction is infallible by design; loading is too
+/// ([`McpConfig::load`]).
 /// Absence of a server shows up either as a skipped entry's notice or
 /// as an absent file, never as an error a caller must handle.
 #[derive(Debug, Clone, Default)]
