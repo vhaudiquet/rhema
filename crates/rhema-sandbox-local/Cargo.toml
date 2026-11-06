@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 # The seam and the process family's shared machinery (`spawn`): the
 # stream pump, the fs routes, `FsRoot`
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = ["spawn"] }
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.0", features = ["spawn"] }
 async-trait = { workspace = true }
 # File contents cross the seed staging base64
 base64 = "0.22"

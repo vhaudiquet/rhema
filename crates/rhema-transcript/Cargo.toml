@@ -10,7 +10,7 @@ authors.workspace = true
 
 [dependencies]
 # The step engine: the transcript projects a Session's history onto a request
-rhema-core = { path = "../rhema-core", version = "0.1.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.0" }
 # Byte accounting over tool-call arguments; zoom's argument parsing
 serde_json = { workspace = true }
 # The stats snapshot serializes for frontends

@@ -76,7 +76,7 @@ time = { version = "0.3", default-features = false, features = ["parsing"] }
 # Inbound chat images ride base64; the dispatch decodes them into the
 # attachment store
 base64 = "0.22"
-rhema-mcp = { version = "0.1.0", path = "../rhema-mcp" }
+rhema-mcp = { version = "0.2.0", path = "../rhema-mcp" }
 
 [dev-dependencies]
 tempfile = "3"

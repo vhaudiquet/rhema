@@ -10,23 +10,23 @@ authors.workspace = true
 
 [dependencies]
 # The step engine: a subagent is a fresh Agent on a fresh Session
-rhema-core = { path = "../rhema-core", version = "0.1.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.0" }
 # The background-tuned retry wrapper: a job rides the frontend's turn
 # provider wrapped once more, so an outage waits out under the job
 # instead of killing it
-rhema-provider = { path = "../rhema-provider", version = "0.1.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
 # The toolkit: the inner shell, the overlay, the approval hook, the
 # renderer. Default features off so a wasm build (remote-shell sandbox,
 # no tokio processes) excludes them; the inner shell shares the parent
 # turn's executor, so nothing here needs the local shell.
-rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0", default-features = false }
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.0", default-features = false }
 # `wire` attaches the tool to a coding-agent config
-rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.1.0", default-features = false }
+rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.2.0", default-features = false }
 # The global definitions directory resolves off the config dir
-rhema-config = { path = "../rhema-config", version = "0.1.0" }
+rhema-config = { path = "../rhema-config", version = "0.2.0" }
 # The bounded request view: the inner agent reads its history through
 # it, so a long call re-sends a bounded prompt, not a growing one
-rhema-transcript = { path = "../rhema-transcript", version = "0.1.0" }
+rhema-transcript = { path = "../rhema-transcript", version = "0.2.0" }
 # Definitions round-trip through YAML frontmatter
 serde = { workspace = true }
 serde_json = { workspace = true }

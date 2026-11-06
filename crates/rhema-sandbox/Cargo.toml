@@ -28,7 +28,7 @@ spawn = ["dep:tokio", "tokio/process", "tokio/io-util", "tokio/time", "tokio/fs"
 [dependencies]
 # The seam adapts onto the toolkit's exec-only shell; it arrives
 # without the local shell, which every backend of this family replaces.
-rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.1.0", default-features = false }
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.0", default-features = false }
 async-trait = { workspace = true }
 serde = { workspace = true }
 # The protocol tests pin the wire's JSON

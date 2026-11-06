@@ -10,10 +10,10 @@ authors.workspace = true
 
 [dependencies]
 # The seam, the protocol, and `FsRoot` (feature `spawn`)
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.1.0", features = ["spawn"] }
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.0", features = ["spawn"] }
 # The exec and seed routes run on the local backend, one `LocalSandbox`
 # per request
-rhema-sandbox-local = { path = "../rhema-sandbox-local", version = "0.1.0" }
+rhema-sandbox-local = { path = "../rhema-sandbox-local", version = "0.2.0" }
 # The daemon's HTTP surface: axum for the routes
 axum = { workspace = true }
 # The binary's args; the version pin mirrors the rest of the workspace's
@@ -38,7 +38,7 @@ tokio = { workspace = true, features = [
 # The loopback test drives the daemon with a raw HTTP/1.1 client
 tokio = { workspace = true }
 # The loopback test drives the real client over the real wire
-rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.1.0" }
+rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.2.0" }
 # The daemon roots in throwaway directories
 tempfile = "3"
 # `probe_healthz` speaks raw HTTP to `/healthz` — outside the protocol
