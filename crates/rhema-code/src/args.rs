@@ -202,11 +202,13 @@ pub enum Command {
     /// profile, colors, skills. The terminal UI with the wizard forced
     /// on, whatever the config's marker says.
     Onboard,
-    /// The MCP meta surface (`mcp servers | tools | schema | call`),
-    /// plus the pass-through that makes the agent shell's generated
+    /// The MCP meta surface (`mcp servers | tools | schema | call`)
+    /// plus the config verbs (`mcp add | list | remove`, which write a
+    /// profile's `mcp_servers` and so work outside any wired shell),
+    /// and the pass-through that makes the agent shell's generated
     /// functions work: `rhema __server <name> …`. Everything after
-    /// the subcommand goes to the MCP CLI verbatim; it reads the
-    /// bridge env the init file set and exits 4 outside a wired
+    /// the subcommand goes to the MCP CLI verbatim; the bridge verbs
+    /// read the env the init file set and exit 4 outside a wired
     /// shell.
     Mcp {
         /// The CLI's own argv, passed through untouched.

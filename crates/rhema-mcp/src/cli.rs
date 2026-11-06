@@ -1,5 +1,6 @@
-//! The CLI: the `rhema mcp` meta verbs and the `__server` generated
-//! command mode — everything a bash command spawned by an agent sees.
+//! The CLI: the `rhema mcp` meta verbs, the config-maintenance verbs
+//! (`add`, `list`, `remove`), and the `__server` generated command
+//! mode — everything a bash command spawned by an agent sees.
 //!
 //! Two surfaces, one JSON-on-stdout rule, distinct exit codes (spec
 //! §5): `0` ok; `2` usage (bad flags, unknown tool, unparseable or
@@ -88,6 +89,11 @@ fn cli_env() -> Result<CliEnv, Outcome> {
 /// code.
 #[must_use]
 pub fn run(argv: &[std::ffi::OsString]) -> i32 {
+    // The config verbs run on the user's own terminal: no bridge env
+    // may be required to reach them.
+    if let Some(code) = config::maybe_run(argv) {
+        return code;
+    }
     match dispatch(cli_env(), argv) {
         Ok(exit) => i32::from(exit),
         Err(Outcome::Exit(exit)) => i32::from(exit),
@@ -113,6 +119,9 @@ pub fn run_with_env(
     tmp: Option<&Path>,
     argv: &[std::ffi::OsString],
 ) -> i32 {
+    if let Some(code) = config::maybe_run(argv) {
+        return code;
+    }
     let env = CliEnv {
         socket: socket.to_path_buf(),
         token: token.to_owned(),
@@ -568,11 +577,13 @@ fn meta_mode(env: &CliEnv, argv: &[std::ffi::OsString]) -> Result<Exit, Outcome>
             Ok(print_envelope(&event, &data, env))
         }
         "" => {
-            eprintln!("expected a verb: servers, tools, schema, or call");
+            eprintln!("expected a verb: add, list, remove, servers, tools, schema, or call");
             Ok(Exit::Usage)
         }
         other => {
-            eprintln!("unknown verb `{other}`; expected servers, tools, schema, or call");
+            eprintln!(
+                "unknown verb `{other}`; expected add, list, remove, servers, tools, schema, or call"
+            );
             Ok(Exit::Usage)
         }
     }
@@ -719,6 +730,8 @@ fn percent_encode(segment: &str) -> String {
     }
     out
 }
+
+mod config;
 
 #[cfg(test)]
 mod tests;

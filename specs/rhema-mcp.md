@@ -34,7 +34,8 @@ dependencies** (§4).
 - The provision step: one init file, the env map, and a generated bash
   function per configured server.
 - `cli`: the `__server` dispatcher behind the generated functions, plus
-  the `mcp` meta verbs (`servers`, `tools`, `schema`, `call`).
+  the `mcp` meta verbs (`servers`, `tools`, `schema`, `call`) and the
+  config-maintenance verbs (`add`, `list`, `remove`).
 - `wire`: the `CodingAgentConfig` helper, the rhema-subagents precedent.
 - Config: `<config dir>/mcp.yaml`, user-authored only (§3).
 - Prompt disclosure: an "MCP servers" section listing servers, never
@@ -380,6 +381,34 @@ mapping omitted):
     mcp schema <server> <tool>   # one tool's raw inputSchema
     mcp call <server> <tool> [args-json]
                                  # argv element, or stdin when omitted or "-"
+
+**Config verbs** (the one-liner install path, `claude mcp add`
+shaped). These never touch the bridge: they read and write
+`config.yaml` directly, so they run on the user's own terminal, which
+is where configuration happens.
+
+    mcp add [--profile NAME] <name> -- <command> [args...]
+                                 # stdio; everything after -- is the child's argv
+    mcp add [--profile NAME] <name> --url <URL> [-H 'KEY: VALUE']...
+                                 # Streamable HTTP
+    mcp list [--profile NAME]    # profile scope + global file, as resolved
+    mcp remove [--profile NAME] <name>
+
+`add` flags: `-e KEY=VALUE` (stdio env, repeatable), `-H 'KEY: VALUE'`
+(HTTP headers, repeatable), `-d TEXT` (the prompt disclosure line),
+`--force` (replace an existing entry). Entries land on the named
+profile's `mcp_servers` map — `personal` without `--profile` — created
+when new, and validated through the same `resolve` rules a load
+applies (`[a-z0-9_-]+` names, transport XOR) before anything is
+written. The global `mcp.yaml` is never written by these verbs (it is
+user-authored; `list` shows it, `add` notes when a profile entry
+shadows it, `remove` names it when the entry only exists there). An
+omitted description is legal: the disclosure falls back to "`<name>
+--help` lists its tools", so the command alone is enough to install.
+Exit codes: `0` ok; `2` usage or validation; `3` remove of a name not
+in the profile; `1` config load or save failure with the reason on
+stderr — these verbs face the user, not the model, so they sit outside
+the JSON-on-stdout noise contract.
 
 **Envelope.** On success the server's `CallToolResult` prints as JSON:
 text, `resource_link`, and `structuredContent` blocks pass through.
