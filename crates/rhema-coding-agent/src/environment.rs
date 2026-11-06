@@ -421,8 +421,11 @@ mod tests {
     }
 
     /// The host report carries its facts — date, model, harness, the OS
-    /// line, one presence line per manifest entry, and the branch on a
-    /// checkout — with no versions anywhere. Runs real bash, like the
+    /// line, one presence line per manifest entry — with no versions
+    /// anywhere. The branch line follows the probe's own rule, present
+    /// on a checkout and absent off one, so both sides get tested: the
+    /// CWD decides which, and a throwaway repo pins the positive side
+    /// wherever the suite happens to run. Runs real bash, like the
     /// claw's environment tests.
     #[test]
     fn the_host_report_carries_facts_and_presence_without_versions() {
@@ -448,11 +451,49 @@ mod tests {
                 entry.executable
             );
         }
-        assert!(report.contains("- git branch: "), "{report}");
+        let on_checkout = Command::new("git")
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        assert_eq!(
+            report.contains("- git branch: "),
+            on_checkout,
+            "branch line must match the checkout: {report}"
+        );
         assert!(
             !report.contains("version"),
             "presence, not versions: {report}"
         );
+
+        // A throwaway checkout proves the positive side on any runner:
+        // the report names whatever branch the fixture lands on.
+        let repo = std::env::temp_dir().join(format!("rhema-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).expect("the fixture directory creates");
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(["-c", "user.email=test@localhost", "-c", "user.name=test"])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .expect("git runs")
+        };
+        run(&["init"]);
+        run(&["commit", "--allow-empty", "-m", "root"]);
+        let branch = String::from_utf8(run(&["branch", "--show-current"]).stdout)
+            .expect("the branch name is utf-8")
+            .trim()
+            .to_owned();
+        let report = host_report(&repo, "glm-5.3", "rhema test");
+        assert!(
+            report.contains(&format!("- git branch: {branch}")),
+            "the checkout's branch reaches the report: {report}"
+        );
+        assert!(
+            !report.contains("version"),
+            "presence, not versions: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&repo);
     }
 
     /// The OS line maps the friendly name beside the raw spelling and
