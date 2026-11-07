@@ -68,6 +68,11 @@ object PhoneSensors {
             ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) ==
             PackageManager.PERMISSION_GRANTED
 
+    /** WifiService's gate (a normal permission, declared in the manifest). */
+    fun hasWifiState(context: Context): Boolean =
+        ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_WIFI_STATE) ==
+            PackageManager.PERMISSION_GRANTED
+
     /** Usage access is a special-app grant (a settings toggle, like DND access). */
     fun hasUsageAccess(context: Context): Boolean {
         val appOps = context.getSystemService(AppOpsManager::class.java) ?: return false
@@ -209,8 +214,15 @@ object PhoneSensors {
         // Reading an SSID is treated as location by the OS: without the
         // grant the answer is a placeholder, so do not post it.
         if (!hasLocation(context)) return null
-        val wifi = context.getSystemService(WifiManager::class.java) ?: return null
-        val info = wifi.connectionInfo ?: return null
+        // And every WifiManager call is gated on ACCESS_WIFI_STATE, which
+        // WifiService enforces by throwing — an install that predates the
+        // manifest declaration keeps the grant set it was installed with,
+        // and that throw travels out of this read into the whole status
+        // report: one missing permission used to cost every topic.
+        if (!hasWifiState(context)) return null
+        val info = runCatching {
+            context.getSystemService(WifiManager::class.java)?.connectionInfo
+        }.getOrNull() ?: return null
         return info.ssid
             ?.removeSurrounding("\"")
             ?.takeIf { ssid ->

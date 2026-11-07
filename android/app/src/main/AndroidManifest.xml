@@ -11,6 +11,13 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <!-- Every WifiManager call — including the connectionInfo that
+         names the joined network — is gated on ACCESS_WIFI_STATE, which
+         WifiService enforces by throwing SecurityException, not by
+         answering null. A normal permission, so declaring it is the
+         whole grant: an install that predates this line keeps the grant
+         set it was installed with. -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- DND control is a special-app grant, and this declaration is what
          puts the app on the "Do Not Disturb access" screen's list: an
          undeclared app opens that screen and finds nothing to flip. -->
