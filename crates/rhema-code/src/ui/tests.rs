@@ -276,12 +276,19 @@ fn the_subagents_page_lists_the_definitions_and_their_targets() {
     assert!(text.contains("general-purpose · built-in"), "{text}");
     assert!(text.contains("reviewer · workspace"), "{text}");
     assert!(
-        text.contains("the parent's"),
-        "the built-in inherits the model: {text}"
+        !text.contains("the parent"),
+        "a definition without a model frontmatter renders no meta line: {text}"
     );
-    assert!(text.contains("zai/glm · 12 steps"), "{text}");
     assert!(
-        text.contains("reviews diffs"),
+        text.contains("zai/glm · 12 steps max"),
+        "overrides render on the meta line: {text}"
+    );
+    assert!(
+        !text.contains("256"),
+        "the default step budget is not a setting to re-read per row: {text}"
+    );
+    assert!(
+        text.contains("Runs one self-contained task in a fresh agent"),
         "an off row still lists: {text}"
     );
     assert!(text.contains("●"), "the on dot: {text}");
@@ -299,6 +306,87 @@ fn the_subagents_page_lists_the_definitions_and_their_targets() {
         hits.len(),
         SettingsSection::ALL.len() + 2,
         "sidebar rows and the two page rows register: {hits:?}"
+    );
+}
+
+/// A long description renders at most two rows, both indented, the
+/// second ending in an ellipsis — never a sprawl from column zero.
+#[test]
+fn the_subagents_page_caps_the_description_at_two_rows() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.section = SettingsSection::Subagents;
+    settings.subagents_global_dir = Some("/cfg".into());
+    settings.subagents_workspace_dir = "/w/.rhema/subagents".into();
+    settings.subagents = vec![crate::screens::SubagentRow {
+        enabled: true,
+        name: "chatty".into(),
+        description: "Takes a long task and breaks it into pieces, \
+             reports each one as it lands, and keeps a running summary \
+             so the parent can follow along without waiting for the end."
+            .into(),
+        model: None,
+        max_steps: None,
+        source: crate::screens::SubagentSource::Workspace,
+        path: Some("/w/.rhema/subagents/chatty/SUBAGENT.md".into()),
+    }];
+
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let rows: Vec<String> = (0..24)
+        .map(|y| {
+            (0..60)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    let name_row = rows
+        .iter()
+        .position(|row| row.contains("chatty · workspace"))
+        .expect("the name row renders");
+    // The sidebar shares every row, and the border glyphs are
+    // multibyte: measure in char columns. The indent puts the prose
+    // exactly at the name's own column.
+    let name_col = rows[name_row]
+        .char_indices()
+        .position(|(_, ch)| ch == 'c')
+        .expect("the name");
+    let indent = |row: &String, col: usize| {
+        row.chars()
+            .skip(col.saturating_sub(4))
+            .take(4)
+            .all(char::is_whitespace)
+    };
+    let first = &rows[name_row + 1];
+    let second = &rows[name_row + 2];
+    let third = &rows[name_row + 3];
+    let takes_col = first
+        .char_indices()
+        .position(|(_, ch)| ch == 'T')
+        .expect("the prose");
+    assert!(
+        indent(first, name_col),
+        "the first row indents: {first:?} / name row: {} (name_col={name_col}, prose_col={takes_col})",
+        rows[name_row]
+    );
+    assert!(
+        indent(second, name_col),
+        "the second row indents: {second:?}"
+    );
+    let prose_end = second.trim_end_matches(|ch: char| ch.is_whitespace() || ch == '│');
+    assert!(
+        prose_end.ends_with('…'),
+        "the cap ends in an ellipsis: {second:?}"
+    );
+    assert!(
+        !third.contains("so the parent"),
+        "the tail is dropped, no third row: {third:?}"
+    );
+    assert!(
+        first.contains("Takes a long task"),
+        "the text starts at the top: {first:?}"
     );
 }
 

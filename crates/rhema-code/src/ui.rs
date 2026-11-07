@@ -363,3 +363,57 @@ fn wrap_line(line: &Line<'_>, width: usize) -> Vec<Line<'static>> {
     }
     rows.into_iter().map(Line::from).collect()
 }
+
+/// [`wrap_line`] capped: at most `max_lines` rows of `width` columns,
+/// each indented `pad` spaces — the indent kept on every row, unlike
+/// `wrap_line`'s continuation rows, so a wrapped paragraph reads as one
+/// block. Overflow drops the tail and ends the last row with an
+/// ellipsis. The text collapses to one paragraph first: a multiline
+/// description renders as prose, not as the frontmatter's line breaks.
+fn wrap_clamped(
+    text: &str,
+    width: usize,
+    pad: usize,
+    max_lines: usize,
+    color: ratatui::style::Color,
+) -> Vec<Line<'static>> {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let inner = width.saturating_sub(pad);
+    if inner == 0 {
+        // No room to indent into: the paragraph as-is, one row.
+        return vec![Line::from(Span::raw(text).fg(color))];
+    }
+    let mut rows = wrap_line(&Line::from(Span::raw(text).fg(color)), inner);
+    if rows.len() > max_lines {
+        rows.truncate(max_lines);
+        // The ellipsis takes the last column: trim the row back one
+        // char, then append.
+        let last = &mut rows[max_lines - 1];
+        let mut content = String::new();
+        for span in &last.spans {
+            content.push_str(&span.content);
+        }
+        // Break at the last whole word when one fits: an ellipsis
+        // after a half word reads broken, not capped.
+        let raw = content
+            .chars()
+            .take(inner.saturating_sub(2))
+            .collect::<String>()
+            .trim_end()
+            .to_owned();
+        let cut = match raw.rfind(char::is_whitespace) {
+            Some(pos) if pos >= raw.chars().count() / 2 => raw[..pos].trim_end().to_owned(),
+            _ => raw,
+        };
+        *last = Line::from(Span::raw(format!("{cut}…")).fg(color));
+    }
+    let pad_span = Span::raw(" ".repeat(pad));
+    rows.into_iter()
+        .map(|row| {
+            let mut spans = Vec::with_capacity(row.spans.len() + 1);
+            spans.push(pad_span.clone());
+            spans.extend(row.spans);
+            Line::from(spans)
+        })
+        .collect()
+}

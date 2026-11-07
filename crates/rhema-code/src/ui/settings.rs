@@ -501,34 +501,41 @@ pub(crate) fn settings_page(
                     Span::raw(format!(" · {}", subagent.source.label())).fg(theme.text3),
                 ]);
                 lines.push(settings_row(line, selected, theme));
-                let model = match &subagent.model {
-                    Some(model) => model.clone(),
-                    None => "the parent's".to_owned(),
-                };
-                lines.extend(wrap_line(
-                    &Line::from(
-                        Span::raw(format!(
-                            "    {model} · {} steps",
-                            subagent
-                                .max_steps
-                                .unwrap_or(rhema_subagents::def::DEFAULT_MAX_STEPS),
-                        ))
-                        .fg(theme.text3),
-                    ),
+                // The description, at most two rows: prose, indented
+                // like the name, an ellipsis when it does not fit.
+                lines.extend(crate::ui::wrap_clamped(
+                    &subagent.description,
                     width,
+                    4,
+                    2,
+                    theme.text3,
                 ));
-                lines.extend(wrap_line(
-                    &Line::from(Span::raw(format!("    {}", subagent.description))).fg(theme.text3),
-                    width,
-                ));
+                // Overrides only: a definition that changes nothing
+                // renders no meta line — the session's model and the
+                // default step budget are the norm, and a number that
+                // looks configured when it is a default reads wrong.
+                let mut meta = Vec::new();
+                if let Some(model) = &subagent.model {
+                    meta.push(model.clone());
+                }
+                if let Some(steps) = subagent.max_steps {
+                    meta.push(format!("{steps} steps max"));
+                }
+                if !meta.is_empty() {
+                    lines.extend(wrap_line(
+                        &Line::from(Span::raw(format!("    {}", meta.join(" · "))).fg(theme.text3)),
+                        width,
+                    ));
+                }
             }
-            (
-                lines,
-                footer(
-                    "space - toggle on and off · enter/e - edit in $EDITOR; the built-in is copied to the global dir first",
-                ),
-                row_hits,
-            )
+            // The hints must not clip on a narrow terminal: the edit
+            // note rides only when the pane fits it whole.
+            let mut hints = "space - toggle on and off · enter/e - edit in $EDITOR".to_owned();
+            let note = "; the built-in is copied to the global dir first";
+            if width >= hints.chars().count() + note.chars().count() + 2 {
+                hints.push_str(note);
+            }
+            (lines, footer(&hints), row_hits)
         }
         SettingsSection::Mcp => {
             if settings.mcp.is_empty() {
