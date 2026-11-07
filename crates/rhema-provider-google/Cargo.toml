@@ -9,9 +9,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.2.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
 # The shared model card and SSE decoder
-rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 # The seam and the process family's shared machinery (`spawn`): the
 # stream pump, the textual path guard, the shell quoting
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.0", features = ["spawn"] }
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.1", features = ["spawn"] }
 async-trait = { workspace = true }
 # The tarball seed is staged base64-side only: the bytes stream raw to
 # the remote `tar` — base64 rides for the file routes

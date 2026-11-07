@@ -15,10 +15,10 @@ publish = false
 rusqlite = { version = "0.40", features = ["bundled"] }
 # The reminder source: one `Source` over the feeds, detect-pass shaped
 # like the task scheduler's
-rhema-autonomous-agent = { path = "../../crates/rhema-autonomous-agent", version = "0.2.0" }
+rhema-autonomous-agent = { path = "../../crates/rhema-autonomous-agent", version = "0.2.1" }
 # The reminder source ingests its slots into a `Dispatcher`; the event
 # and key-function shapes are the dispatcher's
-rhema-rsd = { path = "../../crates/rhema-rsd", version = "0.2.0" }
+rhema-rsd = { path = "../../crates/rhema-rsd", version = "0.2.1" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

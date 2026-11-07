@@ -11,7 +11,7 @@ authors.workspace = true
 [dependencies]
 # The ModelProvider seam the retry decorator implements and the
 # ProviderError it classifies
-rhema-core = { path = "../rhema-core", version = "0.2.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
 # The Stream trait under the transport seam's byte-stream type; the
 # core trait only, no runtime
 futures-core = { version = "0.3", default-features = false }

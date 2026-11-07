@@ -13,15 +13,15 @@ authors.workspace = true
 mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
 
 [dependencies]
-rhema-config = { path = "../rhema-config", version = "0.2.0" }
-rhema-core = { path = "../rhema-core", version = "0.2.0" }
-rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.2.0" }
+rhema-config = { path = "../rhema-config", version = "0.2.1" }
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
+rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.2.1" }
 # The vision wiring's env map, for the agent config's shell_env
-rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.0" }
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.1" }
 # The adapter family, resolved from config the same way the other
 # frontends resolve it
-rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
-rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.2.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
+rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.2.1" }
 # The ACP schema and agent-side connection; `stdio` is the transport a
 # subprocess agent serves on
 agent-client-protocol = { workspace = true, features = ["stdio"] }

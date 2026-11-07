@@ -23,34 +23,34 @@ path = "src/main.rs"
 mock = ["rhema-core/mock", "rhema-coding-agent/mock"]
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.2.0" }
-rhema-config = { path = "../rhema-config", version = "0.2.0" }
-rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.0" }
-rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.2.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
+rhema-config = { path = "../rhema-config", version = "0.2.1" }
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.1" }
+rhema-coding-agent = { path = "../rhema-coding-agent", version = "0.2.1" }
 # The subagent extension: discovered definitions wired in as one tool
-rhema-subagents = { path = "../rhema-subagents", version = "0.2.0" }
+rhema-subagents = { path = "../rhema-subagents", version = "0.2.1" }
 # The bounded request view, when --transcript is set
-rhema-transcript = { path = "../rhema-transcript", version = "0.2.0" }
+rhema-transcript = { path = "../rhema-transcript", version = "0.2.1" }
 # The `rhema acp` subcommand: the Agent Client Protocol server
-rhema-acp = { path = "../rhema-acp", version = "0.2.0" }
+rhema-acp = { path = "../rhema-acp", version = "0.2.1" }
 # Where bash runs: the sandbox seam and its backends — docker, lxd,
 # ecrou, ssh, http — behind the stored choice; the seam itself brings
 # `FsRoot` (feature `spawn`)
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.0", features = [
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.1", features = [
     "spawn",
 ] }
-rhema-sandbox-ecrou = { path = "../rhema-sandbox-ecrou", version = "0.2.0" }
-rhema-sandbox-lxd = { path = "../rhema-sandbox-lxd", version = "0.2.0" }
-rhema-sandbox-docker = { path = "../rhema-sandbox-docker", version = "0.2.0" }
-rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.2.0" }
-rhema-sandbox-ssh = { path = "../rhema-sandbox-ssh", version = "0.2.0" }
+rhema-sandbox-ecrou = { path = "../rhema-sandbox-ecrou", version = "0.2.1" }
+rhema-sandbox-lxd = { path = "../rhema-sandbox-lxd", version = "0.2.1" }
+rhema-sandbox-docker = { path = "../rhema-sandbox-docker", version = "0.2.1" }
+rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.2.1" }
+rhema-sandbox-ssh = { path = "../rhema-sandbox-ssh", version = "0.2.1" }
 # The shared model card every adapter's catalog normalizes into
-rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
-rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.2.0" }
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.0" }
-rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.2.0" }
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.0" }
-rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.2.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
+rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.2.1" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.1" }
+rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.2.1" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.1" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.2.1" }
 # Derives for the saved session's usage-stats blob (src/sessions.rs);
 # the session types themselves live in rhema-core
 serde = { workspace = true }
@@ -80,7 +80,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # The image block's data is bare base64
 base64 = "0.22"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
-rhema-mcp = { version = "0.2.0", path = "../rhema-mcp" }
+rhema-mcp = { version = "0.2.1", path = "../rhema-mcp" }
 serde_yaml.workspace = true
 
 [dev-dependencies]

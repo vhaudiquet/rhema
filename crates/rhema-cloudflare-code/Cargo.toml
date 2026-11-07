@@ -22,29 +22,29 @@ worker = []
 [dependencies]
 # The harness the DO assembles: assembly, gate, sandbox seam — shared
 # with the other cloud frontends, tested on the host without wasm.
-rhema-cloud-agent = { path = "../rhema-cloud-agent", version = "0.2.0" }
+rhema-cloud-agent = { path = "../rhema-cloud-agent", version = "0.2.1" }
 # The toolkit pieces the worker touches directly: the fail-safe
 # turn-level approval and the skill shape
-rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.0", default-features = false }
+rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.1", default-features = false }
 # The engine's session type the checkpoints wrap
-rhema-core = { path = "../rhema-core", version = "0.2.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
 # The transport seam the fetch transport implements, and the Sleeper
 # the Delay sleeper implements
-rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
 # The Anthropic dialect over a caller-supplied transport; the native
 # reqwest feature stays off — workerd has no sockets
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.0", default-features = false }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.1", default-features = false }
 # The revision-guarded record the DO checkpoints sessions through
-rhema-rsd = { path = "../rhema-rsd", version = "0.2.0", default-features = false }
+rhema-rsd = { path = "../rhema-rsd", version = "0.2.1", default-features = false }
 # The sandbox seam the DO's bash runs through: `SandboxDo` speaks the
 # shared protocol types
-rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.0", default-features = false }
+rhema-sandbox = { path = "../rhema-sandbox", version = "0.2.1", default-features = false }
 # The protocol's HTTPS client: the `HttpTransport` seam this worker
 # implements over host fetch, plus the `HttpSandbox` the `http` backend
 # drives — reqwest behind its `native` feature, off here, workerd has
 # no sockets
-rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.2.0", default-features = false }
-rhema-transcript = { path = "../rhema-transcript", version = "0.2.0" }
+rhema-sandbox-http = { path = "../rhema-sandbox-http", version = "0.2.1", default-features = false }
+rhema-transcript = { path = "../rhema-transcript", version = "0.2.1" }
 # The typed errors the backend choice and the turn's durable pieces report
 thiserror = { workspace = true }
 async-trait = { workspace = true }

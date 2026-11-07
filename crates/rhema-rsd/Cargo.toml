@@ -23,7 +23,7 @@ sqlite = ["dep:rusqlite"]
 [dependencies]
 # The RSD session wraps rhema-core's caller-owned session; checkpointing
 # round-trips it verbatim
-rhema-core = { path = "../rhema-core", version = "0.2.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
 # Event payloads, plans, and session state cross the store boundary as JSON
 serde = { workspace = true }
 serde_json = { workspace = true }

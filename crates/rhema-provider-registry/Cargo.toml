@@ -9,14 +9,14 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-rhema-core = { path = "../rhema-core", version = "0.2.0" }
-rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.0" }
-rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.2.0" }
-rhema-provider-google = { path = "../rhema-provider-google", version = "0.2.0" }
-rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp", version = "0.2.0" }
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.0" }
-rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.2.0" }
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
+rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.1" }
+rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.2.1" }
+rhema-provider-google = { path = "../rhema-provider-google", version = "0.2.1" }
+rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp", version = "0.2.1" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.1" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.2.1" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
