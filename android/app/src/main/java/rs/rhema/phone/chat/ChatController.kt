@@ -34,8 +34,10 @@ const val MAX_IMAGE_BYTES = 5L * 1024 * 1024
 // seeded from the session cache before the first frame and kept in the
 // cache as events stream, so opening a session paints it at once and the
 // claw is asked only for the events past the cache (the stream's `since`
-// cursor). Rotation re-seeds from the cache; process death no longer
-// costs the transcript.
+// cursor, which is the seq of the last event applied). A screen with no
+// cache opens on the newest turn and walks back through the history
+// route as the reader scrolls up. Rotation re-seeds from the cache;
+// process death no longer costs the transcript.
 class ChatController(
     private val api: ClawApi,
     private val cache: SessionCache,
@@ -101,6 +103,11 @@ class ChatController(
     // reply carries the text, this carries the outcome.
     data class Outcome(override val id: Long, val outcome: String) : Item
 
+    // One applied event with the seq the claw gave it: the cache window
+    // needs the seqs to resume from, and a lagged drop leaves a gap the
+    // window's arithmetic must not paper over.
+    private data class Applied(val seq: Long?, val event: ClawEvent)
+
     sealed interface Conn {
         data object Connecting : Conn
         data object Live : Conn
@@ -120,11 +127,24 @@ class ChatController(
     private var nextId = 0L
     private fun newId() = nextId++
 
-    // The applied event log: the cache's tail plus what this connection
-    // delivered, and [appliedTotal] its count from the session's first
-    // event — the cursor every (re)connection opens with.
-    private var applied: MutableList<ClawEvent> = mutableListOf()
-    private var appliedTotal = 0L
+    // The applied event log the cache window is taken from: the cached
+    // tail plus what this connection delivered. Pages folded in above it
+    // by [loadOlder] are transcript rows only — the walk back re-reads
+    // them, so they never bloat what is persisted.
+    private var applied: MutableList<Applied> = mutableListOf()
+    // The seq of the newest event applied: the cursor every
+    // (re)connection opens with. -1 asks for the tail.
+    private var cursor = -1L
+    // The seq of the oldest event on screen: the anchor [loadOlder]
+    // ends its page at. -1 when the screen holds nothing.
+    private var oldestSeq = -1L
+
+    // The walk back through history: whether a page is in flight, and
+    // whether any more exist below what the screen holds.
+    var loadingOlder by mutableStateOf(false)
+        private set
+    var moreOlder by mutableStateOf(false)
+        private set
 
     private var streamJob: Job? = null
 
@@ -134,18 +154,30 @@ class ChatController(
             // Seed before the first frame: the screen shows the cached
             // transcript at once, and the stream opens past it.
             val cached = cache.get(sessionKey)
-            appliedTotal = cached.total
-            applied = cached.events.toMutableList()
-            items = applyEvents(emptyList(), applied)
+            cursor = cached.resumeCursor
+            oldestSeq = cached.oldestSeq
+            applied = cached.events.map { Applied(null, it) }.toMutableList()
+            items = applyEvents(emptyList(), cached.events)
+            // A cache holds a window, not the record: the walk back has
+            // somewhere to go unless the session held nothing. (A seed
+            // from an empty cache leaves this false; the tail's first
+            // event re-arms it — see [record].)
+            moreOlder = items.isNotEmpty()
             try {
                 while (isActive) {
-                    api.eventStream(sessionKey, appliedTotal).collect { frame ->
+                    api.eventStream(sessionKey, cursor).collect { frame ->
                         when (frame) {
                             // The replay was cut at the cursor, so nothing
                             // already on screen arrives twice; the feed just
-                            // continues from where the cache left off.
+                            // continues from where the cache left off. With
+                            // no cursor it is the newest turn — the screen
+                            // paints it and the reader walks back.
                             SseFrame.Opened -> connection = Conn.Live
-                            is SseFrame.Event -> record(frame.event)
+                            is SseFrame.Event -> record(frame.event, frame.seq)
+                            // The cursor named events the claw no longer
+                            // holds: drop the mirror, take the tail that
+                            // follows.
+                            SseFrame.Reset -> resetMirror()
                             SseFrame.Closed -> Unit
                             is SseFrame.Failed -> connection = Conn.Failed(frame.code, frame.message)
                         }
@@ -166,16 +198,79 @@ class ChatController(
 
     // Appends one delivered event to the log and the transcript. The
     // turn's end persists the cache — once per turn, not per delta.
-    private suspend fun record(event: ClawEvent) {
-        applied.add(event)
-        appliedTotal += 1
+    private suspend fun record(event: ClawEvent, seq: Long?) {
+        if (seq != null) cursor = seq
+        if (seq != null && oldestSeq < 0) {
+            // The first event on an empty mirror: this is the tail the
+            // claw opened with, and the record may hold more above it —
+            // only a page that comes back empty (or `more` false) says
+            // otherwise.
+            oldestSeq = seq
+            moreOlder = true
+        }
+        applied.add(Applied(seq, event))
         items = applyEvent(items, event)
         if (event is ClawEvent.TurnDone) persist()
     }
 
+    // The claw no longer holds what this screen's cursor named: the
+    // transcript goes, and the tail that follows the notice rebuilds it.
+    private suspend fun resetMirror() {
+        applied = mutableListOf()
+        cursor = -1
+        oldestSeq = -1
+        items = emptyList()
+        loadingOlder = false
+        moreOlder = false
+        cache.put(sessionKey, CachedSession())
+    }
+
+    // One page of turns older than the screen's oldest, appended above it.
+    // Whole turns only, so the page never duplicates or strands a row; the
+    // page ends exactly where the screen begins, and [moreOlder] says
+    // whether another exists. A page folded from empty goes through the
+    // same reducer the stream uses, so a replayed consent or attachment
+    // card folds exactly as it would have live.
+    suspend fun loadOlder() {
+        if (loadingOlder || !moreOlder || oldestSeq < 0) return
+        loadingOlder = true
+        try {
+            when (val result = api.history(sessionKey, oldestSeq, HISTORY_PAGE)) {
+                is ClawResult.Ok -> {
+                    val page = result.value.events.mapNotNull { entry ->
+                        entry.event?.let { entry.seq to it }
+                    }
+                    val first = page.firstOrNull() ?: return
+                    // The page is older than everything on screen, and the
+                    // list runs oldest first: it goes above, never below —
+                    // appended, it would land at the newest end.
+                    items = applyEvents(emptyList(), page.map { it.second }) + items
+                    oldestSeq = first.first
+                    moreOlder = result.value.more
+                }
+                is ClawResult.HttpError, is ClawResult.Network -> Unit
+            }
+        } finally {
+            loadingOlder = false
+        }
+    }
+
     private suspend fun persist() {
+        // The window starts on a turn boundary: a page cut mid-turn would
+        // paint a reply with no question above it on the next open, and
+        // the walk back from the window's first seq would then have to
+        // start inside a turn instead of at its top.
         val window = applied.takeLast(SESSION_WINDOW)
-        cache.put(sessionKey, CachedSession(total = appliedTotal, events = window))
+        val start = window.indexOfFirst { it.event is ClawEvent.UserMessage }.takeIf { it > 0 } ?: 0
+        val kept = window.drop(start)
+        cache.put(
+            sessionKey,
+            CachedSession(
+                cursor = cursor,
+                first = kept.firstOrNull()?.seq ?: -1,
+                events = kept.map { it.event },
+            ),
+        )
     }
 
     fun stop() {
@@ -381,5 +476,9 @@ class ChatController(
 
     private companion object {
         const val RECONNECT_DELAY_MS = 2_000L
+
+        // The most events one history page may hold: the claw widens the
+        // page back to a turn boundary, so this is a floor, not a cap.
+        const val HISTORY_PAGE = 400
     }
 }

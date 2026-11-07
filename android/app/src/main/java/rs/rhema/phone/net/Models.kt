@@ -117,9 +117,21 @@ data class RhemaNotification(
 @Serializable
 data class UserImage(val id: String, @SerialName("media_type") val mediaType: String)
 
+// One event of GET /v1/sessions/{key}/history: the record's seq for it,
+// beside the event itself. Seq order is the wire order.
+@Serializable
+data class HistoryEvent(val seq: Long = -1, val event: ClawEvent? = null)
+
+// One page of whole turns older than the seq the screen holds oldest
+// (`before`). `more` false means the page reached the session's first
+// event, so the walk back can stop.
+@Serializable
+data class HistoryPage(val events: List<HistoryEvent> = emptyList(), val more: Boolean = false)
+
 // Frames of GET /v1/sessions/{key}/events; "type" is the discriminator.
-// The stream opens with the session's recorded turns replayed before the
-// live feed, so a screen (re)builds its transcript from the replay.
+// Every frame also names the record's seq in its `id:` line, which is the
+// stream's resume cursor. A screen with no cache opens on the newest turn
+// and walks back through /history; one with a cache resumes past it.
 // Unknown types fail the per-frame parse and are skipped, so the API can grow
 // without breaking older clients.
 @Serializable

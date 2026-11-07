@@ -46,15 +46,19 @@ manages the device fleet the claw keeps.
 - **Chat**: session list (`GET /v1/sessions`, interactive sessions first,
   the phone's own `phone:*` status keys hidden)
   and one chat screen per session. The applied events persist in a
-  per-session cache (DataStore, newest 500 with the full count as the
-  cursor), so a screen opens on its cached transcript at once and the
-  stream connects with `?since=<count>` to receive only what is new
-  instead of replaying the whole history; the cache flushes at every
-  `turn_done` and when the screen closes. While a chat screen is open the
-  app holds one SSE connection (`GET /v1/sessions/{key}/events`, OkHttp
-  streaming GET with the auth header, hand-parsed frames: blank-line
-  delimited `data:` lines, `:` comment keep-alives skipped, unknown event
-  types skipped). The reader's own messages render as right-anchored
+  per-session cache (DataStore, the newest 500 events, the seq of the
+  last one as its cursor), so a screen opens on its cached transcript at
+  once and the stream connects with `?since=<seq>` to receive only the
+  gap instead of replaying the session again; the cache flushes at every
+  `turn_done` and when the screen closes. A screen with no cache opens on
+  the claw's newest turn and walks back through `GET
+  /v1/sessions/{key}/history` as the reader scrolls up, one whole turn
+  per page. While a chat screen is open the app holds one SSE connection
+  (`GET /v1/sessions/{key}/events`, OkHttp streaming GET with the auth
+  header, hand-parsed frames: blank-line delimited `data:` lines with the
+  event's seq on the `id:` line, `:` comment keep-alives skipped, the
+  claw's `reset` comment dropping the mirror, unknown event types
+  skipped). The reader's own messages render as right-anchored
   bubbles (elevated surface, accent bar on the trailing edge); the
   agent's turns keep the avatar on the left. The
   composer's (+) door stages images for the next send — a photo-picker
@@ -215,7 +219,8 @@ All under one base URL; `Authorization: Bearer <token>` on `/v1`, never on
 | `PUT /v1/providers/active` | switch the backend instance, persisted |
 | `GET /v1/sessions` | session list |
 | `POST /v1/sessions/{key}/messages` | `{"text"}`, optional `images` (≤ 8, ≤ 5 MiB decoded each, bare base64) → 202; reply via stream |
-| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment`, `consent_request`, `consent_resolved`. `?since=N` skips the replay's oldest N events — the transcript cache's cursor |
+| `GET /v1/sessions/{key}/events` | SSE, replay-then-live: `user_message`, `thinking_delta`, `text_delta`, `tool_start`, `tool_result`, `turn_done`, `attachment`, `consent_request`, `consent_resolved`. Every frame carries the record's seq on its `id:` line; `?since=<seq>` replays only the events past it, and no cursor replays the newest turn only — the transcript cache's cursor |
+| `GET /v1/sessions/{key}/history?before=&limit=` | one page of whole turns older than `before`, ending exactly there, with `more` saying whether anything precedes it — the chat screen's walk back |
 | `GET /v1/attachments/{id}` | an attachment event's bytes (bearer) |
 | `GET /v1/consents` | pending consent questions, oldest first |
 | `POST /v1/consents/{id}` | answer one: `{"secret"}` or `{"grant"}` |
@@ -261,11 +266,16 @@ posts for that topic.
   notifications are as fresh as the WorkManager interval (15 min). The chat
   screen is always live via SSE.
 - **Transcript cache**: the applied event log persists per session (the
-  newest 500 events plus the full count), so a screen opens on its cached
+  newest 500 events plus their seqs), so a screen opens on its cached
   transcript and the stream resumes past it. The cache is a cursor over
   the claw's record, not a copy of it: a claw database wiped behind the
   phone's back leaves the cache pointing past a history that no longer
-  exists, and that session replays nothing until it catches up.
+  exists, which the claw answers with a `reset` comment and the newest
+  turn — the screen drops its stale rows and rebuilds from those.
+- **Older turns are fetched, not cached**: the screen holds the cached
+  window plus whatever the reader scrolled back to; reopening a session
+  starts from the cache again, and the walk back re-reads the record.
+  Nothing older is persisted, so the cache stays a fixed size.
 - **First launch**: nothing works until Settings validates `/healthz`.
 
 ## One-consumer principle

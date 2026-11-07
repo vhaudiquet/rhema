@@ -32,7 +32,16 @@ sealed interface ClawResult<out T> {
 
 sealed interface SseFrame {
     data object Opened : SseFrame
-    data class Event(val event: ClawEvent) : SseFrame
+
+    // seq is the record's number for the event, from the frame's `id:`
+    // line: the cursor a reconnect names as `since`. Null only when the
+    // frame carried no id.
+    data class Event(val event: ClawEvent, val seq: Long?) : SseFrame
+
+    // The claw no longer holds the events our cursor named (a wiped or
+    // reset database): the mirror is invalid, and the tail that follows
+    // this notice is what replaces it.
+    data object Reset : SseFrame
 
     // code != null carries an HTTP status; 401 means the token is wrong.
     data class Failed(val code: Int?, val message: String) : SseFrame
@@ -263,18 +272,20 @@ class ClawApi(
         return execute(builder.post(body).build()) { }
     }
 
-    // GET /v1/sessions/{key}/events?since=N: the claw replays the
-    // session's record minus its oldest N events, then goes live. `since`
-    // is the transcript cache's cursor — how many events this device has
-    // already applied — so a reopening screen receives only what is new
-    // instead of the whole history. Built by hand like notifications():
-    // v1() bakes the URL into the builder, leaving no room for a query.
+    // GET /v1/sessions/{key}/events?since=N: the claw replays the events
+    // past seq N, then goes live. `since` is the transcript cache's
+    // cursor — the seq of the last event this device applied — so a
+    // reopening screen receives only the gap instead of the whole
+    // history. A negative `since` asks for nothing: the claw answers
+    // with the newest turn, which is what a screen with no cache opens
+    // on. Built by hand like notifications(): v1() bakes the URL into
+    // the builder, leaving no room for a query.
     fun eventStream(sessionKey: String, since: Long): Flow<SseFrame> = callbackFlow {
         val url = baseOrNull()?.toHttpUrlOrNull()?.newBuilder()
             ?.addPathSegments("v1/sessions")
             ?.addPathSegment(sessionKey)
             ?.addPathSegment("events")
-            ?.apply { if (since > 0) addQueryParameter("since", since.toString()) }
+            ?.apply { if (since >= 0) addQueryParameter("since", since.toString()) }
             ?.build()
         if (url == null) {
             trySend(SseFrame.Failed(null, "no base URL configured"))
@@ -311,27 +322,38 @@ class ClawApi(
                         close()
                         return
                     }
-                    // SSE framing per contract: blank-line-delimited data lines,
-                    // ":" comment lines are keep-alives. No event:/id: fields.
+                    // SSE framing per contract: blank-line-delimited
+                    // frames, `data:` the payload, `id:` the event's seq,
+                    // ":" comment lines the keep-alives (plus the claw's
+                    // lag and reset notices). `event:` lines do not occur.
                     val data = StringBuilder()
+                    var id: String? = null
                     try {
                         while (true) {
                             val line = source.readUtf8Line() ?: break
                             when {
-                                line.startsWith(":") -> Unit
+                                line.startsWith(":") -> {
+                                    if (line.removePrefix(":").trimStart().startsWith("reset")) {
+                                        trySend(SseFrame.Reset)
+                                    }
+                                }
                                 line.isEmpty() -> {
                                     if (data.isNotEmpty()) {
                                         val payload = data.toString().trim()
+                                        val seq = id?.trim()?.toLongOrNull()
+                                        id = null
                                         data.setLength(0)
                                         runCatching { json.decodeFromString<ClawEvent>(payload) }
                                             .getOrNull()
-                                            ?.let { trySend(SseFrame.Event(it)) }
+                                            ?.let { trySend(SseFrame.Event(it, seq)) }
                                     }
                                 }
                                 line.startsWith("data:") -> {
                                     data.append(line.removePrefix("data:").trimStart())
                                     data.append('\n')
                                 }
+                                line.startsWith("id:") ->
+                                    id = line.removePrefix("id:").trim()
                             }
                         }
                         trySend(SseFrame.Closed)
@@ -345,6 +367,25 @@ class ClawApi(
         })
         awaitClose { call.cancel() }
     }.buffer(Channel.UNLIMITED)
+
+    // GET /v1/sessions/{key}/history?before=<seq>&limit=<n>: one page of
+    // whole turns older than the seq this device holds oldest, for the
+    // walk back through a session's history. `more` false means the page
+    // reached the session's first event. Built by hand like
+    // eventStream(): the query is not expressible through v1().
+    suspend fun history(sessionKey: String, before: Long, limit: Int): ClawResult<HistoryPage> {
+        val base = baseOrNull() ?: return ClawResult.Network("no base URL configured")
+        val url = base.toHttpUrlOrNull()?.newBuilder()
+            ?.addPathSegments("v1/sessions")
+            ?.addPathSegment(sessionKey)
+            ?.addPathSegment("history")
+            ?.addQueryParameter("before", before.toString())
+            ?.addQueryParameter("limit", limit.toString())
+            ?.build() ?: return ClawResult.Network("base URL is not a URL")
+        return execute(Request.Builder().url(url).header("Authorization", bearer()).build()) { response ->
+            json.decodeFromString<HistoryPage>(response.body?.string() ?: "{}")
+        }
+    }
 
     private suspend fun baseOrNull(): String? =
         settings.current().baseUrl.trim().trimEnd('/').takeIf { it.isNotBlank() }

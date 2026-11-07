@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -58,6 +59,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -81,6 +83,7 @@ import rs.rhema.phone.data.AgentIdentityCache
 import rs.rhema.phone.di.AppContainer
 import rs.rhema.phone.net.ClawResult
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -178,7 +181,25 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
         // bottom edge. A streaming reply grows against that anchor, so
         // the newest text stays on screen without scroll bookkeeping,
         // and a reader scrolled into history is never yanked back.
+        val listState = rememberLazyListState()
+        // Older turns are fetched, not cached: the claw holds the record
+        // and the screen opens on its newest turn, so the walk back
+        // starts when the reader reaches the top (higher indices are
+        // older here) or when the transcript is too short to fill the
+        // screen — which reads as "the last visible item is the last
+        // item" either way.
+        LaunchedEffect(listState, controller) {
+            snapshotFlow {
+                val info = listState.layoutInfo
+                info.visibleItemsInfo.lastOrNull()?.index to info.totalItemsCount
+            }
+                .distinctUntilChanged()
+                .collect { (last, total) ->
+                    if (last != null && total > 0 && last >= total - 2) controller.loadOlder()
+                }
+        }
         LazyColumn(
+            state = listState,
             modifier = Modifier
                 .weight(1f)
                 .fillMaxWidth(),
@@ -188,6 +209,18 @@ fun ChatScreen(container: AppContainer, sessionKey: String, onBack: () -> Unit) 
         ) {
             items(turnGroups(controller.items).asReversed(), key = { it.key }) { group ->
                 TurnGroupRow(group, container, controller, face)
+            }
+            // The last declared item sits at the top of a reversed list.
+            if (controller.loadingOlder) {
+                item(key = "older") {
+                    Text(
+                        stringResource(R.string.chat_loading_earlier),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = JadeiteMono,
+                        color = JadeiteText3,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         }
 
@@ -678,11 +711,19 @@ private fun ReplyBlock(item: ChatController.Reply) {
 
 @Composable
 private fun OutcomeTag(outcome: String) {
+    // A steered turn was cut short by the next message, not failed: the
+    // reply that replaced it streams right below, so the tag reads as an
+    // accent, not an error — the same distinction the web UI draws.
+    val color = when {
+        outcome.equals("Failed", ignoreCase = true) -> JadeiteError
+        outcome.equals("Steered", ignoreCase = true) -> JadeiteAccentText
+        else -> JadeiteText3
+    }
     Text(
         outcome,
         style = MaterialTheme.typography.labelSmall,
         fontFamily = JadeiteMono,
-        color = if (outcome.equals("Failed", ignoreCase = true)) JadeiteError else JadeiteText3,
+        color = color,
     )
 }
 
