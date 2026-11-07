@@ -122,18 +122,103 @@ impl TurnStore {
         Ok(())
     }
 
-    /// `key`'s whole recorded stream, oldest first — the replay a fresh
-    /// subscriber folds before the live feed.
-    pub fn events(&self, key: &str) -> Result<Vec<TurnEvent>, TurnStoreError> {
+    /// `key`'s recorded stream oldest first, as `(seq, event)` pairs —
+    /// the replay a subscriber folds before the live feed. `after`
+    /// bounds it below: only events with a seq past `after` come back,
+    /// so a client holding a cursor reads exactly the gap it missed;
+    /// `-1` (or any negative) reads whole. `limit` caps the page,
+    /// [`usize::MAX`] reads all of it.
+    pub fn events_from(
+        &self,
+        key: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, TurnEvent)>, TurnStoreError> {
         let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut stmt = conn.prepare("SELECT event FROM turn_events WHERE key = ?1 ORDER BY seq")?;
-        let rows = stmt.query_map(params![key], |row| row.get::<_, String>(0))?;
+        let mut stmt = conn.prepare(
+            "SELECT seq, event FROM turn_events
+             WHERE key = ?1 AND seq > ?2
+             ORDER BY seq
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![key, after, limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
         let mut out = Vec::new();
         for row in rows {
-            let json = row.map_err(TurnStoreError::from)?;
-            out.push(parse(key, &json)?);
+            let (seq, json) = row.map_err(TurnStoreError::from)?;
+            out.push((seq, parse(key, &json)?));
         }
         Ok(out)
+    }
+
+    /// The record's last `limit` events, oldest first — the tail a
+    /// client without a transcript cache opens with instead of the
+    /// whole history. (Whether that tail opens on a turn boundary is
+    /// the caller's concern; the store only reads rows.)
+    pub fn events_last(
+        &self,
+        key: &str,
+        limit: usize,
+    ) -> Result<Vec<(i64, TurnEvent)>, TurnStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut stmt = conn.prepare(
+            "SELECT seq, event FROM turn_events
+             WHERE key = ?1
+             ORDER BY seq DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![key, limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, json) = row.map_err(TurnStoreError::from)?;
+            out.push((seq, parse(key, &json)?));
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// The `limit` events just below `before` (exclusive), oldest first
+    /// — the page a client walking backward through history asks for.
+    /// The newest of them has the largest seq under `before`.
+    pub fn events_before(
+        &self,
+        key: &str,
+        before: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, TurnEvent)>, TurnStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut stmt = conn.prepare(
+            "SELECT seq, event FROM turn_events
+             WHERE key = ?1 AND seq < ?2
+             ORDER BY seq DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![key, before, limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (seq, json) = row.map_err(TurnStoreError::from)?;
+            out.push((seq, parse(key, &json)?));
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    /// The record's newest seq, or `None` when the key has no history —
+    /// the anchor a cursor conversation starts from, and the value a
+    /// reconnect's `since` is checked against.
+    pub fn last_seq(&self, key: &str) -> Result<Option<i64>, TurnStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.query_row(
+            "SELECT MAX(seq) FROM turn_events WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(TurnStoreError::from)
     }
 }
 
@@ -214,7 +299,12 @@ mod tests {
     #[test]
     fn an_appended_history_round_trips_through_events() {
         let store = TurnStore::in_memory().expect("store opens");
-        assert_eq!(store.events("interactive:web").expect("reads"), vec![]);
+        assert_eq!(
+            store
+                .events_from("interactive:web", -1, usize::MAX)
+                .expect("reads"),
+            vec![]
+        );
 
         store
             .append(
@@ -238,19 +328,27 @@ mod tests {
             )
             .expect("appends again");
         assert_eq!(
-            store.events("interactive:web").expect("reads"),
+            store
+                .events_from("interactive:web", -1, usize::MAX)
+                .expect("reads"),
             vec![
-                TurnEvent::UserMessage {
-                    text: "hello".into(),
-                    images: Vec::new()
-                },
-                text_delta("hi"),
-                TurnEvent::TurnDone {
-                    reply: Some("hi".into()),
-                    outcome: "handled".into(),
-                },
+                (
+                    0,
+                    TurnEvent::UserMessage {
+                        text: "hello".into(),
+                        images: Vec::new()
+                    }
+                ),
+                (1, text_delta("hi")),
+                (
+                    2,
+                    TurnEvent::TurnDone {
+                        reply: Some("hi".into()),
+                        outcome: "handled".into(),
+                    }
+                ),
             ],
-            "appends extend the stream in order"
+            "appends extend the stream in order, seqs dense from zero"
         );
     }
 
@@ -260,7 +358,12 @@ mod tests {
         store
             .append("interactive:web", &[])
             .expect("an empty append is a no-op");
-        assert_eq!(store.events("interactive:web").expect("reads"), vec![]);
+        assert_eq!(
+            store
+                .events_from("interactive:web", -1, usize::MAX)
+                .expect("reads"),
+            vec![]
+        );
     }
 
     #[test]
@@ -271,11 +374,17 @@ mod tests {
             .append("interactive:web", &[text_delta("a")])
             .expect("appends");
         assert_eq!(
-            store.events("task:2").expect("reads"),
-            vec![text_delta("b")],
+            store.events_from("task:2", -1, usize::MAX).expect("reads"),
+            vec![(0, text_delta("b"))],
             "one key's stream never leaks into another's"
         );
-        assert_eq!(store.events("interactive:web").expect("reads").len(), 1);
+        assert_eq!(
+            store
+                .events_from("interactive:web", -1, usize::MAX)
+                .expect("reads")
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -290,7 +399,7 @@ mod tests {
             .expect("writes raw");
         }
         let err = store
-            .events("interactive:web")
+            .events_from("interactive:web", -1, usize::MAX)
             .expect_err("corruption is loud");
         assert!(err.to_string().contains("interactive:web"), "{err}");
     }
@@ -317,11 +426,18 @@ mod tests {
         }
         let store = TurnStore::open(&path).expect("opens and migrates");
         assert_eq!(
-            store.events("interactive:web").expect("reads"),
-            vec![text_delta("old days")],
+            store
+                .events_from("interactive:web", -1, usize::MAX)
+                .expect("reads"),
+            vec![(0, text_delta("old days"))],
             "the readable blob migrated"
         );
-        assert_eq!(store.events("interactive:broke").expect("reads"), vec![]);
+        assert_eq!(
+            store
+                .events_from("interactive:broke", -1, usize::MAX)
+                .expect("reads"),
+            vec![]
+        );
         {
             let conn = store.conn.lock().unwrap_or_else(PoisonError::into_inner);
             let legacy: i64 = conn
@@ -337,6 +453,12 @@ mod tests {
         store
             .append("interactive:web", &[text_delta("new days")])
             .expect("appends");
-        assert_eq!(store.events("interactive:web").expect("reads").len(), 2);
+        assert_eq!(
+            store
+                .events_from("interactive:web", -1, usize::MAX)
+                .expect("reads")
+                .len(),
+            2
+        );
     }
 }

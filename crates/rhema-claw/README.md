@@ -124,7 +124,8 @@ The native surface:
 GET  /healthz                          GET  /v1/sessions
 POST /v1/sessions                    {"name"} — create an empty interactive session
 POST /v1/sessions/{key}/messages       {"text": "..."}   -> 202
-GET  /v1/sessions/{key}/events         SSE turn events (see below)
+GET  /v1/sessions/{key}/events         SSE turn events (see below); ?since=<seq> resumes a cursor
+GET  /v1/sessions/{key}/history        one page of older turns: ?before=<seq>&limit=<n>
 GET  /v1/watches                       POST /v1/watches  DELETE /v1/watches/{forge}/{repo}
 GET  /v1/bootstrap                     {"soul": bool, "user": bool}
 POST /v1/ingest                         {"source","key","payload"} -> 202
@@ -165,18 +166,29 @@ and it simply keeps offering, never
 interrogating. Both files stay hand-editable forever; `/v1/bootstrap`
 lets a UI badge setup state.
 
-SSE frames are JSON, `data: {..}`: `user_message`, `thinking_delta`,
-`text_delta`, `tool_start`, `tool_result`, `turn_done`. A subscription
-opens with the session's recorded turns replayed first and the live feed
-after, cut atomically daemon-side — every streamed event is persisted as
-it streams, so both a reload and a daemon restart rebuild the whole
-transcript, not a recent window; a session that runs for weeks scrolls
-back to its first message. A chat UI subscribes once,
-POSTs messages, and resets its mirror whenever the stream (re)opens,
-letting the replay rebuild it; the daemon owns the conversation, so the
-client mirrors the stream rather than managing history. The OpenAI shim
-and the message POST read the live feed only — replay never reaches a
-turn that is starting.
+SSE frames are `id: <seq>` plus `data: {..}`: `user_message`,
+`thinking_delta`, `text_delta`, `tool_start`, `tool_result`,
+`turn_done`. Every streamed event is persisted as it streams, so both a
+reload and a daemon restart rebuild the transcript, and a session that
+runs for weeks keeps all of it.
+
+The seq is the record's dense per-key number for the event, and it is
+the client's cursor. A subscription opens with a replay cut atomically
+against the live feed, and the frames of both carry their seqs, so a
+client that reconnects sends `?since=<last seq it saw>` and receives
+exactly the gap. With no cursor the replay is the tail — the newest 400
+events, cut back to the first turn boundary in them — so a weeks-old
+session paints its latest turn at once instead of replaying everything;
+the turns above it come from the history route, one whole turn per
+page, each ending exactly where the previous page began. A cursor the
+record can no longer serve (a wiped table) answers with a `reset;`
+comment and the tail, and the client rebuilds rather than splice.
+
+A chat UI subscribes once, POSTs messages, and resets its mirror
+whenever the stream (re)opens, letting the replay rebuild it; the daemon
+owns the conversation, so the client mirrors the stream rather than
+managing history. The OpenAI shim and the message POST read the live
+feed only — replay never reaches a turn that is starting.
 
 A message into a session whose turn is running **steers** it, the same
 interrupt rhema-code's UI owns: the running turn is cut at its current

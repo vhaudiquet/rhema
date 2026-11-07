@@ -261,6 +261,7 @@ pub fn router(state: ClawState) -> Router {
             post(messages).layer(axum::extract::DefaultBodyLimit::max(MAX_MESSAGE_BODY_BYTES)),
         )
         .route("/sessions/{key}/events", get(events))
+        .route("/sessions/{key}/history", get(session_history))
         .route("/bootstrap", get(bootstrap_status))
         .route("/watches", get(watches_list).post(watches_add))
         .route("/watches/{forge}/{*repo}", delete(watches_remove))
@@ -696,15 +697,29 @@ where
     }
 }
 
-/// The events route's query: `since` counts how many of the record's
-/// oldest events the client already holds in its local transcript cache,
-/// and those are skipped in the replay. Absent (the web UI keeps no
-/// cache) the replay stays whole; a blank `since` is absent, see
+/// How much of the record a client with nothing cached opens with: the
+/// newest events, cut back to the first turn boundary in the window. A
+/// resident session runs for weeks, so replaying it whole to paint a
+/// screen would cost more the longer the session lived; the tail paints
+/// the latest turn at once and the client walks back through history as
+/// the reader scrolls up.
+const TAIL_WINDOW: usize = 400;
+
+/// One backward history page: the size asked for by default, and the
+/// most one request may ask for.
+const HISTORY_PAGE: usize = 400;
+const HISTORY_PAGE_MAX: usize = 2000;
+
+/// The events route's query: `since` is the seq of the last event the
+/// client already holds, from the `id:` line of the frame that carried
+/// it. The replay starts after it, so a reconnecting client receives
+/// exactly the gap it missed, whatever its size. Absent, the stream
+/// opens with the tail ([`TAIL_WINDOW`]); a blank `since` is absent, see
 /// [`blank_as_none`].
 #[derive(Debug, Deserialize)]
 struct EventStreamQuery {
     #[serde(default, deserialize_with = "blank_as_none")]
-    since: Option<usize>,
+    since: Option<i64>,
 }
 
 async fn events(
@@ -723,13 +738,26 @@ async fn events(
     }
     // History first, live second, cut atomically: the snapshot and the
     // subscription leave the hub under one lock, so a client folding the
-    // replay and then the stream sees every event exactly once. A reload
-    // rebuilds its transcript from this — nothing else backfills it. A
-    // client that cached the transcript opens with `since` and receives
-    // only the events it has not seen.
-    let (history, mut receiver) = state
-        .hub
-        .subscribe_with_history_from(&ResourceKey::from(key), query.since.unwrap_or(0));
+    // replay and then the stream sees every event exactly once. A
+    // client holding a cursor opens with `since` and receives only the
+    // gap; one with nothing cached opens with the tail, then walks back
+    // through `history` for the turns above it.
+    let key = ResourceKey::from(key);
+    let (replay, mut receiver) = match query.since {
+        Some(cursor) => state.hub.replay_after(&key, cursor, TAIL_WINDOW),
+        None => state.hub.replay_tail(&key, TAIL_WINDOW),
+    };
+    let stale = replay.stale;
+    // A tail window can open mid-turn (the oldest events in it belong
+    // to a turn that started before the window), and a transcript that
+    // opens on a reply with no question above it reads as a bug. Cut
+    // back to the window's first question. A cursor replay is exact by
+    // construction and is never cut.
+    let history = if query.since.is_none() {
+        snap_to_turn(replay.events)
+    } else {
+        replay.events
+    };
     // The pump decouples the broadcast channel from the SSE body: the
     // client's disconnect closes the body, which fails the send, which
     // ends the pump. The stream never ends on its own — a chat UI
@@ -737,16 +765,41 @@ async fn events(
     let (sender, body) =
         tokio::sync::mpsc::channel::<Result<SseEvent, std::convert::Infallible>>(64);
     tokio::spawn(async move {
-        for turn in history {
-            if sender.send(Ok(sse_event(turn))).await.is_err() {
+        // Every frame carries its seq as the SSE `id:`, so the client's
+        // cursor is read off the wire and a reconnect names the exact
+        // event it stopped at. The record numbers events densely and
+        // the hub appends and broadcasts under one lock, so the seq the
+        // pump counts matches the record's: a lagged drop is announced
+        // with how many were skipped, and the count steps over them.
+        let mut next_seq = history.last().map_or(0, |(seq, _)| seq + 1);
+        if stale {
+            // The cursor named events the record no longer holds: the
+            // replay above is the tail, not the gap. Say so before it,
+            // so a client that kept its transcript drops it instead of
+            // splicing a reset onto the end of a stale one.
+            let reset = SseEvent::default()
+                .comment("reset; the record no longer holds the events your cursor named");
+            if sender.send(Ok(reset)).await.is_err() {
+                return;
+            }
+        }
+        for (seq, turn) in history {
+            if sender.send(Ok(sse_event(seq, turn))).await.is_err() {
                 return;
             }
         }
         loop {
             let item = match receiver.recv().await {
-                Ok(turn) => sse_event(turn),
-                Err(RecvError::Lagged(dropped)) => SseEvent::default()
-                    .comment(format!("lagged; {dropped} earlier event(s) dropped")),
+                Ok(turn) => {
+                    let seq = next_seq;
+                    next_seq += 1;
+                    sse_event(seq, turn)
+                }
+                Err(RecvError::Lagged(dropped)) => {
+                    next_seq += dropped as i64;
+                    SseEvent::default()
+                        .comment(format!("lagged; {dropped} earlier event(s) dropped"))
+                }
                 Err(RecvError::Closed) => break,
             };
             if sender.send(Ok(item)).await.is_err() {
@@ -824,14 +877,16 @@ async fn calendars_list(State(state): State<ClawState>) -> Response {
     }
 }
 
-/// One `TurnEvent` as an SSE frame: `data: {json}`. A lagged subscriber
-/// gets a comment naming the drop — live delivery is best-effort; the
-/// record replays what completed. A serialization failure is logged with
-/// the event kind instead of vanishing: a dropped frame a client can
-/// never see must at least reach the operator.
-fn sse_event(turn: TurnEvent) -> SseEvent {
+/// One `TurnEvent` as an SSE frame: `id: {seq}` then `data: {json}`.
+/// The id is the record's seq for the event, which is what a client
+/// names as `since` when it reconnects. A lagged subscriber gets a
+/// comment naming the drop — live delivery is best-effort; the record
+/// replays what completed. A serialization failure is logged with the
+/// event kind instead of vanishing: a dropped frame a client can never
+/// see must at least reach the operator.
+fn sse_event(seq: i64, turn: TurnEvent) -> SseEvent {
     match serde_json::to_string(&turn) {
-        Ok(data) => SseEvent::default().data(data),
+        Ok(data) => SseEvent::default().id(seq.to_string()).data(data),
         Err(err) => {
             eprintln!(
                 "[claw] warning: dropped unserializable {} event: {err}",
@@ -840,6 +895,69 @@ fn sse_event(turn: TurnEvent) -> SseEvent {
             SseEvent::default().comment("unserializable event dropped")
         }
     }
+}
+
+/// A replay window cut back to its first question: the events before
+/// it belong to a turn whose start the window did not reach, and half a
+/// turn reads as a bug. A window with no question in it (one turn
+/// longer than the window) is returned whole — showing it beats showing
+/// nothing, and the walk back through history continues above it.
+fn snap_to_turn(mut events: Vec<crate::hub::SeqEvent>) -> Vec<crate::hub::SeqEvent> {
+    match events
+        .iter()
+        .position(|(_, event)| matches!(event, TurnEvent::UserMessage { .. }))
+    {
+        Some(index) if index > 0 => events.split_off(index),
+        _ => events,
+    }
+}
+
+/// The history route's query: the page ends at `before` (the seq of the
+/// oldest event the client holds; absent reads from the newest), and
+/// `limit` is the most events it may hold before the page is widened
+/// back to a turn boundary — see [`EventHub::replay_turn_before`].
+#[derive(Debug, Deserialize)]
+struct HistoryQuery {
+    #[serde(default, deserialize_with = "blank_as_none")]
+    before: Option<i64>,
+    #[serde(default, deserialize_with = "blank_as_none")]
+    limit: Option<usize>,
+}
+
+/// `GET /v1/sessions/{key}/history?before=<seq>&limit=<n>`: one page of
+/// turns older than the client's oldest event, for the walk back
+/// through a session's history. The page starts on a turn boundary and
+/// ends exactly at `before`, so pages stack without gaps or overlaps.
+/// The response's `more` says whether anything precedes it: `false`
+/// means the client has reached the session's first event.
+async fn session_history(
+    State(state): State<ClawState>,
+    Path(key): Path<String>,
+    Query(query): Query<HistoryQuery>,
+) -> Response {
+    if !crate::interactive::is_resident_key(&key) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "key must start with interactive:, task:, or phone:"})),
+        )
+            .into_response();
+    }
+    let key = ResourceKey::from(key);
+    let limit = query
+        .limit
+        .unwrap_or(HISTORY_PAGE)
+        .clamp(1, HISTORY_PAGE_MAX);
+    let page = state.hub.replay_turn_before(&key, query.before, limit);
+    // Whether anything sits below the page: a lookup, not a read.
+    let more = match page.first().map(|(seq, _)| *seq) {
+        Some(first) => state.hub.has_record_before(&key, first),
+        None => false,
+    };
+    let events: Vec<Value> = page
+        .into_iter()
+        .map(|(seq, event)| json!({"seq": seq, "event": event}))
+        .collect();
+    Json(json!({"events": events, "more": more})).into_response()
 }
 
 async fn watches_list(State(state): State<ClawState>) -> Result<Json<Value>, (StatusCode, String)> {

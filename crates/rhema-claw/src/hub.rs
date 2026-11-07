@@ -39,6 +39,12 @@ use crate::turn_store::TurnStore;
 /// past four digits.
 pub const TURN_CHANNEL_CAPACITY: usize = 1024;
 
+/// The furthest a bare history page widens while hunting for the turn
+/// boundary it must start on, in events. A turn longer than this has
+/// no boundary to find; the page then starts wherever the scan stops,
+/// so the walk back through history always advances.
+pub const HISTORY_SCAN_CAP: usize = 8192;
+
 /// How many events one key's in-memory record holds when no turn store
 /// is attached. Wide enough that a reload rebuilds whole recent turns —
 /// thinking traces and tool rows are deltas, and they add up.
@@ -173,11 +179,30 @@ impl TurnEvent {
     }
 }
 
+/// One recorded event with the seq the record carries for it: dense
+/// per key from zero, assigned as the event is appended, never reused.
+/// The seq is the wire frame's `id:`, so a client's cursor names an
+/// exact place in the stream even across a reconnect.
+pub type SeqEvent = (i64, TurnEvent);
+
+/// What a replay hands back with its live receiver.
+pub struct Replay {
+    /// The events the caller asked for, oldest first, each with its seq.
+    pub events: Vec<SeqEvent>,
+    /// The caller's cursor names events this record no longer holds —
+    /// a wiped table, or a memory window that has already dropped them.
+    /// Its cache is invalid: it must drop what it has and rebuild from
+    /// the tail, or the seqs it prints past this point would be lies.
+    pub stale: bool,
+}
+
 /// One key's entry: the live channel, plus the in-memory record a
 /// replay reads when no turn store is attached. Both live behind one
 /// mutex, which is what makes a history snapshot + subscription atomic.
 struct KeyEntry {
-    history: VecDeque<TurnEvent>,
+    history: VecDeque<SeqEvent>,
+    /// The seq the next memory event takes; dense from zero.
+    next_seq: i64,
     sender: broadcast::Sender<TurnEvent>,
 }
 
@@ -239,32 +264,214 @@ impl EventHub {
         &self,
         key: &ResourceKey,
     ) -> (Vec<TurnEvent>, broadcast::Receiver<TurnEvent>) {
-        Self::subscribe_with_history_from(self, key, 0)
+        let (Replay { events, .. }, receiver) = self.replay_after(key, -1, 0);
+        (
+            events.into_iter().map(|(_, event)| event).collect(),
+            receiver,
+        )
     }
 
-    /// [`Self::subscribe_with_history`] with a cursor: `skip` names how
-    /// many of the record's oldest events the caller already holds (the
-    /// count a client tracks for its local transcript cache), and the
-    /// replay drops them, so a reconnecting client that kept its
-    /// transcript receives only what is new. A `skip` past the record's
-    /// end clamps to it — the client cannot skip into events that do not
-    /// exist, and the live feed after the cut is unaffected either way.
-    pub fn subscribe_with_history_from(
+    /// The record past a cursor, cut at the same instant as the live
+    /// receiver: every event with a seq greater than `after` is in
+    /// `events`, everything emitted after the cut is on the receiver.
+    /// `after` is `-1` for a client with nothing cached, which reads the
+    /// whole record.
+    ///
+    /// A cursor the record can no longer serve (a wiped table, a pruned
+    /// memory window) comes back `stale`, and the replay carries the
+    /// newest `tail` events in place of the unreachable gap: the client
+    /// drops what it has and rebuilds from those, instead of printing
+    /// seqs that no longer name anything. The tail is read under the
+    /// same lock as the receiver, so the reset has no hole either.
+    pub fn replay_after(
         &self,
         key: &ResourceKey,
-        skip: usize,
-    ) -> (Vec<TurnEvent>, broadcast::Receiver<TurnEvent>) {
+        after: i64,
+        tail: usize,
+    ) -> (Replay, broadcast::Receiver<TurnEvent>) {
         let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
         let entry = Self::entry(&mut entries, key, self.capacity);
-        let mut history = match self.record_store.as_ref() {
-            Some(store) => store.events(key.as_str()).unwrap_or_else(|err| {
-                eprintln!("[claw] warning: replay for {key} failed: {err}");
-                Vec::new()
-            }),
-            None => entry.history.iter().cloned().collect(),
-        };
-        history.drain(..skip.min(history.len()));
-        (history, entry.sender.subscribe())
+        let store = self.record_store.as_deref();
+        let (mut events, stale) = Self::record_after(store, entry, key, after);
+        if stale {
+            events = Self::record_tail(store, entry, key, tail);
+        }
+        (Replay { events, stale }, entry.sender.subscribe())
+    }
+
+    /// The record's newest `limit` events, cut with the live receiver —
+    /// what a client with no cache opens with, so a session that ran
+    /// for weeks paints its latest turn before anything older arrives.
+    pub fn replay_tail(
+        &self,
+        key: &ResourceKey,
+        limit: usize,
+    ) -> (Replay, broadcast::Receiver<TurnEvent>) {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = Self::entry(&mut entries, key, self.capacity);
+        let events = Self::record_tail(self.record_store.as_deref(), entry, key, limit);
+        (
+            Replay {
+                events,
+                stale: false,
+            },
+            entry.sender.subscribe(),
+        )
+    }
+
+    /// One page of the record older than `before` (`None` reads from the
+    /// newest), ending exactly at `before` and starting at a turn's
+    /// first event — the page a client walking backward asks for, so a
+    /// transcript never grows a fragment of a turn at its top. Reading
+    /// back far enough to find a turn boundary widens the window; a
+    /// record with no boundary in it (one turn longer than
+    /// [`HISTORY_SCAN_CAP`] events) returns the widest window it read
+    /// instead of nothing, so the walk always makes progress.
+    pub fn replay_turn_before(
+        &self,
+        key: &ResourceKey,
+        before: Option<i64>,
+        limit: usize,
+    ) -> Vec<SeqEvent> {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = Self::entry(&mut entries, key, self.capacity);
+        let store = self.record_store.as_deref();
+        let mut want = limit.max(1);
+        loop {
+            let Some(window) = Self::record_before(store, entry, key, before, want) else {
+                return Vec::new();
+            };
+            if window.is_empty() {
+                return window;
+            }
+            if let Some(index) = window
+                .iter()
+                .position(|(_, event)| matches!(event, TurnEvent::UserMessage { .. }))
+            {
+                return window[index..].to_vec();
+            }
+            // The whole window sits inside one turn: read further back,
+            // unless there is nothing further back to read.
+            if window.len() < want || want >= HISTORY_SCAN_CAP {
+                return window;
+            }
+            want = (want * 2).min(HISTORY_SCAN_CAP);
+        }
+    }
+
+    /// Whether the record holds anything older than `seq` — the
+    /// history walk's `more` flag, a lookup rather than a read.
+    pub fn has_record_before(&self, key: &ResourceKey, seq: i64) -> bool {
+        let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
+        let entry = Self::entry(&mut entries, key, self.capacity);
+        Self::record_before(self.record_store.as_deref(), entry, key, Some(seq), 1)
+            .is_some_and(|window| !window.is_empty())
+    }
+
+    /// `after`'s events and whether the cursor outran the record.
+    fn record_after(
+        store: Option<&TurnStore>,
+        entry: &KeyEntry,
+        key: &ResourceKey,
+        after: i64,
+    ) -> (Vec<SeqEvent>, bool) {
+        match store {
+            Some(store) => match store.events_from(key.as_str(), after, usize::MAX) {
+                Ok(rows) => {
+                    // The table never drops rows, so a cursor past its
+                    // newest seq can only mean the table was reset
+                    // under a client that kept a cache of the old one.
+                    let last = store.last_seq(key.as_str()).ok().flatten();
+                    let stale = match last {
+                        Some(last) => after > last,
+                        None => after >= 0,
+                    };
+                    (rows, stale)
+                }
+                Err(err) => {
+                    eprintln!("[claw] warning: replay for {key} failed: {err}");
+                    // A record that cannot be read cannot be vouched
+                    // for: the client rebuilds rather than trust a gap.
+                    (Vec::new(), true)
+                }
+            },
+            None => {
+                let first = entry.history.front().map(|(seq, _)| *seq);
+                let last = entry.history.back().map(|(seq, _)| *seq);
+                let stale = match (first, last) {
+                    // A pruned window it has passed, or a cursor ahead
+                    // of the record it holds.
+                    (Some(first), Some(last)) => {
+                        after > last || (after >= 0 && after.saturating_add(1) < first)
+                    }
+                    _ => after >= 0,
+                };
+                let events = entry
+                    .history
+                    .iter()
+                    .filter(|(seq, _)| *seq > after)
+                    .cloned()
+                    .collect();
+                (events, stale)
+            }
+        }
+    }
+
+    /// The record's newest `limit` events.
+    fn record_tail(
+        store: Option<&TurnStore>,
+        entry: &KeyEntry,
+        key: &ResourceKey,
+        limit: usize,
+    ) -> Vec<SeqEvent> {
+        match store {
+            Some(store) => store
+                .events_last(key.as_str(), limit)
+                .unwrap_or_else(|err| {
+                    eprintln!("[claw] warning: tail replay for {key} failed: {err}");
+                    Vec::new()
+                }),
+            None => {
+                let skip = entry.history.len().saturating_sub(limit);
+                entry.history.iter().skip(skip).cloned().collect()
+            }
+        }
+    }
+
+    /// The newest `want` events below `before`, oldest first; `None`
+    /// when the source could not be read.
+    fn record_before(
+        store: Option<&TurnStore>,
+        entry: &KeyEntry,
+        key: &ResourceKey,
+        before: Option<i64>,
+        want: usize,
+    ) -> Option<Vec<SeqEvent>> {
+        match store {
+            Some(store) => store
+                .events_before(key.as_str(), before.unwrap_or(i64::MAX), want)
+                .map_err(|err| eprintln!("[claw] warning: history page for {key} failed: {err}"))
+                .ok(),
+            None => {
+                let end = match before {
+                    Some(before) => entry
+                        .history
+                        .iter()
+                        .position(|(seq, _)| *seq >= before)
+                        .unwrap_or(entry.history.len()),
+                    None => entry.history.len(),
+                };
+                Some(
+                    entry
+                        .history
+                        .iter()
+                        .take(end)
+                        .skip(end.saturating_sub(want))
+                        .cloned()
+                        .collect(),
+                )
+            }
+        }
     }
 
     /// Publishes one event to `key`: the record takes it, and every
@@ -284,7 +491,8 @@ impl EventHub {
                 }
             }
             None => {
-                entry.history.push_back(event.clone());
+                entry.history.push_back((entry.next_seq, event.clone()));
+                entry.next_seq += 1;
                 if entry.history.len() > RECORD_CAPACITY {
                     entry.history.pop_front();
                 }
@@ -305,6 +513,7 @@ impl EventHub {
     ) -> &'a mut KeyEntry {
         entries.entry(key.clone()).or_insert_with(|| KeyEntry {
             history: VecDeque::new(),
+            next_seq: 0,
             sender: broadcast::channel(capacity).0,
         })
     }
@@ -577,28 +786,119 @@ mod tests {
         assert_eq!(receiver.try_recv().unwrap(), text("in this life"));
     }
 
+    /// The seq cursor: a client names the last event it holds and gets
+    /// exactly what came after — no replay of what it has, no gap.
     #[test]
-    fn a_cursor_skips_exactly_the_events_the_caller_already_holds() {
+    fn a_seq_cursor_replays_exactly_the_events_past_it() {
         let hub = EventHub::default();
         let key = key("cached");
         for n in 0..4 {
             hub.emit(&key, text(&n.to_string()));
         }
 
-        // A client that cached the first three receives only the fourth;
-        // the live cut is untouched by the skip.
-        let (history, mut receiver) = hub.subscribe_with_history_from(&key, 3);
-        assert_eq!(history, vec![text("3")], "only the unseen part replays");
+        // Seqs are dense from zero: the fourth event is seq 3.
+        let (replay, mut receiver) = hub.replay_after(&key, 2, 0);
+        assert!(!replay.stale);
+        assert_eq!(
+            replay.events,
+            vec![(3, text("3"))],
+            "only the unseen part replays"
+        );
         hub.emit(&key, done("hi back"));
         assert_eq!(receiver.try_recv().unwrap(), done("hi back"));
 
-        // A cursor past the record's end clamps to it: nothing replays,
-        // and nothing the record still holds is skipped twice.
-        let (history, _) = hub.subscribe_with_history_from(&key, 100);
-        assert!(history.is_empty());
+        // A cursor at the record's newest replays nothing and is not
+        // stale: the client is simply up to date.
+        let (replay, _) = hub.replay_after(&key, 4, 0);
+        assert!(replay.events.is_empty());
+        assert!(!replay.stale);
 
-        // Zero behaves as the plain replay.
-        let (history, _) = hub.subscribe_with_history_from(&key, 0);
-        assert_eq!(history.len(), 5);
+        // Nothing cached behaves as the plain replay.
+        let (replay, _) = hub.replay_after(&key, -1, 0);
+        assert_eq!(replay.events.len(), 5);
+        assert_eq!(replay.events.first().map(|(seq, _)| *seq), Some(0));
+    }
+
+    /// A cursor the record cannot serve is reported, and the tail comes
+    /// back in place of the gap: a memory window that dropped the events,
+    /// or a record that was wiped under the client.
+    #[test]
+    fn a_cursor_past_the_record_is_stale_and_gets_the_tail() {
+        let hub = EventHub::with_capacity(16);
+        let key = key("wiped");
+        for n in 0..3 {
+            hub.emit(&key, text(&n.to_string()));
+        }
+        // A cursor from a record this one never had (seq 40): stale, and
+        // the tail is what replaces the gap.
+        let (replay, _) = hub.replay_after(&key, 40, 2);
+        assert!(replay.stale, "a cursor ahead of the record is stale");
+        assert_eq!(replay.events, vec![(1, text("1")), (2, text("2"))]);
+    }
+
+    /// A memory window that pruned events the client still names: the
+    /// gap is unreachable, so it is stale too.
+    #[test]
+    fn a_cursor_below_a_pruned_window_is_stale() {
+        let hub = EventHub::default();
+        let key = key("pruned");
+        for n in 0..RECORD_CAPACITY + 5 {
+            hub.emit(&key, text(&n.to_string()));
+        }
+        // The window now starts at seq 5; a client parked at seq 0 can
+        // never be served events 1..5 again.
+        let (replay, _) = hub.replay_after(&key, 0, 1);
+        assert!(replay.stale);
+        assert_eq!(replay.events.len(), 1, "the tail replaces the gap");
+    }
+
+    /// The tail is the newest events, with their seqs intact.
+    #[test]
+    fn the_tail_is_the_newest_events() {
+        let hub = EventHub::default();
+        let key = key("tail");
+        for n in 0..6 {
+            hub.emit(&key, text(&n.to_string()));
+        }
+        let (replay, _) = hub.replay_tail(&key, 2);
+        assert!(!replay.stale);
+        assert_eq!(replay.events, vec![(4, text("4")), (5, text("5"))]);
+    }
+
+    /// Backward paging: each page ends where the last began and starts
+    /// on a turn boundary, so a transcript stacks pages without gaps,
+    /// overlaps, or a fragment at its top.
+    #[test]
+    fn a_backward_page_starting_on_a_turn_boundary_stacks_exactly() {
+        let hub = EventHub::default();
+        let key = key("paged");
+        // Three turns of three events each: question, reply, done.
+        for turn in 0..3 {
+            hub.emit(
+                &key,
+                TurnEvent::UserMessage {
+                    text: format!("q{turn}"),
+                    images: Vec::new(),
+                },
+            );
+            hub.emit(&key, text(&format!("a{turn}")));
+            hub.emit(&key, done(&format!("a{turn}")));
+        }
+        // A window of 4 from the end (seqs 5..8) opens mid-turn; the
+        // page cuts back to the question at seq 6.
+        let page = hub.replay_turn_before(&key, None, 4);
+        assert_eq!(page.len(), 3, "one whole turn");
+        assert_eq!(page.first().map(|(seq, _)| *seq), Some(6));
+        assert!(hub.has_record_before(&key, 6));
+
+        // The next page ends exactly at that first seq.
+        let page = hub.replay_turn_before(&key, Some(6), 4);
+        assert_eq!(page.first().map(|(seq, _)| *seq), Some(3));
+        assert_eq!(page.len(), 3);
+
+        // The first page reaches the record's start and says so.
+        let page = hub.replay_turn_before(&key, Some(3), 4);
+        assert_eq!(page.first().map(|(seq, _)| *seq), Some(0));
+        assert!(!hub.has_record_before(&key, 0), "nothing below the first");
     }
 }

@@ -723,11 +723,12 @@ async fn a_cold_subscription_replays_the_turns_it_missed_even_after_a_restart() 
     );
 }
 
-/// The `since` cursor: a client that already holds the record's first
-/// event receives the record minus it — the phone client's transcript
-/// cache, so reopening a session is not a rebuild from zero.
+/// The `since` cursor is the seq of the last frame the client saw (the
+/// SSE `id:`), so a reconnecting client receives exactly the gap past
+/// it — its transcript cache, so reopening a session is not a rebuild
+/// from zero.
 #[tokio::test]
-async fn a_since_cursor_skips_the_replays_oldest_events() {
+async fn a_since_cursor_replays_only_the_events_past_it() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = config(&dir, None);
     {
@@ -760,7 +761,7 @@ async fn a_since_cursor_skips_the_replays_oldest_events() {
     let base = serve(&daemon).await;
     let client = reqwest::Client::new();
     let events = client
-        .get(format!("{base}/v1/sessions/interactive:web/events?since=1"))
+        .get(format!("{base}/v1/sessions/interactive:web/events?since=0"))
         .send()
         .await
         .expect("the events request goes out");
@@ -773,6 +774,133 @@ async fn a_since_cursor_skips_the_replays_oldest_events() {
         !seen.contains(r#""type":"user_message""#),
         "the event the cursor names does not replay: {seen}"
     );
+    // The frames carry the record's seq: the delta is seq 1, the end
+    // marker seq 2 — the user_message the cursor named was seq 0.
+    assert!(seen.contains("id: 1"), "the frame names its seq: {seen}");
+}
+
+/// A client with nothing cached opens on the newest turn, not on the
+/// whole record: a session that ran for weeks paints its latest
+/// conversation at once, and the turns above it come from the history
+/// route, one whole turn per page, ending exactly where the last page
+/// began. This is the wiring the web UI and the phone use.
+#[tokio::test]
+async fn a_fresh_stream_opens_on_the_tail_and_history_walks_back_turns() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config(&dir, None);
+    {
+        let daemon = Daemon::build(
+            &config,
+            mock_registry(Arc::new(MockProvider::new([
+                reply("first"),
+                reply("second"),
+                reply("third"),
+            ]))),
+            rhema_rsd::DispatcherConfig::default(),
+        )
+        .expect("the daemon assembles");
+        let base = serve(&daemon).await;
+        let client = reqwest::Client::new();
+        for text in ["one", "two", "three"] {
+            let accepted = client
+                .post(format!("{base}/v1/sessions/interactive:web/messages"))
+                .json(&json!({"text": text}))
+                .send()
+                .await
+                .expect("the message posts");
+            assert_eq!(accepted.status(), 202);
+        }
+    }
+
+    let daemon = Daemon::build(
+        &config,
+        mock_registry(Arc::new(MockProvider::new([]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the restarted daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    // Nothing cached: the tail replays everything here (the record is
+    // under the window), and the frames name their seqs.
+    let mut stream = sse_body(
+        client
+            .get(format!("{base}/v1/sessions/interactive:web/events"))
+            .send()
+            .await
+            .expect("the events request goes out"),
+    )
+    .await;
+    let mut seen = String::new();
+    read_until(&mut stream, &mut seen, r#""type":"turn_done""#).await;
+    assert!(
+        seen.contains(r#""text":"one""#),
+        "the tail is whole: {seen}"
+    );
+
+    // The history route pages backward from a seq, one whole turn at a
+    // time, and says when there is nothing older.
+    let newest = client
+        .get(format!(
+            "{base}/v1/sessions/interactive:web/history?before=9999&limit=1"
+        ))
+        .send()
+        .await
+        .expect("the history request goes out")
+        .json::<Value>()
+        .await
+        .expect("the history body parses");
+    let newest = newest["events"]
+        .as_array()
+        .expect("events is a list")
+        .clone();
+    assert_eq!(newest.len(), 3, "one whole turn per page: {newest:?}");
+    assert_eq!(
+        newest[0]["event"]["type"], "user_message",
+        "a page starts on a turn boundary: {newest:?}"
+    );
+    assert_eq!(newest[0]["event"]["text"], "three");
+    assert_eq!(newest[0]["seq"], 6, "seqs are dense across turns");
+    assert_eq!(newest[2]["event"]["type"], "turn_done");
+
+    let older = client
+        .get(format!(
+            "{base}/v1/sessions/interactive:web/history?before=6&limit=1"
+        ))
+        .send()
+        .await
+        .expect("the history request goes out")
+        .json::<Value>()
+        .await
+        .expect("the history body parses");
+    assert_eq!(older["events"][0]["event"]["text"], "two");
+    assert_eq!(older["more"], true);
+
+    let first = client
+        .get(format!(
+            "{base}/v1/sessions/interactive:web/history?before=3&limit=1"
+        ))
+        .send()
+        .await
+        .expect("the history request goes out")
+        .json::<Value>()
+        .await
+        .expect("the history body parses");
+    assert_eq!(first["events"][0]["event"]["text"], "one");
+    assert_eq!(first["more"], false, "the walk reached the first turn");
+
+    let none = client
+        .get(format!(
+            "{base}/v1/sessions/interactive:web/history?before=0"
+        ))
+        .send()
+        .await
+        .expect("the history request goes out")
+        .json::<Value>()
+        .await
+        .expect("the history body parses");
+    assert_eq!(none["events"].as_array().map(Vec::len), Some(0));
+    assert_eq!(none["more"], false);
 }
 
 /// The other two resident prefixes take chat messages, and their turns'
