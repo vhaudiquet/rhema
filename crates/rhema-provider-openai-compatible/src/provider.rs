@@ -173,18 +173,18 @@ struct DeepSeekFacts {
     cached_input_per_mtok: f64,
     input_per_mtok: f64,
     output_per_mtok: f64,
-    /// Whether the model accepts image input. DeepSeek's model
-    /// documentation describes both rows as text-only chat, and the
-    /// endpoint rejects image parts — a verdict the catalog can state
-    /// that the generic `/models` listing cannot.
+    /// Whether the model accepts image input. DeepSeek's vision guide
+    /// documents `deepseek-flash` as accepting images, while
+    /// `deepseek-v4-pro` stays text-only; the generic `/models` listing
+    /// carries no modality, so the catalog states the verdict.
     vision: bool,
 }
 
 const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
     DeepSeekFacts {
         id: "deepseek-flash",
-        // Text-only chat, per DeepSeek's model documentation.
-        vision: false,
+        // Accepts text and images, per DeepSeek's vision guide.
+        vision: true,
         context: 1_048_576,
         output: 393_216,
         cached_input_per_mtok: 0.006,
@@ -429,8 +429,8 @@ mod tests {
         let flash = &models[0];
         assert_eq!(flash.input_token_limit, Some(1_048_576));
         assert_eq!(flash.output_token_limit, Some(393_216));
-        // Both catalog rows are known text-only chat models.
-        assert_eq!(flash.supports_vision, Some(false));
+        // Flash accepts images; the pro row is text-only.
+        assert_eq!(flash.supports_vision, Some(true));
         let pricing = flash.pricing.expect("flash is priced");
         assert_eq!(pricing.input_per_mtok, 0.30);
         assert_eq!(pricing.output_per_mtok, 1.20);
