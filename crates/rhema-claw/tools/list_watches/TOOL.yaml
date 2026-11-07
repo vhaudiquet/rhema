@@ -2,7 +2,11 @@
 # compiled builtin named under `run`.
 name: list_watches
 description: >-
-  List the watched repositories: forge, repo, and host for each.
+  List the watched repositories: forge, repo, and host for each, with its
+  poll health — last_ok_at is when it last polled successfully,
+  consecutive_failures is the streak it is on now, and last_error is why
+  the last attempt failed. A watch with failures and no last_ok_at has
+  never polled once.
 replay_safety: safe
 parameters:
   type: object

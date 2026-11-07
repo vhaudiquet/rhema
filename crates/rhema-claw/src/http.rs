@@ -834,9 +834,19 @@ async fn watches_list(State(state): State<ClawState>) -> Result<Json<Value>, (St
         .watches
         .list_account_watches()
         .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
-    Ok(Json(
-        json!({ "watches": watches, "account_watches": account_watches }),
-    ))
+    // The poll health rides along for the same reason the account
+    // watches do: "has this ever polled?" is the first question a silent
+    // watch raises, and a tick that failed with a 401 answers it, while
+    // an empty table would say nothing either way.
+    let health = state
+        .watches
+        .list_health()
+        .map_err(|err| (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()))?;
+    Ok(Json(json!({
+        "watches": watches,
+        "account_watches": account_watches,
+        "health": health,
+    })))
 }
 
 /// `{"forge", "repo", "host"?, "token"?}` — the shape every watch entry

@@ -8,6 +8,12 @@
 //! config no longer carries watches at all — the table is the one
 //! truth, managed over `/v1/watches` and (from chat) the watch tools.
 //!
+//! Beside it, the poll health of every watch ([`WatchHealth`]): when it
+//! last polled successfully, why it last failed and how many failures
+//! that makes. A watch that has been refused by its forge on every tick
+//! since it was created looks exactly like a quiet repository without
+//! this — the difference has to be readable somewhere.
+//!
 //! Two connections, one file: this store opens its own rusqlite
 //! connection to the same database as the dispatcher's store — WAL and a
 //! busy timeout, the pattern rhema-rsd's SQLite tests use — and the two
@@ -97,6 +103,16 @@ CREATE TABLE IF NOT EXISTS account_watches (
     account_id TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     UNIQUE(forge, account_id)
+);
+CREATE TABLE IF NOT EXISTS watch_health (
+    scope                TEXT NOT NULL,
+    forge                TEXT NOT NULL,
+    subject              TEXT NOT NULL,
+    last_ok_at           INTEGER,
+    last_error           TEXT,
+    last_error_at        INTEGER,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, forge, subject)
 );
 ";
 
@@ -190,6 +206,45 @@ pub struct AccountWatchRecord {
     pub account_id: String,
     /// Creation time, milliseconds since the Unix epoch.
     pub created_at: i64,
+}
+
+/// The scope of a health row: a repository watch's thread feed.
+pub const SCOPE_REPO: &str = "repo";
+
+/// The scope of a health row: an account's notification feed.
+pub const SCOPE_ACCOUNT: &str = "account";
+
+/// One watch's poll health, as stored: the last success, the last
+/// failure and its reason, and the streak length. `last_ok_at: None` with
+/// `consecutive_failures: 0` is a watch that has not polled yet; a growing
+/// `consecutive_failures` with no `last_ok_at` is a watch that has never
+/// once succeeded — the shape a wrong or mislabelled credential leaves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WatchHealth {
+    /// [`SCOPE_REPO`] or [`SCOPE_ACCOUNT`].
+    pub scope: String,
+    /// The forge's source name: `github`, `gitea`, or `gitlab`.
+    pub forge: String,
+    /// The repo (`owner/name`) for a repo watch, the account id for an
+    /// account watch.
+    pub subject: String,
+    /// When a poll last succeeded, millis since the Unix epoch.
+    pub last_ok_at: Option<i64>,
+    /// The last failure's reason, as the poll reported it.
+    pub last_error: Option<String>,
+    /// When that failure happened, millis since the Unix epoch.
+    pub last_error_at: Option<i64>,
+    /// Failures since the last success — what tells a caller to say
+    /// something once, not on every tick of a long outage.
+    pub consecutive_failures: i64,
+}
+
+impl WatchHealth {
+    /// Whether this is the first failure of a streak: the moment worth a
+    /// notification, before the tick's log line becomes wallpaper.
+    pub fn opens_a_failure_streak(&self) -> bool {
+        self.consecutive_failures == 1
+    }
 }
 
 impl ClawStore {
@@ -364,6 +419,142 @@ impl ClawStore {
             .map_err(WatchStoreError::from)?;
         Ok(rows)
     }
+    /// Records a successful poll: the streak resets, and the row stops
+    /// reading as broken.
+    pub fn record_poll_ok(
+        &self,
+        scope: &str,
+        forge: &str,
+        subject: &str,
+        at: i64,
+    ) -> Result<WatchHealth, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.execute(
+            "INSERT INTO watch_health (scope, forge, subject, last_ok_at, consecutive_failures)
+             VALUES (?1, ?2, ?3, ?4, 0)
+             ON CONFLICT(scope, forge, subject) DO UPDATE SET
+                last_ok_at = excluded.last_ok_at,
+                consecutive_failures = 0",
+            params![scope, forge, subject, at],
+        )
+        .map_err(WatchStoreError::from)?;
+        read_health(&conn, scope, forge, subject)
+    }
+
+    /// Records a failed poll and the reason: the streak grows, and the
+    /// last success (if any) stays visible beside it.
+    pub fn record_poll_failure(
+        &self,
+        scope: &str,
+        forge: &str,
+        subject: &str,
+        error: &str,
+        at: i64,
+    ) -> Result<WatchHealth, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.execute(
+            "INSERT INTO watch_health
+                (scope, forge, subject, last_error, last_error_at, consecutive_failures)
+             VALUES (?1, ?2, ?3, ?4, ?5, 1)
+             ON CONFLICT(scope, forge, subject) DO UPDATE SET
+                last_error = excluded.last_error,
+                last_error_at = excluded.last_error_at,
+                consecutive_failures = watch_health.consecutive_failures + 1",
+            params![scope, forge, subject, error, at],
+        )
+        .map_err(WatchStoreError::from)?;
+        read_health(&conn, scope, forge, subject)
+    }
+
+    /// Every health row, ordered for a stable answer.
+    pub fn list_health(&self) -> Result<Vec<WatchHealth>, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut statement = conn
+            .prepare(
+                "SELECT scope, forge, subject, last_ok_at, last_error, last_error_at,
+                        consecutive_failures
+                 FROM watch_health ORDER BY scope ASC, forge ASC, subject ASC",
+            )
+            .map_err(WatchStoreError::from)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok(WatchHealth {
+                    scope: row.get(0)?,
+                    forge: row.get(1)?,
+                    subject: row.get(2)?,
+                    last_ok_at: row.get(3)?,
+                    last_error: row.get(4)?,
+                    last_error_at: row.get(5)?,
+                    consecutive_failures: row.get(6)?,
+                })
+            })
+            .map_err(WatchStoreError::from)?
+            .collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(WatchStoreError::from)?;
+        Ok(rows)
+    }
+
+    /// One watch's health, when it has polled at all.
+    pub fn health(
+        &self,
+        scope: &str,
+        forge: &str,
+        subject: &str,
+    ) -> Result<Option<WatchHealth>, WatchStoreError> {
+        let conn = self.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut statement = conn
+            .prepare(
+                "SELECT scope, forge, subject, last_ok_at, last_error, last_error_at,
+                        consecutive_failures
+                 FROM watch_health WHERE scope = ?1 AND forge = ?2 AND subject = ?3",
+            )
+            .map_err(WatchStoreError::from)?;
+        let mut rows = statement
+            .query_map(params![scope, forge, subject], |row| {
+                Ok(WatchHealth {
+                    scope: row.get(0)?,
+                    forge: row.get(1)?,
+                    subject: row.get(2)?,
+                    last_ok_at: row.get(3)?,
+                    last_error: row.get(4)?,
+                    last_error_at: row.get(5)?,
+                    consecutive_failures: row.get(6)?,
+                })
+            })
+            .map_err(WatchStoreError::from)?;
+        match rows.next() {
+            Some(row) => Ok(Some(row.map_err(WatchStoreError::from)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+/// One health row by key: the upserts' return value, read back under the
+/// connection they wrote with.
+fn read_health(
+    conn: &rusqlite::Connection,
+    scope: &str,
+    forge: &str,
+    subject: &str,
+) -> Result<WatchHealth, WatchStoreError> {
+    conn.query_row(
+        "SELECT scope, forge, subject, last_ok_at, last_error, last_error_at,
+                consecutive_failures
+         FROM watch_health WHERE scope = ?1 AND forge = ?2 AND subject = ?3",
+        params![scope, forge, subject],
+        |row| {
+            Ok(WatchHealth {
+                scope: row.get(0)?,
+                forge: row.get(1)?,
+                subject: row.get(2)?,
+                last_ok_at: row.get(3)?,
+                last_error: row.get(4)?,
+                last_error_at: row.get(5)?,
+                consecutive_failures: row.get(6)?,
+            })
+        },
+    )
+    .map_err(WatchStoreError::from)
 }
 
 /// Milliseconds since the Unix epoch; stamps `created_at`.
@@ -400,6 +591,51 @@ pub fn validate_watch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A watch's health is a streak, not a flag: the first failure opens
+    /// it, the next extends it, and a success closes it without losing
+    /// the last success's stamp.
+    #[test]
+    fn a_health_row_tracks_the_streak_and_survives_a_recovery() {
+        let store = ClawStore::in_memory().expect("store opens");
+        assert_eq!(
+            store
+                .health(SCOPE_REPO, "gitea", "acme/barn")
+                .expect("read"),
+            None,
+            "a watch that never polled has no row"
+        );
+
+        let first = store
+            .record_poll_failure(SCOPE_REPO, "gitea", "acme/barn", "401 denied", 1_000)
+            .expect("failure lands");
+        assert_eq!(first.consecutive_failures, 1);
+        assert!(first.opens_a_failure_streak());
+        assert_eq!(first.last_ok_at, None);
+        assert_eq!(first.last_error.as_deref(), Some("401 denied"));
+
+        let second = store
+            .record_poll_failure(SCOPE_REPO, "gitea", "acme/barn", "401 denied", 2_000)
+            .expect("failure lands");
+        assert_eq!(second.consecutive_failures, 2);
+        assert!(
+            !second.opens_a_failure_streak(),
+            "only the first failure of a streak is news"
+        );
+        assert_eq!(second.last_error_at, Some(2_000));
+
+        let recovered = store
+            .record_poll_ok(SCOPE_REPO, "gitea", "acme/barn", 3_000)
+            .expect("success lands");
+        assert_eq!(recovered.consecutive_failures, 0);
+        assert_eq!(recovered.last_ok_at, Some(3_000));
+        assert_eq!(
+            recovered.last_error.as_deref(),
+            Some("401 denied"),
+            "the last failure stays on the record after a recovery"
+        );
+        assert_eq!(store.list_health().expect("list reads").len(), 1);
+    }
 
     #[test]
     fn validation_fails_a_watch_loudly_and_specificly() {

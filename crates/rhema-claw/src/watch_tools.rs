@@ -18,7 +18,7 @@ use rhema_autonomous_agent::{ToolError, ToolOp, ToolRegistry, async_trait};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::watch_store::{ClawStore, validate_watch};
+use crate::watch_store::{ClawStore, SCOPE_REPO, validate_watch};
 use rhema_forge_integration::ForgeKind;
 
 /// The compiled operations behind the manifests, by `run.builtin` id.
@@ -161,13 +161,25 @@ struct ListWatches {
 impl ToolOp for ListWatches {
     async fn invoke(&self, _args: Value) -> Result<String, ToolError> {
         let watches = self.store.list().map_err(|err| err.to_string())?;
+        let health = self.store.list_health().map_err(|err| err.to_string())?;
         let rows: Vec<Value> = watches
             .iter()
             .map(|watch| {
+                // A watch that has never polled has no health row at all:
+                // it answers with every health field empty and a zero
+                // streak, which is exactly what it is.
+                let health = health.iter().find(|row| {
+                    row.scope == SCOPE_REPO && row.forge == watch.forge && row.subject == watch.repo
+                });
                 json!({
                     "forge": watch.forge,
                     "repo": watch.repo,
                     "host": watch.host,
+                    "last_ok_at": health.and_then(|row| row.last_ok_at),
+                    "last_error": health.and_then(|row| row.last_error.clone()),
+                    "consecutive_failures": health
+                        .map(|row| row.consecutive_failures)
+                        .unwrap_or(0),
                 })
             })
             .collect();
@@ -363,8 +375,22 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(&listed.content).unwrap(),
             json!({"watches": [
-                {"forge": "github", "repo": "acme/widgets", "host": null},
-                {"forge": "gitlab", "repo": "group/prop", "host": null},
+                {
+                    "forge": "github",
+                    "repo": "acme/widgets",
+                    "host": null,
+                    "last_ok_at": null,
+                    "last_error": null,
+                    "consecutive_failures": 0,
+                },
+                {
+                    "forge": "gitlab",
+                    "repo": "group/prop",
+                    "host": null,
+                    "last_ok_at": null,
+                    "last_error": null,
+                    "consecutive_failures": 0,
+                },
             ]}),
             "{}",
             listed.content

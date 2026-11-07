@@ -31,7 +31,7 @@ use rhema_forge_integration::{
 use rhema_identity::{IdentityStore, SecretKind};
 use rhema_rsd::{Clock, Dispatcher, Event, KeyFn, SystemClock};
 
-use crate::watch_store::{AccountWatchRecord, ClawStore, WatchRecord};
+use crate::watch_store::{AccountWatchRecord, ClawStore, SCOPE_ACCOUNT, SCOPE_REPO, WatchRecord};
 use rhema_forge_integration::{ForgeKind, resolve_token};
 
 /// The credential a watch polls with: the value the forge takes as a
@@ -315,7 +315,16 @@ impl Source for ForgeSource {
                 }
             };
             let client = self.client_for(&record);
-            match self.watcher.poll(client.as_ref(), &repo).await {
+            let polled = self.watcher.poll(client.as_ref(), &repo).await;
+            // Health first, whatever the outcome: a watch that has been
+            // failing since it was created must be able to say so.
+            self.record_poll(
+                SCOPE_REPO,
+                &record.forge,
+                &record.repo,
+                polled.as_ref().err().map(|err| err.to_string()),
+            );
+            match polled {
                 Ok(count) => fed += count,
                 // One dead watch (a lapsed token, a forge outage) must
                 // not starve the kind's other watches either.
@@ -335,7 +344,14 @@ impl Source for ForgeSource {
             if watch.forge != self.name {
                 continue;
             }
-            match self.poll_account(&watch).await {
+            let polled = self.poll_account(&watch).await;
+            self.record_poll(
+                SCOPE_ACCOUNT,
+                &watch.forge,
+                &watch.account_id,
+                polled.as_ref().err().map(|err| err.to_string()),
+            );
+            match polled {
                 Ok(count) => fed += count,
                 // One dead account (a revoked token, a forge outage)
                 // must not starve the kind's other watches either.
@@ -350,6 +366,47 @@ impl Source for ForgeSource {
 }
 
 impl ForgeSource {
+    /// Records one poll's outcome, and says something the first time a
+    /// streak begins: a watch refused on every tick looks exactly like a
+    /// quiet repository from the outside, and only the failing tick knows
+    /// the difference. One notification per streak — the health row
+    /// carries the count, so the log line does not have to.
+    fn record_poll(&self, scope: &str, forge: &str, subject: &str, failure: Option<String>) {
+        // The table stamps in i64 millis like every other column here;
+        // the clock speaks u64.
+        let at = SystemClock.now_millis() as i64;
+        let recorded = match &failure {
+            Some(error) => self
+                .store
+                .record_poll_failure(scope, forge, subject, error, at),
+            None => self.store.record_poll_ok(scope, forge, subject, at),
+        };
+        let health = match recorded {
+            Ok(health) => health,
+            Err(err) => {
+                // Losing the health row must not stop the poll loop.
+                eprintln!("[claw] warning: watch health for {subject}: {err}");
+                return;
+            }
+        };
+        if !health.opens_a_failure_streak() {
+            return;
+        }
+        let Some(error) = failure else {
+            return;
+        };
+        let title = format!("{forge} watch {subject} is failing");
+        let body = format!(
+            "{error}\n\nFirst failure of the streak: GET /v1/watches has the count and the error."
+        );
+        if let Err(err) =
+            self.notifications
+                .push(crate::notifications::DEFAULT_DEVICE, &title, &body)
+        {
+            eprintln!("[claw] warning: notifying {title} failed: {err}");
+        }
+    }
+
     /// One account-watch poll: fetch the account's notifications as the
     /// account, triage each, and land the verdicts — agent dispatches
     /// ingest as role-tagged thread events, surfaces hit the
@@ -652,6 +709,60 @@ mod tests {
             .as_deref(),
             Some("row-tok")
         );
+    }
+
+    /// A watch that cannot poll is not a quiet watch: the pass records
+    /// the failure in the health table and tells the device once per
+    /// streak, so a dead credential looks dead instead of quiet.
+    #[tokio::test]
+    async fn a_failing_poll_records_health_and_notifies_once() {
+        let store = Arc::new(ClawStore::in_memory().expect("store opens"));
+        // Nothing listens on port 1: every poll fails on the connect.
+        store
+            .add("gitea", "acme/barn", Some("http://127.0.0.1:1"), "")
+            .expect("add");
+        let (dispatcher, accounts, notifications) = test_parts(store.clone());
+        let source = ForgeSource::new(
+            &dispatcher,
+            "gitea",
+            store.clone(),
+            accounts,
+            notifications.clone(),
+        );
+
+        source
+            .detect()
+            .await
+            .expect("a failed poll is not a pass error");
+        let health = store
+            .health(SCOPE_REPO, "gitea", "acme/barn")
+            .expect("health reads")
+            .expect("the failure is recorded");
+        assert_eq!(health.consecutive_failures, 1);
+        assert_eq!(health.last_ok_at, None, "it has never polled once");
+        assert!(health.last_error.is_some(), "the reason is kept");
+
+        let queued = notifications
+            .pending(crate::notifications::DEFAULT_DEVICE, 0)
+            .expect("the queue reads");
+        assert_eq!(queued.len(), 1, "one notification for the streak");
+        assert!(
+            queued[0].title.contains("acme/barn"),
+            "the title names the watch: {}",
+            queued[0].title
+        );
+
+        // The second failing pass extends the streak and stays quiet.
+        source.detect().await.expect("the second pass runs");
+        let health = store
+            .health(SCOPE_REPO, "gitea", "acme/barn")
+            .expect("health reads")
+            .expect("the failure is still recorded");
+        assert_eq!(health.consecutive_failures, 2);
+        let queued = notifications
+            .pending(crate::notifications::DEFAULT_DEVICE, 0)
+            .expect("the queue reads");
+        assert_eq!(queued.len(), 1, "the streak is not re-announced");
     }
 
     /// The client cache pays off when two watches share their
