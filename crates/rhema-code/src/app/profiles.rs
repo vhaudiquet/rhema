@@ -246,6 +246,7 @@ impl App {
                 .as_deref()
                 .unwrap_or(rhema_config::DEFAULT_PROFILE),
             &self.config.disabled_mcp_servers,
+            self.secrets.as_ref(),
         );
         match CodingAgent::from_session(backend.provider(), agent_config, session) {
             Ok(mut agent) => {

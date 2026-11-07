@@ -47,7 +47,7 @@ pub use agent::{
     CodingAgent, CodingAgentError, clear_environment_stamp, stamped_system,
     stamped_system_with_sections, stamped_system_with_skills,
 };
-pub use config::{CodingAgentConfig, Steering};
+pub use config::{CodingAgentConfig, Steering, SubagentProviders};
 pub use environment::{host_report, remote_notice};
 pub use prompt::{DEFAULT_SYSTEM_MD, default_system};
 // The toolkit the driver is built on, under this crate's name: every

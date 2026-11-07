@@ -191,7 +191,10 @@ pub(crate) fn system_show_at_with_mcp(
         .ok()
         .map(|c| c.disabled_subagents.clone())
         .unwrap_or_default();
-    let mut extra = rhema_subagents::extra_specs(&workspace, &disabled_subagents);
+    // No provider factory here: the system utilities touch no
+    // credentials, so the preview's spec names no cross-provider
+    // reach even when the session would list some.
+    let mut extra = rhema_subagents::extra_specs(&workspace, &disabled_subagents, &[]);
     // The transcript is on by default, so the default preview names
     // zoom, exactly as the agent's prompt does.
     extra.push(rhema_transcript::Zoom::spec());

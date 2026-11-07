@@ -22,6 +22,15 @@ pub trait Steering: Send + Sync {
     fn drain(&self) -> Vec<String>;
 }
 
+/// How a frontend resolves any provider kind to a turn provider: the
+/// credential policy behind the subagent tool's cross-provider
+/// `model` argument. A `None` answer means that kind has no usable
+/// credentials here — the same shape the model picker's catalog
+/// reports. The registry's `build` does the wiring; what this closure
+/// adds is the resolved credentials themselves.
+pub type SubagentProviders =
+    Arc<dyn Fn(&str) -> Option<Arc<dyn rhema_core::ModelProvider>> + Send + Sync>;
+
 /// Everything a [`CodingAgent`](crate::CodingAgent) needs besides the
 /// provider.
 #[derive(Clone)]
@@ -118,6 +127,15 @@ pub struct CodingAgentConfig {
     /// like any other, and a set holding every discovered name leaves
     /// no catalog, which drops the tool whole.
     pub disabled_subagents: std::collections::BTreeSet<String>,
+    /// Resolves a provider kind to a turn provider, for the subagent
+    /// tool's `model` argument (`<provider>/<model>`) and the same
+    /// spelling in a definition's `model` frontmatter: a subagent can
+    /// run on another logged-in provider while the session stays put.
+    /// The wire hands it to the tool; `None` means the session's own
+    /// provider is the only one, and cross-provider requests fail with
+    /// that named. Credential resolution stays with the frontend —
+    /// this carries the answers, not the policy.
+    pub subagent_providers: Option<SubagentProviders>,
     /// The environment section rendered into the system prompt: machine
     /// facts probed where commands run (see the [`environment`
     /// module](crate::environment)). `None` renders the section empty.
@@ -198,6 +216,7 @@ impl CodingAgentConfig {
             mcp_servers: Vec::new(),
             disabled_mcp_servers: std::collections::BTreeSet::new(),
             disabled_subagents: std::collections::BTreeSet::new(),
+            subagent_providers: None,
             environment: None,
             user_preferences: None,
             vision: None,

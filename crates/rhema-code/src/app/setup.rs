@@ -316,7 +316,7 @@ impl Backend {
     /// alone, `None` when the environment carries no usable credential
     /// for it. Profiles with a stored instance resolve through
     /// [`Backend::from_profile`] instead.
-    fn named(
+    pub(crate) fn named(
         provider: &str,
         profile: &rhema_config::Profile,
         secrets: Option<&dyn rhema_config::secrets::SecretStore>,
@@ -719,8 +719,23 @@ pub(crate) fn session_agent_config(
     profile: &rhema_config::Profile,
     session_key: &str,
     disabled_mcp: &std::collections::BTreeSet<String>,
+    secrets: Option<&Arc<dyn rhema_config::secrets::SecretStore>>,
 ) -> (CodingAgentConfig, rhema_subagents::SubagentHandle) {
     let mut config = agent_config(options, model, disabled_skills, disabled_subagents);
+    // The subagent tool's cross-provider `model` spellings resolve
+    // through the same per-kind answers the model picker's catalog
+    // reads: one backend per kind, built off this profile's stored
+    // keys and the environment. Built here where `Backend::named`
+    // lives; `None` (no keychain) leaves the session's provider the
+    // only one, and the tool's spec says so.
+    config.subagent_providers = secrets.map(|secrets| {
+        let profile = profile.clone();
+        let secrets = secrets.clone();
+        let factory: rhema_coding_agent::SubagentProviders = Arc::new(move |kind: &str| {
+            Backend::named(kind, &profile, Some(secrets.as_ref())).map(|backend| backend.provider())
+        });
+        factory
+    });
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_tools(&mut config);
     }

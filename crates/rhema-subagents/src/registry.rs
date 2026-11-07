@@ -166,6 +166,12 @@ pub struct JobRerun {
     /// The approval hook captured off the parent shell at spawn, held
     /// for the job's lifetime.
     pub(crate) hook: Option<std::sync::Arc<dyn rhema_agent_tools::Approval>>,
+    /// The call's raw `model` argument, the same spelling the call
+    /// carried; a restart re-resolves it against the factory, so a
+    /// re-run lands where the original was aimed, not where a
+    /// wire-time snapshot put it. `None` inherits the definition's
+    /// frontmatter, then the parent's model.
+    pub(crate) model: Option<String>,
 }
 
 impl std::fmt::Debug for JobRerun {
@@ -177,6 +183,7 @@ impl std::fmt::Debug for JobRerun {
             .field("prompt", &self.prompt)
             .field("parent_run", &self.parent_run)
             .field("hook", &self.hook.as_ref().map(|_| "<dyn Approval>"))
+            .field("model", &self.model)
             .finish()
     }
 }
@@ -698,6 +705,7 @@ mod tests {
                 },
                 prompt: "go".into(),
                 parent_run: "turn-1".into(),
+                model: None,
                 hook: None,
             },
         );

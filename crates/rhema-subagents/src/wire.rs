@@ -154,13 +154,6 @@ pub fn wire_at(
     // `Some`, and every bash command would lose the functions the prompt
     // advertises. (Regression shape: the prompt listed the MCP servers
     // while `mcp` was `command not found` in the same session.)
-    // The shared shell carries the config's env — the wiring's
-    // provisioned BASH_ENV and socket ride it. Building `ShellTools::new`
-    // here instead would strand the env in a config field nothing reads:
-    // agent.rs's own `with_env` fallback never runs once `tools` is
-    // `Some`, and every bash command would lose the functions the prompt
-    // advertises. (Regression shape: the prompt listed the MCP servers
-    // while `mcp` was `command not found` in the same session.)
     let shell = config.tools.clone().unwrap_or_else(|| {
         Arc::new(ShellTools::with_env(
             config.workspace.clone(),
@@ -170,7 +163,12 @@ pub fn wire_at(
     let tools = Arc::new(
         SubagentTools::new(provider, defs, shell.clone(), config.model.clone())
             .with_thinking(config.thinking)
-            .with_base_system(subagent_base_system(config, shell.workspace())),
+            .with_base_system(subagent_base_system(config, shell.workspace()))
+            // The frontend's credential answers, when it carries any:
+            // the `model` argument's `<provider>/<model>` spellings
+            // resolve through these, and the spec's provider list is
+            // their wire-time snapshot.
+            .with_providers_if(config.subagent_providers.clone()),
     );
     let handle = tools.handle();
     config.tools = Some(shell);
@@ -232,13 +230,17 @@ fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String 
 /// empty when none survive. A prompt preview passes this to
 /// `stamped_system` so the preview matches what turns send; `disabled`
 /// is the config's persisted off switch, the same set the wire filters
-/// by.
+/// by, and `provider_kinds` the providers a `model` argument can
+/// reach — the factory's wire-time answers. A preview that touches no
+/// credentials (the `system show` path) passes an empty slice and its
+/// spec names no providers.
 pub fn extra_specs(
     workspace: &Path,
     disabled: &std::collections::BTreeSet<String>,
+    provider_kinds: &[&str],
 ) -> Vec<ToolSpec> {
     let global = rhema_config::Home::discover().ok().map(|h| h.subagents());
-    extra_specs_at(global.as_deref(), workspace, disabled)
+    extra_specs_at(global.as_deref(), workspace, disabled, provider_kinds)
 }
 
 /// [`extra_specs`] over an explicit global directory: the testable form.
@@ -246,13 +248,14 @@ pub fn extra_specs_at(
     global: Option<&Path>,
     workspace: &Path,
     disabled: &std::collections::BTreeSet<String>,
+    provider_kinds: &[&str],
 ) -> Vec<ToolSpec> {
     let mut defs = discover(global, workspace);
     defs.retain(|def| !disabled.contains(&def.name));
     if defs.is_empty() {
         Vec::new()
     } else {
-        vec![SubagentTools::spec(&defs)]
+        vec![SubagentTools::spec(&defs, provider_kinds)]
     }
 }
 
@@ -281,6 +284,55 @@ mod tests {
                 usage: rhema_core::Usage::default(),
             })
         }
+    }
+
+    #[tokio::test]
+    async fn the_wire_carries_the_provider_factory_into_the_tool() {
+        use rhema_core::{ToolCall, ToolResolver};
+        let empty = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        def_in(
+            workspace.path().join(".rhema").join("subagents").as_path(),
+            "scout",
+            "scouts ahead",
+        );
+        let mut config = CodingAgentConfig::new("m", workspace.path());
+        // The factory answers only anthropic; the model the wire's
+        // config carries is never the parent here.
+        let other = Arc::new(Never);
+        config.subagent_providers = Some(Arc::new(move |kind: &str| {
+            (kind == "anthropic").then(|| other.clone() as Arc<dyn ModelProvider>)
+        }) as rhema_coding_agent::SubagentProviders);
+        let _handle = wire_at(Some(empty.path()), Arc::new(Never), &mut config);
+        let resolver = config.extra_resolver.as_ref().expect("the tool is wired");
+        let spec = &ToolResolver::specs(resolver.as_ref())[0];
+        // The spec's taught list is the factory's wire-time answers.
+        assert!(
+            spec.description.contains("available here: anthropic"),
+            "{}",
+            spec.description
+        );
+        // And a start whose kind the factory cannot resolve fails
+        // in-band naming it — never a silent ride on the session's
+        // provider.
+        let ctx = rhema_core::ToolContext {
+            cwd: workspace.path().to_path_buf(),
+            run_id: "turn-1".into(),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({
+                "name": "scout",
+                "prompt": "go",
+                "model": "openrouter/no-such-login"
+            }),
+            provider_data: serde_json::Value::Null,
+        };
+        let result = resolver.resolve(call, &ctx).await;
+        assert!(result.is_error, "an unresolvable kind must fail the call");
+        assert!(result.content.contains("openrouter"), "{}", result.content);
     }
 
     /// Writes one definition folder under `dir`.
@@ -361,7 +413,13 @@ mod tests {
         );
         assert_eq!(shell.workspace(), root);
         assert_eq!(
-            extra_specs_at(Some(empty.path()), workspace.path(), &Default::default()).len(),
+            extra_specs_at(
+                Some(empty.path()),
+                workspace.path(),
+                &Default::default(),
+                &[]
+            )
+            .len(),
             1,
             "the preview sees the same built-in"
         );
@@ -372,7 +430,7 @@ mod tests {
     fn a_user_definition_shadows_the_builtin_in_the_catalog() {
         let (global, workspace) = workspace_with_defs();
         def_in(global.path(), "general-purpose", "my own generalist");
-        let specs = extra_specs_at(Some(global.path()), &workspace, &Default::default());
+        let specs = extra_specs_at(Some(global.path()), &workspace, &Default::default(), &[]);
         let description = &specs[0].description;
         assert!(description.contains("my own generalist"), "{description}");
         assert!(
@@ -401,7 +459,7 @@ mod tests {
         assert!(steering.drain().is_empty(), "no jobs, no notifications");
 
         // The same discovery feeds the prompt preview.
-        let specs = extra_specs_at(Some(global.path()), &workspace, &Default::default());
+        let specs = extra_specs_at(Some(global.path()), &workspace, &Default::default(), &[]);
         assert_eq!(specs.len(), 1);
         let prompt = stamped_system(None, &workspace, &specs).unwrap();
         assert!(prompt.contains("subagent"), "{prompt}");
@@ -422,6 +480,7 @@ mod tests {
             Some(global.path()),
             &workspace,
             &BTreeSet::from(["reviewer".to_owned(), "general-purpose".to_owned()]),
+            &[],
         );
         assert!(specs.is_empty(), "{specs:?}");
 
@@ -429,6 +488,7 @@ mod tests {
             Some(global.path()),
             &workspace,
             &BTreeSet::from(["reviewer".to_owned()]),
+            &[],
         );
         assert_eq!(specs.len(), 1);
         assert!(
@@ -442,6 +502,7 @@ mod tests {
             Some(global.path()),
             &workspace,
             &BTreeSet::from(["reviewer".to_owned()]),
+            &[],
         );
         assert_eq!(specs.len(), 1);
         assert!(

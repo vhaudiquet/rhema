@@ -39,9 +39,12 @@ the feature builds without it and the rest builds without it.
 - ❌ **Persistent subagent sessions.** A subagent's session lives for one
   tool call. The parent's committed tool call is the durable record; a
   crashed subagent is an error result and the parent re-delegates.
-- ❌ **Per-subagent providers.** One provider instance (the parent's);
-  the `model` frontmatter only changes `ChatParams`. A provider factory
-  per definition is a later decision (§7).
+- ❌ ~~**Per-subagent providers.**~~ Resolved since v1 (§8, and §4's
+  *Where a run rides*): one provider instance — the session's — by
+  default, with a frontend-installed provider factory behind the
+  `<provider>/<model>` spelling for the runs that name another
+  provider. The factory is a value the frontend carries, not a
+  discovery the crate runs: credentials stay with the caller.
 - ❌ **Structured nested events / live transcript trees.** Inner output
   rides the existing progress channel (§4). A dedicated UI nesting is a
   later decision.
@@ -100,7 +103,11 @@ You are a code reviewer. ...full system prompt...
 - `description` (required, non-empty) — the trigger, shown to the parent
   in the `subagent` tool's catalog.
 - `model` (optional) — the model identifier the subagent's requests
-  carry; without it, the parent's model.
+  carry, spelled `<provider>/<model>` to ride another logged-in
+  provider (the first `/`'s head must name a provider kind; anything
+  else reads as one bare id on the session's provider — an
+  OpenRouter-style id, say) or a bare model id on the session's own;
+  without it, the call's `model` argument, then the session's model.
 - `max_steps` (optional, ≥ 1) — the subagent's step budget; without it,
   the crate default (256).
 - The body (required, non-empty) — plain text, never rendered: it is
@@ -140,9 +147,10 @@ cannot drift into a shape a user could not have written.
 ```
 resolve(call, ctx):
   def   = defs by call.args.name (unknown name → error result)
+  ride  = resolve_model(call.args.model, def.model)   # §4 "Where a run rides"
   inner = ShellTools(workspace); install the parent turn's approval hook
   resolver = inner, plus a nested SubagentTools when depth allows
-  agent = Agent(provider, resolver, stamped(config) + def.body, params(def.model))
+  agent = Agent(ride.provider, resolver, stamped(config) + def.body, params(ride.model))
   session = fresh; push user message `call.args.prompt`
   for step in 0..def.max_steps:
       if ctx.cancelled → error result "cancelled"
@@ -158,6 +166,18 @@ resolve(call, ctx):
   out. Inner approvals therefore flow through the same bridge and the
   same modal as the parent's. No hook installed (never the case mid-turn,
   but the fail-safe default stands) means inner calls are rejected.
+- **Where a run rides.** The call's optional `model` argument wins over
+  the definition's `model` frontmatter, which wins over the session's
+  provider and model. The spelling splits on its first `/`: a head
+  naming a provider kind resolves through the frontend's factory (the
+  `subagent_providers` config field, one `Backend` per logged-in kind);
+  a head naming no kind stays whole — a bare id on the session's own
+  provider. A kind whose credentials do not resolve fails the call
+  naming what is available, never a silent ride on the session's
+  provider; the taught list in the spec description is the factory's
+  wire-time answers, while the resolution itself probes live, so a
+  `/login` mid-session serves jobs started after it. A background
+  restart re-resolves the spelling the call carried.
 - **The inner context** clones the parent's `cancelled` flag, so a user
   stop reaches the subagent's tools, and the loop checks it between
   steps. The `run_id` carries the parent's: `turn-3` becomes
@@ -202,8 +222,9 @@ subagents on its own.
    answers to its folder name like any definition, and a set holding
    every name leaves the config unwired), then stamp the subagents'
    base prompt off the config (the parent's own sections, the shell's
-   workspace), build the shell and the `SubagentTools`, set both
-   fields, return. The frontends apply the prompt sections before the
+   workspace), build the shell and the `SubagentTools` — installing the
+   config's `subagent_providers` factory when the frontend carries one —
+   set both fields, return. The frontends apply the prompt sections before the
    wire, so the stamp carries them. Each frontend calls it at
    its agent-construction sites (TUI, headless one-shot; the claw and
    ACP when they adopt the feature). The `/system` preview goes through
@@ -237,7 +258,6 @@ subagents on its own.
 
 ## 7. Explicitly not decided here
 
-- A per-definition provider factory (different backends per subagent).
 - Usage accounting: a subagent's token spend is invisible to the parent's
   totals in v1.
 - A `--no-subagents` flag or per-workspace opt-out.
@@ -257,3 +277,10 @@ subagents on its own.
   argument needs a catalog to name into; the built-in guarantees one,
   and a definition of the same name shadows it. A generic delegation is
   always useful; a definition is only a system prompt with a trigger.
+- **Cross-provider rides resolve through a frontend-installed factory**
+  — the `<provider>/<model>` spelling (the model picker's own
+  convention) names the provider, the crate builds nothing itself: the
+  `subagent_providers` config field carries the credential answers, and
+  with none installed the session's provider is the only one, named as
+  such in the spec. A restart re-resolves, so a re-run aims where the
+  credentials point when it runs.

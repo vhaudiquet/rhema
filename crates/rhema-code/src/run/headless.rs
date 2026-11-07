@@ -214,7 +214,17 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     // Subagents ride in as one tool: the built-in general-purpose
     // definition plus whatever the workspace defines.
     // The handle rides to the UI in the wire-up piece; the registry
-    // is live either way.
+    // is live either way. The provider factory is the same per-kind
+    // answer the TUI carries: one backend per logged-in kind, built
+    // off this profile, so a cross-provider `model` argument works
+    // headless too.
+    agent_config.subagent_providers = Some({
+        let profile = effective.clone();
+        let secrets = secrets.clone();
+        Arc::new(move |kind: &str| {
+            Backend::named(kind, &profile, Some(&secrets)).map(|backend| backend.provider())
+        }) as rhema_coding_agent::SubagentProviders
+    });
     let (mut agent_config, _subagents) = rhema_subagents::wire(backend.provider(), agent_config);
     if let Some(assembled) = sandboxed.as_ref() {
         assembled.apply_workspace(&mut agent_config);

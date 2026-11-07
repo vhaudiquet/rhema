@@ -661,8 +661,9 @@ session and never a running subagent.
   inbox (§5, §7 test 5); the second-consumer discipline is why no
   notification type enters crate 1.
 
-**The tool's two shapes.** One tool, one spec, an optional third
-argument:
+**The tool's two shapes.** One tool, one spec, optional arguments
+alongside (`id` to fetch, `model` to move the run — see the crate spec
+§4, *Where a run rides*):
 
 ```
 subagent(name, prompt)   → starts; the result carries the job id at once

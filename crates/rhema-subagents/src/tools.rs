@@ -16,8 +16,11 @@
 //! step loop on a
 //! fresh [`Session`](rhema_core::Session) whose first message is the
 //! `prompt`, reading its history through the bounded transcript view.
-//! The inner turn inherits five things and nothing else: the provider,
-//! the approval hook (captured at spawn off the parent's
+//! The inner turn inherits five things and nothing else: where it
+//! rides — the call's optional `model` argument over the definition's
+//! frontmatter over the parent's provider and model, the first two
+//! free to move to another provider the frontend is logged into — the
+//! approval hook (captured at spawn off the parent's
 //! [`ShellTools`], held for the job's lifetime — a gate firing after
 //! the parent turn's end still consults the turn's policy), the job's
 //! own cancel flag (escape stops the main session, never the job), the
@@ -45,6 +48,7 @@ use serde_json::json;
 use std::time::Duration;
 
 use rhema_agent_tools::{Approval, Overlay, ShellTools};
+use rhema_coding_agent::SubagentProviders;
 use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     Agent, ChatParams, Content, Event, EventSink, Message, ModelProvider, Role, Session, ToolCall,
@@ -87,11 +91,25 @@ const JOB_SERVER_LADDER: &[Duration] = &[Duration::from_secs(30), Duration::from
 /// path and the synchronous nested path.
 #[derive(Clone)]
 struct Inner {
-    /// The provider the inner agents run on: the parent's, wrapped
-    /// once per run in a background-tuned [`Retrying`] — the frontend
-    /// already rides its own turn ladder underneath, and the two
-    /// compose into the job's tolerance (see [`JOB_NETWORK_LADDER`]).
+    /// The provider the inner agents run on by default: the parent's,
+    /// wrapped once per run in a background-tuned [`Retrying`] — the
+    /// frontend already rides its own turn ladder underneath, and the
+    /// two compose into the job's tolerance (see
+    /// [`JOB_NETWORK_LADDER`]). A `model` argument naming another
+    /// provider resolves through [`Inner::providers`] instead.
     provider: Arc<dyn ModelProvider>,
+    /// Resolves a provider kind to a turn provider: the frontend's
+    /// credential policy behind the `<provider>/<model>` spelling in
+    /// the call's `model` argument and a definition's frontmatter.
+    /// `None` means the session's provider is the only one — a
+    /// cross-provider spelling fails with that named.
+    providers: Option<SubagentProviders>,
+    /// The kinds [`Inner::providers`] resolved when it was installed,
+    /// probed once at wire time: the provider list the spec teaches.
+    /// Credential answers can change mid-session (a `/login`), so a
+    /// call resolves through the factory live and this list only
+    /// informs the prompt.
+    provider_kinds: Vec<&'static str>,
     /// The dead-link waits a run's retry wrapper walks; the default
     /// is [`JOB_NETWORK_LADDER`], a test knob shortens it.
     network_ladder: Vec<Duration>,
@@ -100,8 +118,8 @@ struct Inner {
     server_ladder: Vec<Duration>,
     /// The discovered definitions; the tool's catalog.
     defs: Vec<SubagentDef>,
-    /// The model identifier a definition without its own `model` runs
-    /// on: the parent's.
+    /// The model identifier a call and a definition without their own
+    /// `model` run on: the parent's.
     default_model: String,
     /// The thinking effort the inner requests carry. The default,
     /// [`ThinkingEffort::Default`], lets the provider decide — and on a
@@ -118,6 +136,15 @@ struct Inner {
     /// computed once at wire time off the config. Empty on direct
     /// constructions (tests): the body runs alone.
     base: String,
+}
+
+/// Where one run rides: the provider its requests turn on and the
+/// model id they carry — the resolved form of the call's `model`
+/// argument over the definition's frontmatter over the session's own.
+#[derive(Clone)]
+struct Ride {
+    provider: Arc<dyn ModelProvider>,
+    model: String,
 }
 
 impl Inner {
@@ -163,9 +190,66 @@ impl Inner {
         }
     }
 
+    /// Resolves where one run rides: the call's `model` argument wins
+    /// over the definition's frontmatter, which wins over the parent's
+    /// provider and model. The spelling splits on its first `/`: a
+    /// first component naming a provider kind resolves through the
+    /// factory — unresolvable is an error naming what is available,
+    /// never a silent ride on the session's provider — while an
+    /// unknown first component (an OpenRouter-style id, say) stays
+    /// whole and rides the parent's provider. An explicit `<kind>/`
+    /// with an empty tail names no model.
+    fn resolve_model(&self, call_model: Option<&str>, def: &SubagentDef) -> Result<Ride, String> {
+        let spelling = call_model.or(def.model.as_deref());
+        let Some(spelling) = spelling else {
+            return Ok(Ride {
+                provider: self.provider.clone(),
+                model: self.default_model.clone(),
+            });
+        };
+        let spelling = spelling.trim();
+        if let Some((kind, rest)) = spelling.split_once('/') {
+            let known = rhema_config::PROVIDERS.iter().any(|info| info.name == kind);
+            if known {
+                let provider = self
+                    .providers
+                    .as_ref()
+                    .and_then(|providers| providers(kind))
+                    .ok_or_else(|| {
+                        let available = if self.provider_kinds.is_empty() {
+                            "none besides this session's own".to_owned()
+                        } else {
+                            self.provider_kinds.join(", ")
+                        };
+                        format!(
+                            "provider kind \"{kind}\" has no usable credentials here \
+                             (not logged in?); providers available to subagents: {available}"
+                        )
+                    })?;
+                let model = rest.trim();
+                if model.is_empty() {
+                    return Err(format!(
+                        "\"{spelling}\" names a provider but no model after the slash"
+                    ));
+                }
+                return Ok(Ride {
+                    provider,
+                    model: model.to_owned(),
+                });
+            }
+        }
+        Ok(Ride {
+            provider: self.provider.clone(),
+            model: spelling.to_owned(),
+        })
+    }
+
     /// Runs one definition to its report, or to the reason it failed.
+    /// `ride` is the caller's resolution — this never consults the
+    /// frontmatter or the default itself.
     async fn run(
         &self,
+        ride: &Ride,
         def: &SubagentDef,
         prompt: &str,
         ctx: &ToolContext,
@@ -184,31 +268,27 @@ impl Inner {
             format!("{}\n\n{}", self.base, def.body)
         };
         let resolver = self.inner_resolver(inner_shell);
-        // Each run wraps the provider in its own fresh retry and
-        // transcript: the wrapper holds no state across requests, so a
-        // per-run instance is the shared one's exact equal, and the
-        // inner history lives and dies with the run — no mirror to
-        // share, no per-definition settings to plumb. The `zoom` half
-        // of `attach` is dropped on purpose — the subagent's tool
-        // surface stays the shell alone.
+        // Each run wraps the provider the caller resolved in its own
+        // fresh retry and transcript: the wrapper holds no state
+        // across requests, so a per-run instance is the shared one's
+        // exact equal, and the inner history lives and dies with the
+        // run — no mirror to share, no per-definition settings to
+        // plumb. The `zoom` half of `attach` is dropped on purpose —
+        // the subagent's tool surface stays the shell alone.
         let retrying = Arc::new(Retrying::with_ladders(
-            self.provider.clone(),
+            ride.provider.clone(),
             self.network_ladder.clone(),
             self.server_ladder.clone(),
         ));
-        let (provider, _zoom) =
+        let (retrying, _zoom) =
             rhema_transcript::attach(retrying, rhema_transcript::TranscriptSettings::default());
         let mut agent = Agent::builder()
-            .provider(provider)
+            .provider(retrying)
             .resolver(resolver)
             .system(system)
             .params(ChatParams {
                 thinking: self.thinking,
-                ..ChatParams::new(
-                    def.model
-                        .clone()
-                        .unwrap_or_else(|| self.default_model.clone()),
-                )
+                ..ChatParams::new(ride.model.clone())
             })
             .build()
             .map_err(|err| JobFailure::Permanent(format!("its engine failed to build: {err}")))?;
@@ -220,13 +300,9 @@ impl Inner {
             run_id: format!("{}/subagent:{}", ctx.run_id, def.name),
             cancelled: ctx.cancelled.clone(),
         };
-        let model = def
-            .model
-            .clone()
-            .unwrap_or_else(|| self.default_model.clone());
         let mut sink = Forwarder {
             progress,
-            model: model.clone(),
+            model: ride.model.clone(),
             phase: None,
             context: None,
             spent: rhema_core::Usage::default(),
@@ -303,6 +379,8 @@ impl SubagentTools {
         Self {
             inner: Inner {
                 provider,
+                providers: None,
+                provider_kinds: Vec::new(),
                 network_ladder: JOB_NETWORK_LADDER.to_vec(),
                 server_ladder: JOB_SERVER_LADDER.to_vec(),
                 defs,
@@ -353,6 +431,32 @@ impl SubagentTools {
         self
     }
 
+    /// Installs the frontend's provider factory: the credential
+    /// answers behind the `<provider>/<model>` spelling in the call's
+    /// `model` argument and a definition's frontmatter. The kinds the
+    /// factory resolves are probed once here — the provider list the
+    /// spec teaches; a call resolves through the factory live, so a
+    /// login mid-session still serves a job even though the prompt's
+    /// list was stamped earlier.
+    pub fn with_providers(mut self, providers: SubagentProviders) -> Self {
+        self.inner.provider_kinds = rhema_config::PROVIDERS
+            .iter()
+            .map(|info| info.name)
+            .filter(|kind| (providers)(kind).is_some())
+            .collect();
+        self.inner.providers = Some(providers);
+        self
+    }
+
+    /// [`Self::with_providers`] over an optional factory: `None`
+    /// installs nothing, the session's provider stays the only one.
+    pub(crate) fn with_providers_if(self, providers: Option<SubagentProviders>) -> Self {
+        match providers {
+            Some(providers) => self.with_providers(providers),
+            None => self,
+        }
+    }
+
     /// Sets the stamped system prompt the inner agents run under —
     /// the parent's, computed once at wire time; the definition's
     /// body lands under it verbatim. Call before the first job.
@@ -399,15 +503,16 @@ impl SubagentTools {
     /// The `subagent` tool spec over `defs`: the catalog and the
     /// protocol ride the description, so the prompt's tool list teaches
     /// the model when to delegate and how to fetch with no renderer
-    /// change.
-    pub fn spec(defs: &[SubagentDef]) -> ToolSpec {
-        Self::spec_for(defs, true)
+    /// change. `provider_kinds` is the providers a `model` argument can
+    /// reach, the factory's wire-time answers.
+    pub fn spec(defs: &[SubagentDef], provider_kinds: &[&str]) -> ToolSpec {
+        Self::spec_for(defs, true, provider_kinds)
     }
 
     /// [`Self::spec`] per shape: the background spec carries the
     /// start/notification/fetch protocol; the synchronous (nested) one
     /// the report-as-result contract.
-    fn spec_for(defs: &[SubagentDef], background: bool) -> ToolSpec {
+    fn spec_for(defs: &[SubagentDef], background: bool, provider_kinds: &[&str]) -> ToolSpec {
         let mut description = if background {
             String::from(
                 "Run a named subagent in the background: an independent \
@@ -442,6 +547,23 @@ impl SubagentTools {
         for def in defs {
             description.push_str(&format!("\n- {}: {}", def.name, def.description));
         }
+        // Where a run rides. The definition's frontmatter and the
+        // session's model are the defaults; the argument is the
+        // override. The provider list is the factory's wire-time
+        // answers — an empty list still leaves the bare-id spelling
+        // meaningful, on this session's own provider.
+        let providers = if provider_kinds.is_empty() {
+            "none besides this session's own".to_owned()
+        } else {
+            provider_kinds.join(", ")
+        };
+        description.push_str(&format!(
+            "\n\nWhere it runs: without `model`, the definition's own \
+             model choice applies, then this session's model. Pass \
+             `model` to move it: `<provider>/<model>` runs on another \
+             provider (available here: {providers}), and a bare model \
+             id runs on this session's provider."
+        ));
         if background {
             ToolSpec::new(
                 "subagent",
@@ -460,6 +582,10 @@ impl SubagentTools {
                         "id": {
                             "type": "string",
                             "description": "A job id to fetch the report of, instead of starting a new subagent."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Optional. `<provider>/<model>` runs the subagent on another provider named in this description; a bare model id runs on this session's provider. Without it the definition's model applies, then this session's."
                         }
                     }
                 }),
@@ -478,6 +604,10 @@ impl SubagentTools {
                         "prompt": {
                             "type": "string",
                             "description": "The full task for the subagent: what to do, and what to report back."
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Optional. `<provider>/<model>` runs the subagent on another provider named in this description; a bare model id runs on this session's provider. Without it the definition's model applies, then this session's."
                         }
                     },
                     "required": ["name", "prompt"]
@@ -493,6 +623,11 @@ impl SubagentTools {
         let id = call.args.get("id").and_then(|value| value.as_str());
         let name = call.args.get("name").and_then(|value| value.as_str());
         let prompt = call.args.get("prompt").and_then(|value| value.as_str());
+        // A fetch carries no model: its arguments name a finished job,
+        // and re-resolving a model a report already earned would be
+        // re-running it by another name. An ignored stray `model`
+        // beside `id` stays silent, the schema's Optional covers it.
+        let model = call.args.get("model").and_then(|value| value.as_str());
         match (id, name, prompt) {
             (Some(_), Some(_), _) | (Some(_), _, Some(_)) => Err(invalid(
                 "pass `name` and `prompt` to start a subagent, or `id` to \
@@ -535,7 +670,12 @@ impl SubagentTools {
                 if prompt.trim().is_empty() {
                     return Err(invalid("the `prompt` argument is empty".to_owned()));
                 }
-                Ok(Parsed::Start { def, prompt })
+                if let Some(model) = model
+                    && model.trim().is_empty()
+                {
+                    return Err(invalid("the `model` argument is empty".to_owned()));
+                }
+                Ok(Parsed::Start { def, prompt, model })
             }
         }
     }
@@ -549,8 +689,17 @@ impl SubagentTools {
         call_id: &str,
         def: &SubagentDef,
         prompt: &str,
+        model: Option<&str>,
         ctx: &ToolContext,
     ) -> ToolResult {
+        // Resolve once here so a spelling that cannot ride fails the
+        // call outright — an id that starts a job destined to die is
+        // not a start. The spawned task re-resolves the same spelling;
+        // the factory's answers are live, and a restart re-aims the
+        // same way.
+        if let Err(why) = self.inner.resolve_model(model, def) {
+            return ToolResult::failure(call_id.to_owned(), why);
+        }
         let registry = self
             .registry
             .clone()
@@ -566,6 +715,7 @@ impl SubagentTools {
             prompt: prompt.to_owned(),
             parent_run: ctx.run_id.clone(),
             hook: hook.clone(),
+            model: model.map(str::to_owned),
         };
         registry.arm_restart(&minted.id, rerun.clone());
         let id = minted.id.clone();
@@ -588,11 +738,6 @@ impl SubagentTools {
     fn spawn(&self, registry: &Arc<Registry>, id: &str, cancel: Arc<AtomicBool>, rerun: JobRerun) {
         let inner = self.inner.clone();
         let inner_shell = self.inner.inner_shell(&self.shell, rerun.hook.clone());
-        let model = rerun
-            .def
-            .model
-            .clone()
-            .unwrap_or_else(|| self.inner.default_model.clone());
         let task_id = id.to_owned();
         let task_name = rerun.def.name.clone();
         let weak_registry = Arc::downgrade(registry);
@@ -607,12 +752,27 @@ impl SubagentTools {
             let Some(permit) = crate::registry::acquire_slot(&weak_registry).await else {
                 return;
             };
+            // Re-resolve the spelling the call carried: the factory's
+            // answers are live, so a re-run aims where the credentials
+            // point now, and a definition's frontmatter rides the same
+            // resolution it always had. A spelling that stopped
+            // resolving (logged out since the start) fails the job
+            // with the reason — fetchable, restartable.
+            let ride = match inner.resolve_model(rerun.model.as_deref(), &rerun.def) {
+                Ok(ride) => ride,
+                Err(why) => {
+                    if let Some(registry) = weak_registry.upgrade() {
+                        registry.finish(&task_id, Err(JobFailure::Permanent(why)));
+                    }
+                    return;
+                }
+            };
             // Touch the registry only in short critical sections: the
             // task holds the Weak, never a strong ref across the run —
             // a dropped registry must actually drop, and its flag stops
             // the job at the next step boundary.
             if let Some(registry) = weak_registry.upgrade() {
-                registry.mark_running(&task_id, Some(model.clone()));
+                registry.mark_running(&task_id, Some(ride.model.clone()));
             }
             let ctx = ToolContext {
                 cwd: inner_shell.workspace().to_path_buf(),
@@ -621,7 +781,14 @@ impl SubagentTools {
             };
             let mut progress = progress;
             let outcome = inner
-                .run(&rerun.def, &rerun.prompt, &ctx, &inner_shell, &mut progress)
+                .run(
+                    &ride,
+                    &rerun.def,
+                    &rerun.prompt,
+                    &ctx,
+                    &inner_shell,
+                    &mut progress,
+                )
                 .await;
             if let Some(registry) = weak_registry.upgrade() {
                 registry.finish(&task_id, outcome);
@@ -658,10 +825,12 @@ impl SubagentTools {
 
 /// The validated shape of one `subagent` call.
 enum Parsed<'a> {
-    /// `name` + `prompt`: start a job over this definition.
+    /// `name` + `prompt`: start a job over this definition, on the
+    /// model the optional `model` argument names.
     Start {
         def: &'a SubagentDef,
         prompt: &'a str,
+        model: Option<&'a str>,
     },
     /// `id` alone: fetch a started job's report.
     Fetch { id: &'a str },
@@ -673,7 +842,11 @@ impl ToolResolver for SubagentTools {
         if self.inner.max_depth == 0 || self.inner.defs.is_empty() {
             return Vec::new();
         }
-        vec![Self::spec_for(&self.inner.defs, self.registry.is_some())]
+        vec![Self::spec_for(
+            &self.inner.defs,
+            self.registry.is_some(),
+            &self.inner.provider_kinds,
+        )]
     }
 
     fn replay_safety(&self, name: &str) -> rhema_core::ReplaySafety {
@@ -730,20 +903,26 @@ impl ToolResolver for SubagentTools {
                     ),
                 }
             }
-            Ok(Parsed::Start { def, prompt }) if self.registry.is_some() => {
-                self.start(&id, def, prompt, ctx)
+            Ok(Parsed::Start { def, prompt, model }) if self.registry.is_some() => {
+                self.start(&id, def, prompt, model, ctx)
             }
-            Ok(Parsed::Start { def, prompt }) => {
+            Ok(Parsed::Start { def, prompt, model }) => {
                 // The synchronous (nested) shape: run to the report
                 // inside the resolving step, the hook captured here as
                 // anywhere.
-                let hook = self.shell.current_approval();
-                let inner_shell = self.inner.inner_shell(&self.shell, hook);
-                let outcome = self
-                    .inner
-                    .run(def, prompt, ctx, &inner_shell, progress)
-                    .await;
-                inner_shell.clear_approval();
+                let outcome = match self.inner.resolve_model(model, def) {
+                    Ok(ride) => {
+                        let hook = self.shell.current_approval();
+                        let inner_shell = self.inner.inner_shell(&self.shell, hook);
+                        let outcome = self
+                            .inner
+                            .run(&ride, def, prompt, ctx, &inner_shell, progress)
+                            .await;
+                        inner_shell.clear_approval();
+                        outcome
+                    }
+                    Err(why) => Err(JobFailure::Permanent(why)),
+                };
                 match outcome {
                     Ok(report) => ToolResult::success(id, report),
                     Err(why) => {
@@ -899,6 +1078,8 @@ fn capped(report: String) -> String {
 mod tests {
     use super::*;
 
+    use rhema_core::{ModelOutput, ProviderError};
+
     #[test]
     fn a_oversized_report_keeps_its_tail() {
         let head = "h".repeat(200);
@@ -932,7 +1113,7 @@ mod tests {
                 body: "Explore.".into(),
             },
         ];
-        let spec = SubagentTools::spec(&defs);
+        let spec = SubagentTools::spec(&defs, &[]);
         assert_eq!(spec.name, "subagent");
         assert!(spec.description.contains("reviewer: reviews diffs"));
         assert!(spec.description.contains("scout: explores the tree"));
@@ -950,6 +1131,239 @@ mod tests {
         assert!(properties.contains_key("name"));
         assert!(properties.contains_key("prompt"));
         assert!(properties.contains_key("id"));
+    }
+
+    /// The spec teaches where a run rides: the provider list rides the
+    /// description and the schema, an empty list reading honestly.
+    #[test]
+    fn the_spec_teaches_the_model_argument() {
+        let defs = vec![SubagentDef {
+            name: "scout".into(),
+            description: "explores".into(),
+            model: None,
+            max_steps: None,
+            body: "Explore.".into(),
+        }];
+        let spec = SubagentTools::spec(&defs, &["google", "anthropic"]);
+        assert!(
+            spec.description
+                .contains("available here: google, anthropic"),
+            "{}",
+            spec.description
+        );
+        assert!(spec.description.contains("<provider>/<model>"));
+        let properties = spec.parameters["properties"].as_object().unwrap();
+        assert!(properties.contains_key("model"));
+
+        // No factory, no providers named: the session's own is the
+        // only one, and the spec says so instead of staying silent.
+        let spec = SubagentTools::spec(&defs, &[]);
+        assert!(
+            spec.description.contains("none besides this session's own"),
+            "{}",
+            spec.description
+        );
+    }
+
+    /// Where a run rides: call model over frontmatter over the
+    /// session's own, the `<provider>/<model>` split, and the honest
+    /// failure when the kind has no credentials.
+    #[test]
+    fn model_resolution_walks_the_precedence_ladder() {
+        let def_with_model = SubagentDef {
+            name: "reviewer".into(),
+            description: "reviews".into(),
+            model: Some("haiku-on-parent".into()),
+            max_steps: None,
+            body: "Review.".into(),
+        };
+        let plain = SubagentDef {
+            name: "scout".into(),
+            description: "explores".into(),
+            model: None,
+            max_steps: None,
+            body: "Explore.".into(),
+        };
+        let parent = Recording::new();
+        let other = Recording::new();
+        let factory: SubagentProviders = {
+            let other = other.clone();
+            Arc::new(move |kind: &str| (kind == "anthropic").then(|| other.clone() as _))
+        };
+        let tools = SubagentTools::new(
+            parent.clone() as Arc<dyn ModelProvider>,
+            vec![plain.clone(), def_with_model.clone()],
+            Arc::new(ShellTools::new("/workspace")),
+            "parent-model",
+        )
+        .with_providers(factory);
+
+        // No argument, no frontmatter: the parent's.
+        let ride = tools.inner.resolve_model(None, &plain).unwrap();
+        assert_eq!(ride.model, "parent-model");
+        assert!(Arc::ptr_eq(
+            &(ride.provider as Arc<dyn ModelProvider>),
+            &(parent.clone() as Arc<dyn ModelProvider>)
+        ));
+
+        // Frontmatter only: the definition's model, on the parent.
+        let ride = tools.inner.resolve_model(None, &def_with_model).unwrap();
+        assert_eq!(ride.model, "haiku-on-parent");
+        assert!(Arc::ptr_eq(
+            &(ride.provider as Arc<dyn ModelProvider>),
+            &(parent.clone() as Arc<dyn ModelProvider>)
+        ));
+
+        // The call's argument wins over the frontmatter.
+        let ride = tools
+            .inner
+            .resolve_model(Some("sonnet-on-parent"), &def_with_model)
+            .unwrap();
+        assert_eq!(ride.model, "sonnet-on-parent");
+
+        // A kind the factory resolves moves the provider, and only the
+        // tail after the first slash is the model id.
+        let ride = tools
+            .inner
+            .resolve_model(Some("anthropic/claude-haiku"), &plain)
+            .unwrap();
+        assert_eq!(ride.model, "claude-haiku");
+        assert!(Arc::ptr_eq(
+            &(ride.provider as Arc<dyn ModelProvider>),
+            &(other.clone() as Arc<dyn ModelProvider>)
+        ));
+
+        // A first component naming no kind stays whole: an
+        // OpenRouter-style id rides the parent's provider.
+        let ride = tools
+            .inner
+            .resolve_model(Some("vendor/model-name"), &plain)
+            .unwrap();
+        assert_eq!(ride.model, "vendor/model-name");
+
+        // A known kind without credentials fails the call, naming what
+        // is available — never a silent ride on the session's own.
+        let why = expect_resolution_error(&tools.inner, Some("openrouter/mistral-large"), &plain);
+        assert!(why.contains("openrouter"), "{why}");
+        assert!(why.contains("anthropic"), "{why}");
+
+        // A kind spelled with no model after the slash names nothing.
+        let why = expect_resolution_error(&tools.inner, Some("anthropic/"), &plain);
+        assert!(why.contains("no model"), "{why}");
+
+        // Without a factory installed, the same spellings fail the
+        // same way.
+        let bare = SubagentTools::new(
+            parent.clone() as Arc<dyn ModelProvider>,
+            vec![plain],
+            Arc::new(ShellTools::new("/workspace")),
+            "parent-model",
+        );
+        let why =
+            expect_resolution_error(&bare.inner, Some("anthropic/claude-haiku"), &def_with_model);
+        assert!(why.contains("no usable credentials"), "{why}");
+    }
+
+    /// The failure a resolution must carry, asserted to be a failure
+    /// first — `Result`'s `Ok` half holds no `Debug` (a dyn provider),
+    /// so `unwrap_err` cannot.
+    fn expect_resolution_error(inner: &Inner, model: Option<&str>, def: &SubagentDef) -> String {
+        match inner.resolve_model(model, def) {
+            Ok(_) => panic!("expected the resolution to fail"),
+            Err(why) => why,
+        }
+    }
+
+    /// A recording provider: the model id each request carried, for
+    /// asserting where a run actually rode.
+    struct Recording {
+        models: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Recording {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                models: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+        fn taken(&self) -> Vec<String> {
+            self.models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for Recording {
+        async fn complete(
+            &self,
+            req: rhema_core::ModelRequest,
+            _sink: &mut dyn EventSink,
+        ) -> Result<ModelOutput, ProviderError> {
+            self.models
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(req.params.model);
+            Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "the report"),
+                stop_reason: rhema_core::StopReason::EndTurn,
+                usage: rhema_core::Usage::default(),
+            })
+        }
+    }
+
+    /// The argument reaches the wire: a synchronous call with
+    /// `<provider>/<model>` runs its first request on the other
+    /// provider with the tail as the model id, and a bare id rides the
+    /// session's provider.
+    #[tokio::test]
+    async fn a_model_argument_moves_where_the_run_rides() {
+        let session = Recording::new();
+        let other = Recording::new();
+        let factory: SubagentProviders = {
+            let other = other.clone();
+            Arc::new(move |kind: &str| (kind == "anthropic").then(|| other.clone() as _))
+        };
+        let def = SubagentDef {
+            name: "scout".into(),
+            description: "explores".into(),
+            model: None,
+            max_steps: None,
+            body: "Explore.".into(),
+        };
+        let tools = SubagentTools::new(
+            session.clone() as Arc<dyn ModelProvider>,
+            vec![def],
+            Arc::new(ShellTools::new("/workspace")),
+            "parent-model",
+        )
+        .with_providers(factory);
+
+        let sync = SubagentTools::synchronous(tools.inner.clone(), tools.shell.clone());
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({
+                "name": "scout",
+                "prompt": "go",
+                "model": "anthropic/claude-haiku"
+            }),
+            provider_data: serde_json::Value::Null,
+        };
+        let ctx = rhema_core::ToolContext {
+            cwd: "/workspace".into(),
+            run_id: "turn-1".into(),
+            cancelled: Arc::new(AtomicBool::new(false)),
+        };
+        let result = sync.resolve(call, &ctx).await;
+        assert!(
+            !result.is_error,
+            "the cross-provider call should run: {:?}",
+            result
+        );
+        assert_eq!(other.taken(), vec!["claude-haiku"]);
+        assert!(session.taken().is_empty(), "the session provider is idle");
     }
 
     /// A progress channel that keeps everything it is handed.

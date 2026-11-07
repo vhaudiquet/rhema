@@ -430,6 +430,7 @@ impl App {
                             .as_deref()
                             .unwrap_or(rhema_config::DEFAULT_PROFILE),
                         &setup.config.disabled_mcp_servers,
+                        setup.secrets.as_ref(),
                     );
                     agent = Some(CodingAgent::from_session(
                         provider,

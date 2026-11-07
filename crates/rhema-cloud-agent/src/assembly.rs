@@ -165,8 +165,11 @@ impl AgentAssembly {
             mcp_servers: Vec::new(),
             disabled_mcp_servers: std::collections::BTreeSet::new(),
             // No subagent wire runs here (nothing discovers off a
-            // filesystem), so nothing to hold back either.
+            // filesystem), so nothing to hold back either, and no
+            // provider factory to resolve a cross-provider `model`
+            // against.
             disabled_subagents: std::collections::BTreeSet::new(),
+            subagent_providers: None,
             max_turn_steps: self.max_turn_steps,
             thinking: self.thinking,
             tools: Some(shell.clone()),
