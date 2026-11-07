@@ -161,7 +161,7 @@ pub fn resolve_watch_credential(
         .filter(|account| host_matches(host, account.url.as_deref()))
         .find_map(|account| {
             let secret = accounts.secret(&account.id).ok()??;
-            (secret.kind == SecretKind::Token).then(|| WatchCredential {
+            (secret.kind == SecretKind::Token).then_some(WatchCredential {
                 token: secret.value,
                 login: account.username,
             })

@@ -929,11 +929,8 @@ mod tests {
     #[test]
     fn an_account_watch_resolves_the_client_a_repo_watch_would_have() {
         let watches = Arc::new(ClawStore::in_memory().expect("store opens"));
-        watches
-            .add_account_watch("gitea", Some("https://git.example"), "acct-1")
-            .expect("account watch lands");
         let accounts = Arc::new(rhema_identity::VolatileIdentityStore::new());
-        accounts
+        let account = accounts
             .put(
                 rhema_identity::AccountDraft::new(
                     "kosmos",
@@ -944,6 +941,11 @@ mod tests {
                 .with_username("kosmos"),
             )
             .expect("account lands");
+        // The watch row names the id the store actually assigned: a
+        // fabricated id is a row that resolves nothing.
+        watches
+            .add_account_watch("gitea", Some("https://git.example"), &account.id)
+            .expect("account watch lands");
         let registry = Arc::new(
             crate::backends::BackendRegistry::new(
                 vec![crate::backends::Backend::headless(
