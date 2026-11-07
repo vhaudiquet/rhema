@@ -1,6 +1,22 @@
-//! The catalog row every adapter's listing normalizes into.
+//! The catalog row every adapter's listing normalizes into, and the
+//! seam the listings share.
 
 use serde::{Deserialize, Serialize};
+
+use async_trait::async_trait;
+use rhema_core::ProviderError;
+
+/// The live-catalog seam: a provider's models, as they list today.
+/// Every adapter in the family implements it, so a consumer holding
+/// nothing but a provider name can still fetch the catalog — no
+/// concrete type required. The listing stays off the turn seam's
+/// retry: a catalog fetch either answers or fails, no ladder.
+#[async_trait]
+pub trait ModelListing: Send + Sync {
+    /// The provider's text-chat models, normalized to [`ModelCard`]
+    /// rows — pricing included when the provider publishes it.
+    async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError>;
+}
 
 /// One model in a provider's catalog, normalized for consumers: the id
 /// the adapter's chat API accepts, the listing's display fields, and the

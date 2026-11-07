@@ -33,7 +33,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{Allowance, ModelCard};
+use rhema_provider::{Allowance, ModelCard, ModelListing};
 use rhema_provider_openai_compatible::provider::{
     drain_chat_stream, network_error as dialect_network_error,
 };
@@ -241,34 +241,6 @@ impl CopilotProvider {
         })
     }
 
-    /// The models the seat's Copilot subscription serves (`GET
-    /// {api}/models`), chat-capable rows only — see
-    /// [`crate::wire::normalize_models`].
-    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-        let token = self.copilot_token().await?;
-        let base = token.api_base.clone();
-        let response = self
-            .http
-            .get(format!("{base}/models"))
-            .bearer_auth(&token.token)
-            .editor_headers()
-            // A bounded listing call, not a stream.
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
-        }
-        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
-            message: format!("malformed models page: {err}"),
-            status: None,
-        })?;
-        Ok(crate::wire::normalize_models(&page))
-    }
-
     /// The seat's premium-request allowance (`GET
     /// {api}/copilot_internal/user`, authenticated with the OAuth
     /// token — no Copilot-token exchange needed). The endpoint is
@@ -372,6 +344,37 @@ fn now_epoch() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_secs())
         .unwrap_or(0)
+}
+
+#[async_trait]
+impl ModelListing for CopilotProvider {
+    /// The models the seat's Copilot subscription serves (`GET
+    /// {api}/models`), chat-capable rows only — see
+    /// [`crate::wire::normalize_models`].
+    async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
+        let token = self.copilot_token().await?;
+        let base = token.api_base.clone();
+        let response = self
+            .http
+            .get(format!("{base}/models"))
+            .bearer_auth(&token.token)
+            .editor_headers()
+            // A bounded listing call, not a stream.
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(api_error(status, &text));
+        }
+        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed models page: {err}"),
+            status: None,
+        })?;
+        Ok(crate::wire::normalize_models(&page))
+    }
 }
 
 #[async_trait]

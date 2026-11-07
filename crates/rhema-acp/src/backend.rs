@@ -15,12 +15,7 @@ use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_core::{ModelProvider, ProviderError};
 use rhema_provider::ModelCard;
-use rhema_provider_anthropic::AnthropicProvider;
-use rhema_provider_copilot::CopilotProvider;
-use rhema_provider_google::GoogleProvider;
-use rhema_provider_llama_cpp::LlamaCppProvider;
-use rhema_provider_openai_compatible::OpenAiCompatibleProvider;
-use rhema_provider_openrouter::OpenRouterProvider;
+use rhema_provider_registry::build;
 
 /// The provider kinds rhema serves, by their config names. The model
 /// select's choice values are `<kind>/<model>` on these names, so a
@@ -120,60 +115,30 @@ fn catalog_fetch(
     secrets: Option<&dyn SecretStore>,
 ) -> Option<tokio::task::JoinHandle<Result<Vec<ModelCard>, ProviderError>>> {
     let profile = profile.clone();
-    let llama_url = llama_url.map(str::to_owned);
-    let task = match kind {
-        "llama-cpp" => {
-            let mut llama =
-                LlamaCppProvider::new(llama_url.unwrap_or_else(|| profile.llama_cpp_url()));
-            if let Some(api_key) = profile.api_key("llama-cpp", secrets) {
-                llama = llama.with_api_key(api_key);
-            }
-            tokio::spawn(async move { llama.list_models().await })
-        }
-        "openrouter" => {
-            let key = profile.api_key("openrouter", secrets)?;
-            tokio::spawn(async move { OpenRouterProvider::new(key).list_models().await })
-        }
-        "anthropic" => {
-            let key = profile.api_key("anthropic", secrets)?;
-            tokio::spawn(async move { AnthropicProvider::new(key).list_models().await })
-        }
-        "openai" => {
-            let key = profile.api_key("openai", secrets)?;
-            tokio::spawn(async move { OpenAiCompatibleProvider::new(key).list_models().await })
-        }
-        "deepseek" => {
-            let key = profile.api_key("deepseek", secrets)?;
-            tokio::spawn(async move {
-                OpenAiCompatibleProvider::new(key)
-                    .with_base_url("https://api.deepseek.com/v1")
-                    .list_models()
-                    .await
-            })
-        }
-        "zai" => {
-            let key = profile.api_key("zai", secrets)?;
-            let base_url = stored_zai_route(&profile);
-            tokio::spawn(async move {
-                let mut provider = AnthropicProvider::new(key).with_bearer_auth();
-                if let Some(base_url) = base_url {
-                    provider = provider.with_base_url(base_url);
-                } else {
-                    provider = provider.with_base_url(rhema_provider_anthropic::ZAI_BASE_URL);
-                }
-                provider.list_models().await
-            })
-        }
-        "copilot" => {
-            let key = profile.api_key("copilot", secrets)?;
-            tokio::spawn(async move { CopilotProvider::new(key).list_models().await })
-        }
+    let llama_url = llama_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| profile.llama_cpp_url());
+    // A stored route override is the zai kind's alone; handing it to
+    // the registry unguarded would read it as an openai or deepseek
+    // override too.
+    let route = (kind == "zai")
+        .then(|| stored_zai_route(&profile))
+        .flatten();
+    let key = profile.api_key(kind, secrets);
+    let built = match kind {
+        // The server address is optional to guard with a key; every
+        // other kind is keyed, and no credential means nothing to
+        // fetch — `None`, the same answer an unresolvable turn gets.
+        "llama-cpp" => build(kind, key.as_deref(), Some(&llama_url), None),
         _ => {
-            let key = profile.api_key("google", secrets)?;
-            tokio::spawn(async move { GoogleProvider::new(key).list_models().await })
+            let key = key.as_deref()?;
+            build(kind, Some(key), None, route.as_deref())
         }
-    };
-    Some(task)
+    }
+    .expect("a PROVIDERS kind the registry has no wiring for");
+    Some(tokio::spawn(
+        async move { built.listing.list_models().await },
+    ))
 }
 
 /// The stored route override of the profile's zai instance, trimmed and
@@ -236,52 +201,31 @@ pub fn provider_for(
     llama_url: Option<&str>,
     secrets: Option<&dyn SecretStore>,
 ) -> Result<Option<Arc<dyn ModelProvider>>, String> {
-    let raw: Option<Arc<dyn ModelProvider>> = match kind {
-        "llama-cpp" => {
-            let url = llama_url
-                .map(str::to_owned)
-                .unwrap_or_else(|| profile.llama_cpp_url());
-            let mut llama = LlamaCppProvider::new(url);
-            if let Some(api_key) = profile.api_key("llama-cpp", secrets) {
-                llama = llama.with_api_key(api_key);
-            }
-            Some(Arc::new(llama))
+    // An unknown spelling is an error naming it, never a silent
+    // `auth_required` — the same gate `resolve` applies. Credential
+    // resolution stays here, settings vocabulary; the registry's rows
+    // are wiring only. A keyed kind with no key is `Ok(None)` (the
+    // client reads `auth_required`).
+    let kind = known_kind(kind)?;
+    let llama_url = llama_url
+        .map(str::to_owned)
+        .unwrap_or_else(|| profile.llama_cpp_url());
+    let route = (kind == "zai").then(|| stored_zai_route(profile)).flatten();
+    let key = profile.api_key(kind, secrets);
+    let built = match kind {
+        "llama-cpp" => build(kind, key.as_deref(), Some(&llama_url), None),
+        _ => {
+            let Some(key) = key.as_deref() else {
+                // No key, no provider — `auth_required` to the client.
+                return Ok(None);
+            };
+            build(kind, Some(key), None, route.as_deref())
         }
-        "openrouter" => profile
-            .api_key("openrouter", secrets)
-            .map(|key| Arc::new(OpenRouterProvider::new(key)) as Arc<dyn ModelProvider>),
-        "anthropic" => profile
-            .api_key("anthropic", secrets)
-            .map(|key| Arc::new(AnthropicProvider::new(key)) as Arc<dyn ModelProvider>),
-        "openai" => profile
-            .api_key("openai", secrets)
-            .map(|key| Arc::new(OpenAiCompatibleProvider::new(key)) as Arc<dyn ModelProvider>),
-        "deepseek" => profile.api_key("deepseek", secrets).map(|key| {
-            Arc::new(
-                OpenAiCompatibleProvider::new(key).with_base_url("https://api.deepseek.com/v1"),
-            ) as Arc<dyn ModelProvider>
-        }),
-        "zai" => profile.api_key("zai", secrets).map(|key| {
-            // A stored instance may override the route (a proxy); none
-            // means the Coding Plan endpoint itself. Bearer auth is the
-            // scheme that route documents.
-            let mut provider = AnthropicProvider::new(key).with_bearer_auth();
-            if let Some(base_url) = stored_zai_route(profile) {
-                provider = provider.with_base_url(base_url);
-            } else {
-                provider = provider.with_base_url(rhema_provider_anthropic::ZAI_BASE_URL);
-            }
-            Arc::new(provider) as Arc<dyn ModelProvider>
-        }),
-        "copilot" => profile
-            .api_key("copilot", secrets)
-            .map(|key| Arc::new(CopilotProvider::new(key)) as Arc<dyn ModelProvider>),
-        "google" => profile
-            .api_key("google", secrets)
-            .map(|key| Arc::new(GoogleProvider::new(key)) as Arc<dyn ModelProvider>),
-        other => return Err(format!("unknown provider kind \"{other}\"")),
-    };
-    Ok(raw.map(|raw| Arc::new(rhema_provider::Retrying::new(raw)) as Arc<dyn ModelProvider>))
+    }
+    .map_err(|err| err.to_string())?;
+    Ok(Some(Arc::new(rhema_provider::Retrying::new(
+        built.provider,
+    ))))
 }
 
 /// Splits a model select value into the provider kind to ride on and

@@ -49,8 +49,9 @@ Rules:
   - `mock` — `MockProvider` (`src/mock.rs`, `mock` feature)
   - `tests` — integration suites under `crates/rhema-core/tests/`
   - `rhema-provider` — the adapter-family base: the `ModelCard` catalog
-    row, `Pricing`, the SSE decoder, and the `InteractiveLogin`
-    login-flow seam (`crates/rhema-provider/`)
+    row, the `ModelListing` catalog seam, `Pricing`, the SSE decoder,
+    and the `InteractiveLogin` login-flow seam
+    (`crates/rhema-provider/`)
   - `google` — the Gemini provider adapter (`crates/rhema-provider-google/`)
   - `llama-cpp` — the llama.cpp server adapter (`crates/rhema-provider-llama-cpp/`)
   - `openrouter` — the OpenRouter adapter (`crates/rhema-provider-openrouter/`)
@@ -60,6 +61,10 @@ Rules:
     (`crates/rhema-provider-openai-compatible/`)
   - `copilot` — the GitHub Copilot adapter
     (`crates/rhema-provider-copilot/`)
+  - `provider-registry` — the fleet's name-to-adapter wiring: `build`
+    turns a rhema-config `PROVIDERS` spelling plus resolved
+    credentials into the turn provider and the catalog listing, one
+    row per kind (`crates/rhema-provider-registry/`)
   - `mcp` — the MCP client extension: the protocol subset, the manager,
     the bridge, and the provisioned shell functions
     (`crates/rhema-mcp/`)

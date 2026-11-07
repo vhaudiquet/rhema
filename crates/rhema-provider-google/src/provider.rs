@@ -27,7 +27,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{ModelCard, SseDecoder};
+use rhema_provider::{ModelCard, ModelListing, SseDecoder};
 
 use crate::wire::{
     ChunkAssembler, GenerateContentResponse, WireErrorBody, WireModelsPage, is_text,
@@ -85,7 +85,38 @@ impl GoogleProvider {
         self.base_url = base_url.into().trim_end_matches('/').to_owned();
         self
     }
+}
 
+/// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot
+/// be carried in [`ProviderError`] directly (it is `Clone + Eq`).
+fn network_error(err: reqwest::Error) -> ProviderError {
+    if err.is_timeout() {
+        ProviderError::Timeout
+    } else {
+        ProviderError::Network(err.to_string())
+    }
+}
+
+/// Parses one SSE payload as a response chunk and folds it into the
+/// assembler. An empty payload (keep-alive) is skipped.
+fn feed_chunk(
+    payload: &str,
+    assembler: &mut ChunkAssembler,
+    sink: &mut dyn EventSink,
+) -> Result<(), ProviderError> {
+    if payload.trim().is_empty() {
+        return Ok(());
+    }
+    let chunk: GenerateContentResponse =
+        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
+            message: format!("malformed SSE chunk: {err}"),
+            status: None,
+        })?;
+    assembler.push(chunk, sink)
+}
+
+#[async_trait]
+impl ModelListing for GoogleProvider {
     /// Every text chat model the key can see, following pagination until
     /// the list is exhausted. The ListModels API also reports embeddings,
     /// video, speech, and image models — those cannot drive a coding agent
@@ -93,7 +124,7 @@ impl GoogleProvider {
     /// on the shared [`ModelCard`]. `models/` is stripped from
     /// `ModelCard::id`, and the curated table prices each row the listing
     /// itself leaves unpriced.
-    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
+    async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         let mut models = Vec::new();
         let mut page_token: Option<String> = None;
         loop {
@@ -151,34 +182,6 @@ impl GoogleProvider {
             page_token = page.next_page_token;
         }
     }
-}
-
-/// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot
-/// be carried in [`ProviderError`] directly (it is `Clone + Eq`).
-fn network_error(err: reqwest::Error) -> ProviderError {
-    if err.is_timeout() {
-        ProviderError::Timeout
-    } else {
-        ProviderError::Network(err.to_string())
-    }
-}
-
-/// Parses one SSE payload as a response chunk and folds it into the
-/// assembler. An empty payload (keep-alive) is skipped.
-fn feed_chunk(
-    payload: &str,
-    assembler: &mut ChunkAssembler,
-    sink: &mut dyn EventSink,
-) -> Result<(), ProviderError> {
-    if payload.trim().is_empty() {
-        return Ok(());
-    }
-    let chunk: GenerateContentResponse =
-        serde_json::from_str(payload).map_err(|err| ProviderError::Api {
-            message: format!("malformed SSE chunk: {err}"),
-            status: None,
-        })?;
-    assembler.push(chunk, sink)
 }
 
 #[async_trait]

@@ -39,12 +39,6 @@ rhema-forge-integration = { path = "../../integrations/rhema-forge-integration" 
 # The accounts layer: identities hold the forge tokens the watches poll
 # with, and the identity tools manage them over chat
 rhema-identity = { path = "../rhema-identity" }
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic" }
-rhema-provider-copilot = { path = "../rhema-provider-copilot" }
-rhema-provider-google = { path = "../rhema-provider-google" }
-rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp" }
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible" }
-rhema-provider-openrouter = { path = "../rhema-provider-openrouter" }
 rhema-rsd = { path = "../rhema-rsd" }
 # The tool contract: the agent-token allowlist and version the auth
 # middleware enforces (rhema-tools spec). The arrow runs claw ->
@@ -54,6 +48,7 @@ rhema-claw-tools-contract = { path = "../../tools/contract" }
 rhema-memory = { path = "../rhema-memory" }
 # The shared ModelCard the backend registry's listings return
 rhema-provider = { path = "../rhema-provider" }
+rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.2.0" }
 # Args for the two-flag binary surface
 clap = { version = "4.5", features = ["derive"] }
 serde = { workspace = true }

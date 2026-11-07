@@ -4,6 +4,7 @@
 //! agent builds read.
 
 use super::*;
+use rhema_provider_registry::build;
 
 /// Everything the runner fixed before the app started: flags, store,
 /// resolved credentials, and the initial session.
@@ -110,65 +111,33 @@ impl Backend {
     /// under the shared retry, so a transient failure costs a pause
     /// instead of the turn (see `rhema_provider::Retrying`).
     pub fn provider(&self) -> Arc<dyn ModelProvider> {
-        let raw: Arc<dyn ModelProvider> = match self {
-            Backend::Google { api_key } => {
-                Arc::new(rhema_provider_google::GoogleProvider::new(api_key.clone()))
-            }
-            Backend::LlamaCpp { url, api_key } => {
-                let mut provider = rhema_provider_llama_cpp::LlamaCppProvider::new(url.clone());
-                if let Some(key) = api_key {
-                    provider = provider.with_api_key(key.clone());
-                }
-                Arc::new(provider)
-            }
-            Backend::OpenRouter { api_key } => Arc::new(
-                rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone()),
-            ),
-            Backend::Anthropic { api_key } => Arc::new(
-                rhema_provider_anthropic::AnthropicProvider::new(api_key.clone()),
-            ),
-            // An instance's base URL points the adapter at any
-            // OpenAI-compatible server; the default is OpenAI itself.
-            Backend::OpenAi { api_key, base_url } => {
-                let mut provider = rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(
-                    api_key.clone(),
-                );
-                if let Some(base_url) = base_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                {
-                    provider = provider.with_base_url(base_url.to_owned());
-                }
-                Arc::new(provider)
-            }
-            Backend::DeepSeek { api_key } => Arc::new(
-                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
-                    .with_base_url("https://api.deepseek.com/v1"),
-            ),
-            Backend::Zai { api_key, base_url } => Arc::new(Self::zai_provider(api_key, base_url)),
-            Backend::Copilot { api_key } => Arc::new(rhema_provider_copilot::CopilotProvider::new(
-                api_key.clone(),
-            )),
-        };
-        Arc::new(rhema_provider::Retrying::new(raw))
+        Arc::new(rhema_provider::Retrying::new(self.wired().provider))
     }
 
-    /// The Coding Plan provider: the stored base URL when an instance
-    /// overrode it, the Coding Plan route otherwise — always with bearer
-    /// auth, the scheme that route documents.
-    fn zai_provider(
-        api_key: &str,
-        base_url: &Option<String>,
-    ) -> rhema_provider_anthropic::AnthropicProvider {
-        let base = base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .unwrap_or(rhema_provider_anthropic::ZAI_BASE_URL);
-        rhema_provider_anthropic::AnthropicProvider::new(api_key)
-            .with_base_url(base)
-            .with_bearer_auth()
+    /// The kind's adapters, from the variant's own credentials — the
+    /// enum's job is holding the credential shape, construction is the
+    /// registry's. A build failure would mean a variant whose shape
+    /// lies (a keyed backend without a key), which the enum cannot
+    /// represent; route overrides ride the variant's stored base URL,
+    /// blank reading as unset.
+    fn wired(&self) -> rhema_provider_registry::Built {
+        match self {
+            Backend::Google { api_key } => build("google", Some(api_key), None, None),
+            Backend::LlamaCpp { url, api_key } => {
+                build("llama-cpp", api_key.as_deref(), Some(url), None)
+            }
+            Backend::OpenRouter { api_key } => build("openrouter", Some(api_key), None, None),
+            Backend::Anthropic { api_key } => build("anthropic", Some(api_key), None, None),
+            Backend::OpenAi { api_key, base_url } => {
+                build("openai", Some(api_key), None, base_url.as_deref())
+            }
+            Backend::DeepSeek { api_key } => build("deepseek", Some(api_key), None, None),
+            Backend::Zai { api_key, base_url } => {
+                build("zai", Some(api_key), None, base_url.as_deref())
+            }
+            Backend::Copilot { api_key } => build("copilot", Some(api_key), None, None),
+        }
+        .expect("a Backend's own credentials build")
     }
 
     /// The config `provider` string this backend persists.
@@ -409,16 +378,23 @@ impl Backend {
             }
             Backend::DeepSeek { api_key } => {
                 rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
-                    .with_base_url("https://api.deepseek.com/v1")
+                    .with_base_url(rhema_provider_openai_compatible::DEEPSEEK_BASE_URL)
                     .balance()
                     .await
                     .map(Some)
                     .map_err(|err| err.to_string())
             }
-            Backend::Zai { api_key, base_url } => Self::zai_provider(api_key, base_url)
-                .allowance()
-                .await
-                .map_err(|err| err.to_string()),
+            Backend::Zai { api_key, base_url } => {
+                let mut provider = rhema_provider_anthropic::AnthropicProvider::zai(api_key);
+                if let Some(base_url) = base_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                {
+                    provider = provider.with_base_url(base_url.to_owned());
+                }
+                provider.allowance().await.map_err(|err| err.to_string())
+            }
             // No allowance endpoint to ask: Google keys, local servers,
             // Anthropic, the generic OpenAI-compatible family.
             Backend::Google { .. }
@@ -428,69 +404,15 @@ impl Backend {
         }
     }
 
-    /// The models the backend offers, normalized to the picker's row type.
+    /// The models the backend offers, normalized to the picker's row
+    /// type. The listing rides the registry's catalog seam, off the
+    /// retry: it answers or it fails.
     pub async fn list_models(&self) -> Result<Vec<ModelCard>, String> {
-        match self {
-            Backend::Google { api_key } => {
-                rhema_provider_google::GoogleProvider::new(api_key.clone())
-                    .list_models()
-                    .await
-                    .map_err(|err| err.to_string())
-            }
-            Backend::OpenRouter { api_key } => {
-                rhema_provider_openrouter::OpenRouterProvider::new(api_key.clone())
-                    .list_models()
-                    .await
-                    .map_err(|err| err.to_string())
-            }
-            // Each adapter's listing already fills what its endpoint
-            // reports and defaults the rest: Anthropic rows carry id and
-            // display name only, OpenAI-compatible rows add the server's
-            // name/description/context_length when present.
-            Backend::DeepSeek { api_key } => {
-                rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(api_key.clone())
-                    .with_base_url("https://api.deepseek.com/v1")
-                    .list_models()
-                    .await
-                    .map_err(|err| err.to_string())
-            }
-            Backend::Anthropic { api_key } => {
-                rhema_provider_anthropic::AnthropicProvider::new(api_key.clone())
-                    .list_models()
-                    .await
-                    .map_err(|err| err.to_string())
-            }
-            Backend::Zai { api_key, base_url } => Self::zai_provider(api_key, base_url)
-                .list_models()
-                .await
-                .map_err(|err| err.to_string()),
-            Backend::OpenAi { api_key, base_url } => {
-                let mut provider = rhema_provider_openai_compatible::OpenAiCompatibleProvider::new(
-                    api_key.clone(),
-                );
-                if let Some(base_url) = base_url
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                {
-                    provider = provider.with_base_url(base_url.to_owned());
-                }
-                provider.list_models().await.map_err(|err| err.to_string())
-            }
-            Backend::Copilot { api_key } => {
-                rhema_provider_copilot::CopilotProvider::new(api_key.clone())
-                    .list_models()
-                    .await
-                    .map_err(|err| err.to_string())
-            }
-            Backend::LlamaCpp { url, api_key } => {
-                let mut provider = rhema_provider_llama_cpp::LlamaCppProvider::new(url.clone());
-                if let Some(key) = api_key {
-                    provider = provider.with_api_key(key.clone());
-                }
-                provider.list_models().await.map_err(|err| err.to_string())
-            }
-        }
+        self.wired()
+            .listing
+            .list_models()
+            .await
+            .map_err(|err| err.to_string())
     }
 }
 

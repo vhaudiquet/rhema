@@ -38,7 +38,8 @@ use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 use rhema_provider::{
-    Allowance, HttpRequest, HttpResponse, ModelCard, Pricing, SseDecoder, Transport, TransportError,
+    Allowance, HttpRequest, HttpResponse, ModelCard, ModelListing, Pricing, SseDecoder, Transport,
+    TransportError,
 };
 
 use crate::wire::{ChunkAssembler, StreamEvent, WireErrorBody, WireModelsPage, WireZaiQuota};
@@ -90,6 +91,17 @@ impl std::fmt::Debug for AnthropicProvider {
 }
 
 impl AnthropicProvider {
+    /// A provider speaking for Z.ai's GLM Coding Plan: the key against
+    /// [`ZAI_BASE_URL`], bearer auth — the scheme that route documents.
+    /// A stored route override composes: `.with_base_url` replaces the
+    /// base and keeps the scheme.
+    #[cfg(feature = "native")]
+    pub fn zai(api_key: impl Into<String>) -> Self {
+        Self::new(api_key)
+            .with_base_url(ZAI_BASE_URL)
+            .with_bearer_auth()
+    }
+
     /// A provider authenticating with `api_key` against
     /// [`DEFAULT_BASE_URL`], over the native reqwest transport.
     #[cfg(feature = "native")]
@@ -124,62 +136,6 @@ impl AnthropicProvider {
     pub fn with_bearer_auth(mut self) -> Self {
         self.bearer_auth = true;
         self
-    }
-
-    /// Every model the key can see, following `has_more`/`after_id`
-    /// pagination until the list is exhausted. Anthropic's listing is
-    /// text chat models only, so there is nothing to filter; the
-    /// api.z.ai route's rows gain the published catalog facts
-    /// ([`decorate_zai`]).
-    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-        let mut models = Vec::new();
-        let mut after_id: Option<String> = None;
-        loop {
-            // The query is assembled by hand: the only parameter that
-            // varies is a cursor the same endpoint handed out (an id of
-            // letters, digits, and dashes), so there is nothing to
-            // percent-encode.
-            let mut url = format!("{}/v1/models?limit={MODELS_PAGE_LIMIT}", self.base_url);
-            if let Some(after) = &after_id {
-                url.push_str("&after_id=");
-                url.push_str(after);
-            }
-            let mut response = self
-                .transport
-                .send(
-                    self.authenticated(HttpRequest::new("GET", url))
-                        .with_timeout(LIST_TIMEOUT),
-                )
-                .await
-                .map_err(transport_error)?;
-            if !is_success(response.status) {
-                let text = read_all(&mut response).await?;
-                return Err(api_error(
-                    response.status,
-                    &String::from_utf8_lossy(&text),
-                    &response.headers,
-                ));
-            }
-            let body = read_all(&mut response).await?;
-            let page: WireModelsPage =
-                serde_json::from_slice(&body).map_err(|err| ProviderError::Api {
-                    message: format!("malformed models page: {err}"),
-                    status: None,
-                })?;
-            let fetched = page.data.len();
-            models.extend(page.data.into_iter().map(ModelCard::from));
-            // A missing cursor or a zero-row page keeps a misbehaving mirror
-            // from spinning this loop forever.
-            match page.has_more.then_some(page.last_id).flatten() {
-                Some(cursor) if fetched > 0 => after_id = Some(cursor),
-                _ => {
-                    if self.base_url.contains(ZAI_HOST) {
-                        decorate_zai(&mut models);
-                    }
-                    return Ok(models);
-                }
-            }
-        }
     }
 
     /// The subscription allowance the base URL's platform reports: the
@@ -467,6 +423,65 @@ fn feed_chunk(
         status: None,
     })?;
     assembler.push(event, sink)
+}
+
+#[async_trait]
+impl ModelListing for AnthropicProvider {
+    /// Every model the key can see, following `has_more`/`after_id`
+    /// pagination until the list is exhausted. Anthropic's listing is
+    /// text chat models only, so there is nothing to filter; the
+    /// api.z.ai route's rows gain the published catalog facts, via the
+    /// crate-private decorate_zai helper.
+    async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
+        let mut models = Vec::new();
+        let mut after_id: Option<String> = None;
+        loop {
+            // The query is assembled by hand: the only parameter that
+            // varies is a cursor the same endpoint handed out (an id of
+            // letters, digits, and dashes), so there is nothing to
+            // percent-encode.
+            let mut url = format!("{}/v1/models?limit={MODELS_PAGE_LIMIT}", self.base_url);
+            if let Some(after) = &after_id {
+                url.push_str("&after_id=");
+                url.push_str(after);
+            }
+            let mut response = self
+                .transport
+                .send(
+                    self.authenticated(HttpRequest::new("GET", url))
+                        .with_timeout(LIST_TIMEOUT),
+                )
+                .await
+                .map_err(transport_error)?;
+            if !is_success(response.status) {
+                let text = read_all(&mut response).await?;
+                return Err(api_error(
+                    response.status,
+                    &String::from_utf8_lossy(&text),
+                    &response.headers,
+                ));
+            }
+            let body = read_all(&mut response).await?;
+            let page: WireModelsPage =
+                serde_json::from_slice(&body).map_err(|err| ProviderError::Api {
+                    message: format!("malformed models page: {err}"),
+                    status: None,
+                })?;
+            let fetched = page.data.len();
+            models.extend(page.data.into_iter().map(ModelCard::from));
+            // A missing cursor or a zero-row page keeps a misbehaving mirror
+            // from spinning this loop forever.
+            match page.has_more.then_some(page.last_id).flatten() {
+                Some(cursor) if fetched > 0 => after_id = Some(cursor),
+                _ => {
+                    if self.base_url.contains(ZAI_HOST) {
+                        decorate_zai(&mut models);
+                    }
+                    return Ok(models);
+                }
+            }
+        }
+    }
 }
 
 #[async_trait]

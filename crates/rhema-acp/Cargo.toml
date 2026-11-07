@@ -21,12 +21,7 @@ rhema-agent-tools = { path = "../rhema-agent-tools", version = "0.2.0" }
 # The adapter family, resolved from config the same way the other
 # frontends resolve it
 rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
-rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.0" }
-rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.2.0" }
-rhema-provider-google = { path = "../rhema-provider-google", version = "0.2.0" }
-rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp", version = "0.2.0" }
-rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.0" }
-rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.2.0" }
+rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.2.0" }
 # The ACP schema and agent-side connection; `stdio` is the transport a
 # subprocess agent serves on
 agent-client-protocol = { workspace = true, features = ["stdio"] }

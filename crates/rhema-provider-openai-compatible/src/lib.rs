@@ -53,5 +53,5 @@
 pub mod provider;
 pub mod wire;
 
-pub use provider::{DEFAULT_BASE_URL, OpenAiCompatibleProvider};
+pub use provider::{DEEPSEEK_BASE_URL, DEFAULT_BASE_URL, OpenAiCompatibleProvider};
 pub use wire::{ChatCompletionChunk, ChatCompletionRequest, ChunkAssembler};

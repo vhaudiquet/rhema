@@ -34,7 +34,7 @@ pub mod stream;
 pub mod transport;
 
 pub use allowance::Allowance;
-pub use card::ModelCard;
+pub use card::{ModelCard, ModelListing};
 pub use login::{InteractiveLogin, LoginInstruction, LoginSink, LoginUpdate};
 pub use pricing::Pricing;
 pub use retry::{Retrying, Sleeper, TokioSleeper};

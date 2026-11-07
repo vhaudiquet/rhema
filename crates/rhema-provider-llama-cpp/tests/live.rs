@@ -12,6 +12,7 @@
 use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, Role,
 };
+use rhema_provider::ModelListing;
 use rhema_provider_llama_cpp::{DEFAULT_BASE_URL, LlamaCppProvider};
 
 struct NullSink;

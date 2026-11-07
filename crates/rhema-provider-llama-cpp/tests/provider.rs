@@ -5,7 +5,7 @@ use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, ToolSpec, Usage,
 };
-use rhema_provider::ModelCard;
+use rhema_provider::{ModelCard, ModelListing};
 use rhema_provider_llama_cpp::LlamaCppProvider;
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path, query_param};

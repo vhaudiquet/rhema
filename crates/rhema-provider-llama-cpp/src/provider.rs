@@ -16,7 +16,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::ModelCard;
+use rhema_provider::{ModelCard, ModelListing};
 use rhema_provider_openai_compatible::provider::{
     OpenAiCompatibleProvider, network_error as dialect_network_error,
 };
@@ -76,62 +76,6 @@ impl LlamaCppProvider {
         self.api_key = Some(key.into());
         self.transport = transport_for(&self.base_url, self.api_key.as_deref());
         self
-    }
-
-    /// The models the server can serve, normalized into the shared
-    /// [`ModelCard`] rows (`GET /v1/models`; llama.cpp lists the one
-    /// loaded model). A single-model server also gets its context from
-    /// `/props`; in router mode, models that are loaded and still silent
-    /// about their context are asked per model (bounded — never for
-    /// unloaded entries, which some servers would autoload just to
-    /// answer).
-    ///
-    /// # Errors
-    ///
-    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
-    /// when the transport fails, [`ProviderError::Api`] with the HTTP
-    /// status on a non-2xx listing, and [`ProviderError::Api`] without
-    /// one on a malformed listing or props body.
-    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-        let response = self
-            .http
-            .get(format!("{}/v1/models", self.base_url))
-            .authorized(&self.api_key)
-            .timeout(std::time::Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
-        }
-        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
-            message: format!("malformed models page: {err}"),
-            status: None,
-        })?;
-        let mut models = crate::wire::normalize_models(&page);
-
-        if models.len() == 1 && models[0].context_length.is_none() {
-            if let Some(n_ctx) = self.props(None).await? {
-                models[0].context_length = Some(n_ctx);
-            }
-        } else {
-            let silent: Vec<String> = models
-                .iter()
-                .filter(|model| model.loaded == Some(true) && model.context_length.is_none())
-                .take(8)
-                .map(|model| model.id.clone())
-                .collect();
-            for id in silent {
-                if let Some(n_ctx) = self.props(Some(&id)).await?
-                    && let Some(model) = models.iter_mut().find(|model| model.id == id)
-                {
-                    model.context_length = Some(n_ctx);
-                }
-            }
-        }
-        Ok(models.into_iter().map(ModelCard::from).collect())
     }
 
     /// The server's runtime properties, optionally for one model. `n_ctx`
@@ -219,6 +163,65 @@ fn transport_for(base_url: &str, api_key: Option<&str>) -> OpenAiCompatibleProvi
     OpenAiCompatibleProvider::new(api_key.unwrap_or_default())
         .with_base_url(format!("{base_url}/v1"))
         .with_dialect(LLAMA_CPP)
+}
+
+#[async_trait]
+impl ModelListing for LlamaCppProvider {
+    /// The models the server can serve, normalized into the shared
+    /// [`ModelCard`] rows (`GET /v1/models`; llama.cpp lists the one
+    /// loaded model). A single-model server also gets its context from
+    /// `/props`; in router mode, models that are loaded and still silent
+    /// about their context are asked per model (bounded — never for
+    /// unloaded entries, which some servers would autoload just to
+    /// answer).
+    ///
+    /// # Errors
+    ///
+    /// Fails with [`ProviderError::Network`]/[`ProviderError::Timeout`]
+    /// when the transport fails, [`ProviderError::Api`] with the HTTP
+    /// status on a non-2xx listing, and [`ProviderError::Api`] without
+    /// one on a malformed listing or props body.
+    async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
+        let response = self
+            .http
+            .get(format!("{}/v1/models", self.base_url))
+            .authorized(&self.api_key)
+            .timeout(std::time::Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(api_error(status, &text));
+        }
+        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed models page: {err}"),
+            status: None,
+        })?;
+        let mut models = crate::wire::normalize_models(&page);
+
+        if models.len() == 1 && models[0].context_length.is_none() {
+            if let Some(n_ctx) = self.props(None).await? {
+                models[0].context_length = Some(n_ctx);
+            }
+        } else {
+            let silent: Vec<String> = models
+                .iter()
+                .filter(|model| model.loaded == Some(true) && model.context_length.is_none())
+                .take(8)
+                .map(|model| model.id.clone())
+                .collect();
+            for id in silent {
+                if let Some(n_ctx) = self.props(Some(&id)).await?
+                    && let Some(model) = models.iter_mut().find(|model| model.id == id)
+                {
+                    model.context_length = Some(n_ctx);
+                }
+            }
+        }
+        Ok(models.into_iter().map(ModelCard::from).collect())
+    }
 }
 
 #[async_trait]

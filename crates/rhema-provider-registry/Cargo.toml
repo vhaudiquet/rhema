@@ -1,0 +1,26 @@
+[package]
+name = "rhema-provider-registry"
+description = "The provider fleet's name-to-adapter wiring: one build call per rhema-config PROVIDERS spelling"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core", version = "0.2.0" }
+rhema-provider = { path = "../rhema-provider", version = "0.2.0" }
+rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.0" }
+rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.2.0" }
+rhema-provider-google = { path = "../rhema-provider-google", version = "0.2.0" }
+rhema-provider-llama-cpp = { path = "../rhema-provider-llama-cpp", version = "0.2.0" }
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.0" }
+rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.2.0" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

@@ -28,16 +28,9 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, PoisonError, RwLock, RwLockWriteGuard};
 
-use rhema_autonomous_agent::async_trait;
-use rhema_core::{EventSink, ModelOutput, ModelProvider, ModelRequest, ProviderError};
-use rhema_provider_anthropic::{AnthropicProvider, ZAI_BASE_URL};
-use rhema_provider_copilot::CopilotProvider;
-use rhema_provider_google::GoogleProvider;
-use rhema_provider_llama_cpp::LlamaCppProvider;
-use rhema_provider_openai_compatible::OpenAiCompatibleProvider;
-use rhema_provider_openrouter::OpenRouterProvider;
-
+use rhema_core::{ModelProvider, ProviderError};
 use rhema_provider::ModelCard;
+use rhema_provider_registry::build;
 use serde::{Deserialize, Serialize};
 
 /// Why a registry operation or a backend construction failed: an id or
@@ -295,70 +288,16 @@ pub fn credential_seed(backends: &[Backend]) -> Option<(String, Option<String>)>
         .map(|backend| (backend.id.clone(), None))
 }
 
-/// The concrete providers behind [`Backend`]: an enum because the live
-/// model listings are inherent methods, and the registry stores the
-/// provider behind the object-safe seam. Shared by `Arc`, never cloned.
-pub enum AnyProvider {
-    /// The Gemini adapter.
-    Google(GoogleProvider),
-    /// The llama.cpp server adapter.
-    LlamaCpp(LlamaCppProvider),
-    /// The OpenRouter adapter.
-    OpenRouter(OpenRouterProvider),
-    /// The Anthropic Messages adapter.
-    Anthropic(AnthropicProvider),
-    /// The generic OpenAI-compatible adapter.
-    OpenAiCompatible(OpenAiCompatibleProvider),
-    /// DeepSeek through the OpenAI-compatible adapter at its own base.
-    DeepSeek(OpenAiCompatibleProvider),
-    /// Z.ai's GLM Coding Plan through the Anthropic-compatible route.
-    Zai(AnthropicProvider),
-    /// GitHub Copilot through the Copilot adapter.
-    Copilot(CopilotProvider),
-}
-
-impl AnyProvider {
-    /// The kind's live model listing, in the shared card shape.
-    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-        match self {
-            AnyProvider::Google(provider) => provider.list_models().await,
-            AnyProvider::Anthropic(provider) => provider.list_models().await,
-            AnyProvider::OpenRouter(provider) => provider.list_models().await,
-            AnyProvider::OpenAiCompatible(provider) => provider.list_models().await,
-            AnyProvider::DeepSeek(provider) => provider.list_models().await,
-            AnyProvider::Zai(provider) => provider.list_models().await,
-            AnyProvider::Copilot(provider) => provider.list_models().await,
-            AnyProvider::LlamaCpp(provider) => provider.list_models().await,
-        }
-    }
-
-    /// The boxed listing a [`Backend`] carries.
-    pub fn boxed_listing(provider: Arc<Self>) -> Arc<dyn Fn() -> ModelListing + Send + Sync> {
-        Arc::new(move || {
-            let provider = provider.clone();
-            Box::pin(async move { provider.list_models().await })
-        })
-    }
-}
-
-#[async_trait]
-impl ModelProvider for AnyProvider {
-    async fn complete(
-        &self,
-        request: ModelRequest,
-        sink: &mut dyn EventSink,
-    ) -> Result<ModelOutput, ProviderError> {
-        match self {
-            AnyProvider::Google(provider) => provider.complete(request, sink).await,
-            AnyProvider::LlamaCpp(provider) => provider.complete(request, sink).await,
-            AnyProvider::OpenRouter(provider) => provider.complete(request, sink).await,
-            AnyProvider::Anthropic(provider) => provider.complete(request, sink).await,
-            AnyProvider::OpenAiCompatible(provider) => provider.complete(request, sink).await,
-            AnyProvider::DeepSeek(provider) => provider.complete(request, sink).await,
-            AnyProvider::Zai(provider) => provider.complete(request, sink).await,
-            AnyProvider::Copilot(provider) => provider.complete(request, sink).await,
-        }
-    }
+/// The boxed listing a [`Backend`] carries: one call to the live
+/// catalog seam per listing request, the raw provider under it — the
+/// listing stays off the turn retry, which is for turns only.
+fn boxed_listing(
+    listing: std::sync::Arc<dyn rhema_provider::ModelListing>,
+) -> std::sync::Arc<dyn Fn() -> ModelListing + Send + Sync> {
+    std::sync::Arc::new(move || {
+        let listing = listing.clone();
+        Box::pin(async move { listing.list_models().await })
+    })
 }
 
 /// The env variable each keyed backend reads, in precedence order
@@ -383,9 +322,6 @@ fn env_vars_for(kind: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
-
-/// DeepSeek speaks the OpenAI-compatible dialect at its own base.
-const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
 
 /// The settings-store key prefix under which a backend instance's
 /// credentials persist: `provider.<id>` holds a [`ProviderParams`]
@@ -478,51 +414,31 @@ pub fn param_fields_for(kind: &str) -> &'static [ParamField] {
 /// neither is given). Unknown kinds are an error — "mock" is
 /// registry-injected, never constructed.
 pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, BackendError> {
-    let provider = match kind {
-        "google" => AnyProvider::Google(GoogleProvider::new(require_key(kind, params)?)),
-        "anthropic" => AnyProvider::Anthropic(AnthropicProvider::new(require_key(kind, params)?)),
-        "openai" => {
-            AnyProvider::OpenAiCompatible(OpenAiCompatibleProvider::new(require_key(kind, params)?))
-        }
-        "openrouter" => {
-            AnyProvider::OpenRouter(OpenRouterProvider::new(require_key(kind, params)?))
-        }
-        "deepseek" => AnyProvider::DeepSeek(
-            OpenAiCompatibleProvider::new(require_key(kind, params)?)
-                .with_base_url(DEEPSEEK_BASE_URL),
-        ),
-        // Bearer auth: the scheme the Coding Plan route documents.
-        "zai" => AnyProvider::Zai(
-            AnthropicProvider::new(require_key(kind, params)?)
-                .with_base_url(ZAI_BASE_URL)
-                .with_bearer_auth(),
-        ),
-        "copilot" => AnyProvider::Copilot(CopilotProvider::new(require_key(kind, params)?)),
-        "llama-cpp" => {
-            let mut provider = LlamaCppProvider::new(
-                params
-                    .url
-                    .clone()
-                    .unwrap_or_else(|| rhema_config::Profile::default().llama_cpp_url()),
-            );
-            if let Some(key) = &params.api_key {
-                provider = provider.with_api_key(key);
-            }
-            AnyProvider::LlamaCpp(provider)
-        }
-        _ => return Err(BackendError::UnknownKind(kind.to_owned())),
-    };
+    // Credential resolution stays here — claw's params vocabulary;
+    // the registry's rows are wiring only. llama.cpp's server address
+    // defaults to the stored profile's, its key guards when given.
+    let llama_url = params
+        .url
+        .clone()
+        .unwrap_or_else(|| rhema_config::Profile::default().llama_cpp_url());
+    let built = match kind {
+        "llama-cpp" => build(kind, params.api_key.as_deref(), Some(&llama_url), None),
+        _ => build(kind, Some(require_key(kind, params)?.as_str()), None, None),
+    }
+    .map_err(|err| match err {
+        rhema_provider_registry::BuildError::Unknown(kind) => BackendError::UnknownKind(kind),
+        _ => BackendError::MissingKey(kind.to_owned()),
+    })?;
     let default_model = rhema_config::default_model(kind).to_owned();
-    let provider = Arc::new(provider);
     Ok(Backend {
         id: kind.to_owned(),
         kind: kind.to_owned(),
         // Turns ride the retry, so a transient failure costs a pause
-        // instead of the turn; the listing stays on the raw adapter —
-        // `list_models` is an inherent method the wrapper has no.
-        provider: Arc::new(rhema_provider::Retrying::new(provider.clone())),
+        // instead of the turn; the listing stays off the retry, which
+        // is for turns only.
+        provider: Arc::new(rhema_provider::Retrying::new(built.provider)),
         default_model,
-        list_models: Some(AnyProvider::boxed_listing(provider)),
+        list_models: Some(boxed_listing(built.listing)),
     })
 }
 
@@ -665,8 +581,9 @@ fn seed_llama_model(backend: &mut Backend, config: &crate::config::ClawConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhema_autonomous_agent::async_trait;
     use rhema_config::secrets::SecretStore as _;
-    use rhema_core::{Message, Role, StopReason, Usage};
+    use rhema_core::{EventSink, Message, ModelOutput, ModelRequest, Role, StopReason, Usage};
 
     /// A minimal scripted stand-in: registry tests never complete a turn.
     struct Stub;

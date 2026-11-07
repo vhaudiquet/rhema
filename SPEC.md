@@ -268,6 +268,23 @@ The RSD driver (crate 2) is the same shape with different scaffolding: `acquire(
   onto every command, so an inherited var reaches every generated init in a chain and an outer
   one re-sources itself until the shell dies by signal. The MCP provision carries the same fix.
 - ~~**How a hosted Anthropic-compatible endpoint is served**~~, **decided:** the same `AnthropicProvider` under a base override and bearer auth, not a new adapter: Z.ai's GLM Coding Plan (`ZAI_BASE_URL`) speaks the Messages dialect and only the header scheme differs (`with_bearer_auth`). It is its own provider kind (`zai`, `ZAI_API_KEY`) with an overridable stored route, and its traffic identifies honestly as `rhema` — never another client's mark; quota multipliers are a vendor conversation, not a header.
+- ~~**Where the name-to-adapter construction lives**~~, **decided:**
+  `rhema-provider-registry`, one `build` per rhema-config `PROVIDERS`
+  spelling: the kind plus whatever the caller resolved (a key, the
+  llama.cpp server address, a stored route override) in, the turn
+  provider and the catalog listing out, both trait objects. The
+  recipes the frontends used to each spell — deepseek is the generic
+  adapter at DeepSeek's endpoint, zai is the Anthropic adapter at
+  Z.ai's route under bearer auth, a stored route replaces a kind's
+  default while a blank reads as unset — live in the registry (the
+  base constants and named route constructors stay on the adapters
+  themselves); what stays with the frontend is policy: credential
+  resolution, the retry wrapper, the default model. The catalog seam
+  behind it is `ModelListing` in `rhema-provider`, on every adapter,
+  so code holding only a name can list the fleet's models — no
+  concrete type, no per-frontend boxing. The listing deliberately
+  stays off `ModelProvider`'s turn seam and off the retry: a catalog
+  fetch answers or fails, no ladder.
 - ~~**How transient provider failures retry**~~, **decided:** the `Retrying` decorator in
   `rhema-provider` (`retry.rs`), wrapped around every turn provider the frontends assemble —
   the TUI's `Backend::provider()`, claw's backend `construct()`, and ACP's `provider_for()` —

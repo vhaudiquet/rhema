@@ -5,6 +5,7 @@ use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, ToolSpec, Usage,
 };
+use rhema_provider::ModelListing;
 use rhema_provider_openai_compatible::{DEFAULT_BASE_URL, OpenAiCompatibleProvider};
 use serde_json::{Value, json};
 use wiremock::matchers::{header, method, path};

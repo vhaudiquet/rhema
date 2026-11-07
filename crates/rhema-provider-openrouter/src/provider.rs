@@ -28,7 +28,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{Allowance, ModelCard};
+use rhema_provider::{Allowance, ModelCard, ModelListing};
 use rhema_provider_openai_compatible::provider::{
     OpenAiCompatibleProvider, network_error as dialect_network_error,
 };
@@ -102,49 +102,6 @@ impl OpenRouterProvider {
         self.base_url = base_url.into().trim_end_matches('/').to_owned();
         self.transport = transport_for(&self.base_url, &self.api_key);
         self
-    }
-
-    /// Every text chat model OpenRouter offers, following `limit`/`offset`
-    /// pagination until `links.next` is exhausted. The catalog is public:
-    /// the call works without an API key.
-    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-        let mut models = Vec::new();
-        let mut offset: u32 = 0;
-        loop {
-            let response = self
-                .http
-                .get(format!("{}/models", self.base_url))
-                .query(&[
-                    ("limit", MODELS_PAGE_LIMIT.to_string()),
-                    ("offset", offset.to_string()),
-                ])
-                .attributed(&self.api_key)
-                // The one overall timeout: a bounded catalog call, not a
-                // stream of unbounded length.
-                .timeout(Duration::from_secs(20))
-                .send()
-                .await
-                .map_err(network_error)?;
-            let status = response.status();
-            if !status.is_success() {
-                let text = response.text().await.unwrap_or_default();
-                return Err(api_error(status, &text));
-            }
-            let page: WireModelsPage = response.json().await.map_err(|err| ProviderError::Api {
-                message: format!("malformed models page: {err}"),
-                status: None,
-            })?;
-            // Linked before the models move out of the page.
-            let more = page.next_page();
-            let fetched = page.data.len();
-            models.extend(page.data.into_iter().map(ModelCard::from).filter(is_text));
-            // The zero-row guard keeps a misbehaving mirror from spinning
-            // this loop forever.
-            if fetched == 0 || !more {
-                return Ok(models);
-            }
-            offset += fetched as u32;
-        }
     }
 
     /// The account's prepaid credit: `GET /credits` for the account's
@@ -234,6 +191,52 @@ fn transport_for(base_url: &str, api_key: &str) -> OpenAiCompatibleProvider {
         .with_base_url(base_url)
         .with_dialect(OPENROUTER)
         .with_extra_headers(headers)
+}
+
+#[async_trait]
+impl ModelListing for OpenRouterProvider {
+    /// Every text chat model OpenRouter offers, following `limit`/`offset`
+    /// pagination until `links.next` is exhausted. The catalog is public:
+    /// the call works without an API key.
+    async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
+        let mut models = Vec::new();
+        let mut offset: u32 = 0;
+        loop {
+            let response = self
+                .http
+                .get(format!("{}/models", self.base_url))
+                .query(&[
+                    ("limit", MODELS_PAGE_LIMIT.to_string()),
+                    ("offset", offset.to_string()),
+                ])
+                .attributed(&self.api_key)
+                // The one overall timeout: a bounded catalog call, not a
+                // stream of unbounded length.
+                .timeout(Duration::from_secs(20))
+                .send()
+                .await
+                .map_err(network_error)?;
+            let status = response.status();
+            if !status.is_success() {
+                let text = response.text().await.unwrap_or_default();
+                return Err(api_error(status, &text));
+            }
+            let page: WireModelsPage = response.json().await.map_err(|err| ProviderError::Api {
+                message: format!("malformed models page: {err}"),
+                status: None,
+            })?;
+            // Linked before the models move out of the page.
+            let more = page.next_page();
+            let fetched = page.data.len();
+            models.extend(page.data.into_iter().map(ModelCard::from).filter(is_text));
+            // The zero-row guard keeps a misbehaving mirror from spinning
+            // this loop forever.
+            if fetched == 0 || !more {
+                return Ok(models);
+            }
+            offset += fetched as u32;
+        }
+    }
 }
 
 #[async_trait]

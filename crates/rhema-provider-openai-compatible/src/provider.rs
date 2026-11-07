@@ -29,7 +29,7 @@ use rhema_core::event::EventSink;
 use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
-use rhema_provider::{Allowance, ModelCard, Pricing, SseDecoder};
+use rhema_provider::{Allowance, ModelCard, ModelListing, Pricing, SseDecoder};
 
 use crate::wire::{ChatCompletionChunk, ChunkAssembler, WireBalance, WireErrorBody, is_text};
 
@@ -52,6 +52,10 @@ pub fn http_client() -> reqwest::Client {
         .build()
         .expect("a client builder with only timeouts cannot fail")
 }
+
+/// DeepSeek's OpenAI-compatible endpoint — the base the `deepseek`
+/// kind speaks by default, over the generic adapter.
+pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1";
 
 /// Any server speaking the OpenAI chat-completions dialect, addressed by
 /// its full versioned base URL.
@@ -120,38 +124,6 @@ impl OpenAiCompatibleProvider {
     pub fn with_extra_headers(mut self, headers: reqwest::header::HeaderMap) -> Self {
         self.extra_headers.extend(headers);
         self
-    }
-
-    /// The text chat models the server can serve (`GET {base}/models` →
-    /// `data[].id`, plus whatever metadata the entry carries). Sparse
-    /// entries are the norm on generic servers; see
-    /// [`crate::wire::normalize_models`].
-    pub async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-        let response = self
-            .http
-            .get(format!("{}/models", self.base_url))
-            .authorized(&self.api_key, &self.extra_headers)
-            // The one overall timeout: a bounded listing call, not a stream
-            // of unbounded length.
-            .timeout(Duration::from_secs(20))
-            .send()
-            .await
-            .map_err(network_error)?;
-        let status = response.status();
-        if !status.is_success() {
-            let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
-        }
-        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
-            message: format!("malformed models page: {err}"),
-            status: None,
-        })?;
-        let mut models = crate::wire::normalize_models(&page);
-        models.retain(is_text);
-        if self.base_url.contains(DEEPSEEK_HOST) {
-            decorate_deepseek(&mut models);
-        }
-        Ok(models)
     }
 
     /// The DeepSeek account's prepaid balance (`GET /user/balance`).
@@ -351,6 +323,41 @@ fn feed_chunk(
             status: None,
         })?;
     assembler.push(chunk, sink)
+}
+
+#[async_trait]
+impl ModelListing for OpenAiCompatibleProvider {
+    /// The text chat models the server can serve (`GET {base}/models` →
+    /// `data[].id`, plus whatever metadata the entry carries). Sparse
+    /// entries are the norm on generic servers; see
+    /// [`crate::wire::normalize_models`].
+    async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
+        let response = self
+            .http
+            .get(format!("{}/models", self.base_url))
+            .authorized(&self.api_key, &self.extra_headers)
+            // The one overall timeout: a bounded listing call, not a stream
+            // of unbounded length.
+            .timeout(Duration::from_secs(20))
+            .send()
+            .await
+            .map_err(network_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(api_error(status, &text));
+        }
+        let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
+            message: format!("malformed models page: {err}"),
+            status: None,
+        })?;
+        let mut models = crate::wire::normalize_models(&page);
+        models.retain(is_text);
+        if self.base_url.contains(DEEPSEEK_HOST) {
+            decorate_deepseek(&mut models);
+        }
+        Ok(models)
+    }
 }
 
 #[async_trait]

@@ -9,8 +9,26 @@ use rhema_coding_agent::{Approval, CodingAgentConfig};
 use rhema_config::secrets::SecretStore as _;
 use rhema_core::{Message, Role, Session, StopReason, ToolCall, Usage};
 use rhema_provider::ModelCard;
-use rhema_provider_google::GoogleProvider;
 use std::collections::BTreeMap;
+
+/// A turn provider the cancelled-turn tests never drive — these tests
+/// exercise the UI's cancellation bookkeeping, not an exchange, so any
+/// `Arc<dyn ModelProvider>` will do and a scripted one (feature
+/// `mock`) would gate the tests.
+struct NeverDriven;
+
+#[async_trait::async_trait]
+impl rhema_core::ModelProvider for NeverDriven {
+    async fn complete(
+        &self,
+        _req: rhema_core::ModelRequest,
+        _sink: &mut dyn rhema_core::EventSink,
+    ) -> Result<rhema_core::ModelOutput, rhema_core::ProviderError> {
+        Err(rhema_core::ProviderError::Network(
+            "these tests never complete a turn".to_owned(),
+        ))
+    }
+}
 
 /// A described skill folder under `dir`, the way discovery reads
 /// one.
@@ -2277,7 +2295,7 @@ fn the_status_tracks_thinking_versus_running() {
 
     // The turn ends: idle, no phase.
     let agent = CodingAgent::new(
-        Arc::new(GoogleProvider::new("k".to_owned())),
+        Arc::new(NeverDriven),
         CodingAgentConfig::new("m-a", PathBuf::from(".")),
     )
     .unwrap();
@@ -2339,7 +2357,7 @@ fn esc_when_running_cancels_the_turn_and_flags_the_channel() {
 
     // The task's event closes the turn out.
     let agent = CodingAgent::new(
-        Arc::new(GoogleProvider::new("k".to_owned())),
+        Arc::new(NeverDriven),
         CodingAgentConfig::new("m-a", PathBuf::from(".")),
     )
     .unwrap();
@@ -2388,7 +2406,7 @@ fn the_cancelled_event_hands_the_agent_back_with_a_notice() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.turn.running = true;
     let agent = CodingAgent::new(
-        Arc::new(GoogleProvider::new("k".to_owned())),
+        Arc::new(NeverDriven),
         CodingAgentConfig::new("m-a", PathBuf::from(".")),
     )
     .unwrap();
@@ -2430,11 +2448,7 @@ fn turn_finished_records_usage_and_errors() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let make_agent = || {
         Box::new(
-            CodingAgent::new(
-                Arc::new(GoogleProvider::new("k")),
-                CodingAgentConfig::new("m-a", "."),
-            )
-            .unwrap(),
+            CodingAgent::new(Arc::new(NeverDriven), CodingAgentConfig::new("m-a", ".")).unwrap(),
         )
     };
     let usage = Usage {
@@ -5274,7 +5288,7 @@ fn the_status_tracker_follows_the_turn_lifecycle() {
         crate::status::Status::Working { .. }
     ));
     let agent = CodingAgent::new(
-        Arc::new(GoogleProvider::new("k")),
+        Arc::new(NeverDriven),
         CodingAgentConfig::new("m-a", std::env::temp_dir()),
     )
     .unwrap();

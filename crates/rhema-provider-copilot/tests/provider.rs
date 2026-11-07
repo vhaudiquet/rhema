@@ -7,7 +7,7 @@ use rhema_core::message::{Content, Message, Role};
 use rhema_core::output::StopReason;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ChatParams;
-use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate};
+use rhema_provider::{InteractiveLogin, LoginSink, LoginUpdate, ModelListing};
 use rhema_provider_copilot::{CopilotLogin, CopilotProvider};
 use wiremock::matchers::{body_partial_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
