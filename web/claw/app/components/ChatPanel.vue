@@ -28,6 +28,13 @@ const props = defineProps<{
   session: ClawSession | null
   activeBackend: { provider: string; model: string } | null
   streamStatus: StreamStatus
+  /** An older page is in flight: the stream area shows it, so a slow
+   * claw reads as loading rather than as the top of the transcript. */
+  loadingOlder?: boolean
+  /** The record still holds turns above what the mirror shows. */
+  olderAvailable?: boolean
+  /** Bumped whenever a page was folded in above the mirror. */
+  prependCount?: number
   identity?: { name: string | null; mark: string | null; initials: string | null } | null
   avatarUrl?: string | null
 }>()
@@ -47,6 +54,7 @@ const emit = defineEmits<{
   consentAnswer: [id: string, answer: ConsentAnswer]
   consentDeny: [id: string]
   downloadAttachment: [id: string, name: string]
+  older: []
 }>()
 
 const draft = ref('')
@@ -68,11 +76,65 @@ const scroller = ref<HTMLElement | null>(null)
 /** Pin to the bottom only while the reader is already there. */
 const pinned = ref(true)
 
+/** How near the top counts as asking for the turn above. */
+const OLDER_THRESHOLD = 160
+
+/** The scroll state captured when a page was asked for, so the reader
+ * keeps looking at the same message once it lands above them: the
+ * content grew over the viewport, and the position must move down by
+ * that growth. */
+let olderAnchor: { top: number; height: number } | null = null
+
+/** Asks for the page above when the reader nears the top, or when the
+ * transcript is too short to fill the screen — an auto-walk that stops
+ * the moment the record runs out (`olderAvailable`) or a page lands. */
+function requestOlder(): void {
+  if (props.loadingOlder || props.olderAvailable === false) return
+  const el = scroller.value
+  if (!el) return
+  const atTop = el.scrollTop < OLDER_THRESHOLD
+  const unfilled = el.scrollHeight - el.clientHeight < 8
+  if (!atTop && !unfilled) return
+  olderAnchor = { top: el.scrollTop, height: el.scrollHeight }
+  emit('older')
+}
+
 function onScroll(): void {
   const el = scroller.value
   if (!el) return
   pinned.value = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+  // Scrolling back into the history asks for the next page up; the
+  // anchor captured here is what keeps the reader's place when it
+  // lands.
+  if (el.scrollTop < OLDER_THRESHOLD) requestOlder()
 }
+
+/** A page landed above the viewport: hold the reader's place. */
+watch(
+  () => props.prependCount,
+  async () => {
+    const el = scroller.value
+    const anchor = olderAnchor
+    olderAnchor = null
+    if (!el || !anchor) return
+    await nextTick()
+    el.scrollTop = anchor.top + (el.scrollHeight - anchor.height)
+  },
+)
+
+/** A transcript shorter than the screen has nothing to scroll, so no
+ * scroll event will ever ask for the page above: ask once the first
+ * turn has rendered, and keep asking as pages land until the screen
+ * fills or the record ends. */
+watch(
+  () => [props.items.length, props.loadingOlder] as const,
+  async () => {
+    await nextTick()
+    const el = scroller.value
+    if (!el || props.items.length === 0) return
+    if (el.scrollHeight - el.clientHeight < 8) requestOlder()
+  },
+)
 
 // Thinking grows inside the trailing entry without changing the
 // entries length, so its total length joins the watch to keep the
@@ -371,6 +433,8 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
         nothing streamed yet; messages post to the claw and replies arrive here live
       </p>
 
+      <p v-if="loadingOlder" class="older-hint">loading earlier turns</p>
+
       <template v-for="item in items" :key="item.id">
         <div v-if="item.kind === 'sent'" class="msg">
           <div class="avatar user" aria-hidden="true">·</div>
@@ -616,6 +680,14 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
 .empty {
   color: var(--text3);
   padding: 24px;
+}
+
+.older-hint {
+  color: var(--text3);
+  font-family: var(--mono, monospace);
+  font-size: 12px;
+  margin: 0 0 16px;
+  text-align: center;
 }
 
 .msg {

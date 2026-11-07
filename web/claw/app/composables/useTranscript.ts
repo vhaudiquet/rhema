@@ -173,6 +173,19 @@ export function useTranscript() {
   const live = ref<TurnBlock | null>(null)
   let nextId = 1
 
+  /** The record's seq for the oldest event on the mirror, when one is
+   * known — the cursor an older page ends at. Null until an event with
+   * a seq lands, and again after a reset. */
+  const firstSeq = ref<number | null>(null)
+  /** True while an older page is being fetched and folded in, so a
+   * scroll that keeps firing at the top does not stack the same page
+   * twice. */
+  const loadingOlder = ref(false)
+  /** Bumped by every page folded in above the mirror. The panel watches
+   * it to hold the reader's place: the content above the viewport grew,
+   * so the scroll position moves down by exactly that much. */
+  const prependCount = ref(0)
+
   /** Locally sent messages the stream has not echoed yet: `addSent`
    * pushes here, the `user_message` handler pops the match. Text plus
    * image count is the whole signature the stream carries, and that is
@@ -197,8 +210,17 @@ export function useTranscript() {
     return { kind: 'attachment', attachment: { ...entry.attachment } }
   }
 
-  /** Folds one stream event into the mirror. */
-  function applyEvent(event: TurnEvent): void {
+  /** True while a page of older turns is folding in: the pending-echo
+   * match is for live echoes, and a replayed question from weeks ago
+   * that happens to read the same as one on screen is its own row. */
+  let replaying = false
+
+  /** Folds one stream event into the mirror; `seq` is the record's
+   * number for it, which puts it at the mirror's top when nothing else
+   * is there yet. The stream keeps its own resume cursor; this one is
+   * the walk-back anchor. */
+  function applyEvent(event: TurnEvent, seq: number | null = null): void {
+    if (seq !== null && firstSeq.value === null) firstSeq.value = seq
     switch (event.type) {
       case 'user_message': {
         // The replayed question. A live echo of a message this surface
@@ -207,9 +229,12 @@ export function useTranscript() {
         // previews and all. Anything else (a replay, another surface's
         // message, a steered echo after other events) renders as its
         // own row.
-        const mine = pendingSent.findIndex(
-          (pending) => pending.text === event.text && pending.images === event.images.length,
-        )
+        const mine = replaying
+          ? -1
+          : pendingSent.findIndex(
+              (pending) =>
+                pending.text === event.text && pending.images === event.images.length,
+            )
         if (mine !== -1) {
           pendingSent.splice(mine, 1)
           return
@@ -419,20 +444,56 @@ export function useTranscript() {
     return items.value.some((item) => item.kind === 'attachment' && item.attachment.id === id)
   }
 
-  /** Session switched, or the stream reopened: the mirror is per-key,
-   * and the replay that follows rebuilds it either way. The pending
-   * echoes go too — a replay carries every message, optimistic rows
-   * included. */
+  /** Reads one page of older turns (whole turns, oldest first) and
+   * stacks it above what the mirror holds.
+   *
+   * The page folds from empty with the same reducer the stream uses, so
+   * a replayed consent or attachment card folds exactly as it would
+   * have live, and then the two lists join: no page is ever half
+   * applied. A page can end mid-turn if the record's first turn is
+   * longer than a page; that open tail is dropped, and the next page
+   * (which walks back from this one's first seq) brings it again with
+   * the turn's beginning above it. */
+  function prependOlder(events: { seq: number; event: TurnEvent }[]): void {
+    const page = events[0]
+    if (!page) return
+    const current = items.value
+    const currentLive = live.value
+    replaying = true
+    items.value = []
+    live.value = null
+    try {
+      for (const { event } of events) applyEvent(event)
+    } finally {
+      replaying = false
+    }
+    items.value = [...items.value, ...current]
+    live.value = currentLive
+    // The page sits above everything the mirror held, so it owns the
+    // first cursor.
+    firstSeq.value = page.seq
+    prependCount.value += 1
+  }
+
+  /** Session switched, or the record reset under the mirror: everything
+   * the mirror holds goes, cursors included. The replay that follows
+   * rebuilds it. The pending echoes go too — the tail carries every
+   * message, optimistic rows included. */
   function reset(): void {
     items.value = []
     live.value = null
     pendingSent.length = 0
+    firstSeq.value = null
   }
 
   return {
     items,
     live,
+    firstSeq,
+    loadingOlder,
+    prependCount,
     applyEvent,
+    prependOlder,
     addSent,
     removeSent,
     resolveConsent,

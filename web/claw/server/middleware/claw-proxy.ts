@@ -14,7 +14,11 @@ import { proxyRequest } from 'h3'
 
 export default defineEventHandler((event) => {
   if (!import.meta.dev) return
-  const { pathname } = getRequestURL(event)
+  // The query string rides along: `since` on the event stream and
+  // `before`/`limit` on the history pages are the whole protocol, and a
+  // proxy that dropped them would quietly serve the tail to every
+  // request.
+  const { pathname, search } = getRequestURL(event)
   if (pathname !== '/healthz' && !pathname.startsWith('/v1/')) return
-  return proxyRequest(event, useRuntimeConfig(event).clawUpstream + pathname)
+  return proxyRequest(event, useRuntimeConfig(event).clawUpstream + pathname + search)
 })

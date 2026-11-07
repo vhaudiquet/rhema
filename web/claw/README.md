@@ -59,17 +59,34 @@ Two consequences worth knowing before changing this code:
 - **The daemon owns the conversation.** `POST .../messages` is
   fire-and-forget (202); the reply streams back on
   `GET /v1/sessions/{key}/events`. The transcript here is a mirror of
-  the stream, and the stream opens with the claw's replay of the
-  session's recorded turns before the live feed — a reload and every
-  reconnect reset the mirror and rebuild from the replay, so the
-  transcript survives the browser, not just the claw.
+  the stream, and the stream opens on the newest turn before the live
+  feed — a reload paints the latest conversation at once instead of
+  replaying a session that may have run for weeks, and the turns above
+  it come from `GET /v1/sessions/{key}/history`, one whole turn per
+  page, as the reader scrolls up (or right away, while the transcript
+  is shorter than the screen). So the transcript survives the browser,
+  not just the claw.
+- **Every frame names its seq, and a reconnect names it back.** The
+  frame's `id:` is the record's seq for the event, and
+  `useClaw().subscribeEvents` keeps the last one it delivered: a retry
+  sends `?since=<seq>` and receives exactly the gap, so a dropped
+  connection costs nothing on screen and nothing on the wire. The mirror
+  is not reset on reconnect for the same reason — its items are still
+  true. A `reset;` comment means the cursor named events the record no
+  longer holds (a wiped database): the mirror drops, and the tail that
+  follows rebuilds it.
 - **SSE goes over fetch, not `EventSource`.** The claw's auth reads
   only the `Authorization: Bearer` header (`http.rs` `require_auth`); it
   has no query-param fallback, and `EventSource` cannot set headers. So
   `useClaw().subscribeEvents` holds a `GET` with the auth header, reads
-  the body as a `ReadableStream`, and parses `data:` frames by hand
-  (`composables/useClaw.ts`). Drops retry with backoff; the hub's
+  the body as a `ReadableStream`, and parses `data:`/`id:` frames by
+  hand (`composables/useClaw.ts`). Drops retry with backoff; the hub's
   `lagged` comments surface as notices.
+- **The dev proxy forwards the query string.** `server/middleware/
+  claw-proxy.ts` rebuilds the upstream URL from the request's pathname,
+  and `since`/`before` are the whole history protocol: dropping them
+  silently turns every resume into a full replay and every history page
+  into the tail.
 
 ## What the transcript does with the stream
 
@@ -83,8 +100,8 @@ Two consequences worth knowing before changing this code:
   inline card: kind `secret` gets a password input plus submit, kind
   `phone` gets Approve/Deny, and both carry a deny link
   (`DELETE /v1/consents/{id}`). The card flips when the answer lands
-  and again on the stream's `consent_resolved` echo; a reconnect's
-  replay rebuilds the cards, so nothing persists client-side.
+  and again on the stream's `consent_resolved` echo; nothing persists
+  client-side, so a reload rebuilds the cards from the replay.
 - **Attachments render inline.** An `attachment` event becomes a card
   — media glyph, file name, B/KB/MB size, caption. Images fetch the
   bearer-guarded bytes (`GET /v1/attachments/{id}`, blob → object URL,

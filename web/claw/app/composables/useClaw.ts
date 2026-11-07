@@ -303,8 +303,16 @@ export async function clawHealth(): Promise<boolean> {
 
 /** Handlers for a turn-event stream. */
 export interface StreamHandlers {
-  /** One turn event, in stream order. */
-  onEvent: (event: TurnEvent) => void
+  /** One turn event, in stream order, with the record's seq for it — the
+   * cursor a reconnect names. Null only for a frame whose `id:` was
+   * missing or unparseable. */
+  onEvent: (event: TurnEvent, seq: number | null) => void
+  /**
+   * The cursor named events the record no longer holds (a wiped or
+   * reset daemon). The mirror must go: the tail that follows this
+   * notice rebuilds it.
+   */
+  onReset?: () => void
   /** Connection lifecycle; `reconnecting` follows a drop, with backoff. */
   onStatus?: (status: StreamStatus) => void
   /**
@@ -313,6 +321,15 @@ export interface StreamHandlers {
    * turn events, never silent.
    */
   onNotice?: (notice: string) => void
+}
+
+/** One page of a session's older turns, as `GET /v1/sessions/{key}/
+ * history` answers it: whole turns, oldest first, each event with the
+ * seq the record gave it. `more` is false once the page reached the
+ * session's first event. */
+export interface HistoryPage {
+  events: { seq: number; event: TurnEvent }[]
+  more: boolean
 }
 
 export interface ClawApi {
@@ -373,12 +390,33 @@ export interface ClawApi {
   /**
    * Stream one session's turns. Resolves with a handle once the fetch
    * is started; the claw keeps the stream open forever, and a drop is
-   * retried with backoff until `close()` is called. Every (re)connection
-   * opens with the session's recorded turns replayed first, then the
-   * live feed — so a consumer resets its mirror on reconnect and lets
-   * the stream rebuild it.
+   * retried with backoff until `close()` is called.
+   *
+   * Every frame names the record's seq, so a reconnect resumes from the
+   * last one delivered and replays only the gap. A first open with no
+   * `since` names nothing, and the claw sends the newest turn plus the
+   * live feed; older turns come from `history` as the reader scrolls
+   * up. A `reset` comment means the cursor named events the record no
+   * longer holds: the mirror is dropped and the tail that follows
+   * rebuilds it.
    */
-  subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void }
+  subscribeEvents(
+    key: string,
+    handlers: StreamHandlers,
+    options?: StreamOptions,
+  ): { close: () => void }
+  /**
+   * `GET /v1/sessions/{key}/history` — one page of whole turns ending
+   * at `before` (absent: the newest). Pages stack: the next call passes
+   * the seq of the oldest event held, and stops when `more` is false.
+   */
+  history(key: string, before?: number | null, limit?: number): Promise<HistoryPage>
+}
+
+/** How `subscribeEvents` opens: `since` is the seq of the last event the
+ * caller already holds, or null for "nothing, give me the tail". */
+export interface StreamOptions {
+  since?: number | null
 }
 
 /** Build the client bound to one bearer token (null = unguarded claw). */
@@ -441,6 +479,29 @@ export function useClaw(token: Ref<string | null>): ClawApi {
       headers: { 'Content-Type': 'application/json', ...authHeaders(token.value) },
       body: JSON.stringify(images?.length ? { text, images } : { text }),
     })
+  }
+
+  async function history(
+    key: string,
+    before?: number | null,
+    limit?: number,
+  ): Promise<HistoryPage> {
+    const params = new URLSearchParams()
+    if (before !== undefined && before !== null) params.set('before', String(before))
+    if (limit !== undefined) params.set('limit', String(limit))
+    const query = params.size ? `?${params}` : ''
+    const body = (await get(
+      `/v1/sessions/${encodeURIComponent(key)}/history${query}`,
+      token.value,
+    )) as { events?: { seq?: unknown; event?: unknown }[]; more?: unknown }
+    // The wire shape is trusted only as far as it parses: an event the
+    // parser does not know is dropped, and its seq with it — the page
+    // still renders what it could read.
+    const events = (body.events ?? []).flatMap((entry) => {
+      const event = parseTurnEvent(JSON.stringify(entry.event))
+      return event && typeof entry.seq === 'number' ? [{ seq: entry.seq, event }] : []
+    })
+    return { events, more: body.more === true }
   }
 
   async function providers(): Promise<ProvidersState> {
@@ -536,9 +597,17 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     return url
   }
 
-  function subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void } {
+  function subscribeEvents(
+    key: string,
+    handlers: StreamHandlers,
+    options?: StreamOptions,
+  ): { close: () => void } {
     let closed = false
     let attempt = 0
+    /** The seq of the last event this stream delivered: what a retry
+     * names as `since`, so a reconnect replays the gap and nothing else.
+     * Null until a frame arrives, or after a reset drops the mirror. */
+    let cursor: number | null = options?.since ?? null
     /** The attempt in flight; `close` aborts it mid-read. */
     let current: AbortController | null = null
     /** Set when the watchdog, not the server, cut the attempt — the
@@ -571,8 +640,9 @@ export function useClaw(token: Ref<string | null>): ClawApi {
         timedOut = false
         rearmSilence()
         try {
+          const resume = cursor === null ? '' : `?since=${cursor}`
           const response = await fetch(
-            `${base()}/v1/sessions/${encodeURIComponent(key)}/events`,
+            `${base()}/v1/sessions/${encodeURIComponent(key)}/events${resume}`,
             {
               headers: {
                 Accept: 'text/event-stream',
@@ -588,16 +658,31 @@ export function useClaw(token: Ref<string | null>): ClawApi {
           status('open')
           await readFrames(
             response.body,
-            (data) => {
+            (data, id) => {
               rearmSilence()
               const event = parseTurnEvent(data)
-              if (event) handlers.onEvent(event)
+              if (!event) return
+              const seq = id !== null && /^\d+$/.test(id) ? Number(id) : null
+              if (seq !== null) cursor = seq
+              handlers.onEvent(event, seq)
             },
             (comment) => {
               // Keep-alives come through here too; each one proves the
-              // path alive, and only the hub's dropped-events notice is
-              // worth raising.
+              // path alive.
               rearmSilence()
+              // The record lost what this mirror holds: drop the cursor
+              // so the next open asks for the tail, and let the consumer
+              // drop its items before the tail that already followed
+              // this notice folds in.
+              if (comment.startsWith('reset')) {
+                cursor = null
+                handlers.onReset?.()
+                return
+              }
+              // A skipped run of events is not a hole in the cursor:
+              // the next frame's id names the seq after it, and a drop
+              // before then reopens at the old cursor and replays what
+              // was skipped.
               if (comment.startsWith('lagged')) {
                 handlers.onNotice?.(`stream lagged — ${comment.replace(/^lagged;\s*/, '')}`)
               }
@@ -640,6 +725,7 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     resolveConsent,
     denyConsent,
     sendMessage,
+    history,
     providers,
     setActive,
     models,
@@ -659,13 +745,13 @@ export function useClaw(token: Ref<string | null>): ClawApi {
 }
 
 /** One parsed SSE frame: the joined `data:` payload, comments excluded. */
-type FrameHandler = (data: string) => void
+type FrameHandler = (data: string, id: string | null) => void
 
 /**
  * Reads an SSE body into frames. Frames split on a blank line; `data:`
- * lines carry payload (joined with newlines) and `:`-prefixed lines are
- * comments (the claw's keep-alive and its lag notice). `event:`/`id:`
- * lines do not occur on this surface.
+ * lines carry payload (joined with newlines), `id:` names the event's
+ * seq, and `:`-prefixed lines are comments (the claw's keep-alive, its
+ * lag notice, and its reset). `event:` lines do not occur here.
  */
 async function readFrames(
   body: ReadableStream<Uint8Array>,
@@ -676,17 +762,20 @@ async function readFrames(
   const decoder = new TextDecoder()
   let buffer = ''
   const step = (frame: string) => {
-    const data = frame
-      .split('\n')
+    const lines = frame.split('\n')
+    const data = lines
       .filter((line) => line.startsWith('data:'))
       .map((line) => line.replace(/^data: ?/, ''))
       .join('\n')
     if (data) {
-      onFrame(data)
+      const id = lines
+        .find((line) => line.startsWith('id:'))
+        ?.slice(3)
+        .trim()
+      onFrame(data, id ?? null)
       return
     }
-    const comment = frame
-      .split('\n')
+    const comment = lines
       .filter((line) => line.startsWith(':'))
       .map((line) => line.slice(1).trimStart())
       .join('\n')

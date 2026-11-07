@@ -99,7 +99,19 @@ const activeKey = ref(stored(ACTIVE_STORE_KEY) ?? DEFAULT_KEY)
 watch(activeKey, (key) => persist(ACTIVE_STORE_KEY, key))
 
 const transcript = useTranscript()
-const { items: transcriptItems, live: liveTurn } = transcript
+const {
+  items: transcriptItems,
+  live: liveTurn,
+  loadingOlder,
+  prependCount,
+} = transcript
+
+// Whether the record still holds turns above what the mirror shows.
+// The stream opens on the newest turn and the reader walks back page
+// by page (ChatPanel asks when the scroller nears its top, or when the
+// transcript is too short to fill the screen), so a session that ran
+// for weeks costs nothing up front and still reaches its first message.
+const olderAvailable = ref(true)
 
 // Attachment ids this page already tried to fetch; a failed fetch is
 // not retried until the stream resets and clears the set.
@@ -529,20 +541,27 @@ let stream: { close: () => void } | null = null
 function resubscribe(): void {
   stream?.close()
   transcript.reset()
+  olderAvailable.value = true
   attemptedAttachments.clear()
   notices.value = []
   streamStatus.value = 'connecting'
   stream = claw.subscribeEvents(activeKey.value, {
-    onEvent: (event) => transcript.applyEvent(event),
+    onEvent: (event, seq) => transcript.applyEvent(event, seq),
+    // The record lost what this mirror holds (a wiped or reset
+    // database): drop it, and the tail the claw sends next rebuilds it.
+    onReset: () => {
+      transcript.reset()
+      olderAvailable.value = true
+      attemptedAttachments.clear()
+      scannedItems = 0
+    },
     onStatus: (status) => {
       streamStatus.value = status
-      // A retry reopens the stream with the claw's replay of the
-      // recorded turns: drop the mirror and let it rebuild, or the
-      // replay would double everything already on screen. The
-      // attempted-attachment set goes too — a fetch that failed during
-      // the outage must retry against the recovered stream.
+      // A retry resumes from the last seq this mirror holds, so the
+      // claw sends the gap and nothing else: the mirror stays as it
+      // is. Only the attachment set is cleared — a fetch that failed
+      // during the outage should retry against the recovered stream.
       if (status === 'reconnecting') {
-        transcript.reset()
         attemptedAttachments.clear()
         scannedItems = 0
       }
@@ -550,6 +569,28 @@ function resubscribe(): void {
     },
     onNotice: pushNotice,
   })
+}
+
+/** Fetches one page of turns older than the mirror's first and stacks
+ * it above. Whole turns only, so the page never duplicates or skips:
+ * the daemon ends it exactly where the mirror begins. */
+async function loadOlder(): Promise<void> {
+  const before = transcript.firstSeq.value
+  if (before === null || !olderAvailable.value || transcript.loadingOlder.value) return
+  transcript.loadingOlder.value = true
+  const key = activeKey.value
+  try {
+    const page = await claw.history(key, before)
+    // The reader may have switched sessions while the page was in
+    // flight; a page belongs to the mirror it was asked for.
+    if (key !== activeKey.value) return
+    transcript.prependOlder(page.events)
+    olderAvailable.value = page.more
+  } catch (err) {
+    noteApiError(err)
+  } finally {
+    transcript.loadingOlder.value = false
+  }
 }
 
 watch(activeKey, resubscribe)
@@ -641,8 +682,12 @@ onUnmounted(() => {
             :session="activeSession"
             :active-backend="providersState?.active ?? null"
             :stream-status="streamStatus"
+            :loading-older="loadingOlder"
+            :older-available="olderAvailable"
+            :prepend-count="prependCount"
             :identity="identity"
             :avatar-url="identityAvatarUrl"
+            @older="loadOlder"
             @send="send"
             @open-providers="go({ view: 'settings', section: 'providers' })"
             @consent-answer="answerConsent"
