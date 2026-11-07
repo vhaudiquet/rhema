@@ -502,6 +502,11 @@ impl ForgeSource {
                         "is_pr": notification.is_pr,
                         "role": role.as_str(),
                         "notification": notification,
+                        // The account whose feed delivered this: the
+                        // dispatch answers as that identity, and a thread
+                        // with no repo watch row of its own has only this
+                        // to resolve a client by.
+                        "account_id": watch.account_id,
                     });
                     self.dispatcher
                         .ingest(Event {

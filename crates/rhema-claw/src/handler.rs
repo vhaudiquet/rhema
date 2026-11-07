@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::forge::{record_client, resolve_watch_credential};
+use crate::forge::{WatchCredential, record_client, resolve_watch_credential};
 use crate::watch_store::ClawStore;
 use rhema_agent_tools::AllowAll;
 use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
@@ -97,46 +97,117 @@ impl ClawHandler {
 
     /// The forge client a dispatch key answers to:
     /// `"github:issue:acme/widgets#7"` resolves its watch record from the
-    /// table at dispatch time — the
-    /// table is the source of truth, not a boot-time snapshot — and the
-    /// client is cached per `(forge, host, token)` so one poll pool serves
-    /// every thread of a watch.
+    /// table at dispatch time — the table is the source of truth, not a
+    /// boot-time snapshot — and the client is cached per
+    /// `(forge, host, credential)` so one poll pool serves every thread of
+    /// a watch.
+    ///
+    /// A thread an account watch delivered may have no repo watch of its
+    /// own: the account's notification feed covers the whole instance, so
+    /// the row that fed the dispatch is the account watch, and the reply
+    /// has to post as that account. `as_account` names it; `None` — the
+    /// caller does not know, or there is one account per forge — takes the
+    /// kind's first account watch.
     pub fn watch_forge(&self, key: &ResourceKey) -> Result<Arc<dyn Forge>, String> {
+        self.watch_forge_as(key, None)
+    }
+
+    /// [`Self::watch_forge`] with the account the dispatch was delivered
+    /// as, when the caller knows it: an account notification carries the
+    /// id it arrived on (see [`crate::forge::ForgeSource`]'s poll).
+    pub fn watch_forge_as(
+        &self,
+        key: &ResourceKey,
+        as_account: Option<&str>,
+    ) -> Result<Arc<dyn Forge>, String> {
         let watch = watch_key(key)
             .ok_or_else(|| format!("resource key {key} is not a forge thread key"))?;
-        let (kind, repo) = watch
+        let (forge, repo) = watch
             .split_once(':')
             .ok_or_else(|| format!("watch entry {watch} has no forge kind"))?;
-        let record = self
+        let records = self
             .watches
             .list()
-            .map_err(|err| format!("watch lookup for {key} failed: {err}"))?
-            .into_iter()
-            .find(|record| record.forge == kind && record.repo == repo)
+            .map_err(|err| format!("watch lookup for {key} failed: {err}"))?;
+        if let Some(record) = records
+            .iter()
+            .find(|record| record.forge == forge && record.repo == repo)
+        {
+            let kind = ForgeKind::parse(&record.forge)
+                .ok_or_else(|| format!("watch entry {watch} names an unknown forge"))?;
+            // The same chain the poll resolved: row token, env var, then
+            // the matching account identity — keyed on the resolved
+            // value, so a credential rotation (or a saved account) is a
+            // new client on the next dispatch. The login rides along: an
+            // instance that refuses the value in the token header takes it
+            // as Basic auth (`GiteaForge::with_login`).
+            let credential = resolve_watch_credential(
+                self.accounts.as_ref(),
+                kind,
+                record.host.as_deref(),
+                &record.token,
+            );
+            return Ok(self.client(kind, record.host.as_deref(), &credential));
+        }
+        // No repo watch: the account watch is what fed this thread, so its
+        // identity is what the reply posts as.
+        let account_watches = self
+            .watches
+            .list_account_watches()
+            .map_err(|err| format!("watch lookup for {key} failed: {err}"))?;
+        let account_watch = account_watches
+            .iter()
+            .filter(|watch| watch.forge == forge)
+            .find(|watch| as_account.is_none_or(|id| id == watch.account_id))
             .ok_or_else(|| format!("no watch configured for {key}"))?;
-        let kind = ForgeKind::parse(&record.forge)
+        let kind = ForgeKind::parse(&account_watch.forge)
             .ok_or_else(|| format!("watch entry {watch} names an unknown forge"))?;
-        // The same chain the poll resolved: row token, env var, then
-        // the matching account identity — keyed on the resolved value,
-        // so a credential rotation (or a saved account) is a new client
-        // on the next dispatch. The login rides along: an instance that
-        // refuses the value in the token header takes it as Basic auth
-        // (`GiteaForge::with_login`).
-        let credential = resolve_watch_credential(
-            self.accounts.as_ref(),
-            kind,
-            record.host.as_deref(),
-            &record.token,
-        );
+        let secret = self
+            .accounts
+            .secret(&account_watch.account_id)
+            .map_err(|err| format!("account lookup for {key} failed: {err}"))?
+            .ok_or_else(|| {
+                format!(
+                    "the account watch for {key} names account {}, which is gone",
+                    account_watch.account_id
+                )
+            })?;
+        let login = self
+            .accounts
+            .get(&account_watch.account_id)
+            .map_err(|err| format!("account lookup for {key} failed: {err}"))?
+            .and_then(|account| account.username);
+        let credential = WatchCredential {
+            token: secret.value,
+            login,
+        };
+        Ok(self.client(kind, account_watch.host.as_deref(), &credential))
+    }
+
+    /// The cached client for one credential: the dispatch path and the
+    /// poll path build the same key, so a thread's replies ride the poll's
+    /// pool.
+    fn client(
+        &self,
+        kind: ForgeKind,
+        host: Option<&str>,
+        credential: &WatchCredential,
+    ) -> Arc<dyn Forge> {
+        // Everything that changes the client: the kind, its host, and the
+        // credential — the login included, since one value sent two ways
+        // is two credentials.
         let cache_key = format!(
             "{}|{:?}|{}|{:?}",
-            record.forge, record.host, credential.token, credential.login
+            kind.name(),
+            host,
+            credential.token,
+            credential.login
         );
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
-        Ok(clients
+        clients
             .entry(cache_key)
-            .or_insert_with(|| record_client(kind, record.host.as_deref(), &credential))
-            .clone())
+            .or_insert_with(|| record_client(kind, host, credential))
+            .clone()
     }
 
     /// One dispatch, failed with a reason on any step. The session stash
@@ -148,13 +219,17 @@ impl ClawHandler {
         let key = ctx.key.as_str().to_owned();
         let (repo, thread_kind, number) = parse_key(&ctx.key)
             .ok_or_else(|| format!("resource key {key} is not a forge thread key"))?;
-        let forge = self.watch_forge(&ctx.key)?;
+        // Drained before the client resolves: an account notification
+        // names the account that delivered it, and the reply must post as
+        // that account — a thread the account's feed delivered may have no
+        // repo watch row at all.
+        let news = self.drain_news(ctx, &key).await?;
+        let forge = self.watch_forge_as(&ctx.key, delivery_account(&news))?;
 
         let snapshot = forge
             .snapshot(&repo, thread_kind, number)
             .await
             .map_err(|err| format!("snapshot of {key} failed: {err}"))?;
-        let news = self.drain_news(ctx, &key).await?;
         let role = dominant_role(&news);
 
         // The permission check is load-bearing: this handler's one tool
@@ -320,16 +395,24 @@ enum InboxNews {
     Notified {
         role: Role,
         notification: Notification,
+        /// The account watch the notification arrived on, when the payload
+        /// names it: what the reply posts as.
+        account_id: Option<String>,
     },
 }
 
 /// The triaged payload [`crate::forge::ForgeSource`] ingests: `repo` and
 /// `number` ride at the top level for the key function, the rest is the
-/// notification and the role its triage earned.
+/// notification, the role its triage earned, and the account whose feed
+/// delivered it.
 #[derive(serde::Deserialize)]
 struct TriagedPayload {
     role: Role,
     notification: Notification,
+    /// The identity store id of the account watch that polled this. Absent
+    /// on payloads ingested before it was recorded.
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 /// Decodes one inbox item into its news. A triaged notification is tried
@@ -340,9 +423,21 @@ fn decode_news(item: &InboxItem) -> Result<InboxNews, ForgeError> {
         return Ok(InboxNews::Notified {
             role: triaged.role,
             notification: triaged.notification,
+            account_id: triaged.account_id,
         });
     }
     decode(item).map(InboxNews::Event)
+}
+
+/// The account a batch's notifications were delivered as, when they name
+/// one: the first is enough, since a thread fed by two accounts' feeds is
+/// two identities on one conversation and the first is as good as the
+/// second. Plain events name no account.
+fn delivery_account(news: &[InboxNews]) -> Option<&str> {
+    news.iter().find_map(|news| match news {
+        InboxNews::Notified { account_id, .. } => account_id.as_deref(),
+        InboxNews::Event(_) => None,
+    })
 }
 
 /// The batch's dominant role, for the prompt's persona framing:
@@ -713,10 +808,12 @@ mod tests {
         let review = InboxNews::Notified {
             role: Role::Reviewer,
             notification: notification(NotificationReason::ReviewRequested),
+            account_id: None,
         };
         let work = InboxNews::Notified {
             role: Role::Implementer,
             notification: notification(NotificationReason::Assigned),
+            account_id: None,
         };
         assert_eq!(
             dominant_role(std::slice::from_ref(&review)),
@@ -741,6 +838,7 @@ mod tests {
             &[InboxNews::Notified {
                 role: Role::Reviewer,
                 notification: notification(NotificationReason::ReviewRequested),
+                account_id: None,
             }],
             Path::new("/tmp/w"),
             Some(Role::Reviewer),
@@ -822,6 +920,81 @@ mod tests {
                 .watch_forge(&ResourceKey::from("github:nonsense"))
                 .is_err(),
             "a non-thread key does not"
+        );
+    }
+
+    /// A thread an account's notification feed delivered has no repo watch
+    /// row of its own — the account watch covers the whole instance — and
+    /// the dispatch still resolves a client, as that account.
+    #[test]
+    fn an_account_watch_resolves_the_client_a_repo_watch_would_have() {
+        let watches = Arc::new(ClawStore::in_memory().expect("store opens"));
+        watches
+            .add_account_watch("gitea", Some("https://git.example"), "acct-1")
+            .expect("account watch lands");
+        let accounts = Arc::new(rhema_identity::VolatileIdentityStore::new());
+        accounts
+            .put(
+                rhema_identity::AccountDraft::new(
+                    "kosmos",
+                    "gitea",
+                    rhema_identity::Secret::new(rhema_identity::SecretKind::Token, "tok"),
+                )
+                .with_url("https://git.example")
+                .with_username("kosmos"),
+            )
+            .expect("account lands");
+        let registry = Arc::new(
+            crate::backends::BackendRegistry::new(
+                vec![crate::backends::Backend::headless(
+                    "mock",
+                    Arc::new(NoopProvider),
+                )],
+                None,
+            )
+            .expect("constructs"),
+        );
+        let handler = ClawHandler::new(
+            registry,
+            "/tmp/w",
+            watches,
+            accounts,
+            true,
+            std::collections::BTreeMap::new(),
+        );
+        let keys = |handler: &ClawHandler| -> Vec<String> {
+            handler
+                .clients
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .keys()
+                .cloned()
+                .collect()
+        };
+
+        let key = ResourceKey::from("gitea:issue:acme/widgets#7");
+        handler
+            .watch_forge(&key)
+            .expect("the account watch answers for the thread");
+        let cached = keys(&handler);
+        assert_eq!(cached.len(), 1);
+        assert!(
+            cached[0].contains("kosmos"),
+            "the account's login rides the client: {cached:?}"
+        );
+
+        handler.watch_forge(&key).expect("it resolves again");
+        assert_eq!(keys(&handler).len(), 1, "the second dispatch is cached");
+
+        assert!(
+            handler.watch_forge_as(&key, Some("acct-2")).is_err(),
+            "naming another account refuses: there is no watch to post as it"
+        );
+        assert!(
+            handler
+                .watch_forge(&ResourceKey::from("github:issue:acme/widgets#7"))
+                .is_err(),
+            "a forge with no watch at all still refuses"
         );
     }
 
