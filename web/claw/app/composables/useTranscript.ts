@@ -178,8 +178,10 @@ export function useTranscript() {
    * image count is the whole signature the stream carries, and that is
    * enough — the echo dedupes against what this surface sent, not
    * against whichever row happens to sit last: a steered turn's end
-   * marker can land between the optimistic row and its echo. */
-  const pendingSent: { text: string; images: number }[] = []
+   * marker can land between the optimistic row and its echo. `itemId`
+   * links an entry to its row, so a send that failed to post can take
+   * both the row and its pending echo back out. */
+  const pendingSent: { text: string; images: number; itemId: number }[] = []
 
   function ensureLive(): TurnBlock {
     if (!live.value) live.value = { reply: '', entries: [], outcome: null }
@@ -327,10 +329,25 @@ export function useTranscript() {
 
   /** A locally sent message, shown immediately; the reply streams after.
    * Its images render from the staged previews — the claw stores them
-   * and the stream's echo dedupes against this row. */
-  function addSent(text: string, images: SentImage[] = []): void {
-    pendingSent.push({ text, images: images.length })
-    items.value.push({ kind: 'sent', id: nextId++, text, images })
+   * and the stream's echo dedupes against this row. Returns the row's
+   * id, so a failed POST can retract it. */
+  function addSent(text: string, images: SentImage[] = []): number {
+    const id = nextId++
+    pendingSent.push({ text, images: images.length, itemId: id })
+    items.value.push({ kind: 'sent', id, text, images })
+    return id
+  }
+
+  /** Retracts a locally sent row whose POST failed: the message never
+   * reached the claw, so neither the reply nor the echo will ever come.
+   * (If it did reach the claw and only the answer was lost, the
+   * pending echo goes with the row — the stream's `user_message` then
+   * renders a fresh one, with the stored attachment ids.) */
+  function removeSent(id: number): void {
+    const index = items.value.findIndex((item) => item.kind === 'sent' && item.id === id)
+    if (index !== -1) items.value.splice(index, 1)
+    const pending = pendingSent.findIndex((entry) => entry.itemId === id)
+    if (pending !== -1) pendingSent.splice(pending, 1)
   }
 
   /** A consent card resolved: flipped in place, or ignored when no
@@ -412,5 +429,15 @@ export function useTranscript() {
     pendingSent.length = 0
   }
 
-  return { items, live, applyEvent, addSent, resolveConsent, setAttachmentUrl, setSentImageUrl, reset }
+  return {
+    items,
+    live,
+    applyEvent,
+    addSent,
+    removeSent,
+    resolveConsent,
+    setAttachmentUrl,
+    setSentImageUrl,
+    reset,
+  }
 }

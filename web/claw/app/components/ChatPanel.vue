@@ -50,6 +50,20 @@ const emit = defineEmits<{
 }>()
 
 const draft = ref('')
+/** The draft each session typed before the view moved on: the composer
+ * belongs to the session it types into, so a draft never sends into a
+ * session it was not written for. Staged attachments and pastes stay
+ * with the composer itself — they sit visible in the chips, so the
+ * user still sees them carry. */
+const drafts = new Map<string, string>()
+watch(
+  () => props.activeKey,
+  (key, previous) => {
+    if (previous !== undefined) drafts.set(previous, draft.value)
+    draft.value = drafts.get(key) ?? ''
+    void nextTick(resizePrompt)
+  },
+)
 const scroller = ref<HTMLElement | null>(null)
 /** Pin to the bottom only while the reader is already there. */
 const pinned = ref(true)

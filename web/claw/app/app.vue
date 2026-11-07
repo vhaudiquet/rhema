@@ -110,10 +110,16 @@ const attemptedAttachments = new Set<string>()
 // A replayed question's images fetch the same way — the stream carries
 // their attachment ids, never the bytes; locally sent rows hold their
 // own object URLs.
+//
+// The watch is deep (rows mutate in place as their bytes land), and it
+// fires on every streamed delta, so the scan covers only the items the
+// last pass did not see — the transcript only ever appends.
+let scannedItems = 0
+
 watch(
   transcriptItems,
   (items) => {
-    for (const item of items) {
+    for (const item of items.slice(scannedItems)) {
       if (item.kind === 'attachment') {
         const { id, media, url } = item.attachment
         if (media !== 'image' || url !== null || attemptedAttachments.has(id)) continue
@@ -134,6 +140,7 @@ watch(
         }
       }
     }
+    scannedItems = items.length
   },
   { deep: true },
 )
@@ -435,7 +442,7 @@ async function removeProvider(id: string): Promise<void> {
 async function send(message: { text: string; images: StagedImage[] }): Promise<void> {
   // The optimistic row renders the staged previews; the stream's
   // user_message echo carries the stored ids and dedupes against it.
-  transcript.addSent(
+  const rowId = transcript.addSent(
     message.text,
     message.images.map(({ media_type, url, name }) => ({ id: null, media_type, url, name })),
   )
@@ -451,6 +458,9 @@ async function send(message: { text: string; images: StagedImage[] }): Promise<v
     )
     apiError.value = null
   } catch (err) {
+    // The claw never took the message: retract the optimistic row, or
+    // it would sit there forever waiting for a reply that cannot come.
+    transcript.removeSent(rowId)
     noteApiError(err)
   } finally {
     busy.value = false
@@ -503,10 +513,14 @@ function saveToken(): void {
   authRequired.value = false
   apiError.value = null
   // The stream's retry loop reads the token fresh each attempt, so it
-  // recovers on its own; the polls below confirm the token works.
+  // recovers on its own; everything the 401 froze reloads now — the
+  // polls confirm the token works, and the identity and accounts pages
+  // were left empty by the failed fetches that raised the banner.
   void checkHealth()
   void refreshProviders()
   void refreshSessions()
+  void refreshIdentity()
+  void refreshAccounts()
 }
 
 // --- the one live subscription ---------------------------------------
@@ -524,8 +538,14 @@ function resubscribe(): void {
       streamStatus.value = status
       // A retry reopens the stream with the claw's replay of the
       // recorded turns: drop the mirror and let it rebuild, or the
-      // replay would double everything already on screen.
-      if (status === 'reconnecting') transcript.reset()
+      // replay would double everything already on screen. The
+      // attempted-attachment set goes too — a fetch that failed during
+      // the outage must retry against the recovered stream.
+      if (status === 'reconnecting') {
+        transcript.reset()
+        attemptedAttachments.clear()
+        scannedItems = 0
+      }
       if (status === 'open') void refreshSessions()
     },
     onNotice: pushNotice,

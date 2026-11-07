@@ -199,19 +199,24 @@ function sourceTitle(source: string): string {
   }
 }
 
-// A login landed: the claw answered with a new state object (a failed
-// one leaves the old, and the banner names the error), so the form
-// forgets what it held and closes.
+// A login landed: the claw answered with a new state object whose
+// roster carries the new id, so the form forgets what it held and
+// closes. A state change without the id means the login failed (the
+// banner names the error) or an unrelated edit replaced the state —
+// either way the form stays open, no longer waiting on a response that
+// already came back.
 watch(
   () => props.state,
   (state, previous) => {
     if (pendingAdd.value !== null && state !== previous) {
+      if (state?.providers.some((p) => p.id === pendingAdd.value)) {
+        loginOpen.value = false
+        addName.value = ''
+        addApiKey.value = ''
+        addUrl.value = ''
+        addKind.value = ''
+      }
       pendingAdd.value = null
-      loginOpen.value = false
-      addName.value = ''
-      addApiKey.value = ''
-      addUrl.value = ''
-      addKind.value = ''
     }
   },
 )

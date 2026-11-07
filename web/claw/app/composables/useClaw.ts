@@ -235,6 +235,13 @@ export type StreamStatus = 'connecting' | 'open' | 'reconnecting'
 
 const INTERACTIVE_PREFIX = 'interactive:'
 
+/** How long the stream may go silent before this client gives up on the
+ * connection and reconnects: the claw sends a keep-alive comment every
+ * fifteen seconds (hub.rs), so three missed ones means the path is
+ * black-holed — a half-open TCP after a laptop sleep shows the same
+ * 'live' badge a healthy stream does without this check. */
+const STREAM_SILENCE_TIMEOUT_MS = 45000
+
 /** Interactive keys are the only ones message ingest accepts (http.rs `messages`). */
 export function isInteractive(key: string): boolean {
   return key.startsWith(INTERACTIVE_PREFIX)
@@ -530,9 +537,27 @@ export function useClaw(token: Ref<string | null>): ClawApi {
   }
 
   function subscribeEvents(key: string, handlers: StreamHandlers): { close: () => void } {
-    const controller = new AbortController()
     let closed = false
     let attempt = 0
+    /** The attempt in flight; `close` aborts it mid-read. */
+    let current: AbortController | null = null
+    /** Set when the watchdog, not the server, cut the attempt — the
+     * notice says so instead of naming an opaque abort error. */
+    let timedOut = false
+    let silence: ReturnType<typeof setTimeout> | null = null
+
+    const rearmSilence = (): void => {
+      if (silence !== null) clearTimeout(silence)
+      silence = setTimeout(() => {
+        if (closed) return
+        timedOut = true
+        current?.abort()
+      }, STREAM_SILENCE_TIMEOUT_MS)
+    }
+    const stopSilence = (): void => {
+      if (silence !== null) clearTimeout(silence)
+      silence = null
+    }
 
     const status = (next: StreamStatus) => {
       if (!closed) handlers.onStatus?.(next)
@@ -541,6 +566,10 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     void (async () => {
       while (!closed) {
         status(attempt === 0 ? 'connecting' : 'reconnecting')
+        const controller = new AbortController()
+        current = controller
+        timedOut = false
+        rearmSilence()
         try {
           const response = await fetch(
             `${base()}/v1/sessions/${encodeURIComponent(key)}/events`,
@@ -560,12 +589,15 @@ export function useClaw(token: Ref<string | null>): ClawApi {
           await readFrames(
             response.body,
             (data) => {
+              rearmSilence()
               const event = parseTurnEvent(data)
               if (event) handlers.onEvent(event)
             },
             (comment) => {
-              // Keep-alives come through here too; only the hub's
-              // dropped-events notice is worth raising.
+              // Keep-alives come through here too; each one proves the
+              // path alive, and only the hub's dropped-events notice is
+              // worth raising.
+              rearmSilence()
               if (comment.startsWith('lagged')) {
                 handlers.onNotice?.(`stream lagged — ${comment.replace(/^lagged;\s*/, '')}`)
               }
@@ -574,15 +606,20 @@ export function useClaw(token: Ref<string | null>): ClawApi {
           if (closed) break
           throw new ClawError(0, 'stream closed by the claw')
         } catch (cause) {
-          if (closed || controller.signal.aborted) break
+          if (closed) break
           // Backoff caps at 15s: a live stream of a running turn is the
           // UI's whole job, so retries stay eager but not tight-looped.
           const backoff = Math.min(15000, 1000 * 2 ** attempt++)
           handlers.onNotice?.(
-            `event stream dropped (${cause instanceof Error ? cause.message : String(cause)}); retrying in ${backoff / 1000}s`,
+            timedOut
+              ? `the event stream went quiet (no keep-alive for ${STREAM_SILENCE_TIMEOUT_MS / 1000}s); reconnecting in ${backoff / 1000}s`
+              : `event stream dropped (${cause instanceof Error ? cause.message : String(cause)}); retrying in ${backoff / 1000}s`,
           )
           status('reconnecting')
           await new Promise((resolve) => setTimeout(resolve, backoff))
+        } finally {
+          stopSilence()
+          if (current === controller) current = null
         }
       }
     })()
@@ -590,7 +627,8 @@ export function useClaw(token: Ref<string | null>): ClawApi {
     return {
       close() {
         closed = true
-        controller.abort()
+        stopSilence()
+        current?.abort()
       },
     }
   }

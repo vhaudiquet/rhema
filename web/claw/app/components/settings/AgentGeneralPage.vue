@@ -207,7 +207,7 @@ const CAPS: Record<keyof IdentityTexts, number> = {
       <SettingCard
         v-if="identity"
         title="Avatar & logo"
-        meta="png or jpeg, up to 2 MiB — uploads apply immediately"
+        meta="png, jpeg, or webp, up to 2 MiB — uploads apply immediately"
       >
         <SettingRow
           title="Avatar"

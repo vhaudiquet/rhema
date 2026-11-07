@@ -20,8 +20,8 @@ const emit = defineEmits<{
 
 const adding = ref(false)
 
-/// The form's own shape: every field a string (empty = omit on the
-/// wire), so the template never fights `NewAccount`'s optional fields.
+// The form's own shape: every field a string (empty = omit on the
+// wire), so the template never fights `NewAccount`'s optional fields.
 const draft = ref({
   label: '',
   service: '',

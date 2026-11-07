@@ -28,7 +28,33 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return defaultLinkOpen(tokens, idx, options, env, self)
 }
 
-const html = computed(() => md.render(props.text))
+// Streaming re-parses the whole reply per delta — quadratic over the
+// reply's length, and every render lands on the main thread. A short
+// trailing debounce keeps the render at a readable cadence while the
+// turn streams; a settled text renders at once, so a finished reply is
+// never a frame behind its last delta.
+const html = ref('')
+let renderTimer: ReturnType<typeof setTimeout> | null = null
+
+watch(
+  () => props.text,
+  (text) => {
+    if (renderTimer !== null) clearTimeout(renderTimer)
+    if (!props.streaming) {
+      html.value = md.render(text)
+      return
+    }
+    renderTimer = setTimeout(() => {
+      renderTimer = null
+      html.value = md.render(props.text)
+    }, 80)
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => {
+  if (renderTimer !== null) clearTimeout(renderTimer)
+})
 </script>
 
 <template>
