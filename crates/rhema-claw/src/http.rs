@@ -771,7 +771,15 @@ async fn events(
         // the hub appends and broadcasts under one lock, so the seq the
         // pump counts matches the record's: a lagged drop is announced
         // with how many were skipped, and the count steps over them.
-        let mut next_seq = history.last().map_or(0, |(seq, _)| seq + 1);
+        let mut next_seq = match history.last() {
+            Some((seq, _)) => seq + 1,
+            // A cursor replay with an empty gap names no seq to count
+            // from, but the record's next one is the cursor's successor
+            // — zero would hand the client a number that names nothing
+            // and make its next resume replay the whole record.
+            None if !stale => query.since.map_or(0, |cursor| cursor + 1),
+            None => 0,
+        };
         if stale {
             // The cursor named events the record no longer holds: the
             // replay above is the tail, not the gap. Say so before it,

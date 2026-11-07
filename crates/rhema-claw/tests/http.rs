@@ -777,6 +777,88 @@ async fn a_since_cursor_replays_only_the_events_past_it() {
     // The frames carry the record's seq: the delta is seq 1, the end
     // marker seq 2 — the user_message the cursor named was seq 0.
     assert!(seen.contains("id: 1"), "the frame names its seq: {seen}");
+
+    // A live turn after the replay continues the record's numbering: a
+    // pump that counted from the replay alone would restart at zero and
+    // hand the client a cursor that names nothing.
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "again"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+    read_until(&mut stream, &mut seen, r#""text":"again""#).await;
+    assert!(
+        seen.contains("id: 3"),
+        "the live frame continues the seqs: {seen}"
+    );
+}
+
+/// A cursor already at the record's head replays nothing, and the live
+/// feed that follows still names the record's next seq — not zero, which
+/// would leave the client's next resume replaying the whole record.
+#[tokio::test]
+async fn a_cursor_at_the_head_leaves_the_live_frames_numbered() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config(&dir, None);
+    let daemon = Daemon::build(
+        &config,
+        mock_registry(Arc::new(MockProvider::new([reply("one"), reply("two")]))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "hi"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+
+    // Watch the first turn land, and note the seq it ended at.
+    let first = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut first_stream = sse_body(first).await;
+    let mut first_seen = String::new();
+    read_until(&mut first_stream, &mut first_seen, r#""type":"turn_done""#).await;
+    drop(first_stream);
+    let head: i64 = first_seen
+        .lines()
+        .filter_map(|line| line.strip_prefix("id: "))
+        .filter_map(|id| id.trim().parse::<i64>().ok())
+        .max()
+        .expect("the frames name their seqs");
+
+    // Resume from the turn's head: nothing to replay, and the next live
+    // frame must still name the seq after it.
+    let events = client
+        .get(format!(
+            "{base}/v1/sessions/interactive:web/events?since={head}"
+        ))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "second"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+    read_until(&mut stream, &mut seen, r#""text":"second""#).await;
+    assert!(
+        seen.contains(&format!("id: {}", head + 1)),
+        "the live frame names the record's next seq: {seen}"
+    );
+    assert!(!seen.contains("id: 0"), "not a restarted count: {seen}");
 }
 
 /// A client with nothing cached opens on the newest turn, not on the
