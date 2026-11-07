@@ -240,6 +240,7 @@ impl App {
             effective.model.clone(),
             backend.provider(),
             &self.config.skills_disabled.clone(),
+            &self.config.disabled_subagents,
             &effective,
             self.session_profile
                 .as_deref()

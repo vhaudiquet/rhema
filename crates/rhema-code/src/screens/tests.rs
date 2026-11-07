@@ -509,6 +509,7 @@ fn subagents_screen() -> SettingsScreen {
     settings.section = SettingsSection::Subagents;
     settings.subagents = vec![
         SubagentRow {
+            enabled: true,
             name: "general-purpose".into(),
             description: "the built-in delegation".into(),
             model: None,
@@ -517,6 +518,7 @@ fn subagents_screen() -> SettingsScreen {
             path: None,
         },
         SubagentRow {
+            enabled: true,
             name: "reviewer".into(),
             description: "reviews diffs".into(),
             model: Some("zai/glm".into()),
@@ -544,6 +546,33 @@ fn settings_subagent_rows_move_and_enter_edits() {
     assert_eq!(
         settings.handle_key(key(KeyCode::Char('e'))),
         SettingsAction::EditSubagent
+    );
+}
+
+#[test]
+fn settings_subagent_rows_move_and_space_toggles_while_enter_edits() {
+    let mut settings = subagents_screen();
+    // Space flips the row's state into an action; enter stays the edit,
+    // and `e` with it — the toggle never steals the editor's keys.
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char(' '))),
+        SettingsAction::ToggleSubagent
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Enter)),
+        SettingsAction::EditSubagent
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char('e'))),
+        SettingsAction::EditSubagent
+    );
+    // The toggle only arms on a subagent row: the MCP page's space arm
+    // is another section's, and the empty page has nothing to act on.
+    let mut settings = settings_screen();
+    settings.section = SettingsSection::Subagents;
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char(' '))),
+        SettingsAction::None
     );
 }
 

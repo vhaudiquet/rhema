@@ -109,6 +109,15 @@ pub struct CodingAgentConfig {
     /// [`mcp_servers`](Self::mcp_servers) by config name; the wire
     /// step filters the same set before anything spawns.
     pub disabled_mcp_servers: std::collections::BTreeSet<String>,
+    /// Subagent definition folder names the subagent wire drops from
+    /// discovery — the persisted off switch a frontend reads out of
+    /// its stored settings, the [`disabled_skills`](Self::disabled_skills)
+    /// mechanism. The filter runs before the catalog builds, so a
+    /// disabled name is in neither the prompt's tool list nor the
+    /// tools array; the built-in `general-purpose` answers to its name
+    /// like any other, and a set holding every discovered name leaves
+    /// no catalog, which drops the tool whole.
+    pub disabled_subagents: std::collections::BTreeSet<String>,
     /// The environment section rendered into the system prompt: machine
     /// facts probed where commands run (see the [`environment`
     /// module](crate::environment)). `None` renders the section empty.
@@ -188,6 +197,7 @@ impl CodingAgentConfig {
             shell_env: std::collections::BTreeMap::new(),
             mcp_servers: Vec::new(),
             disabled_mcp_servers: std::collections::BTreeSet::new(),
+            disabled_subagents: std::collections::BTreeSet::new(),
             environment: None,
             user_preferences: None,
             vision: None,

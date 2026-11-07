@@ -184,11 +184,17 @@ pub(crate) fn system_show_at_with_mcp(
     mcp: Vec<rhema_agent_tools::prompt::McpServerLine>,
 ) -> anyhow::Result<String> {
     let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
-    let mut extra = rhema_subagents::extra_specs(&workspace);
+    let home = rhema_config::Home::discover().ok();
+    // The preview shows what turns send: a disabled subagent is not in
+    // the catalog, so it is not in the preview either.
+    let disabled_subagents = Config::load()
+        .ok()
+        .map(|c| c.disabled_subagents.clone())
+        .unwrap_or_default();
+    let mut extra = rhema_subagents::extra_specs(&workspace, &disabled_subagents);
     // The transcript is on by default, so the default preview names
     // zoom, exactly as the agent's prompt does.
     extra.push(rhema_transcript::Zoom::spec());
-    let home = rhema_config::Home::discover().ok();
     let agents = home.as_ref().map(|home| home.agents_skills());
     let global = home.as_ref().map(|home| home.skills());
     let disabled = Config::load()

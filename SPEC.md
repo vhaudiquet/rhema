@@ -826,6 +826,18 @@ line lands in the transcript as a muted notice, not a user bubble.
 An idle session's prompt path reads as a user line instead: it is
 the turn input the model received.
 
+**Off switch.** The config's `disabled_subagents` set is the third
+persisted off switch, the `skills_disabled` and `disabled_mcp_servers`
+twins: the settings Subagents page flips it with space (enter stays
+the edit), and discovery filters it before the catalog builds —
+`wire_at` and `extra_specs` alike, so the prompt preview and the turns
+agree. The built-in answers to its folder name like any definition,
+and a set holding every discovered name leaves no catalog, which drops
+the `subagent` tool whole and leaves the config unwired. Off rows
+still list in the UI, dimmed, the skills page's rendering; the running
+agent rebuilds on a toggle carrying the conversation over, so the very
+next turn sees the change.
+
 **Resume and replay.** Jobs are in-memory, so a crash mid-turn with
 jobs running loses them. The committed history shows the start calls
 answered with their job ids — nothing dangles, revive has nothing to

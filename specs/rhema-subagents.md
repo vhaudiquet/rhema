@@ -197,14 +197,18 @@ subagents on its own.
    `Overlay::new(shell, extra)` and `stamped_system` renders the merged
    spec list, so the prompt and the tools array cannot drift.
 3. **`wire(provider, config) -> config`** — discover (the built-in
-   `general-purpose` plus the folders), then stamp the subagents'
+   `general-purpose` plus the folders), drop the config's
+   `disabled_subagents` names (the persisted off switch; the built-in
+   answers to its folder name like any definition, and a set holding
+   every name leaves the config unwired), then stamp the subagents'
    base prompt off the config (the parent's own sections, the shell's
    workspace), build the shell and the `SubagentTools`, set both
    fields, return. The frontends apply the prompt sections before the
    wire, so the stamp carries them. Each frontend calls it at
    its agent-construction sites (TUI, headless one-shot; the claw and
    ACP when they adopt the feature). The `/system` preview goes through
-   the same discovery so what is previewed is what turns send.
+   the same filtered discovery so what is previewed is what turns
+   send.
 
 ## 6. How we know it works
 

@@ -84,7 +84,11 @@ impl App {
             .join("skills")
             .to_string_lossy()
             .into_owned();
-        settings.subagents = subagent_rows(global_subagents.as_deref(), &workspace);
+        settings.subagents = subagent_rows(
+            global_subagents.as_deref(),
+            &workspace,
+            &config.disabled_subagents,
+        );
         settings.subagents_global_dir =
             global_subagents.map(|dir| dir.to_string_lossy().into_owned());
         settings.subagents_workspace_dir = workspace
@@ -111,7 +115,11 @@ impl App {
         let workspace = std::fs::canonicalize(&self.options.workspace)
             .unwrap_or_else(|_| self.options.workspace.clone());
         let global = self.config_root.clone();
-        settings.subagents = subagent_rows(global.as_deref(), &workspace);
+        settings.subagents = subagent_rows(
+            global.as_deref(),
+            &workspace,
+            &self.config.disabled_subagents,
+        );
         settings.subagents_global_dir = global.map(|dir| dir.to_string_lossy().into_owned());
         settings.subagents_workspace_dir = workspace
             .join(".rhema")
@@ -431,6 +439,40 @@ impl App {
                 }
             }
             _ => {}
+        }
+        // The prompt change rides the next agent build; mid-turn the
+        // rebuild would race the running one, so it waits.
+        if !self.turn.running
+            && let Err(err) = self.rebuild_live_agent(false)
+        {
+            self.error = Some(err);
+        }
+    }
+
+    /// Flips a subagent definition's on/off state: the config's
+    /// `disabled_subagents` set flips, the change persists, and the
+    /// running agent rebuilds carrying the conversation over — the
+    /// `subagent` tool's catalog is in the system prompt, so the very
+    /// next turn sees the change. A set left holding every name (the
+    /// built-in included) drops the tool whole. The open screen's row
+    /// follows; a running turn defers the rebuild to its end, the
+    /// toggle itself lands immediately.
+    pub(crate) fn toggle_subagent(&mut self, name: &str) {
+        let turning_on = self.config.disabled_subagents.contains(name);
+        if turning_on {
+            self.config.disabled_subagents.remove(name);
+        } else {
+            self.config.disabled_subagents.insert(name.to_owned());
+        }
+        if !self.save_config() {
+            return;
+        }
+        if let Screen::Settings(settings) = &mut self.screen {
+            for row in &mut settings.subagents {
+                if row.name == name {
+                    row.enabled = !row.enabled;
+                }
+            }
         }
         // The prompt change rides the next agent build; mid-turn the
         // rebuild would race the running one, so it waits.

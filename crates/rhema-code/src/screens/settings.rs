@@ -106,6 +106,9 @@ pub enum SettingsAction {
     /// The built-in has no file — the app copies it into the global
     /// directory first, where it shadows the built-in from then on.
     EditSubagent,
+    /// Space on a subagent row: flip the definition's on/off state
+    /// (enter stays the edit, the skills page's toggle's twin).
+    ToggleSubagent,
     /// Enter or Space on a skills row: flip the skill's on/off state.
     ToggleSkill,
     /// Enter on a sandbox kind row: run `bash` under it.
@@ -223,6 +226,10 @@ impl SubagentSource {
 /// One discovered subagent row of the Subagents page.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SubagentRow {
+    /// Whether the definition reaches the subagent wire's catalog —
+    /// the config's `disabled_subagents` set, inverted. Off rows still
+    /// list, dimmed; only discovery filters them.
+    pub enabled: bool,
     /// The definition's folder name.
     pub name: String,
     /// The frontmatter description the parent triggers on.
@@ -624,7 +631,8 @@ impl SettingsScreen {
     /// backs out (dialog first, then the screen), enter acts on the
     /// selected row, `d` forgets an instance or removes a profile, `c`
     /// cycles a profile's name color (and colors the Appearance page),
-    /// `e` edits the selected subagent, and the Appearance page carries
+    /// `e` edits the selected subagent, space toggles a skill or
+    /// subagent or mutes an MCP server, and the Appearance page carries
     /// `t`/`b`/`i` as shortcuts for its remaining toggles.
     pub fn handle_key(&mut self, key: KeyEvent) -> SettingsAction {
         if let Some(action) = self
@@ -736,6 +744,9 @@ impl SettingsScreen {
             }
             KeyCode::Char(' ' | 't') if self.selected_skill().is_some() => {
                 SettingsAction::ToggleSkill
+            }
+            KeyCode::Char(' ') if self.selected_subagent().is_some() => {
+                SettingsAction::ToggleSubagent
             }
             KeyCode::Char(' ') if self.selected_mcp_server().is_some() => {
                 SettingsAction::ToggleMcpServer

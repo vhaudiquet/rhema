@@ -164,6 +164,9 @@ impl AgentAssembly {
             disabled_skills: Default::default(),
             mcp_servers: Vec::new(),
             disabled_mcp_servers: std::collections::BTreeSet::new(),
+            // No subagent wire runs here (nothing discovers off a
+            // filesystem), so nothing to hold back either.
+            disabled_subagents: std::collections::BTreeSet::new(),
             max_turn_steps: self.max_turn_steps,
             thinking: self.thinking,
             tools: Some(shell.clone()),

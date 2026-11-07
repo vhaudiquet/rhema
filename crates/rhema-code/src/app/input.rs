@@ -320,6 +320,21 @@ impl App {
             }
             SettingsAction::RemoveSandboxInstance => self.remove_sandbox_instance(),
             SettingsAction::EditSubagent => self.edit_subagent(),
+            SettingsAction::ToggleSubagent => {
+                let name = match &self.screen {
+                    Screen::Settings(settings) => {
+                        settings.selected_subagent().map(|row| row.name.clone())
+                    }
+                    _ => None,
+                };
+                match name {
+                    Some(name) => {
+                        self.toggle_subagent(&name);
+                        Vec::new()
+                    }
+                    None => Vec::new(),
+                }
+            }
             SettingsAction::ToggleSkill => {
                 let name = match &self.screen {
                     Screen::Settings(settings) => {

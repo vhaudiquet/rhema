@@ -160,6 +160,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         thinking,
         base_system: base_system.clone(),
         disabled_skills: config.skills_disabled.clone(),
+        disabled_subagents: config.disabled_subagents.clone(),
         ..rhema_coding_agent::CodingAgentConfig::new(&model, &workspace)
     };
     // Where bash runs: the sandbox choice engages only off `local`, and

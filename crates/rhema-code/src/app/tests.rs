@@ -4030,7 +4030,8 @@ fn subagent_rows_carry_the_provenance_discovery_shadows_by() {
     )
     .unwrap();
 
-    let rows = subagent_rows(Some(global.path()), workspace.path());
+    let disabled = Default::default();
+    let rows = subagent_rows(Some(global.path()), workspace.path(), &disabled);
     let reviewer = rows
         .iter()
         .find(|row| row.name == "reviewer")
@@ -4048,13 +4049,42 @@ fn subagent_rows_carry_the_provenance_discovery_shadows_by() {
 
     // Without the workspace file the same name reads as global.
     std::fs::remove_dir_all(&workspace_folder).unwrap();
-    let rows = subagent_rows(Some(global.path()), workspace.path());
+    let rows = subagent_rows(Some(global.path()), workspace.path(), &Default::default());
     let reviewer = rows.iter().find(|row| row.name == "reviewer").unwrap();
     assert_eq!(reviewer.source, SubagentSource::Global);
     assert_eq!(
         reviewer.path.as_deref(),
         Some(global_folder.join("SUBAGENT.md").as_path())
     );
+}
+
+#[test]
+fn subagent_rows_carry_the_disabled_set_as_the_enabled_flag() {
+    let global = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let folder = global.path().join("reviewer");
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("SUBAGENT.md"),
+        "---\ndescription: reviews diffs\n---\n\nBody.\n",
+    )
+    .unwrap();
+
+    // The disabled set inverts into the flag: off rows still list.
+    let disabled = std::collections::BTreeSet::from(["reviewer".to_owned()]);
+    let rows = subagent_rows(Some(global.path()), workspace.path(), &disabled);
+    assert_eq!(rows.len(), 2, "the built-in and the off reviewer");
+    let reviewer = rows.iter().find(|row| row.name == "reviewer").unwrap();
+    assert!(!reviewer.enabled);
+    let builtin = rows
+        .iter()
+        .find(|row| row.name == "general-purpose")
+        .expect("the built-in lists beside the disabled row");
+    assert!(builtin.enabled);
+
+    // An empty set enables everything.
+    let rows = subagent_rows(Some(global.path()), workspace.path(), &Default::default());
+    assert!(rows.iter().all(|row| row.enabled));
 }
 
 #[test]
@@ -4691,6 +4721,44 @@ fn the_wizard_s_colors_step_previews_and_the_settings_skills_page_toggles() {
     // re-seed from the re-enable path).
     h.app.on_key(key(KeyCode::Enter));
     assert!(!h.app.config.skills_disabled.contains("unslop"));
+}
+
+#[test]
+fn the_subagents_page_toggles_through_space_and_persists_it() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .open_settings_at(crate::screens::SettingsSection::Subagents);
+    if let Screen::Settings(settings) = &mut h.app.screen {
+        settings.subagents = vec![crate::screens::SubagentRow {
+            enabled: true,
+            name: "reviewer".into(),
+            description: "reviews diffs".into(),
+            model: None,
+            max_steps: None,
+            source: crate::screens::SubagentSource::Workspace,
+            path: Some("/w/.rhema/subagents/reviewer/SUBAGENT.md".into()),
+        }];
+    }
+    // Space (not enter — that opens $EDITOR) flips the row into the
+    // disabled set and persists it.
+    h.app.on_key(key(KeyCode::Char(' ')));
+    assert!(
+        h.app.config.disabled_subagents.contains("reviewer"),
+        "the toggle lands in the disabled set"
+    );
+    assert_eq!(
+        h.store.load().unwrap().disabled_subagents,
+        h.app.config.disabled_subagents
+    );
+    if let Screen::Settings(settings) = &h.app.screen {
+        assert!(!settings.subagents[0].enabled, "the row follows");
+    }
+    // Space again turns it back on.
+    h.app.on_key(key(KeyCode::Char(' ')));
+    assert!(!h.app.config.disabled_subagents.contains("reviewer"));
+    if let Screen::Settings(settings) = &h.app.screen {
+        assert!(settings.subagents[0].enabled, "the row follows back");
+    }
 }
 
 #[test]

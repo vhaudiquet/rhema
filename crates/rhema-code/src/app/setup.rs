@@ -579,8 +579,13 @@ pub enum Effect {
 /// provenance and the file an edit opens. The source is the file check
 /// discovery shadows by — a workspace definition outranks a global one
 /// of the same name, and a definition of the built-in's name replaces
-/// the built-in wholesale.
-pub(crate) fn subagent_rows(global: Option<&Path>, workspace: &Path) -> Vec<SubagentRow> {
+/// the built-in wholesale. `disabled` is the config's off switch: off
+/// rows still list, with `enabled` false; only discovery filters them.
+pub(crate) fn subagent_rows(
+    global: Option<&Path>,
+    workspace: &Path,
+    disabled: &std::collections::BTreeSet<String>,
+) -> Vec<SubagentRow> {
     rhema_subagents::discover(global, workspace)
         .into_iter()
         .map(|def| {
@@ -598,6 +603,7 @@ pub(crate) fn subagent_rows(global: Option<&Path>, workspace: &Path) -> Vec<Suba
                 }
             };
             SubagentRow {
+                enabled: !disabled.contains(&def.name),
                 name: def.name,
                 description: def.description,
                 model: def.model,
@@ -675,14 +681,16 @@ pub(crate) fn shadow_builtin(global: &Path, name: &str) -> std::io::Result<PathB
 fn agent_config(
     options: &RunOptions,
     model: Option<String>,
-    disabled: &std::collections::BTreeSet<String>,
+    disabled_skills: &std::collections::BTreeSet<String>,
+    disabled_subagents: &std::collections::BTreeSet<String>,
 ) -> CodingAgentConfig {
     CodingAgentConfig {
         max_turn_steps: options.max_steps,
         transcript: (!options.no_transcript).then(rhema_transcript::TranscriptSettings::default),
         thinking: options.thinking,
         base_system: options.base_system.clone(),
-        disabled_skills: disabled.clone(),
+        disabled_skills: disabled_skills.clone(),
+        disabled_subagents: disabled_subagents.clone(),
         ..CodingAgentConfig::new(model.unwrap_or_default(), &options.workspace)
     }
 }
@@ -707,11 +715,12 @@ pub(crate) fn session_agent_config(
     model: Option<String>,
     provider: Arc<dyn ModelProvider>,
     disabled_skills: &std::collections::BTreeSet<String>,
+    disabled_subagents: &std::collections::BTreeSet<String>,
     profile: &rhema_config::Profile,
     session_key: &str,
     disabled_mcp: &std::collections::BTreeSet<String>,
 ) -> (CodingAgentConfig, rhema_subagents::SubagentHandle) {
-    let mut config = agent_config(options, model, disabled_skills);
+    let mut config = agent_config(options, model, disabled_skills, disabled_subagents);
     if let Some(sandboxed) = sandboxed {
         sandboxed.apply_tools(&mut config);
     }

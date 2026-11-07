@@ -241,6 +241,7 @@ fn the_subagents_page_lists_the_definitions_and_their_targets() {
     settings.subagents_workspace_dir = "/w/.rhema/subagents".into();
     settings.subagents = vec![
         crate::screens::SubagentRow {
+            enabled: true,
             name: "general-purpose".into(),
             description: "Runs one self-contained task in a fresh agent".into(),
             model: None,
@@ -249,6 +250,7 @@ fn the_subagents_page_lists_the_definitions_and_their_targets() {
             path: None,
         },
         crate::screens::SubagentRow {
+            enabled: false,
             name: "reviewer".into(),
             description: "reviews diffs".into(),
             model: Some("zai/glm".into()),
@@ -278,10 +280,19 @@ fn the_subagents_page_lists_the_definitions_and_their_targets() {
         "the built-in inherits the model: {text}"
     );
     assert!(text.contains("zai/glm · 12 steps"), "{text}");
-    assert!(text.contains("reviews diffs"), "{text}");
+    assert!(
+        text.contains("reviews diffs"),
+        "an off row still lists: {text}"
+    );
+    assert!(text.contains("●"), "the on dot: {text}");
+    assert!(text.contains("○"), "the off dot: {text}");
     assert!(
         text.contains("enter/e - edit in $EDITOR"),
         "the footer hints: {text}"
+    );
+    assert!(
+        text.contains("space - toggle on and off"),
+        "the footer hints the toggle: {text}"
     );
     // Every sidebar row plus the two definition rows are clickable.
     assert_eq!(

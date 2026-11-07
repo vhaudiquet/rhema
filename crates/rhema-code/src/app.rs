@@ -422,6 +422,7 @@ impl App {
                         effective.model.clone(),
                         provider.clone(),
                         &setup.config.skills_disabled,
+                        &setup.config.disabled_subagents,
                         &effective,
                         setup
                             .options

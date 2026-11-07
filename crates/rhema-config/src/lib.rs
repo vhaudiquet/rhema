@@ -860,6 +860,14 @@ pub struct Settings {
     /// not define is simply inert.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub disabled_mcp_servers: BTreeSet<String>,
+    /// Subagent definition folder names held back from discovery: the
+    /// persisted off switch, the other two sets' twin. A disabled name
+    /// leaves the `subagent` tool's catalog and the prompt; the
+    /// built-in included, so a set holding every name drops the tool
+    /// whole. Frontends may still list disabled definitions, greyed
+    /// out — only discovery filters them.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_subagents: BTreeSet<String>,
 }
 
 /// The profile the flags and stores fall back to: fresh setups seed it,
@@ -883,6 +891,7 @@ impl Default for Settings {
             profiles: default_profiles(),
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
+            disabled_subagents: BTreeSet::new(),
         }
     }
 }
@@ -1324,6 +1333,30 @@ mod tests {
     }
 
     #[test]
+    fn disabled_subagents_round_trip_and_default_to_quiet() {
+        // No subagent is off by default.
+        assert!(Settings::default().disabled_subagents.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let settings = Settings {
+            disabled_subagents: BTreeSet::from(["scout".to_owned(), "reviewer".to_owned()]),
+            ..Settings::default()
+        };
+        Settings::save_to(&path, &settings).unwrap();
+        let loaded = Settings::load_from(&path).unwrap();
+        assert_eq!(
+            loaded.disabled_subagents,
+            BTreeSet::from(["scout".to_owned(), "reviewer".to_owned()])
+        );
+        // A file written before the field existed keeps reading as the
+        // quiet state.
+        std::fs::write(&path, "profiles: {}\n").unwrap();
+        let old = Settings::load_from(&path).unwrap();
+        assert!(old.disabled_subagents.is_empty());
+    }
+
+    #[test]
     fn env_key_wins_over_stored_and_blank_counts_as_unset() {
         let env = |name: &str| match name {
             "GEMINI_API_KEY" => Some("  ".into()),
@@ -1546,6 +1579,7 @@ profiles:
             )]),
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
+            disabled_subagents: BTreeSet::new(),
         };
         Settings::save_to(&path, &config).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -1936,6 +1970,7 @@ profiles:
             ]),
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
+            disabled_subagents: BTreeSet::new(),
         };
         let work = config.effective(Some("work"));
         assert_eq!(work.provider.as_deref(), Some("openrouter"));
@@ -2126,6 +2161,7 @@ profiles:
             ]),
             skills_disabled: BTreeSet::new(),
             disabled_mcp_servers: BTreeSet::new(),
+            disabled_subagents: BTreeSet::new(),
         };
         let store = VolatileSecretStore::new();
         assert_eq!(config.migrate_secrets(&store), 2);

@@ -481,9 +481,23 @@ pub(crate) fn settings_page(
                 // under it are description, not a second target.
                 row_hits.push((lines.len(), SettingsHit::PageRow(index)));
                 let marker = Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text);
+                // The dot is the on/off state: filled and ok-green on,
+                // hollow and dim off — the Skills page's pair.
+                let dot = if subagent.enabled { "●" } else { "○" };
+                let dot_color = if subagent.enabled {
+                    theme.ok
+                } else {
+                    theme.text3
+                };
                 let line = Line::from(vec![
                     marker,
-                    Span::raw(subagent.name.clone()).fg(theme.text),
+                    Span::raw(dot).fg(dot_color),
+                    Span::raw(" ").fg(theme.text3),
+                    Span::raw(subagent.name.clone()).fg(if subagent.enabled {
+                        theme.text
+                    } else {
+                        theme.text3
+                    }),
                     Span::raw(format!(" · {}", subagent.source.label())).fg(theme.text3),
                 ]);
                 lines.push(settings_row(line, selected, theme));
@@ -510,7 +524,9 @@ pub(crate) fn settings_page(
             }
             (
                 lines,
-                footer("enter/e - edit in $EDITOR; the built-in is copied to the global dir first"),
+                footer(
+                    "space - toggle on and off · enter/e - edit in $EDITOR; the built-in is copied to the global dir first",
+                ),
                 row_hits,
             )
         }

@@ -8,10 +8,14 @@
 //! announced to the model by the very instance that started it. The
 //! same call hands back a [`SubagentHandle`], the registry-backed
 //! status subscription a frontend's redraw tick renders one live line
-//! per job from. The catalog is never empty: the built-in
-//! `general-purpose` definition is always in it, discovered ones
-//! beside or shadowing it. [`extra_specs`] feeds the same discovery to
-//! a prompt preview, so what is previewed is what turns send.
+//! per job from. The catalog is never empty unless the config's
+//! disabled set says so: the built-in `general-purpose` definition is
+//! always discovered, discovered ones beside or shadowing it, and the
+//! config's `disabled_subagents` names drop before the catalog
+//! builds — a set holding every name leaves no catalog, and the
+//! config keeps its default wiring. [`extra_specs`] feeds the same
+//! filtered discovery to a prompt preview, so what is previewed is
+//! what turns send.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -129,11 +133,16 @@ pub fn wire_at(
     provider: Arc<dyn ModelProvider>,
     config: &mut CodingAgentConfig,
 ) -> SubagentHandle {
-    let defs = discover(global, &config.workspace);
+    let mut defs = discover(global, &config.workspace);
+    // The persisted off switch runs here, before the catalog builds:
+    // a disabled name is in neither the prompt's tool list nor the
+    // tools array, and the built-in answers to its folder name like
+    // any other definition.
+    defs.retain(|def| !config.disabled_subagents.contains(&def.name));
     if defs.is_empty() {
-        // Unreachable today (the built-in definition is always
-        // discovered), but the config stays untouched rather than
-        // advertising an empty catalog.
+        // Reachable only when every name — the built-in included —
+        // sits in the disabled set; the config stays untouched rather
+        // than advertising an empty catalog.
         return SubagentHandle::from_registry(Arc::new(Registry::new(
             crate::registry::DEFAULT_MAX_RUNNING,
         )));
@@ -219,17 +228,27 @@ fn subagent_base_system(config: &CodingAgentConfig, workspace: &Path) -> String 
     })
 }
 
-/// The specs discovered for `workspace` — empty when none are. A prompt
-/// preview passes this to `stamped_system` so the preview matches what
-/// turns send.
-pub fn extra_specs(workspace: &Path) -> Vec<ToolSpec> {
+/// The specs discovered for `workspace` minus the disabled names —
+/// empty when none survive. A prompt preview passes this to
+/// `stamped_system` so the preview matches what turns send; `disabled`
+/// is the config's persisted off switch, the same set the wire filters
+/// by.
+pub fn extra_specs(
+    workspace: &Path,
+    disabled: &std::collections::BTreeSet<String>,
+) -> Vec<ToolSpec> {
     let global = rhema_config::Home::discover().ok().map(|h| h.subagents());
-    extra_specs_at(global.as_deref(), workspace)
+    extra_specs_at(global.as_deref(), workspace, disabled)
 }
 
 /// [`extra_specs`] over an explicit global directory: the testable form.
-pub fn extra_specs_at(global: Option<&Path>, workspace: &Path) -> Vec<ToolSpec> {
-    let defs = discover(global, workspace);
+pub fn extra_specs_at(
+    global: Option<&Path>,
+    workspace: &Path,
+    disabled: &std::collections::BTreeSet<String>,
+) -> Vec<ToolSpec> {
+    let mut defs = discover(global, workspace);
+    defs.retain(|def| !disabled.contains(&def.name));
     if defs.is_empty() {
         Vec::new()
     } else {
@@ -241,6 +260,7 @@ pub fn extra_specs_at(global: Option<&Path>, workspace: &Path) -> Vec<ToolSpec> 
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
     use std::path::PathBuf;
 
     use rhema_coding_agent::stamped_system;
@@ -341,7 +361,7 @@ mod tests {
         );
         assert_eq!(shell.workspace(), root);
         assert_eq!(
-            extra_specs_at(Some(empty.path()), workspace.path()).len(),
+            extra_specs_at(Some(empty.path()), workspace.path(), &Default::default()).len(),
             1,
             "the preview sees the same built-in"
         );
@@ -352,7 +372,7 @@ mod tests {
     fn a_user_definition_shadows_the_builtin_in_the_catalog() {
         let (global, workspace) = workspace_with_defs();
         def_in(global.path(), "general-purpose", "my own generalist");
-        let specs = extra_specs_at(Some(global.path()), &workspace);
+        let specs = extra_specs_at(Some(global.path()), &workspace, &Default::default());
         let description = &specs[0].description;
         assert!(description.contains("my own generalist"), "{description}");
         assert!(
@@ -381,7 +401,7 @@ mod tests {
         assert!(steering.drain().is_empty(), "no jobs, no notifications");
 
         // The same discovery feeds the prompt preview.
-        let specs = extra_specs_at(Some(global.path()), &workspace);
+        let specs = extra_specs_at(Some(global.path()), &workspace, &Default::default());
         assert_eq!(specs.len(), 1);
         let prompt = stamped_system(None, &workspace, &specs).unwrap();
         assert!(prompt.contains("subagent"), "{prompt}");
@@ -390,6 +410,80 @@ mod tests {
         // The handle reads the same registry the config steers with.
         assert!(handle.status().is_empty());
         let _ = handle.steering().drain();
+    }
+
+    #[test]
+    fn the_disabled_set_drops_definitions_before_the_catalog_builds() {
+        let (global, workspace) = workspace_with_defs();
+
+        // The preview: a disabled name is in no spec. The built-in is
+        // always discovered too, so "every name" includes it.
+        let specs = extra_specs_at(
+            Some(global.path()),
+            &workspace,
+            &BTreeSet::from(["reviewer".to_owned(), "general-purpose".to_owned()]),
+        );
+        assert!(specs.is_empty(), "{specs:?}");
+
+        let specs = extra_specs_at(
+            Some(global.path()),
+            &workspace,
+            &BTreeSet::from(["reviewer".to_owned()]),
+        );
+        assert_eq!(specs.len(), 1);
+        assert!(
+            specs[0].description.contains("general-purpose"),
+            "{}",
+            specs[0].description
+        );
+
+        def_in(global.path(), "scout", "scouts ahead");
+        let specs = extra_specs_at(
+            Some(global.path()),
+            &workspace,
+            &BTreeSet::from(["reviewer".to_owned()]),
+        );
+        assert_eq!(specs.len(), 1);
+        assert!(
+            specs[0].description.contains("scouts ahead"),
+            "{}",
+            specs[0].description
+        );
+        assert!(
+            !specs[0].description.contains("reviews diffs"),
+            "{}",
+            specs[0].description
+        );
+
+        // The wire: the config's own set runs the same filter, the
+        // built-in answering to its name like any other.
+        def_in(global.path(), "general-purpose", "my generalist");
+        let mut config = CodingAgentConfig::new("m", &workspace);
+        config.disabled_subagents = BTreeSet::from([
+            "reviewer".to_owned(),
+            "scout".to_owned(),
+            "general-purpose".to_owned(),
+        ]);
+        let handle = wire_at(Some(global.path()), Arc::new(Never), &mut config);
+        assert!(
+            config.extra_resolver.is_none(),
+            "an empty catalog leaves the config unwired"
+        );
+        assert!(handle.status().is_empty());
+        let _ = handle.steering().drain();
+
+        // Disabling one of two leaves the other: the tool stays.
+        let mut config = CodingAgentConfig::new("m", &workspace);
+        config.disabled_subagents = BTreeSet::from(["reviewer".to_owned()]);
+        let _handle = wire_at(Some(global.path()), Arc::new(Never), &mut config);
+        let extra = config.extra_resolver.clone().expect("the tool");
+        let description = extra.specs()[0].description.clone();
+        assert!(description.contains("scouts ahead"), "{description}");
+        assert!(
+            description.contains("my generalist"),
+            "the unlisted built-in shadow stays: {description}"
+        );
+        assert!(!description.contains("reviews diffs"), "{description}");
     }
 
     #[test]

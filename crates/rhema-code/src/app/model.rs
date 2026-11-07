@@ -656,6 +656,7 @@ impl App {
             self.effective().model.clone(),
             provider.clone(),
             &self.config.skills_disabled.clone(),
+            &self.config.disabled_subagents,
             &self.effective(),
             self.session_profile
                 .as_deref()
