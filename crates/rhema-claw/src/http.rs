@@ -59,6 +59,7 @@ use crate::bootstrap::Bootstrap;
 use crate::hub::{EventHub, TurnEvent};
 use crate::interactive::WireImage;
 use crate::notifications::NotificationStore;
+use crate::steer::SteerRegistry;
 use crate::task_store::TaskStore;
 use crate::watch_store::{ClawStore, validate_watch};
 
@@ -85,6 +86,10 @@ pub struct ClawState {
     tasks: Arc<TaskStore>,
     bootstrap: Arc<Bootstrap>,
     hub: Arc<EventHub>,
+    /// The steer registry the messages route signals after its ingest:
+    /// a chat message into a key whose turn is live cuts that turn
+    /// short (see [`crate::steer`]).
+    steer: Arc<SteerRegistry>,
     backends: Arc<BackendRegistry>,
     settings: Arc<crate::settings::SettingsStore>,
     identity: Arc<crate::identity::IdentityStore>,
@@ -125,7 +130,7 @@ impl ClawState {
     /// `agent_token`.
     #[expect(
         clippy::too_many_arguments,
-        reason = "seventeen parts, each load-bearing"
+        reason = "eighteen parts, each load-bearing"
     )]
     pub fn new(
         dispatcher: Arc<Dispatcher>,
@@ -137,6 +142,7 @@ impl ClawState {
         tasks: Arc<TaskStore>,
         bootstrap: Arc<Bootstrap>,
         hub: Arc<EventHub>,
+        steer: Arc<SteerRegistry>,
         backends: Arc<BackendRegistry>,
         settings: Arc<crate::settings::SettingsStore>,
         identity: Arc<crate::identity::IdentityStore>,
@@ -159,6 +165,7 @@ impl ClawState {
             tasks,
             bootstrap,
             hub,
+            steer,
             backends,
             settings,
             identity,
@@ -204,6 +211,11 @@ impl ClawState {
     /// The event hub: turns are streamed from it.
     pub fn hub(&self) -> &EventHub {
         &self.hub
+    }
+
+    /// The steer registry: the messages route signals it.
+    pub fn steer(&self) -> &SteerRegistry {
+        &self.steer
     }
 
     /// The configured model — the shim's echo default.
@@ -630,13 +642,23 @@ async fn messages(
         )
             .into_response();
     }
-    if let Err(err) = drain(&state.driver, &state.dispatcher, &key).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": err.to_string()})),
-        )
-            .into_response();
-    }
+    // Steering: a message into a key whose turn is live cuts that turn
+    // short and runs instead of it. After the ingest, per the
+    // registry's contract — the signal must never outrun its message.
+    // The bool is informational: no live turn means the message simply
+    // waits for admission, as it always did.
+    state.steer().signal(key.as_str());
+    // The drain runs detached: a chat turn is minutes of tool rounds,
+    // and this route's contract is acceptance, not completion — the
+    // reply arrives on the event stream. Holding the POST for the
+    // whole turn would lock the sender's composer (and every message
+    // typed behind it) for that long; the daemon's tick is the backstop
+    // for a drain a process exit cuts.
+    tokio::spawn(drain_owned(
+        state.driver.clone(),
+        state.dispatcher.clone(),
+        key.clone(),
+    ));
     (
         StatusCode::ACCEPTED,
         Json(json!({"key": key.as_str(), "accepted": true})),
@@ -1725,6 +1747,19 @@ pub(crate) async fn drain(
         }
     }
     Ok(())
+}
+
+/// [`drain`] over owned handles: the shape the messages route spawns,
+/// since a detached pass outlives the request that started it. A
+/// failure is logged, not delivered — the caller already got its 202.
+pub(crate) async fn drain_owned(
+    driver: Arc<Driver>,
+    dispatcher: Arc<Dispatcher>,
+    key: ResourceKey,
+) {
+    if let Err(err) = drain(&driver, &dispatcher, &key).await {
+        eprintln!("[claw] warning: detached drain for {key} failed: {err}");
+    }
 }
 
 /// `GET /v1/providers`: every constructible backend and the active pair.

@@ -345,6 +345,10 @@ impl Daemon {
             jobs: jobs_dispatcher.clone(),
         };
         let sources = extensions.sources(&lanes)?;
+        // The steer registry: the handler's dispatch chains listen on
+        // it, the messages route signals it — the interrupt that lets a
+        // chat message cut a running turn (see crate::steer).
+        let steer = Arc::new(crate::steer::SteerRegistry::new());
         let interactive_handler = InteractiveHandler::new(
             backends.clone(),
             interactive_workspace,
@@ -356,7 +360,8 @@ impl Daemon {
             config.max_turn_steps,
             extensions.clone(),
             config.transcript_enabled(),
-        );
+        )
+        .with_steer(steer.clone());
         let interactive_driver = Arc::new(
             Driver::new(
                 interactive_dispatcher.clone(),
@@ -396,6 +401,7 @@ impl Daemon {
             tasks,
             bootstrap,
             hub,
+            steer,
             backends.clone(),
             settings.clone(),
             identity,

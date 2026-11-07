@@ -111,7 +111,8 @@ pub enum TurnEvent {
     TurnDone {
         /// The turn's final assistant text, when it produced one.
         reply: Option<String>,
-        /// `handled` or `failed`.
+        /// `handled` or `failed` — or `steered`, when a chat message
+        /// cut the turn short and a next turn runs instead of it.
         outcome: String,
     },
     /// The agent asked the human something only they can answer: a

@@ -277,7 +277,15 @@ pub async fn chat_completions(
     let deadline = tokio::time::Instant::now() + TURN_WAIT;
     let reply = loop {
         let done = match tokio::time::timeout_at(deadline, receiver.recv()).await {
-            Ok(Ok(TurnEvent::TurnDone { reply, .. })) => reply,
+            Ok(Ok(TurnEvent::TurnDone { reply, outcome })) => {
+                // A steered chain's first end marker closes one
+                // interrupted round, not the completion: keep waiting
+                // for the round that answers.
+                if outcome == "steered" {
+                    continue;
+                }
+                reply
+            }
             Ok(Ok(_)) => continue,
             Ok(Err(RecvError::Lagged(_))) => continue,
             Ok(Err(RecvError::Closed)) => {
@@ -339,6 +347,11 @@ fn stream_response(
                 )),
                 Ok(TurnEvent::TextDelta { text }) => {
                     Ok(sse_chunk(&id, created, &model, json!({"content": text})))
+                }
+                Ok(TurnEvent::TurnDone { outcome, .. }) if outcome == "steered" => {
+                    // A steered chain keeps streaming: this end marker
+                    // closes one interrupted round, not the completion.
+                    continue;
                 }
                 Ok(TurnEvent::TurnDone { .. }) => {
                     // The turn is over regardless of who triggered it or

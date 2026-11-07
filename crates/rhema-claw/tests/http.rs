@@ -137,6 +137,82 @@ impl RecordingProvider {
     }
 }
 
+/// The steer test's synchronization: the provider announces the
+/// generation's arrival and parks until the test opens the gate. The
+/// receivers clone out — a `watch` receiver mutates, so none sits
+/// behind the `Arc` the provider and the test share.
+struct WireGate {
+    in_flight: (
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Receiver<bool>,
+    ),
+    open: (
+        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Receiver<bool>,
+    ),
+}
+
+impl Default for WireGate {
+    fn default() -> Self {
+        Self {
+            in_flight: tokio::sync::watch::channel(false),
+            open: tokio::sync::watch::channel(false),
+        }
+    }
+}
+
+impl WireGate {
+    /// A fresh `in_flight` receiver for the test.
+    fn in_flight_rx(&self) -> tokio::sync::watch::Receiver<bool> {
+        self.in_flight.1.clone()
+    }
+
+    /// Opens the gate; the parked generation returns.
+    fn open(&self) {
+        self.open.0.send_replace(true);
+    }
+}
+
+/// A provider whose first generation parks in the gate — the request a
+/// steer interrupts. Later generations answer at once.
+struct GatedProvider {
+    gate: Arc<WireGate>,
+    /// The parked generation's side of the gate, behind a mutex so the
+    /// `&self` trait seam can clone it out (the lock never crosses an
+    /// await).
+    open: std::sync::Mutex<tokio::sync::watch::Receiver<bool>>,
+    served: std::sync::atomic::AtomicBool,
+}
+
+impl GatedProvider {
+    fn new(gate: Arc<WireGate>) -> Self {
+        Self {
+            open: std::sync::Mutex::new(gate.open.1.clone()),
+            gate,
+            served: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+}
+
+#[rhema_autonomous_agent::async_trait]
+impl rhema_core::ModelProvider for GatedProvider {
+    async fn complete(
+        &self,
+        _request: rhema_core::ModelRequest,
+        sink: &mut dyn rhema_core::EventSink,
+    ) -> Result<rhema_core::ModelOutput, rhema_core::ProviderError> {
+        if !self.served.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.gate.in_flight.0.send_replace(true);
+            let mut open = self.open.lock().expect("gate lock").clone();
+            while !*open.borrow_and_update() {
+                open.changed().await.expect("the open sender lives");
+            }
+        }
+        sink.emit(rhema_core::Event::TextDelta("the steered answer"));
+        Ok(reply("the steered answer"))
+    }
+}
+
 #[rhema_autonomous_agent::async_trait]
 impl rhema_core::ModelProvider for RecordingProvider {
     async fn complete(
@@ -315,6 +391,111 @@ async fn chat_streams_turns_and_remembers_across_messages() {
         .await
         .expect("the forged key posts");
     assert_eq!(refused.status(), 400, "only resident keys take messages");
+}
+
+/// A message into a live turn steers it: the POST answers 202 while the
+/// first generation still hangs, the interrupted turn closes with the
+/// `steered` outcome on the stream, and the steered question runs as
+/// the next turn of the same conversation.
+#[tokio::test]
+async fn a_message_into_a_live_turn_steers_it() {
+    let gate = Arc::new(WireGate::default());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let daemon = Daemon::build(
+        &config(&dir, None),
+        mock_registry(Arc::new(GatedProvider::new(gate.clone()))),
+        rhema_rsd::DispatcherConfig::default(),
+    )
+    .expect("the daemon assembles");
+    let base = serve(&daemon).await;
+    let client = reqwest::Client::new();
+
+    let events = client
+        .get(format!("{base}/v1/sessions/interactive:web/events"))
+        .send()
+        .await
+        .expect("the events request goes out");
+    let mut stream = sse_body(events).await;
+    let mut seen = String::new();
+
+    // Message one starts a turn that parks in the gate.
+    let accepted = client
+        .post(format!("{base}/v1/sessions/interactive:web/messages"))
+        .json(&json!({"text": "hello"}))
+        .send()
+        .await
+        .expect("the message posts");
+    assert_eq!(accepted.status(), 202);
+
+    // The first generation is in flight: the round's inbox drain
+    // precedes it, so whatever lands now belongs to the next round.
+    let mut in_flight = gate.in_flight_rx();
+    while !*in_flight.borrow_and_update() {
+        in_flight
+            .changed()
+            .await
+            .expect("the in-flight sender lives");
+    }
+
+    // Steer while the turn hangs. The POST answers promptly — the drain
+    // is detached, the route's contract is acceptance — and the signal
+    // cuts the parked generation.
+    let steered = tokio::time::timeout(
+        Duration::from_secs(5),
+        client
+            .post(format!("{base}/v1/sessions/interactive:web/messages"))
+            .json(&json!({"text": "stop that"}))
+            .send(),
+    )
+    .await
+    .expect("the steered POST answers while the first turn still hangs")
+    .expect("the steered POST goes out");
+    assert_eq!(steered.status(), 202);
+
+    // Release the first generation: the interrupted round closes with
+    // the steered outcome, the steered question streams, the reply and
+    // the clean end follow.
+    gate.open();
+    read_until(&mut stream, &mut seen, r#""outcome":"steered""#).await;
+    read_until(&mut stream, &mut seen, "the steered answer").await;
+    read_until(&mut stream, &mut seen, r#""outcome":"handled""#).await;
+    assert!(
+        seen.contains(r#""type":"user_message","text":"hello""#),
+        "the first question streamed: {seen}"
+    );
+    assert!(
+        seen.contains(r#""type":"user_message","text":"stop that""#),
+        "the steered question streamed as its own turn: {seen}"
+    );
+
+    // The conversation holds both questions and the one answer: the
+    // interrupted generation committed nothing but the question.
+    let store = SqliteStore::open(dir.path().join("dispatch.db")).expect("db reopens");
+    let key = ResourceKey::from("interactive:web");
+    let record = store
+        .load(&key)
+        .expect("the record loads")
+        .expect("the key has a record");
+    let stashed: Session =
+        serde_json::from_value(record.session.expect("a session").core.driver_state)
+            .expect("the stash parses");
+    let turns: Vec<(Role, &str)> = stashed
+        .history
+        .iter()
+        .filter_map(|message| match &message.content[0] {
+            Content::Text(text) => Some((message.role, text.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        turns,
+        [
+            (Role::User, "hello"),
+            (Role::User, "stop that"),
+            (Role::Assistant, "the steered answer"),
+        ],
+        "the steered chain answered once, on both questions"
+    );
 }
 
 /// A chat message with images: the route enforces the budget (media

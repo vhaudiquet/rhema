@@ -50,6 +50,17 @@
 //! [`crate::extension::ClawExtension`]'s tools in the standard set's
 //! order. The system prompt is rendered per dispatch from the
 //! bootstrap template over the live SOUL/USER files.
+//!
+//! **Steering** breaks the one-turn-per-dispatch shape on purpose: a
+//! chat message that arrives while a key's turn is live interrupts it
+//! ([`crate::steer`]) instead of waiting behind every remaining tool
+//! round. The interrupted turn closes on the stream with the `steered`
+//! outcome, the dispatch loops on the same lease, and the steered
+//! message — already in the inbox, the route signals only after its
+//! ingest — becomes the next round's input. Same session, same stream:
+//! the conversation shows the question, the cut, and the answer that
+//! replaced the rest of the interrupted work, exactly the shape
+//! rhema-code's UI draws for a steered turn.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -61,7 +72,7 @@ use rhema_agent_tools::{AllowAll, ExpandPastes, ShellTools, revive_dangling_call
 use rhema_autonomous_agent::{Allowlist, Handler, ResolverChain, SessionContext, async_trait};
 use rhema_core::{
     Agent, ChatParams, Content, Event as ModelEvent, EventSink, Image, ImageMediaType, Message,
-    ModelProvider, Role, Session, ToolContext, ToolResolver, run_turn,
+    ModelProvider, Role, Session, ToolContext, ToolResolver, close_orphaned_calls, run_turn,
 };
 use rhema_memory::{MemoryResolver, MemoryStore, Scope};
 use rhema_rsd::{Dispatcher, Event, KeyFn, Outcome, ResourceKey};
@@ -71,6 +82,7 @@ use crate::backends::BackendRegistry;
 use crate::bootstrap::{Bootstrap, DEFAULT_SYSTEM_MD, render_system};
 use crate::hub::{EventHub, TurnEvent, UserImage};
 use crate::notifications::NotificationStore;
+use crate::steer::{SteerGuard, SteerRegistry};
 
 /// The key prefixes of the resident context (see the module docs):
 /// `interactive:`, `task:`, `phone:`, and `calendar:`. Forge keys —
@@ -207,6 +219,13 @@ pub struct InteractiveHandler {
     attachments: Arc<crate::attachments::AttachmentStore>,
     bootstrap_resolver: Arc<dyn rhema_core::ToolResolver>,
     hub: Arc<EventHub>,
+    /// The interrupt registry the messages route signals: a chat
+    /// message into a key whose turn is live cuts that turn and runs
+    /// instead of it (see [`crate::steer`]). Built private by
+    /// [`InteractiveHandler::new`] — a handler nobody shared a
+    /// registry with never receives a signal — and shared with the
+    /// HTTP surface through [`InteractiveHandler::with_steer`].
+    steer: Arc<SteerRegistry>,
     /// The notification table: the `notify` tool writes it, and
     /// non-interactive replies auto-notify through it.
     notifications: Arc<NotificationStore>,
@@ -271,6 +290,7 @@ impl InteractiveHandler {
             bootstrap,
             bootstrap_resolver,
             hub,
+            steer: Arc::new(SteerRegistry::new()),
             notifications,
             attachments,
             max_turn_steps,
@@ -327,6 +347,15 @@ impl InteractiveHandler {
             .map_err(|err| format!("cannot build the interactive agent: {err}"))
     }
 
+    /// Shares `steer` with the HTTP surface: the messages route
+    /// signals it after its ingest, and every dispatch chain this
+    /// handler runs listens on it. Without this call the handler keeps
+    /// the constructor's private registry, which no route can reach.
+    pub fn with_steer(mut self, steer: Arc<SteerRegistry>) -> Self {
+        self.steer = steer;
+        self
+    }
+
     /// The resolver chain one dispatch runs under: the core toolsets —
     /// the shell over the interactive workspace, memory,
     /// `bootstrap_save` — then every extension's tools in the standard
@@ -352,8 +381,16 @@ impl InteractiveHandler {
         Arc::new(ResolverChain::new(resolvers))
     }
 
-    /// One dispatch: drain, restore, turn, stash, reply.
-    async fn dispatch(&self, ctx: &mut SessionContext) -> Result<Option<String>, String> {
+    /// One round: drain, restore, turn, stash, reply. The turn runs
+    /// under the steer select, so a round that was interrupted comes
+    /// back as [`Round::Steered`] with the session stashed and the
+    /// dangling calls closed.
+    async fn dispatch(
+        &self,
+        ctx: &mut SessionContext,
+        steer: &mut SteerGuard,
+        round: usize,
+    ) -> Result<Round, String> {
         let key = ctx.key.as_str().to_owned();
         // Renews the lease and drains: every text since the last poll,
         // folded into one input (spec §3's batching rule). Chat events
@@ -386,7 +423,15 @@ impl InteractiveHandler {
         }
         let input = texts.join("\n\n");
         if input.trim().is_empty() {
-            return Err(format!("dispatch for {key} carried no text"));
+            // Round one's emptiness is the dispatch bug it always was:
+            // the lease exists because something waited. A steered
+            // round can drain empty — a signal whose message rode the
+            // previous round's input — and that ends the chain, not
+            // the conversation.
+            if round == 1 {
+                return Err(format!("dispatch for {key} carried no text"));
+            }
+            return Ok(Round::Idle);
         }
         // Inbound images: the bytes copy into the attachment store and
         // the transcript records ids — a replay streams the same small
@@ -483,22 +528,46 @@ impl InteractiveHandler {
             tool_names: HashMap::new(),
             tool_args: HashMap::new(),
         };
-        let output = run_turn(
+        // The turn runs under the steer select: a signal drops the
+        // future at its current await — a streaming request, or a
+        // running shell command, whose child dies with the drop. The
+        // next round revives whatever committed before the drop.
+        let mut turn = Box::pin(run_turn(
             &mut agent,
             &mut session,
             Message::text_with_images(Role::User, input, core_images),
             &mut sink,
             &tools,
             self.max_turn_steps,
-        )
-        .await
-        .map_err(|err| format!("turn for {key} failed: {err}"))?;
-
+        ));
+        let finished = tokio::select! {
+            result = &mut turn => match steer.take() {
+                // A message that raced the completion steers the next
+                // round instead of slipping into the closing window.
+                true => None,
+                false => Some(
+                    result.map_err(|err| format!("turn for {key} failed: {err}")),
+                ),
+            },
+            _ = steer.wait() => None,
+        };
+        drop(turn);
+        // An interrupted turn can leave committed calls without
+        // results; the repair answers them so the next round's request
+        // is valid history.
+        if finished.is_none() {
+            close_orphaned_calls(&mut session.history);
+        }
         // Stash before anything else: the conversation survives even if
-        // the subscriber never sees the stream.
+        // the subscriber never sees the stream — and a steered chain
+        // dies between rounds, the steered state is what resumes.
         ctx.session.core.driver_state = serde_json::to_value(&session)
             .map_err(|err| format!("session for {key} does not serialize: {err}"))?;
-        Ok(final_text(&output.message))
+        match finished {
+            Some(Ok(output)) => Ok(Round::Done(Ok(final_text(&output.message)))),
+            Some(Err(reason)) => Err(reason),
+            None => Ok(Round::Steered),
+        }
     }
 }
 
@@ -506,7 +575,41 @@ impl InteractiveHandler {
 impl Handler for InteractiveHandler {
     async fn handle(&self, ctx: &mut SessionContext) -> Outcome {
         let key = ctx.key.clone();
-        match self.dispatch(ctx).await {
+        // The listener lives across the whole chain: one lease, one
+        // listener, every steered round under it. `Drop` unregisters
+        // before the outcome releases the lease, so no signal can
+        // address a turn that no longer runs.
+        let mut steer = self.steer.listen(key.as_str());
+        let mut round = 1;
+        let finished = loop {
+            // Stale signals first: the route signals only after its
+            // ingest, so anything pending here is already in the inbox
+            // waiting for this round's drain — a signal must never cut
+            // the round it precedes.
+            steer.clear();
+            match self.dispatch(ctx, &mut steer, round).await {
+                Ok(Round::Done(reply)) => break reply,
+                // A steered round that drained nothing: the interrupt
+                // already happened, the chain just ends instead of
+                // running a turn on empty input.
+                Ok(Round::Idle) => break Ok(None),
+                Ok(Round::Steered) => {
+                    // The interrupted turn closes on the stream, so the
+                    // steered question reads as its own turn's start.
+                    self.hub.emit(
+                        &key,
+                        TurnEvent::TurnDone {
+                            reply: None,
+                            outcome: "steered".to_owned(),
+                        },
+                    );
+                    round += 1;
+                }
+                Err(reason) => break Err(reason),
+            }
+        };
+        drop(steer);
+        match finished {
             Ok(reply) => {
                 self.auto_notify(&key, reply.as_deref());
                 self.hub.emit(
@@ -554,6 +657,20 @@ impl InteractiveHandler {
             eprintln!("[claw] warning: auto-notify for {key} failed: {err}");
         }
     }
+}
+
+/// One dispatch round's shape. A steered round ended in an interrupt:
+/// the caller owes the inbox another round on the same lease, same
+/// session, same stream.
+enum Round {
+    /// The turn ran to its end; the final reply text.
+    Done(Result<Option<String>, String>),
+    /// A steered message cut the turn short.
+    Steered,
+    /// A steered round whose inbox drained empty — the belt-and-braces
+    /// exit for a signal whose message raced the previous round's
+    /// drain: end the chain quietly, fail nothing.
+    Idle,
 }
 
 /// The stashed conversation: a serialized [`Session`], `Null` meaning
@@ -1424,6 +1541,220 @@ mod tests {
             dispatcher.status(&key).expect("status reads").state,
             KeyState::Idle
         );
+    }
+
+    /// A steered message cuts a live turn and runs as the next round on
+    /// the same lease: the interrupted turn closes on the stream with
+    /// the `steered` outcome, the steered question streams as its own
+    /// turn, and the stashed conversation carries both questions and
+    /// the one answer that replaced the interrupted generation.
+    #[tokio::test]
+    async fn a_steered_message_cuts_the_live_turn_and_runs_as_the_next_round() {
+        let gate = Arc::new(Gate::default());
+        let registry = Arc::new(SteerRegistry::new());
+        let hub = Arc::new(EventHub::default());
+        let workspace = tempfile::tempdir().expect("tempdir");
+        let notifications = notifications();
+        let extensions = test_extensions(
+            hub.clone(),
+            Arc::new(ClawStore::in_memory().expect("store opens")),
+            notifications.clone(),
+            tasks(),
+            jobs(),
+            accounts(),
+            consents(),
+            bridge(),
+            attachments(),
+            phone(),
+            identity(),
+            &workspace.path().join("interactive"),
+        );
+        let handler = InteractiveHandler::new(
+            test_registry(Arc::new(GatedProvider::new(gate.clone()))),
+            workspace.path().join("interactive"),
+            Arc::new(rhema_memory::VolatileStore::new()),
+            Arc::new(Bootstrap::new(workspace.path().join("bootstrap")).expect("store opens")),
+            hub.clone(),
+            notifications.clone(),
+            attachments(),
+            crate::config::DEFAULT_MAX_TURN_STEPS,
+            extensions,
+            true,
+        )
+        .with_steer(registry.clone());
+
+        let volatile = Arc::new(VolatileStore::new());
+        let dispatcher = Arc::new(Dispatcher::new(
+            DispatcherConfig {
+                debounce_window_millis: 0,
+                ..DispatcherConfig::default()
+            },
+            Arc::new(rhema_rsd::SystemClock),
+            volatile.clone(),
+        ));
+        register_user(&dispatcher);
+        let key = Key::from("interactive:web");
+        let mut receiver = hub.subscribe(&key);
+        dispatcher
+            .ingest(user_event(key.as_str(), "hello", &[]))
+            .expect("ingests");
+        let driver = rhema_autonomous_agent::Driver::new(dispatcher.clone(), Arc::new(handler))
+            .with_holder("test");
+
+        // The pass runs off the test task; the first generation parks
+        // in the gate once it is in flight — and a round's inbox drain
+        // precedes its generation, so whatever lands now belongs to the
+        // next round.
+        let pass = tokio::spawn(async move { driver.run_once().await });
+        let mut in_flight = gate.in_flight_rx();
+        while !*in_flight.borrow_and_update() {
+            in_flight
+                .changed()
+                .await
+                .expect("the in-flight sender lives");
+        }
+
+        // Steer, in the route's order: ingest first, signal second.
+        dispatcher
+            .ingest(user_event(key.as_str(), "stop that", &[]))
+            .expect("ingests");
+        assert!(registry.signal(key.as_str()));
+
+        // One pass carries the whole chain: the interrupted round and
+        // the steered one.
+        assert_eq!(
+            pass.await.expect("the pass joins").expect("the pass runs"),
+            vec![RsdOutcome::Handled]
+        );
+
+        // Stream order: the question, the cut, the steered question,
+        // the answer, the clean end.
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::UserMessage {
+                text: "hello".into(),
+                images: Vec::new()
+            }
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::TurnDone {
+                reply: None,
+                outcome: "steered".into()
+            }
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::UserMessage {
+                text: "stop that".into(),
+                images: Vec::new()
+            }
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::TextDelta {
+                text: "the steered answer".into()
+            }
+        );
+        assert_eq!(
+            receiver.try_recv().unwrap(),
+            TurnEvent::TurnDone {
+                reply: Some("the steered answer".into()),
+                outcome: "handled".into()
+            }
+        );
+
+        // The key is back to idle, and the conversation holds both
+        // questions and the one answer.
+        assert_eq!(
+            dispatcher.status(&key).expect("status reads").state,
+            KeyState::Idle
+        );
+        let record = rhema_rsd::Store::load(volatile.as_ref(), &key)
+            .expect("the record loads")
+            .expect("the key has a record");
+        let stashed: Session =
+            serde_json::from_value(record.session.expect("a session").core.driver_state)
+                .expect("the stash parses");
+        let turns: Vec<(CoreRole, &str)> = stashed
+            .history
+            .iter()
+            .filter_map(|message| match &message.content[0] {
+                Content::Text(text) => Some((message.role, text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            turns,
+            [
+                (CoreRole::User, "hello"),
+                (CoreRole::User, "stop that"),
+                (CoreRole::Assistant, "the steered answer"),
+            ],
+            "the steered chain answered once, on both questions"
+        );
+    }
+
+    /// The steer test's synchronization: the provider announces the
+    /// generation's arrival.
+    struct Gate {
+        in_flight: (
+            tokio::sync::watch::Sender<bool>,
+            tokio::sync::watch::Receiver<bool>,
+        ),
+    }
+
+    impl Default for Gate {
+        fn default() -> Self {
+            Self {
+                in_flight: tokio::sync::watch::channel(false),
+            }
+        }
+    }
+
+    impl Gate {
+        /// A fresh `in_flight` receiver for one waiter.
+        fn in_flight_rx(&self) -> tokio::sync::watch::Receiver<bool> {
+            self.in_flight.1.clone()
+        }
+    }
+
+    /// A provider whose first generation parks forever — the request a
+    /// steer interrupts, released only by the drop. Later generations
+    /// (the steered round's) answer at once.
+    struct GatedProvider {
+        in_flight: tokio::sync::watch::Sender<bool>,
+        served: std::sync::atomic::AtomicBool,
+    }
+
+    impl GatedProvider {
+        fn new(gate: Arc<Gate>) -> Self {
+            Self {
+                in_flight: gate.in_flight.0.clone(),
+                served: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[rhema_autonomous_agent::async_trait]
+    impl rhema_core::ModelProvider for GatedProvider {
+        async fn complete(
+            &self,
+            _request: rhema_core::ModelRequest,
+            sink: &mut dyn rhema_core::EventSink,
+        ) -> Result<ModelOutput, rhema_core::ProviderError> {
+            if !self.served.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.in_flight.send_replace(true);
+                // The interrupted generation: the drop is its release,
+                // so this park resolves only if the test forgets to
+                // steer.
+                std::future::pending::<()>().await;
+            }
+            // Stream the reply like a real provider would: the sink's
+            // deltas are what the transcript replays.
+            sink.emit(rhema_core::Event::TextDelta("the steered answer"));
+            Ok(reply("the steered answer"))
+        }
     }
 
     /// A batch whose messages carry images: the bytes land in the

@@ -39,7 +39,9 @@ pub mod workspace;
 // Re-exported so implementors of the async seams can apply #[async_trait]
 // without adding the crate themselves.
 pub use async_trait::async_trait;
-pub use engine::{Agent, AgentBuilder, AgentError, CommitError, CommitHook, run_turn};
+pub use engine::{
+    Agent, AgentBuilder, AgentError, CommitError, CommitHook, close_orphaned_calls, run_turn,
+};
 pub use event::{Event, EventSink};
 pub use message::{Content, Image, ImageMediaType, Message, Role};
 #[cfg(feature = "mock")]

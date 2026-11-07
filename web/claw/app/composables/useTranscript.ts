@@ -173,6 +173,14 @@ export function useTranscript() {
   const live = ref<TurnBlock | null>(null)
   let nextId = 1
 
+  /** Locally sent messages the stream has not echoed yet: `addSent`
+   * pushes here, the `user_message` handler pops the match. Text plus
+   * image count is the whole signature the stream carries, and that is
+   * enough — the echo dedupes against what this surface sent, not
+   * against whichever row happens to sit last: a steered turn's end
+   * marker can land between the optimistic row and its echo. */
+  const pendingSent: { text: string; images: number }[] = []
+
   function ensureLive(): TurnBlock {
     if (!live.value) live.value = { reply: '', entries: [], outcome: null }
     return live.value
@@ -192,15 +200,16 @@ export function useTranscript() {
     switch (event.type) {
       case 'user_message': {
         // The replayed question. A live echo of a message this surface
-        // just sent arrives after the optimistic `sent` row: identical
-        // text and the same image count as the last item means the row
-        // already stands in for it, previews and all.
-        const last = items.value[items.value.length - 1]
-        if (
-          last?.kind === 'sent' &&
-          last.text === event.text &&
-          last.images.length === event.images.length
-        ) {
+        // just sent arrives after the optimistic `sent` row: the match
+        // pops the pending entry and the row already stands in for it,
+        // previews and all. Anything else (a replay, another surface's
+        // message, a steered echo after other events) renders as its
+        // own row.
+        const mine = pendingSent.findIndex(
+          (pending) => pending.text === event.text && pending.images === event.images.length,
+        )
+        if (mine !== -1) {
+          pendingSent.splice(mine, 1)
           return
         }
         items.value.push({
@@ -320,6 +329,7 @@ export function useTranscript() {
    * Its images render from the staged previews — the claw stores them
    * and the stream's echo dedupes against this row. */
   function addSent(text: string, images: SentImage[] = []): void {
+    pendingSent.push({ text, images: images.length })
     items.value.push({ kind: 'sent', id: nextId++, text, images })
   }
 
@@ -393,10 +403,13 @@ export function useTranscript() {
   }
 
   /** Session switched, or the stream reopened: the mirror is per-key,
-   * and the replay that follows rebuilds it either way. */
+   * and the replay that follows rebuilds it either way. The pending
+   * echoes go too — a replay carries every message, optimistic rows
+   * included. */
   function reset(): void {
     items.value = []
     live.value = null
+    pendingSent.length = 0
   }
 
   return { items, live, applyEvent, addSent, resolveConsent, setAttachmentUrl, setSentImageUrl, reset }

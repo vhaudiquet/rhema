@@ -178,6 +178,15 @@ client mirrors the stream rather than managing history. The OpenAI shim
 and the message POST read the live feed only — replay never reaches a
 turn that is starting.
 
+A message into a session whose turn is running **steers** it, the same
+interrupt rhema-code's UI owns: the running turn is cut at its current
+await (an in-flight shell command dies with it), closes on the stream
+with `turn_done` carrying `outcome: "steered"`, and the message runs as
+the next turn of the same conversation. The messages route answers 202
+the moment the message is accepted — the turn runs off the request, and
+its reply arrives on the event stream — so a composer never locks for
+the length of a turn and a follow-up is always typeable.
+
 Every provider whose credentials resolve (env, the claw's own stored
 logins, or the stored rhema config) is constructed at boot as a backend
 *instance* named by an id, the kind unless a login named it, so two

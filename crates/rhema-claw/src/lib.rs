@@ -54,6 +54,8 @@
 //!   comment
 //! - [`interactive`] — the resident dispatch: the key-prefix contract,
 //!   inbox, one turn, one streamed reply, auto-notify
+//! - [`steer`] — the interrupt registry: a chat message into a live
+//!   turn cuts it and runs instead of it
 //! - [`http`] — the routes: chat, sessions, watches, ingest,
 //!   notifications, the event stream
 //! - [`openai`] — the `/v1/chat/completions` shim for stock web UIs
@@ -88,6 +90,7 @@ pub mod notify_tools;
 pub mod openai;
 pub mod phone;
 pub mod settings;
+pub mod steer;
 pub mod task_source;
 pub mod task_store;
 pub mod task_tools;

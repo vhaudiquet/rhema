@@ -1,9 +1,12 @@
 <script setup lang="ts">
 // The transcript: sent lines and streamed turns, the turn in flight at
 // the bottom. The claw owns the conversation — this renders what the
-// event stream delivered, nothing more. The header names the session
-// and hides the dispatch internals behind an info modal; the composer
-// chips mirror live claw state; the backend chip jumps to settings.
+// event stream delivered, nothing more. The composer never closes for
+// a running turn: sending while one streams steers it — the claw cuts
+// the turn and answers the message instead (rhema-code's shape). The
+// header names the session and hides the dispatch internals behind an
+// info modal; the composer chips mirror live claw state; the backend
+// chip jumps to settings.
 import {
   PASTE_INLINE_LINES,
   chipLabel,
@@ -82,7 +85,9 @@ watch(
 function submit(): void {
   const text = draft.value.trim()
   // The draft stays the gate: the claw 422s an empty text even with
-  // images aboard.
+  // images aboard. `busy` is only this send's POST in flight (the claw
+  // answers 202 at once) — a running turn never blocks the composer,
+  // because a send into one steers it.
   if (!text || !props.canSend || props.busy) return
   emit('send', { text: embedPastes(text, pastes.value), images: stagedImages.value })
   stageGeneration++
@@ -391,7 +396,7 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
             <div
               v-if="item.turn.outcome"
               class="outcome mono"
-              :class="{ failed: item.turn.outcome === 'failed' }"
+              :class="{ failed: item.turn.outcome === 'failed', steered: item.turn.outcome === 'steered' }"
             >
               {{ item.turn.outcome }}
             </div>
@@ -465,13 +470,24 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
           ref="prompt"
           v-model="draft"
           rows="1"
-          :placeholder="canSend ? `Message ${agentName}…` : 'only interactive:* sessions accept messages'"
+          :placeholder="
+            canSend
+              ? live
+                ? `Message ${agentName}… sending steers the running turn`
+                : `Message ${agentName}…`
+              : 'only interactive:* sessions accept messages'
+          "
           :disabled="!canSend"
           @keydown="onPromptKeydown"
           @paste="onPaste"
           @input="resizePrompt"
         />
-        <button class="primary send" :disabled="!canSend || busy || draft.trim() === ''" title="send" @click="submit">
+        <button
+          class="primary send"
+          :disabled="!canSend || busy || draft.trim() === ''"
+          :title="live ? 'send — interrupts the running turn' : 'send'"
+          @click="submit"
+        >
           ↑
         </button>
         <input
@@ -630,6 +646,12 @@ function streamTone(status: StreamStatus): 'ok' | 'warn' | 'error' {
 
 .outcome.failed {
   color: var(--error);
+}
+
+/* A steered turn: cut short by the user's next message — not a
+   failure, the reply that replaced it streams right below. */
+.outcome.steered {
+  color: var(--accent-text);
 }
 
 /* A consent card: the agent asking its human something — distinct
