@@ -53,7 +53,6 @@ fn the_picker_row_names_the_vision_verdict_only_when_known() {
 fn the_appearance_labels_keep_a_gap_before_their_values() {
     let mut settings = crate::screens::SettingsScreen::new();
     settings.section = SettingsSection::Appearance;
-    settings.background_native = true;
     let mut hits = Vec::new();
     let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
     terminal
@@ -69,11 +68,13 @@ fn the_appearance_labels_keep_a_gap_before_their_values() {
     // Four toggles render, all values one aligned column over; the
     // longest label (`Background`, ten cells) keeps a space before its
     // value instead of swallowing it.
+    // The screen's own placeholder state — nerd icons, native
+    // background — is what renders here; the opener overwrites it.
     let row = |label: &str, value: &str| format!("{:<11}{value}", label);
     assert!(text.contains(&row("Background", "Native")), "{text}");
     assert!(text.contains(&row("Colors", "Rhema")), "{text}");
     assert!(text.contains(&row("Theme", "Dark")), "{text}");
-    assert!(text.contains(&row("Icons", "Unicode")), "{text}");
+    assert!(text.contains(&row("Icons", "Nerd")), "{text}");
     assert!(!text.contains("BackgroundNative"), "{text}");
 }
 

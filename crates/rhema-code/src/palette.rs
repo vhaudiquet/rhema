@@ -43,19 +43,23 @@ pub enum ThemeKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Background {
     /// The palette's fills paint every slot: the drawn design.
-    #[default]
     Rhema,
     /// The terminal's own background shows through: the fill slots read
     /// as the terminal default, and only the ink keeps rhema's colors.
+    #[default]
     Native,
 }
 
 impl Background {
     /// Parses the stored config value; unset or unparseable reads as
-    /// the default.
+    /// the default. Both spellings parse — `rhema` fell into the
+    /// default arm while it *was* the default, and reading it back as
+    /// `native` once the default flipped would silently drop the
+    /// stored choice.
     pub fn parse(text: Option<&str>) -> Self {
         match text {
             Some("native") => Self::Native,
+            Some("rhema") => Self::Rhema,
             _ => Self::default(),
         }
     }
@@ -921,8 +925,8 @@ mod tests {
     fn the_background_spellings_round_trip() {
         assert_eq!(Background::parse(Some("native")), Background::Native);
         assert_eq!(Background::parse(Some("rhema")), Background::Rhema);
-        assert_eq!(Background::parse(Some("bogus")), Background::Rhema);
-        assert_eq!(Background::parse(None), Background::Rhema);
+        assert_eq!(Background::parse(Some("bogus")), Background::Native);
+        assert_eq!(Background::parse(None), Background::Native);
         assert_eq!(Background::Rhema.stored_name(), "rhema");
         assert_eq!(Background::Native.stored_name(), "native");
     }

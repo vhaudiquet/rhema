@@ -62,13 +62,15 @@ pub const NERD: Icons = Icons {
     sandbox: "\u{f1b2}",
 };
 
-/// Which flavor the footer draws with.
+/// Which flavor the footer draws with. Nerd is the default: the
+/// footer's glyphs are picked for it, and a terminal without a Nerd
+/// font set flips the config to `unicode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Flavor {
     /// Plain Unicode; renders everywhere.
-    #[default]
     Unicode,
     /// Nerd Font glyphs.
+    #[default]
     Nerd,
 }
 
@@ -129,7 +131,8 @@ mod tests {
     fn flavors_parse_and_resolve() {
         assert_eq!(Flavor::parse(" nerd "), Some(Flavor::Nerd));
         assert_eq!(Flavor::parse("emoji"), None);
-        assert_eq!(Flavor::default(), Flavor::Unicode);
+        assert_eq!(Flavor::default(), Flavor::Nerd);
+        assert_eq!(Flavor::parse("unicode"), Some(Flavor::Unicode));
         assert_eq!(Flavor::Nerd.set().thinking, "\u{f0eb}");
         assert_eq!(Flavor::Unicode.set().thinking, "⁂");
         // Both sets name the allowance with a money glyph…

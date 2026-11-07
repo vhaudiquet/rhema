@@ -86,8 +86,9 @@ pub struct Document {
     /// off switches.
     #[serde(flatten)]
     pub settings: Settings,
-    /// The footer's icon flavor: `unicode` (the default) or `nerd` for
-    /// Nerd Font glyphs. Anything unparseable reads as the default.
+    /// The footer's icon flavor: `nerd` (the default) for Nerd Font
+    /// glyphs, or `unicode` for the everywhere-safe set. Anything
+    /// unparseable reads as the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icons: Option<String>,
     /// The color theme: `dark` (the default) or `light`. Validated by
@@ -95,10 +96,10 @@ pub struct Document {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
-    /// What paints behind the ink: `rhema` (the default) paints the
-    /// palette's fills over the whole screen, `native` leaves the
-    /// terminal's own background in place. Validated by the consumer,
-    /// not here — anything unparseable reads as the default.
+    /// What paints behind the ink: `native` (the default) leaves the
+    /// terminal's own background in place, `rhema` paints the palette's
+    /// fills over the whole screen. Validated by the consumer, not
+    /// here — anything unparseable reads as the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
     /// The UI color palette: `rhema` (the default), `aquamarine`,

@@ -329,8 +329,9 @@ pub struct SettingsScreen {
 }
 
 impl Default for SettingsScreen {
-    /// A settings screen on the Providers page: dark theme, plain
-    /// icons, empty snapshots — the opener fills the rest.
+    /// A settings screen on the Providers page: dark theme, nerd
+    /// icons, native background, empty snapshots — the opener fills
+    /// the rest.
     fn default() -> Self {
         Self::new()
     }
@@ -345,8 +346,8 @@ impl SettingsScreen {
             row: 0,
             colors: crate::palette::Palette::Rhema,
             theme_dark: true,
-            icons_nerd: false,
-            background_native: false,
+            icons_nerd: true,
+            background_native: true,
             profile: "personal".to_owned(),
             stored: rhema_config::Profile::default(),
             dialog: None,
