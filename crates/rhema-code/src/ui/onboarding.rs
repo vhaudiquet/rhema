@@ -381,14 +381,24 @@ pub(crate) fn onboarding_body(
                 } else {
                     line
                 });
-                lines.push(Line::from(
-                    Span::raw(format!("    {}", skill.description)).fg(theme.text3),
+                // The description, at most two rows — the same cap the
+                // settings Skills page applies.
+                lines.extend(crate::ui::wrap_clamped(
+                    &skill.description,
+                    width,
+                    4,
+                    2,
+                    Style::default().fg(theme.text3),
                 ));
                 // The license, a step dimmer than the description — the
                 // same treatment the settings Skills page gives it.
                 if let Some(license) = &skill.license {
-                    lines.push(Line::from(
-                        Span::raw(format!("    {}", license)).fg(theme.text3).dim(),
+                    lines.extend(crate::ui::wrap_clamped(
+                        license,
+                        width,
+                        4,
+                        1,
+                        Style::default().fg(theme.text3).dim(),
                     ));
                 }
             }

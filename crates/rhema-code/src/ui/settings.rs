@@ -435,17 +435,26 @@ pub(crate) fn settings_page(
                     Span::raw(format!(" · {}", skill.source.label())).fg(theme.text3),
                 ]);
                 lines.push(settings_row(line, selected, theme));
-                lines.extend(wrap_line(
-                    &Line::from(Span::raw(format!("    {}", skill.description)).fg(theme.text3)),
+                // The description, at most two rows — the same cap the
+                // Subagents page applies, so both catalogs scan alike.
+                lines.extend(crate::ui::wrap_clamped(
+                    &skill.description,
                     width,
+                    4,
+                    2,
+                    Style::default().fg(theme.text3),
                 ));
                 // The license sits a step dimmer than the description:
                 // same tone, dim modifier — attribution that reads only
-                // when looked for.
+                // when looked for, and never cut: a clipped copyright
+                // line fails its one job.
                 if let Some(license) = &skill.license {
-                    lines.extend(wrap_line(
-                        &Line::from(Span::raw(format!("    {}", license)).fg(theme.text3).dim()),
+                    lines.extend(crate::ui::wrap_clamped(
+                        license,
                         width,
+                        4,
+                        2,
+                        Style::default().fg(theme.text3).dim(),
                     ));
                 }
             }
@@ -508,7 +517,7 @@ pub(crate) fn settings_page(
                     width,
                     4,
                     2,
-                    theme.text3,
+                    Style::default().fg(theme.text3),
                 ));
                 // Overrides only: a definition that changes nothing
                 // renders no meta line — the session's model and the

@@ -390,6 +390,83 @@ fn the_subagents_page_caps_the_description_at_two_rows() {
     );
 }
 
+/// The Skills page caps its descriptions at two indented rows —
+/// the same discipline the Subagents page applies — and the license
+/// renders one dim row under them.
+#[test]
+fn the_skills_page_caps_the_description_and_dims_the_license() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.section = SettingsSection::Skills;
+    settings.skills_global_dir = Some("/cfg".into());
+    settings.skills_workspace_dir = "/w/.rhema/skills".into();
+    settings.skills = vec![crate::screens::SkillRow {
+        name: "wordy".into(),
+        description: "Takes a long task and breaks it into pieces, reports each one \
+             as it lands, and keeps a running summary so the parent can follow \
+             along without waiting for the end of the whole run to conclude."
+            .into(),
+        license: Some("MIT License, Copyright (c) 2026 Someone Somewhere".into()),
+        source: crate::screens::SkillSource::Workspace,
+        enabled: true,
+    }];
+
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let rows: Vec<String> = (0..24)
+        .map(|y| {
+            (0..60)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    let name_row = rows
+        .iter()
+        .position(|row| row.contains("wordy · workspace"))
+        .expect("the name row renders");
+    let name_col = rows[name_row]
+        .char_indices()
+        .position(|(_, ch)| ch == 'w')
+        .expect("the name");
+    let indent = |row: &String, col: usize| {
+        row.chars()
+            .skip(col.saturating_sub(4))
+            .take(4)
+            .all(char::is_whitespace)
+    };
+    let first = &rows[name_row + 1];
+    let second = &rows[name_row + 2];
+    let license = &rows[name_row + 3];
+    let after = &rows[name_row + 4];
+    assert!(indent(first, name_col), "the first row indents: {first:?}");
+    assert!(
+        indent(second, name_col),
+        "the second row indents: {second:?}"
+    );
+    let prose_end = second.trim_end_matches(|ch: char| ch.is_whitespace() || ch == '│');
+    assert!(
+        prose_end.ends_with('…'),
+        "the cap ends in an ellipsis: {second:?}"
+    );
+    assert!(
+        !after.contains("whole run"),
+        "the tail is dropped, no third row: {after:?}"
+    );
+    assert!(
+        license.contains("MIT License"),
+        "the license renders: {license:?}"
+    );
+    let dim = (0..60).any(|x| {
+        terminal.backend().buffer()[(x, (name_row + 3) as u16)]
+            .style()
+            .add_modifier
+            .contains(ratatui::style::Modifier::DIM)
+    });
+    assert!(dim, "the license renders dimmed: {license:?}");
+}
+
 /// The Profiles page lists the registry with its details and the
 /// add row, one click target each.
 #[test]

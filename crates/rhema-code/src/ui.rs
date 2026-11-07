@@ -375,15 +375,15 @@ fn wrap_clamped(
     width: usize,
     pad: usize,
     max_lines: usize,
-    color: ratatui::style::Color,
+    style: Style,
 ) -> Vec<Line<'static>> {
     let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
     let inner = width.saturating_sub(pad);
     if inner == 0 {
         // No room to indent into: the paragraph as-is, one row.
-        return vec![Line::from(Span::raw(text).fg(color))];
+        return vec![Line::from(Span::styled(text, style))];
     }
-    let mut rows = wrap_line(&Line::from(Span::raw(text).fg(color)), inner);
+    let mut rows = wrap_line(&Line::from(Span::styled(text, style)), inner);
     if rows.len() > max_lines {
         rows.truncate(max_lines);
         // The ellipsis takes the last column: trim the row back one
@@ -405,7 +405,7 @@ fn wrap_clamped(
             Some(pos) if pos >= raw.chars().count() / 2 => raw[..pos].trim_end().to_owned(),
             _ => raw,
         };
-        *last = Line::from(Span::raw(format!("{cut}…")).fg(color));
+        *last = Line::from(Span::styled(format!("{cut}…"), style));
     }
     let pad_span = Span::raw(" ".repeat(pad));
     rows.into_iter()
