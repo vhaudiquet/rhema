@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::forge::{record_client, resolve_watch_token};
+use crate::forge::{record_client, resolve_watch_credential};
 use crate::watch_store::ClawStore;
 use rhema_agent_tools::AllowAll;
 use rhema_autonomous_agent::{Handler, SessionContext, async_trait};
@@ -119,19 +119,23 @@ impl ClawHandler {
         // The same chain the poll resolved: row token, env var, then
         // the matching account identity — keyed on the resolved value,
         // so a credential rotation (or a saved account) is a new client
-        // on the next dispatch.
-        let resolved = resolve_watch_token(
+        // on the next dispatch. The login rides along: an instance that
+        // refuses the value in the token header takes it as Basic auth
+        // (`GiteaForge::with_login`).
+        let credential = resolve_watch_credential(
             self.accounts.as_ref(),
             kind,
             record.host.as_deref(),
             &record.token,
-        )
-        .unwrap_or_default();
-        let cache_key = format!("{}|{:?}|{}", record.forge, record.host, resolved);
+        );
+        let cache_key = format!(
+            "{}|{:?}|{}|{:?}",
+            record.forge, record.host, credential.token, credential.login
+        );
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
         Ok(clients
             .entry(cache_key)
-            .or_insert_with(|| record_client(kind, record.host.as_deref(), &resolved))
+            .or_insert_with(|| record_client(kind, record.host.as_deref(), &credential))
             .clone())
     }
 

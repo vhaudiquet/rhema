@@ -12,9 +12,10 @@
 //! (spec §1). Reading the tables every pass is what makes a watch added
 //! mid-flight (chat tool, HTTP route) take effect without a restart.
 //! Repo-watch clients are constructed on first use and cached per
-//! `(forge, host, resolved token)` — resolved through
-//! [`resolve_watch_token`], so a blank row borrows the matching
+//! `(forge, host, resolved credential)` — resolved through
+//! [`resolve_watch_credential`], so a blank row borrows the matching
 //! account identity; account clients are built fresh every pass,
+
 //! so a rotated identity secret is live on the next tick. Cadence
 //! belongs to the daemon's loop; the source is one pass, nothing more.
 
@@ -33,23 +34,66 @@ use rhema_rsd::{Clock, Dispatcher, Event, KeyFn, SystemClock};
 use crate::watch_store::{AccountWatchRecord, ClawStore, WatchRecord};
 use rhema_forge_integration::{ForgeKind, resolve_token};
 
+/// The credential a watch polls with: the value the forge takes as a
+/// bearer-style token, and the login that owns it when an account
+/// identity supplied the value.
+///
+/// The login is why this is a struct and not a string: an instance that
+/// refuses the value in the token header can be retried as Basic auth,
+/// which needs `user:password` — see `GiteaForge::with_login`. A row's
+/// stored token and the forge's environment variable name no login, so
+/// they carry `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchCredential {
+    /// The secret itself.
+    pub token: String,
+    /// The login that owns `token`, when an account identity supplied it.
+    pub login: Option<String>,
+}
+
+impl WatchCredential {
+    /// A credential from a bare value: a row token or an environment
+    /// variable, neither of which names a login.
+    pub fn bare(token: impl Into<String>) -> Self {
+        Self {
+            token: token.into(),
+            login: None,
+        }
+    }
+
+    /// Whether nothing resolved at all: the client then polls anonymous,
+    /// and the forge — not the daemon — is what says no.
+    pub fn is_empty(&self) -> bool {
+        self.token.is_empty()
+    }
+}
+
 /// The cache key of a forge client: everything that changes the client
-/// is the forge kind, its host, and the token it authenticates with.
+/// is the forge kind, its host, and the credential it authenticates
+/// with — the login included, because one value sent two ways is two
+/// credentials.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ClientKey {
     forge: String,
     host: Option<String>,
     token: String,
+    login: Option<String>,
 }
 
 /// The forge client one watch RECORD polls through: the kind's
 /// production base unless the record names a `host`. Callers pass the
-/// credential already resolved through [`resolve_watch_token`] (the
-/// account watches pass the identity store's secret directly), so a
-/// blank token here means nothing resolved anywhere: the client polls
+/// credential already resolved through [`resolve_watch_credential`] (the
+/// account watches pass the identity store's secret directly), so an
+/// empty token here means nothing resolved anywhere: the client polls
 /// anonymous, and the poll fails loudly at the forge, not silently.
-pub fn record_client(kind: ForgeKind, host: Option<&str>, token: &str) -> Arc<dyn Forge> {
-    let resolved = resolve_token(|name| std::env::var(name), kind, Some(token)).unwrap_or_default();
+pub fn record_client(
+    kind: ForgeKind,
+    host: Option<&str>,
+    credential: &WatchCredential,
+) -> Arc<dyn Forge> {
+    let resolved = resolve_token(|name| std::env::var(name), kind, Some(&credential.token))
+        .unwrap_or_default();
+
     match kind {
         ForgeKind::GitHub => {
             let mut forge = GitHubForge::new(resolved);
@@ -58,10 +102,16 @@ pub fn record_client(kind: ForgeKind, host: Option<&str>, token: &str) -> Arc<dy
             }
             Arc::new(forge)
         }
-        ForgeKind::Gitea => Arc::new(GiteaForge::new(
-            host.unwrap_or_default().to_owned(),
-            resolved,
-        )),
+        ForgeKind::Gitea => {
+            let mut forge = GiteaForge::new(host.unwrap_or_default().to_owned(), resolved);
+            // The login rides the client: a credential the instance
+            // refuses in the token header is retried as Basic auth (see
+            // `GiteaForge::with_login`).
+            if let Some(login) = &credential.login {
+                forge = forge.with_login(login.clone());
+            }
+            Arc::new(forge)
+        }
         ForgeKind::GitLab => {
             let mut forge = GitLabForge::new(resolved);
             if let Some(host) = host {
@@ -86,24 +136,49 @@ pub fn record_client(kind: ForgeKind, host: Option<&str>, token: &str) -> Arc<dy
 /// account) is visible. A matching account that holds a password is
 /// skipped without a word: a password is not a poll credential, and
 /// the per-pass alternative is a log line per watch per tick.
+///
+/// A derived credential carries the account's login too. The store's
+/// `secret_kind` is a label its human typed at `identity_save`, not a
+/// fact about the value, so a login password saved as a token resolves
+/// here — and the login is what lets the forge client retry it as Basic
+/// auth (`GiteaForge::with_login`) instead of 401-ing every tick. A row
+/// token or an environment variable names no login and carries `None`.
+pub fn resolve_watch_credential(
+    accounts: &dyn IdentityStore,
+    kind: ForgeKind,
+    host: Option<&str>,
+    stored: &str,
+) -> WatchCredential {
+    if let Some(token) = resolve_token(|name| std::env::var(name), kind, Some(stored)) {
+        return WatchCredential::bare(token);
+    }
+    accounts
+        .list()
+        .ok()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|account| account.service.eq_ignore_ascii_case(kind.name()))
+        .filter(|account| host_matches(host, account.url.as_deref()))
+        .find_map(|account| {
+            let secret = accounts.secret(&account.id).ok()??;
+            (secret.kind == SecretKind::Token).then(|| WatchCredential {
+                token: secret.value,
+                login: account.username,
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// The token half of [`resolve_watch_credential`]: what a caller with no
+/// use for the login — a cache key's text, a test — needs.
 pub fn resolve_watch_token(
     accounts: &dyn IdentityStore,
     kind: ForgeKind,
     host: Option<&str>,
     stored: &str,
 ) -> Option<String> {
-    resolve_token(|name| std::env::var(name), kind, Some(stored)).or_else(|| {
-        accounts
-            .list()
-            .ok()?
-            .into_iter()
-            .filter(|account| account.service.eq_ignore_ascii_case(kind.name()))
-            .filter(|account| host_matches(host, account.url.as_deref()))
-            .find_map(|account| {
-                let secret = accounts.secret(&account.id).ok()??;
-                (secret.kind == SecretKind::Token).then_some(secret.value)
-            })
-    })
+    let credential = resolve_watch_credential(accounts, kind, host, stored);
+    (!credential.is_empty()).then_some(credential.token)
 }
 
 /// Whether `account_url` names the same instance a watch with `host`
@@ -182,24 +257,25 @@ impl ForgeSource {
             // table would be skipped in `detect` before reaching here.
             unreachable!("detect filters unknown forge kinds before client lookup")
         };
-        let resolved = resolve_watch_token(
+        let credential = resolve_watch_credential(
             self.accounts.as_ref(),
             kind,
             record.host.as_deref(),
             &record.token,
-        )
-        .unwrap_or_default();
+        );
         // The RESOLVED credential, not the row's: two blank-token
-        // watches whose identities differ must not share a client.
+        // watches whose identities differ must not share a client, and
+        // neither must one value answerable as a token and as a password.
         let key = ClientKey {
             forge: record.forge.clone(),
             host: record.host.clone(),
-            token: resolved.clone(),
+            token: credential.token.clone(),
+            login: credential.login.clone(),
         };
         let mut clients = self.clients.lock().unwrap_or_else(PoisonError::into_inner);
         clients
             .entry(key)
-            .or_insert_with(|| record_client(kind, record.host.as_deref(), &resolved))
+            .or_insert_with(|| record_client(kind, record.host.as_deref(), &credential))
             .clone()
     }
 }
@@ -309,8 +385,19 @@ impl ForgeSource {
         }
         // Fresh client every pass: a rotated secret is live on the next
         // tick, and one client build per account per pass is nothing
-        // next to the poll itself.
-        let client = record_client(kind, watch.host.as_deref(), &secret.value);
+        // next to the poll itself. The login rides it: a password saved
+        // under the token kind still polls, as Basic auth.
+        let login = self
+            .accounts
+            .get(&watch.account_id)
+            .map_err(|err| SourceError::Backend(format!("account store: {err}")))?
+            .and_then(|account| account.username);
+        let credential = WatchCredential {
+            token: secret.value,
+            login,
+        };
+        let client = record_client(kind, watch.host.as_deref(), &credential);
+
         let since = self
             .account_cursors
             .lock()
@@ -438,6 +525,39 @@ mod tests {
         let resolved =
             resolve_watch_token(&accounts, ForgeKind::Gitea, Some("https://git.example"), "");
         assert_eq!(resolved.as_deref(), Some("acct-tok"));
+    }
+
+    /// A derived credential carries the account's login: it is what lets
+    /// the forge client retry a secret the instance refuses as a token
+    /// (a login password saved under the token kind) as Basic auth.
+    #[test]
+    fn a_borrowed_credential_carries_the_accounts_login() {
+        let accounts = rhema_identity::VolatileIdentityStore::new();
+        accounts
+            .put(
+                rhema_identity::AccountDraft::new(
+                    "kosmos",
+                    "gitea",
+                    rhema_identity::Secret::new(rhema_identity::SecretKind::Token, "hunter2"),
+                )
+                .with_url("https://git.example")
+                .with_username("kosmos"),
+            )
+            .expect("account lands");
+
+        let derived =
+            resolve_watch_credential(&accounts, ForgeKind::Gitea, Some("https://git.example"), "");
+        assert_eq!(derived.token, "hunter2");
+        assert_eq!(derived.login.as_deref(), Some("kosmos"));
+
+        // A row token names no login: there is nothing to retry with.
+        let row = resolve_watch_credential(
+            &accounts,
+            ForgeKind::Gitea,
+            Some("https://git.example"),
+            "row-tok",
+        );
+        assert_eq!(row, WatchCredential::bare("row-tok"));
     }
 
     /// The derived identity is instance-scoped: a self-hosted watch
