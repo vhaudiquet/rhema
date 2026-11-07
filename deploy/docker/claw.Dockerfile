@@ -31,6 +31,7 @@ COPY crates/rhema-provider-google/Cargo.toml crates/rhema-provider-google/Cargo.
 COPY crates/rhema-provider-llama-cpp/Cargo.toml crates/rhema-provider-llama-cpp/Cargo.toml
 COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-openai-compatible/Cargo.toml
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
+COPY crates/rhema-provider-registry/Cargo.toml crates/rhema-provider-registry/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
 COPY crates/rhema-sandbox/Cargo.toml crates/rhema-sandbox/Cargo.toml
 COPY crates/rhema-sandbox-docker/Cargo.toml crates/rhema-sandbox-docker/Cargo.toml
