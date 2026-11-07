@@ -247,6 +247,19 @@ pub enum UiEvent {
         /// why the choice could not be stood up.
         result: Result<crate::sandbox::Sandboxed, String>,
     },
+    /// The Update page's version check answered: the channel's latest
+    /// version, or why the check failed.
+    UpdateChecked {
+        /// The manifest's `stable` version, or the failure text.
+        result: Result<String, String>,
+    },
+    /// The Update page's install run finished: the script's output
+    /// tail, or the failure. A success means the new binary is on
+    /// disk; the running process keeps the old one until a restart.
+    UpdateInstalled {
+        /// The installer's output tail, or the failure text.
+        result: Result<String, String>,
+    },
     /// A `/resume` pick finished loading off-thread. The session file
     /// is a JSON read plus a parse, and the usage accounting it derives
     /// is more of the same — neither belongs on the UI thread, which

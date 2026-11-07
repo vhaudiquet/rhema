@@ -69,6 +69,24 @@ impl App {
                 self.cancel_finished(agent, steer);
                 vec![Effect::FetchUsage]
             }
+            UiEvent::UpdateChecked { result } => {
+                self.update.check = crate::screens::UpdateCheck::Done(result);
+                self.sync_update_page();
+                Vec::new()
+            }
+            UiEvent::UpdateInstalled { result } => {
+                // The transcript carries the outcome too: a big
+                // download outlives the page, and the notice is the
+                // record the chat holds either way.
+                let notice = match &result {
+                    Ok(_) => "rhema updated — restart to run the new version".to_owned(),
+                    Err(err) => format!("the rhema update failed: {err}"),
+                };
+                self.update.install = crate::screens::UpdateInstall::Done(result);
+                self.sync_update_page();
+                self.transcript.push_notice(&notice);
+                Vec::new()
+            }
         }
     }
 

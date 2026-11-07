@@ -172,6 +172,10 @@ pub struct App {
     /// being stood up off the UI thread. Turns and further switches
     /// wait for it; the answer arrives as `UiEvent::SandboxAssembled`.
     pub assembling: Option<SandboxChoice>,
+    /// The self-update state: what the version check and the install
+    /// run last reported. Outlives the settings screen — the opener
+    /// syncs it into the Update page, and every result syncs it back.
+    pub update: crate::screens::UpdatePage,
     /// Where the onboarding welcome step drew its logo, when it did:
     /// the runner places the terminal-graphics image there after the
     /// frame, and clears it when the rect goes away. `None` on every
@@ -496,6 +500,7 @@ impl App {
             disabled_mcp_servers: config_disabled_mcp,
             sandbox_offered: setup.sandbox_machines.offered_for(&effective),
             assembling: None,
+            update: crate::screens::UpdatePage::default(),
             logo_rect: None,
         })
     }

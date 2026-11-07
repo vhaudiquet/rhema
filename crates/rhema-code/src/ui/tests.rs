@@ -78,6 +78,62 @@ fn the_appearance_labels_keep_a_gap_before_their_values() {
     assert!(!text.contains("BackgroundNative"), "{text}");
 }
 
+/// The Update page: this build's row, the channel's latest with its
+/// verdict, the two rows, and the dim install row before a check
+/// earned it.
+#[test]
+fn the_update_page_shows_the_versions_and_its_two_rows() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.section = SettingsSection::Update;
+    settings.update.check =
+        crate::screens::UpdateCheck::Done(Ok(crate::update::current_version().to_owned()));
+    let drawn = |settings: &crate::screens::SettingsScreen| {
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        (0..40)
+            .map(|y| {
+                (0..80)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<String>()
+    };
+    let text = drawn(&settings);
+    assert!(text.contains("Current"), "{text}");
+    assert!(
+        text.contains("up to date"),
+        "the channel at this build is no update: {text}"
+    );
+    assert!(text.contains("Check for updates..."), "{text}");
+    assert!(text.contains("Update now"), "{text}");
+    assert!(
+        !text.contains("downloading and installing"),
+        "an idle install says nothing: {text}"
+    );
+
+    // A newer release: the verdict flips, and the install run's
+    // outcome renders under the rows.
+    settings.update.check = crate::screens::UpdateCheck::Done(Ok("99.0.0".to_owned()));
+    settings.update.install = crate::screens::UpdateInstall::Running;
+    let text = drawn(&settings);
+    assert!(text.contains("update available"), "{text}");
+    assert!(text.contains("downloading and installing"), "{text}");
+
+    // A failed run names itself, not success.
+    settings.update.install =
+        crate::screens::UpdateInstall::Done(Err("checksum mismatch".to_owned()));
+    let text = drawn(&settings);
+    assert!(
+        text.contains("the install failed: checksum mismatch"),
+        "{text}"
+    );
+}
+
 /// The Usage page's detailed split: the subtitle, the six rows as
 /// percentages of the total with their kilo-scaled amounts.
 #[test]

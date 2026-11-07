@@ -573,6 +573,12 @@ pub enum Effect {
     /// Subagents page's rows refresh then — the edit happened behind
     /// the app's back.
     EditSubagent(PathBuf),
+    /// Fetch the distribution channel's latest version off-thread;
+    /// the answer lands as `UiEvent::UpdateChecked`.
+    CheckForUpdates,
+    /// Run the install script off-thread; the outcome lands as
+    /// `UiEvent::UpdateInstalled`.
+    InstallUpdate,
 }
 
 /// The Subagents page's rows: every discovered definition with its

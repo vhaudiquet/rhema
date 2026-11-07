@@ -42,5 +42,5 @@ pub use profiles::{ProfileAction, ProfileRow, ProfileScreen, profile_rows};
 pub use providers::{LoginProvider, PROVIDERS, ProviderEntry};
 pub use settings::{
     InstanceRow, SettingsAction, SettingsScreen, SettingsSection, SkillRow, SkillSource,
-    SubagentRow, SubagentSource,
+    SubagentRow, SubagentSource, UpdateCheck, UpdateInstall, UpdatePage,
 };

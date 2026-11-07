@@ -319,6 +319,20 @@ impl App {
                 }
             }
             SettingsAction::RemoveSandboxInstance => self.remove_sandbox_instance(),
+            SettingsAction::CheckForUpdates => {
+                self.update.check = crate::screens::UpdateCheck::Checking;
+                self.sync_update_page();
+                vec![Effect::CheckForUpdates]
+            }
+            SettingsAction::InstallUpdate => {
+                // Already out: a second Enter does not stack installers.
+                if self.update.install == crate::screens::UpdateInstall::Running {
+                    return Vec::new();
+                }
+                self.update.install = crate::screens::UpdateInstall::Running;
+                self.sync_update_page();
+                vec![Effect::InstallUpdate]
+            }
             SettingsAction::EditSubagent => self.edit_subagent(),
             SettingsAction::ToggleSubagent => {
                 let name = match &self.screen {

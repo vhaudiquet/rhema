@@ -791,6 +791,102 @@ pub(crate) fn settings_page(
             }
             (lines, footer("esc back"), Vec::new())
         }
+        SettingsSection::Update => {
+            let mut row_hits = Vec::new();
+            let current = crate::update::current_version();
+            lines.extend(settings_field(
+                "Current",
+                Span::raw(current.to_owned()).fg(theme.text),
+                theme,
+                width,
+            ));
+            let latest = match &settings.update.check {
+                crate::screens::UpdateCheck::Idle => {
+                    Span::raw("not checked yet".to_owned()).fg(theme.text3)
+                }
+                crate::screens::UpdateCheck::Checking => {
+                    Span::raw("checking…".to_owned()).fg(theme.text3)
+                }
+                crate::screens::UpdateCheck::Done(Ok(latest)) => {
+                    // The verdict rides the version: the channel's
+                    // number beside this build's, colored by what a
+                    // restart would bring.
+                    let newer = crate::update::is_newer(latest, current);
+                    Span::raw(format!(
+                        "{latest} — {}",
+                        if newer {
+                            "update available"
+                        } else {
+                            "up to date"
+                        }
+                    ))
+                    .fg(if newer { theme.warn } else { theme.ok })
+                }
+                crate::screens::UpdateCheck::Done(Err(err)) => {
+                    Span::raw(err.clone()).fg(theme.warn)
+                }
+            };
+            lines.extend(settings_field("Latest", latest, theme, width));
+            lines.push(Line::default());
+            // The two rows. The install row lists dim until a check
+            // earned it — a row that would refuse every enter must
+            // say so before the enter.
+            let rows = [
+                ("Check for updates...", true),
+                ("Update now", settings.update.update_available()),
+            ];
+            for (index, (label, enabled)) in rows.iter().enumerate() {
+                let selected = index == settings.row;
+                row_hits.push((lines.len(), SettingsHit::PageRow(index)));
+                lines.push(settings_row(
+                    Line::from(vec![
+                        super::chrome::marker(selected, theme),
+                        Span::raw((*label).to_owned()).fg(if *enabled {
+                            theme.text2
+                        } else {
+                            theme.text3
+                        }),
+                    ]),
+                    selected,
+                    theme,
+                ));
+            }
+            lines.push(Line::default());
+            // The install run's outcome, when there is one: the
+            // script's last lines (its final line names what landed
+            // where), or why the run died.
+            match &settings.update.install {
+                crate::screens::UpdateInstall::Idle => {}
+                crate::screens::UpdateInstall::Running => lines.extend(settings_hint(
+                    "downloading and installing — this can take a minute",
+                    theme,
+                    width,
+                )),
+                crate::screens::UpdateInstall::Done(Ok(output)) => {
+                    let tail: Vec<&str> = output.lines().rev().take(3).collect();
+                    for line in tail.into_iter().rev() {
+                        lines.extend(settings_hint(line, theme, width));
+                    }
+                    lines.extend(settings_hint(
+                        "a restart picks the new version up",
+                        theme,
+                        width,
+                    ));
+                }
+                crate::screens::UpdateInstall::Done(Err(err)) => {
+                    lines.extend(settings_hint(
+                        &format!("the install failed: {err}"),
+                        theme,
+                        width,
+                    ));
+                }
+            }
+            (
+                lines,
+                footer("enter checks or installs · the install runs in the background"),
+                row_hits,
+            )
+        }
         SettingsSection::About => {
             lines.push(Line::from(
                 Span::raw(format!("Rhema Code {}", env!("CARGO_PKG_VERSION"))).bold(),

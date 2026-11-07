@@ -357,6 +357,42 @@ pub fn spawn_login_flow(
     })
 }
 
+/// The wall-clock bound on one update check: the fetch tools carry
+/// shorter bounds of their own; this one keeps the Update page's
+/// `checking…` state honest even when a transfer trickles past them.
+const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Spawns the Update page's version check on a tokio task: the
+/// distribution manifest's fetch and parse run off the UI thread and
+/// report as [`UiEvent::UpdateChecked`].
+pub fn spawn_update_check(events: UnboundedSender<UiEvent>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let result =
+            match tokio::time::timeout(UPDATE_CHECK_TIMEOUT, crate::update::fetch_latest_version())
+                .await
+            {
+                Ok(result) => result,
+                Err(_) => Err(format!(
+                    "no answer within {} s",
+                    UPDATE_CHECK_TIMEOUT.as_secs()
+                )),
+            };
+        let _ = events.send(UiEvent::UpdateChecked { result });
+    })
+}
+
+/// Spawns the Update page's install run on a tokio task: the published
+/// install script — a download of the whole release behind it — runs
+/// off the UI thread with no time bound and reports as
+/// [`UiEvent::UpdateInstalled`]. The running binary stays the old one
+/// until a restart either way.
+pub fn spawn_update_install(events: UnboundedSender<UiEvent>) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let result = crate::update::run_installer().await;
+        let _ = events.send(UiEvent::UpdateInstalled { result });
+    })
+}
+
 /// Forwards login-flow updates onto the UI channel; a closed channel
 /// means the UI is gone, and the flow dies with the task.
 struct FlowSink(UnboundedSender<UiEvent>);
@@ -384,6 +420,8 @@ pub async fn drive_turn_for_test(
             | UiEvent::ApprovalRequested { .. }
             | UiEvent::SandboxAssembled { .. }
             | UiEvent::SessionResumed { .. }
+            | UiEvent::UpdateChecked { .. }
+            | UiEvent::UpdateInstalled { .. }
             | UiEvent::LoginUpdate(_) => {}
         }
     }

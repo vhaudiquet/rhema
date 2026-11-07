@@ -25,6 +25,9 @@ pub enum SettingsSection {
     Mcp,
     /// The allowance, the session's cost, the last turn's tokens.
     Usage,
+    /// This build beside the channel's latest release, and the
+    /// installer run behind the page's two rows.
+    Update,
     /// Version, repository, paths.
     About,
 }
@@ -41,6 +44,7 @@ impl SettingsSection {
         SettingsSection::Subagents,
         SettingsSection::Mcp,
         SettingsSection::Usage,
+        SettingsSection::Update,
         SettingsSection::About,
     ];
 
@@ -56,6 +60,7 @@ impl SettingsSection {
             SettingsSection::Subagents => "Subagents",
             SettingsSection::Mcp => "MCP",
             SettingsSection::Usage => "Usage",
+            SettingsSection::Update => "Update",
             SettingsSection::About => "About",
         }
     }
@@ -136,6 +141,63 @@ pub enum SettingsAction {
     /// `y` on the remove-server confirm: the entry goes from the
     /// profile.
     RemoveMcpServer,
+    /// Enter on the Update page's check row: the manifest fetch starts.
+    CheckForUpdates,
+    /// Enter on the Update page's install row: the install script
+    /// runs. The page only raises the action when a check found a
+    /// newer release and no install is already out.
+    InstallUpdate,
+}
+
+/// The Update page's snapshot: what the last version check and the
+/// last install run reported. The app holds the truth — the states
+/// survive closing the settings — and the opener and every result
+/// sync it in here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdatePage {
+    /// The version check's state.
+    pub check: UpdateCheck,
+    /// The install run's state.
+    pub install: UpdateInstall,
+}
+
+impl UpdatePage {
+    /// Whether the channel carries a release above this build: the
+    /// install row's one enabled state. A check that has not run, is
+    /// running, or failed says no, as does a channel behind this build.
+    pub fn update_available(&self) -> bool {
+        matches!(
+            &self.check,
+            UpdateCheck::Done(Ok(latest))
+                if crate::update::is_newer(latest, crate::update::current_version())
+        )
+    }
+}
+
+/// The version check's state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpdateCheck {
+    /// No check has run in this session yet.
+    #[default]
+    Idle,
+    /// The manifest fetch is in flight.
+    Checking,
+    /// The fetch answered: the channel's latest version, or why it
+    /// could not be read.
+    Done(Result<String, String>),
+}
+
+/// The install run's state.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum UpdateInstall {
+    /// No install has run in this session yet.
+    #[default]
+    Idle,
+    /// The install script is out; its output grows unseen until the
+    /// result event lands.
+    Running,
+    /// The run finished: the script's output tail, or the failure.
+    Done(Result<String, String>),
 }
 
 /// One row of the Providers page's instance list: a stored instance, or
@@ -326,6 +388,10 @@ pub struct SettingsScreen {
     pub transcript: Option<rhema_transcript::TranscriptStats>,
     /// The session's accumulated cost in USD.
     pub session_cost: f64,
+    // The Update page's snapshot.
+    /// The last check's and the last install's states, synced from the
+    /// app whenever either moves.
+    pub update: UpdatePage,
     // The About page's snapshot.
     /// The config file's path, when one resolves.
     pub config_path: Option<String>,
@@ -377,6 +443,7 @@ impl SettingsScreen {
             last_turn: None,
             transcript: None,
             session_cost: 0.0,
+            update: UpdatePage::default(),
             config_path: None,
             workspace: String::new(),
             profile_count: 0,
@@ -568,6 +635,7 @@ impl SettingsScreen {
             SettingsSection::Skills => self.skills.len(),
             SettingsSection::Subagents => self.subagents.len(),
             SettingsSection::Mcp => self.mcp.len() + 1,
+            SettingsSection::Update => 2,
             _ => 0,
         }
     }
@@ -621,6 +689,11 @@ impl SettingsScreen {
             SettingsSection::Mcp => match self.selected_mcp_server() {
                 Some(_) => SettingsAction::ToggleMcpServer,
                 None => SettingsAction::OpenMcpDialog,
+            },
+            SettingsSection::Update => match self.row {
+                0 => SettingsAction::CheckForUpdates,
+                _ if self.update.update_available() => SettingsAction::InstallUpdate,
+                _ => SettingsAction::None,
             },
             _ => SettingsAction::None,
         }

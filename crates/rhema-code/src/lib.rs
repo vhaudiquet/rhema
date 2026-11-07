@@ -27,6 +27,8 @@
 //! - [`status`] — program status over OSC 7501, for the terminal's tabs
 //! - [`app`] — the state machine routing keys and events
 //! - [`turn`] — the tokio tasks (turn, model fetch)
+//! - [`update`] — the self-update seam: the channel's manifest check
+//!   and the install script run behind the settings' Update page
 //! - [`ui`] — ratatui rendering, with `chrome` as its shared
 //!   panel/marker vocabulary of the menus
 //! - [`term_image`] — the onboarding logo through the kitty graphics
@@ -68,6 +70,7 @@ pub mod term_image;
 pub mod transcript;
 pub mod turn;
 pub mod ui;
+pub mod update;
 
 pub use app::{App, AppSetup, Effect, RunOptions, Screen};
 pub use approval::ApprovalAnswerer;

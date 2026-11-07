@@ -35,6 +35,7 @@ impl App {
             .last_sandbox_in(&self.options.workspace)
             .as_deref()
             .and_then(|kind| SandboxChoice::from_stored(Some(kind)));
+        settings.update = self.update.clone();
         settings.mcp = crate::screens::mcp_server_rows(
             &settings.stored.mcp_servers,
             &self.disabled_mcp_servers,
@@ -103,6 +104,15 @@ impl App {
         settings.workspace = workspace.to_string_lossy().into_owned();
         settings.profile_count = config.profiles.len();
         settings
+    }
+
+    /// Copies the update state into the open settings page, so the
+    /// Update page keeps telling the truth while a check or an install
+    /// runs behind it. A no-op when the screen is not open.
+    pub(crate) fn sync_update_page(&mut self) {
+        if let Screen::Settings(settings) = &mut self.screen {
+            settings.update = self.update.clone();
+        }
     }
 
     /// Re-reads the Subagents page's snapshot: an edit happened in

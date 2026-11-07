@@ -6189,3 +6189,129 @@ fn the_mcp_mute_round_trips() {
         "the mute dies with the server"
     );
 }
+
+#[test]
+fn the_update_page_checks_then_installs() {
+    let mut h = harness(None, None, Session::default());
+    h.app.open_settings_at(SettingsSection::Update);
+    // Enter on the check row: the fetch effect leaves, the page shows
+    // the check as running.
+    let effects = h.app.on_key(key(KeyCode::Enter));
+    assert_eq!(effects, vec![Effect::CheckForUpdates]);
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(
+        settings.update.check,
+        crate::screens::UpdateCheck::Checking,
+        "the page keeps telling the truth"
+    );
+
+    // The check answers with a release above this build: the state and
+    // the open page follow, and the install row raises its action.
+    h.app.on_event(UiEvent::UpdateChecked {
+        result: Ok("99.0.0".to_owned()),
+    });
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(
+        settings.update.check,
+        crate::screens::UpdateCheck::Done(Ok("99.0.0".to_owned()))
+    );
+    assert!(
+        settings.update.update_available(),
+        "99.0.0 is above any build in tests"
+    );
+    h.app.on_key(key(KeyCode::Down));
+    let effects = h.app.on_key(key(KeyCode::Enter));
+    assert_eq!(effects, vec![Effect::InstallUpdate]);
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(
+        settings.update.install,
+        crate::screens::UpdateInstall::Running
+    );
+
+    // The install run answers: the page shows it done and the
+    // transcript carries the notice a closed page would show.
+    h.app.on_event(UiEvent::UpdateInstalled {
+        result: Ok("installed rhema 99.0.0 to ~/.local/bin/rhema".to_owned()),
+    });
+    assert!(matches!(
+        h.app.update.install,
+        crate::screens::UpdateInstall::Done(Ok(_))
+    ));
+    assert!(
+        h.app.transcript.lines().contains(&Line::Notice(
+            "rhema updated — restart to run the new version".into()
+        )),
+        "the install is noticed"
+    );
+
+    // A second Enter mid-run does not stack installers: a fresh
+    // harness with the state mid-run re-checks the guard alone.
+    h.app.update.install = crate::screens::UpdateInstall::Running;
+    h.app.sync_update_page();
+    let effects = h.app.on_key(key(KeyCode::Enter));
+    assert!(effects.is_empty(), "the running install refuses re-enters");
+    // A finished run may run again: the installer is idempotent, and
+    // a retry after a failure is the point.
+    h.app.update.install = crate::screens::UpdateInstall::Done(Ok("done".to_owned()));
+    h.app.sync_update_page();
+    let effects = h.app.on_key(key(KeyCode::Enter));
+    assert_eq!(effects, vec![Effect::InstallUpdate]);
+}
+
+#[test]
+fn the_update_install_row_stays_inert_without_a_newer_release() {
+    let mut h = harness(None, None, Session::default());
+    h.app.open_settings_at(SettingsSection::Update);
+
+    // No check yet: the install row lists but refuses the enter.
+    h.app.on_key(key(KeyCode::Down));
+    assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
+
+    // A check that failed says no too.
+    h.app.on_key(key(KeyCode::Up));
+    h.app.on_key(key(KeyCode::Enter));
+    h.app.on_event(UiEvent::UpdateChecked {
+        result: Err("no answer within 30 s".to_owned()),
+    });
+    h.app.on_key(key(KeyCode::Down));
+    assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
+
+    // So does a channel at or below this build.
+    h.app.on_event(UiEvent::UpdateChecked {
+        result: Ok("0.0.1".to_owned()),
+    });
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(
+        !settings.update.update_available(),
+        "the channel trails this build"
+    );
+    assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
+}
+
+#[test]
+fn the_update_states_survive_closing_the_settings() {
+    let mut h = harness(None, None, Session::default());
+    h.app.open_settings_at(SettingsSection::Update);
+    h.app.on_key(key(KeyCode::Enter));
+    // Back to the chat and in again: the check's in-flight state
+    // rides with the app, not the page snapshot.
+    h.app.on_key(key(KeyCode::Esc));
+    assert!(matches!(h.app.screen, Screen::Chat));
+    h.app.open_settings_at(SettingsSection::Update);
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(
+        settings.update.check,
+        crate::screens::UpdateCheck::Checking,
+        "the opener syncs the app's state in"
+    );
+}
