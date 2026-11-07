@@ -428,6 +428,85 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
     }
 }
 
+/// A secret the instance refuses as a token but accepts as a password —
+/// the shape a self-hosted Gitea answers to an account whose stored
+/// `secret_kind` says token and whose value is a login password. The
+/// retry is what keeps such a watch polling instead of 401-ing forever.
+#[tokio::test]
+async fn a_refused_token_header_retries_once_as_basic_auth() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widgets/issues/7"))
+        .and(header("authorization", "token hunter2"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "message": "invalid username, password or token"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widgets/issues/7"))
+        // base64("kosmos:hunter2"): the instance's own login form.
+        .and(header("authorization", "Basic a29zbW9zOmh1bnRlcjI="))
+        .respond_with(ResponseTemplate::new(200).set_body_json(issue_row(7, json!({}))))
+        .mount(&server)
+        .await;
+
+    let snapshot = GiteaForge::new(server.uri(), "hunter2")
+        .with_login("kosmos")
+        .snapshot(&RepoRef::new("acme", "widgets"), ForgeThreadKind::Issue, 7)
+        .await
+        .expect("the Basic retry authenticates");
+    assert_eq!(snapshot.title, "thread 7");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 2, "one token attempt, then one Basic");
+    assert_eq!(
+        received[0]
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("token hunter2")
+    );
+    assert_eq!(
+        received[1]
+            .headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok()),
+        Some("Basic a29zbW9zOmh1bnRlcjI=")
+    );
+}
+
+/// Without a login there is nothing to retry with: the 401 surfaces on
+/// the first attempt, exactly as before the fallback existed.
+#[tokio::test]
+async fn a_refused_token_without_a_login_does_not_retry() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/acme/widgets/issues/7"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "message": "invalid username, password or token"
+        })))
+        .mount(&server)
+        .await;
+
+    let err = forge(&server)
+        .snapshot(&RepoRef::new("acme", "widgets"), ForgeThreadKind::Issue, 7)
+        .await
+        .expect_err("a refused token is an error");
+    assert!(
+        matches!(err, ForgeError::Api { status: 401, .. }),
+        "got: {err:?}"
+    );
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 1);
+}
+
 #[tokio::test]
 async fn a_transport_failure_maps_to_network() {
     // An unroutable address: nothing is listening, so the connect fails.

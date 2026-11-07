@@ -1,7 +1,11 @@
 //! The Gitea adapter: self-hosted, so the base URL is required and points
 //! at the instance root (`https://forge.example`); every request path is
 //! prefixed with `/api/v1`. Auth is the token in
-//! `Authorization: token <token>`.
+//! `Authorization: token <token>`, with one retry as Basic auth
+//! (`user:password`) when the instance refuses it: a Gitea instance
+//! answers 401 to a password sent in the token header while accepting
+//! the same value as Basic, and an account's `secret_kind` is a label
+//! its human typed, not a fact.
 //!
 //! The endpoints mirror GitHub's shape, with the constraints that differ:
 //! - Issues come from `GET /repos/{owner}/{repo}/issues` with
@@ -59,6 +63,10 @@ const MAX_PAGES: usize = 1000;
 pub struct GiteaForge {
     base_url: String,
     token: String,
+    /// The login that owns `token`, when the caller knows it: a Gitea
+    /// instance takes `user:password` as Basic auth, so a secret the
+    /// token header cannot carry still polls — see [`Self::send`].
+    login: Option<String>,
     http: reqwest::Client,
 }
 
@@ -80,6 +88,7 @@ impl GiteaForge {
         Self {
             base_url: base_url.into().trim_end_matches('/').to_owned(),
             token: token.into(),
+            login: None,
             http,
         }
     }
@@ -91,19 +100,70 @@ impl GiteaForge {
         self
     }
 
-    /// A GET builder for `path` with auth applied: the token rides only in
-    /// the `Authorization` header, never in a URL.
-    fn get(&self, path: &str) -> reqwest::RequestBuilder {
-        let base = &self.base_url;
-        let request = self.http.get(format!("{base}/api/v1{path}"));
-        self.auth(request)
+    /// The login that owns the token, when a caller knows it — an account
+    /// identity does, a pasted watch token does not. It is what lets a
+    /// credential the instance refuses as a token be retried as Basic
+    /// auth; blank is the same as never set.
+    pub fn with_login(mut self, login: impl Into<String>) -> Self {
+        let login = login.into();
+        let login = login.trim();
+        self.login = (!login.is_empty()).then(|| login.to_owned());
+        self
     }
 
-    /// A POST builder for `path` with auth applied.
+    /// A GET builder for `path`, unauthenticated: every call goes
+    /// through [`Self::send`], which applies the credential.
+    fn get(&self, path: &str) -> reqwest::RequestBuilder {
+        let base = &self.base_url;
+        self.http.get(format!("{base}/api/v1{path}"))
+    }
+
+    /// A POST builder for `path`, unauthenticated — see [`Self::get`].
     fn post(&self, path: &str) -> reqwest::RequestBuilder {
         let base = &self.base_url;
-        let request = self.http.post(format!("{base}/api/v1{path}"));
-        self.auth(request)
+        self.http.post(format!("{base}/api/v1{path}"))
+    }
+
+    /// Sends `request` with the credential applied, retrying once as
+    /// Basic auth when the instance refuses the token header.
+    ///
+    /// `Authorization: token <t>` is the right header for an API token
+    /// and the wrong one for a password: a self-hosted Gitea answers 401
+    /// to a password sent that way, and 200 to the same value as
+    /// `user:password`. Which one a stored secret is cannot be read off
+    /// its `secret_kind` (a label its human typed), so the attempt
+    /// decides: token first, Basic on a 401, and the instance's own
+    /// error body is what surfaces when both fail.
+    ///
+    /// The retry is cloned *before* the token header lands, so the
+    /// fallback request carries one `Authorization` header, not two.
+    /// Nothing to retry with (no login, or a body the clone cannot
+    /// carry) leaves the 401 to surface as it always did.
+    async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ForgeError> {
+        let retry = if self.login.is_some() {
+            request.try_clone()
+        } else {
+            None
+        };
+        let response = self
+            .auth(request)
+            .send()
+            .await
+            .map_err(ForgeError::network)?;
+        if response.status() != reqwest::StatusCode::UNAUTHORIZED {
+            return Ok(response);
+        }
+        match (self.login.as_deref(), retry) {
+            (Some(login), Some(retry)) => retry
+                .basic_auth(login, Some(self.token.as_str()))
+                .send()
+                .await
+                .map_err(ForgeError::network),
+            _ => Ok(response),
+        }
     }
 
     /// Gitea's token scheme: `Authorization: token <token>`.
@@ -125,12 +185,7 @@ impl GiteaForge {
             let mut query = query.to_vec();
             query.push(("limit".to_owned(), PER_PAGE.to_string()));
             query.push(("page".to_owned(), page.to_string()));
-            let response = self
-                .get(path)
-                .query(&query)
-                .send()
-                .await
-                .map_err(ForgeError::network)?;
+            let response = self.send(self.get(path).query(&query)).await?;
             let batch: Vec<T> = decode(response).await?;
             let full = batch.len() == PER_PAGE;
             rows.extend(batch);
@@ -629,11 +684,8 @@ impl Forge for GiteaForge {
             repo.owner, repo.name
         );
         let response = self
-            .post(&path)
-            .json(&serde_json::json!({ "body": body }))
-            .send()
-            .await
-            .map_err(ForgeError::network)?;
+            .send(self.post(&path).json(&serde_json::json!({ "body": body })))
+            .await?;
         ensure_success(response).await?;
         Ok(())
     }
@@ -647,21 +699,13 @@ impl Forge for GiteaForge {
         // One number space across issues and pulls: `_kind` cannot
         // change the route (see `comment`).
         let issue_path = format!("/repos/{}/{}/issues/{number}", repo.owner, repo.name);
-        let response = self
-            .get(&issue_path)
-            .send()
-            .await
-            .map_err(ForgeError::network)?;
+        let response = self.send(self.get(&issue_path)).await?;
         let issue: WireIssue = decode(response).await?;
         if issue.pull_request.is_some() {
             // The issue view's PR meta is a marker; the pulls row carries
             // the authoritative merged flag.
             let pull_path = format!("/repos/{}/{}/pulls/{number}", repo.owner, repo.name);
-            let response = self
-                .get(&pull_path)
-                .send()
-                .await
-                .map_err(ForgeError::network)?;
+            let response = self.send(self.get(&pull_path)).await?;
             let pull: WirePull = decode(response).await?;
             Ok(snapshot_from_pull(&pull)?)
         } else {
