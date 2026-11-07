@@ -102,12 +102,12 @@ impl UsageBreakdown {
     /// The six categories, labeled as the Usage page spells them.
     pub fn labeled(&self) -> [(&'static str, u64); 6] {
         [
-            ("system prompt", self.system_prompt_tokens),
-            ("skills", self.skills_tokens),
-            ("tool calls input", self.tool_calls_input_tokens),
-            ("tool calls output", self.tool_calls_output_tokens),
-            ("user messages", self.user_messages_tokens),
-            ("model output", self.model_output_tokens),
+            ("System Prompt", self.system_prompt_tokens),
+            ("Skills", self.skills_tokens),
+            ("Tool Calls Input", self.tool_calls_input_tokens),
+            ("Tool Calls Output", self.tool_calls_output_tokens),
+            ("User Messages", self.user_messages_tokens),
+            ("Model Output", self.model_output_tokens),
         ]
     }
 

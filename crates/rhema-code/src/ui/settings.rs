@@ -627,19 +627,19 @@ pub(crate) fn settings_page(
             };
             lines.extend(wrap_line(
                 &Line::from(
-                    std::iter::once(Span::raw(format!("{:<12}", "allowance")).fg(theme.text3))
+                    std::iter::once(Span::raw(format!("{:<12}", "Allowance")).fg(theme.text3))
                         .chain(allowance_value)
                         .collect::<Vec<_>>(),
                 ),
                 width,
             ));
             lines.extend(settings_field(
-                "session",
+                "Session",
                 Span::raw(cost).fg(theme.text),
                 theme,
                 width,
             ));
-            lines.extend(settings_field("last turn", last_turn, theme, width));
+            lines.extend(settings_field("Last Turn", last_turn, theme, width));
             // The compaction benchmark, when the transcript is on: the
             // cache rate is the providers' own accounting, the rest is
             // what the stepped view did this session.
@@ -654,7 +654,7 @@ pub(crate) fn settings_page(
                     None => "no usage yet".to_owned(),
                 };
                 lines.extend(settings_field(
-                    "cache",
+                    "Cache",
                     Span::raw(cache).fg(theme.text),
                     theme,
                     width,
@@ -676,7 +676,7 @@ pub(crate) fn settings_page(
                     worker,
                 );
                 lines.extend(settings_field(
-                    "compaction",
+                    "Compaction",
                     Span::raw(compaction).fg(theme.text),
                     theme,
                     width,
@@ -687,7 +687,7 @@ pub(crate) fn settings_page(
             // numbers ride the transcript's breakdown, so a
             // transcript-less session has nothing to show.
             lines.push(Line::default());
-            lines.push(Line::from(Span::raw("Detailed session usage")).bold());
+            lines.push(Line::from(Span::raw("Detailed Session Usage")).bold());
             // The rows carry two units: the billed input the
             // providers reported per request — the history rides every
             // request, so it dwarfs the content — and, where the
@@ -762,6 +762,12 @@ pub(crate) fn settings_page(
         SettingsSection::About => {
             lines.push(Line::from(
                 Span::raw(format!("Rhema Code {}", env!("CARGO_PKG_VERSION"))).bold(),
+            ));
+            lines.extend(settings_field(
+                "Website",
+                Span::raw("https://rhema.rs".to_owned()).fg(theme.text),
+                theme,
+                width,
             ));
             lines.extend(settings_field(
                 "Repository",

@@ -121,7 +121,7 @@ fn the_usage_page_shows_the_detailed_split() {
                 .collect::<String>()
         })
         .collect();
-    assert!(text.contains("Detailed session usage"), "{text}");
+    assert!(text.contains("Detailed Session Usage"), "{text}");
     assert!(text.contains("summed over 10 requests"), "{text}");
     assert!(text.contains("(~9k/request, 78% cached)"), "{text}");
     // The size lands on its own wrapped row.
