@@ -1736,6 +1736,16 @@ fn turn_costs_accumulate_from_the_model_pricing() {
         other => panic!("expected a turn start, got {other:?}"),
     }
     let agent = Box::new(h.app.agent.take().unwrap());
+    // The turn's one model call lands as the engine's own StepEnd:
+    // pricing rides the step, not the turn's final output.
+    h.app.on_event(UiEvent::Engine(OwnedEvent::StepEnd {
+        usage: Usage {
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
+            cached_input_tokens: 400_000,
+        },
+        stop_reason: StopReason::EndTurn,
+    }));
     h.app.on_event(UiEvent::TurnFinished {
         agent,
         result: Ok(ModelOutput {
@@ -1749,8 +1759,8 @@ fn turn_costs_accumulate_from_the_model_pricing() {
         }),
         steer: tokio::sync::mpsc::channel(STEER_QUEUE_CAP).1,
     });
-    // 600k uncached in at $0.75/M + 400k cached in at a quarter of
-    // that + 1M out at $3.75/M.
+    // The priced StepEnd: 600k uncached in at $0.75/M + 400k cached in
+    // at a quarter of that + 1M out at $3.75/M.
     assert!((h.app.session_cost - 4.275).abs() < 1e-9);
     // The exit save carries the total, so a resume continues it.
     let (exported, _) = h.app.export_session().unwrap();

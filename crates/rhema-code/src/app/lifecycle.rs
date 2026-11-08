@@ -9,6 +9,7 @@ impl App {
     pub fn on_event(&mut self, event: UiEvent) -> Vec<Effect> {
         match event {
             UiEvent::Engine(owned) => {
+                self.price_step(&owned);
                 self.track_phase(&owned);
                 self.transcript.apply(&owned);
                 Vec::new()
@@ -155,6 +156,23 @@ impl App {
         self.remember_profile();
     }
 
+    /// Prices one finished step of a running turn into the session cost:
+    /// every engine step is one billed model call, so the footer's figure
+    /// covers the turn's whole tool chain and not only its last call —
+    /// the dropped intermediate steps were where most of the spend sat.
+    /// A model the catalog cannot price adds nothing.
+    pub(crate) fn price_step(&mut self, owned: &OwnedEvent) {
+        if let OwnedEvent::StepEnd { usage, .. } = owned
+            && let Some(pricing) = self.current_model_pricing()
+        {
+            self.session_cost += pricing.cost(
+                u64::from(usage.input_tokens),
+                u64::from(usage.output_tokens),
+                u64::from(usage.cached_input_tokens),
+            );
+        }
+    }
+
     /// Tracks which phase a running turn is in, from the engine's own
     /// events: streaming is thinking, a tool call is processing. A result
     /// leaves the phase alone — the next call or step moves it, so the
@@ -275,17 +293,9 @@ impl App {
         match result {
             Ok(output) => {
                 self.retryable = false;
-                if let Some(pricing) = self.current_model_pricing() {
-                    let usage = output.usage;
-                    self.session_cost += pricing.cost(
-                        u64::from(usage.input_tokens),
-                        u64::from(usage.output_tokens),
-                        u64::from(usage.cached_input_tokens),
-                    );
-                }
                 // A final tally of zeros is a proxy that never wired
-                // usage through, not a free turn: keep the previous
-                // gauge instead of pricing the turn at nothing.
+                // usage through, not a free turn: the gauge keeps the
+                // last real figure; pricing already rode the steps.
                 if output.usage.input_tokens > 0 || output.usage.output_tokens > 0 {
                     self.usage = Some(output.usage);
                 }

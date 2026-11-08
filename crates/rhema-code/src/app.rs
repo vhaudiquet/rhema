@@ -106,8 +106,9 @@ pub struct App {
     /// agent present: request counts, flushes, and the prompt-cache
     /// hit rate the providers reported.
     pub transcript_stats: Option<rhema_transcript::TranscriptStats>,
-    /// Accumulated cost of the session in USD, summed per turn from the
-    /// current model's pricing; turns on unpriced models add nothing.
+    /// Accumulated cost of the session in USD, summed per model call
+    /// from the current model's pricing; calls on unpriced models add
+    /// nothing.
     pub session_cost: f64,
     /// The last turn's error, shown in the status line until the next
     /// submit.
