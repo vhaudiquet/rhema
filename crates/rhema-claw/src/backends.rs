@@ -355,7 +355,8 @@ pub struct ProviderParams {
     /// The API key (or GitHub token for copilot).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// The server address (llama.cpp).
+    /// The server address (llama.cpp) or stored route override
+    /// (OpenAI-compatible, Z.ai, OpenCode).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 }
@@ -390,7 +391,8 @@ pub struct ParamField {
 /// shape under `addable` the UI builds its inputs from. `required`
 /// states what the daemon demands, not what the form shows: llama.cpp
 /// serves keyless on a default url, so neither of its fields gates the
-/// login; the six keyed kinds cannot construct without an `api_key`.
+/// login; the keyed kinds cannot construct without an `api_key`.
+/// OpenCode's optional url chooses its pay-as-you-go or Go route.
 pub fn param_fields_for(kind: &str) -> &'static [ParamField] {
     match kind {
         "llama-cpp" => &[
@@ -401,6 +403,16 @@ pub fn param_fields_for(kind: &str) -> &'static [ParamField] {
             ParamField {
                 name: "api_key",
                 required: false,
+            },
+        ],
+        "opencode" => &[
+            ParamField {
+                name: "url",
+                required: false,
+            },
+            ParamField {
+                name: "api_key",
+                required: true,
             },
         ],
         _ => &[ParamField {
@@ -425,6 +437,14 @@ pub fn construct(kind: &str, params: &ProviderParams) -> Result<Backend, Backend
         .unwrap_or_else(|| rhema_config::Profile::default().llama_cpp_url());
     let built = match kind {
         "llama-cpp" => build(kind, params.api_key.as_deref(), Some(&llama_url), None),
+        // The route-bearing kinds take an optional stored override; the
+        // rest keep their adapter's default.
+        "openai" | "zai" | "opencode" => build(
+            kind,
+            Some(require_key(kind, params)?.as_str()),
+            None,
+            params.url.as_deref(),
+        ),
         _ => build(kind, Some(require_key(kind, params)?.as_str()), None, None),
     }
     .map_err(|err| match err {
@@ -488,6 +508,16 @@ pub fn discover(
             .filter(|key| !key.trim().is_empty())
     };
 
+    // The stored route override a kind's profile instance carries —
+    // OpenCode's Go/pay-as-you-go choice, Z.ai's proxy, an
+    // OpenAI-compatible server. `None` lets the adapter keep its own
+    // default.
+    let stored_route = |kind: &str| {
+        stored
+            .instance_for_provider(kind)
+            .and_then(|(_, instance)| stored.instance_url(instance))
+    };
+
     // Stored instances first, under the id their row names. An
     // env-backed kind takes the id back from a stored twin of the same
     // id below — env wins the per-kind slot, the row stays persisted.
@@ -531,7 +561,7 @@ pub fn discover(
             ProviderParams {
                 kind: kind.to_owned(),
                 api_key: Some(api_key),
-                url: None,
+                url: stored_route(kind),
             }
         } else if stored_of_kind {
             // The stored instance of the kind wins over the profile
@@ -548,7 +578,7 @@ pub fn discover(
             ProviderParams {
                 kind: kind.to_owned(),
                 api_key,
-                url: None,
+                url: stored_route(kind),
             }
         };
         let has_creds = match kind {
@@ -736,11 +766,40 @@ mod tests {
         assert!(construct("google", &params("google", Some("k"), None)).is_ok());
         assert!(construct("deepseek", &params("deepseek", Some("k"), None)).is_ok());
         assert!(construct("zai", &params("zai", Some("k"), None)).is_ok());
+        assert!(construct("opencode", &params("opencode", Some("k"), None)).is_ok());
+        assert!(
+            construct(
+                "opencode",
+                &params(
+                    "opencode",
+                    Some("k"),
+                    Some("https://opencode.ai/inference/go/openai/v1")
+                )
+            )
+            .is_ok()
+        );
         assert!(construct("copilot", &params("copilot", Some("t"), None)).is_ok());
         assert!(construct("nope", &params("nope", Some("k"), None)).is_err());
         // llama.cpp serves keyless on its default url.
         assert!(construct("llama-cpp", &params("llama-cpp", None, None)).is_ok());
         assert!(construct("llama-cpp", &params("llama-cpp", None, Some("http://h:1"))).is_ok());
+    }
+
+    #[test]
+    fn opencode_offers_an_optional_url_beside_its_key() {
+        assert_eq!(
+            param_fields_for("opencode"),
+            &[
+                ParamField {
+                    name: "url",
+                    required: false,
+                },
+                ParamField {
+                    name: "api_key",
+                    required: true,
+                },
+            ]
+        );
     }
 
     #[test]
