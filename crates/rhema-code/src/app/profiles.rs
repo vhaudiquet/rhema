@@ -213,7 +213,7 @@ impl App {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
-        let Some(backend) = Backend::from_profile(&effective, self.secret_store()) else {
+        let Some(mut backend) = Backend::from_profile(&effective, self.secret_store()) else {
             // Never recorded: startup re-validates usability, so the
             // memory naming a keyless profile would only fall through.
             // The agent drops with the provider: a turn here would run
@@ -234,6 +234,11 @@ impl App {
             ));
             return Vec::new();
         };
+        // A switch keeps the conversation: Console sees the same
+        // OpenCode session id across profiles when the kind matches.
+        if let Some(previous) = &self.backend {
+            backend.keep_session(previous);
+        }
         let (agent_config, subagents) = session_agent_config(
             &self.options,
             self.sandboxed.as_ref(),
@@ -645,13 +650,16 @@ impl App {
         }
         let effective = self.config.effective(Some(&tab));
         self.options.thinking = effective.thinking_effort();
-        let Some(backend) = Backend::from_profile(&effective, self.secret_store()) else {
+        let Some(mut backend) = Backend::from_profile(&effective, self.secret_store()) else {
             self.error = Some(format!(
                 "no usable credentials for {} — /login first",
                 instance.provider
             ));
             return Vec::new();
         };
+        if let Some(previous) = &self.backend {
+            backend.keep_session(previous);
+        }
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
@@ -735,7 +743,10 @@ impl App {
         if self.session_profile.as_deref() == Some(tab.as_str()) {
             let effective = self.config.effective(Some(&tab));
             match Backend::from_profile(&effective, self.secret_store()) {
-                Some(backend) => {
+                Some(mut backend) => {
+                    if let Some(previous) = &self.backend {
+                        backend.keep_session(previous);
+                    }
                     self.backend = Some(backend.clone());
                     self.provider = Some(backend.provider());
                     // What remains is a different plan: refresh the

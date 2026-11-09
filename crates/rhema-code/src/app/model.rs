@@ -85,6 +85,11 @@ impl App {
                 api_key: input,
                 base_url,
             },
+            crate::screens::LoginProvider::OpenCode => Backend::opencode(input, base_url),
+            crate::screens::LoginProvider::OpenCodeGo => Backend::opencode(
+                input,
+                base_url.or_else(|| Some(rhema_provider_opencode::GO_BASE_URL.to_owned())),
+            ),
             // The flow path never validates a typed key: its credential
             // arrives from the flow task, already wrapped in the backend.
             crate::screens::LoginProvider::Copilot => return Vec::new(),
@@ -160,9 +165,11 @@ impl App {
         let provider = backend.config_name();
         let (api_key, base_url) = match backend {
             Backend::LlamaCpp { url, api_key } => (api_key.clone(), Some(url.clone())),
-            Backend::OpenAi { api_key, base_url } | Backend::Zai { api_key, base_url } => {
-                (Some(api_key.clone()), base_url.clone())
-            }
+            Backend::OpenAi { api_key, base_url }
+            | Backend::Zai { api_key, base_url }
+            | Backend::OpenCode {
+                api_key, base_url, ..
+            } => (Some(api_key.clone()), base_url.clone()),
             Backend::Google { api_key }
             | Backend::OpenRouter { api_key }
             | Backend::Anthropic { api_key }
@@ -560,7 +567,7 @@ impl App {
         if let Err(err) = self.store.save(&self.config) {
             return Err(format!("cannot save config: {err}"));
         }
-        let backend = match Backend::from_profile(&self.effective(), self.secret_store()) {
+        let mut backend = match Backend::from_profile(&self.effective(), self.secret_store()) {
             Some(backend) => backend,
             None => {
                 return Err(format!(
@@ -568,6 +575,11 @@ impl App {
                 ));
             }
         };
+        // A model pick stays one conversation: Console keeps seeing the
+        // same OpenCode session id.
+        if let Some(previous) = &self.backend {
+            backend.keep_session(previous);
+        }
         self.backend = Some(backend.clone());
         self.provider = Some(backend.provider());
         let (saved, sections) = self.outgoing_transcript();

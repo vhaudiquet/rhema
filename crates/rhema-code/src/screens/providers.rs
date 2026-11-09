@@ -18,6 +18,10 @@ pub enum LoginProvider {
     /// Z.ai's GLM Coding Plan, by API key (their Anthropic-compatible
     /// endpoint).
     Zai,
+    /// OpenCode Console (pay-as-you-go), by API key.
+    OpenCode,
+    /// OpenCode Go (the subscription route), by API key.
+    OpenCodeGo,
     /// GitHub Copilot, through the device-code flow.
     Copilot,
 }
@@ -61,6 +65,14 @@ pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "Z.ai (GLM Coding Plan)",
         kind: LoginProvider::Zai,
+    },
+    ProviderEntry {
+        name: "OpenCode (pay-as-you-go)",
+        kind: LoginProvider::OpenCode,
+    },
+    ProviderEntry {
+        name: "OpenCode Go",
+        kind: LoginProvider::OpenCodeGo,
     },
     ProviderEntry {
         name: "GitHub Copilot",

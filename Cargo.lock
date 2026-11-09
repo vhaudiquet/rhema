@@ -3399,6 +3399,7 @@ dependencies = [
  "rhema-provider-anthropic",
  "rhema-provider-copilot",
  "rhema-provider-openai-compatible",
+ "rhema-provider-opencode",
  "rhema-provider-openrouter",
  "rhema-provider-registry",
  "rhema-sandbox",
@@ -3618,6 +3619,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-provider-opencode"
+version = "0.2.1"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rhema-core",
+ "rhema-provider",
+ "rhema-provider-openai-compatible",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "rhema-provider-openrouter"
 version = "0.2.1"
 dependencies = [
@@ -3644,6 +3660,7 @@ dependencies = [
  "rhema-provider-google",
  "rhema-provider-llama-cpp",
  "rhema-provider-openai-compatible",
+ "rhema-provider-opencode",
  "rhema-provider-openrouter",
  "thiserror 2.0.21",
  "tokio",

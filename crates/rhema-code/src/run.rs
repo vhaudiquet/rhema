@@ -297,6 +297,18 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
                             .and_then(|(_, instance)| effective.instance_url(instance)),
                     })
             }
+            ProviderChoice::OpenCode => {
+                effective
+                    .api_key("opencode", Some(&*secrets))
+                    .map(|api_key| {
+                        Backend::opencode(
+                            api_key,
+                            effective
+                                .instance_for_provider("opencode")
+                                .and_then(|(_, instance)| effective.instance_url(instance)),
+                        )
+                    })
+            }
             ProviderChoice::Copilot => effective
                 .api_key("copilot", Some(&*secrets))
                 .map(|api_key| Backend::Copilot { api_key }),

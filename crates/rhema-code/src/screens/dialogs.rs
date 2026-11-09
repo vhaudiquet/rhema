@@ -493,6 +493,8 @@ impl AddInstanceDialog {
             LoginProvider::OpenAi => "openai",
             LoginProvider::DeepSeek => "deepseek",
             LoginProvider::Zai => "zai",
+            LoginProvider::OpenCode => "opencode",
+            LoginProvider::OpenCodeGo => "opencode-go",
             LoginProvider::Copilot => "copilot",
         };
         if !self.instances.contains_key(base) {

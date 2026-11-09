@@ -35,6 +35,9 @@ pub enum ProviderChoice {
     /// endpoint).
     #[value(name = "zai")]
     Zai,
+    /// OpenCode Console or Go, by Console API key.
+    #[value(name = "opencode")]
+    OpenCode,
     /// GitHub Copilot, by GitHub OAuth token (the device flow's output).
     #[value(name = "copilot")]
     Copilot,
@@ -53,6 +56,7 @@ impl ProviderChoice {
             Some("openai") => Some(Self::OpenAi),
             Some("deepseek") => Some(Self::DeepSeek),
             Some("zai") => Some(Self::Zai),
+            Some("opencode") => Some(Self::OpenCode),
             Some("copilot") => Some(Self::Copilot),
             _ => None,
         }
@@ -69,6 +73,7 @@ impl ProviderChoice {
             Self::OpenAi => "openai",
             Self::DeepSeek => "deepseek",
             Self::Zai => "zai",
+            Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
         }
     }

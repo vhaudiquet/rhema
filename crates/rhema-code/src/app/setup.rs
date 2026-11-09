@@ -98,6 +98,19 @@ pub enum Backend {
         /// The instance's base URL, when it stored one.
         base_url: Option<String>,
     },
+    /// OpenCode Console or Go, by Console API key: an instance may name
+    /// a base URL (`…/inference/openai/v1` for pay-as-you-go,
+    /// `…/inference/go/openai/v1` for Go); `None` speaks to the
+    /// pay-as-you-go route.
+    OpenCode {
+        /// The resolved key (`env` first, stored second).
+        api_key: String,
+        /// The instance's base URL, when it stored one.
+        base_url: Option<String>,
+        /// The conversation id every request carries. Kept across
+        /// rebuilds of the same conversation.
+        session_id: String,
+    },
     /// GitHub Copilot, driven by the device flow's long-lived GitHub
     /// OAuth token (the adapter exchanges it for short-lived tokens).
     Copilot {
@@ -107,6 +120,37 @@ pub enum Backend {
 }
 
 impl Backend {
+    /// An OpenCode backend with a fresh conversation id. Model rebuilds
+    /// within one conversation carry the id across through
+    /// [`Backend::keep_session`].
+    pub fn opencode(api_key: impl Into<String>, base_url: Option<String>) -> Self {
+        Self::OpenCode {
+            api_key: api_key.into(),
+            base_url: base_url
+                .map(|url| url.trim().to_owned())
+                .filter(|url| !url.is_empty()),
+            session_id: rhema_provider_opencode::new_session_id(),
+        }
+    }
+
+    /// Keeps this conversation's OpenCode id when a rebuild lands on the
+    /// same kind — a model pick, a settings change — so Console keeps
+    /// routing and caching one conversation consistently. A rebuild onto
+    /// another provider, or from one, is a different route and keeps its
+    /// own id.
+    pub fn keep_session(&mut self, previous: &Backend) {
+        if let (
+            Backend::OpenCode { session_id, .. },
+            Backend::OpenCode {
+                session_id: previous_id,
+                ..
+            },
+        ) = (&mut *self, previous)
+        {
+            *session_id = previous_id.clone();
+        }
+    }
+
     /// The provider implementation for this backend: the raw adapter
     /// under the shared retry, so a transient failure costs a pause
     /// instead of the turn (see `rhema_provider::Retrying`).
@@ -135,6 +179,15 @@ impl Backend {
             Backend::Zai { api_key, base_url } => {
                 build("zai", Some(api_key), None, base_url.as_deref())
             }
+            Backend::OpenCode {
+                api_key,
+                base_url,
+                session_id,
+            } => Ok(rhema_provider_registry::build_opencode(
+                api_key,
+                base_url.as_deref(),
+                Some(session_id),
+            )),
             Backend::Copilot { api_key } => build("copilot", Some(api_key), None, None),
         }
         .expect("a Backend's own credentials build")
@@ -150,6 +203,7 @@ impl Backend {
             Backend::OpenAi { .. } => "openai",
             Backend::DeepSeek { .. } => "deepseek",
             Backend::Zai { .. } => "zai",
+            Backend::OpenCode { .. } => "opencode",
             Backend::Copilot { .. } => "copilot",
         }
     }
@@ -300,6 +354,9 @@ impl Backend {
                     api_key,
                     base_url: profile.instance_url(instance),
                 }),
+            "opencode" => profile
+                .instance_api_key(instance, secrets)
+                .map(|api_key| Backend::opencode(api_key, profile.instance_url(instance))),
             "copilot" => profile
                 .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
@@ -348,6 +405,9 @@ impl Backend {
                 api_key,
                 base_url: None,
             }),
+            "opencode" => profile
+                .api_key("opencode", secrets)
+                .map(|api_key| Backend::opencode(api_key, None)),
             "copilot" => profile
                 .api_key("copilot", secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
@@ -400,7 +460,8 @@ impl Backend {
             Backend::Google { .. }
             | Backend::LlamaCpp { .. }
             | Backend::Anthropic { .. }
-            | Backend::OpenAi { .. } => Ok(None),
+            | Backend::OpenAi { .. }
+            | Backend::OpenCode { .. } => Ok(None),
         }
     }
 
