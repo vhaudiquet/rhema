@@ -28,6 +28,7 @@ pub const PROVIDERS: &[&str] = &[
     "openai",
     "deepseek",
     "zai",
+    "opencode",
     "copilot",
     "google",
 ];
@@ -118,12 +119,7 @@ fn catalog_fetch(
     let llama_url = llama_url
         .map(str::to_owned)
         .unwrap_or_else(|| profile.llama_cpp_url());
-    // A stored route override is the zai kind's alone; handing it to
-    // the registry unguarded would read it as an openai or deepseek
-    // override too.
-    let route = (kind == "zai")
-        .then(|| stored_zai_route(&profile))
-        .flatten();
+    let route = stored_route(&profile, kind);
     let key = profile.api_key(kind, secrets);
     let built = match kind {
         // The server address is optional to guard with a key; every
@@ -141,12 +137,18 @@ fn catalog_fetch(
     ))
 }
 
-/// The stored route override of the profile's zai instance, trimmed and
-/// blank-filtered — the shape [`Profile::instance_url`] serves.
-fn stored_zai_route(profile: &Profile) -> Option<String> {
-    profile
-        .instance_for_provider("zai")
-        .and_then(|(_, instance)| profile.instance_url(instance))
+/// The stored route override of the kinds that carry one: zai's proxy
+/// and OpenCode's pay-as-you-go/Go choice. Handing it to the registry
+/// for any other kind would read it as an openai or deepseek override
+/// too.
+fn stored_route(profile: &Profile, kind: &str) -> Option<String> {
+    matches!(kind, "zai" | "opencode")
+        .then(|| {
+            profile
+                .instance_for_provider(kind)
+                .and_then(|(_, instance)| profile.instance_url(instance))
+        })
+        .flatten()
 }
 
 /// Resolves the backend the profile's settings call for. `provider`
@@ -210,7 +212,7 @@ pub fn provider_for(
     let llama_url = llama_url
         .map(str::to_owned)
         .unwrap_or_else(|| profile.llama_cpp_url());
-    let route = (kind == "zai").then(|| stored_zai_route(profile)).flatten();
+    let route = stored_route(profile, kind);
     let key = profile.api_key(kind, secrets);
     let built = match kind {
         "llama-cpp" => build(kind, key.as_deref(), Some(&llama_url), None),
