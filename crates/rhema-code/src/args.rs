@@ -203,8 +203,8 @@ pub enum Command {
         #[command(subcommand)]
         action: SystemCommand,
     },
-    /// Run the first-run onboarding wizard again: provider, model,
-    /// profile, colors, skills. The terminal UI with the wizard forced
+    /// Run the first-run onboarding wizard again: profile, provider,
+    /// model, colors, skills. The terminal UI with the wizard forced
     /// on, whatever the config's marker says.
     Onboard,
     /// The MCP meta surface (`mcp servers | tools | schema | call`)

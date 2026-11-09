@@ -14,7 +14,7 @@ Rhema Code is a terminal-based coding agent, built on the Rhema agent framework.
 
 ### Onboarding
 
-The first start (no config yet, or a wizard left unfinished) runs a setup wizard: the rhema logo on a rail beside the steps — a provider login, a model pick from that login's catalog, the default profile's name, the color palette (previewed live as the rows move), and the bundled skills' on/off switches. `rhema onboard` runs it again any time. Nothing else gates the session: a config without a model or a login still opens the chat — the footer names what is missing in red, and `/model` or `/login` is one keystroke away.
+The first start (no config yet, or a wizard left unfinished) runs a setup wizard: the rhema logo on a rail beside the steps. The wizard opens on the default profile, listing the config's profiles (`personal` and `work` on a fresh setup) with an add row for a new name; the pick becomes the profile the rest of the wizard writes to. Then come a provider login, a model pick from that login's catalog, the color palette (previewed live as the rows move), and the bundled skills' on/off switches. `rhema onboard` runs it again any time. Nothing else gates the session: a config without a model or a login still opens the chat — the footer names what is missing in red, and `/model` or `/login` is one keystroke away.
 
 On terminals that speak the kitty graphics protocol (kitty, Ghostty) the wizard draws the logo as an image; everywhere else it falls back to the wordmark. Set `RHEMA_NO_IMAGES` to keep it text.
 
@@ -126,7 +126,7 @@ Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimo
 
 ## Documentation
 
-- `rhema onboard` — re-run the first-run wizard (provider, model, profile, colors, skills).
+- `rhema onboard` — re-run the first-run wizard (profile, provider, model, colors, skills).
 - `/settings` — everything the wizard sets, plus profiles, appearance, subagents, usage, and about; the Profiles page adds, removes, and switches profiles and cycles each one's name color; the Skills page toggles skills on and off and shows each one's license.
 
 ## About

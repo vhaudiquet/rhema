@@ -597,6 +597,7 @@ fn the_wizard_renders_its_rail_and_welcome() {
             enabled: true,
         }],
         "personal".into(),
+        rhema_config::Settings::default().profiles,
         false,
         rhema_config::Profile::default(),
     );
@@ -647,6 +648,7 @@ fn the_wizard_renders_its_rail_and_welcome() {
             enabled: true,
         }],
         "personal".into(),
+        rhema_config::Settings::default().profiles,
         false,
         rhema_config::Profile::default(),
     );
@@ -685,6 +687,48 @@ fn the_wizard_renders_its_rail_and_welcome() {
         })
     });
     assert!(dim, "the license renders dimmed: {text}");
+}
+
+/// The wizard opens on the profile choice: the config's profiles with
+/// their stored provider, the default marked, and the add row.
+#[test]
+fn the_wizard_s_profile_step_lists_the_registry_and_the_add_row() {
+    let profiles = rhema_config::Settings::default().profiles;
+    let mut wizard = crate::onboarding::OnboardingScreen::new(
+        Vec::new(),
+        "personal".into(),
+        profiles,
+        false,
+        rhema_config::Profile::default(),
+    );
+    wizard.go(crate::onboarding::OnboardingStep::Profile);
+    let mut logo_rect = None;
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            render_onboarding(
+                frame,
+                &wizard,
+                &crate::icons::UNICODE,
+                &DARK,
+                &mut logo_rect,
+                &mut Vec::new(),
+            )
+        })
+        .unwrap();
+    let text: String = (0..24)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("The default profile"), "{text}");
+    assert!(text.contains("personal"), "{text}");
+    assert!(text.contains("work"), "{text}");
+    assert!(text.contains("default"), "{text}");
+    assert!(text.contains("+ Add a new profile..."), "{text}");
 }
 
 /// A page's rows render inside the pane the sidebar leaves: the

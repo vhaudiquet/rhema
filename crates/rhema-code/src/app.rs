@@ -410,6 +410,7 @@ impl App {
                     .profile
                     .clone()
                     .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned()),
+                setup.config.profiles.clone(),
                 setup.backend.is_some(),
                 effective.clone(),
             )))

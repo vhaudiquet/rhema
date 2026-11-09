@@ -2,31 +2,35 @@
 //! body with the current step, one footer of hints — the same chrome
 //! the settings screen wears.
 //!
-//! The steps: welcome, a provider login (the settings' add-instance
-//! dialog reused inline), a model pick from the fresh login's catalog,
-//! the default profile's name, the color palette (applied live as the
-//! rows move), the bundled skills' on/off toggles, and a finish step
-//! that points at `/settings`. Steps that need the app — validating a
-//! credential, persisting a model choice — return
-//! [`OnboardingAction`]s and wait; the screen never touches the store
-//! itself. Esc walks back one step; at the welcome step it quits, and
-//! an unfinished wizard reopens on the next start (the config's
+//! The steps: welcome, the default profile (the config's existing
+//! profiles, or a new one), a provider login (the settings'
+//! add-instance dialog reused inline), a model pick from the fresh
+//! login's catalog, the color palette (applied live as the rows move),
+//! the bundled skills' on/off toggles, and a finish step that points at
+//! `/settings`. Steps that need the app — creating or selecting a
+//! profile, validating a credential, persisting a model choice —
+//! return [`OnboardingAction`]s and wait; the screen never touches the
+//! store itself. Esc walks back one step; at the welcome step it quits,
+//! and an unfinished wizard reopens on the next start (the config's
 //! `onboarded` marker stays `false` until the finish step's Enter).
 
-use crate::screens::{AddInstanceDialog, CatalogModel, DialogAction, SkillRow};
+use crate::screens::{
+    AddInstanceDialog, AddProfileDialog, CatalogModel, DialogAction, ProfileDialogAction, SkillRow,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use std::collections::BTreeMap;
 
 /// The wizard's steps, in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OnboardingStep {
     /// The logo and the wordmark; Enter begins, Esc quits.
     Welcome,
+    /// The default profile: an existing one or a new name.
+    Profile,
     /// A provider login, through the add-instance dialog.
     Login,
     /// A model from the fresh login's catalog.
     Model,
-    /// The default profile's name.
-    Profile,
     /// The color palette, previewed live.
     Appearance,
     /// The bundled skills' on/off toggles.
@@ -39,9 +43,9 @@ impl OnboardingStep {
     /// Every step, in rail order.
     pub const ALL: &'static [OnboardingStep] = &[
         OnboardingStep::Welcome,
+        OnboardingStep::Profile,
         OnboardingStep::Login,
         OnboardingStep::Model,
-        OnboardingStep::Profile,
         OnboardingStep::Appearance,
         OnboardingStep::Skills,
         OnboardingStep::Finish,
@@ -51,9 +55,9 @@ impl OnboardingStep {
     pub fn label(self) -> &'static str {
         match self {
             OnboardingStep::Welcome => "Welcome",
+            OnboardingStep::Profile => "Profile",
             OnboardingStep::Login => "Provider",
             OnboardingStep::Model => "Model",
-            OnboardingStep::Profile => "Profile",
             OnboardingStep::Appearance => "Colors",
             OnboardingStep::Skills => "Skills",
             OnboardingStep::Finish => "Finish",
@@ -92,8 +96,11 @@ pub enum OnboardingAction {
     ToggleSkill(String),
     /// A palette row was moved onto: apply it live.
     SetPalette(crate::palette::Palette),
-    /// The profile step accepted a name different from the current one.
-    RenameProfile(String),
+    /// The profile step selected an existing profile as the default.
+    SelectProfile(String),
+    /// The add-a-profile input submitted a fresh name: create it and
+    /// make it the default.
+    CreateProfile(String),
     /// The finish step's Enter: mark the wizard done and land in the
     /// chat.
     Complete,
@@ -102,13 +109,14 @@ pub enum OnboardingAction {
 }
 
 /// The wizard's state: the current step, the row within it, the login
-/// dialog while it runs, and the snapshots the steps read.
+/// and add-profile inputs while they run, and the snapshots the steps
+/// read.
 #[derive(Debug)]
 pub struct OnboardingScreen {
     /// The step on screen.
     pub step: OnboardingStep,
-    /// The selected row within the step (the login rows, a model, a
-    /// palette, a skill).
+    /// The selected row within the step (a profile, the login rows, a
+    /// model, a palette, a skill).
     pub row: usize,
     /// The login dialog while the Login step runs one.
     pub dialog: Option<AddInstanceDialog>,
@@ -121,11 +129,15 @@ pub struct OnboardingScreen {
     /// The skills the Skills step toggles: the same rows the settings
     /// page shows, sources and on/off states included.
     pub skills: Vec<SkillRow>,
-    /// The default profile's name as the wizard opened — the rename
-    /// check compares against it, not the growing input.
-    pub profile_start: String,
-    /// The default profile's name — the Profile step's starting input.
-    pub profile_name: String,
+    /// The config's profiles, sorted by name: the Profile step's rows,
+    /// refreshed when a profile is created or the wizard moves to
+    /// another one.
+    pub profiles: BTreeMap<String, rhema_config::Profile>,
+    /// The chosen default profile's name, refreshed with [`Self::stored`]
+    /// when the Profile step lands on another one.
+    pub default_profile: String,
+    /// The add-a-profile input while the Profile step types a new name.
+    pub profile_dialog: Option<AddProfileDialog>,
     /// Whether a usable backend already serves (an environment key, or
     /// the login just landed): the login rows may be skipped past.
     pub backend_ready: bool,
@@ -133,17 +145,18 @@ pub struct OnboardingScreen {
     /// could not build, a config write refused); cleared with the step.
     pub error: Option<String>,
     /// The profile snapshot the add-instance dialog dedupes names
-    /// against, refreshed when a login lands.
+    /// against, refreshed when the Profile step lands on another
+    /// profile or a login lands.
     pub stored: rhema_config::Profile,
 }
 
 impl OnboardingScreen {
-    /// A wizard at the welcome step. The skills and profile snapshots
-    /// come from the opener; the profile name starts as the config's
-    /// default.
+    /// A wizard at the welcome step. The skills, the profile registry,
+    /// and the default profile's snapshot come from the opener.
     pub fn new(
         skills: Vec<SkillRow>,
-        profile_name: String,
+        default_profile: String,
+        profiles: BTreeMap<String, rhema_config::Profile>,
         backend_ready: bool,
         stored: rhema_config::Profile,
     ) -> Self {
@@ -155,12 +168,32 @@ impl OnboardingScreen {
             chosen_model: None,
             chosen_provider: None,
             skills,
-            profile_start: profile_name.clone(),
-            profile_name,
+            profiles,
+            default_profile,
+            profile_dialog: None,
             backend_ready,
             error: None,
             stored,
         }
+    }
+
+    /// The Profile step landed on `name`: it becomes the default, the
+    /// snapshots move with it, and the wizard walks on to its login
+    /// step. A fresh login's catalog and the previous profile's model
+    /// choice do not carry over.
+    pub fn select_profile(
+        &mut self,
+        name: String,
+        stored: rhema_config::Profile,
+        profiles: BTreeMap<String, rhema_config::Profile>,
+    ) {
+        self.default_profile = name;
+        self.stored = stored;
+        self.profiles = profiles;
+        self.models.clear();
+        self.chosen_model = None;
+        self.chosen_provider = None;
+        self.go(OnboardingStep::Login);
     }
 
     /// Moves to `step`, resetting the row selection — the rows move
@@ -186,7 +219,14 @@ impl OnboardingScreen {
             OnboardingStep::Model => {
                 self.models.len() + self.keep_current_model().is_some() as usize
             }
-            OnboardingStep::Profile => 0,
+            // One row per profile, then the add row.
+            OnboardingStep::Profile => {
+                if self.profile_dialog.is_some() {
+                    0
+                } else {
+                    self.profiles.len() + 1
+                }
+            }
             OnboardingStep::Appearance => crate::palette::Palette::ALL.len(),
             OnboardingStep::Skills => self.skills.len(),
         }
@@ -206,6 +246,23 @@ impl OnboardingScreen {
     /// welcome step); Enter moves forward or acts; Space and `t` toggle
     /// a skill on the Skills step.
     pub fn handle_key(&mut self, key: KeyEvent) -> OnboardingAction {
+        if self.profile_dialog.is_some() {
+            let (action, name) = {
+                let dialog = self.profile_dialog.as_mut().unwrap();
+                (dialog.handle_key(key), dialog.name().to_owned())
+            };
+            return match action {
+                ProfileDialogAction::None => OnboardingAction::None,
+                ProfileDialogAction::Submit => {
+                    self.profile_dialog = None;
+                    OnboardingAction::CreateProfile(name)
+                }
+                ProfileDialogAction::Close => {
+                    self.profile_dialog = None;
+                    OnboardingAction::None
+                }
+            };
+        }
         if let Some(dialog) = self.dialog.as_mut() {
             let action = dialog.handle_key(key);
             return match action {
@@ -227,15 +284,15 @@ impl OnboardingScreen {
         match self.step {
             OnboardingStep::Welcome => match key.code {
                 KeyCode::Enter => {
-                    self.go(OnboardingStep::Login);
+                    self.go(OnboardingStep::Profile);
                     OnboardingAction::None
                 }
                 KeyCode::Esc => OnboardingAction::Quit,
                 _ => OnboardingAction::None,
             },
+            OnboardingStep::Profile => self.handle_profile_key(key),
             OnboardingStep::Login => self.handle_login_key(key),
             OnboardingStep::Model => self.handle_model_key(key),
-            OnboardingStep::Profile => self.handle_profile_key(key),
             OnboardingStep::Appearance => self.handle_appearance_key(key),
             OnboardingStep::Skills => self.handle_skills_key(key),
             OnboardingStep::Finish => match key.code {
@@ -265,12 +322,12 @@ impl OnboardingScreen {
                 _ => {
                     // Skipping straight past the model step: nothing was
                     // logged in, so there is no catalog to pick from.
-                    self.go(OnboardingStep::Profile);
+                    self.go(OnboardingStep::Appearance);
                     OnboardingAction::None
                 }
             },
             KeyCode::Esc => {
-                self.go(OnboardingStep::Welcome);
+                self.go(OnboardingStep::Profile);
                 OnboardingAction::None
             }
             _ => OnboardingAction::None,
@@ -326,35 +383,28 @@ impl OnboardingScreen {
         Some((provider, self.stored.instance.clone(), model))
     }
 
-    /// The profile-name input: printable keys edit, Enter accepts.
+    /// The profile rows: the config's profiles, then the add row.
+    /// Enter on a profile selects it as the default and moves on; Enter
+    /// on the add row opens the name input. The dialog, while it runs,
+    /// took the keys above.
     fn handle_profile_key(&mut self, key: KeyEvent) -> OnboardingAction {
         match key.code {
-            KeyCode::Char(c) => {
-                if !c.is_control() && !c.is_whitespace() {
-                    self.profile_name.push(c);
-                }
-                OnboardingAction::None
-            }
-            KeyCode::Backspace => {
-                self.profile_name.pop();
+            KeyCode::Up | KeyCode::Down => {
+                self.move_row(key.code == KeyCode::Down);
                 OnboardingAction::None
             }
             KeyCode::Enter => {
-                let name = self.profile_name.trim().to_owned();
-                let action = if name.is_empty() || name == self.stored_name() {
-                    OnboardingAction::None
-                } else {
-                    OnboardingAction::RenameProfile(name)
-                };
-                // The app advances the step when a rename lands; the
-                // no-rename path moves on its own.
-                if matches!(action, OnboardingAction::None) {
-                    self.go(OnboardingStep::Appearance);
+                let picked = self.profiles.keys().nth(self.row).cloned();
+                match picked {
+                    Some(name) => OnboardingAction::SelectProfile(name),
+                    None => {
+                        self.profile_dialog = Some(AddProfileDialog::new(&self.profiles));
+                        OnboardingAction::None
+                    }
                 }
-                action
             }
             KeyCode::Esc => {
-                self.go(OnboardingStep::Model);
+                self.go(OnboardingStep::Welcome);
                 OnboardingAction::None
             }
             _ => OnboardingAction::None,
@@ -375,7 +425,7 @@ impl OnboardingScreen {
                 OnboardingAction::None
             }
             KeyCode::Esc => {
-                self.go(OnboardingStep::Profile);
+                self.go(OnboardingStep::Model);
                 OnboardingAction::None
             }
             _ => OnboardingAction::None,
@@ -405,20 +455,24 @@ impl OnboardingScreen {
             _ => OnboardingAction::None,
         }
     }
-
-    /// The profile name the wizard started with — the rename check
-    /// compares against it, not the trimmed input.
-    fn stored_name(&self) -> &str {
-        &self.profile_start
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn profiles() -> BTreeMap<String, rhema_config::Profile> {
+        rhema_config::Settings::default().profiles
+    }
+
     fn wizard() -> OnboardingScreen {
-        OnboardingScreen::new(Vec::new(), "personal".to_owned(), false, Default::default())
+        OnboardingScreen::new(
+            Vec::new(),
+            "personal".to_owned(),
+            profiles(),
+            false,
+            Default::default(),
+        )
     }
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -432,6 +486,13 @@ mod tests {
             screen.handle_key(key(KeyCode::Enter)),
             OnboardingAction::None
         );
+        assert_eq!(screen.step, OnboardingStep::Profile);
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Enter)),
+            OnboardingAction::SelectProfile("personal".to_owned())
+        );
+        // The app lands the selection; the screen moves on with it.
+        screen.select_profile("personal".to_owned(), Default::default(), profiles());
         assert_eq!(screen.step, OnboardingStep::Login);
         // The login rows: enter on the skip row walks past the model
         // step (no catalog exists to pick from).
@@ -441,7 +502,7 @@ mod tests {
             screen.handle_key(key(KeyCode::Enter)),
             OnboardingAction::None
         );
-        assert_eq!(screen.step, OnboardingStep::Profile);
+        assert_eq!(screen.step, OnboardingStep::Appearance);
         // Esc walks back one step at a time.
         assert_eq!(screen.handle_key(key(KeyCode::Esc)), OnboardingAction::None);
         assert_eq!(screen.step, OnboardingStep::Model);
@@ -454,23 +515,66 @@ mod tests {
     }
 
     #[test]
-    fn the_profile_step_renames_only_a_real_change() {
+    fn the_profile_step_offers_the_registry_then_an_add_row() {
         let mut screen = wizard();
         screen.go(OnboardingStep::Profile);
-        // The seeded name, untouched: no rename, the step moves on.
+        assert_eq!(screen.row_count(), 3, "personal, work, and the add row");
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Enter)),
+            OnboardingAction::SelectProfile("personal".to_owned())
+        );
+        screen.handle_key(key(KeyCode::Down));
+        assert_eq!(
+            screen.handle_key(key(KeyCode::Enter)),
+            OnboardingAction::SelectProfile("work".to_owned())
+        );
+        // The add row opens the name input instead.
+        screen.handle_key(key(KeyCode::Down));
         assert_eq!(
             screen.handle_key(key(KeyCode::Enter)),
             OnboardingAction::None
         );
-        assert_eq!(screen.step, OnboardingStep::Appearance);
-
-        let mut screen = wizard();
-        screen.go(OnboardingStep::Profile);
-        screen.profile_name.push_str("-main");
+        assert!(screen.profile_dialog.is_some(), "the name input is up");
+        assert_eq!(screen.row_count(), 0, "the dialog owns the keys");
+        for c in "home".chars() {
+            screen.handle_key(key(KeyCode::Char(c)));
+        }
         assert_eq!(
             screen.handle_key(key(KeyCode::Enter)),
-            OnboardingAction::RenameProfile("personal-main".to_owned())
+            OnboardingAction::CreateProfile("home".to_owned())
         );
+        assert!(screen.profile_dialog.is_none(), "submit closes the input");
+    }
+
+    #[test]
+    fn selecting_a_profile_moves_the_snapshots_and_drops_the_stale_catalog() {
+        let mut screen = wizard();
+        screen.models = vec![CatalogModel {
+            provider: "google",
+            instance: Some("google".into()),
+            model: rhema_provider::ModelCard {
+                id: "gemini-x".into(),
+                display_name: "Gemini X".into(),
+                description: String::new(),
+                input_token_limit: None,
+                output_token_limit: None,
+                supports_vision: None,
+                generation_methods: vec![],
+                pricing: None,
+            },
+        }];
+        screen.chosen_model = Some("gemini-x".into());
+        let stored = rhema_config::Profile {
+            provider: Some("anthropic".into()),
+            model: Some("claude".into()),
+            ..Default::default()
+        };
+        screen.select_profile("work".to_owned(), stored, profiles());
+        assert_eq!(screen.default_profile, "work");
+        assert_eq!(screen.step, OnboardingStep::Login);
+        assert_eq!(screen.stored.provider.as_deref(), Some("anthropic"));
+        assert!(screen.models.is_empty(), "another login's catalog is stale");
+        assert!(screen.chosen_model.is_none());
     }
 
     #[test]
@@ -493,6 +597,7 @@ mod tests {
                 },
             ],
             "personal".into(),
+            profiles(),
             false,
             Default::default(),
         );
@@ -570,7 +675,8 @@ mod tests {
             model: Some("gemini-x".into()),
             ..Default::default()
         };
-        let mut screen = OnboardingScreen::new(Vec::new(), "personal".into(), true, stored);
+        let mut screen =
+            OnboardingScreen::new(Vec::new(), "personal".into(), profiles(), true, stored);
         screen.go(OnboardingStep::Model);
         assert_eq!(screen.row_count(), 1, "the keep-current row alone");
         assert_eq!(

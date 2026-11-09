@@ -4591,6 +4591,7 @@ fn esc_on_the_wizard_s_welcome_quits() {
     h.app.screen = Screen::Onboarding(Box::new(crate::onboarding::OnboardingScreen::new(
         Vec::new(),
         "personal".into(),
+        h.app.config.profiles.clone(),
         false,
         rhema_config::Profile::default(),
     )));
@@ -4602,6 +4603,7 @@ fn esc_on_the_wizard_s_welcome_quits() {
     h.app.screen = Screen::Onboarding(Box::new(crate::onboarding::OnboardingScreen::new(
         Vec::new(),
         "personal".into(),
+        h.app.config.profiles.clone(),
         false,
         rhema_config::Profile::default(),
     )));
@@ -4620,6 +4622,7 @@ fn wizard_harness() -> Harness {
     h.app.screen = Screen::Onboarding(Box::new(crate::onboarding::OnboardingScreen::new(
         Vec::new(),
         "personal".into(),
+        h.app.config.profiles.clone(),
         false,
         h.app.effective(),
     )));
@@ -4634,17 +4637,22 @@ fn the_wizard_walks_skip_to_finish_and_marks_the_config_onboarded() {
     };
     assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Welcome);
 
-    // Welcome -> Login; skip the login (row 1), landing on Profile.
+    // Welcome -> Profile; keep personal -> Login; skip the login
+    // (row 1), landing on Colors.
     h.app.on_key(key(KeyCode::Enter));
+    h.app.on_key(key(KeyCode::Enter));
+    let Screen::Onboarding(wizard) = &h.app.screen else {
+        panic!("expected the wizard");
+    };
+    assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Login);
     h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Enter));
     let Screen::Onboarding(wizard) = &h.app.screen else {
         panic!("expected the wizard");
     };
-    assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Profile);
+    assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Appearance);
 
-    // Profile (name kept) -> Colors -> Skills -> Finish -> chat.
-    h.app.on_key(key(KeyCode::Enter));
+    // Colors -> Skills -> Finish -> chat.
     h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Enter));
@@ -4655,9 +4663,60 @@ fn the_wizard_walks_skip_to_finish_and_marks_the_config_onboarded() {
 }
 
 #[test]
+fn the_wizard_s_profile_step_makes_an_existing_profile_the_default() {
+    let mut h = wizard_harness();
+    h.app
+        .config
+        .profiles
+        .insert("work".to_owned(), rhema_config::Profile::default());
+    if let Screen::Onboarding(wizard) = &mut h.app.screen {
+        wizard.profiles = h.app.config.profiles.clone();
+    }
+    h.app.on_key(key(KeyCode::Enter)); // welcome -> profile
+    h.app.on_key(key(KeyCode::Down)); // personal -> work
+    h.app.on_key(key(KeyCode::Enter));
+    assert_eq!(h.app.session_profile.as_deref(), Some("work"));
+    let Screen::Onboarding(wizard) = &h.app.screen else {
+        panic!("expected the wizard");
+    };
+    assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Login);
+    assert_eq!(wizard.default_profile, "work");
+    assert_eq!(
+        h.store.load().unwrap().last_profile_in(&PathBuf::from(".")),
+        Some("work".to_owned()),
+        "the choice is the workspace's memory"
+    );
+}
+
+#[test]
+fn the_wizard_s_add_row_creates_and_selects_a_profile() {
+    let mut h = wizard_harness();
+    h.app.on_key(key(KeyCode::Enter)); // welcome -> profile
+    h.app.on_key(key(KeyCode::Down)); // personal -> the add row
+    h.app.on_key(key(KeyCode::Enter)); // opens the name input
+    for c in "home".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    assert_eq!(h.app.session_profile.as_deref(), Some("home"));
+    assert!(
+        h.app.config.profiles.contains_key("home"),
+        "the registry holds the new profile"
+    );
+    assert!(h.store.load().unwrap().profiles.contains_key("home"));
+    let Screen::Onboarding(wizard) = &h.app.screen else {
+        panic!("expected the wizard");
+    };
+    assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Login);
+    assert_eq!(wizard.default_profile, "home");
+    assert!(wizard.dialog.is_none(), "the login rows are up");
+}
+
+#[test]
 fn the_wizard_s_login_advances_to_its_own_model_step() {
     let mut h = wizard_harness();
-    h.app.on_key(key(KeyCode::Enter)); // welcome -> login
+    h.app.on_key(key(KeyCode::Enter)); // welcome -> profile
+    h.app.on_key(key(KeyCode::Enter)); // keep personal -> login
     h.app.on_key(key(KeyCode::Enter)); // add a login -> the dialog
     // The first provider row, the suggested name, a key.
     h.app.on_key(key(KeyCode::Enter));
@@ -4689,7 +4748,7 @@ fn the_wizard_s_login_advances_to_its_own_model_step() {
     assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Model);
     assert_eq!(wizard.models.len(), 2);
     // Pick the highlighted model: the agent builds and the step
-    // lands on Profile.
+    // lands on Colors.
     let effects = h.app.on_key(key(KeyCode::Enter));
     assert_eq!(effects, vec![Effect::FetchUsage]);
     assert!(h.app.agent.is_some());
@@ -4700,7 +4759,7 @@ fn the_wizard_s_login_advances_to_its_own_model_step() {
     let Screen::Onboarding(wizard) = &h.app.screen else {
         panic!("expected the wizard");
     };
-    assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Profile);
+    assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Appearance);
     assert_eq!(wizard.chosen_model.as_deref(), Some("m-a"));
 }
 
@@ -4709,9 +4768,9 @@ fn the_wizard_s_colors_step_previews_and_the_settings_skills_page_toggles() {
     let mut h = wizard_harness();
     // Walk to Colors and step one palette down: the live apply is
     // the app's business, and the config is its record.
-    h.app.on_key(key(KeyCode::Enter)); // welcome -> login
+    h.app.on_key(key(KeyCode::Enter)); // welcome -> profile
+    h.app.on_key(key(KeyCode::Enter)); // keep personal -> login
     h.app.on_key(key(KeyCode::Down)); // the skip row
-    h.app.on_key(key(KeyCode::Enter)); // -> profile
     h.app.on_key(key(KeyCode::Enter)); // -> colors
     h.app.on_key(key(KeyCode::Down));
     let expected = crate::palette::Palette::ALL[1];

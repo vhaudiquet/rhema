@@ -364,6 +364,64 @@ impl App {
         Vec::new()
     }
 
+    /// The onboarding Profile step selected an existing profile: it
+    /// becomes the default the wizard's login and model steps write to.
+    /// Unknown names are ignored.
+    pub(crate) fn select_onboarding_profile(&mut self, name: &str) -> Vec<Effect> {
+        if !self.config.profiles.contains_key(name) {
+            return Vec::new();
+        }
+        self.apply_onboarding_profile(name);
+        Vec::new()
+    }
+
+    /// The add-a-profile input submitted a fresh name: an empty profile
+    /// joins the registry and becomes the default, ready for the
+    /// wizard's login and model steps to fill in. Creation is not the
+    /// settings page's: the wizard moves on with it.
+    pub(crate) fn create_onboarding_profile(&mut self, name: &str) -> Vec<Effect> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Vec::new();
+        }
+        if self.config.profiles.contains_key(name) {
+            if let Screen::Onboarding(wizard) = &mut self.screen {
+                wizard.error = Some(format!("a profile named {name} already exists"));
+            }
+            return Vec::new();
+        }
+        self.config
+            .profiles
+            .insert(name.to_owned(), rhema_config::Profile::default());
+        self.apply_onboarding_profile(name);
+        Vec::new()
+    }
+
+    /// Moves the wizard onto `name`: the session profile, the resolved
+    /// backend, and the wizard's snapshots all follow. The backend
+    /// re-resolves so a rerun that skips the login does not keep
+    /// serving the profile it left; a profile without usable
+    /// credentials drops it.
+    fn apply_onboarding_profile(&mut self, name: &str) {
+        self.session_profile = Some(name.to_owned());
+        let effective = self.config.effective(Some(name));
+        self.options.thinking = effective.thinking_effort();
+        self.backend = Backend::from_profile(&effective, self.secret_store());
+        self.provider = self.backend.as_ref().map(Backend::provider);
+        self.agent = None;
+        self.models.clear();
+        // The choice is the workspace's memory, like a `/profile`
+        // switch: the next launch here opens on it.
+        self.config.note_profile_in(&self.options.workspace, name);
+        self.save_config();
+        if let Screen::Onboarding(wizard) = &mut self.screen {
+            wizard.select_profile(name.to_owned(), effective, self.config.profiles.clone());
+            // The login step's "already configured" note follows the
+            // backend the wizard just landed on, not the one it left.
+            wizard.backend_ready = self.backend.is_some();
+        }
+    }
+
     /// The add-sandbox dialog's accepted kind and value: the kind's
     /// field lands on the session profile's `sandbox` section — the
     /// container, the host, or the url — and the snapshot follows.

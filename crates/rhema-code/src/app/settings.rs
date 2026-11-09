@@ -493,26 +493,6 @@ impl App {
         }
     }
 
-    /// The profile step's accepted rename: the config's profile entry
-    /// moves to the new name (its settings ride along), the session
-    /// follows, and the workspace's profile memory forgets the old
-    /// name. A blank or unchanged name never reaches here.
-    pub(crate) fn rename_session_profile(&mut self, new_name: &str) {
-        let Some(old) = self.session_profile.clone() else {
-            return;
-        };
-        if new_name == old || self.config.profiles.contains_key(new_name) {
-            return;
-        }
-        let entry = self.config.profiles.remove(&old).unwrap_or_default();
-        self.config.profiles.insert(new_name.to_owned(), entry);
-        self.session_profile = Some(new_name.to_owned());
-        self.config
-            .last_profile_by_workspace
-            .retain(|_, remembered| remembered != &old);
-        self.save_config();
-    }
-
     /// The system prompt in the transcript, fenced so it reads verbatim.
     pub fn show_system_prompt(&mut self, prompt: &str) {
         self.transcript

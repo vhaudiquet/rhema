@@ -858,8 +858,13 @@ gate — no usable backend, no stored model — opens the chat: the footer
 names the missing piece in red, the submit box declines with the fix,
 and `/login` or `/model` is one keystroke away. The wizard reuses the
 settings' add-instance dialog inline (its validation is the model
-fetch) and the palette list; steps live in `onboarding.rs`, and the
-finish step is the only writer of `onboarded: true`, so Esc-ing out
+fetch) and the palette list; steps live in `onboarding.rs`. The wizard
+opens on the default profile: the config's profiles, `personal` and
+`work` on a fresh setup, plus an add row that creates a new empty one.
+The pick becomes the session's profile and the workspace's remembered
+one, so the login and model steps write there; the backend re-resolves
+for it, and a profile without usable credentials drops the one it left.
+The finish step is the only writer of `onboarded: true`, so Esc-ing out
 halfway always reopens.
 
 **Bundled skills.** `commit-message` and `unslop` ship in the binary

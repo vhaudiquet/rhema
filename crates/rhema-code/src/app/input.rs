@@ -389,7 +389,7 @@ impl App {
                     if let Screen::Onboarding(wizard) = &mut self.screen {
                         wizard.chosen_model = Some(id);
                         wizard.chosen_provider = Some(provider.to_owned());
-                        wizard.go(crate::onboarding::OnboardingStep::Profile);
+                        wizard.go(crate::onboarding::OnboardingStep::Appearance);
                     }
                     effects
                 }
@@ -408,15 +408,8 @@ impl App {
                 self.set_palette(palette);
                 Vec::new()
             }
-            OnboardingAction::RenameProfile(name) => {
-                self.rename_session_profile(&name);
-                if let Screen::Onboarding(wizard) = &mut self.screen {
-                    wizard.profile_start = name.clone();
-                    wizard.profile_name = name;
-                    wizard.go(crate::onboarding::OnboardingStep::Appearance);
-                }
-                Vec::new()
-            }
+            OnboardingAction::SelectProfile(name) => self.select_onboarding_profile(&name),
+            OnboardingAction::CreateProfile(name) => self.create_onboarding_profile(&name),
             OnboardingAction::Complete => {
                 self.config.onboarded = Some(true);
                 self.save_config();

@@ -299,7 +299,7 @@ impl App {
                         // (skipping straight to the chat on a
                         // single-model server), the wizard advances to
                         // its own model step (or takes the single model
-                        // straight to the profile step).
+                        // straight to the colors step).
                         if let Screen::Onboarding(wizard) = &mut self.screen {
                             wizard.backend_ready = true;
                             wizard.stored = self.config.effective(Some(&tab));
@@ -316,7 +316,8 @@ impl App {
                                         if let Screen::Onboarding(wizard) = &mut self.screen {
                                             wizard.chosen_model = Some(id);
                                             wizard.chosen_provider = Some(provider.to_owned());
-                                            wizard.go(crate::onboarding::OnboardingStep::Profile);
+                                            wizard
+                                                .go(crate::onboarding::OnboardingStep::Appearance);
                                         }
                                         effects
                                     }

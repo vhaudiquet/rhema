@@ -174,7 +174,7 @@ pub(crate) fn onboarding_body(
             title("Rhema Code", &mut lines);
             lines.extend(connected_lines(
                 &wizard.stored,
-                &wizard.profile_start,
+                &wizard.default_profile,
                 theme,
                 width,
             ));
@@ -322,18 +322,65 @@ pub(crate) fn onboarding_body(
             footer("enter choose · esc back")
         }
         Step::Profile => {
-            title("The default profile", &mut lines);
-            lines.push(Line::from(vec![
-                Span::raw("name: ").fg(theme.text3),
-                Span::raw(wizard.profile_name.clone()).bold(),
-                Span::raw("▌").fg(theme.accent_text),
-            ]));
-            lines.push(Line::default());
-            lines.push(Line::from(
-                Span::raw("profiles keep settings apart, so work and personal stay side by side")
+            if let Some(dialog) = &wizard.profile_dialog {
+                title("A new profile", &mut lines);
+                lines.push(Line::from(vec![
+                    Span::raw("name: ").fg(theme.text3),
+                    Span::raw(dialog.input.clone()).bold(),
+                    Span::raw("▌").fg(theme.accent_text),
+                ]));
+                lines.push(Line::default());
+                let status = match &dialog.error {
+                    Some(error) => Line::from(error.clone()).fg(theme.error),
+                    None => {
+                        Line::from("name the profile · enter creates · esc cancels").fg(theme.text3)
+                    }
+                };
+                lines.push(status);
+                footer("enter create · esc cancel")
+            } else {
+                title("The default profile", &mut lines);
+                for (index, (name, profile)) in wizard.profiles.iter().enumerate() {
+                    let selected = index == wizard.row;
+                    let is_default = name == &wizard.default_profile;
+                    let mut detail = match &profile.provider {
+                        Some(provider) => provider.clone(),
+                        None => "no provider".to_owned(),
+                    };
+                    if let Some(model) = &profile.model {
+                        detail.push_str(&format!(" · {model}"));
+                    }
+                    let line = Line::from(vec![
+                        super::chrome::marker(selected, theme),
+                        Span::raw(name.clone()).fg(if selected { theme.text } else { theme.text2 }),
+                        Span::raw(if is_default { "  · default" } else { "" })
+                            .fg(theme.accent_text),
+                        Span::raw(format!("  {detail}")).fg(theme.text3),
+                    ]);
+                    lines.push(if selected {
+                        line.style(Style::default().bg(theme.elevated))
+                    } else {
+                        line
+                    });
+                }
+                let selected = wizard.row == wizard.profiles.len();
+                lines.push(Line::from(vec![
+                    super::chrome::marker(selected, theme),
+                    Span::raw("+ Add a new profile...").fg(if selected {
+                        theme.text
+                    } else {
+                        theme.text2
+                    }),
+                ]));
+                lines.push(Line::default());
+                lines.push(Line::from(
+                    Span::raw(
+                        "profiles keep settings apart, so work and personal stay side by side",
+                    )
                     .fg(theme.text3),
-            ));
-            footer("type to edit · enter continue · esc back")
+                ));
+                footer("↑↓ select · enter continue · esc back")
+            }
         }
         Step::Appearance => {
             title("Colors", &mut lines);
@@ -429,7 +476,7 @@ pub(crate) fn onboarding_body(
             ]));
             lines.push(Line::from(vec![
                 Span::raw("profile   ").fg(theme.text3),
-                Span::raw(wizard.profile_start.clone()).fg(theme.text),
+                Span::raw(wizard.default_profile.clone()).fg(theme.text),
             ]));
             lines.push(Line::default());
             lines.push(Line::from(
