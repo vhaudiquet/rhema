@@ -553,9 +553,9 @@ impl Profile {
     }
 
     /// The base URL an instance serves: `LLAMA_CPP_URL` over the stored
-    /// URL for llama.cpp; the stored base for OpenAI-compatible and Z.ai
-    /// instances (the caller defaults each kind, so its own default
-    /// stays in one place); `None` for key-only providers.
+    /// URL for llama.cpp; the stored base for OpenAI-compatible, Z.ai,
+    /// and OpenCode instances (the caller defaults each kind, so its own
+    /// default stays in one place); `None` for key-only providers.
     pub fn instance_url(&self, instance: &ProviderInstance) -> Option<String> {
         match instance.provider.as_str() {
             "llama-cpp" => Some(
@@ -566,7 +566,7 @@ impl Profile {
                 )
                 .unwrap_or_else(|| "http://localhost:8080".to_owned()),
             ),
-            "openai" | "zai" => instance
+            "openai" | "zai" | "opencode" => instance
                 .base_url
                 .clone()
                 .filter(|url| !url.trim().is_empty()),
@@ -1886,6 +1886,30 @@ profiles:
             },
         );
         assert_eq!(profile.instance_url_for("zai"), None);
+    }
+
+    #[test]
+    fn an_opencode_instance_honors_its_stored_route() {
+        let mut profile = Profile {
+            provider: Some("opencode".into()),
+            instance: Some("OpenCode Go".into()),
+            ..Profile::default()
+        };
+        profile.upsert_instance(
+            "OpenCode Go",
+            ProviderInstance {
+                provider: "opencode".into(),
+                api_key: Some("ockey".into()),
+                secret_ref: None,
+                base_url: Some("https://opencode.ai/inference/go/openai/v1".into()),
+            },
+        );
+        assert_eq!(profile.api_key("opencode", None).as_deref(), Some("ockey"));
+        assert_eq!(
+            profile.instance_url_for("opencode").as_deref(),
+            Some("https://opencode.ai/inference/go/openai/v1"),
+            "the Go route must survive every rebuild from the profile"
+        );
     }
 
     #[test]
