@@ -318,6 +318,7 @@ fn env_vars_for(kind: &str) -> &'static [&'static str] {
         "openrouter" => &["OPENROUTER_API_KEY"],
         "deepseek" => &["DEEPSEEK_API_KEY"],
         "zai" => &["ZAI_API_KEY", "Z_AI_API_KEY"],
+        "opencode" => &["OPENCODE_API_KEY"],
         "copilot" => &["GITHUB_COPILOT_TOKEN"],
         _ => &[],
     }
@@ -369,6 +370,7 @@ pub fn addable_kinds() -> &'static [&'static str] {
         "google",
         "llama-cpp",
         "openai",
+        "opencode",
         "openrouter",
         "zai",
     ]
@@ -508,6 +510,7 @@ pub fn discover(
         "openrouter",
         "deepseek",
         "zai",
+        "opencode",
         "copilot",
     ] {
         let stored_of_kind = rows.iter().any(|(_, params)| params.kind == kind);
