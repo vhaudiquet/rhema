@@ -23,6 +23,7 @@ use rhema_provider_copilot::CopilotProvider;
 use rhema_provider_google::GoogleProvider;
 use rhema_provider_llama_cpp::LlamaCppProvider;
 use rhema_provider_openai_compatible::{DEEPSEEK_BASE_URL, OpenAiCompatibleProvider};
+use rhema_provider_opencode::OpenCodeProvider;
 use rhema_provider_openrouter::OpenRouterProvider;
 
 /// Why a construction failed: a spelling no adapter answers to, or a
@@ -118,9 +119,26 @@ pub fn build(
             }
             assembled(provider)
         }
+        "opencode" => build_opencode(&keyed()?, base_url, None),
         _ => return Err(BuildError::Unknown(name.to_owned())),
     };
     Ok(built)
+}
+
+/// The OpenCode row, with the conversation id a caller keeping one
+/// across rebuilds or resumes supplies. `None` lets the adapter mint a
+/// fresh id — right for a new conversation, and for every frontend that
+/// hands the provider to one session only. `base_url` chooses
+/// pay-as-you-go or Go.
+pub fn build_opencode(api_key: &str, base_url: Option<&str>, session_id: Option<&str>) -> Built {
+    let mut provider = OpenCodeProvider::new(api_key);
+    if let Some(session_id) = session_id {
+        provider = provider.with_session_id(session_id);
+    }
+    if let Some(base_url) = non_blank(base_url) {
+        provider = provider.with_base_url(base_url);
+    }
+    assembled(provider)
 }
 
 /// A route override that is present and not whitespace — blank means
@@ -143,6 +161,7 @@ mod tests {
             "openai",
             "deepseek",
             "zai",
+            "opencode",
         ] {
             let built = build(kind, Some("k"), None, None).expect("the kind builds");
             // One instance behind both seams: dropping either half
