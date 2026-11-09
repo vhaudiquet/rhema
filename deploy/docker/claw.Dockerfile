@@ -30,6 +30,7 @@ COPY crates/rhema-provider-copilot/Cargo.toml crates/rhema-provider-copilot/Carg
 COPY crates/rhema-provider-google/Cargo.toml crates/rhema-provider-google/Cargo.toml
 COPY crates/rhema-provider-llama-cpp/Cargo.toml crates/rhema-provider-llama-cpp/Cargo.toml
 COPY crates/rhema-provider-openai-compatible/Cargo.toml crates/rhema-provider-openai-compatible/Cargo.toml
+COPY crates/rhema-provider-opencode/Cargo.toml crates/rhema-provider-opencode/Cargo.toml
 COPY crates/rhema-provider-openrouter/Cargo.toml crates/rhema-provider-openrouter/Cargo.toml
 COPY crates/rhema-provider-registry/Cargo.toml crates/rhema-provider-registry/Cargo.toml
 COPY crates/rhema-rsd/Cargo.toml crates/rhema-rsd/Cargo.toml
