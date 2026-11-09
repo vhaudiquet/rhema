@@ -61,6 +61,7 @@ agent token, never the reverse; `specs/rhema-tools.md` is the design.
 | `rhema-provider-anthropic` | Anthropic Messages adapter: streaming SSE, native tool use, live model listing; also serves Anthropic-compatible routes (Z.ai's GLM Coding Plan) by base override and bearer auth, and reports the plan's 5-hour/weekly quota on the Z.ai hosts |
 | `rhema-provider-openai-compatible` | Any OpenAI-compatible chat-completions server (OpenAI, vLLM, LM Studio): streaming, live listing |
 | `rhema-provider-openrouter` | OpenRouter adapter: the text-chat catalog with per-model pricing and context lengths |
+| `rhema-provider-opencode` | OpenCode Console and Go adapter: the translated OpenAI chat-completions route, the plan catalog with context windows and per-MTok prices, and the stable `x-opencode-session` conversation header |
 | `rhema-provider-llama-cpp` | llama.cpp `llama-server` adapter: streaming chat completions, optional bearer key |
 | `rhema-provider-copilot` | GitHub Copilot adapter: the OpenAI-shaped proxy, driven by a device-flow OAuth token |
 | `rhema-config` | The framework's stored section — named profiles of provider instances, the stored-key rule, the persisted off switches — plus the directory conventions (`Home`) and the `Store` seam a second frontend implements to embed the section in its own file |

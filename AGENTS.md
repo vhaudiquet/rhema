@@ -59,6 +59,8 @@ Rules:
     (`crates/rhema-provider-anthropic/`)
   - `openai-compatible` — the generic OpenAI-compatible adapter
     (`crates/rhema-provider-openai-compatible/`)
+  - `opencode` — the OpenCode Console and Go adapter
+    (`crates/rhema-provider-opencode/`)
   - `copilot` — the GitHub Copilot adapter
     (`crates/rhema-provider-copilot/`)
   - `provider-registry` — the fleet's name-to-adapter wiring: `build`
