@@ -93,8 +93,8 @@ pub enum ConfigError {
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct ProviderInstance {
     /// Which adapter serves this instance: `google`, `llama-cpp`,
-    /// `openrouter`, `anthropic`, `openai`, `deepseek`, `zai`, or
-    /// `copilot`.
+    /// `openrouter`, `anthropic`, `openai`, `deepseek`, `zai`,
+    /// `opencode`, or `copilot`.
     pub provider: String,
     /// The API key (the bearer key for a llama.cpp server), when the
     /// instance needs one and the keychain does not hold it.
@@ -229,7 +229,8 @@ impl fmt::Debug for SandboxSettings {
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct Profile {
     /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
-    /// `anthropic`, `openai`, `deepseek`, `zai`, or `copilot`.
+    /// `anthropic`, `openai`, `deepseek`, `zai`, `opencode`, or
+    /// `copilot`.
     pub provider: Option<String>,
     /// The name of the active instance in [`Profile::instances`] — the
     /// one whose backend serves turns. Must name an instance of
@@ -304,7 +305,7 @@ impl Profile {
     /// environment tier included; env-only when the profile holds no
     /// instance of it. The provider name is the adapter spelling —
     /// `google`, `llama-cpp`, `openrouter`, `anthropic`, `openai`,
-    /// `deepseek`, `zai`, `copilot`.
+    /// `deepseek`, `zai`, `opencode`, `copilot`.
     pub fn api_key(&self, provider: &str, secrets: Option<&dyn SecretStore>) -> Option<String> {
         match self.instance_for_provider(provider) {
             Some((_, instance)) => self.instance_api_key(instance, secrets),
@@ -360,6 +361,7 @@ impl Profile {
             Some("openai") => self.api_key("openai", secrets).is_some(),
             Some("deepseek") => self.api_key("deepseek", secrets).is_some(),
             Some("zai") => self.api_key("zai", secrets).is_some(),
+            Some("opencode") => self.api_key("opencode", secrets).is_some(),
             Some("copilot") => self.api_key("copilot", secrets).is_some(),
             _ => self.api_key("google", secrets).is_some(),
         }
@@ -796,6 +798,13 @@ pub const PROVIDERS: &[ProviderInfo] = &[
         login: true,
         missing_key_help: "missing API key: set ZAI_API_KEY (or log in once interactively)",
         default_model: "GLM-5.3",
+    },
+    ProviderInfo {
+        name: "opencode",
+        env_keys: &["OPENCODE_API_KEY"],
+        login: true,
+        missing_key_help: "missing API key: set OPENCODE_API_KEY (or log in once interactively)",
+        default_model: "deepseek-v4.1-flash",
     },
     ProviderInfo {
         name: "copilot",
