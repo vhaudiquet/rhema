@@ -1,0 +1,29 @@
+[package]
+name = "rhema-provider-opencode"
+description = "OpenCode Console and Go model provider for rhema"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
+# The shared model card, pricing, and catalog seam
+rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
+# The OpenAI chat-completions dialect core Console translates
+rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.1" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# HTTP client for the model catalog; completions ride the shared core
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+# In-process HTTP mock for offline catalog and header tests
+wiremock = "0.6"
+
+[lints]
+workspace = true
