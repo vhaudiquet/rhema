@@ -1117,6 +1117,33 @@ fn a_zai_profile_builds_its_own_backend_from_a_stored_route() {
 }
 
 #[test]
+fn an_opencode_profile_keeps_its_stored_go_route() {
+    let mut profile = keyed_profile("opencode", "k-oc");
+    profile.instance = Some("OpenCode Go".into());
+    profile.upsert_instance(
+        "OpenCode Go",
+        rhema_config::ProviderInstance {
+            provider: "opencode".into(),
+            api_key: Some("k-go".into()),
+            secret_ref: None,
+            base_url: Some("https://opencode.ai/inference/go/openai/v1".into()),
+        },
+    );
+    let backend =
+        Backend::from_profile(&profile, None).expect("a keyed OpenCode profile serves turns");
+    assert_eq!(backend.config_name(), "opencode");
+    assert!(
+        matches!(
+            backend,
+            Backend::OpenCode { ref api_key, ref base_url, .. }
+                if api_key == "k-go"
+                    && base_url.as_deref() == Some("https://opencode.ai/inference/go/openai/v1")
+        ),
+        "the active OpenCode instance's Go route serves"
+    );
+}
+
+#[test]
 fn anthropic_and_openai_profiles_build_their_own_backends() {
     let keyed = |provider: &str, key: Option<&str>| {
         let mut profile = rhema_config::Profile {
