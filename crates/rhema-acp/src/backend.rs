@@ -421,6 +421,33 @@ mod tests {
     }
 
     #[test]
+    fn the_opencode_kind_reads_its_own_stored_route() {
+        let mut profile = Profile {
+            provider: Some("opencode".into()),
+            instance: Some("Go".into()),
+            ..Profile::default()
+        };
+        profile.upsert_instance(
+            "Go",
+            ProviderInstance {
+                provider: "opencode".into(),
+                api_key: Some("ockey".into()),
+                secret_ref: None,
+                base_url: Some("https://opencode.ai/inference/go/openai/v1".into()),
+            },
+        );
+        assert_eq!(
+            stored_route(&profile, "opencode").as_deref(),
+            Some("https://opencode.ai/inference/go/openai/v1")
+        );
+        assert_eq!(
+            stored_route(&profile, "zai"),
+            None,
+            "another kind never reads OpenCode's route"
+        );
+    }
+
+    #[test]
     fn a_provider_for_an_unknown_kind_is_an_error_not_google() {
         let mut keyed = Profile::default();
         keyed.upsert_instance(
