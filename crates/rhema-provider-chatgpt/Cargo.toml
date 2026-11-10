@@ -1,0 +1,36 @@
+[package]
+name = "rhema-provider-chatgpt"
+description = "ChatGPT subscription adapter for the rhema ModelProvider seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+rhema-core = { path = "../rhema-core", version = "0.2.1" }
+# The shared model card, SSE decoder, and login-flow seam
+rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+# HTTP + SSE streaming against the ChatGPT backend, and the OAuth
+# authorization-code exchange the login flow runs
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# The login callback listener, its timeout, and the token mutex shared
+# across awaited calls
+tokio = { workspace = true, features = ["net", "io-util", "sync", "time"] }
+# PKCE: a CSPRNG verifier (S256) and the URL-safe base64 both sides use
+rand = "0.8"
+sha2 = "0.10"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+# In-process HTTP mock for offline SSE, OAuth, and catalog tests
+wiremock = "0.6"
+
+[lints]
+workspace = true

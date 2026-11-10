@@ -2114,6 +2114,71 @@ fn the_copilot_login_runs_a_flow_and_persists_its_credential() {
 }
 
 #[test]
+fn the_chatgpt_login_runs_a_flow_and_persists_its_credential() {
+    let mut h = harness(None, None, Session::default());
+    // The ChatGPT row sits just above Copilot (the last row).
+    crate::commands::dispatch(&mut h.app, "/login");
+    h.app.on_key(key(KeyCode::Enter));
+    for _ in 0..crate::screens::PROVIDERS.len() - 2 {
+        h.app.on_key(key(KeyCode::Down));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    h.app.on_key(key(KeyCode::Enter));
+    match &h.app.screen {
+        Screen::Settings(s) => {
+            let login = s.dialog.as_ref().unwrap();
+            assert_eq!(login.stage, crate::screens::DialogStage::Flow);
+            assert_eq!(
+                login.pending.as_ref().map(|p| p.provider),
+                Some(LoginProvider::ChatGpt)
+            );
+        }
+        _ => panic!("expected the login screen in its flow stage"),
+    }
+
+    // The browser flow's credential arrives as one JSON string and rides
+    // the ChatGPT backend, not Copilot's.
+    let effects = h.app.on_event(UiEvent::LoginUpdate(
+        rhema_provider::LoginUpdate::Completed(r#"{"access_token":"a"}"#.into()),
+    ));
+    assert_eq!(
+        effects,
+        vec![Effect::FetchModels(FetchWhy::Login {
+            backend: Backend::ChatGpt {
+                credential: r#"{"access_token":"a"}"#.into(),
+            },
+            instance: Some("chatgpt".into()),
+        })]
+    );
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Login {
+            backend: Backend::ChatGpt {
+                credential: r#"{"access_token":"a"}"#.into(),
+            },
+            instance: Some("chatgpt".into()),
+        },
+        result: loaded("chatgpt", models()),
+    });
+    match &h.app.screen {
+        Screen::Picker(picker) => assert_eq!(picker.models.len(), 2),
+        _ => panic!("expected the picker after a successful flow login"),
+    }
+    assert_eq!(
+        h.store
+            .load()
+            .unwrap()
+            .effective(None)
+            .api_key("chatgpt", None)
+            .as_deref(),
+        Some(r#"{"access_token":"a"}"#)
+    );
+    assert!(matches!(
+        h.app.backend,
+        Some(Backend::ChatGpt { ref credential }) if credential == r#"{"access_token":"a"}"#
+    ));
+}
+
+#[test]
 fn a_failed_flow_renders_its_error_and_persists_nothing() {
     let mut h = harness(None, None, Session::default());
     crate::commands::dispatch(&mut h.app, "/login");

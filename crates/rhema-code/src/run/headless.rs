@@ -225,7 +225,11 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             Backend::named(kind, &profile, Some(&secrets)).map(|backend| backend.provider())
         }) as rhema_coding_agent::SubagentProviders
     });
-    let (mut agent_config, _subagents) = rhema_subagents::wire(backend.provider(), agent_config);
+    // One provider instance serves the main agent and the subagent
+    // wrapper: a token-backed adapter keeps one refreshed credential,
+    // not a copy per seam.
+    let provider = backend.provider();
+    let (mut agent_config, _subagents) = rhema_subagents::wire(provider.clone(), agent_config);
     if let Some(assembled) = sandboxed.as_ref() {
         assembled.apply_workspace(&mut agent_config);
     }
@@ -243,7 +247,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             .with_context(|| format!("cannot resume session: {}", path.display()))?,
         None => Session::default(),
     };
-    let mut agent = CodingAgent::from_session(backend.provider(), agent_config, session)?;
+    let mut agent = CodingAgent::from_session(provider, agent_config, session)?;
     // Auto-approved for now: the Approval seam is where command
     // allowlists will land.
     let approval: Arc<dyn Approval> = Arc::new(rhema_coding_agent::AllowAll);

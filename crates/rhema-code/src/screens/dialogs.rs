@@ -125,6 +125,11 @@ pub enum DialogAction {
     /// Esc left the dialog while its flow ran: close it and drop the
     /// flow task.
     CloseCancelFlow,
+    /// Enter or `o` on the running flow's link: open it in the default
+    /// browser.
+    OpenFlowUrl,
+    /// `c` on the running flow's link: copy it to the clipboard.
+    CopyFlowUrl,
 }
 
 /// Which half of the add-instance dialog is showing.
@@ -195,6 +200,10 @@ pub struct AddInstanceDialog {
     pub flow_instruction: Option<rhema_provider::LoginInstruction>,
     /// The flow's latest progress note, when it has sent one.
     pub flow_waiting: Option<String>,
+    /// The flow's one-line answer to the open and copy buttons: the
+    /// last action the user took on the link. Cleared when the flow
+    /// sends a fresh instruction or progress note.
+    pub flow_notice: Option<String>,
     /// When the flow stage began — the clock the progress spinner
     /// animates off, and the marker for "contacting the provider"
     /// before the flow's first update lands.
@@ -218,6 +227,7 @@ impl AddInstanceDialog {
             second_input: false,
             flow_instruction: None,
             flow_waiting: None,
+            flow_notice: None,
             flow_started: None,
             instances: stored.instances.clone(),
         }
@@ -277,7 +287,13 @@ impl AddInstanceDialog {
                 };
                 format!("{what} · ctrl-v paste · enter when done · esc back")
             }
-            DialogStage::Flow => "esc cancels the login".to_owned(),
+            DialogStage::Flow => {
+                if self.flow_url().is_some() {
+                    "enter opens · c copies the link · esc cancels".to_owned()
+                } else {
+                    "esc cancels the login".to_owned()
+                }
+            }
         }
     }
 
@@ -396,7 +412,11 @@ impl AddInstanceDialog {
                     pending.name = self.input.trim().to_owned();
                 }
                 self.input.clear();
-                if self.pending.as_ref().map(|p| p.provider) == Some(LoginProvider::Copilot) {
+                if self
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.provider.uses_flow())
+                {
                     // A flow provider has no key to type: the stage
                     // flips and the app spawns the flow.
                     self.status = DialogStatus::Validating;
@@ -464,11 +484,35 @@ impl AddInstanceDialog {
         }
     }
 
-    /// Keys while a flow runs: esc cancels the dialog; everything else
-    /// is inert — the flow has no input of its own.
+    /// The link the running flow is waiting on, once it has reported
+    /// one. The flow stage renders it as a host label and the buttons
+    /// open or copy the full string.
+    pub fn flow_url(&self) -> Option<&str> {
+        self.flow_instruction
+            .as_ref()
+            .and_then(|instruction| instruction.url.as_deref())
+    }
+
+    /// Notes the outcome of the open or copy button under the flow.
+    pub(crate) fn note_flow(&mut self, notice: impl Into<String>) {
+        self.flow_notice = Some(notice.into());
+    }
+
+    /// Keys while a flow runs: esc cancels the dialog; enter or `o`
+    /// opens the link, `c` copies it. Before the flow reports a URL
+    /// the buttons have nothing to act on, so everything but esc is
+    /// inert.
     fn handle_flow_key(&mut self, key: KeyEvent) -> DialogAction {
         match key.code {
             KeyCode::Esc => DialogAction::CloseCancelFlow,
+            KeyCode::Enter | KeyCode::Char('o') | KeyCode::Char('O')
+                if self.flow_url().is_some() =>
+            {
+                DialogAction::OpenFlowUrl
+            }
+            KeyCode::Char('c') | KeyCode::Char('C') if self.flow_url().is_some() => {
+                DialogAction::CopyFlowUrl
+            }
             _ => DialogAction::None,
         }
     }
@@ -496,6 +540,7 @@ impl AddInstanceDialog {
             LoginProvider::OpenCode => "opencode",
             LoginProvider::OpenCodeGo => "opencode-go",
             LoginProvider::Copilot => "copilot",
+            LoginProvider::ChatGpt => "chatgpt",
         };
         if !self.instances.contains_key(base) {
             return base.to_owned();

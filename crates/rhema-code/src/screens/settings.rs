@@ -95,6 +95,11 @@ pub enum SettingsAction {
     Validate,
     /// The dialog named a flow provider: the app spawns its flow.
     StartFlow,
+    /// Enter or `o` on the running flow's link: open it in the default
+    /// browser.
+    OpenFlowUrl,
+    /// `c` on the running flow's link: copy it to the clipboard.
+    CopyFlowUrl,
     /// The dialog closed (esc at any stage); a running flow task dies
     /// with it.
     CloseDialog,
@@ -732,6 +737,8 @@ impl SettingsScreen {
                 DialogAction::None => SettingsAction::None,
                 DialogAction::Validate => SettingsAction::Validate,
                 DialogAction::StartFlow => SettingsAction::StartFlow,
+                DialogAction::OpenFlowUrl => SettingsAction::OpenFlowUrl,
+                DialogAction::CopyFlowUrl => SettingsAction::CopyFlowUrl,
                 DialogAction::Close | DialogAction::CloseCancelFlow => SettingsAction::CloseDialog,
             };
         }

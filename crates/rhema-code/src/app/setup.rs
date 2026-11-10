@@ -117,6 +117,12 @@ pub enum Backend {
         /// The resolved GitHub token (`env` first, stored second).
         api_key: String,
     },
+    /// A ChatGPT subscription, driven by the browser sign-in's OAuth
+    /// credential (tokens and account facts, JSON-encoded).
+    ChatGpt {
+        /// The resolved credential (`env` first, stored second).
+        credential: String,
+    },
 }
 
 impl Backend {
@@ -189,6 +195,7 @@ impl Backend {
                 Some(session_id),
             )),
             Backend::Copilot { api_key } => build("copilot", Some(api_key), None, None),
+            Backend::ChatGpt { credential } => build("chatgpt", Some(credential), None, None),
         }
         .expect("a Backend's own credentials build")
     }
@@ -205,6 +212,7 @@ impl Backend {
             Backend::Zai { .. } => "zai",
             Backend::OpenCode { .. } => "opencode",
             Backend::Copilot { .. } => "copilot",
+            Backend::ChatGpt { .. } => "chatgpt",
         }
     }
 
@@ -360,6 +368,9 @@ impl Backend {
             "copilot" => profile
                 .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
+            "chatgpt" => profile
+                .instance_api_key(instance, secrets)
+                .map(|credential| Backend::ChatGpt { credential }),
             "google" => profile
                 .instance_api_key(instance, secrets)
                 .map(|api_key| Backend::Google { api_key }),
@@ -411,6 +422,9 @@ impl Backend {
             "copilot" => profile
                 .api_key("copilot", secrets)
                 .map(|api_key| Backend::Copilot { api_key }),
+            "chatgpt" => profile
+                .api_key("chatgpt", secrets)
+                .map(|credential| Backend::ChatGpt { credential }),
             _ => None,
         }
     }
@@ -461,7 +475,8 @@ impl Backend {
             | Backend::LlamaCpp { .. }
             | Backend::Anthropic { .. }
             | Backend::OpenAi { .. }
-            | Backend::OpenCode { .. } => Ok(None),
+            | Backend::OpenCode { .. }
+            | Backend::ChatGpt { .. } => Ok(None),
         }
     }
 
@@ -583,6 +598,10 @@ pub enum SettingsHit {
     PageRow(usize),
     /// A provider row of the add-instance dialog.
     DialogProvider(usize),
+    /// The running login flow's open button.
+    DialogFlowOpen,
+    /// The running login flow's copy button.
+    DialogFlowCopy,
 }
 
 /// What a left click on the onboarding wizard landed on. The renderer

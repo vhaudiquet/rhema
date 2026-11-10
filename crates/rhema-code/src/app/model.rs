@@ -92,7 +92,9 @@ impl App {
             ),
             // The flow path never validates a typed key: its credential
             // arrives from the flow task, already wrapped in the backend.
-            crate::screens::LoginProvider::Copilot => return Vec::new(),
+            crate::screens::LoginProvider::Copilot | crate::screens::LoginProvider::ChatGpt => {
+                return Vec::new();
+            }
             crate::screens::LoginProvider::Google => Backend::Google { api_key: input },
         };
         vec![Effect::FetchModels(FetchWhy::Login {
@@ -124,10 +126,12 @@ impl App {
             rhema_provider::LoginUpdate::Instruct(instruction) => {
                 dialog.flow_instruction = Some(instruction);
                 dialog.flow_waiting = None;
+                dialog.flow_notice = None;
                 Vec::new()
             }
             rhema_provider::LoginUpdate::Waiting(text) => {
                 dialog.flow_waiting = Some(text);
+                dialog.flow_notice = None;
                 Vec::new()
             }
             rhema_provider::LoginUpdate::Failed(message) => {
@@ -138,13 +142,24 @@ impl App {
             }
             rhema_provider::LoginUpdate::Completed(token) => {
                 dialog.flow_waiting = Some("fetching the model list".to_owned());
+                dialog.flow_notice = None;
                 self.login_cancel = None;
                 // The flow's instance was named before the flow started.
-                let instance = dialog.pending.as_ref().map(|p| p.name.clone());
-                vec![Effect::FetchModels(FetchWhy::Login {
-                    backend: Backend::Copilot { api_key: token },
-                    instance,
-                })]
+                let pending = dialog
+                    .pending
+                    .as_ref()
+                    .map(|pending| (pending.provider, pending.name.clone()));
+                let instance = pending.as_ref().map(|(_, name)| name.clone());
+                let backend = match pending.map(|(provider, _)| provider) {
+                    Some(crate::screens::LoginProvider::Copilot) => {
+                        Backend::Copilot { api_key: token }
+                    }
+                    Some(crate::screens::LoginProvider::ChatGpt) => {
+                        Backend::ChatGpt { credential: token }
+                    }
+                    _ => return Vec::new(),
+                };
+                vec![Effect::FetchModels(FetchWhy::Login { backend, instance })]
             }
         }
     }
@@ -174,7 +189,10 @@ impl App {
             | Backend::OpenRouter { api_key }
             | Backend::Anthropic { api_key }
             | Backend::DeepSeek { api_key }
-            | Backend::Copilot { api_key } => (Some(api_key.clone()), None),
+            | Backend::Copilot { api_key }
+            | Backend::ChatGpt {
+                credential: api_key,
+            } => (Some(api_key.clone()), None),
         };
         let secrets = self.secrets.as_deref();
         let mut keychain_delete_failure: Option<String> = None;

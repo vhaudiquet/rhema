@@ -30,6 +30,7 @@ pub const PROVIDERS: &[&str] = &[
     "zai",
     "opencode",
     "copilot",
+    "chatgpt",
     "google",
 ];
 

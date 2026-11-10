@@ -312,6 +312,9 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             ProviderChoice::Copilot => effective
                 .api_key("copilot", Some(&*secrets))
                 .map(|api_key| Backend::Copilot { api_key }),
+            ProviderChoice::ChatGpt => effective
+                .api_key("chatgpt", Some(&*secrets))
+                .map(|credential| Backend::ChatGpt { credential }),
         },
     );
     let session = match &args.resume {
@@ -781,11 +784,15 @@ fn dispatch(
                 _ => None,
             };
             // The dialog already flipped to the flow stage; the effect
-            // only builds the flow. Copilot's device grant is the first
-            // user; further flow providers join behind the same arm.
+            // only builds the flow. Copilot's device grant and
+            // ChatGPT's browser sign-in are the users; further flow
+            // providers join behind the same arm.
             let flow: Box<dyn rhema_provider::InteractiveLogin> = match provider {
                 Some(crate::screens::LoginProvider::Copilot) => {
                     Box::new(rhema_provider_copilot::CopilotLogin::new())
+                }
+                Some(crate::screens::LoginProvider::ChatGpt) => {
+                    Box::new(rhema_provider_chatgpt::ChatGptLogin::new())
                 }
                 _ => return,
             };

@@ -320,6 +320,7 @@ fn env_vars_for(kind: &str) -> &'static [&'static str] {
         "zai" => &["ZAI_API_KEY", "Z_AI_API_KEY"],
         "opencode" => &["OPENCODE_API_KEY"],
         "copilot" => &["GITHUB_COPILOT_TOKEN"],
+        "chatgpt" => &["CHATGPT_ACCESS_TOKEN"],
         _ => &[],
     }
 }
@@ -366,6 +367,7 @@ pub struct ProviderParams {
 pub fn addable_kinds() -> &'static [&'static str] {
     &[
         "anthropic",
+        "chatgpt",
         "copilot",
         "deepseek",
         "google",
@@ -542,6 +544,7 @@ pub fn discover(
         "zai",
         "opencode",
         "copilot",
+        "chatgpt",
     ] {
         let stored_of_kind = rows.iter().any(|(_, params)| params.kind == kind);
         let params = if kind == "llama-cpp" {

@@ -24,6 +24,16 @@ pub enum LoginProvider {
     OpenCodeGo,
     /// GitHub Copilot, through the device-code flow.
     Copilot,
+    /// A ChatGPT subscription, through the browser sign-in flow.
+    ChatGpt,
+}
+
+impl LoginProvider {
+    /// Whether the row runs an interactive flow instead of asking for a
+    /// typed key.
+    pub fn uses_flow(self) -> bool {
+        matches!(self, Self::Copilot | Self::ChatGpt)
+    }
 }
 
 /// The provider rows shown at login. Every row configures an implemented
@@ -73,6 +83,10 @@ pub const PROVIDERS: &[ProviderEntry] = &[
     ProviderEntry {
         name: "OpenCode Go",
         kind: LoginProvider::OpenCodeGo,
+    },
+    ProviderEntry {
+        name: "ChatGPT (subscription)",
+        kind: LoginProvider::ChatGpt,
     },
     ProviderEntry {
         name: "GitHub Copilot",

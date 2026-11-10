@@ -239,11 +239,15 @@ impl App {
         if let Some(previous) = &self.backend {
             backend.keep_session(previous);
         }
+        // One provider instance serves the config, the agent, and the
+        // app's own handle: a token-backed adapter keeps one refreshed
+        // credential, not a copy per seam.
+        let provider = backend.provider();
         let (agent_config, subagents) = session_agent_config(
             &self.options,
             self.sandboxed.as_ref(),
             effective.model.clone(),
-            backend.provider(),
+            provider.clone(),
             &self.config.skills_disabled.clone(),
             &self.config.disabled_subagents,
             &effective,
@@ -253,7 +257,7 @@ impl App {
             &self.config.disabled_mcp_servers,
             self.secrets.as_ref(),
         );
-        match CodingAgent::from_session(backend.provider(), agent_config, session) {
+        match CodingAgent::from_session(provider.clone(), agent_config, session) {
             Ok(mut agent) => {
                 // The benchmark moves with the conversation, the way
                 // the cost does: the old agent's counters fold into
@@ -274,7 +278,7 @@ impl App {
                 agent.adopt_transcript_sections(sections);
                 self.session_profile = Some(name.to_owned());
                 self.backend = Some(backend.clone());
-                self.provider = Some(backend.provider());
+                self.provider = Some(provider);
                 self.models.clear();
                 self.agent = Some(agent);
                 self.subagents = Some(subagents);

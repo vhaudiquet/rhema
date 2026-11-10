@@ -98,6 +98,7 @@ function save(): void {
 // --- the login form ---------------------------------------------------
 const KIND_LABELS: Record<string, string> = {
   anthropic: 'Anthropic',
+  chatgpt: 'ChatGPT (subscription)',
   copilot: 'GitHub Copilot',
   deepseek: 'DeepSeek',
   google: 'Google Gemini',
@@ -111,10 +112,14 @@ function kindLabel(kind: string): string {
   return KIND_LABELS[kind] ?? kind
 }
 
-/** The key field's voice: copilot logs in with a GitHub token. */
-const keyLabel = computed(() =>
-  addKind.value === 'copilot' ? 'GitHub token' : 'API key',
-)
+/** The key field's voice: copilot logs in with a GitHub token, and a
+ * ChatGPT login takes the browser flow's credential JSON (or a bare
+ * access token). */
+const keyLabel = computed(() => {
+  if (addKind.value === 'copilot') return 'GitHub token'
+  if (addKind.value === 'chatgpt') return 'ChatGPT credential (JSON or access token)'
+  return 'API key'
+})
 
 /** A field the daemon does not demand reads as optional, not hidden. */
 function label(name: string, base: string): string {

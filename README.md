@@ -64,6 +64,7 @@ agent token, never the reverse; `specs/rhema-tools.md` is the design.
 | `rhema-provider-opencode` | OpenCode Console and Go adapter: the translated OpenAI chat-completions route, the plan catalog with context windows and per-MTok prices, and the stable `x-opencode-session` conversation header |
 | `rhema-provider-llama-cpp` | llama.cpp `llama-server` adapter: streaming chat completions, optional bearer key |
 | `rhema-provider-copilot` | GitHub Copilot adapter: the OpenAI-shaped proxy, driven by a device-flow OAuth token |
+| `rhema-provider-chatgpt` | ChatGPT subscription adapter: browser OAuth sign-in, the Codex Responses backend, live model listing |
 | `rhema-config` | The framework's stored section — named profiles of provider instances, the stored-key rule, the persisted off switches — plus the directory conventions (`Home`) and the `Store` seam a second frontend implements to embed the section in its own file |
 | `rhema-rsd` | Resource-scoped dispatch: at most one live handler per resource key, a live inbox delivered mid-run, revision-guarded checkpoints, leases with TTL and crash recovery |
 | `rhema-memory` | Cross-session memory: one record per fact behind a `MemoryStore` contract, surfaced as `memory_*` tools the model calls itself; records carry a validity window, decay, provenance, a subject key, and a verify hint, and are superseded or retracted — never silently stale, never silently deleted |

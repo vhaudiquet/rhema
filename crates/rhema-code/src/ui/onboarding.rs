@@ -260,7 +260,7 @@ pub(crate) fn onboarding_body(
                         ]));
                     }
                     crate::screens::DialogStage::Flow => {
-                        lines.extend(dialog_flow_lines(dialog, theme, width));
+                        lines.extend(dialog_flow_lines(dialog, theme, width).lines);
                     }
                 }
                 let status = match &dialog.status {

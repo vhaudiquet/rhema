@@ -49,6 +49,7 @@ rhema-provider = { path = "../rhema-provider", version = "0.2.1" }
 rhema-provider-registry = { path = "../rhema-provider-registry", version = "0.2.1" }
 rhema-provider-anthropic = { path = "../rhema-provider-anthropic", version = "0.2.1" }
 rhema-provider-copilot = { path = "../rhema-provider-copilot", version = "0.2.1" }
+rhema-provider-chatgpt = { path = "../rhema-provider-chatgpt", version = "0.2.1" }
 rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.2.1" }
 rhema-provider-opencode = { path = "../rhema-provider-opencode", version = "0.2.1" }
 rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.2.1" }

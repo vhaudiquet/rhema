@@ -19,6 +19,7 @@ use std::sync::Arc;
 use rhema_core::ModelProvider;
 use rhema_provider::ModelListing;
 use rhema_provider_anthropic::AnthropicProvider;
+use rhema_provider_chatgpt::ChatGptProvider;
 use rhema_provider_copilot::CopilotProvider;
 use rhema_provider_google::GoogleProvider;
 use rhema_provider_llama_cpp::LlamaCppProvider;
@@ -86,6 +87,7 @@ pub fn build(
         "anthropic" => assembled(AnthropicProvider::new(keyed()?)),
         "openrouter" => assembled(OpenRouterProvider::new(keyed()?)),
         "copilot" => assembled(CopilotProvider::new(keyed()?)),
+        "chatgpt" => assembled(ChatGptProvider::new(keyed()?)),
         "openai" => {
             let mut provider = OpenAiCompatibleProvider::new(keyed()?);
             if let Some(base_url) = non_blank(base_url) {
@@ -158,6 +160,7 @@ mod tests {
             "anthropic",
             "openrouter",
             "copilot",
+            "chatgpt",
             "openai",
             "deepseek",
             "zai",

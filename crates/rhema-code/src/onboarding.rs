@@ -80,6 +80,11 @@ pub enum OnboardingAction {
     StartFlow,
     /// The dialog closed while a flow ran: drop the flow task.
     CancelFlow,
+    /// Enter or `o` on the running flow's link: open it in the default
+    /// browser.
+    OpenFlowUrl,
+    /// `c` on the running flow's link: copy it to the clipboard.
+    CopyFlowUrl,
     /// A model row was picked: persist it as the profile's model and
     /// build the agent, then the step advances. The provider is the
     /// config name — a catalog row's is `&'static`, the keep-current
@@ -269,6 +274,8 @@ impl OnboardingScreen {
                 DialogAction::None => OnboardingAction::None,
                 DialogAction::Validate => OnboardingAction::Validate,
                 DialogAction::StartFlow => OnboardingAction::StartFlow,
+                DialogAction::OpenFlowUrl => OnboardingAction::OpenFlowUrl,
+                DialogAction::CopyFlowUrl => OnboardingAction::CopyFlowUrl,
                 DialogAction::Close | DialogAction::CloseCancelFlow => {
                     self.dialog = None;
                     match action {

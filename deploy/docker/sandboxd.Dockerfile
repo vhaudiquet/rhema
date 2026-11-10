@@ -28,6 +28,7 @@ COPY crates/rhema-memory/Cargo.toml crates/rhema-memory/Cargo.toml
 COPY crates/rhema-mcp/Cargo.toml crates/rhema-mcp/Cargo.toml
 COPY crates/rhema-provider/Cargo.toml crates/rhema-provider/Cargo.toml
 COPY crates/rhema-provider-anthropic/Cargo.toml crates/rhema-provider-anthropic/Cargo.toml
+COPY crates/rhema-provider-chatgpt/Cargo.toml crates/rhema-provider-chatgpt/Cargo.toml
 COPY crates/rhema-provider-copilot/Cargo.toml crates/rhema-provider-copilot/Cargo.toml
 COPY crates/rhema-provider-google/Cargo.toml crates/rhema-provider-google/Cargo.toml
 COPY crates/rhema-provider-llama-cpp/Cargo.toml crates/rhema-provider-llama-cpp/Cargo.toml

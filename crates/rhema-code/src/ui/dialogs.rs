@@ -19,7 +19,7 @@ pub(crate) fn render_add_dialog(
         crate::screens::DialogStage::SelectProvider => PROVIDERS.len(),
         crate::screens::DialogStage::NameInstance
         | crate::screens::DialogStage::EnterCredential => 1,
-        crate::screens::DialogStage::Flow => flow.len().max(1),
+        crate::screens::DialogStage::Flow => flow.lines.len().max(1),
     } as u16;
     let height = 2 + rows + 1 + 1;
     let area = centered(58, height, frame.area());
@@ -82,7 +82,30 @@ pub(crate) fn render_add_dialog(
             );
         }
         crate::screens::DialogStage::Flow => {
-            frame.render_widget(Paragraph::new(flow), body_area);
+            frame.render_widget(Paragraph::new(flow.lines), body_area);
+            if let Some(row) = flow.buttons_row {
+                let y = body_area.y + row as u16;
+                let open_width = FLOW_OPEN_BUTTON.chars().count() as u16;
+                let copy_width = FLOW_COPY_BUTTON.chars().count() as u16;
+                hits.push((
+                    Rect {
+                        x: body_area.x,
+                        y,
+                        width: open_width,
+                        height: 1,
+                    },
+                    SettingsHit::DialogFlowOpen,
+                ));
+                hits.push((
+                    Rect {
+                        x: body_area.x + open_width + FLOW_BUTTON_GAP,
+                        y,
+                        width: copy_width,
+                        height: 1,
+                    },
+                    SettingsHit::DialogFlowCopy,
+                ));
+            }
         }
     }
 

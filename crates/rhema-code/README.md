@@ -87,6 +87,14 @@ Rhema Code ships with two default profiles `work` and `personal` that allows you
 
 Login keys are stored in your system keychain (macOS Keychain, Windows Credential Manager, or the freedesktop Secret Service) whenever one is reachable — the config file then holds only an opaque reference to the entry — and fall back to the file itself on machines without one (containers, headless boxes). Logging in again replaces the keychain entry; forgetting the instance deletes it. Environment variables still outrank everything stored.
 
+### ChatGPT subscriptions
+
+Run `/login`, choose **ChatGPT (subscription)**, and sign in through OpenAI's browser OAuth flow, with PKCE and a loopback callback on port 1455 (1457 when 1455 is taken). The flow opens the browser and shows the link's host with two buttons: enter (or `o`) opens the link in the default browser, and `c` copies the full URL to the clipboard, so a long authorization query never has to be selected by hand. The callback captures the code, exchanges it, and stores the credential like any other login. The browser must reach the machine running rhema: over SSH, forward the callback port first with `ssh -L 1455:localhost:1455`. On a headless box, copy the link with `c` and open it on another machine with the same forward in place.
+
+The stored credential is the token JSON the flow returns (access, refresh, account id, email, plan, expiry). `CHATGPT_ACCESS_TOKEN` accepts a bare access token for scripted setups. Refreshed tokens live in memory for the running process; if OpenAI rotates the stored refresh token, sign in again.
+
+Turns run on the Codex Responses backend (`chatgpt.com/backend-api/codex`), and the model picker lists the subscription's live catalog. The adapter sends `originator: rhema`, not another client's name.
+
 ### Skills, sessions, etc.
 
 Skills are folders holding a `SKILL.md` whose frontmatter `description` is the trigger the agent sees; an optional `license` line is shown (dimmed, under the description) in the Skills page of `/settings` and in the onboarding wizard. Drop one into `.rhema/skills/` in your workspace or `~/.config/rhema/skills/` for every workspace; project shadows global.

@@ -4,7 +4,7 @@
 use crate::palette::Theme;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Style, Stylize};
+use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding, Paragraph};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -179,16 +179,37 @@ fn centered(width: u16, height: u16, area: Rect) -> Rect {
     }
 }
 
-/// The flow stage's lines: the wrapped instruction — a device-grant URL
-/// and its code exceed the box's width, and a cut-off code cannot be
-/// typed — then the code, the URL, and the latest progress note. Each
-/// part wears its own tone.
-fn dialog_flow_lines(
+/// The flow's open button, rendered with an accent fill and the key
+/// that presses it. The label is the hit rect's width.
+pub(crate) const FLOW_OPEN_BUTTON: &str = "[ enter open in browser ]";
+/// The flow's copy button, an outline beside the open button.
+pub(crate) const FLOW_COPY_BUTTON: &str = "[ c copy link ]";
+/// The cells between the two buttons.
+pub(crate) const FLOW_BUTTON_GAP: u16 = 2;
+
+/// The flow stage's body: the wrapped instruction, its code, the open
+/// and copy buttons, the link's host, the latest progress note, and the
+/// user's last button outcome.
+pub(crate) struct FlowLines {
+    pub(crate) lines: Vec<Line<'static>>,
+    /// The body row the buttons start on, when the flow has a URL. The
+    /// caller registers the two click rects from it.
+    pub(crate) buttons_row: Option<usize>,
+}
+
+/// The flow stage's lines: the wrapped instruction — a device-grant
+/// instruction and its code exceed the box's width, and a cut-off code
+/// cannot be typed — then the code, the open and copy buttons, the
+/// link's host, and the latest progress note. The full URL is never
+/// rendered: it wraps past the box and cannot be selected, so the
+/// buttons carry it instead.
+pub(crate) fn dialog_flow_lines(
     dialog: &crate::screens::AddInstanceDialog,
     theme: &Theme,
     width: usize,
-) -> Vec<Line<'static>> {
+) -> FlowLines {
     let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut buttons_row = None;
     if let Some(instruction) = &dialog.flow_instruction {
         lines.extend(
             wrap_line(&Line::from(instruction.text.clone()), width)
@@ -207,16 +228,29 @@ fn dialog_flow_lines(
             ]));
         }
         if let Some(url) = &instruction.url {
-            lines.extend(
-                wrap_line(&Line::from(url.clone()), width)
-                    .into_iter()
-                    .map(|mut line| {
-                        line.spans
-                            .iter_mut()
-                            .for_each(|span| span.style = span.style.fg(theme.text3));
-                        line
-                    }),
-            );
+            buttons_row = Some(lines.len());
+            lines.push(Line::from(vec![
+                Span::styled(
+                    FLOW_OPEN_BUTTON,
+                    Style::default()
+                        .fg(theme.on_accent)
+                        .bg(theme.accent)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ".repeat(FLOW_BUTTON_GAP as usize)),
+                Span::styled(
+                    FLOW_COPY_BUTTON,
+                    Style::default()
+                        .fg(theme.accent_text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]));
+            if let Some(host) = display_host(url) {
+                lines.push(Line::from(vec![
+                    Span::raw("link: ").fg(theme.text3),
+                    Span::raw(host.to_owned()).fg(theme.text2),
+                ]));
+            }
         }
     }
     if let Some(waiting) = &dialog.flow_waiting {
@@ -231,11 +265,11 @@ fn dialog_flow_lines(
                 }),
         );
     } else if dialog.flow_instruction.is_none() {
-        // The flow is off and its first update has not landed — the
-        // provider round-trip (Copilot's device-code registration) is
-        // in flight. A spinner over a dim note covers the silence; the
-        // frame animates off the stage's clock, the redraw loop keeps
-        // it stepping.
+        // The flow is off and its first update has not landed: the
+        // provider round-trip (Copilot's device-code registration,
+        // ChatGPT's listener setup) is in flight. A spinner over a dim
+        // note covers the silence; the frame animates off the stage's
+        // clock, the redraw loop keeps it stepping.
         let elapsed = dialog
             .flow_started
             .map(|started| started.elapsed())
@@ -245,7 +279,19 @@ fn dialog_flow_lines(
             Span::raw(" loading…").fg(theme.text3),
         ]));
     }
-    lines
+    if let Some(notice) = &dialog.flow_notice {
+        lines.push(Line::from(notice.clone()).fg(theme.info));
+    }
+    FlowLines { lines, buttons_row }
+}
+
+/// The one-line label for a link: the scheme stripped, everything from
+/// the first path, query, or fragment on cut. The full URL stays in the
+/// button's clipboard entry.
+fn display_host(url: &str) -> Option<&str> {
+    let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    (!host.is_empty()).then_some(host)
 }
 
 /// One picker row: `provider/` dim, id bright, then display name, price,

@@ -63,6 +63,8 @@ Rules:
     (`crates/rhema-provider-opencode/`)
   - `copilot` — the GitHub Copilot adapter
     (`crates/rhema-provider-copilot/`)
+  - `chatgpt`: the ChatGPT subscription adapter
+    (`crates/rhema-provider-chatgpt/`)
   - `provider-registry` — the fleet's name-to-adapter wiring: `build`
     turns a rhema-config `PROVIDERS` spelling plus resolved
     credentials into the turn provider and the catalog listing, one

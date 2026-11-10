@@ -1100,6 +1100,53 @@ fn the_loading_line_leaves_once_the_flow_reports() {
     assert!(screen.contains("waiting for you to finish"), "{screen}");
 }
 
+/// The flow stage's link is a pair of buttons, not a wrapped URL:
+/// the full query string never reaches the screen, the host does,
+/// and each button has its own click target.
+#[test]
+fn the_flow_stage_renders_open_and_copy_buttons() {
+    let mut dialog = crate::screens::AddInstanceDialog::new(&rhema_config::Profile::default());
+    dialog.stage = crate::screens::DialogStage::Flow;
+    dialog.flow_instruction = Some(rhema_provider::LoginInstruction {
+        text: "sign in with ChatGPT".into(),
+        url: Some(
+            "https://auth.openai.com/oauth/authorize?response_type=code&client_id=app_long".into(),
+        ),
+        code: None,
+    });
+    dialog.flow_waiting = Some("waiting for the browser".into());
+    dialog.flow_notice = Some("link copied to the clipboard".into());
+    let backend = TestBackend::new(60, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let mut hits = Vec::new();
+    terminal
+        .draw(|frame| {
+            crate::ui::dialogs::render_add_dialog(frame, &dialog, &crate::palette::DARK, &mut hits)
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let screen: String = (0..buffer.area.height)
+        .flat_map(|y| (0..buffer.area.width).map(move |x| buffer[(x, y)].symbol().to_owned()))
+        .collect();
+    assert!(screen.contains("[ enter open in browser ]"), "{screen}");
+    assert!(screen.contains("[ c copy link ]"), "{screen}");
+    assert!(screen.contains("link: auth.openai.com"), "{screen}");
+    assert!(screen.contains("link copied to the clipboard"), "{screen}");
+    assert!(
+        !screen.contains("client_id"),
+        "the full URL stays off the screen: {screen}"
+    );
+    let open = hits
+        .iter()
+        .filter(|(_, hit)| matches!(hit, crate::app::SettingsHit::DialogFlowOpen))
+        .count();
+    let copy = hits
+        .iter()
+        .filter(|(_, hit)| matches!(hit, crate::app::SettingsHit::DialogFlowCopy))
+        .count();
+    assert_eq!((open, copy), (1, 1), "one target per button: {hits:?}");
+}
+
 #[cfg(all(test, feature = "mock"))]
 mod scroll_tests {
     use crate::app::{App, AppSetup, RunOptions};

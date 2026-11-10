@@ -41,6 +41,9 @@ pub enum ProviderChoice {
     /// GitHub Copilot, by GitHub OAuth token (the device flow's output).
     #[value(name = "copilot")]
     Copilot,
+    /// A ChatGPT subscription, by the browser sign-in's credential.
+    #[value(name = "chatgpt")]
+    ChatGpt,
 }
 
 impl ProviderChoice {
@@ -58,6 +61,7 @@ impl ProviderChoice {
             Some("zai") => Some(Self::Zai),
             Some("opencode") => Some(Self::OpenCode),
             Some("copilot") => Some(Self::Copilot),
+            Some("chatgpt") => Some(Self::ChatGpt),
             _ => None,
         }
     }
@@ -75,6 +79,7 @@ impl ProviderChoice {
             Self::Zai => "zai",
             Self::OpenCode => "opencode",
             Self::Copilot => "copilot",
+            Self::ChatGpt => "chatgpt",
         }
     }
 }
@@ -449,6 +454,11 @@ mod tests {
             Some(ProviderChoice::Copilot)
         );
         assert_eq!(ProviderChoice::Copilot.stored_name(), "copilot");
+        assert_eq!(
+            ProviderChoice::from_stored(Some("chatgpt")),
+            Some(ProviderChoice::ChatGpt)
+        );
+        assert_eq!(ProviderChoice::ChatGpt.stored_name(), "chatgpt");
         assert_eq!(ProviderChoice::Zai.stored_name(), "zai");
     }
 

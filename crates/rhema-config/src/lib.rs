@@ -94,7 +94,7 @@ pub enum ConfigError {
 pub struct ProviderInstance {
     /// Which adapter serves this instance: `google`, `llama-cpp`,
     /// `openrouter`, `anthropic`, `openai`, `deepseek`, `zai`,
-    /// `opencode`, or `copilot`.
+    /// `opencode`, `copilot`, or `chatgpt`.
     pub provider: String,
     /// The API key (the bearer key for a llama.cpp server), when the
     /// instance needs one and the keychain does not hold it.
@@ -229,8 +229,8 @@ impl fmt::Debug for SandboxSettings {
 #[serde(default, rename_all = "snake_case", deny_unknown_fields)]
 pub struct Profile {
     /// Which provider serves turns: `google`, `llama-cpp`, `openrouter`,
-    /// `anthropic`, `openai`, `deepseek`, `zai`, `opencode`, or
-    /// `copilot`.
+    /// `anthropic`, `openai`, `deepseek`, `zai`, `opencode`,
+    /// `copilot`, or `chatgpt`.
     pub provider: Option<String>,
     /// The name of the active instance in [`Profile::instances`] — the
     /// one whose backend serves turns. Must name an instance of
@@ -305,7 +305,7 @@ impl Profile {
     /// environment tier included; env-only when the profile holds no
     /// instance of it. The provider name is the adapter spelling —
     /// `google`, `llama-cpp`, `openrouter`, `anthropic`, `openai`,
-    /// `deepseek`, `zai`, `opencode`, `copilot`.
+    /// `deepseek`, `zai`, `opencode`, `copilot`, `chatgpt`.
     pub fn api_key(&self, provider: &str, secrets: Option<&dyn SecretStore>) -> Option<String> {
         match self.instance_for_provider(provider) {
             Some((_, instance)) => self.instance_api_key(instance, secrets),
@@ -363,6 +363,7 @@ impl Profile {
             Some("zai") => self.api_key("zai", secrets).is_some(),
             Some("opencode") => self.api_key("opencode", secrets).is_some(),
             Some("copilot") => self.api_key("copilot", secrets).is_some(),
+            Some("chatgpt") => self.api_key("chatgpt", secrets).is_some(),
             _ => self.api_key("google", secrets).is_some(),
         }
     }
@@ -726,7 +727,8 @@ pub enum KeyLocation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderInfo {
     /// The config spelling: `google`, `llama-cpp`, `openrouter`,
-    /// `anthropic`, `openai`, `deepseek`, `zai`, `copilot`.
+    /// `anthropic`, `openai`, `deepseek`, `zai`, `opencode`, `copilot`,
+    /// `chatgpt`.
     pub name: &'static str,
     /// The environment variables a credential resolves through, in
     /// priority order.
@@ -784,6 +786,13 @@ pub const PROVIDERS: &[ProviderInfo] = &[
         login: true,
         missing_key_help: "missing API key: set OPENAI_API_KEY (or log in once interactively)",
         default_model: "gpt-5",
+    },
+    ProviderInfo {
+        name: "chatgpt",
+        env_keys: &["CHATGPT_ACCESS_TOKEN"],
+        login: true,
+        missing_key_help: "missing credential: sign in with ChatGPT (or set CHATGPT_ACCESS_TOKEN)",
+        default_model: "gpt-5.1-codex",
     },
     ProviderInfo {
         name: "deepseek",
@@ -1432,6 +1441,7 @@ mod tests {
         assert!(keyed("openai").has_credentials(None));
         assert!(keyed("deepseek").has_credentials(None));
         assert!(keyed("copilot").has_credentials(None));
+        assert!(keyed("chatgpt").has_credentials(None));
         // ...and each provider needs exactly its own key.
         assert!(
             keyed("anthropic")
@@ -1454,6 +1464,7 @@ mod tests {
         assert!(!bare("openai").has_credentials(None));
         assert!(!bare("deepseek").has_credentials(None));
         assert!(!bare("copilot").has_credentials(None));
+        assert!(!bare("chatgpt").has_credentials(None));
     }
 
     #[test]

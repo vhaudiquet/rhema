@@ -59,6 +59,7 @@ pub mod icons;
 pub mod markdown;
 pub(crate) mod mcp_wire;
 pub mod onboarding;
+mod open_url;
 pub mod palette;
 pub mod run;
 pub mod sandbox;

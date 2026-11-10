@@ -204,7 +204,8 @@ export type AgentImageKind = 'avatar' | 'logo'
 
 /** The credentials a provider login carries: the instance name (the
  * kind when omitted), the kind (required on an id's first login), an
- * API key (a GitHub token for copilot), and a server URL for
+ * API key (a GitHub token for copilot, the sign-in JSON for chatgpt),
+ * and a server URL for
  * llama.cpp. Empty optionals are omitted, never sent as "" strings. */
 export interface ProviderCredentials {
   name?: string

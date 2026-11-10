@@ -150,9 +150,13 @@ impl App {
         if !matches!(self.screen, Screen::Settings(_)) {
             return Vec::new();
         }
+        // The last-drawn hit wins: the add dialog draws over the page,
+        // so its rows (and the flow's buttons) answer a click that
+        // lands on both.
         let hit = self
             .settings_hits
             .iter()
+            .rev()
             .find(|(area, _)| area.contains(ratatui::layout::Position::new(x, y)))
             .map(|(_, hit)| *hit);
         let Some(hit) = hit else {
@@ -200,6 +204,8 @@ impl App {
                 dialog.select_provider_row(index);
                 return Vec::new();
             }
+            SettingsHit::DialogFlowOpen => SettingsAction::OpenFlowUrl,
+            SettingsHit::DialogFlowCopy => SettingsAction::CopyFlowUrl,
         };
         self.perform_settings(action)
     }
@@ -311,6 +317,14 @@ impl App {
             }
             SettingsAction::Validate => self.validate_login(),
             SettingsAction::StartFlow => vec![Effect::StartLoginFlow],
+            SettingsAction::OpenFlowUrl => {
+                self.open_active_flow_url();
+                Vec::new()
+            }
+            SettingsAction::CopyFlowUrl => {
+                self.copy_active_flow_url();
+                Vec::new()
+            }
             SettingsAction::CloseDialog => {
                 // The dialog is already gone from the screen; dropping
                 // the handle ends the flow task (the watch receiver
@@ -426,11 +440,68 @@ impl App {
 
     /// Performs one onboarding action: the wizard's side effects, all
     /// of which touch the store, the session, or the network.
+    /// Opens the running login flow's link in the default browser and
+    /// notes the outcome under it. The browser launch is best effort:
+    /// a box with no launcher gets the copy hint instead.
+    fn open_active_flow_url(&mut self) {
+        let Some(url) = self.active_flow_url() else {
+            return;
+        };
+        let opened = crate::open_url::browser(&url);
+        self.note_active_flow(if opened {
+            "opening the browser"
+        } else {
+            "no browser launcher found; press c to copy the link"
+        });
+    }
+
+    /// Copies the running login flow's link and notes it under the
+    /// flow. The clipboard is best effort, the same write the
+    /// transcript selection uses.
+    fn copy_active_flow_url(&mut self) {
+        let Some(url) = self.active_flow_url() else {
+            return;
+        };
+        crate::screens::clipboard::write(&url);
+        self.note_active_flow("link copied to the clipboard");
+    }
+
+    /// The link the open add dialog holds, from the settings or the
+    /// wizard's login step.
+    fn active_flow_url(&self) -> Option<String> {
+        let dialog = match &self.screen {
+            Screen::Settings(settings) => settings.dialog.as_ref(),
+            Screen::Onboarding(wizard) => wizard.dialog.as_ref(),
+            _ => None,
+        }?;
+        dialog.flow_url().map(str::to_owned)
+    }
+
+    /// Sets the one-line notice under the running flow.
+    fn note_active_flow(&mut self, note: &str) {
+        let dialog = match &mut self.screen {
+            Screen::Settings(settings) => settings.dialog.as_mut(),
+            Screen::Onboarding(wizard) => wizard.dialog.as_mut(),
+            _ => None,
+        };
+        if let Some(dialog) = dialog {
+            dialog.note_flow(note);
+        }
+    }
+
     pub(crate) fn perform_onboarding(&mut self, action: OnboardingAction) -> Vec<Effect> {
         match action {
             OnboardingAction::None => Vec::new(),
             OnboardingAction::Validate => self.validate_login(),
             OnboardingAction::StartFlow => vec![Effect::StartLoginFlow],
+            OnboardingAction::OpenFlowUrl => {
+                self.open_active_flow_url();
+                Vec::new()
+            }
+            OnboardingAction::CopyFlowUrl => {
+                self.copy_active_flow_url();
+                Vec::new()
+            }
             OnboardingAction::CancelFlow => {
                 // The dialog is already gone from the screen; dropping
                 // the handle ends the flow task.

@@ -692,6 +692,49 @@ fn the_copilot_row_starts_the_flow_and_esc_closes_the_dialog() {
 }
 
 #[test]
+fn the_flow_buttons_map_to_open_and_copy() {
+    let mut settings = settings_screen();
+    settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+    let dialog = settings.dialog.as_mut().unwrap();
+    dialog.stage = DialogStage::Flow;
+    dialog.flow_instruction = Some(rhema_provider::LoginInstruction {
+        text: "open the page".into(),
+        url: Some("https://auth.openai.com/oauth/authorize?state=abc".into()),
+        code: None,
+    });
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Enter)),
+        SettingsAction::OpenFlowUrl
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char('o'))),
+        SettingsAction::OpenFlowUrl
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char('c'))),
+        SettingsAction::CopyFlowUrl
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char('x'))),
+        SettingsAction::None
+    );
+    // Before the flow reports a URL there is nothing to open or copy.
+    settings.dialog.as_mut().unwrap().flow_instruction = None;
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Enter)),
+        SettingsAction::None
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Char('c'))),
+        SettingsAction::None
+    );
+    assert_eq!(
+        settings.handle_key(key(KeyCode::Esc)),
+        SettingsAction::CloseDialog
+    );
+}
+
+#[test]
 fn the_dialog_error_renders_inline_and_allows_retry() {
     let (mut settings, _) = descend_to_credential(0);
     let dialog = settings.dialog.as_mut().unwrap();
