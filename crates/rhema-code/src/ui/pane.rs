@@ -260,7 +260,7 @@ pub(crate) fn render_block(
                 transcript::Line::User { text, images } => Some((text.as_str(), images)),
                 _ => None,
             })
-            .flat_map(|(text, images)| render_user(text, images, theme))
+            .flat_map(|(text, images)| render_user(text, images, theme, width))
             .collect(),
         // The run's absorbed empty text parts render as nothing.
         Kind::ToolRun => range
@@ -286,14 +286,29 @@ pub(crate) fn render_block(
             .flat_map(|source| crate::markdown::render_markdown(source, theme, width))
             .collect(),
     };
+    if block.kind == Kind::User {
+        // A prompt arrives already wrapped to its bubble's width and
+        // filled out to the row: re-wrapping would drop the right-side
+        // padding that holds the bubble against the edge.
+        return raw;
+    }
     raw.iter().flat_map(|line| wrap_line(line, width)).collect()
 }
 
-/// A multi-line prompt renders as the lines it is: a raw \n inside one
-/// row's spans would vanish. The prompt glyph marks only the first row;
-/// the rest speak for themselves. An embedded paste renders as its
-/// chip — id and size, the body hidden.
-pub(crate) fn render_user(text: &str, images: &[Image], theme: &Theme) -> Vec<Line<'static>> {
+/// The share of the transcript width a prompt bubble may occupy: at
+/// three quarters, a long prompt still reads as a message of its own,
+/// with the model's output keeping the column's left side.
+const BUBBLE_WIDTH_NUM: usize = 3;
+/// Denominator of [`BUBBLE_WIDTH_NUM`].
+const BUBBLE_WIDTH_DEN: usize = 4;
+/// The cells a bubble spends on its frame: two border cells and one
+/// padding cell on each side.
+const BUBBLE_CHROME: usize = 4;
+
+/// A prompt's body rows before wrapping: one span list per logical line,
+/// with an embedded paste or an image as its chip. Shared by the bubble
+/// and the single-row fallback.
+fn user_body(text: &str, images: &[Image], theme: &Theme) -> Vec<Vec<Span<'static>>> {
     let mut rows: Vec<Vec<Span<'static>>> = vec![Vec::new()];
     let mut anchors = 0usize;
     for part in rhema_core::paste::parts(text) {
@@ -326,15 +341,112 @@ pub(crate) fn render_user(text: &str, images: &[Image], theme: &Theme) -> Vec<Li
             .extend(chip_spans(image_chip_label(image, anchors), theme));
         anchors += 1;
     }
-    rows.into_iter()
-        .enumerate()
-        .map(|(index, mut spans)| {
-            if index == 0 {
-                spans.insert(0, Span::raw("❯ ").fg(theme.text3));
-            }
-            Line::from(spans)
-        })
-        .collect()
+    rows
+}
+
+/// A submitted prompt as a chat bubble: right-aligned, at most three
+/// quarters of the column wide, on a rounded elevated fill so it reads
+/// apart from the model's output. An embedded paste renders as its chip
+/// (id and size, the body hidden).
+pub(crate) fn render_user(
+    text: &str,
+    images: &[Image],
+    theme: &Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let body = user_body(text, images, theme);
+    if width < BUBBLE_CHROME + 1 {
+        // Too narrow for a frame: the text uses the cells it has.
+        return body
+            .into_iter()
+            .flat_map(|spans| wrap_line(&Line::from(spans), width))
+            .collect();
+    }
+    let max_width = (width * BUBBLE_WIDTH_NUM / BUBBLE_WIDTH_DEN)
+        .max(BUBBLE_CHROME + 1)
+        .min(width);
+    let padded = max_width - BUBBLE_CHROME;
+    let wrapped: Vec<Line<'static>> = body
+        .into_iter()
+        .flat_map(|spans| wrap_line(&Line::from(spans), padded))
+        .collect();
+    // The bubble hugs its longest row, up to the quarter-share cap. An
+    // empty prompt still draws a frame.
+    let widest = wrapped.iter().map(Line::width).max().unwrap_or(0);
+    let bubble_width = (widest + BUBBLE_CHROME).min(max_width);
+    let content_width = bubble_width - BUBBLE_CHROME;
+    let left = width - bubble_width;
+
+    let mut rows = Vec::with_capacity(wrapped.len() + 2);
+    rows.push(bubble_edge(left, '╭', '╮', bubble_width, theme));
+    for line in wrapped {
+        let used = line.width().min(content_width);
+        let mut spans = Vec::with_capacity(line.spans.len() + 4);
+        if left > 0 {
+            spans.push(Span::raw(" ".repeat(left)));
+        }
+        spans.push(Span::styled("│", bubble_edge_style(theme)));
+        spans.push(Span::styled(" ", bubble_fill(theme)));
+        spans.extend(line.spans.into_iter().map(|span| on_bubble(span, theme)));
+        // The right padding, one cell at least: content_width - used
+        // plus the pad cell before the border.
+        spans.push(Span::styled(
+            " ".repeat(content_width - used + 1),
+            bubble_fill(theme),
+        ));
+        spans.push(Span::styled("│", bubble_edge_style(theme)));
+        rows.push(Line::from(spans));
+    }
+    rows.push(bubble_edge(left, '╰', '╯', bubble_width, theme));
+    rows
+}
+
+/// The bubble's fill: content ink on the lifted surface.
+fn bubble_fill(theme: &Theme) -> Style {
+    Style::default().bg(theme.elevated).fg(theme.text)
+}
+
+/// The bubble's frame ink.
+fn bubble_edge_style(theme: &Theme) -> Style {
+    Style::default().bg(theme.elevated).fg(theme.border_strong)
+}
+
+/// Puts a body span on the bubble's fill: plain text takes the bubble's
+/// ink and background, a chip keeps a card of its own. The light
+/// palettes give `surface` and `elevated` the same value, so a chip
+/// inset against the bubble uses the sunken fill to stay a box.
+fn on_bubble(mut span: Span<'static>, theme: &Theme) -> Span<'static> {
+    if span.style.bg == Some(theme.surface) {
+        span.style = span.style.bg(theme.sunken);
+        return span;
+    }
+    if span.style.bg.is_none() {
+        span.style = span.style.bg(theme.elevated);
+    }
+    if span.style.fg.is_none() {
+        span.style = span.style.fg(theme.text);
+    }
+    span
+}
+
+/// One horizontal edge of the bubble: the corners and the rule between
+/// them, right-aligned to `width` by the caller's left pad.
+fn bubble_edge(
+    left: usize,
+    start: char,
+    end: char,
+    bubble_width: usize,
+    theme: &Theme,
+) -> Line<'static> {
+    let mut spans = Vec::with_capacity(2);
+    if left > 0 {
+        spans.push(Span::raw(" ".repeat(left)));
+    }
+    spans.push(Span::styled(
+        format!("{start}{}{end}", "─".repeat(bubble_width - 2)),
+        bubble_edge_style(theme),
+    ));
+    Line::from(spans)
 }
 
 pub(crate) fn render_line(
@@ -344,24 +456,14 @@ pub(crate) fn render_line(
 ) -> Line<'static> {
     match line {
         transcript::Line::User { text, images } => {
-            // Embedded pastes collapse to their chips here too — this
-            // arm is the fallback off the transcript's multi-row path.
-            let mut spans = vec![Span::raw("❯ ").fg(theme.text3)];
-            let mut anchors = 0usize;
-            for part in rhema_core::paste::parts(text) {
-                match part {
-                    rhema_core::paste::Part::Text(text) => {
-                        spans.push(Span::raw(text.replace('\n', " ")));
-                    }
-                    rhema_core::paste::Part::Paste(payload) => {
-                        spans.extend(chip_spans(chip_label(payload, anchors), theme));
-                        anchors += 1;
-                    }
+            // This arm is the fallback off the transcript's bubble path;
+            // embedded pastes still collapse to their chips here.
+            let mut spans = Vec::new();
+            for (index, row) in user_body(text, images, theme).into_iter().enumerate() {
+                if index > 0 {
+                    spans.push(Span::raw(" "));
                 }
-            }
-            for image in images {
-                spans.extend(chip_spans(image_chip_label(image, anchors), theme));
-                anchors += 1;
+                spans.extend(row);
             }
             Line::from(spans)
         }

@@ -22,6 +22,10 @@ On terminals that speak the kitty graphics protocol (kitty, Ghostty) the wizard 
 
 Drag with the left button over the transcript to select the text between the cell the drag started on and the cell it reached. The selected cells render reversed, and releasing the button copies the text to the system clipboard. On a terminal-only session with no desktop clipboard, the copy goes through the terminal with OSC 52. Any key, the wheel, or a fresh click clears the highlight, and a selection only covers the rows currently on screen.
 
+### Prompts
+
+What you send sits on the right in a rounded bubble, capped at three quarters of the transcript's width. The bubble is filled with the palette's elevated surface, so a prompt reads apart from the model's reply. A multi-line prompt keeps its breaks, and a paste or an image stays a chip inside the bubble.
+
 ### Rich settings
 
 <!-- TODO Screenshot -->

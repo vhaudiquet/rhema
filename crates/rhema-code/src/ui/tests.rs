@@ -2544,15 +2544,21 @@ mod scroll_tests {
         };
         let rows: Vec<String> = (0..buffer.area.height)
             .map(row_text)
-            .map(|row| row.trim_end().to_owned())
+            .map(|row| row.trim().to_owned())
             .collect();
         assert!(
-            rows.contains(&" ❯ alpha".to_owned()),
-            "first line keeps the prompt: {rows:?}"
+            rows.contains(&"╭───────╮".to_owned()),
+            "a rounded frame opens the bubble: {rows:?}"
         );
         assert!(
-            rows.contains(&" beta".to_owned()) && rows.contains(&" gamma".to_owned()),
-            "continuation lines keep their break, bare: {rows:?}"
+            rows.contains(&"│ alpha │".to_owned())
+                && rows.contains(&"│ beta  │".to_owned())
+                && rows.contains(&"│ gamma │".to_owned()),
+            "each source line keeps its own row: {rows:?}"
+        );
+        assert!(
+            rows.contains(&"╰───────╯".to_owned()),
+            "the frame closes under the last line: {rows:?}"
         );
     }
 
@@ -2808,7 +2814,7 @@ mod scroll_tests {
         app.transcript
             .apply(&crate::events::OwnedEvent::TextDelta("meanwhile".into()));
         let before = draw_screen(&mut app);
-        assert!(before.contains("❯ investigate"), "{before}");
+        assert!(before.contains("investigate"), "{before}");
         assert!(before.contains("$ git status"), "{before}");
         assert!(!before.contains("[1]"), "unresolved: {before}");
         assert_eq!(app.transcript_cache.blocks.len(), 3);
@@ -2823,7 +2829,7 @@ mod scroll_tests {
                 code: Some(1),
             });
         let after = draw_screen(&mut app);
-        assert!(after.contains("❯ investigate"), "{after}");
+        assert!(after.contains("investigate"), "{after}");
         assert!(after.contains("[1]"), "the mark lands: {after}");
     }
 
@@ -2863,16 +2869,94 @@ mod scroll_tests {
         let alpha_row = (0..buffer.area.height)
             .find(|y| row_text(*y).contains("alpha"))
             .expect("first prompt visible");
-        let beta_row = (alpha_row..buffer.area.height)
+        let alpha_bottom = (alpha_row..buffer.area.height)
+            .find(|y| row_text(*y).contains('╰'))
+            .expect("the bubble closes");
+        let beta_row = (alpha_bottom..buffer.area.height)
             .find(|y| row_text(*y).contains("beta reply"))
             .expect("reply visible");
-        let gamma_row = (beta_row..buffer.area.height)
-            .find(|y| row_text(*y).contains("gamma"))
+        let gamma_top = (beta_row..buffer.area.height)
+            .find(|y| row_text(*y).contains('╭'))
             .expect("second prompt visible");
-        // Every block breathes: one blank row after the prompt, one
+        // Every block breathes: one blank row under the bubble, one
         // after the reply.
-        assert_eq!(beta_row, alpha_row + 2, "a blank row after the prompt");
-        assert_eq!(gamma_row, beta_row + 2, "one blank row after the reply");
+        assert_eq!(beta_row, alpha_bottom + 2, "a blank row after the bubble");
+        assert_eq!(gamma_top, beta_row + 2, "one blank row after the reply");
+    }
+
+    #[test]
+    fn a_prompt_renders_as_a_right_aligned_bubble() {
+        let mut app = chat_app();
+        // One unbroken run wraps at the bubble's content width, so the
+        // widest row fills the cap exactly.
+        app.transcript.push_user(&"x".repeat(160), Vec::new());
+
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let rows: Vec<String> = (0..buffer.area.height).map(row_text).collect();
+        let top = rows
+            .iter()
+            .position(|row| row.contains('╭'))
+            .expect("the frame opens");
+        let start = rows[top].chars().position(|c| c == '╭').unwrap();
+        let end = rows[top].chars().position(|c| c == '╮').unwrap();
+        // The bubble hugs the transcript's right edge: 56 cells wide,
+        // drawn one cell in from the pane's left edge.
+        assert_eq!(end + 1, 57, "flush right: {:?}", rows[top]);
+        assert!(
+            rows[top][..start].trim().is_empty(),
+            "only the right-aligned pad leads: {:?}",
+            rows[top]
+        );
+        // A long prompt stops at three quarters of the column.
+        let bubble_width = end - start + 1;
+        assert_eq!(bubble_width, 56 * 3 / 4, "capped at 3/4");
+        // The body sits on the lifted surface, not the transcript well.
+        let body_row = top + 1;
+        assert_eq!(
+            buffer[(1 + start as u16 + 1, body_row as u16)].style().bg,
+            Some(DARK.elevated),
+            "the bubble carries its own fill"
+        );
+        assert_ne!(
+            buffer[(1 + start as u16 + 1, body_row as u16)].style().bg,
+            Some(DARK.sunken),
+            "the fill lifts off the transcript"
+        );
+    }
+
+    #[test]
+    fn a_short_prompt_bubble_hugs_its_text() {
+        let mut app = chat_app();
+        app.transcript.push_user("hi", Vec::new());
+
+        let backend = TestBackend::new(60, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_text = |y: u16| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        };
+        let rows: Vec<String> = (0..buffer.area.height).map(row_text).collect();
+        let top = rows
+            .iter()
+            .position(|row| row.contains('╭'))
+            .expect("the frame opens");
+        let start = rows[top].chars().position(|c| c == '╭').unwrap();
+        let end = rows[top].chars().position(|c| c == '╮').unwrap();
+        // Two content cells and the frame's four: the bubble does not
+        // stretch to the cap for short text.
+        assert_eq!(end - start + 1, 6, "{:?}", rows[top]);
+        assert!(rows[top + 1].contains("│ hi │"), "{:?}", rows[top + 1]);
     }
 }
 
