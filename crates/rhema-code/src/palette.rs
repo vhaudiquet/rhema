@@ -121,6 +121,13 @@ impl Theme {
         relative_luminance(self.ground) < relative_luminance(self.text)
     }
 
+    /// Whether the fills were handed to the terminal (`background:
+    /// native`): the panel sits on the terminal's own ground, not a
+    /// known fill, so chrome that must read picks a stronger ink.
+    pub fn is_native(&self) -> bool {
+        self.sunken == Color::Reset
+    }
+
     /// Paints the background choice onto the tokens. `Native` hands the
     /// fill slots (`sunken`, `surface`, `elevated`) back to the
     /// terminal: `Color::Reset` leaves each cell on the terminal's own
@@ -917,6 +924,8 @@ mod tests {
         assert_eq!(painted.accent, DARK.accent);
         assert_eq!(painted.ground, DARK.ground);
         assert!(painted.is_dark());
+        assert!(painted.is_native());
+        assert!(!DARK.is_native());
         // The default paints nothing over.
         assert_eq!(DARK.painted(Background::Rhema), DARK);
     }

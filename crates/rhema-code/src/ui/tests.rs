@@ -22,6 +22,32 @@ fn model(id: &str) -> ModelCard {
     }
 }
 
+/// The panel's frame reads on either ground, and the title never
+/// inherits the border's dim ink: on a native ground the frame lifts to
+/// the readable token because there is no panel fill behind it.
+#[test]
+fn the_panel_frame_and_title_read_on_both_grounds() {
+    let inks = |theme: &crate::palette::Theme| {
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(super::chrome::panel(Some("Welcome"), theme), frame.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let x = (0..40)
+            .find(|&x| buffer[(x, 0)].symbol() == "W")
+            .expect("the title starts on the top border");
+        (
+            buffer[(x, 0)].style().fg.expect("the title has ink"),
+            buffer[(0, 1)].style().fg.expect("the frame has ink"),
+        )
+    };
+    assert_eq!(inks(&DARK), (DARK.text, DARK.border_strong));
+    let native = DARK.painted(crate::palette::Background::Native);
+    assert_eq!(inks(&native), (DARK.text, DARK.text3));
+}
+
 #[test]
 fn the_picker_row_names_the_vision_verdict_only_when_known() {
     let mut card = model("m");

@@ -13,10 +13,22 @@ use ratatui::widgets::{Block, Borders};
 /// The panel every full-screen menu sits in: rounded border, the menu's
 /// ground, a spaced title. `None` is the untitled frame.
 pub fn panel<'a>(title: Option<&str>, theme: &Theme) -> Block<'a> {
+    // A native background leaves the panel without its fill, so the
+    // frame needs the readable ink to separate itself from the
+    // terminal's own ground; on the palette's fill the strong hairline
+    // is enough.
+    let frame = if theme.is_native() {
+        theme.text3
+    } else {
+        theme.border_strong
+    };
     let mut block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(frame))
+        // Titles draw over the border cells: without ink of their own
+        // they inherit the border's fg and read as dim as the frame.
+        .title_style(Style::default().fg(theme.text))
         .style(Style::default().bg(theme.sunken).fg(theme.text));
     if let Some(title) = title {
         block = block.title(format!(" {title} "));
