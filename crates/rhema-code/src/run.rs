@@ -650,11 +650,23 @@ async fn event_loop(
                 Event::Mouse(mouse) => match mouse.kind {
                     crossterm::event::MouseEventKind::ScrollUp => app.on_mouse_scroll(true),
                     crossterm::event::MouseEventKind::ScrollDown => app.on_mouse_scroll(false),
-                    // A click is the button's release: press-drag-release
-                    // lands once, on the row the user let go over.
+                    // A left drag over the transcript is a text
+                    // selection; the release copies it. A release with
+                    // no selection to consume is a click, and lands once,
+                    // on the row the user let go over: press-drag-release
+                    // still routes through one `on_click`.
+                    crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                        app.on_mouse_down(mouse.column, mouse.row)
+                    }
+                    crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
+                        app.on_mouse_drag(mouse.column, mouse.row)
+                    }
                     crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left) => {
-                        for effect in app.on_click(mouse.column, mouse.row) {
-                            dispatch(terminal, app, tx, &mut status, effect);
+                        let selected = app.finish_selection(mouse.column, mouse.row);
+                        if !selected {
+                            for effect in app.on_click(mouse.column, mouse.row) {
+                                dispatch(terminal, app, tx, &mut status, effect);
+                            }
                         }
                     }
                     _ => {}

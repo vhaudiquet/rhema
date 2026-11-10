@@ -1,9 +1,41 @@
-//! The system clipboard, read side only: ctrl-v as a paste key where the
-//! terminal does not bind it itself. A fresh handle per read — the
-//! connection is not held open between presses, and a session without a
-//! clipboard (a pipe, an ssh hop) simply reads as none.
+//! The system clipboard: ctrl-v as a paste key where the terminal does
+//! not bind it itself, and the transcript selection's copy. A fresh
+//! handle per use — the connection is not held open between presses.
+//!
+//! Desktop sessions write through `arboard`; a terminal-only session
+//! (a pipe, an ssh hop, a TTY with no X11 or Wayland display) has no
+//! clipboard to connect to, so the copy falls back to OSC 52 and lets
+//! the terminal put the text on its own clipboard.
 
 use base64::Engine;
+use std::io::Write as _;
+
+/// Writes `text` to the clipboard, best effort. A reachable desktop
+/// clipboard takes it directly; otherwise the terminal is asked with
+/// OSC 52, which is also what carries a copy over ssh. The terminal
+/// silently ignores the sequence when it does not support it, so there
+/// is no failure to report.
+pub fn write(text: &str) {
+    if arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .is_ok()
+    {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    let _ = stdout
+        .write_all(osc52(text).as_bytes())
+        .and_then(|()| stdout.flush());
+}
+
+/// The OSC 52 sequence that asks the terminal to put `text` on its
+/// clipboard: the payload is the UTF-8 bytes as base64.
+fn osc52(text: &str) -> String {
+    format!(
+        "\x1b]52;c;{}\x1b\\",
+        base64::engine::general_purpose::STANDARD.encode(text)
+    )
+}
 
 /// The clipboard's text, when one is reachable.
 pub fn read() -> Option<String> {
@@ -46,6 +78,11 @@ mod tests {
     /// The clipboard itself has no test double: what is testable here is
     /// the pure tail of the read — RGBA pixels in, base64 PNG out, the
     /// exact form a message block carries.
+    #[test]
+    fn a_copy_encodes_as_an_osc52_sequence() {
+        assert_eq!(osc52("hello"), "\x1b]52;c;aGVsbG8=\x1b\\");
+    }
+
     #[test]
     fn rgba_pixels_encode_as_bare_base64_png() {
         let image = encode_png(1, 1, vec![255, 0, 0, 255]).unwrap();

@@ -31,6 +31,7 @@ mod input;
 mod lifecycle;
 mod model;
 mod profiles;
+pub(crate) mod selection;
 mod session;
 mod settings;
 mod setup;
@@ -150,6 +151,12 @@ pub struct App {
     /// The transcript render's row cache: wrapped rows per block,
     /// invalided by width, theme, and the transcript's watermark.
     pub(crate) transcript_cache: crate::ui::WrapCache,
+    /// The transcript's last drawn frame: its rect and plain rows, the
+    /// cells a mouse selection maps onto.
+    pub(crate) transcript_view: selection::TranscriptView,
+    /// The selection over the transcript, while one is in flight or was
+    /// just copied. Keys, the wheel, and a fresh click clear it.
+    pub(crate) selection: Option<selection::Selection>,
     /// The session's assembled sandbox, when `bash` runs on one:
     /// `None` is the local fast path — every agent build applies this
     /// when set, so a mid-session rebuild never drops it.
@@ -497,6 +504,8 @@ impl App {
             settings_hits: Vec::new(),
             onboarding_hits: Vec::new(),
             transcript_cache: crate::ui::WrapCache::new(),
+            transcript_view: Default::default(),
+            selection: None,
             sandboxed: setup.sandboxed,
             sandbox_machines: setup.sandbox_machines,
             disabled_mcp_servers: config_disabled_mcp,

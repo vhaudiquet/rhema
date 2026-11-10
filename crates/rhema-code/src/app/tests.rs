@@ -2368,6 +2368,48 @@ fn an_oversized_paste_is_cut_at_the_cap_and_noticed() {
 }
 
 #[test]
+fn a_mouse_down_over_the_transcript_starts_a_selection() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.transcript_view = crate::app::selection::TranscriptView {
+        area: ratatui::layout::Rect::new(0, 0, 20, 4),
+        rows: vec!["hello".to_owned()],
+    };
+    h.app.on_mouse_down(2, 0);
+    assert_eq!(
+        h.app.selection.map(|selection| selection.anchor),
+        Some((2, 0)),
+        "the transcript starts a selection"
+    );
+}
+
+#[test]
+fn a_mouse_down_outside_the_drawn_rows_clears_the_selection() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.transcript_view = crate::app::selection::TranscriptView {
+        area: ratatui::layout::Rect::new(0, 0, 20, 4),
+        rows: vec!["hello".to_owned()],
+    };
+    h.app.on_mouse_down(2, 0);
+    h.app.on_mouse_down(2, 3);
+    assert!(
+        h.app.selection.is_none(),
+        "the blank rows below the text select nothing"
+    );
+}
+
+#[test]
+fn a_key_clears_the_selection() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.transcript_view = crate::app::selection::TranscriptView {
+        area: ratatui::layout::Rect::new(0, 0, 20, 4),
+        rows: vec!["hello".to_owned()],
+    };
+    h.app.on_mouse_down(2, 0);
+    h.app.on_key(key(KeyCode::Char('x')));
+    assert!(h.app.selection.is_none());
+}
+
+#[test]
 fn the_wheel_scrolls_the_same_step_as_the_page_keys() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.on_mouse_scroll(true);

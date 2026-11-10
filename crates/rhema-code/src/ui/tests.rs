@@ -1187,6 +1187,47 @@ mod scroll_tests {
             .collect()
     }
 
+    /// A selection reverses exactly the cells its text covers: the
+    /// painter reads the same row strings the copy does, so the two
+    /// cannot disagree.
+    #[test]
+    fn a_selection_reverses_the_cells_it_covers() {
+        use crate::app::selection::Selection;
+        use ratatui::style::Modifier;
+
+        let mut app = chat_app();
+        app.transcript.push_notice("hello world");
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+
+        let area = app.transcript_view.area;
+        let row = app
+            .transcript_view
+            .rows
+            .iter()
+            .position(|row| row.contains("hello"))
+            .expect("the notice is drawn");
+        let start_col = app.transcript_view.rows[row].find("hello").unwrap() as u16;
+        let mut selection = Selection::new((area.x + start_col, area.y + row as u16));
+        selection.extend((area.x + start_col + 5, area.y + row as u16));
+        app.selection = Some(selection);
+        terminal.draw(|frame| render(&mut app, frame)).unwrap();
+
+        let y = area.y + row as u16;
+        let reversed = |x: u16| {
+            terminal.backend().buffer()[(x, y)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        for x in area.x + start_col..area.x + start_col + 5 {
+            assert!(reversed(x), "cell {x} carries the highlight");
+        }
+        assert!(
+            !reversed(area.x + start_col + 5),
+            "the cell after the selection stays plain"
+        );
+    }
+
     #[test]
     fn elapsed_time_reads_as_a_clock() {
         assert_eq!(elapsed_text(std::time::Duration::from_secs(42)), "42s");

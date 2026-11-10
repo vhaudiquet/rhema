@@ -62,12 +62,66 @@ impl App {
     }
 
     /// Scroll the history with the wheel: the same step as PageUp/PageDown
-    /// (one wheel tick), so both controls move in lockstep.
+    /// (one wheel tick), so both controls move in lockstep. The wheel
+    /// moves the rows a selection was measured against, so it clears it.
     pub fn on_mouse_scroll(&mut self, up: bool) {
+        self.selection = None;
         if matches!(self.screen, Screen::Chat) {
             let step = crate::screens::ChatState::SCROLL_STEP as isize;
             self.chat.scroll_by(if up { step } else { -step });
         }
+    }
+
+    /// A left button went down: over the transcript it starts a text
+    /// selection, the way dragging over a terminal does. Anywhere else
+    /// it clears the previous selection; clicks still act on release.
+    pub fn on_mouse_down(&mut self, x: u16, y: u16) {
+        self.selection = None;
+        if !matches!(self.screen, Screen::Chat)
+            || self.turn.pending_approval.is_some()
+            || self.confirm_quit
+        {
+            return;
+        }
+        if self.transcript_view.starts_at(x, y) {
+            self.selection = Some(super::selection::Selection::new((x, y)));
+        }
+    }
+
+    /// The drag moved: the selection follows the pointer, clamped into
+    /// the transcript so a drag past an edge still selects the text it
+    /// crossed.
+    pub fn on_mouse_drag(&mut self, x: u16, y: u16) {
+        if self.selection.is_none() || self.transcript_view.rows.is_empty() {
+            return;
+        }
+        let area = self.transcript_view.area;
+        let last_row = self.transcript_view.rows.len().saturating_sub(1) as u16;
+        let right = area.right().saturating_sub(1).max(area.x);
+        let x = x.clamp(area.x, right);
+        let y = y.clamp(area.y, area.y.saturating_add(last_row));
+        if let Some(selection) = &mut self.selection {
+            selection.extend((x, y));
+        }
+    }
+
+    /// The left button came up: copies the text between the selection's
+    /// cells, and keeps the highlight until a key, the wheel, or another
+    /// click clears it. A release with no selection to consume returns
+    /// `false`, so the caller still routes it as a click.
+    pub fn finish_selection(&mut self, x: u16, y: u16) -> bool {
+        if self.selection.is_none() {
+            return false;
+        }
+        self.on_mouse_drag(x, y);
+        let Some(selection) = self.selection else {
+            return true;
+        };
+        let text = super::selection::text(&self.transcript_view, selection);
+        if !text.is_empty() {
+            crate::screens::clipboard::write(&text);
+        }
+        true
     }
 
     /// A left click landed. The settings menu answers clicks — sidebar
@@ -153,6 +207,9 @@ impl App {
     /// Routes one keypress to the current screen, then the app-level
     /// handling (modals, quit, effects).
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        // Any key ends the selection's life: the highlight is a pointer
+        // artifact, not transcript content.
+        self.selection = None;
         // Ctrl-C and Ctrl-D (EOF) quit immediately, from any screen,
         // modal or not.
         if key.modifiers.contains(KeyModifiers::CONTROL)

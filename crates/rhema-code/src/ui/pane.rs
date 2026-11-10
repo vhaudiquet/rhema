@@ -190,12 +190,32 @@ pub(crate) fn render_transcript(frame: &mut Frame, app: &mut App, area: Rect, th
     // instead of burning the surplus first.
     app.chat.scroll = app.chat.scroll.min(max_top);
     let top = max_top - app.chat.scroll;
+    // The rows the frame draws, as plain text: the cells a mouse
+    // selection maps onto and copies from.
+    let visible_rows: Vec<String> = rows
+        .iter()
+        .skip(top)
+        .take(visible)
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect()
+        })
+        .collect();
     frame.render_widget(
         Paragraph::new(rows)
             .scroll((top as u16, 0))
             .style(Style::default().bg(theme.sunken).fg(theme.text)),
         inner,
     );
+    app.transcript_view = crate::app::selection::TranscriptView {
+        area: inner,
+        rows: visible_rows,
+    };
+    if let Some(selection) = app.selection {
+        crate::app::selection::highlight(frame, &app.transcript_view, selection);
+    }
 }
 
 /// Renders one block's wrapped content rows at `width` — the separators

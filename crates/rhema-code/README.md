@@ -18,6 +18,10 @@ The first start (no config yet, or a wizard left unfinished) runs a setup wizard
 
 On terminals that speak the kitty graphics protocol (kitty, Ghostty) the wizard draws the logo as an image; everywhere else it falls back to the wordmark. Set `RHEMA_NO_IMAGES` to keep it text.
 
+### Text selection
+
+Drag with the left button over the transcript to select the text between the cell the drag started on and the cell it reached. The selected cells render reversed, and releasing the button copies the text to the system clipboard. On a terminal-only session with no desktop clipboard, the copy goes through the terminal with OSC 52. Any key, the wheel, or a fresh click clears the highlight, and a selection only covers the rows currently on screen.
+
 ### Rich settings
 
 <!-- TODO Screenshot -->

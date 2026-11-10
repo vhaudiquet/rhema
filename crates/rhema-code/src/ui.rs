@@ -94,6 +94,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // every other screen clears it, and the runner diffs it against
     // what the terminal graphics layer holds.
     app.logo_rect = None;
+    // The transcript's selection geometry is re-stated by its render
+    // too: a screen without the transcript leaves no stale cells for a
+    // mouse selection to map onto.
+    app.transcript_view = Default::default();
     let mut onboarding_hits = Vec::new();
     match &app.screen {
         Screen::Onboarding(wizard) => render_onboarding(
