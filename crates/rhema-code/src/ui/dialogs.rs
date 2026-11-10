@@ -74,16 +74,9 @@ pub(crate) fn render_add_dialog(
                     } else {
                         Style::default().fg(theme.text2)
                     };
-                    let count = category.provider_count();
-                    let count = if count == 1 {
-                        "1 provider".to_owned()
-                    } else {
-                        format!("{count} providers")
-                    };
                     ListItem::new(Line::from(vec![
                         Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
-                        Span::styled(format!("{:<22}", category.label()), name_style),
-                        Span::raw(count).fg(theme.text3),
+                        Span::styled(category.label(), name_style),
                     ]))
                 })
                 .collect();

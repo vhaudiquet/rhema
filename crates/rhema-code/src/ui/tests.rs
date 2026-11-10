@@ -991,6 +991,12 @@ fn the_add_dialog_starts_with_categories_then_lists_providers() {
         !text.contains("Google Gemini"),
         "providers wait behind their category: {text}"
     );
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row.trim_end().ends_with(" providers")),
+        "the category rows carry no count: {text}"
+    );
     let category_hits = hits
         .iter()
         .filter(|(_, hit)| matches!(hit, SettingsHit::DialogCategory(_)))

@@ -110,11 +110,6 @@ impl ProviderCategory {
             Self::Local => "Local/Custom",
         }
     }
-
-    /// How many providers the category holds.
-    pub fn provider_count(self) -> usize {
-        providers_in(self).len()
-    }
 }
 
 /// The provider rows in `category`, in display order.

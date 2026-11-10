@@ -251,16 +251,9 @@ pub(crate) fn onboarding_body(
                             } else {
                                 Style::default().fg(theme.text2)
                             };
-                            let count = category.provider_count();
-                            let count = if count == 1 {
-                                "1 provider".to_owned()
-                            } else {
-                                format!("{count} providers")
-                            };
                             lines.push(Line::from(vec![
                                 super::chrome::marker(selected, theme),
-                                Span::styled(format!("{:<22}", category.label()), style),
-                                Span::raw(count).fg(theme.text3),
+                                Span::styled(category.label(), style),
                             ]));
                         }
                     }
