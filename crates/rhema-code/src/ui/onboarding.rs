@@ -34,8 +34,9 @@ pub(crate) fn render_onboarding(
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(page_area);
     let text_width = content_area.width.saturating_sub(4) as usize;
 
-    // The rail: the logo, the wordmark, a rule, then the steps — the
-    // current one marked, the rest dim.
+    // The rail: the logo, the wordmark, a rule, then the steps. The
+    // passed ones carry a check, the current one is highlighted, and
+    // the ones ahead stay dim.
     let mut rail = Vec::new();
     if crate::term_image::supported() {
         // The image composites over these reserved rows after the
@@ -64,21 +65,51 @@ pub(crate) fn render_onboarding(
         rail_area.width.saturating_sub(2) as usize,
         theme,
     )));
-    for step in crate::onboarding::OnboardingStep::ALL {
-        // The rail line this row will render at — the hit rect's y
+    // The steps read as a progress list, not a menu: a check for the
+    // ones passed, a filled dot for the current one, a hollow dot for
+    // the ones ahead. The rows stay clickable, but the glyphs say where
+    // the wizard is rather than where a cursor might move.
+    let steps = crate::onboarding::OnboardingStep::ALL;
+    let current = steps
+        .iter()
+        .position(|step| *step == wizard.step)
+        .unwrap_or(0);
+    rail.push(Line::from(
+        Span::raw(format!("Step {} of {}", current + 1, steps.len())).fg(theme.text3),
+    ));
+    rail.push(Line::default());
+    let rail_width = rail_area.width.saturating_sub(2) as usize;
+    for (index, step) in steps.iter().enumerate() {
+        // The rail line this row will render at: the hit rect's y
         // counts the top padding in, the way the settings sidebar's
         // rects do.
         let rail_line = rail.len();
-        let current = *step == wizard.step;
-        let style = if current {
-            Style::default().fg(theme.accent_text).bold()
-        } else {
-            Style::default().fg(theme.text2)
+        let is_current = index == current;
+        let is_done = index < current;
+        let (glyph, glyph_style) = match (is_done, is_current) {
+            (_, true) => ("● ", Style::default().fg(theme.accent_text)),
+            (true, false) => ("✓ ", Style::default().fg(theme.ok)),
+            (false, false) => ("○ ", Style::default().fg(theme.text3)),
         };
-        rail.push(Line::from(vec![
-            super::chrome::marker(current, theme),
-            Span::styled(step.label().to_owned(), style),
-        ]));
+        let label_style = if is_current {
+            Style::default().fg(theme.accent_text).bold()
+        } else if is_done {
+            Style::default().fg(theme.text2)
+        } else {
+            Style::default().fg(theme.text3)
+        };
+        let label = step.label().to_owned();
+        let used = 2 + label.chars().count();
+        let filler = rail_width.saturating_sub(used);
+        let mut line = Line::from(vec![
+            Span::styled(glyph, glyph_style),
+            Span::styled(label, label_style),
+            Span::raw(" ".repeat(filler)),
+        ]);
+        if is_current {
+            line = line.style(Style::default().bg(theme.elevated));
+        }
+        rail.push(line);
         hits.push((
             Rect {
                 x: rail_area.x + 1,
@@ -181,20 +212,26 @@ pub(crate) fn onboarding_body(
             lines.extend(wrap_line(
                 &Line::from(
                     Span::raw(
-                        "A coding agent for the terminal: it reads and edits the tree, \
-                         runs the commands, and keeps the conversation.",
+                        "This step by step assistant will help you configure \
+                         Rhema Code. Press Enter to continue.",
                     )
-                    .fg(theme.text),
+                    .fg(theme.text)
+                    .bold(),
                 ),
                 width,
             ));
-            for text in [
-                "A few choices set it up: a provider login, a model, a profile,",
-                "the colors, and the skills rhema ships with. Everything is",
-                "revisitable later in /settings.",
-            ] {
-                lines.push(Line::from(Span::raw(text).fg(theme.text2)));
-            }
+            lines.push(Line::default());
+            lines.extend(wrap_line(
+                &Line::from(
+                    Span::raw(
+                        "It covers the default profile, a provider login, a model, \
+                         the colors, and the skills rhema ships with. Everything \
+                         is revisitable later in /settings.",
+                    )
+                    .fg(theme.text2),
+                ),
+                width,
+            ));
             footer("enter start · esc quit")
         }
         Step::Login => {

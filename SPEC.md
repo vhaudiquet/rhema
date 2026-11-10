@@ -858,8 +858,11 @@ gate — no usable backend, no stored model — opens the chat: the footer
 names the missing piece in red, the submit box declines with the fix,
 and `/login` or `/model` is one keystroke away. The wizard reuses the
 settings' add-instance dialog inline (its validation is the model
-fetch) and the palette list; steps live in `onboarding.rs`. The wizard
-opens on the default profile: the config's profiles, `personal` and
+fetch) and the palette list; steps live in `onboarding.rs`. The welcome
+step introduces the flow and Enter begins it; the rail reads as
+progress, with a check on passed steps, a filled dot on the current
+one, and a hollow dot on the ones ahead. After the welcome the wizard
+asks for the default profile: the config's profiles, `personal` and
 `work` on a fresh setup, plus an add row that creates a new empty one.
 The pick becomes the session's profile and the workspace's remembered
 one, so the login and model steps write there; the backend re-resolves

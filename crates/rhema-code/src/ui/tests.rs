@@ -632,7 +632,9 @@ fn the_wizard_renders_its_rail_and_welcome() {
             step.label()
         );
     }
-    assert!(text.contains("revisitable later in /settings"));
+    assert!(text.contains("This step by step"), "{text}");
+    assert!(text.contains("Press Enter"), "{text}");
+    assert!(text.contains("later in /settings"));
     assert!(
         !logo_rect.is_some(),
         "no graphics protocol under TestBackend: {logo_rect:?}"
@@ -687,6 +689,56 @@ fn the_wizard_renders_its_rail_and_welcome() {
         })
     });
     assert!(dim, "the license renders dimmed: {text}");
+}
+
+/// The rail reads as progress, not a menu: passed steps carry a check,
+/// the current one is a filled dot, and the ones ahead are hollow.
+#[test]
+fn the_rail_checks_passed_steps_and_marks_the_current_one() {
+    let mut wizard = crate::onboarding::OnboardingScreen::new(
+        Vec::new(),
+        "personal".into(),
+        rhema_config::Settings::default().profiles,
+        false,
+        rhema_config::Profile::default(),
+    );
+    wizard.go(crate::onboarding::OnboardingStep::Login);
+    let mut logo_rect = None;
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            render_onboarding(
+                frame,
+                &wizard,
+                &crate::icons::UNICODE,
+                &DARK,
+                &mut logo_rect,
+                &mut Vec::new(),
+            )
+        })
+        .unwrap();
+    let text: String = (0..24)
+        .map(|y| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("Step 3 of 7"), "{text}");
+    assert!(text.contains("✓ Welcome"), "{text}");
+    assert!(text.contains("✓ Profile"), "{text}");
+    assert!(text.contains("● Provider"), "{text}");
+    assert!(text.contains("○ Model"), "{text}");
+    let rail: String = (0..24)
+        .map(|y| {
+            (0..26)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(!rail.contains("❯"), "no cursor arrow in the rail: {rail}");
 }
 
 /// The wizard opens on the profile choice: the config's profiles with
