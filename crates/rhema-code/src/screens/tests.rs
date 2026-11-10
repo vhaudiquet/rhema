@@ -801,8 +801,8 @@ fn the_dialog_groups_providers_under_their_categories() {
     );
     // The group already names the plan, so the rows do not repeat it.
     let providers = settings.dialog.as_ref().unwrap().visible_providers();
-    assert_eq!(providers[0].name, "ChatGPT (OpenAI)");
-    assert_eq!(providers[3].name, "GLM Coding Plan (Z.ai)");
+    assert_eq!(providers[0].name, "ChatGPT");
+    assert_eq!(providers[3].name, "GLM Coding Plan");
     // The categories wrap at both ends.
     settings.handle_key(key(KeyCode::Up));
     assert_eq!(
@@ -826,6 +826,7 @@ fn the_dialog_groups_providers_under_their_categories() {
             LoginProvider::Google,
             LoginProvider::Anthropic,
             LoginProvider::OpenAi,
+            LoginProvider::OpenAiCompatible,
             LoginProvider::OpenRouter,
             LoginProvider::DeepSeek,
             LoginProvider::OpenCode
@@ -834,7 +835,58 @@ fn the_dialog_groups_providers_under_their_categories() {
     settings.handle_key(key(KeyCode::Esc));
     settings.handle_key(key(KeyCode::Down));
     settings.handle_key(key(KeyCode::Enter));
-    assert_eq!(kinds(&settings), vec![LoginProvider::LlamaCpp]);
+    assert_eq!(
+        kinds(&settings),
+        vec![LoginProvider::LlamaCpp, LoginProvider::OpenAiCompatible]
+    );
+}
+
+#[test]
+fn hosted_providers_go_straight_to_their_key() {
+    // OpenAI and GLM Coding Plan have fixed routes: the credential
+    // stage opens on the key, not a base URL.
+    for provider in [LoginProvider::OpenAi, LoginProvider::Zai] {
+        let (settings, _) = descend_to_credential(provider);
+        let dialog = settings.dialog.as_ref().unwrap();
+        assert_eq!(dialog.input_label(), "API key: ", "{provider:?}");
+        assert_eq!(
+            dialog.pending.as_ref().unwrap().base_url,
+            None,
+            "{provider:?}"
+        );
+    }
+}
+
+#[test]
+fn a_custom_endpoint_requires_a_base_url_before_the_key() {
+    let (mut settings, name) = descend_to_credential(LoginProvider::OpenAiCompatible);
+    assert_eq!(name, "Custom OpenAI-compatible API");
+    let dialog = settings.dialog.as_ref().unwrap();
+    assert_eq!(dialog.input_label(), "base URL: ");
+
+    // An empty URL cannot advance: a custom endpoint has no default
+    // host to fall back to.
+    settings.handle_key(key(KeyCode::Enter));
+    let dialog = settings.dialog.as_ref().unwrap();
+    assert_eq!(dialog.stage, DialogStage::EnterCredential);
+    assert!(!dialog.second_input, "the first prompt stays");
+    assert_eq!(dialog.pending.as_ref().unwrap().base_url, None);
+
+    for c in "http://localhost:11434/v1".chars() {
+        settings.handle_key(key(KeyCode::Char(c)));
+    }
+    settings.handle_key(key(KeyCode::Enter));
+    let dialog = settings.dialog.as_ref().unwrap();
+    assert!(dialog.second_input, "the key prompt follows the URL");
+    assert_eq!(dialog.input_label(), "API key: ");
+    assert_eq!(
+        dialog.pending.as_ref().unwrap().base_url.as_deref(),
+        Some("http://localhost:11434/v1")
+    );
+
+    settings.handle_key(key(KeyCode::Char('k')));
+    let dialog = settings.dialog.as_ref().unwrap();
+    assert_eq!(dialog.masked_input(), "\u{2022}");
 }
 
 #[test]
@@ -879,7 +931,7 @@ fn the_dialog_takes_a_masked_api_key_for_the_new_providers() {
 #[test]
 fn the_name_suggestion_skips_taken_names() {
     let mut stored = rhema_config::Profile::default();
-    for name in ["openai", "openai-2"] {
+    for name in ["OpenAI", "OpenAI 2"] {
         stored.instances.insert(
             name.to_owned(),
             rhema_config::ProviderInstance {
@@ -896,7 +948,7 @@ fn the_name_suggestion_skips_taken_names() {
     // OpenAI's row, then into the name input.
     choose_provider_row(&mut settings, LoginProvider::OpenAi);
     settings.handle_key(key(KeyCode::Enter));
-    assert_eq!(settings.dialog.as_ref().unwrap().input, "openai-3");
+    assert_eq!(settings.dialog.as_ref().unwrap().input, "OpenAI 3");
     // Renaming is free: clear and type.
     for _ in 0..8 {
         settings.handle_key(key(KeyCode::Backspace));

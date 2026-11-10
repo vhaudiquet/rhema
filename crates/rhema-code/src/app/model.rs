@@ -74,7 +74,8 @@ impl App {
                 url: base_url.unwrap_or_default(),
                 api_key: (!input.is_empty()).then_some(input),
             },
-            crate::screens::LoginProvider::OpenAi => Backend::OpenAi {
+            crate::screens::LoginProvider::OpenAi
+            | crate::screens::LoginProvider::OpenAiCompatible => Backend::OpenAi {
                 api_key: input,
                 base_url,
             },

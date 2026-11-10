@@ -142,8 +142,8 @@ pub enum DialogStage {
     SelectProvider,
     /// The name input for the instance being added.
     NameInstance,
-    /// The credential input — llama.cpp and OpenAI ask a URL first,
-    /// then a key.
+    /// The credential input — llama.cpp and a custom OpenAI-compatible
+    /// endpoint ask a URL first, then a key.
     EnterCredential,
     /// An interactive flow (device code and friends) is running: its
     /// instruction and progress render from the dialog's `flow_*`
@@ -174,7 +174,7 @@ pub struct PendingInstance {
     /// The name the instance will carry in the profile.
     pub name: String,
     /// The URL from the first credential prompt, when the provider asks
-    /// for one.
+    /// for one: llama.cpp's server address, a custom endpoint's base.
     pub base_url: Option<String>,
 }
 
@@ -197,8 +197,9 @@ pub struct AddInstanceDialog {
     /// The instance being added, from the provider pick through
     /// validation.
     pub pending: Option<PendingInstance>,
-    /// The credential stage's second prompt: llama.cpp and openai ask a
-    /// URL first, then a key — when set, the input line is that key.
+    /// The credential stage's second prompt: llama.cpp and a custom
+    /// OpenAI-compatible endpoint ask a URL first, then a key — when
+    /// set, the input line is that key.
     pub second_input: bool,
     /// The flow's instruction, once the running flow has reported one
     /// (the Flow stage renders from this).
@@ -321,11 +322,8 @@ impl AddInstanceDialog {
                     (Some(LoginProvider::LlamaCpp), true) => {
                         "enter the bearer key (empty for none)"
                     }
-                    (Some(LoginProvider::OpenAi), false) => {
-                        "enter the base URL (empty for api.openai.com)"
-                    }
-                    (Some(LoginProvider::Zai), false) => {
-                        "enter the base URL (empty for the coding plan route)"
+                    (Some(LoginProvider::OpenAiCompatible), false) => {
+                        "enter the base URL (required)"
                     }
                     _ => "enter the API key",
                 };
@@ -348,8 +346,7 @@ impl AddInstanceDialog {
             DialogStage::EnterCredential => {
                 match (self.pending.as_ref().map(|p| p.provider), self.second_input) {
                     (Some(LoginProvider::LlamaCpp), false) => "server URL: ",
-                    (Some(LoginProvider::OpenAi), false) => "base URL: ",
-                    (Some(LoginProvider::Zai), false) => "base URL: ",
+                    (Some(LoginProvider::OpenAiCompatible), false) => "base URL: ",
                     _ => "API key: ",
                 }
             }
@@ -364,9 +361,9 @@ impl AddInstanceDialog {
         let secret = match self.stage {
             DialogStage::NameInstance => false,
             DialogStage::EnterCredential => match self.pending.as_ref().map(|p| p.provider) {
-                Some(LoginProvider::LlamaCpp)
-                | Some(LoginProvider::OpenAi)
-                | Some(LoginProvider::Zai) => self.second_input,
+                Some(LoginProvider::LlamaCpp) | Some(LoginProvider::OpenAiCompatible) => {
+                    self.second_input
+                }
                 _ => true,
             },
             _ => true,
@@ -522,15 +519,16 @@ impl AddInstanceDialog {
             }
             KeyCode::Enter => {
                 let provider = self.pending.as_ref().map(|p| p.provider);
-                if !self.second_input
-                    && matches!(
-                        provider,
-                        Some(LoginProvider::LlamaCpp | LoginProvider::OpenAi | LoginProvider::Zai)
-                    )
-                {
-                    // The URL prompt: captured, then the key is asked.
+                if !self.second_input && provider.is_some_and(LoginProvider::asks_base_url) {
+                    // The URL prompt: captured, then the key is asked. A
+                    // custom endpoint must name its host, so an empty
+                    // line stays put.
+                    let url = self.input.trim().to_owned();
+                    if provider.is_some_and(LoginProvider::base_url_required) && url.is_empty() {
+                        return DialogAction::None;
+                    }
                     if let Some(pending) = self.pending.as_mut() {
-                        pending.base_url = Some(self.input.trim().to_owned());
+                        pending.base_url = Some(url);
                     }
                     self.second_input = true;
                     self.input.clear();
@@ -595,26 +593,14 @@ impl AddInstanceDialog {
     /// A deduped default name for a new instance of `provider`: the
     /// provider's own name, numbered when taken.
     fn name_suggestion(&self, provider: LoginProvider) -> String {
-        let base = match provider {
-            LoginProvider::Google => "google",
-            LoginProvider::LlamaCpp => "llama-cpp",
-            LoginProvider::OpenRouter => "openrouter",
-            LoginProvider::Anthropic => "anthropic",
-            LoginProvider::OpenAi => "openai",
-            LoginProvider::DeepSeek => "deepseek",
-            LoginProvider::Zai => "zai",
-            LoginProvider::OpenCode => "opencode",
-            LoginProvider::OpenCodeGo => "opencode-go",
-            LoginProvider::Copilot => "copilot",
-            LoginProvider::ChatGpt => "chatgpt",
-        };
+        let base = provider.default_name();
         if !self.instances.contains_key(base) {
             return base.to_owned();
         }
         (2..)
-            .map(|n| format!("{base}-{n}"))
+            .map(|n| format!("{base} {n}"))
             .find(|name| !self.instances.contains_key(name))
-            .unwrap_or_else(|| format!("{base}-{}", self.instances.len() + 1))
+            .unwrap_or_else(|| format!("{base} {}", self.instances.len() + 1))
     }
 
     /// Enter on the final credential prompt: validate, unless a

@@ -662,7 +662,7 @@ fn login_success_persists_the_key_and_opens_the_picker() {
             backend: Backend::Google {
                 api_key: "secret".into()
             },
-            instance: Some("google".into()),
+            instance: Some("Google Gemini".into()),
         })]
     );
     h.app.on_event(UiEvent::ModelsLoaded {
@@ -670,7 +670,7 @@ fn login_success_persists_the_key_and_opens_the_picker() {
             backend: Backend::Google {
                 api_key: "secret".into(),
             },
-            instance: Some("google".into()),
+            instance: Some("Google Gemini".into()),
         },
         result: loaded("google", models()),
     });
@@ -679,9 +679,9 @@ fn login_success_persists_the_key_and_opens_the_picker() {
         _ => panic!("expected the picker after a successful login"),
     }
     let effective = h.store.load().unwrap().effective(None);
-    assert_eq!(effective.instance.as_deref(), Some("google"));
+    assert_eq!(effective.instance.as_deref(), Some("Google Gemini"));
     assert_eq!(
-        effective.instances["google"].api_key.as_deref(),
+        effective.instances["Google Gemini"].api_key.as_deref(),
         Some("secret")
     );
     assert_eq!(effective.api_key("google", None).as_deref(), Some("secret"));
@@ -705,12 +705,12 @@ fn a_login_places_its_key_in_the_keychain_and_the_file_stays_clean() {
             backend: Backend::Google {
                 api_key: "secret".into(),
             },
-            instance: Some("google".into()),
+            instance: Some("Google Gemini".into()),
         },
         result: loaded("google", models()),
     });
     let effective = h.store.load().unwrap().effective(None);
-    let instance = &effective.instances["google"];
+    let instance = &effective.instances["Google Gemini"];
     assert_eq!(instance.api_key, None, "the file holds no key");
     let id = instance.secret_ref.as_deref().expect("the keychain ref");
     assert_eq!(secrets.get(id).unwrap().as_deref(), Some("secret"));
@@ -779,7 +779,7 @@ fn a_login_merges_its_catalog_instead_of_replacing_the_cache() {
             backend: Backend::OpenRouter {
                 api_key: "o".into(),
             },
-            instance: Some("openrouter".into()),
+            instance: Some("OpenRouter".into()),
         },
         result: loaded(
             "openrouter",
@@ -824,7 +824,7 @@ fn a_late_bootstrap_keeps_the_login_models() {
             backend: Backend::OpenRouter {
                 api_key: "o".into(),
             },
-            instance: Some("openrouter".into()),
+            instance: Some("OpenRouter".into()),
         },
         result: loaded(
             "openrouter",
@@ -851,7 +851,7 @@ fn llama_login_validates_by_server_url_and_persists_the_provider() {
     let mut h = harness(None, None, Session::default());
     // The llama.cpp row, the suggested name, the URL, and a key.
     let name = descend_to_credential(&mut h, LoginProvider::LlamaCpp);
-    assert_eq!(name, "llama-cpp");
+    assert_eq!(name, "llama.cpp");
     match &h.app.screen {
         Screen::Settings(s) => {
             let login = s.dialog.as_ref().unwrap();
@@ -884,7 +884,7 @@ fn llama_login_validates_by_server_url_and_persists_the_provider() {
                 url: "http://box:8080".into(),
                 api_key: None,
             },
-            instance: Some("llama-cpp".into()),
+            instance: Some("llama.cpp".into()),
         })]
     );
     h.app.on_event(UiEvent::ModelsLoaded {
@@ -893,7 +893,7 @@ fn llama_login_validates_by_server_url_and_persists_the_provider() {
                 url: "http://box:8080".into(),
                 api_key: None,
             },
-            instance: Some("llama-cpp".into()),
+            instance: Some("llama.cpp".into()),
         },
         result: loaded(
             "llama-cpp",
@@ -916,7 +916,7 @@ fn llama_login_validates_by_server_url_and_persists_the_provider() {
     let effective = config.effective(None);
     assert_eq!(effective.provider.as_deref(), Some("llama-cpp"));
     assert_eq!(
-        effective.instances["llama-cpp"].base_url.as_deref(),
+        effective.instances["llama.cpp"].base_url.as_deref(),
         Some("http://box:8080")
     );
     assert_eq!(effective.llama_cpp_url(), "http://box:8080");
@@ -927,7 +927,7 @@ fn anthropic_login_validates_by_key_and_persists_the_provider() {
     let mut h = harness(None, None, Session::default());
     // Anthropic's row, the suggested name, and the key.
     let name = descend_to_credential(&mut h, LoginProvider::Anthropic);
-    assert_eq!(name, "anthropic");
+    assert_eq!(name, "Anthropic");
     match &h.app.screen {
         Screen::Settings(s) => {
             let login = s.dialog.as_ref().unwrap();
@@ -945,7 +945,7 @@ fn anthropic_login_validates_by_key_and_persists_the_provider() {
             backend: Backend::Anthropic {
                 api_key: "sk-ant-01".into(),
             },
-            instance: Some("anthropic".into()),
+            instance: Some("Anthropic".into()),
         })]
     );
     // The model-list fetch is the validation; success lands in the
@@ -955,7 +955,7 @@ fn anthropic_login_validates_by_key_and_persists_the_provider() {
             backend: Backend::Anthropic {
                 api_key: "sk-ant-01".into(),
             },
-            instance: Some("anthropic".into()),
+            instance: Some("Anthropic".into()),
         },
         result: loaded(
             "anthropic",
@@ -980,7 +980,7 @@ fn anthropic_login_validates_by_key_and_persists_the_provider() {
     let effective = config.effective(None);
     assert_eq!(effective.provider.as_deref(), Some("anthropic"));
     assert_eq!(
-        effective.instances["anthropic"].api_key.as_deref(),
+        effective.instances["Anthropic"].api_key.as_deref(),
         Some("sk-ant-01")
     );
     assert_eq!(
@@ -996,11 +996,9 @@ fn anthropic_login_validates_by_key_and_persists_the_provider() {
 #[test]
 fn openai_login_validates_by_key_with_the_default_base() {
     let mut h = harness(None, None, Session::default());
-    // OpenAI's row, the suggested name, and the key.
+    // OpenAI's row, the suggested name, and the key. Hosted providers
+    // go straight to the key; only a custom endpoint asks for a URL.
     descend_to_credential(&mut h, LoginProvider::OpenAi);
-    // The base URL prompt comes first: an empty one means OpenAI
-    // itself.
-    h.app.on_key(key(KeyCode::Enter));
     for c in "sk-proj-01".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -1012,7 +1010,7 @@ fn openai_login_validates_by_key_with_the_default_base() {
                 api_key: "sk-proj-01".into(),
                 base_url: None,
             },
-            instance: Some("openai".into()),
+            instance: Some("OpenAI".into()),
         })]
     );
     // A failed validation stays on the login screen and persists
@@ -1023,7 +1021,7 @@ fn openai_login_validates_by_key_with_the_default_base() {
                 api_key: "sk-proj-01".into(),
                 base_url: None,
             },
-            instance: Some("openai".into()),
+            instance: Some("OpenAI".into()),
         },
         result: failed("openai", "openai-compatible api error (HTTP 401): denied"),
     });
@@ -1041,11 +1039,9 @@ fn openai_login_validates_by_key_with_the_default_base() {
 #[test]
 fn zai_login_validates_by_key_with_the_default_route() {
     let mut h = harness(None, None, Session::default());
-    // Z.ai's row, the suggested name, and the key.
+    // GLM Coding Plan's row, the suggested name, and the key. The
+    // plan's own route is fixed, so no URL prompt.
     descend_to_credential(&mut h, LoginProvider::Zai);
-    // The base URL prompt comes first: an empty one means the Coding
-    // Plan route itself.
-    h.app.on_key(key(KeyCode::Enter));
     for c in "zkey-01".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -1057,7 +1053,7 @@ fn zai_login_validates_by_key_with_the_default_route() {
                 api_key: "zkey-01".into(),
                 base_url: None,
             },
-            instance: Some("zai".into()),
+            instance: Some("GLM Coding Plan".into()),
         })]
     );
     // A failed validation stays on the login screen and persists
@@ -1068,7 +1064,7 @@ fn zai_login_validates_by_key_with_the_default_route() {
                 api_key: "zkey-01".into(),
                 base_url: None,
             },
-            instance: Some("zai".into()),
+            instance: Some("GLM Coding Plan".into()),
         },
         result: failed("zai", "anthropic api error (HTTP 401): denied"),
     });
@@ -1826,7 +1822,7 @@ fn a_single_model_server_auto_selects_and_skips_the_picker() {
                 url: "http://localhost:8080".into(),
                 api_key: None,
             },
-            instance: Some("llama-cpp".into()),
+            instance: Some("llama.cpp".into()),
         },
         result: loaded("llama-cpp", vec![llama_model("qwen3-8b")]),
     });
@@ -1964,8 +1960,9 @@ fn d_forgets_the_highlighted_instance() {
 #[test]
 fn a_second_openai_compatible_instance_lands_under_its_own_name() {
     let mut h = harness(None, None, Session::default());
-    // The openai row: a custom base URL, then the key.
-    descend_to_credential(&mut h, LoginProvider::OpenAi);
+    // The custom endpoint row: its base URL, then the key.
+    let name = descend_to_credential(&mut h, LoginProvider::OpenAiCompatible);
+    assert_eq!(name, "Custom OpenAI-compatible API");
     for c in "http://proxy:1234/v1".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -1981,7 +1978,7 @@ fn a_second_openai_compatible_instance_lands_under_its_own_name() {
                 api_key: "sk-p".into(),
                 base_url: Some("http://proxy:1234/v1".into()),
             },
-            instance: Some("openai".into()),
+            instance: Some("Custom OpenAI-compatible API".into()),
         })]
     );
     h.app.on_event(UiEvent::ModelsLoaded {
@@ -1990,7 +1987,7 @@ fn a_second_openai_compatible_instance_lands_under_its_own_name() {
                 api_key: "sk-p".into(),
                 base_url: Some("http://proxy:1234/v1".into()),
             },
-            instance: Some("openai".into()),
+            instance: Some("Custom OpenAI-compatible API".into()),
         },
         result: loaded("openai", vec![llama_model("gpt-5")]),
     });
@@ -2003,8 +2000,11 @@ fn a_second_openai_compatible_instance_lands_under_its_own_name() {
 
     // A second login of the same provider suggests a fresh name.
     crate::commands::dispatch(&mut h.app, "/login");
-    let name = descend_to_credential(&mut h, LoginProvider::OpenAi);
-    assert_eq!(name, "openai-2", "the suggestion skips the taken name");
+    let name = descend_to_credential(&mut h, LoginProvider::OpenAiCompatible);
+    assert_eq!(
+        name, "Custom OpenAI-compatible API 2",
+        "the suggestion skips the taken name"
+    );
 }
 
 #[test]
@@ -2020,7 +2020,7 @@ fn login_failure_renders_inline_and_persists_nothing() {
             backend: Backend::Google {
                 api_key: "bad-key".into(),
             },
-            instance: Some("google".into()),
+            instance: Some("Google Gemini".into()),
         },
         result: failed("google", "gemini api error (HTTP 403): denied"),
     });
@@ -2096,7 +2096,7 @@ fn the_copilot_login_runs_a_flow_and_persists_its_credential() {
             backend: Backend::Copilot {
                 api_key: "gho_token".into(),
             },
-            instance: Some("copilot".into()),
+            instance: Some("GitHub Copilot".into()),
         })]
     );
     h.app.on_event(UiEvent::ModelsLoaded {
@@ -2104,7 +2104,7 @@ fn the_copilot_login_runs_a_flow_and_persists_its_credential() {
             backend: Backend::Copilot {
                 api_key: "gho_token".into(),
             },
-            instance: Some("copilot".into()),
+            instance: Some("GitHub Copilot".into()),
         },
         result: loaded("copilot", models()),
     });
@@ -2159,7 +2159,7 @@ fn the_chatgpt_login_runs_a_flow_and_persists_its_credential() {
             backend: Backend::ChatGpt {
                 credential: r#"{"access_token":"a"}"#.into(),
             },
-            instance: Some("chatgpt".into()),
+            instance: Some("ChatGPT".into()),
         })]
     );
     h.app.on_event(UiEvent::ModelsLoaded {
@@ -2167,7 +2167,7 @@ fn the_chatgpt_login_runs_a_flow_and_persists_its_credential() {
             backend: Backend::ChatGpt {
                 credential: r#"{"access_token":"a"}"#.into(),
             },
-            instance: Some("chatgpt".into()),
+            instance: Some("ChatGPT".into()),
         },
         result: loaded("chatgpt", models()),
     });
@@ -2894,7 +2894,7 @@ fn login_success_writes_into_the_selected_tab_profile() {
             backend: Backend::OpenRouter {
                 api_key: "work-key".into(),
             },
-            instance: Some("openrouter".into()),
+            instance: Some("OpenRouter".into()),
         },
         result: loaded("google", models()),
     });
@@ -2902,9 +2902,9 @@ fn login_success_writes_into_the_selected_tab_profile() {
     assert_eq!(h.app.session_profile.as_deref(), Some("work"));
     let stored = h.store.load().unwrap();
     let work = stored.effective(Some("work"));
-    assert_eq!(work.instance.as_deref(), Some("openrouter"));
+    assert_eq!(work.instance.as_deref(), Some("OpenRouter"));
     assert_eq!(
-        work.instances["openrouter"].api_key.as_deref(),
+        work.instances["OpenRouter"].api_key.as_deref(),
         Some("work-key")
     );
     assert_eq!(
@@ -4852,7 +4852,7 @@ fn the_wizard_s_login_advances_to_its_own_model_step() {
             backend: Backend::Google {
                 api_key: "k".into(),
             },
-            instance: Some("google".into()),
+            instance: Some("Google Gemini".into()),
         })],
         "the wizard validates exactly like the settings dialog"
     );
@@ -4861,7 +4861,7 @@ fn the_wizard_s_login_advances_to_its_own_model_step() {
             backend: Backend::Google {
                 api_key: "k".into(),
             },
-            instance: Some("google".into()),
+            instance: Some("Google Gemini".into()),
         },
         result: loaded("google", models()),
     });
