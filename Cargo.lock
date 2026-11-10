@@ -2128,7 +2128,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mcp-to-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clap",
  "serde_json",
@@ -3252,7 +3252,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-acp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3269,7 +3269,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-agent-tools"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3285,7 +3285,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-autonomous-agent"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "rhema-core",
@@ -3299,7 +3299,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-calendar-integration"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "quick-xml",
@@ -3318,7 +3318,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-claw"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3354,7 +3354,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-claw-tools-contract"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -3363,7 +3363,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-cloud-agent"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "rhema-agent-tools",
@@ -3379,7 +3379,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-cloudflare-code"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-code"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "arboard",
@@ -3445,7 +3445,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-coding-agent"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "minijinja",
  "rhema-agent-tools",
@@ -3462,7 +3462,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-config"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "keyring",
  "rhema-core",
@@ -3475,7 +3475,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "serde",
@@ -3486,7 +3486,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-forge-integration"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -3500,7 +3500,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-identity"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rusqlite",
  "serde",
@@ -3510,7 +3510,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-mcp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-stream",
  "axum",
@@ -3534,7 +3534,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-memory"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "rhema-core",
@@ -3549,7 +3549,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures-core",
@@ -3562,7 +3562,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-anthropic"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3578,7 +3578,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-chatgpt"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3596,7 +3596,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-copilot"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3613,7 +3613,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-google"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3630,7 +3630,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-llama-cpp"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3647,7 +3647,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-openai-compatible"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3663,7 +3663,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-opencode"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -3678,7 +3678,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-openrouter"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -3694,7 +3694,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-provider-registry"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rhema-core",
  "rhema-provider",
@@ -3712,7 +3712,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-rsd"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rhema-core",
  "rusqlite",
@@ -3724,7 +3724,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "rhema-agent-tools",
@@ -3739,7 +3739,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-docker"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3750,7 +3750,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-ecrou"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3761,7 +3761,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-http"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3774,7 +3774,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-local"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3785,7 +3785,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-lxd"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3796,7 +3796,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3813,7 +3813,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-sandbox-ssh"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3824,7 +3824,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-subagents"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "rhema-agent-tools",
@@ -3842,7 +3842,7 @@ dependencies = [
 
 [[package]]
 name = "rhema-transcript"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "rhema-core",

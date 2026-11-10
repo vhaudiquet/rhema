@@ -20,15 +20,15 @@ hyper = { version = "1", default-features = false, features = ["http1", "client"
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
 http-body-util = "0.1"
 bytes = "1"
-rhema-config = { version = "0.2.1", path = "../rhema-config" }
+rhema-config = { version = "0.2.2", path = "../rhema-config" }
 axum.workspace = true
 async-stream = "0.3.6"
 futures-util = "0.3.34"
 sha2 = "0.10"
 base64 = "0.22"
 clap = "4.6.7"
-mcp-to-cli = { version = "0.2.1", path = "../mcp-to-cli" }
-rhema-agent-tools = { version = "0.2.1", path = "../rhema-agent-tools" }
+mcp-to-cli = { version = "0.2.2", path = "../mcp-to-cli" }
+rhema-agent-tools = { version = "0.2.2", path = "../rhema-agent-tools" }
 
 [dev-dependencies]
 tempfile = "3"

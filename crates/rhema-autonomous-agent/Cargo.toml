@@ -13,9 +13,9 @@ publish = false
 
 [dependencies]
 # The dispatch seam: sources ingest, the driver runs admitted keys
-rhema-rsd = { path = "../rhema-rsd", version = "0.2.1" }
+rhema-rsd = { path = "../rhema-rsd", version = "0.2.2" }
 # The step engine and its seams: tools resolve through a ToolResolver
-rhema-core = { path = "../rhema-core", version = "0.2.1" }
+rhema-core = { path = "../rhema-core", version = "0.2.2" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

@@ -20,7 +20,7 @@ store-contract = []
 [dependencies]
 # Tools implement the resolver seam; the store contract stays
 # step-engine-agnostic (specs/rhema-memory.md §0)
-rhema-core = { path = "../rhema-core", version = "0.2.1" }
+rhema-core = { path = "../rhema-core", version = "0.2.2" }
 # Records round-trip through serde; the file store's frontmatter is YAML
 serde = { workspace = true }
 serde_json = { workspace = true }
