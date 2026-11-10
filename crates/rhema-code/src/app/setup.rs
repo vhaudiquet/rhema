@@ -596,6 +596,8 @@ pub enum SettingsHit {
     /// A page row (an instance, the add row, an appearance toggle):
     /// select it and act.
     PageRow(usize),
+    /// A category row of the add-instance dialog.
+    DialogCategory(usize),
     /// A provider row of the add-instance dialog.
     DialogProvider(usize),
     /// The running login flow's open button.

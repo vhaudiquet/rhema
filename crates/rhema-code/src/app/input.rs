@@ -194,6 +194,17 @@ impl App {
                 settings.row = index;
                 settings.enter_action()
             }
+            SettingsHit::DialogCategory(index) => {
+                let Screen::Settings(settings) = &mut self.screen else {
+                    return Vec::new();
+                };
+                let Some(dialog) = &mut settings.dialog else {
+                    return Vec::new();
+                };
+                dialog.select_category_row(index);
+                dialog.choose_category();
+                return Vec::new();
+            }
             SettingsHit::DialogProvider(index) => {
                 let Screen::Settings(settings) = &mut self.screen else {
                     return Vec::new();

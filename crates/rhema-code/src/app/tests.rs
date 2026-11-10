@@ -2,7 +2,7 @@
 //! code they exercise, the tests share them from here.
 use super::*;
 use crate::events::OwnedEvent;
-use crate::screens::LoginProvider;
+use crate::screens::{LoginProvider, ProviderCategory, providers_in};
 use crate::store::MemoryStore;
 use crate::transcript::Line;
 use rhema_coding_agent::{Approval, CodingAgentConfig};
@@ -337,10 +337,10 @@ fn harness_inner(
 }
 
 /// Drives the settings' add-instance dialog to the credential stage
-/// for a provider sitting at `row` on the provider list, accepting
-/// the suggested instance name — ready to type the credential. The
-/// settings must be open (or `/login` dispatchable) first.
-fn descend_to_credential(h: &mut Harness, row: usize) -> String {
+/// for `provider`, accepting the suggested instance name — ready to
+/// type the credential. The settings must be open (or `/login`
+/// dispatchable) first.
+fn descend_to_credential(h: &mut Harness, provider: LoginProvider) -> String {
     use crate::screens::DialogStage;
     if !matches!(h.app.screen, Screen::Settings(_)) {
         crate::commands::dispatch(&mut h.app, "/login");
@@ -353,7 +353,22 @@ fn descend_to_credential(h: &mut Harness, row: usize) -> String {
         h.app.on_key(key(KeyCode::Down));
     }
     h.app.on_key(key(KeyCode::Enter));
-    for _ in 0..row {
+    // The dialog opens on the categories: walk to the provider's group,
+    // then to its row inside the group.
+    let category = provider.category();
+    let category_row = ProviderCategory::ALL
+        .iter()
+        .position(|entry| *entry == category)
+        .expect("the provider's category is in the list");
+    let provider_row = providers_in(category)
+        .iter()
+        .position(|entry| entry.kind == provider)
+        .expect("the provider is in its category");
+    for _ in 0..category_row {
+        h.app.on_key(key(KeyCode::Down));
+    }
+    h.app.on_key(key(KeyCode::Enter));
+    for _ in 0..provider_row {
         h.app.on_key(key(KeyCode::Down));
     }
     h.app.on_key(key(KeyCode::Enter));
@@ -376,7 +391,7 @@ fn a_paste_on_the_add_dialog_fills_the_credential() {
     let mut h = harness(None, None, Session::default());
     assert!(matches!(h.app.screen, Screen::Chat));
     // Descend into the credential stage first.
-    descend_to_credential(&mut h, 0);
+    descend_to_credential(&mut h, LoginProvider::Google);
     h.app.on_paste("sk-123");
     let Screen::Settings(settings) = &h.app.screen else {
         panic!("expected the settings screen");
@@ -636,7 +651,7 @@ fn a_model_switch_refreshes_the_allowance() {
 #[test]
 fn login_success_persists_the_key_and_opens_the_picker() {
     let mut h = harness(None, None, Session::default());
-    descend_to_credential(&mut h, 0);
+    descend_to_credential(&mut h, LoginProvider::Google);
     for c in "secret".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -680,7 +695,7 @@ fn login_success_persists_the_key_and_opens_the_picker() {
 fn a_login_places_its_key_in_the_keychain_and_the_file_stays_clean() {
     let mut h = harness_with_secrets(None, None, Session::default());
     let secrets = Arc::clone(h.secrets.as_ref().unwrap());
-    descend_to_credential(&mut h, 0);
+    descend_to_credential(&mut h, LoginProvider::Google);
     for c in "secret".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -747,7 +762,7 @@ fn a_login_merges_its_catalog_instead_of_replacing_the_cache() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
     h.app.on_key(key(KeyCode::Enter));
-    descend_to_credential(&mut h, 2);
+    descend_to_credential(&mut h, LoginProvider::OpenRouter);
     for c in "o".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -795,7 +810,7 @@ fn a_late_bootstrap_keeps_the_login_models() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
     h.app.on_key(key(KeyCode::Enter));
-    descend_to_credential(&mut h, 2);
+    descend_to_credential(&mut h, LoginProvider::OpenRouter);
     for c in "o".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -834,8 +849,8 @@ fn a_late_bootstrap_keeps_the_login_models() {
 #[test]
 fn llama_login_validates_by_server_url_and_persists_the_provider() {
     let mut h = harness(None, None, Session::default());
-    // The llama.cpp row is second on the add flow's provider list.
-    let name = descend_to_credential(&mut h, 1);
+    // The llama.cpp row, the suggested name, the URL, and a key.
+    let name = descend_to_credential(&mut h, LoginProvider::LlamaCpp);
     assert_eq!(name, "llama-cpp");
     match &h.app.screen {
         Screen::Settings(s) => {
@@ -910,8 +925,8 @@ fn llama_login_validates_by_server_url_and_persists_the_provider() {
 #[test]
 fn anthropic_login_validates_by_key_and_persists_the_provider() {
     let mut h = harness(None, None, Session::default());
-    // Anthropic is the fourth provider row.
-    let name = descend_to_credential(&mut h, 3);
+    // Anthropic's row, the suggested name, and the key.
+    let name = descend_to_credential(&mut h, LoginProvider::Anthropic);
     assert_eq!(name, "anthropic");
     match &h.app.screen {
         Screen::Settings(s) => {
@@ -981,8 +996,8 @@ fn anthropic_login_validates_by_key_and_persists_the_provider() {
 #[test]
 fn openai_login_validates_by_key_with_the_default_base() {
     let mut h = harness(None, None, Session::default());
-    // OpenAI is the fifth provider row.
-    descend_to_credential(&mut h, 4);
+    // OpenAI's row, the suggested name, and the key.
+    descend_to_credential(&mut h, LoginProvider::OpenAi);
     // The base URL prompt comes first: an empty one means OpenAI
     // itself.
     h.app.on_key(key(KeyCode::Enter));
@@ -1026,8 +1041,8 @@ fn openai_login_validates_by_key_with_the_default_base() {
 #[test]
 fn zai_login_validates_by_key_with_the_default_route() {
     let mut h = harness(None, None, Session::default());
-    // Z.ai is the seventh provider row.
-    descend_to_credential(&mut h, 6);
+    // Z.ai's row, the suggested name, and the key.
+    descend_to_credential(&mut h, LoginProvider::Zai);
     // The base URL prompt comes first: an empty one means the Coding
     // Plan route itself.
     h.app.on_key(key(KeyCode::Enter));
@@ -1799,7 +1814,7 @@ fn a_single_model_server_auto_selects_and_skips_the_picker() {
     let mut h = harness(None, None, Session::default());
     // The llama.cpp row, the suggested name, the URL, and a blank
     // bearer key.
-    descend_to_credential(&mut h, 1);
+    descend_to_credential(&mut h, LoginProvider::LlamaCpp);
     for c in "http://localhost:8080".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -1950,7 +1965,7 @@ fn d_forgets_the_highlighted_instance() {
 fn a_second_openai_compatible_instance_lands_under_its_own_name() {
     let mut h = harness(None, None, Session::default());
     // The openai row: a custom base URL, then the key.
-    descend_to_credential(&mut h, 4);
+    descend_to_credential(&mut h, LoginProvider::OpenAi);
     for c in "http://proxy:1234/v1".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -1988,14 +2003,14 @@ fn a_second_openai_compatible_instance_lands_under_its_own_name() {
 
     // A second login of the same provider suggests a fresh name.
     crate::commands::dispatch(&mut h.app, "/login");
-    let name = descend_to_credential(&mut h, 4);
+    let name = descend_to_credential(&mut h, LoginProvider::OpenAi);
     assert_eq!(name, "openai-2", "the suggestion skips the taken name");
 }
 
 #[test]
 fn login_failure_renders_inline_and_persists_nothing() {
     let mut h = harness(None, None, Session::default());
-    descend_to_credential(&mut h, 0);
+    descend_to_credential(&mut h, LoginProvider::Google);
     for c in "bad-key".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -2028,14 +2043,13 @@ fn login_failure_renders_inline_and_persists_nothing() {
 #[test]
 fn the_copilot_login_runs_a_flow_and_persists_its_credential() {
     let mut h = harness(None, None, Session::default());
-    // Walk down to the GitHub Copilot row (the last), name the
+    // Open Subscriptions, walk to the GitHub Copilot row, name the
     // instance, and enter: the effect starts the flow, not a
     // credential input.
     crate::commands::dispatch(&mut h.app, "/login");
     h.app.on_key(key(KeyCode::Enter));
-    for _ in 0..crate::screens::PROVIDERS.len() - 1 {
-        h.app.on_key(key(KeyCode::Down));
-    }
+    h.app.on_key(key(KeyCode::Enter));
+    h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Enter));
     match &h.app.screen {
@@ -2116,12 +2130,10 @@ fn the_copilot_login_runs_a_flow_and_persists_its_credential() {
 #[test]
 fn the_chatgpt_login_runs_a_flow_and_persists_its_credential() {
     let mut h = harness(None, None, Session::default());
-    // The ChatGPT row sits just above Copilot (the last row).
+    // Open the dialog and Subscriptions; ChatGPT is its first row.
     crate::commands::dispatch(&mut h.app, "/login");
     h.app.on_key(key(KeyCode::Enter));
-    for _ in 0..crate::screens::PROVIDERS.len() - 2 {
-        h.app.on_key(key(KeyCode::Down));
-    }
+    h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Enter));
     match &h.app.screen {
@@ -2182,10 +2194,9 @@ fn the_chatgpt_login_runs_a_flow_and_persists_its_credential() {
 fn a_failed_flow_renders_its_error_and_persists_nothing() {
     let mut h = harness(None, None, Session::default());
     crate::commands::dispatch(&mut h.app, "/login");
-    for _ in 0..crate::screens::PROVIDERS.len() - 1 {
-        h.app.on_key(key(KeyCode::Down));
-    }
     h.app.on_key(key(KeyCode::Enter));
+    h.app.on_key(key(KeyCode::Enter));
+    h.app.on_key(key(KeyCode::Down));
     h.app
         .on_event(UiEvent::LoginUpdate(rhema_provider::LoginUpdate::Failed(
             "authorization was denied on GitHub".into(),
@@ -2204,7 +2215,9 @@ fn a_failed_flow_renders_its_error_and_persists_nothing() {
             .values()
             .all(|profile| profile.instances.is_empty())
     );
-    // Esc closes the dialog back onto the Providers page for a retry.
+    // Esc walks back to the categories, then closes the dialog onto the
+    // Providers page for a retry.
+    h.app.on_key(key(KeyCode::Esc));
     h.app.on_key(key(KeyCode::Esc));
     let Screen::Settings(settings) = &h.app.screen else {
         panic!("expected the settings screen");
@@ -2871,7 +2884,7 @@ fn login_success_writes_into_the_selected_tab_profile() {
         panic!("expected the settings screen");
     };
     assert_eq!(settings.profile, "work");
-    descend_to_credential(&mut h, 2);
+    descend_to_credential(&mut h, LoginProvider::OpenRouter);
     for c in "work-key".chars() {
         h.app.on_key(key(KeyCode::Char(c)));
     }
@@ -4825,7 +4838,10 @@ fn the_wizard_s_login_advances_to_its_own_model_step() {
     h.app.on_key(key(KeyCode::Enter)); // welcome -> profile
     h.app.on_key(key(KeyCode::Enter)); // keep personal -> login
     h.app.on_key(key(KeyCode::Enter)); // add a login -> the dialog
-    // The first provider row, the suggested name, a key.
+    // Down to API, then the first provider (Google), the suggested
+    // name, a key.
+    h.app.on_key(key(KeyCode::Down));
+    h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Enter));
     h.app.on_key(key(KeyCode::Char('k')));

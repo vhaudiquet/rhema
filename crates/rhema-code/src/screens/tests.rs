@@ -335,14 +335,34 @@ fn settings_screen() -> SettingsScreen {
     settings
 }
 
-/// The dialog opened and descended to the credential line for the
-/// provider at `row`, accepting the suggested name.
-fn descend_to_credential(row: usize) -> (SettingsScreen, String) {
-    let mut settings = settings_screen();
-    settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
-    for _ in 0..row {
+/// Opens the dialog and walks its two levels to `provider`'s row.
+fn choose_provider_row(settings: &mut SettingsScreen, provider: LoginProvider) {
+    let category = provider.category();
+    let category_row = ProviderCategory::ALL
+        .iter()
+        .position(|entry| *entry == category)
+        .expect("the provider's category is in the list");
+    let provider_row = providers_in(category)
+        .iter()
+        .position(|entry| entry.kind == provider)
+        .expect("the provider is in its category");
+    settings
+        .dialog
+        .as_mut()
+        .unwrap()
+        .select_category_row(category_row);
+    settings.handle_key(key(KeyCode::Enter));
+    for _ in 0..provider_row {
         settings.handle_key(key(KeyCode::Down));
     }
+}
+
+/// The dialog opened and descended to the credential line for
+/// `provider`, accepting the suggested name.
+fn descend_to_credential(provider: LoginProvider) -> (SettingsScreen, String) {
+    let mut settings = settings_screen();
+    settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+    choose_provider_row(&mut settings, provider);
     settings.handle_key(key(KeyCode::Enter));
     let name = settings.dialog.as_ref().unwrap().input.clone();
     settings.handle_key(key(KeyCode::Enter));
@@ -358,7 +378,7 @@ fn q_leaves_the_settings_like_escape() {
     );
     // Inside the add dialog `q` is text, not a leave key: the
     // dialog takes every key while it is open.
-    let (mut settings, _) = descend_to_credential(0);
+    let (mut settings, _) = descend_to_credential(LoginProvider::Google);
     settings.handle_key(key(KeyCode::Char('q')));
     let dialog = settings.dialog.as_ref().expect("the dialog stands");
     assert!(dialog.input.ends_with('q'), "q is text: {:?}", dialog.input);
@@ -595,7 +615,7 @@ fn the_empty_subagents_page_has_nothing_to_act_on() {
 
 #[test]
 fn the_dialog_buffers_typing_and_masks_it() {
-    let (mut settings, _) = descend_to_credential(0);
+    let (mut settings, _) = descend_to_credential(LoginProvider::Google);
     for c in "sk-abc".chars() {
         settings.handle_key(key(KeyCode::Char(c)));
     }
@@ -627,7 +647,7 @@ fn the_dialog_enter_with_a_blank_credential_does_nothing() {
 
 #[test]
 fn the_dialog_enter_validates_and_locks_until_the_outcome() {
-    let (mut settings, _) = descend_to_credential(0);
+    let (mut settings, _) = descend_to_credential(LoginProvider::Google);
     settings.dialog.as_mut().unwrap().input = " key ".into();
     assert_eq!(
         settings.handle_key(key(KeyCode::Enter)),
@@ -652,9 +672,9 @@ fn the_dialog_enter_validates_and_locks_until_the_outcome() {
 fn the_copilot_row_starts_the_flow_and_esc_closes_the_dialog() {
     let mut settings = settings_screen();
     settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
-    // Down to Copilot's row, then the name stage: enter starts the
-    // flow, not a credential input.
-    settings.dialog.as_mut().unwrap().selected = PROVIDERS.len() - 1;
+    // Copilot's row, then the name stage: enter starts the flow, not
+    // a credential input.
+    choose_provider_row(&mut settings, LoginProvider::Copilot);
     assert_eq!(
         settings.dialog.as_ref().unwrap().selected_provider(),
         LoginProvider::Copilot
@@ -736,7 +756,7 @@ fn the_flow_buttons_map_to_open_and_copy() {
 
 #[test]
 fn the_dialog_error_renders_inline_and_allows_retry() {
-    let (mut settings, _) = descend_to_credential(0);
+    let (mut settings, _) = descend_to_credential(LoginProvider::Google);
     let dialog = settings.dialog.as_mut().unwrap();
     dialog.input = "bad-key".into();
     dialog.status = DialogStatus::Validating;
@@ -753,26 +773,94 @@ fn the_dialog_error_renders_inline_and_allows_retry() {
 }
 
 #[test]
+fn the_dialog_groups_providers_under_their_categories() {
+    let mut settings = settings_screen();
+    settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
+    let kinds = |settings: &SettingsScreen| {
+        settings
+            .dialog
+            .as_ref()
+            .unwrap()
+            .visible_providers()
+            .iter()
+            .map(|entry| entry.kind)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        settings.dialog.as_ref().unwrap().selected_category(),
+        ProviderCategory::Subscription
+    );
+    assert_eq!(
+        kinds(&settings),
+        vec![
+            LoginProvider::ChatGpt,
+            LoginProvider::Copilot,
+            LoginProvider::OpenCodeGo,
+            LoginProvider::Zai
+        ]
+    );
+    // The group already names the plan, so the rows do not repeat it.
+    let providers = settings.dialog.as_ref().unwrap().visible_providers();
+    assert_eq!(providers[0].name, "ChatGPT (OpenAI)");
+    assert_eq!(providers[3].name, "GLM Coding Plan (Z.ai)");
+    // The categories wrap at both ends.
+    settings.handle_key(key(KeyCode::Up));
+    assert_eq!(
+        settings.dialog.as_ref().unwrap().selected_category(),
+        ProviderCategory::Local
+    );
+    settings.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        settings.dialog.as_ref().unwrap().selected_category(),
+        ProviderCategory::Subscription
+    );
+    settings.handle_key(key(KeyCode::Down));
+    settings.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        settings.dialog.as_ref().unwrap().selected_category(),
+        ProviderCategory::Api
+    );
+    assert_eq!(
+        kinds(&settings),
+        vec![
+            LoginProvider::Google,
+            LoginProvider::Anthropic,
+            LoginProvider::OpenAi,
+            LoginProvider::OpenRouter,
+            LoginProvider::DeepSeek,
+            LoginProvider::OpenCode
+        ]
+    );
+    settings.handle_key(key(KeyCode::Esc));
+    settings.handle_key(key(KeyCode::Down));
+    settings.handle_key(key(KeyCode::Enter));
+    assert_eq!(kinds(&settings), vec![LoginProvider::LlamaCpp]);
+}
+
+#[test]
 fn the_dialog_selection_wraps_across_the_providers() {
     let mut settings = settings_screen();
     settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
-    for _ in 0..PROVIDERS.len() {
+    // Down to the API category, then into its provider list.
+    settings.handle_key(key(KeyCode::Down));
+    settings.handle_key(key(KeyCode::Enter));
+    let count = settings.dialog.as_ref().unwrap().visible_providers().len();
+    for _ in 0..count {
         settings.handle_key(key(KeyCode::Down));
     }
     assert_eq!(settings.dialog.as_ref().unwrap().selected, 0, "down wraps");
     settings.handle_key(key(KeyCode::Up));
     assert_eq!(
         settings.dialog.as_ref().unwrap().selected,
-        PROVIDERS.len() - 1,
+        count - 1,
         "up wraps"
     );
 }
 
 #[test]
 fn the_dialog_takes_a_masked_api_key_for_the_new_providers() {
-    // The add flow: down three to Anthropic, the suggested name,
-    // then the key.
-    let (mut settings, _) = descend_to_credential(3);
+    // The add flow: Anthropic's row, the suggested name, then the key.
+    let (mut settings, _) = descend_to_credential(LoginProvider::Anthropic);
     let dialog = settings.dialog.as_ref().unwrap();
     assert_eq!(dialog.selected_provider(), LoginProvider::Anthropic);
     assert_eq!(dialog.input_label(), "API key: ");
@@ -805,10 +893,8 @@ fn the_name_suggestion_skips_taken_names() {
     let mut settings = settings_screen();
     settings.stored = stored;
     settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
-    // Down to openai's row, then into the name input.
-    for _ in 0..4 {
-        settings.handle_key(key(KeyCode::Down));
-    }
+    // OpenAI's row, then into the name input.
+    choose_provider_row(&mut settings, LoginProvider::OpenAi);
     settings.handle_key(key(KeyCode::Enter));
     assert_eq!(settings.dialog.as_ref().unwrap().input, "openai-3");
     // Renaming is free: clear and type.
@@ -834,7 +920,7 @@ fn the_name_suggestion_skips_taken_names() {
 
 #[test]
 fn the_dialog_esc_walks_back_through_the_stages_then_closes() {
-    let (mut settings, _) = descend_to_credential(0);
+    let (mut settings, _) = descend_to_credential(LoginProvider::Google);
     settings.handle_key(key(KeyCode::Esc));
     assert_eq!(
         settings.dialog.as_ref().unwrap().stage,
@@ -844,6 +930,11 @@ fn the_dialog_esc_walks_back_through_the_stages_then_closes() {
     assert_eq!(
         settings.dialog.as_ref().unwrap().stage,
         DialogStage::SelectProvider
+    );
+    settings.handle_key(key(KeyCode::Esc));
+    assert_eq!(
+        settings.dialog.as_ref().unwrap().stage,
+        DialogStage::SelectCategory
     );
     assert_eq!(
         settings.handle_key(key(KeyCode::Esc)),
@@ -856,16 +947,22 @@ fn the_dialog_esc_walks_back_through_the_stages_then_closes() {
 fn a_click_can_pick_the_dialogs_provider_row() {
     let mut settings = settings_screen();
     settings.dialog = Some(AddInstanceDialog::new(&settings.stored));
-    settings.dialog.as_mut().unwrap().select_provider_row(3);
-    let dialog = settings.dialog.as_ref().unwrap();
-    assert_eq!(dialog.selected, 3);
-    assert_eq!(dialog.selected_provider(), LoginProvider::Anthropic);
-    // Out-of-range clicks clamp; other stages ignore them.
-    settings.dialog.as_mut().unwrap().select_provider_row(99);
+    // The dialog opens on the categories; a click clamps there too.
+    settings.dialog.as_mut().unwrap().select_category_row(99);
     assert_eq!(
-        settings.dialog.as_ref().unwrap().selected,
-        PROVIDERS.len() - 1
+        settings.dialog.as_ref().unwrap().selected_category(),
+        ProviderCategory::Local
     );
+    settings.dialog.as_mut().unwrap().select_category_row(1);
+    settings.dialog.as_mut().unwrap().choose_category();
+    settings.dialog.as_mut().unwrap().select_provider_row(0);
+    let dialog = settings.dialog.as_ref().unwrap();
+    assert_eq!(dialog.selected, 0);
+    assert_eq!(dialog.selected_provider(), LoginProvider::Google);
+    // Out-of-range clicks clamp to the visible providers.
+    let count = dialog.visible_providers().len();
+    settings.dialog.as_mut().unwrap().select_provider_row(99);
+    assert_eq!(settings.dialog.as_ref().unwrap().selected, count - 1);
     settings.handle_key(key(KeyCode::Enter));
     settings.dialog.as_mut().unwrap().select_provider_row(0);
     assert_eq!(
@@ -1255,8 +1352,9 @@ fn a_paste_lands_on_the_dialogs_credential_line_without_control_characters() {
     settings.dialog.as_mut().unwrap().paste("sk-123");
     assert_eq!(settings.dialog.as_ref().unwrap().input, "");
 
-    // The add flow down to the credential line.
-    settings.handle_key(key(KeyCode::Enter));
+    // The add flow down to the credential line: into API, its first
+    // provider, then the name.
+    settings.handle_key(key(KeyCode::Down));
     settings.handle_key(key(KeyCode::Enter));
     settings.handle_key(key(KeyCode::Enter));
     settings.handle_key(key(KeyCode::Enter));

@@ -34,6 +34,60 @@ impl LoginProvider {
     pub fn uses_flow(self) -> bool {
         matches!(self, Self::Copilot | Self::ChatGpt)
     }
+
+    /// The group the row belongs to in the add-provider dialog.
+    pub fn category(self) -> ProviderCategory {
+        match self {
+            Self::ChatGpt | Self::Copilot | Self::OpenCodeGo | Self::Zai => {
+                ProviderCategory::Subscription
+            }
+            Self::Google
+            | Self::OpenRouter
+            | Self::Anthropic
+            | Self::OpenAi
+            | Self::DeepSeek
+            | Self::OpenCode => ProviderCategory::Api,
+            Self::LlamaCpp => ProviderCategory::Local,
+        }
+    }
+}
+
+/// A group of provider rows in the add-provider dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderCategory {
+    /// Plans billed by a recurring subscription.
+    Subscription,
+    /// Providers billed per token or per request.
+    Api,
+    /// A server on this machine or a custom endpoint.
+    Local,
+}
+
+impl ProviderCategory {
+    /// The categories in dialog order.
+    pub const ALL: &[ProviderCategory] = &[Self::Subscription, Self::Api, Self::Local];
+
+    /// The row's label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Subscription => "Subscriptions",
+            Self::Api => "API / Pay-as-you-go",
+            Self::Local => "Local/Custom",
+        }
+    }
+
+    /// How many providers the category holds.
+    pub fn provider_count(self) -> usize {
+        providers_in(self).len()
+    }
+}
+
+/// The provider rows in `category`, in display order.
+pub fn providers_in(category: ProviderCategory) -> Vec<&'static ProviderEntry> {
+    PROVIDERS
+        .iter()
+        .filter(|entry| entry.kind.category() == category)
+        .collect()
 }
 
 /// The provider rows shown at login. Every row configures an implemented
@@ -46,19 +100,30 @@ pub struct ProviderEntry {
     pub kind: LoginProvider,
 }
 
-/// The login provider list, in display order.
+/// The login provider list, in display order: grouped by category, the
+/// subscriptions first.
 pub const PROVIDERS: &[ProviderEntry] = &[
+    // Subscriptions
+    ProviderEntry {
+        name: "ChatGPT (OpenAI)",
+        kind: LoginProvider::ChatGpt,
+    },
+    ProviderEntry {
+        name: "GitHub Copilot",
+        kind: LoginProvider::Copilot,
+    },
+    ProviderEntry {
+        name: "OpenCode Go",
+        kind: LoginProvider::OpenCodeGo,
+    },
+    ProviderEntry {
+        name: "GLM Coding Plan (Z.ai)",
+        kind: LoginProvider::Zai,
+    },
+    // API / Pay-as-you-go
     ProviderEntry {
         name: "Google Gemini",
         kind: LoginProvider::Google,
-    },
-    ProviderEntry {
-        name: "llama.cpp (local server)",
-        kind: LoginProvider::LlamaCpp,
-    },
-    ProviderEntry {
-        name: "OpenRouter",
-        kind: LoginProvider::OpenRouter,
     },
     ProviderEntry {
         name: "Anthropic",
@@ -69,28 +134,21 @@ pub const PROVIDERS: &[ProviderEntry] = &[
         kind: LoginProvider::OpenAi,
     },
     ProviderEntry {
-        name: "DeepSeek",
-        kind: LoginProvider::DeepSeek,
+        name: "OpenRouter",
+        kind: LoginProvider::OpenRouter,
     },
     ProviderEntry {
-        name: "Z.ai (GLM Coding Plan)",
-        kind: LoginProvider::Zai,
+        name: "DeepSeek",
+        kind: LoginProvider::DeepSeek,
     },
     ProviderEntry {
         name: "OpenCode (pay-as-you-go)",
         kind: LoginProvider::OpenCode,
     },
+    // Local/Custom
     ProviderEntry {
-        name: "OpenCode Go",
-        kind: LoginProvider::OpenCodeGo,
-    },
-    ProviderEntry {
-        name: "ChatGPT (subscription)",
-        kind: LoginProvider::ChatGpt,
-    },
-    ProviderEntry {
-        name: "GitHub Copilot",
-        kind: LoginProvider::Copilot,
+        name: "llama.cpp (local server)",
+        kind: LoginProvider::LlamaCpp,
     },
 ];
 

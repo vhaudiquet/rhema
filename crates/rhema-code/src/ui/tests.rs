@@ -6,6 +6,9 @@ use super::settings::usage_k;
 use super::*;
 use crate::palette::DARK;
 use crate::screens::{CatalogModel, PickerScreen};
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
+use ratatui::style::Color;
 use ratatui::{Terminal, backend::TestBackend};
 use rhema_provider::ModelCard;
 
@@ -44,6 +47,114 @@ fn the_panel_frame_and_title_read_on_both_grounds() {
         )
     };
     assert_eq!(inks(&DARK), (DARK.text, DARK.border_strong));
+    let native = DARK.painted(crate::palette::Background::Native);
+    assert_eq!(inks(&native), (DARK.text, DARK.text3));
+}
+
+/// The add dialog carries its own frame and title ink, so the title
+/// never takes the dim border fg and the box reads on either ground.
+/// The backdrop loses brightness but keeps its glyphs: a terminal has
+/// no pixels to blur, so the modal haze is a contrast fade.
+#[test]
+fn the_modal_backdrop_fades_the_page_but_keeps_its_glyphs() {
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 1, 1));
+    buffer[(0, 0)]
+        .set_symbol("S")
+        .set_fg(Color::Rgb(0xEE, 0xF3, 0xF1));
+    super::chrome::dim_backdrop(&mut buffer, &DARK);
+    assert_eq!(buffer[(0, 0)].symbol(), "S", "the glyph survives the fade");
+    let Color::Rgb(r, g, b) = buffer[(0, 0)].fg else {
+        panic!("the theme's ink is RGB");
+    };
+    assert!(
+        r < 0xEE && g < 0xF3 && b < 0xF1,
+        "the page's ink dims toward the canvas"
+    );
+    assert!(r > 0x0A, "the page still reads behind the dialog");
+}
+
+/// Opening a settings dialog runs the fade over the page, not just the
+/// dialog's own box.
+#[test]
+fn a_settings_dialog_fades_the_page_behind_it() {
+    let ink = |dialog: bool| {
+        let mut settings = crate::screens::SettingsScreen::new();
+        if dialog {
+            settings.dialog = Some(crate::screens::AddInstanceDialog::new(&settings.stored));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(
+                    frame,
+                    &settings,
+                    &DARK,
+                    &crate::icons::UNICODE,
+                    &mut Vec::new(),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let (x, y) = (0..16)
+            .find_map(|y| {
+                let row: String = (0..80).map(|x| buffer[(x, y)].symbol()).collect();
+                row.find("Settings").map(|x| (x as u16, y))
+            })
+            .expect("the sidebar heading draws");
+        buffer[(x, y)].style().fg.expect("the heading has ink")
+    };
+    let plain = ink(false);
+    let hazed = ink(true);
+    let brightness = |color: Color| {
+        let Color::Rgb(r, g, b) = color else {
+            panic!("the theme's ink is RGB");
+        };
+        r as u32 + g as u32 + b as u32
+    };
+    assert!(
+        brightness(hazed) < brightness(plain),
+        "the page sits back under the dialog: {plain:?} -> {hazed:?}"
+    );
+}
+
+#[test]
+fn the_add_dialog_frame_and_title_read_on_both_grounds() {
+    let inks = |theme: &crate::palette::Theme| {
+        let mut settings = crate::screens::SettingsScreen::new();
+        settings.dialog = Some(crate::screens::AddInstanceDialog::new(&settings.stored));
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(
+                    frame,
+                    &settings,
+                    theme,
+                    &crate::icons::UNICODE,
+                    &mut Vec::new(),
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let y = (0..16)
+            .find(|&y| {
+                (0..80)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+                    .contains("Add a login")
+            })
+            .expect("the dialog title draws");
+        let x = (0..80)
+            .find(|&x| buffer[(x, y)].symbol() == "A")
+            .expect("the title starts after the border");
+        let corner = (0..80)
+            .find(|&x| buffer[(x, y)].symbol() == "╭")
+            .expect("the frame starts on the title row");
+        (
+            buffer[(x, y)].style().fg.expect("the title has ink"),
+            buffer[(corner, y)].style().fg.expect("the frame has ink"),
+        )
+    };
+    assert_eq!(inks(&DARK), (DARK.text, DARK.text3));
     let native = DARK.painted(crate::palette::Background::Native);
     assert_eq!(inks(&native), (DARK.text, DARK.text3));
 }
@@ -849,10 +960,10 @@ fn the_page_renders_its_title_and_rule() {
     );
 }
 
-/// The add dialog pops over the settings: its provider list draws,
-/// and its rows register as click targets while it shows.
+/// The add dialog opens on the categories, and a category opens its
+/// provider list. Both levels register click targets.
 #[test]
-fn the_add_dialog_draws_its_provider_list() {
+fn the_add_dialog_starts_with_categories_then_lists_providers() {
     let mut settings = crate::screens::SettingsScreen::new();
     settings.dialog = Some(crate::screens::AddInstanceDialog::new(&settings.stored));
 
@@ -869,16 +980,59 @@ fn the_add_dialog_draws_its_provider_list() {
         })
         .collect();
     let text = rows.join("\n");
-    assert!(text.contains("add a login"), "the dialog title: {text}");
+    assert!(text.contains("Add a login"), "the dialog title: {text}");
     assert!(
-        text.contains("GitHub Copilot"),
+        text.contains("Subscriptions")
+            && text.contains("API / Pay-as-you-go")
+            && text.contains("Local/Custom"),
+        "the category list renders: {text}"
+    );
+    assert!(
+        !text.contains("Google Gemini"),
+        "providers wait behind their category: {text}"
+    );
+    let category_hits = hits
+        .iter()
+        .filter(|(_, hit)| matches!(hit, SettingsHit::DialogCategory(_)))
+        .count();
+    assert_eq!(
+        category_hits,
+        crate::screens::ProviderCategory::ALL.len(),
+        "each category is clickable"
+    );
+
+    // Open the API category: its providers draw and register.
+    settings.dialog.as_mut().unwrap().select_category_row(1);
+    settings.dialog.as_mut().unwrap().choose_category();
+    let mut hits = Vec::new();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let rows: Vec<String> = (0..16)
+        .map(|y| {
+            (0..80)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    let text = rows.join("\n");
+    assert!(
+        text.contains("Google Gemini") && text.contains("Anthropic"),
         "the provider list renders: {text}"
+    );
+    assert!(
+        !text.contains("Local/Custom"),
+        "the category list is behind the providers: {text}"
     );
     let provider_hits = hits
         .iter()
         .filter(|(_, hit)| matches!(hit, SettingsHit::DialogProvider(_)))
         .count();
-    assert_eq!(provider_hits, PROVIDERS.len(), "each provider is clickable");
+    assert_eq!(
+        provider_hits,
+        crate::screens::providers_in(crate::screens::ProviderCategory::Api).len(),
+        "each provider is clickable"
+    );
 }
 
 /// The selection must be visible: the highlighted row carries the

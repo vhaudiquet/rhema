@@ -39,7 +39,7 @@ pub use picker::{
     CatalogModel, PickerAction, PickerScreen, PickerStatus, ResumeAction, ResumeRow, ResumeScreen,
 };
 pub use profiles::{ProfileAction, ProfileRow, ProfileScreen, profile_rows};
-pub use providers::{LoginProvider, PROVIDERS, ProviderEntry};
+pub use providers::{LoginProvider, PROVIDERS, ProviderCategory, ProviderEntry, providers_in};
 pub use settings::{
     InstanceRow, SettingsAction, SettingsScreen, SettingsSection, SkillRow, SkillSource,
     SubagentRow, SubagentSource, UpdateCheck, UpdateInstall, UpdatePage,

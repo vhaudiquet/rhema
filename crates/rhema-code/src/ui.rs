@@ -10,7 +10,9 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Screen, SettingsHit};
-use crate::screens::{Chip, PROVIDERS, PickerScreen, PickerStatus, SettingsSection, format_tokens};
+use crate::screens::{
+    Chip, PickerScreen, PickerStatus, ProviderCategory, SettingsSection, format_tokens,
+};
 use crate::transcript::pretty_args;
 use rhema_core::Image;
 use rhema_provider::ModelCard;

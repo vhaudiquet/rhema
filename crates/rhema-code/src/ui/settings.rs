@@ -98,6 +98,14 @@ pub(crate) fn render_settings(
         footer_area,
     );
 
+    let modal = settings.dialog.is_some()
+        || settings.add_profile.is_some()
+        || settings.sandbox_dialog.is_some()
+        || settings.mcp_dialog.is_some()
+        || settings.mcp_confirm.is_some();
+    if modal {
+        super::chrome::dim_backdrop(frame.buffer_mut(), theme);
+    }
     if let Some(dialog) = &settings.dialog {
         render_add_dialog(frame, dialog, theme, hits);
     }

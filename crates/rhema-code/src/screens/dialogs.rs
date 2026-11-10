@@ -135,7 +135,10 @@ pub enum DialogAction {
 /// Which half of the add-instance dialog is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogStage {
-    /// The provider list: arrows to choose, enter to continue.
+    /// The category list: arrows to choose, enter to see its providers.
+    SelectCategory,
+    /// The provider list of the chosen category: arrows to choose,
+    /// enter to continue.
     SelectProvider,
     /// The name input for the instance being added.
     NameInstance,
@@ -182,7 +185,9 @@ pub struct PendingInstance {
 pub struct AddInstanceDialog {
     /// Which half of the dialog is showing.
     pub stage: DialogStage,
-    /// The highlighted row on the provider list.
+    /// The highlighted row on the category list.
+    pub selected_category: usize,
+    /// The highlighted row on the chosen category's provider list.
     pub selected: usize,
     /// The line being typed: the instance name on `NameInstance`, the
     /// credential on `EnterCredential`.
@@ -219,7 +224,8 @@ impl AddInstanceDialog {
     /// the profile's stored instances.
     pub fn new(stored: &rhema_config::Profile) -> Self {
         Self {
-            stage: DialogStage::SelectProvider,
+            stage: DialogStage::SelectCategory,
+            selected_category: 0,
             selected: 0,
             input: String::new(),
             status: DialogStatus::Idle,
@@ -233,16 +239,50 @@ impl AddInstanceDialog {
         }
     }
 
+    /// The highlighted category.
+    pub fn selected_category(&self) -> ProviderCategory {
+        ProviderCategory::ALL[self.selected_category.min(ProviderCategory::ALL.len() - 1)]
+    }
+
+    /// The provider rows the highlighted category holds.
+    pub fn visible_providers(&self) -> Vec<&'static ProviderEntry> {
+        providers_in(self.selected_category())
+    }
+
+    /// Moves the category-list selection to `index` (a click); out-of-
+    /// range clicks clamp to the list.
+    pub fn select_category_row(&mut self, index: usize) {
+        if self.stage == DialogStage::SelectCategory {
+            self.selected_category = index.min(ProviderCategory::ALL.len() - 1);
+        }
+    }
+
+    /// Enter (or a click) on the category list: show its providers.
+    pub fn choose_category(&mut self) -> DialogAction {
+        if self.stage != DialogStage::SelectCategory {
+            return DialogAction::None;
+        }
+        self.selected = 0;
+        self.stage = DialogStage::SelectProvider;
+        DialogAction::None
+    }
+
     /// The backend the highlighted provider row configures.
     pub fn selected_provider(&self) -> LoginProvider {
-        PROVIDERS[self.selected.min(PROVIDERS.len() - 1)].kind
+        let providers = self.visible_providers();
+        let index = self.selected.min(providers.len().saturating_sub(1));
+        providers
+            .get(index)
+            .map(|entry| entry.kind)
+            .unwrap_or(LoginProvider::Google)
     }
 
     /// Moves the provider-list selection to `index` (a click); out-of-
     /// range clicks clamp to the list.
     pub fn select_provider_row(&mut self, index: usize) {
         if self.stage == DialogStage::SelectProvider {
-            self.selected = index.min(PROVIDERS.len() - 1);
+            let count = self.visible_providers().len();
+            self.selected = index.min(count.saturating_sub(1));
         }
     }
 
@@ -250,6 +290,9 @@ impl AddInstanceDialog {
     /// input — or the interactive flow, for the providers that log in
     /// that way.
     pub fn choose_provider(&mut self) -> DialogAction {
+        if self.stage != DialogStage::SelectProvider {
+            return DialogAction::None;
+        }
         let provider = self.selected_provider();
         self.pending = Some(PendingInstance {
             provider,
@@ -265,9 +308,10 @@ impl AddInstanceDialog {
     /// The hint under the input, per the stage.
     pub fn input_hint(&self) -> String {
         match self.stage {
-            DialogStage::SelectProvider => {
-                "arrows choose · enter to log in · esc cancels".to_owned()
+            DialogStage::SelectCategory => {
+                "arrows choose · enter for providers · esc cancels".to_owned()
             }
+            DialogStage::SelectProvider => "arrows choose · enter to log in · esc back".to_owned(),
             DialogStage::NameInstance => {
                 "name this login · enter to continue · esc back".to_owned()
             }
@@ -367,6 +411,7 @@ impl AddInstanceDialog {
             return DialogAction::None;
         }
         match self.stage {
+            DialogStage::SelectCategory => self.handle_category_key(key),
             DialogStage::SelectProvider => self.handle_provider_key(key),
             DialogStage::NameInstance => self.handle_name_key(key),
             DialogStage::EnterCredential => self.handle_credential_key(key),
@@ -374,18 +419,39 @@ impl AddInstanceDialog {
         }
     }
 
+    /// Keys on the category list: arrows choose, enter shows the
+    /// category's providers, esc closes the dialog.
+    fn handle_category_key(&mut self, key: KeyEvent) -> DialogAction {
+        match key.code {
+            KeyCode::Up | KeyCode::Down => {
+                let count = ProviderCategory::ALL.len() as isize;
+                let step = if key.code == KeyCode::Down { 1 } else { -1 };
+                self.selected_category =
+                    ((self.selected_category as isize + step).rem_euclid(count)) as usize;
+                DialogAction::None
+            }
+            KeyCode::Enter => self.choose_category(),
+            KeyCode::Esc => DialogAction::Close,
+            _ => DialogAction::None,
+        }
+    }
+
     /// Keys on the provider list: arrows choose, enter descends into the
-    /// name input, esc closes the dialog.
+    /// name input, esc returns to the category list.
     fn handle_provider_key(&mut self, key: KeyEvent) -> DialogAction {
         match key.code {
             KeyCode::Up | KeyCode::Down => {
-                let count = PROVIDERS.len() as isize;
+                let count = self.visible_providers().len() as isize;
                 let step = if key.code == KeyCode::Down { 1 } else { -1 };
                 self.selected = ((self.selected as isize + step).rem_euclid(count)) as usize;
                 DialogAction::None
             }
             KeyCode::Enter => self.choose_provider(),
-            KeyCode::Esc => DialogAction::Close,
+            KeyCode::Esc => {
+                self.selected = 0;
+                self.stage = DialogStage::SelectCategory;
+                DialogAction::None
+            }
             _ => DialogAction::None,
         }
     }

@@ -236,10 +236,36 @@ pub(crate) fn onboarding_body(
         }
         Step::Login => {
             if let Some(dialog) = &wizard.dialog {
-                title("Add a login", &mut lines);
+                let heading = if dialog.stage == crate::screens::DialogStage::SelectProvider {
+                    format!("Add a login · {}", dialog.selected_category().label())
+                } else {
+                    "Add a login".to_owned()
+                };
+                title(&heading, &mut lines);
                 match dialog.stage {
+                    crate::screens::DialogStage::SelectCategory => {
+                        for (index, category) in ProviderCategory::ALL.iter().enumerate() {
+                            let selected = index == dialog.selected_category;
+                            let style = if selected {
+                                Style::default().fg(theme.text).bold()
+                            } else {
+                                Style::default().fg(theme.text2)
+                            };
+                            let count = category.provider_count();
+                            let count = if count == 1 {
+                                "1 provider".to_owned()
+                            } else {
+                                format!("{count} providers")
+                            };
+                            lines.push(Line::from(vec![
+                                super::chrome::marker(selected, theme),
+                                Span::styled(format!("{:<22}", category.label()), style),
+                                Span::raw(count).fg(theme.text3),
+                            ]));
+                        }
+                    }
                     crate::screens::DialogStage::SelectProvider => {
-                        for (index, entry) in PROVIDERS.iter().enumerate() {
+                        for (index, entry) in dialog.visible_providers().iter().enumerate() {
                             let selected = index == dialog.selected;
                             let style = if selected {
                                 Style::default().fg(theme.text).bold()

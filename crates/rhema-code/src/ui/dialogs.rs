@@ -16,7 +16,8 @@ pub(crate) fn render_add_dialog(
     const INNER_WIDTH: usize = 56;
     let flow = dialog_flow_lines(dialog, theme, INNER_WIDTH);
     let rows = match dialog.stage {
-        crate::screens::DialogStage::SelectProvider => PROVIDERS.len(),
+        crate::screens::DialogStage::SelectCategory => ProviderCategory::ALL.len(),
+        crate::screens::DialogStage::SelectProvider => dialog.visible_providers().len(),
         crate::screens::DialogStage::NameInstance
         | crate::screens::DialogStage::EnterCredential => 1,
         crate::screens::DialogStage::Flow => flow.lines.len().max(1),
@@ -24,12 +25,22 @@ pub(crate) fn render_add_dialog(
     let height = 2 + rows + 1 + 1;
     let area = centered(58, height, frame.area());
     frame.render_widget(Clear, area);
+    let heading = match dialog.stage {
+        crate::screens::DialogStage::SelectProvider => {
+            format!(" Add a login · {} ", dialog.selected_category().label())
+        }
+        _ => " Add a login ".to_owned(),
+    };
+    // The dialog is the screen's focus: the frame takes the readable
+    // ink rather than the dim hairline, and the title its own bright
+    // ink instead of the border's fg.
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
-        .border_style(Style::default().fg(theme.border))
+        .border_style(Style::default().fg(theme.text3))
+        .title_style(Style::default().fg(theme.text).bold())
         .style(Style::default().bg(theme.sunken).fg(theme.text))
-        .title(" add a login ");
+        .title(heading);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -41,10 +52,48 @@ pub(crate) fn render_add_dialog(
     .areas(inner);
 
     match dialog.stage {
+        crate::screens::DialogStage::SelectCategory => {
+            // The groups a provider can belong to, each row a click
+            // target; enter (or a click) opens the group's list.
+            let rows: Vec<ListItem> = ProviderCategory::ALL
+                .iter()
+                .enumerate()
+                .map(|(index, category)| {
+                    let selected = index == dialog.selected_category;
+                    hits.push((
+                        Rect {
+                            x: body_area.x,
+                            y: body_area.y + index as u16,
+                            width: body_area.width,
+                            height: 1,
+                        },
+                        SettingsHit::DialogCategory(index),
+                    ));
+                    let name_style = if selected {
+                        Style::default().fg(theme.text).bold()
+                    } else {
+                        Style::default().fg(theme.text2)
+                    };
+                    let count = category.provider_count();
+                    let count = if count == 1 {
+                        "1 provider".to_owned()
+                    } else {
+                        format!("{count} providers")
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::raw(if selected { "❯ " } else { "  " }).fg(theme.accent_text),
+                        Span::styled(format!("{:<22}", category.label()), name_style),
+                        Span::raw(count).fg(theme.text3),
+                    ]))
+                })
+                .collect();
+            frame.render_widget(ratatui::widgets::List::new(rows), body_area);
+        }
         crate::screens::DialogStage::SelectProvider => {
             // The provider kinds a new instance can be, each row a click
             // target; enter (or a second click's enter) confirms.
-            let rows: Vec<ListItem> = PROVIDERS
+            let rows: Vec<ListItem> = dialog
+                .visible_providers()
                 .iter()
                 .enumerate()
                 .map(|(index, entry)| {
