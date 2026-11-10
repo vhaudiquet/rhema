@@ -34,6 +34,14 @@ pub fn logo_png() -> Option<&'static [u8]> {
 /// legal but may overflow terminal input buffers.
 const CHUNK: usize = 4096;
 
+/// Whether `TERM` names Ghostty's own terminfo entry. Ghostty sets it
+/// for every shell it starts, and unlike `TERM_PROGRAM` and
+/// `GHOSTTY_RESOURCES_DIR` it survives ssh — the way a remote session
+/// reaches a Ghostty terminal at all.
+fn ghostty_term(term: Option<&str>) -> bool {
+    matches!(term, Some(term) if term == "ghostty" || term.ends_with("-ghostty"))
+}
+
 /// Whether this terminal draws the kitty graphics protocol — kitty and
 /// Ghostty, by their own environment marks — and an image to draw
 /// exists. `RHEMA_NO_IMAGES` overrides detection off: an escape a
@@ -45,11 +53,13 @@ pub fn supported() -> bool {
     if !std::io::stdout().is_terminal() {
         return false;
     }
+    let term = std::env::var("TERM").ok();
     let kitty = std::env::var_os("KITTY_WINDOW_ID").is_some()
         || std::env::var_os("KITTY_PID").is_some()
-        || std::env::var("TERM").as_deref() == Ok("xterm-kitty");
+        || term.as_deref() == Some("xterm-kitty");
     let ghostty = std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
-        || std::env::var("TERM_PROGRAM").as_deref() == Ok("ghostty");
+        || std::env::var("TERM_PROGRAM").as_deref() == Ok("ghostty")
+        || ghostty_term(term.as_deref());
     kitty || ghostty
 }
 
@@ -134,6 +144,16 @@ mod tests {
         assert_eq!(base64(b"foob"), "Zm9vYg==");
         assert_eq!(base64(b"fooba"), "Zm9vYmE=");
         assert_eq!(base64(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn the_ghostty_mark_survives_ssh() {
+        // `TERM` crosses ssh; `TERM_PROGRAM` and the resources dir do not.
+        assert!(ghostty_term(Some("xterm-ghostty")));
+        assert!(ghostty_term(Some("ghostty")));
+        assert!(!ghostty_term(Some("xterm-kitty")));
+        assert!(!ghostty_term(Some("xterm-256color")));
+        assert!(!ghostty_term(None));
     }
 
     #[test]
