@@ -16,6 +16,11 @@
 //! the sink as an [`Event::RetryWait`] before it runs, so a UI can
 //! count it down.
 //!
+//! A short rate limit ([`ProviderError::RateLimited`] within
+//! [`rhema_core::MAX_RATE_LIMIT_WAIT`]) rides no ladder: the provider
+//! said how long to wait, so the retry waits that, a bounded number of
+//! times.
+//!
 //! Three rules keep an exchange honest:
 //!
 //! - A request whose stream already streamed **text** never starts
@@ -68,6 +73,16 @@ const DEFAULT_NETWORK_LADDER: &[Duration] = &[
 /// timeout, a 408 or 5xx status, an exchange that closed before any
 /// content. Three attempts, three seconds all told.
 const DEFAULT_SERVER_LADDER: &[Duration] = &[Duration::from_secs(1), Duration::from_secs(2)];
+
+/// How many times a short rate limit is waited out before the error
+/// surfaces: a request larger than the per-minute window can never
+/// fit, and no ladder should spin on it forever.
+const RATE_LIMIT_RETRIES: u32 = 4;
+
+/// Added to the provider's own wait: its reset times are rounded and
+/// its clock is not ours, so a retry at the exact second can land a
+/// hair early and buy another 429.
+const RATE_LIMIT_SLACK: Duration = Duration::from_millis(500);
 
 /// Re-issues failed model requests with backoff from a per-failure
 /// ladder.
@@ -203,6 +218,7 @@ impl ModelProvider for Retrying {
         // must not eat a server-ladder slot or its waits misread.
         let mut network_spent = 0u32;
         let mut server_spent = 0u32;
+        let mut rate_spent = 0u32;
         // The text every attempt of this exchange has streamed: what
         // the caller has already read, and what a continuation anchors
         // on. `carried` is the part streamed before the current
@@ -272,6 +288,22 @@ impl ModelProvider for Retrying {
                 Err(err) => {
                     if !err.is_retryable() {
                         return Err(err);
+                    }
+                    if let ProviderError::RateLimited { retry_after, .. } = &err {
+                        if rate_spent >= RATE_LIMIT_RETRIES {
+                            return Err(err);
+                        }
+                        let delay = *retry_after + RATE_LIMIT_SLACK;
+                        let message = err.to_string();
+                        sink.emit(Event::RetryWait {
+                            error: &message,
+                            delay,
+                            attempt: rate_spent + 1,
+                            total: RATE_LIMIT_RETRIES + 1,
+                        });
+                        self.sleeper.sleep(delay).await;
+                        rate_spent += 1;
+                        continue;
                     }
                     // A cut the caller watched but that streamed no
                     // durable text, thinking and half-parsed call
@@ -345,6 +377,8 @@ mod tests {
         Auth,
         /// A quota wall: never retryable, whatever the status family.
         RateLimit,
+        /// A per-minute window that named its two-second reset.
+        ShortRateLimit,
         /// One text delta, then a timeout mid-stream.
         DeltaThenTimeout,
         /// Tool-call deltas, then the link died: the caller watched
@@ -403,6 +437,10 @@ mod tests {
                 Attempt::RateLimit => Err(ProviderError::Api {
                     message: "anthropic api error (HTTP 429): rate_limit_error".into(),
                     status: Some(429),
+                }),
+                Attempt::ShortRateLimit => Err(ProviderError::RateLimited {
+                    message: "tokens per min".into(),
+                    retry_after: Duration::from_secs(2),
                 }),
                 Attempt::DeltaThenTimeout => {
                     sink.emit(Event::TextDelta("partial "));
@@ -668,6 +706,54 @@ mod tests {
             .await;
         assert!(result.is_err(), "the quota wall surfaces immediately");
         assert_eq!(scripted.calls(), 1, "no attempts wasted on the window");
+    }
+
+    /// Records the waits instead of sleeping them.
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<Duration>>);
+
+    #[async_trait]
+    impl Sleeper for Recorded {
+        async fn sleep(&self, duration: Duration) {
+            self.0.lock().unwrap().push(duration);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_short_rate_limit_waits_the_named_reset_and_answers() {
+        let scripted = Arc::new(Scripted::new(vec![
+            Attempt::ShortRateLimit,
+            Attempt::Succeed("fits now"),
+        ]));
+        let sleeper = Arc::new(Recorded::default());
+        let mut sink = Deltas::default();
+        let out = retried(scripted.clone())
+            .with_sleeper(sleeper.clone())
+            .complete(request(), &mut sink)
+            .await
+            .expect("the window cleared");
+        assert_eq!(out.message.content, vec![Content::Text("fits now".into())]);
+        assert_eq!(scripted.calls(), 2);
+        assert_eq!(
+            *sleeper.0.lock().unwrap(),
+            vec![Duration::from_secs(2) + RATE_LIMIT_SLACK],
+            "the provider's wait, not a ladder rung"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_that_never_clears_surfaces_after_its_retries() {
+        let steps = vec![Attempt::ShortRateLimit; RATE_LIMIT_RETRIES as usize + 1];
+        let scripted = Arc::new(Scripted::new(steps));
+        let sleeper = Arc::new(Recorded::default());
+        let mut sink = Deltas::default();
+        let result = retried(scripted.clone())
+            .with_sleeper(sleeper.clone())
+            .complete(request(), &mut sink)
+            .await;
+        assert!(matches!(result, Err(ProviderError::RateLimited { .. })));
+        assert_eq!(scripted.calls(), RATE_LIMIT_RETRIES as usize + 1);
+        assert_eq!(sleeper.0.lock().unwrap().len(), RATE_LIMIT_RETRIES as usize);
     }
 
     #[tokio::test]
