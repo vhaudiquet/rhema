@@ -170,8 +170,9 @@ impl OpenAiCompatibleProvider {
             .map_err(network_error)?;
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
+            return Err(response_error(status, &headers, &text));
         }
         Ok(response)
     }
@@ -193,8 +194,9 @@ impl OpenAiCompatibleProvider {
             .map_err(network_error)?;
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
+            return Err(response_error(status, &headers, &text));
         }
         let balance: WireBalance = response.json().await.map_err(|err| ProviderError::Api {
             message: format!("malformed balance response: {err}"),
@@ -311,6 +313,100 @@ pub fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
         ),
         status: Some(status.as_u16()),
     }
+}
+
+/// Maps a non-2xx response onto [`ProviderError`]: [`api_error`], except
+/// a 429 that names its reset becomes [`ProviderError::RateLimited`], so
+/// the retry ladder can wait out a per-minute window instead of failing
+/// the turn.
+pub fn response_error(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    raw: &str,
+) -> ProviderError {
+    let err = api_error(status, raw);
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return err;
+    }
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let body: WireErrorBody = serde_json::from_str(raw).unwrap_or_default();
+    match rate_limit_wait(header, &body.message(raw)) {
+        Some(retry_after) => ProviderError::RateLimited {
+            message: err.to_string(),
+            retry_after,
+        },
+        None => err,
+    }
+}
+
+/// The wait a 429 names, read from the most precise source first:
+/// `retry-after-ms`, `retry-after` in seconds (an HTTP date is not
+/// read), OpenAI's "try again in 2.004s" sentence, then the
+/// `x-ratelimit-reset-*` headers, the token window before the request
+/// window since TPM is the limit long agent turns hit.
+fn rate_limit_wait<'a>(
+    header: impl Fn(&str) -> Option<&'a str>,
+    message: &str,
+) -> Option<Duration> {
+    if let Some(ms) = header("retry-after-ms").and_then(|v| v.trim().parse::<f64>().ok()) {
+        return seconds(ms / 1000.0);
+    }
+    if let Some(secs) = header("retry-after").and_then(|v| v.trim().parse::<f64>().ok()) {
+        return seconds(secs);
+    }
+    let lower = message.to_ascii_lowercase();
+    if let Some(at) = lower.find("try again in ") {
+        let rest = &lower[at + "try again in ".len()..];
+        let token = rest
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .next()
+            .unwrap_or("")
+            .trim_end_matches('.');
+        if let Some(wait) = go_duration(token) {
+            return Some(wait);
+        }
+    }
+    ["x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"]
+        .into_iter()
+        .find_map(|name| header(name).and_then(|v| go_duration(v.trim())))
+}
+
+/// A non-negative, finite number of seconds as a [`Duration`].
+fn seconds(secs: f64) -> Option<Duration> {
+    (secs.is_finite() && secs >= 0.0).then(|| Duration::from_secs_f64(secs))
+}
+
+/// A Go-style duration as OpenAI spells resets: `1h2m3.5s`, `6m0s`,
+/// `120ms`, `2.004s`. A bare number reads as seconds.
+fn go_duration(text: &str) -> Option<Duration> {
+    if text.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = text.parse::<f64>() {
+        return seconds(secs);
+    }
+    let mut total = 0.0;
+    let mut rest = text;
+    while !rest.is_empty() {
+        let digits = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(rest.len());
+        let value: f64 = rest[..digits].parse().ok()?;
+        rest = &rest[digits..];
+        let unit_len = rest
+            .find(|c: char| c.is_ascii_digit() || c == '.')
+            .unwrap_or(rest.len());
+        let scale = match &rest[..unit_len] {
+            "h" => 3600.0,
+            "m" => 60.0,
+            "s" => 1.0,
+            "ms" => 0.001,
+            _ => return None,
+        };
+        total += value * scale;
+        rest = &rest[unit_len..];
+    }
+    seconds(total)
 }
 
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
@@ -490,8 +586,9 @@ impl ModelListing for OpenAiCompatibleProvider {
             .map_err(network_error)?;
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
+            return Err(response_error(status, &headers, &text));
         }
         let page: serde_json::Value = response.json().await.map_err(|err| ProviderError::Api {
             message: format!("malformed models page: {err}"),
@@ -541,6 +638,68 @@ impl ModelProvider for OpenAiCompatibleProvider {
 mod tests {
     use super::*;
     use crate::wire::normalize_models;
+
+    fn wait(headers: &[(&str, &str)], message: &str) -> Option<Duration> {
+        rate_limit_wait(
+            |name| {
+                headers
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| *value)
+            },
+            message,
+        )
+    }
+
+    #[test]
+    fn go_durations_read_as_openai_spells_them() {
+        assert_eq!(go_duration("2.004s"), Some(Duration::from_millis(2004)));
+        assert_eq!(go_duration("120ms"), Some(Duration::from_millis(120)));
+        assert_eq!(go_duration("6m0s"), Some(Duration::from_secs(360)));
+        assert_eq!(go_duration("1h2m3s"), Some(Duration::from_secs(3723)));
+        assert_eq!(go_duration("7"), Some(Duration::from_secs(7)));
+        assert_eq!(go_duration(""), None);
+        assert_eq!(go_duration("soon"), None);
+    }
+
+    #[test]
+    fn a_rate_limit_wait_prefers_the_most_precise_source() {
+        assert_eq!(
+            wait(&[("retry-after-ms", "1500"), ("retry-after", "2")], ""),
+            Some(Duration::from_millis(1500))
+        );
+        assert_eq!(
+            wait(&[("retry-after", "20")], ""),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            wait(
+                &[("x-ratelimit-reset-tokens", "30s")],
+                "Rate limit reached on tokens per min (TPM): Limit 30000, \
+                 Used 29000, Requested 2000. Please try again in 2.004s. Visit \
+                 https://platform.openai.com/account/rate-limits to learn more."
+            ),
+            Some(Duration::from_millis(2004))
+        );
+        assert_eq!(
+            wait(
+                &[
+                    ("x-ratelimit-reset-requests", "1s"),
+                    ("x-ratelimit-reset-tokens", "8.5s")
+                ],
+                "rate limited"
+            ),
+            Some(Duration::from_millis(8500))
+        );
+        // An HTTP-date retry-after is not read, and nothing else names a wait.
+        assert_eq!(
+            wait(
+                &[("retry-after", "Wed, 21 Oct 2026 07:28:00 GMT")],
+                "slow down"
+            ),
+            None
+        );
+    }
 
     #[test]
     fn debug_prints_presence_never_the_key() {

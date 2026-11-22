@@ -574,6 +574,79 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
 }
 
 #[tokio::test]
+async fn a_429_naming_its_reset_is_a_retryable_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("x-ratelimit-reset-tokens", "1.5s")
+                .set_body_string(
+                    json!({
+                        "error": {
+                            "message": "Rate limit reached on tokens per min (TPM)",
+                            "type": "tokens",
+                        }
+                    })
+                    .to_string(),
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new("k").with_base_url(base(&server));
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(
+            request(vec![Message::text(Role::User, "hi")], vec![]),
+            &mut sink,
+        )
+        .await
+        .expect_err("429 is an error");
+
+    match &err {
+        ProviderError::RateLimited {
+            message,
+            retry_after,
+        } => {
+            assert_eq!(*retry_after, std::time::Duration::from_millis(1500));
+            assert!(message.contains("tokens per min"), "got: {message}");
+        }
+        other => panic!("expected RateLimited, got: {other:?}"),
+    }
+    assert!(err.is_retryable());
+}
+
+#[tokio::test]
+async fn a_429_without_a_reset_stays_a_plain_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(429).set_body_string("quota exceeded"))
+        .mount(&server)
+        .await;
+
+    let provider = OpenAiCompatibleProvider::new("k").with_base_url(base(&server));
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(
+            request(vec![Message::text(Role::User, "hi")], vec![]),
+            &mut sink,
+        )
+        .await
+        .expect_err("429 is an error");
+    assert!(
+        matches!(
+            err,
+            ProviderError::Api {
+                status: Some(429),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(!err.is_retryable());
+}
+
+#[tokio::test]
 async fn a_mid_stream_error_chunk_maps_to_an_api_error() {
     let server = MockServer::start().await;
     let body = "data: {\"choices\":[{\"delta\":{\"content\":\"so f\"}}]}\n\n\
