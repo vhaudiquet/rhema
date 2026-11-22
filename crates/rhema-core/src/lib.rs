@@ -51,7 +51,7 @@ pub use message::{Content, Image, ImageMediaType, Message, Role};
 pub use mock::MockProvider;
 pub use output::{ModelOutput, Step, StopReason, Usage};
 pub use overlay::Overlay;
-pub use provider::{ModelProvider, ProviderError};
+pub use provider::{MAX_RATE_LIMIT_WAIT, ModelProvider, ProviderError};
 pub use request::{ChatParams, ModelRequest, ToolSpec};
 pub use session::Session;
 pub use tool::{

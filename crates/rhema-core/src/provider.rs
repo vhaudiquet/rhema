@@ -6,6 +6,7 @@
 //! [`Event`](crate::Event)s out.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 
@@ -26,6 +27,17 @@ pub enum ProviderError {
         message: String,
         /// The HTTP status the failure carried, when one was read.
         status: Option<u16>,
+    },
+    /// A 429 whose response said when to come back. Only a short wait is
+    /// retryable (see [`ProviderError::is_retryable`]): a per-minute
+    /// token or request window clears in seconds, a usage quota does
+    /// not.
+    #[error("provider rate limited: {message}")]
+    RateLimited {
+        /// Human-readable description of the failure.
+        message: String,
+        /// How long the provider asked the caller to wait.
+        retry_after: Duration,
     },
     /// The transport failed before an HTTP status was readable: a connect
     /// failure, a reset, a DNS miss.
@@ -55,15 +67,19 @@ impl ProviderError {
     /// mid-stream protocol error, and the other variants are request
     /// defects: none of those a retry fixes.
     ///
-    /// A 429 rate limit is deliberately absent: its wall is a quota
-    /// window, not a hiccup, and the retry ladder waits seconds, a
-    /// 5-hour usage limit does not clear inside it, so the retries only
-    /// burn turns and tokens. The caller sees the error at once (with
-    /// the provider's own reset time, where the adapter could read one)
-    /// and decides when to come back.
+    /// A bare 429 is deliberately absent: its wall is a quota window,
+    /// not a hiccup, and the retry ladder waits seconds, a 5-hour usage
+    /// limit does not clear inside it, so the retries only burn turns
+    /// and tokens. The caller sees the error at once (with the
+    /// provider's own reset time, where the adapter could read one) and
+    /// decides when to come back. The exception is a
+    /// [`ProviderError::RateLimited`] whose wait is at most
+    /// [`MAX_RATE_LIMIT_WAIT`]: the per-minute windows OpenAI-style
+    /// servers enforce, which clear before a retry would be wasted.
     pub fn is_retryable(&self) -> bool {
         match self {
             ProviderError::Timeout | ProviderError::Network(_) => true,
+            ProviderError::RateLimited { retry_after, .. } => *retry_after <= MAX_RATE_LIMIT_WAIT,
             ProviderError::Api {
                 status: Some(status),
                 ..
@@ -75,6 +91,11 @@ impl ProviderError {
         }
     }
 }
+
+/// The longest provider-requested wait a rate limit may ask for and
+/// still count as retryable: a minute's window plus slack. Anything
+/// longer is a quota, surfaced at once.
+pub const MAX_RATE_LIMIT_WAIT: Duration = Duration::from_secs(90);
 
 /// A model backend: assembles [`ModelOutput`] from one exchange and streams
 /// its deltas to `sink` as they arrive.
@@ -117,6 +138,20 @@ mod tests {
             };
             assert!(err.is_retryable(), "{status} retries");
         }
+    }
+
+    #[test]
+    fn a_short_rate_limit_retries_and_a_long_one_does_not() {
+        let short = ProviderError::RateLimited {
+            message: "tokens per min".into(),
+            retry_after: Duration::from_secs(2),
+        };
+        assert!(short.is_retryable());
+        let long = ProviderError::RateLimited {
+            message: "daily quota".into(),
+            retry_after: Duration::from_secs(3600),
+        };
+        assert!(!long.is_retryable());
     }
 
     #[test]
