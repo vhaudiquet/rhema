@@ -371,9 +371,11 @@ fn rate_limit_wait<'a>(
         .find_map(|name| header(name).and_then(|v| go_duration(v.trim())))
 }
 
-/// A non-negative, finite number of seconds as a [`Duration`].
+/// A non-negative, finite number of seconds as a [`Duration`]. A value
+/// no duration can hold, an absurd header, reads as no wait: a rate
+/// limit that cannot be metered is not one to sleep on.
 fn seconds(secs: f64) -> Option<Duration> {
-    (secs.is_finite() && secs >= 0.0).then(|| Duration::from_secs_f64(secs))
+    Duration::try_from_secs_f64(secs).ok()
 }
 
 /// A Go-style duration as OpenAI spells resets: `1h2m3.5s`, `6m0s`,
@@ -660,6 +662,18 @@ mod tests {
         assert_eq!(go_duration("7"), Some(Duration::from_secs(7)));
         assert_eq!(go_duration(""), None);
         assert_eq!(go_duration("soon"), None);
+    }
+
+    #[test]
+    fn an_absurd_reset_names_no_wait() {
+        // `Duration::from_secs_f64` panicked on these, so one hostile
+        // header took the turn down; a wait that cannot be metered is
+        // not one to sleep on.
+        assert_eq!(wait(&[("retry-after", "1e300")], "rate limited"), None);
+        assert_eq!(
+            wait(&[("x-ratelimit-reset-tokens", "1e400s")], "rate limited"),
+            None
+        );
     }
 
     #[test]
