@@ -210,7 +210,7 @@ Requested work has a durable record too. `rhema-submissions` keeps one ledger un
   does not retry, except a `ProviderError::RateLimited` whose provider-named wait is at most
   `MAX_RATE_LIMIT_WAIT`, 90 s: a per-minute token or request window, waited out for exactly
   the named reset, four times at most; the OpenAI-compatible adapter reads the reset off
-  `retry-after-ms`, `retry-after`, the body's "try again in", or `x-ratelimit-reset-*`) is re-issued with exponential backoff, three attempts at most. Two guards keep a retry honest: a stream that already emitted an event
+  `retry-after-ms`, `retry-after`, the body's "try again in", or `x-ratelimit-reset-*`; the Anthropic adapter reads `retry-after` seconds) is re-issued with exponential backoff, three attempts at most. Two guards keep a retry honest: a stream that already emitted an event
   never retries (the caller saw the deltas; a second attempt would repeat them), and an
   exchange that "succeeds" empty, a provider that closed the stream before its first chunk,
   retries like any dead response and, if every attempt comes back empty, fails naming that

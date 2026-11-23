@@ -532,12 +532,56 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
 }
 
 #[tokio::test]
-async fn a_rate_limit_names_its_reset_time_and_does_not_retry() {
+async fn a_429_naming_retry_after_becomes_a_retryable_rate_limit() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .respond_with(
             ResponseTemplate::new(429)
                 .insert_header("retry-after", "37")
+                .set_body_string(
+                    json!({
+                        "type": "error",
+                        "error": {
+                            "type": "rate_limit_error",
+                            "message": "rate limit hit, wait it out"
+                        }
+                    })
+                    .to_string(),
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let mut sink = Collector(vec![]);
+    let err = provider(&server)
+        .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
+        .await
+        .expect_err("a rate limit is an error");
+
+    match &err {
+        ProviderError::RateLimited {
+            message,
+            retry_after,
+        } => {
+            assert_eq!(*retry_after, std::time::Duration::from_secs(37));
+            assert!(message.contains("rate limit hit"), "got: {message}");
+            assert!(
+                message.contains("retry-after: 37"),
+                "the reset time rides the message: {message}"
+            );
+        }
+        other => panic!("expected RateLimited, got: {other:?}"),
+    }
+    assert!(err.is_retryable(), "a short window clears in seconds");
+}
+
+#[tokio::test]
+async fn a_rate_limit_past_the_wait_ceiling_stays_a_quota() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "3600")
                 .set_body_string(
                     json!({
                         "type": "error",
@@ -556,22 +600,57 @@ async fn a_rate_limit_names_its_reset_time_and_does_not_retry() {
     let err = provider(&server)
         .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
         .await
+        .expect_err("a rate limit error");
+
+    // The error names its hour, and the caller decides when to come
+    // back: the retry ladder cannot clear a quota window.
+    assert!(
+        matches!(
+            &err,
+            ProviderError::RateLimited { retry_after, .. }
+                if *retry_after == std::time::Duration::from_secs(3600)
+        ),
+        "{err:?}"
+    );
+    assert!(!err.is_retryable());
+    assert!(sink.0.is_empty());
+}
+
+#[tokio::test]
+async fn a_429_without_retry_after_stays_a_plain_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429).set_body_string(
+                json!({
+                    "type": "error",
+                    "error": {
+                        "type": "rate_limit_error",
+                        "message": "too many requests"
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let mut sink = Collector(vec![]);
+    let err = provider(&server)
+        .complete(request(vec![Message::text(Role::User, "hi")]), &mut sink)
+        .await
         .expect_err("a rate limit is an error");
 
-    match &err {
-        ProviderError::Api { message, status } => {
-            assert_eq!(*status, Some(429));
-            assert!(message.contains("429"), "got: {message}");
-            assert!(message.contains("usage limit reached"), "got: {message}");
-            assert!(
-                message.contains("retry-after: 37"),
-                "the reset time rides the message: {message}"
-            );
-        }
-        other => panic!("expected Api error, got: {other:?}"),
-    }
-    // The wall does not retry above this seam either: the ladder cannot
-    // clear a quota window.
+    assert!(
+        matches!(
+            &err,
+            ProviderError::Api {
+                status: Some(429),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
     assert!(!err.is_retryable());
 }
 

@@ -370,9 +370,9 @@ async fn read_all(response: &mut HttpResponse) -> Result<Vec<u8>, ProviderError>
 /// Maps a non-2xx body onto [`ProviderError::Api`], keeping the Anthropic
 /// error shape's `error.message` when the body has it, and carrying the
 /// HTTP status structurally for [`ProviderError::is_retryable`]. A
-/// `retry-after` response header rides the message: a rate limit does
-/// not retry (the ladder cannot clear a quota window), so the reset time
-/// is the one fact the caller needs to decide when to come back.
+/// `retry-after` response header rides the message, so the caller still
+/// reads the reset time on a quota that [`response_error`] did not
+/// class as a short window.
 fn api_error(status: u16, raw: &str, headers: &[(String, String)]) -> ProviderError {
     let retry_after = headers
         .iter()
@@ -395,6 +395,32 @@ fn api_error(status: u16, raw: &str, headers: &[(String, String)]) -> ProviderEr
             ),
         },
         status: Some(status),
+    }
+}
+
+/// Maps a non-2xx response onto [`ProviderError`]: [`api_error`], except
+/// a 429 whose `retry-after` names a reset becomes
+/// [`ProviderError::RateLimited`], so the retry ladder can wait out a
+/// per-minute window instead of failing the turn. Anthropic spells the
+/// wait one way, `retry-after` in seconds, never in the body, and a
+/// value no duration can hold reads as no wait.
+fn response_error(status: u16, raw: &str, headers: &[(String, String)]) -> ProviderError {
+    let err = api_error(status, raw, headers);
+    if status != 429 {
+        return err;
+    }
+    let retry_after = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.trim().parse::<f64>().ok())
+        .filter(|secs| *secs >= 0.0)
+        .and_then(|secs| Duration::try_from_secs_f64(secs).ok());
+    match retry_after {
+        Some(retry_after) => ProviderError::RateLimited {
+            message: err.to_string(),
+            retry_after,
+        },
+        None => err,
     }
 }
 
@@ -458,7 +484,7 @@ impl ModelListing for AnthropicProvider {
                 .map_err(transport_error)?;
             if !is_success(response.status) {
                 let text = read_all(&mut response).await?;
-                return Err(api_error(
+                return Err(response_error(
                     response.status,
                     &String::from_utf8_lossy(&text),
                     &response.headers,
@@ -516,7 +542,7 @@ impl ModelProvider for AnthropicProvider {
 
         if !is_success(response.status) {
             let text = read_all(&mut response).await?;
-            return Err(api_error(
+            return Err(response_error(
                 response.status,
                 &String::from_utf8_lossy(&text),
                 &response.headers,
