@@ -297,6 +297,16 @@ pub(crate) fn system_show_at_with_mcp(
                 serde_json::json!(rhema_bash::websearch::PROMPT_SECTION),
             ));
         }
+        // Decision rides the same local rule the search section does:
+        // the section exists exactly when the session would wire the
+        // `decide` macro, the wire's own gate, asked without
+        // provisioning the init file.
+        if decision_section(kind.as_deref(), effective.as_ref(), secrets) {
+            sections.push((
+                "decision",
+                serde_json::json!(rhema_bash::decision::PROMPT_SECTION),
+            ));
+        }
     }
     Ok(rhema_host_agent::stamped_system_with_sections(
         resolve_base_system(path).as_deref(),
@@ -317,6 +327,19 @@ pub(crate) fn search_section(
     secrets: Option<&dyn rhema_config::secrets::SecretStore>,
 ) -> bool {
     kind.is_none() && rhema_websearch_registry::would_wire(profile, secrets)
+}
+
+/// The decision section's rule: a local session, and the decision
+/// wire's own gate open, the same two gates
+/// [`crate::decision_wire::wire_for_session`] closes on. The preview
+/// asks the question here rather than wiring, so no init file is
+/// written for a prompt nobody sends.
+pub(crate) fn decision_section(
+    kind: Option<&str>,
+    profile: Option<&rhema_config::Profile>,
+    secrets: Option<&dyn rhema_config::secrets::SecretStore>,
+) -> bool {
+    kind.is_none() && rhema_decision_registry::is_configured(profile, secrets)
 }
 
 /// The prompt's mcp lines as config would produce them: global file

@@ -3,8 +3,8 @@
 
 use super::headless::failed_checkpoint_path;
 use super::system::{
-    markdown_ansi, search_section, system_edit_at, system_restore_at, system_show_at,
-    system_show_at_with_mcp, without_terminal_controls,
+    decision_section, markdown_ansi, search_section, system_edit_at, system_restore_at,
+    system_show_at, system_show_at_with_mcp, without_terminal_controls,
 };
 use super::*;
 
@@ -192,6 +192,175 @@ mod system_tests {
         // session, so the section renders, and only for a local one.
         assert!(search_section(None, Some(&profile), Some(&store)));
         assert!(!search_section(Some("local"), Some(&profile), Some(&store)));
+    }
+
+    /// The decision section's two gates, the search test's shape: a
+    /// local session, and the decision wire's own gate open. A key
+    /// that lives only in the store still wires, so the preview must
+    /// render the section for it too, and for no sandbox kind.
+    #[test]
+    fn the_decision_section_follows_the_local_rule_and_the_wire_gate() {
+        use rhema_config::secrets::{SecretStore, VolatileSecretStore};
+        use rhema_config::{DecisionInstance, DecisionSettings, Profile};
+        use std::collections::BTreeMap;
+        let store = VolatileSecretStore::new();
+        store.set("dec-1", "chain-key").unwrap();
+        let profile = Profile {
+            decision: Some(DecisionSettings {
+                instances: BTreeMap::from([(
+                    "jev-main".to_owned(),
+                    DecisionInstance {
+                        provider: "jev".into(),
+                        api_key: None,
+                        secret_ref: Some("dec-1".into()),
+                        model: None,
+                        account_id: None,
+                        base_url: None,
+                    },
+                )]),
+                ..DecisionSettings::default()
+            }),
+            ..Profile::default()
+        };
+        assert!(decision_section(None, Some(&profile), Some(&store)));
+        assert!(!decision_section(
+            Some("docker"),
+            Some(&profile),
+            Some(&store)
+        ));
+        // No instance and no store: nothing in the profile names a
+        // provider, so no section, whatever the store holds.
+        assert!(!decision_section(
+            None,
+            Some(&Profile::default()),
+            Some(&store)
+        ));
+    }
+
+    /// `system show`'s preview gates its sections on questions of its
+    /// own; the assembly wires the functions through
+    /// `wire_for_session`. Two code paths deciding one thing can
+    /// drift, and `decision` did: setup wired the macro, the preview
+    /// stayed silent. This test pins each preview gate to the wire
+    /// the assembly runs, over every profile shape: for the same
+    /// profile and keychain, the section renders exactly when the
+    /// session would wire, both directions, so a gate that changes on
+    /// one side alone fails here.
+    #[test]
+    fn the_preview_gates_agree_with_the_wires_for_every_profile_shape() {
+        use rhema_config::secrets::{SecretStore, VolatileSecretStore};
+        use rhema_config::{DecisionInstance, DecisionSettings, Profile, WebSearchInstance};
+        use std::collections::BTreeMap;
+
+        let store = VolatileSecretStore::new();
+        store.set("sync-key", "chain-key").unwrap();
+
+        fn decision(instance: DecisionInstance) -> Option<DecisionSettings> {
+            Some(DecisionSettings {
+                instances: BTreeMap::from([("one".to_owned(), instance)]),
+                ..DecisionSettings::default()
+            })
+        }
+
+        let shapes: Vec<(&str, Profile)> = vec![
+            ("no providers", Profile::default()),
+            (
+                "a decision instance with a literal key",
+                Profile {
+                    decision: decision(DecisionInstance {
+                        provider: "openrouter".into(),
+                        api_key: Some("literal".into()),
+                        ..DecisionInstance::default()
+                    }),
+                    ..Profile::default()
+                },
+            ),
+            (
+                "a decision instance keyed by the store",
+                Profile {
+                    decision: decision(DecisionInstance {
+                        provider: "jev".into(),
+                        api_key: None,
+                        secret_ref: Some("sync-key".into()),
+                        ..DecisionInstance::default()
+                    }),
+                    ..Profile::default()
+                },
+            ),
+            (
+                "a search instance keyed by the store",
+                Profile {
+                    websearch: BTreeMap::from([(
+                        "brave".to_owned(),
+                        WebSearchInstance {
+                            provider: "brave".into(),
+                            api_key: None,
+                            secret_ref: Some("sync-key".into()),
+                        },
+                    )]),
+                    websearch_order: vec!["brave".into()],
+                    ..Profile::default()
+                },
+            ),
+            (
+                "both",
+                Profile {
+                    decision: decision(DecisionInstance {
+                        provider: "jev".into(),
+                        api_key: None,
+                        secret_ref: Some("sync-key".into()),
+                        ..DecisionInstance::default()
+                    }),
+                    websearch: BTreeMap::from([(
+                        "brave".to_owned(),
+                        WebSearchInstance {
+                            provider: "brave".into(),
+                            api_key: None,
+                            secret_ref: Some("sync-key".into()),
+                        },
+                    )]),
+                    websearch_order: vec!["brave".into()],
+                    ..Profile::default()
+                },
+            ),
+        ];
+
+        for (name, profile) in &shapes {
+            for (n, section) in [(1usize, "decision"), (2, "websearch")] {
+                // The local session each preview section assumes, and
+                // the wire's own answer for the same inputs.
+                let wired = match section {
+                    "decision" => crate::decision_wire::wire_for_session(
+                        &format!("sync-{name}-{n}"),
+                        profile,
+                        Some(&store),
+                        None,
+                        None,
+                    )
+                    .is_some(),
+                    _ => crate::search_wire::wire_for_session(
+                        &format!("sync-{name}-{n}"),
+                        profile,
+                        Some(&store),
+                        None,
+                        None,
+                    )
+                    .is_some(),
+                };
+                let previewed = match section {
+                    "decision" => decision_section(None, Some(profile), Some(&store)),
+                    _ => search_section(None, Some(profile), Some(&store)),
+                };
+                assert_eq!(
+                    previewed, wired,
+                    "{name}: the preview's {section} gate disagrees with the wire's"
+                );
+            }
+        }
+        // The sandbox half of each gate: no sandbox kind wires a local
+        // section, the search test's own assertion, decision's now.
+        assert!(!decision_section(Some("ssh"), None, None));
+        assert!(!search_section(Some("ssh"), None, None));
     }
 
     #[test]
