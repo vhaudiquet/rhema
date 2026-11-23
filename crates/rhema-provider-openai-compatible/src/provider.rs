@@ -341,7 +341,8 @@ pub fn response_error(
 
 /// The wait a 429 names, read from the most precise source first:
 /// `retry-after-ms`, `retry-after` in seconds (an HTTP date is not
-/// read), OpenAI's "try again in 2.004s" sentence, then the
+/// read), OpenAI's "try again in 2.004s" sentence, where the wait is a
+/// Go-style duration or a spelled-out unit ("2 minutes"), then the
 /// `x-ratelimit-reset-*` headers, the token window before the request
 /// window since TPM is the limit long agent turns hit.
 fn rate_limit_wait<'a>(
@@ -357,12 +358,23 @@ fn rate_limit_wait<'a>(
     let lower = message.to_ascii_lowercase();
     if let Some(at) = lower.find("try again in ") {
         let rest = &lower[at + "try again in ".len()..];
-        let token = rest
+        let mut words = rest
             .split(|c: char| c.is_whitespace() || c == ',')
-            .next()
-            .unwrap_or("")
-            .trim_end_matches('.');
-        if let Some(wait) = go_duration(token) {
+            .filter(|word| !word.is_empty());
+        // The sentence can end on the token: "in 2.004s." carries its
+        // period on it.
+        let token = words.next().unwrap_or("").trim_end_matches('.');
+        // A bare number names no wait alone: its unit rides the word
+        // after it ("2 minutes"). A Go-style token carries its own.
+        if let Ok(bare) = token.parse::<f64>() {
+            if let Some(scale) = words
+                .next()
+                .map(|word| word.trim_end_matches('.'))
+                .and_then(unit_scale)
+            {
+                return seconds(bare * scale);
+            }
+        } else if let Some(wait) = go_duration(token) {
             return Some(wait);
         }
     }
@@ -372,8 +384,9 @@ fn rate_limit_wait<'a>(
 }
 
 /// A non-negative, finite number of seconds as a [`Duration`]. A value
-/// no duration can hold, an absurd header, reads as no wait: a rate
-/// limit that cannot be metered is not one to sleep on.
+/// no duration can hold, an absurd header or an overflowed unit
+/// product, reads as no wait: a rate limit that cannot be metered is
+/// not one to sleep on.
 fn seconds(secs: f64) -> Option<Duration> {
     Duration::try_from_secs_f64(secs).ok()
 }
@@ -409,6 +422,17 @@ fn go_duration(text: &str) -> Option<Duration> {
         rest = &rest[unit_len..];
     }
     seconds(total)
+}
+
+/// The second scale of a unit spelled out in a 429's sentence:
+/// "2 minutes", "1 hour".
+fn unit_scale(word: &str) -> Option<f64> {
+    match word {
+        "second" | "seconds" => Some(1.0),
+        "minute" | "minutes" => Some(60.0),
+        "hour" | "hours" => Some(3600.0),
+        _ => None,
+    }
 }
 
 /// Maps a transport failure onto [`ProviderError`]; reqwest errors cannot be
@@ -662,6 +686,31 @@ mod tests {
         assert_eq!(go_duration("7"), Some(Duration::from_secs(7)));
         assert_eq!(go_duration(""), None);
         assert_eq!(go_duration("soon"), None);
+    }
+
+    #[test]
+    fn a_prose_wait_reads_spelled_out_units() {
+        assert_eq!(
+            wait(&[], "slow down, please try again in 1 minute."),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            wait(
+                &[],
+                "Please try again in 2 minutes. Visit https://example.com."
+            ),
+            Some(Duration::from_secs(120))
+        );
+        // The unit word after the number names the scale, so the
+        // seconds case reads the same as before.
+        assert_eq!(
+            wait(&[], "Please try again in 30 seconds."),
+            Some(Duration::from_secs(30))
+        );
+        // A unit the scale table does not know, and a bare number
+        // with no unit word, name no wait.
+        assert_eq!(wait(&[], "Please try again in 2 days."), None);
+        assert_eq!(wait(&[], "Please try again."), None);
     }
 
     #[test]
