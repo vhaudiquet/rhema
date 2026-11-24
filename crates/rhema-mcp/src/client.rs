@@ -14,7 +14,9 @@
 //! session expired and triggers exactly one re-initialize-and-retry.
 //! Calls serialize on the session lock: this client's call volume is
 //! a shell command at a time, and the session state must stay
-//! coherent above all.
+//! coherent above all. The queue wait between serialized calls
+//! never burns a caller's per-call budget: the clock runs on the
+//! wire, not in the queue.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -685,7 +687,10 @@ impl Client {
             }
             Transport::Http => {
                 let http = self.http.as_ref().expect("http state on http transport");
-                let fut = self.http_exchange(http, id, &line);
+                // The exchange runs its own clock, started once it
+                // holds the session lock: the queue wait behind a
+                // slower caller is not this call's budget.
+                let fut = self.http_exchange(http, id, &line, timeout);
                 tokio::pin!(fut);
                 tokio::select! {
                     biased;
@@ -693,12 +698,12 @@ impl Client {
                         self.abandon_http(id).await;
                         Err(ClientError::Cancelled)
                     }
-                    answer = tokio::time::timeout(timeout, &mut fut) => match answer {
-                        Ok(result) => result,
-                        Err(_elapsed) => {
+                    answer = &mut fut => match answer {
+                        Err(err) if matches!(err, ClientError::Timeout) => {
                             self.abandon_http(id).await;
-                            Err(ClientError::Timeout)
+                            Err(err)
                         }
+                        other => other,
                     },
                 }
             }
@@ -844,15 +849,52 @@ impl Client {
     }
 
     /// One HTTP request-response exchange, with the 404
-    /// re-initialize-and-retry-once dance (spec §6).
+    /// re-initialize-and-retry-once dance (spec §6). `timeout` bounds
+    /// the exchange only, never the queue wait: calls serialize on
+    /// the session lock by design (module doc), and time spent
+    /// waiting behind a slower predecessor is the queue's, not this
+    /// call's. The clock starts the moment the lock is held, so a
+    /// queued call keeps its whole budget on the wire and a timeout
+    /// always means the wire. Releasing the lock before the response
+    /// body arrives would also let a queued call through sooner, but
+    /// every session mutation around the lock (the 404
+    /// re-initialize here, the cancellation POST from
+    /// `abandon_http`) assumes one request in flight per session;
+    /// keeping the hold and moving the clock start is the
+    /// smaller-risk change.
     async fn http_exchange(
         &self,
         http: &HttpState,
-        _id: u64,
+        id: u64,
         line: &str,
+        timeout: Duration,
+    ) -> Result<Value, ClientError> {
+        // Take the lock outside the timer: this wait costs the
+        // caller nothing. From here the exchange runs on the clock.
+        let first = http.session.clone().lock_owned().await;
+        let exchange = self.http_exchange_attempts(http, id, line, Some(first));
+        match tokio::time::timeout(timeout, exchange).await {
+            Ok(result) => result,
+            Err(_elapsed) => Err(ClientError::Timeout),
+        }
+    }
+
+    /// The exchange attempts, entered with the first session guard in
+    /// hand. The 404 dance drops the guard around the re-initialize
+    /// (which takes the lock itself); the second attempt re-locks
+    /// while the same budget keeps running.
+    async fn http_exchange_attempts(
+        &self,
+        http: &HttpState,
+        id: u64,
+        line: &str,
+        mut held: Option<tokio::sync::OwnedMutexGuard<HttpSession>>,
     ) -> Result<Value, ClientError> {
         for _attempt in 0..2 {
-            let session = http.session.lock().await;
+            let session = match held.take() {
+                Some(guard) => guard,
+                None => http.session.clone().lock_owned().await,
+            };
             let had_session = session.id.is_some();
             let (status, headers, body) = http.post_line_with(line, &session).await?;
             drop(session);
@@ -867,7 +909,7 @@ impl Client {
                 .unwrap_or_default()
                 .to_ascii_lowercase();
             if content_type.starts_with("text/event-stream") {
-                return sse_answer(body, _id).await;
+                return sse_answer(body, id).await;
             }
             if !status.is_success() {
                 return Err(ClientError::HttpStatus(status.as_u16()));
@@ -1081,7 +1123,13 @@ async fn reader_task(
                     }
                 };
                 match incoming {
-                    Incoming::Response(response) => route_response(&shared, response),
+                    Incoming::Response(response) => {
+                        if let Err(violation) = route_response(&shared, response) {
+                            die(&shared, PendingReason::Protocol(violation));
+                            let _ = kill_tx.send(KillSignal::Violation);
+                            return;
+                        }
+                    }
                     Incoming::Notification(notification) => {
                         route_notification(&shared, notification)
                     }
@@ -1104,21 +1152,49 @@ async fn reader_task(
     }
 }
 
-/// Sends a response to whoever waits on its id; unmatched responses
-/// (late, or to an abandoned request) drop silently.
-fn route_response(shared: &Shared, response: protocol::Response) {
-    let RequestId::Number(id) = response.id else {
-        return;
+/// Sends a response to whoever waits on its id. Unmatched responses
+/// (late, or to an abandoned request) drop silently — the abandoned
+/// caller has already moved on. A response naming an id this client
+/// never minted is different: ids are handed out in order, so the
+/// mint mark (`next_id`) bounds everything ever asked, and such a
+/// response can never match anyone, late or not. It kills the
+/// connection, the stdio counterpart of the HTTP transport's loud
+/// failure for the same server bug (the SSE stream ends without an
+/// answer); dropped instead, every pending caller would strand until
+/// its own budget ran out. The error is the violation text.
+fn route_response(shared: &Shared, response: protocol::Response) -> Result<(), &'static str> {
+    let Some(id) = echoed_numeric(&response.id) else {
+        return Err(NEVER_MINTED);
     };
+    if id >= shared.next_id.load(Ordering::SeqCst) {
+        return Err(NEVER_MINTED);
+    }
     let sender = shared.pending.lock().expect("pending lock").remove(&id);
     if let Some(sender) = sender {
         let _ = sender.send(envelope_value(response));
+    }
+    Ok(())
+}
+
+/// The violation text for a response naming an id this client never
+/// minted.
+const NEVER_MINTED: &str = "a response echoed an id this client never minted";
+
+/// The request an echoed id names, in either shape: this client
+/// always mints numeric ids, but JSON-RPC lets a server echo them as
+/// strings, and the decimal number is the same request either way.
+/// Mint side and route side agree on the number.
+fn echoed_numeric(id: &RequestId) -> Option<u64> {
+    match id {
+        RequestId::Number(n) => Some(*n),
+        RequestId::Text(text) => text.parse().ok(),
     }
 }
 
 /// Routes server notifications: only `notifications/cancelled` means
 /// anything to this subset; everything else (progress, log) is data
-/// this layer does not surface.
+/// this layer does not surface. An unmatched cancellation (or one
+/// naming an unknown id) is a no-op, advisory at most.
 fn route_notification(shared: &Shared, notification: protocol::Notification) {
     if notification.method != method::CANCELLED {
         return;
@@ -1129,7 +1205,7 @@ fn route_notification(shared: &Shared, notification: protocol::Notification) {
     let Ok(cancelled) = serde_json::from_value::<protocol::CancelledParams>(params) else {
         return;
     };
-    let RequestId::Number(id) = cancelled.request_id else {
+    let Some(id) = echoed_numeric(&cancelled.request_id) else {
         return;
     };
     if let Some(sender) = shared.pending.lock().expect("pending lock").remove(&id) {
@@ -1270,9 +1346,10 @@ fn event_answer(data_lines: &[String], id: u64) -> Result<Option<Value>, ClientE
     let Incoming::Response(response) = incoming else {
         return Ok(None);
     };
-    match &response.id {
-        RequestId::Number(n) if *n == id => envelope_value(response).map(Some),
-        _ => Ok(None),
+    if echoed_numeric(&response.id) == Some(id) {
+        envelope_value(response).map(Some)
+    } else {
+        Ok(None)
     }
 }
 

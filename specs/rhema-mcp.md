@@ -475,7 +475,12 @@ the stdin form once.
   JSON-RPC. A stdout line failing to parse, or exceeding 4 MiB, kills
   the connection (status error, stderr tail kept), never the manager:
   the process holding every server's credentials is never an unbounded
-  reader, matching the tree's capture-window discipline elsewhere.
+  reader, matching the tree's capture-window discipline elsewhere. A
+  reply naming a request id this client never minted is the same
+  violation, not history: the connection dies and the caller gets the
+  reason in-band. A server echoing a minted id as a JSON string
+  instead of a number routes normally; the mint side and the route
+  side read either shape as one number.
 - **Cancellation.** A bridge client that disconnects mid-call cancels
   its pending request: dropped from the pending map, and
   `notifications/cancelled` sent best-effort and **unconditionally**
@@ -483,7 +488,10 @@ the stdin form once.
   negotiate). A late result is discarded.
 - **Timeouts.** Per-call `timeout`, default 120 s, aligned with the
   bash tool's own cap: a longer call is moot while the invoking shell
-  dies first. Config may lower it, never raise it in v1.
+  dies first. Config may lower it, never raise it in v1. The budget
+  counts time on the wire: one HTTP session serializes its calls
+  behind a lock, and the queue wait between them never burns a
+  queued call's budget — the clock runs once the lock is held.
 - **Streamable HTTP.** POST with `Accept: application/json,
   text/event-stream`; both response shapes handled; `Mcp-Session-Id`
   stored from initialize and resent; `MCP-Protocol-Version` sent on

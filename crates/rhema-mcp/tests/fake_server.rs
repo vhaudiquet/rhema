@@ -91,6 +91,12 @@ const TESTS: &[(&str, AsyncTest)] = &[
         Box::pin(cancellation_reaches_the_server())
     }),
     ("rpc_error_surfaces", || Box::pin(rpc_error_surfaces())),
+    ("stdio_string_id_echo_routes", || {
+        Box::pin(stdio_string_id_echo_routes())
+    }),
+    ("stdio_unknown_id_is_surfaced_not_dropped", || {
+        Box::pin(stdio_unknown_id_is_surfaced_not_dropped())
+    }),
     ("http_refuses_2024_11_05", || {
         Box::pin(http_refuses_2024_11_05())
     }),
@@ -101,6 +107,12 @@ const TESTS: &[(&str, AsyncTest)] = &[
         Box::pin(http_404_reinitializes_exactly_once())
     }),
     ("http_sse_answer", || Box::pin(http_sse_answer())),
+    ("http_sse_string_id_echo_routes", || {
+        Box::pin(http_sse_string_id_echo_routes())
+    }),
+    ("http_queue_wait_keeps_the_second_calls_budget", || {
+        Box::pin(http_queue_wait_keeps_the_second_calls_budget())
+    }),
     ("http_handshake_timeout", || {
         Box::pin(http_handshake_timeout())
     }),
@@ -151,6 +163,8 @@ fn play(script: &str) {
         "ignoreeof" => ignore_eof_scenario(),
         "counting" => counting_scenario(),
         "dieaftertools" => die_after_tools_scenario(),
+        "stringid" => string_echo_scenario(),
+        "unknownid" => unknown_id_scenario(),
         _ => happy_scenario(),
     }
 }
@@ -464,6 +478,66 @@ fn die_after_tools_scenario() {
     }
 }
 
+/// Handshake, catalog, and calls with every request id echoed as a
+/// JSON string: the client mints numbers, but JSON-RPC lets a server
+/// echo them as strings, and the same number routes either way.
+fn string_echo_scenario() {
+    loop {
+        let Some(msg) = read_request() else { return };
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        let Some(id) = msg.get("id").cloned() else {
+            continue;
+        };
+        let echoed = json!(id.to_string());
+        match method {
+            "initialize" => {
+                send(result_envelope(&echoed, handshake_result("2025-06-18")));
+            }
+            "tools/list" => {
+                send(result_envelope(
+                    &echoed,
+                    json!({"tools": [
+                        {"name": "render", "description": "Render", "inputSchema": {"type": "object"}}
+                    ]}),
+                ));
+            }
+            "tools/call" => {
+                send(result_envelope(
+                    &echoed,
+                    json!({"content": [{"type": "text", "text": "done"}], "isError": false}),
+                ));
+            }
+            _ => {
+                send(error_envelope(&echoed, -32601, "method not found"));
+            }
+        }
+    }
+}
+
+/// Handshake normally, then answer any call with an id this client
+/// never minted (a string that names no number, the reusable form of
+/// a never-issued numeric id): the reply must surface, never
+/// silently drop.
+fn unknown_id_scenario() {
+    loop {
+        let Some(msg) = read_request() else { return };
+        let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+        let id = msg.get("id").cloned();
+        match method {
+            "initialize" => {
+                send(result_envelope(
+                    &id.expect("initialize id"),
+                    handshake_result("2025-06-18"),
+                ));
+            }
+            _ => {
+                let Some(_id) = id else { continue };
+                send(result_envelope(&json!("abc"), json!({"content": []})));
+            }
+        }
+    }
+}
+
 /// Appends this process's pid to the marker file (its path comes
 /// from [`MARKER_ENV`]).
 fn write_marker() {
@@ -740,6 +814,59 @@ async fn rpc_error_surfaces() -> Result<(), String> {
         .map_err(|e| format!("call failed: {e}"))?;
     if result.is_error == Some(true) {
         return Err("unexpected error flag".to_owned());
+    }
+    Ok(())
+}
+
+/// A string echo of a requested id routes to the pending request:
+/// the client mints numeric ids, a server echoing them as JSON
+/// strings still names the same request, and the handshake plus one
+/// call both prove it. Before the fix the stdio router only matched
+/// the numeric shape and such replies dropped silently.
+async fn stdio_string_id_echo_routes() -> Result<(), String> {
+    let client = must_connect("stringid").await;
+    let result = client
+        .call_tool("render", json!({}), call_timeout(), &never())
+        .await
+        .map_err(|e| format!("the string echo was dropped: {e}"))?;
+    let text = result
+        .content
+        .first()
+        .and_then(|b| b.raw.get("text").and_then(Value::as_str));
+    if text != Some("done") {
+        return Err(format!("call content wrong: {:?}", result.content));
+    }
+    Ok(())
+}
+
+/// A reply naming an id this client never minted surfaces as a
+/// protocol violation instead of dropping so the caller strands to
+/// its own timeout: the HTTP transport already fails this server bug
+/// loudly, stdio must not be the quiet one. The connection dies, and
+/// a later call fails fast.
+async fn stdio_unknown_id_is_surfaced_not_dropped() -> Result<(), String> {
+    let client = must_connect("unknownid").await;
+    let err = client
+        .call_tool("render", json!({}), call_timeout(), &never())
+        .await
+        .err()
+        .ok_or("the bogus reply should fail the call")?;
+    let ClientError::Protocol(reason) = err else {
+        return Err(format!("wrong error: {err}"));
+    };
+    if !reason.contains("never minted") {
+        return Err(format!("the violation is unnamed: {reason}"));
+    }
+    if !client.is_dead() {
+        return Err("the connection should be dead".to_owned());
+    }
+    let second = client
+        .call_tool("render", json!({}), call_timeout(), &never())
+        .await
+        .err()
+        .ok_or("a later call should fail fast")?;
+    if !matches!(second, ClientError::Dead(_)) {
+        return Err(format!("second call wrong error: {second}"));
     }
     Ok(())
 }
@@ -1068,6 +1195,110 @@ async fn http_sse_answer() -> Result<(), String> {
     }
     if ledger.lock().expect("ledger").len() != 3 {
         return Err("unexpected request count".to_owned());
+    }
+    Ok(())
+}
+
+/// A string echo of the request id on the SSE path routes too: the
+/// mint side and the route side agree on the number, whichever shape
+/// echoes it. Before the fix only the numeric shape matched and the
+/// stream ended without an answer.
+async fn http_sse_string_id_echo_routes() -> Result<(), String> {
+    let payload = json!({
+        "jsonrpc": "2.0", "id": "2",
+        "result": {"content": [{"type": "text", "text": "sse done"}]}
+    })
+    .to_string();
+    let (_ledger, url) = spawn_stub(vec![init_ok(), http_202(), http_sse(&payload)]).await;
+    let client = connect_http(&url)
+        .await
+        .map_err(|e| format!("handshake: {e}"))?;
+    let result = client
+        .call_tool("look", json!({}), call_timeout(), &never())
+        .await
+        .map_err(|e| format!("sse call with a string echo: {e}"))?;
+    let text = result
+        .content
+        .first()
+        .and_then(|b| b.raw.get("text").and_then(Value::as_str));
+    if text != Some("sse done") {
+        return Err(format!("the string echo was dropped: {:?}", result.content));
+    }
+    Ok(())
+}
+
+/// A slow first call, and a second queued behind the session lock
+/// (the serialization is deliberate, module doc): the queue wait
+/// must not burn the second call's budget. Its 300 ms fence covers
+/// wire work that takes microseconds, the first call holds the wire
+/// for 800 ms, so a budget started at the call site fails the second
+/// call without its request ever reaching the server; a budget
+/// started at the lock keeps the whole 300 ms for the wire.
+async fn http_queue_wait_keeps_the_second_calls_budget() -> Result<(), String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| e.to_string())?;
+    let addr = listener.local_addr().map_err(|e| e.to_string())?;
+    // (delay before writing, the raw response), one per expected
+    // request: initialize, the initialized notification, the slow
+    // first call, the instant second.
+    let answers = Arc::new(tokio::sync::Mutex::new(VecDeque::from(vec![
+        (Duration::ZERO, init_ok()),
+        (Duration::ZERO, http_202()),
+        (Duration::from_millis(800), call_ok(2)),
+        (Duration::ZERO, call_ok(3)),
+    ])));
+    let stub = tokio::spawn(async move {
+        loop {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let answers = Arc::clone(&answers);
+            tokio::spawn(async move {
+                loop {
+                    let Some(_request) = read_http_request(&mut stream).await else {
+                        return;
+                    };
+                    let Some((delay, response)) = answers.lock().await.pop_front() else {
+                        return;
+                    };
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    if stream.write_all(response.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    let client = connect_http(&format!("http://{addr}/mcp"))
+        .await
+        .map_err(|e| format!("handshake: {e}"))?;
+    let slow_gate = never();
+    let queued_gate = never();
+    let slow = client.call_tool("render", json!({}), Duration::from_secs(3), &slow_gate);
+    tokio::pin!(slow);
+    let queued = client.call_tool("look", json!({}), Duration::from_millis(300), &queued_gate);
+    tokio::pin!(queued);
+    // join! polls in order: the first call takes the session lock and
+    // the second queues behind it, exactly the concurrent callers.
+    let (first, second) = tokio::join!(&mut slow, &mut queued);
+    stub.abort();
+    let first = first.map_err(|e| format!("the slow call lost its own budget: {e}"))?;
+    let second =
+        second.map_err(|e| format!("the queued call lost its budget to the queue wait: {e}"))?;
+    for (label, result) in [("slow", first), ("queued", second)] {
+        let text = result
+            .content
+            .first()
+            .and_then(|b| b.raw.get("text").and_then(Value::as_str));
+        if text != Some("http done") {
+            return Err(format!(
+                "the {label} call lost its result: {:?}",
+                result.content
+            ));
+        }
     }
     Ok(())
 }
