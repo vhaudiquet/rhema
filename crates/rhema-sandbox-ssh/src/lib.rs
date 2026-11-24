@@ -32,7 +32,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use base64::Engine;
 
-use rhema_sandbox::exec_util::{check_remote_path, shquote};
+use rhema_sandbox::exec_util::{EXEC_GRACE, check_remote_path, shquote};
 use rhema_sandbox::{RunOutcome, RunRequest, Sandbox, SandboxError, ToolProgress, WorkspaceSeed};
 
 use session::RemoteCall;
@@ -359,14 +359,16 @@ impl Sandbox for SshSandbox {
         check_remote_path(&request.cwd.to_string_lossy())?;
         // The remote `timeout` prefix is the budget's enforcer and
         // the run loop is the cancel; the sandbox cwd is remote and
-        // rides in the script.
+        // rides in the script. The wall holds the budget plus the
+        // kill grace, so a black-holed channel abandons itself with
+        // the request's own timeout, not a pending forever.
         self.call(&exec_command(
-            request.timeout.as_secs(),
+            rhema_sandbox::exec_util::budget_secs(request.timeout),
             &request.cwd.to_string_lossy(),
             &request.command,
         ))
         .await?
-        .run(&request, cancelled, progress)
+        .run(&request, cancelled, progress, request.timeout + EXEC_GRACE)
         .await
     }
 
@@ -554,6 +556,17 @@ mod tests {
         assert_eq!(
             exec_command(30, "/src", "echo hi"),
             "timeout --kill-after=5 30 bash -c 'cd '\\''/src'\\'' && echo hi'"
+        );
+    }
+
+    #[test]
+    fn a_sub_second_budget_never_reaches_a_timeout_zero() {
+        // `timeout 0` is no timeout at all: the ceiled seconds are
+        // computed before the line is shaped, so a 500 ms budget
+        // prefixes `timeout 1`, never an ungated command.
+        assert_eq!(
+            rhema_sandbox::exec_util::budget_secs(Duration::from_millis(500)),
+            1
         );
     }
 
@@ -1000,6 +1013,42 @@ mod tests {
         .await
         .expect_err("the budget kills the command");
         assert_eq!(error, SandboxError::Timeout(1));
+    }
+
+    // A channel that never answers owes the caller the request's own
+    // timeout: the far end runs a command that writes nothing and
+    // never exits, and the small named wall exercises the breach
+    // without paying the grace. Dropping the call is the abandon, the
+    // connection leaves with it.
+    #[tokio::test]
+    async fn a_transport_that_never_answers_breaches_as_the_budget() {
+        let (sandbox, _known) = sandbox().await;
+        let call = sandbox
+            .call("sleep 300")
+            .await
+            .expect("the far end takes the call");
+        let request = RunRequest {
+            command: "sleep 300".into(),
+            cwd: "/".into(),
+            // The budget the model reads when the wall ends the run.
+            timeout: Duration::from_secs(1),
+        };
+        let started = std::time::Instant::now();
+        let error = call
+            .run(
+                &request,
+                &AtomicBool::new(false),
+                &mut OutputOnly(|_| {}),
+                Duration::from_millis(300),
+            )
+            .await
+            .expect_err("the wall ends the run");
+        assert_eq!(error, SandboxError::Timeout(1));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wall did not end the run: {:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

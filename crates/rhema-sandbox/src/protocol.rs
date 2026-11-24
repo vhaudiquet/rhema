@@ -136,7 +136,7 @@ impl From<&RunRequest> for ExecCall {
         Self {
             command: request.command.clone(),
             cwd: Some(request.cwd.to_string_lossy().into_owned()),
-            timeout_secs: request.timeout.as_secs(),
+            timeout_secs: crate::exec_util::budget_secs(request.timeout),
         }
     }
 }
@@ -145,6 +145,22 @@ impl From<&RunRequest> for ExecCall {
 mod tests {
     use super::*;
     use rhema_core::OutputOnly;
+
+    #[test]
+    fn the_wire_carries_ceiled_whole_seconds() {
+        // The daemon prefixes its own `timeout` from this field, and
+        // `timeout 0` is no timeout at all: sub-second budgets ride
+        // the wire as 1, never 0.
+        let call = ExecCall::from(&RunRequest {
+            command: "sleep 0.1".to_owned(),
+            cwd: std::path::PathBuf::from("/"),
+            timeout: std::time::Duration::from_millis(500),
+        });
+        assert_eq!(
+            call.timeout_secs, 1,
+            "the wire never carries an ungated zero"
+        );
+    }
 
     #[test]
     fn an_exec_call_round_trips_with_a_cwd() {

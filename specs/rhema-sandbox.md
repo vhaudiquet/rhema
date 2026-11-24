@@ -217,7 +217,17 @@ backend.
 Kill semantics: backends without a per-command kill API (docker exec
 among them) run every command under `timeout --kill-after=5 N bash -c …`,
 the shim's trick, so `ExecRequest::timeout` stays the single knob
-everywhere. Live output is a transport property: local and SSH pump real
+everywhere. The prefix is the intended winner, but no backend trusts
+it alone: every exec route also carries a host-side wall clock at the
+budget plus a fixed grace (`EXEC_GRACE`, 10 s — the remote kill's 5 s
+plus propagation), so a hung `docker exec`, a stuck transport, or an
+ssh channel that never answers ends on time anyway: the local child
+is killed, an ssh channel is dropped with its connection, and the
+model reads the same `timed_out` the prefix's exit 124 produces.
+Budgets are whole seconds at every boundary — the prefix's `N`, the
+wire's `timeout_secs`, the timeout report a model reads: sub-second
+spells cannot floor into a prefix's `timeout 0`, which is no timeout
+at all; the seconds are ceiled, `500ms` reads as 1. Live output is a transport property: local and SSH pump real
 lines today; HTTP-family backends deliver at completion until a
 streaming shape exists (§8).
 

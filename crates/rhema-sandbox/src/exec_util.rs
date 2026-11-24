@@ -23,7 +23,7 @@ use crate::{RunOutcome, RunRequest, SandboxError, ToolProgress};
 /// probe, re-exported from the bash tool's executor: every backend that
 /// spawns a host process applies the same "no terminal" contract, and
 /// the definition lives where the `bash` tool's spec does.
-pub use rhema_bash::exec::{NONINTERACTIVE_ENV, setsid_executable};
+pub use rhema_bash::exec::{NONINTERACTIVE_ENV, budget_secs, setsid_executable};
 
 /// The stream tail a finished command keeps: a runaway command cannot
 /// flood memory, and the tool applies its display caps again on top
@@ -36,6 +36,15 @@ pub const EXEC_TAIL_BYTES: usize = 50 * 1024;
 /// never observe a flip; this tick is the cancellation check, not a
 /// timer kill, the budget belongs to the `timeout` prefix.
 const CANCEL_TICK: Duration = Duration::from_millis(100);
+
+/// The slack one exec's wall clock holds past the request's budget:
+/// the remote `timeout` prefix owns the command's budget and wins
+/// first (its 124 is the budget's own report, its `--kill-after=5`
+/// escalation included), so the host side draws the line only for a
+/// transport that never answered. Ten is the escalation (five)
+/// plus the propagation back through the CLI's pipe or the ssh
+/// channel.
+pub const EXEC_GRACE: Duration = Duration::from_secs(10);
 
 /// The file the tarball seed is staged under before `tar` unpacks it.
 /// The name on the wire is diagnostics only, so the staging file has
@@ -141,11 +150,39 @@ async fn drain_stderr(mut pipe: Option<tokio::process::ChildStderr>) -> String {
 /// child killed on it, and the exit read through the `timeout`
 /// prefix's codes (see [`classify_exit`]). Any other exit, nonzero
 /// included, is the command's own result and rides to the caller.
+///
+/// The host-side wall clock is the request's budget plus
+/// [`EXEC_GRACE`], so the remote prefix wins first; a transport that
+/// never answers owes the model a [`SandboxError::Timeout`], not a
+/// pending forever.
 pub async fn run_child(
+    child: tokio::process::Child,
+    request: &RunRequest,
+    cancelled: &AtomicBool,
+    progress: &mut dyn ToolProgress,
+) -> Result<RunOutcome, SandboxError> {
+    run_child_within(
+        child,
+        request,
+        cancelled,
+        progress,
+        request.timeout + EXEC_GRACE,
+    )
+    .await
+}
+
+/// [`run_child`] with the wall clock named instead of derived: the
+/// deadline that turns a hung child into the request's own timeout,
+/// the local child killed on breach. The reported seconds stay the
+/// request's budget, the same shape the `timeout` prefix's 124
+/// reads as, whichever side drew the line. The tests' seam: a small
+/// named wall exercises the breach without paying [`EXEC_GRACE`].
+async fn run_child_within(
     mut child: tokio::process::Child,
     request: &RunRequest,
     cancelled: &AtomicBool,
     progress: &mut dyn ToolProgress,
+    wall: Duration,
 ) -> Result<RunOutcome, SandboxError> {
     // One reader per stream, complete lines into one channel: each
     // line streams live through `progress`, and each reader keeps
@@ -154,6 +191,9 @@ pub async fn run_child(
     let stdout_tail = tokio::spawn(pump(child.stdout.take(), false, tx.clone()));
     let stderr_tail = tokio::spawn(pump(child.stderr.take(), true, tx.clone()));
     drop(tx);
+    let deadline = tokio::time::Instant::now() + wall;
+    let overdue = tokio::time::sleep_until(deadline);
+    tokio::pin!(overdue);
     loop {
         tokio::select! {
             line = rx.recv() => match line {
@@ -172,6 +212,14 @@ pub async fn run_child(
                     kill(&mut child).await;
                     return Err(SandboxError::Failed("cancelled".into()));
                 }
+            },
+            // The wall: the remote prefix had its budget plus the
+            // grace and never answered. The child dies here, a hung
+            // `docker exec` or a stuck `lxc` owes the caller its
+            // timeout, not a pipe held open forever.
+            _ = &mut overdue => {
+                kill(&mut child).await;
+                return Err(SandboxError::Timeout(budget_secs(request.timeout)));
             }
         }
     }
@@ -179,11 +227,17 @@ pub async fn run_child(
     // the turn decided meanwhile, so the flag is not rechecked.
     let stdout = stdout_tail.await.unwrap_or_default();
     let stderr = stderr_tail.await.unwrap_or_default();
-    let status = child
-        .wait()
-        .await
-        .map_err(|err| SandboxError::Unavailable(format!("waiting for the command: {err}")))?;
-    let code = classify_exit(status.code(), request.timeout.as_secs())?;
+    let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+        Ok(status) => status
+            .map_err(|err| SandboxError::Unavailable(format!("waiting for the command: {err}")))?,
+        // Streams closed but the child never exits: same wall, same
+        // timeout report.
+        Err(_) => {
+            kill(&mut child).await;
+            return Err(SandboxError::Timeout(budget_secs(request.timeout)));
+        }
+    };
+    let code = classify_exit(status.code(), budget_secs(request.timeout))?;
     Ok(RunOutcome {
         stdout,
         stderr,
@@ -441,6 +495,98 @@ mod tests {
         assert_eq!(stdout, b"done\n".as_slice());
         assert_eq!(code, Some(0));
         assert_eq!(stderr.len(), 8_388_608);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_sub_second_budget_reports_the_second_it_killed_in() {
+        use std::process::Stdio;
+        let child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 300")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        let request = RunRequest {
+            command: "sleep 300".to_owned(),
+            cwd: std::path::PathBuf::from("/"),
+            timeout: std::time::Duration::from_millis(500),
+        };
+        let error = run_child_within(
+            child,
+            &request,
+            &AtomicBool::new(false),
+            &mut super::super::OutputOnly(|_| {}),
+            std::time::Duration::from_millis(200),
+        )
+        .await
+        .expect_err("the wall ends the run");
+        assert_eq!(
+            error,
+            SandboxError::Timeout(1),
+            "ceiled, never floored to 0"
+        );
+    }
+
+    // A hung local child owes the caller the request's own timeout, not
+    // a never-answering pipe: the wall kills the child and reports the
+    // budget, and the child is dead when the call returns. The named
+    // wall is the seam; production pays the grace on top of the budget.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_hung_child_is_killed_and_reports_the_budget() {
+        use std::process::Stdio;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let realized = dir.path().join("hung.pid");
+        let script = format!("echo $$ > {}; sleep 300", realized.display());
+        let child = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("the fake runs");
+        let request = RunRequest {
+            command: script,
+            cwd: "/".into(),
+            // The budget the model reads: the wall is what ends the
+            // run here, and the two stay apart.
+            timeout: Duration::from_secs(30),
+        };
+        let started = std::time::Instant::now();
+        let error = run_child_within(
+            child,
+            &request,
+            &AtomicBool::new(false),
+            &mut super::super::OutputOnly(|_| {}),
+            Duration::from_millis(300),
+        )
+        .await
+        .expect_err("the wall ends the run");
+        assert_eq!(error, SandboxError::Timeout(30));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the wall did not end the run: {:?}",
+            started.elapsed()
+        );
+        let pid: u32 = String::from_utf8_lossy(
+            &std::fs::read(&realized).expect("the child's pid was written"),
+        )
+        .trim()
+        .parse()
+        .expect("a pid");
+        let alive = std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(!alive, "the hung child outlived the wall's kill");
     }
 
     #[tokio::test]

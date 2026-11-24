@@ -354,20 +354,36 @@ impl RemoteCall {
     /// exit read goes through the `timeout` prefix's codes. The
     /// message loop is the shape the old child pump had, over one
     /// multiplexed stream instead of two pipes.
+    ///
+    /// `wall` is the host-side deadline: the remote `timeout` prefix
+    /// owns the command's budget and wins first, and past the wall a
+    /// channel that never answers is abandoned, returning drops the
+    /// connection and with it the channel, the far end's command
+    /// losing its reader. The report is the request's own budget,
+    /// the same shape the prefix's 124 reads as, whichever side
+    /// drew the line.
     pub(crate) async fn run(
         mut self,
         request: &RunRequest,
         cancelled: &AtomicBool,
         progress: &mut dyn ToolProgress,
+        wall: Duration,
     ) -> Result<RunOutcome, SandboxError> {
         if cancelled.load(Ordering::Relaxed) {
             return Err(SandboxError::Failed("cancelled".into()));
         }
+        let deadline = tokio::time::Instant::now() + wall;
         let mut streams = LineFeeds::new();
         let mut code = None;
         loop {
             let message = tokio::select! {
                 message = self.channel.wait() => message,
+                // The wall: the prefix had its budget and the
+                // channel never answered. Dropping `self` (the
+                // connection's handle included) abandons the channel.
+                _ = tokio::time::sleep_until(deadline) => {
+                    return Err(SandboxError::Timeout(rhema_sandbox::exec_util::budget_secs(request.timeout)));
+                }
                 _ = tokio::time::sleep(CANCEL_TICK) => {
                     if cancelled.load(Ordering::Relaxed) {
                         return Err(SandboxError::Failed("cancelled".into()));
@@ -400,7 +416,7 @@ impl RemoteCall {
             progress.output(&format!("{line}\n"));
             Ok(())
         })?;
-        let code = classify_exit(code, request.timeout.as_secs())?;
+        let code = classify_exit(code, rhema_sandbox::exec_util::budget_secs(request.timeout))?;
         Ok(RunOutcome {
             stdout,
             stderr,

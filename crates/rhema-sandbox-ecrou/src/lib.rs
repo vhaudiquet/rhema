@@ -103,6 +103,9 @@ pub struct EcrouSandbox {
     /// read-only, and what the commands install survives them in the
     /// key's upper. `None` is the one-command rootfs.
     persist: Option<String>,
+    /// The backend binary every boot spawns: `ecrou` in production, a
+    /// fake the tests substitute.
+    bin: String,
 }
 
 impl EcrouSandbox {
@@ -114,6 +117,7 @@ impl EcrouSandbox {
             root,
             workspace: workspace.into(),
             persist: None,
+            bin: "ecrou".to_owned(),
         }
     }
 
@@ -406,6 +410,7 @@ fn snap_common(resolved: Option<&std::path::Path>) -> Option<std::path::PathBuf>
 
 #[allow(clippy::too_many_arguments)]
 fn run_argv(
+    bin: &str,
     image: &str,
     capture: &Path,
     share: &str,
@@ -416,7 +421,7 @@ fn run_argv(
     persist_reset: bool,
 ) -> Vec<String> {
     let mut argv = vec![
-        "ecrou".to_owned(),
+        bin.to_owned(),
         "run".to_owned(),
         // The console is diagnostics; the payload's streams cross the
         // capture share. Quiet also keeps the progress renderer off
@@ -678,6 +683,11 @@ impl Sandbox for EcrouSandbox {
         // config, no git here) the pair is simply not passed, and git
         // behaves as it always has.
         let git_env = self.stage_git_config();
+        // One deadline for the whole request, the mismatch retry
+        // included: the boot that discovered the mismatch already
+        // spent part of the budget, and the reset boot runs on what
+        // is left, so one nominal budget cannot pay for two boots.
+        let deadline = Instant::now() + request.timeout;
         let outcome = self
             .run_machine(
                 &workdir,
@@ -688,6 +698,7 @@ impl Sandbox for EcrouSandbox {
                 &capture,
                 git_env.as_ref(),
                 false,
+                deadline,
             )
             .await;
         match outcome {
@@ -712,6 +723,7 @@ impl Sandbox for EcrouSandbox {
                     &capture,
                     git_env.as_ref(),
                     true,
+                    deadline,
                 )
                 .await
             }
@@ -758,7 +770,9 @@ impl Sandbox for EcrouSandbox {
 impl EcrouSandbox {
     /// Boots one machine for `request` and sees it through: spawn,
     /// the capture-file pump, the budget and cancel, the classify.
-    /// One call is one `ecrou run`; the reset retry calls this twice.
+    /// One call is one `ecrou run`; the reset retry calls this twice
+    /// under the caller's `deadline`, the same request-budget wall
+    /// clock, so the retry runs on the budget's remainder.
     #[allow(clippy::too_many_arguments)]
     async fn run_machine(
         &self,
@@ -770,10 +784,12 @@ impl EcrouSandbox {
         capture: &tempfile::TempDir,
         git_env: Option<&GitEnv>,
         persist_reset: bool,
+        deadline: Instant,
     ) -> Result<RunOutcome, SandboxError> {
         use std::process::Stdio;
 
         let argv = run_argv(
+            &self.bin,
             &self.image,
             capture.path(),
             &format!("{mount}:{mount}"),
@@ -806,7 +822,6 @@ impl EcrouSandbox {
             path: capture.path().join("stderr"),
             ..StreamTail::default()
         };
-        let started = Instant::now();
         let code = loop {
             tokio::select! {
                 _ = tokio::time::sleep(TICK) => {
@@ -817,10 +832,12 @@ impl EcrouSandbox {
                         let _ = child.wait().await;
                         return Err(SandboxError::Failed("cancelled".into()));
                     }
-                    if started.elapsed() >= request.timeout {
+                    if Instant::now() >= deadline {
                         let _ = child.start_kill();
                         let _ = child.wait().await;
-                        return Err(SandboxError::Timeout(request.timeout.as_secs()));
+                        return Err(SandboxError::Timeout(rhema_sandbox::exec_util::budget_secs(
+                        request.timeout,
+                    )));
                     }
                 }
                 status = child.wait() => {
@@ -936,6 +953,7 @@ mod tests {
     #[test]
     fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
         let argv = run_argv(
+            "ecrou",
             "ubuntu",
             Path::new("/tmp/io"),
             "/w:/w",
@@ -953,6 +971,7 @@ mod tests {
         assert!(at < argv.iter().position(|a| a == "ubuntu").unwrap());
 
         let reset = run_argv(
+            "ecrou",
             "ubuntu",
             Path::new("/tmp/io"),
             "/w:/w",
@@ -970,6 +989,7 @@ mod tests {
         assert!(!reset.contains(&"--persist".to_owned()));
 
         let none = run_argv(
+            "ecrou",
             "ubuntu",
             Path::new("/tmp/io"),
             "/w:/w",
@@ -995,6 +1015,7 @@ mod tests {
     #[test]
     fn the_run_argv_names_capture_share_workdir_then_the_payload() {
         let argv = run_argv(
+            "ecrou",
             "ubuntu",
             Path::new("/tmp/io"),
             "/home/me/proj:/home/me/proj",
@@ -1033,6 +1054,7 @@ mod tests {
             guest_config_path: "/home/me/proj/.rhema/git/config".to_owned(),
         };
         let argv = run_argv(
+            "ecrou",
             "ubuntu",
             Path::new("/tmp/io"),
             "/home/me/proj:/home/me/proj",
@@ -1054,6 +1076,7 @@ mod tests {
         assert!(at < argv.iter().position(|a| a == "ubuntu").unwrap());
 
         let bare = run_argv(
+            "ecrou",
             "ubuntu",
             Path::new("/tmp/io"),
             "/w:/w",
@@ -1597,6 +1620,53 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(20),
             "the kill lands near the budget, the boot inside it: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// A fake `ecrou` script: the first boot (`--persist`) burns most
+    /// of the budget with a real sleep, then refuses on the mismatch;
+    /// the reset boot (`--persist-reset`) tries to run its own fresh
+    /// budget of sleep. If the retry shares the deadline, the second
+    /// boot dies inside the first budget's remainder; a fresh clock
+    /// would let it finish.
+    fn fake_machine(dir: &Path, first_boot: f64, second_boot: f64) -> std::path::PathBuf {
+        let body = format!(
+            "#!/bin/sh\n             case \"$*\" in\n               *--persist-reset*) sleep {second_boot}; exit 0;;\n\
+               *) sleep {first_boot}; echo 'Error: persist base mismatch' >&2; exit 3;;\n\
+             esac\n"
+        );
+        let path = dir.join("ecrou-fake");
+        std::fs::write(&path, body).expect("the fake is written");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("the fake is executable");
+        path
+    }
+
+    #[tokio::test]
+    async fn the_persist_retry_does_not_extend_the_budget() {
+        let (mut sandbox, dir) = sandbox();
+        sandbox.bin = fake_machine(dir.path(), 1.4, 1.4).display().to_string();
+        sandbox.persist = Some("proj-1".to_owned());
+        // The budget that pays for both boots together: the first
+        // boot spends 1.4s of it, and the retry must die inside the
+        // remainder instead of sleeping its own fresh 1.4s out.
+        let started = Instant::now();
+        let error = run(
+            &sandbox,
+            RunRequest {
+                command: "true".into(),
+                cwd: "/".into(),
+                timeout: Duration::from_secs(2),
+            },
+        )
+        .await
+        .expect_err("one budget cannot pay for two boots");
+        assert_eq!(error, SandboxError::Timeout(2));
+        assert!(
+            started.elapsed() < Duration::from_millis(2800),
+            "the retry restarted the wall clock: {:?}",
             started.elapsed()
         );
     }

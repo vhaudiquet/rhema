@@ -420,7 +420,7 @@ impl Sandbox for LxdSandbox {
             &self.instance,
             self.root.is_some(),
             &self.workspace,
-            request.timeout.as_secs(),
+            rhema_sandbox::exec_util::budget_secs(request.timeout),
             &cwd,
             &request.command,
             self.user,

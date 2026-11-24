@@ -200,7 +200,7 @@ impl Sandbox for DockerSandbox {
         let argv = exec_argv(
             &self.container,
             &self.workspace,
-            request.timeout.as_secs(),
+            rhema_sandbox::exec_util::budget_secs(request.timeout),
             &cwd,
             &request.command,
             self.user,
