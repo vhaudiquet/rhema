@@ -534,9 +534,11 @@ fn any_chunk_split_assembles_to_the_documented_output(tc: TestCase) {
             );
         }
 
-        // The committed message: the buffered text, then the calls in
-        // ascending index order (chunk order may differ), each call
-        // carrying the reasoning it claimed.
+        // The committed message: the buffered text, then the named
+        // calls in ascending index order (chunk order may differ), each
+        // call carrying the reasoning it claimed. A call whose name
+        // element never arrived is dropped, the sibling rule: no
+        // half-call rides the transcript nor forces a tool-use verdict.
         assert_eq!(output.message.role, Role::Assistant);
         let mut expected_content: Vec<Content> = Vec::new();
         if !text.is_empty() {
@@ -544,7 +546,12 @@ fn any_chunk_split_assembles_to_the_documented_output(tc: TestCase) {
         }
         let mut ordered = script.calls.clone();
         ordered.sort_by_key(|call| call.index);
+        let mut named_calls = 0;
         for call in &ordered {
+            if call.name.is_empty() {
+                continue;
+            }
+            named_calls += 1;
             let provider_data = if call.reasoning.is_empty() {
                 serde_json::Value::Null
             } else {
@@ -582,9 +589,9 @@ fn any_chunk_split_assembles_to_the_documented_output(tc: TestCase) {
             "the final usage diverged"
         );
 
-        // The stop reason: a streamed call outranks the wire's final
-        // reason, the siblings' convention.
-        let expected_stop = if !expected_starts.is_empty() {
+        // The stop reason: a streamed named call outranks the wire's
+        // final reason, the siblings' convention.
+        let expected_stop = if named_calls > 0 {
             StopReason::ToolUse
         } else {
             match script.finish_reason.as_deref() {

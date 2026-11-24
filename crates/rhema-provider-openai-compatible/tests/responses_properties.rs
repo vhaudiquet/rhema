@@ -458,14 +458,25 @@ fn any_event_order_assembles_to_the_documented_output(tc: TestCase) {
         }
     }
 
-    // The committed message: the text, then the calls in start order,
-    // each carrying the reasoning it claimed.
+    // The committed message: the text, then the named calls in start
+    // order, each carrying the reasoning it claimed. A call whose name
+    // element never arrived is dropped, the sibling rule: no
+    // half-call rides the transcript.
     assert_eq!(output.message.role, Role::Assistant);
     let mut expected_content: Vec<Content> = Vec::new();
     if !text.is_empty() {
         expected_content.push(Content::Text(text.clone()));
     }
+    let mut named_calls = 0;
     for call in &script.calls {
+        let name = call
+            .done_name
+            .clone()
+            .unwrap_or_else(|| call.added_name.clone());
+        if name.is_empty() {
+            continue;
+        }
+        named_calls += 1;
         let provider_data = if call.reasoning.is_empty() {
             serde_json::Value::Null
         } else {
@@ -473,10 +484,7 @@ fn any_event_order_assembles_to_the_documented_output(tc: TestCase) {
         };
         expected_content.push(Content::ToolCall(ToolCall {
             id: call.id.clone(),
-            name: call
-                .done_name
-                .clone()
-                .unwrap_or_else(|| call.added_name.clone()),
+            name,
             args: call.args.clone(),
             provider_data,
         }));
@@ -510,7 +518,7 @@ fn any_event_order_assembles_to_the_documented_output(tc: TestCase) {
         "the final usage diverged"
     );
 
-    let expected_stop = if !expected_starts.is_empty() {
+    let expected_stop = if named_calls > 0 {
         StopReason::ToolUse
     } else {
         match &terminal {

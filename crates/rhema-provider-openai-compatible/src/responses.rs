@@ -777,15 +777,10 @@ impl ResponsesAssembler {
             .or_else(|| self.calls.iter().position(|call| !call.done))
             .unwrap_or(self.calls.len());
         if index == self.calls.len() {
+            // `item_added` always registers the item at this point: the
+            // kind gate above leaves only function calls, and its push
+            // takes every one.
             self.item_added(item, sink);
-            if index == self.calls.len() {
-                // `item_added` declined to start it and no slot exists:
-                // remember the call so its arguments are not lost.
-                self.calls.push(PartialCall {
-                    id: format!("call_{}", self.calls.len()),
-                    ..PartialCall::default()
-                });
-            }
         }
         let partial = &mut self.calls[index];
         partial.done = true;
@@ -844,8 +839,9 @@ impl ResponsesAssembler {
         self.finish.is_some()
     }
 
-    /// The assembled output: the streamed text, the calls in their
-    /// start order, and the usage the terminal event carried.
+    /// The assembled output: the streamed text, the named calls in
+    /// their start order (a nameless fragment is dropped, no half-call
+    /// rides the transcript), and the usage the terminal event carried.
     pub fn finish(self) -> ModelOutput {
         let Self {
             text,
@@ -860,6 +856,13 @@ impl ResponsesAssembler {
         }
         let mut has_calls = false;
         for partial in calls {
+            // A name that never arrived leaves no callable tool: the
+            // transcript must not carry a half-call, and it must not
+            // force a ToolUse verdict the message cannot back, the
+            // sibling adapters' rule.
+            if partial.name.is_empty() {
+                continue;
+            }
             has_calls = true;
             let provider_data = if partial.reasoning.is_empty() {
                 Value::Null
@@ -885,9 +888,9 @@ impl ResponsesAssembler {
     }
 }
 
-/// Maps the terminal event onto rhema-core's stop reason; any tool
-/// call in the assembled message wins as [`StopReason::ToolUse`], the
-/// same rule as the sibling adapters.
+/// Maps the terminal event onto rhema-core's stop reason; any named
+/// tool call in the assembled message wins as [`StopReason::ToolUse`],
+/// the same rule as the sibling adapters.
 fn stop_reason(finish: Option<&Finish>, has_calls: bool) -> StopReason {
     if has_calls {
         return StopReason::ToolUse;
@@ -1440,6 +1443,30 @@ mod tests {
             )
             .expect("event is not an error");
         assert!(assembler.was_completed());
+    }
+
+    #[test]
+    fn a_nameless_response_call_is_dropped_for_text() {
+        // A malformed stream can announce a call whose name element never
+        // arrives: the text survives, the half-call never rides the
+        // transcript, no half-call forces a tool-use verdict the
+        // message cannot back, the sibling rule.
+        let mut assembler = ResponsesAssembler::new();
+        let mut sink = Collector::new();
+        for fixture in [
+            r#"{"type":"response.output_text.delta","delta":"half"}"#,
+            r#"{"type":"response.output_item.added","output_index":0,"item":{
+                "type":"function_call","call_id":"fc_z","arguments":""}}"#,
+            r#"{"type":"response.function_call_arguments.delta","call_id":"fc_z","delta":"{}"}"#,
+            r#"{"type":"response.completed","response":{}}"#,
+        ] {
+            assembler
+                .push(event(fixture), &mut sink)
+                .expect("event is not an error");
+        }
+        let out = assembler.finish();
+        assert_eq!(out.message.content, vec![Content::Text("half".into())]);
+        assert_eq!(out.stop_reason, StopReason::EndTurn);
     }
 
     #[test]

@@ -1263,8 +1263,10 @@ impl ChunkAssembler {
         self.finish_reason.is_some()
     }
 
-    /// The assembled output: the buffered text, the calls in their
-    /// chunk order, and the stop reason the final chunk named.
+    /// The assembled output: the buffered text, the named calls in
+    /// their chunk order (a nameless fragment is dropped, no half-call
+    /// rides the transcript), and the stop reason the final chunk
+    /// named.
     pub fn finish(self) -> ModelOutput {
         let mut content: Vec<Content> = Vec::new();
         if !self.text.is_empty() {
@@ -1272,6 +1274,13 @@ impl ChunkAssembler {
         }
         let mut has_calls = false;
         for (index, partial) in self.calls {
+            // A name that never arrived leaves no callable tool: the
+            // transcript must not carry a half-call, and it must not
+            // force a ToolUse verdict the message cannot back, the
+            // sibling adapters' rule.
+            if partial.name.as_deref().map(str::is_empty).unwrap_or(true) {
+                continue;
+            }
             has_calls = true;
             let provider_data = if partial.reasoning.is_empty() {
                 Value::Null
@@ -1978,6 +1987,32 @@ mod tests {
             })]
         );
         assert_eq!(out.stop_reason, StopReason::ToolUse);
+    }
+
+    #[test]
+    fn a_nameless_call_fragment_is_dropped_for_text() {
+        // A malformed stream can carry a fragment with no name element
+        // at all: the text survives, and the half-call never rides the
+        // transcript nor forces a tool-use verdict the message cannot
+        // back.
+        let mut assembler = ChunkAssembler::new(&OPENAI_COMPATIBLE);
+        let mut sink = Collector::new();
+        assembler
+            .push(
+                chunk(concat!(
+                    "{\"choices\":[{\"delta\":{\"content\":\"half-way\",",
+                    "\"tool_calls\":[{\"index\":0,\"id\":\"call_abc\",",
+                    "\"type\":\"function\",",
+                    "\"function\":{\"arguments\":\"{\\\"x\\\":1}\"}}]},",
+                    "\"finish_reason\":\"stop\"}]}"
+                )),
+                &mut sink,
+            )
+            .expect("chunk feeds");
+        let out = assembler.finish();
+
+        assert_eq!(out.message.content, vec![Content::Text("half-way".into())]);
+        assert_eq!(out.stop_reason, StopReason::EndTurn);
     }
 
     #[test]
