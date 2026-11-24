@@ -170,7 +170,8 @@ pub async fn drive(
 /// Orphaned tool calls are closed first, with core's
 /// [`close_orphaned_calls`], which needs no tools. A driver that wants
 /// replay-safe revival calls `revive_dangling_calls` before this, and
-/// then there is nothing left to close.
+/// then there is nothing left to close — the pattern both of
+/// `rhema-subagents`' drivers follow.
 pub async fn resume(
     agent: &mut Agent,
     session: &mut Session,

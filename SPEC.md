@@ -623,7 +623,22 @@ to queued with a fresh clock and cancel flag, the pending failure
 announcements retire with the state they described (a model that read
 one would delegate the same task beside the re-run), and the report
 cache clears, a fetch reads "still running", and the re-run
-announces its finish into the id the model already knows. A re-run
+announces its finish into the id the model already knows. The
+re-run continues the same child session: its spent history — the
+failed run's committed steps and tool results — is the tail the
+re-run steps through, and the failed turn's ledger record is
+re-armed in place (`retry` on its settled `Failed { retryable }`
+state) rather than re-submitted, so the child file keeps one
+turn for the work and one copy of its prompt. A child without a
+re-armable turn (done, or failed for the work itself) still keeps
+its history and gets a new submitted turn over it, never the
+overwritten fresh start a first run builds; a child the store
+cannot even read fails the job instead of running blind over it.
+Dangling calls at either resume seam — the crash resume and the
+restart's continuation — are revived through the run's own
+resolver, replay-safe calls re-execute under the turn's approval,
+unsafe ones land the verify-state failure, the host agent's own
+ordering and answer. A re-run
 that fails transiently again keeps its ingredients and restarts
 again. Permanent failures never restart, re-running them repeats the
 failure at full cost, and a restart past the agent's drop is an

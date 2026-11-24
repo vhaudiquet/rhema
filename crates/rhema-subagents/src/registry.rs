@@ -39,7 +39,10 @@
 //! command restarts it in place: `restart_failed` moves
 //! every transient-failed job back to queued under its own id, with a
 //! fresh cancel flag and clock, and hands the spawn ingredients back
-//! to the tool. The pending failure announcements retire with the
+//! to the tool. The re-run continues the same child session: what the
+//! failed run committed stays, its turn re-armed in place rather than
+//! re-submitted, and the work picks up where it stopped instead of
+//! starting over. The pending failure announcements retire with the
 //! state they describe, the report cache clears, and the re-run
 //! finishes into the same id, the model sees the failure, then a
 //! finish, and fetches as it always did. A
@@ -138,7 +141,9 @@ pub enum JobFailure {
     /// The infrastructure failed: a dead link, a transport timeout, a
     /// struggling server, every [`ProviderError`](rhema_core::ProviderError) a retry ladder
     /// would wait out. The job may run again; the user's retry
-    /// command restarts it from its start.
+    /// command restarts it, and the re-run continues the child session
+    /// the failed run left, its spent history intact, from where its
+    /// work stopped.
     Transient(String),
     /// The work itself failed: no report was written, or the step
     /// budget ran out. Re-running repeats the failure at full cost,

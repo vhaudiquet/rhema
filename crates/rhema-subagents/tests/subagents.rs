@@ -1183,9 +1183,9 @@ async fn a_dead_link_inside_a_job_retries_and_completes() {
 #[tokio::test]
 async fn an_outage_that_outruns_the_ladder_fails_transiently_and_retry_restarts_it() {
     // No ladder at all: the first attempt dies, the job fails with a
-    // transient error, the class the retry command picks up. The
-    // restart re-runs the same id from its start, and the recovered
-    // network answers.
+    // transient error, the class the retry command picks up. No child
+    // session is wired here, so the restart re-runs the same id from
+    // its prompt, and the recovered network answers.
     let provider = Flaky::new(1);
     let shell = Arc::new(ShellTools::new(std::env::temp_dir()));
     let tools = Arc::new(
@@ -1205,7 +1205,8 @@ async fn an_outage_that_outruns_the_ladder_fails_transiently_and_retry_restarts_
          network error: error decoding response body."
     );
 
-    // The restart keeps the id and re-runs from the start.
+    // The restart keeps the id; with no child wired there is no
+    // spent history to continue, so the re-run starts from the prompt.
     let restarted = handle.restart_failed_jobs();
     assert_eq!(
         restarted,

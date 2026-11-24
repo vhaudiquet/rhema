@@ -3,9 +3,11 @@
 //! continues the tail.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use rhema_bash::ShellTools;
+use rhema_bash::{AllowAll, ShellTools};
 use rhema_core::{
     Content, EventSink, Message, ModelOutput, ModelProvider, ModelRequest, ProviderError, Role,
     Session, StopReason, ToolCall, ToolContext, ToolResolver, Usage,
@@ -523,4 +525,324 @@ fn a_retryable_failure_never_reads_interrupted_on_recovery() {
     )
     .unwrap();
     assert!(changes.is_empty());
+}
+
+/// One tool-use step, then a dead link once, then the report on every
+/// later call: the exact shape a transient failure leaves a child in,
+/// the first run with work committed before it dies, the restart
+/// picking the tail up over a recovered network.
+struct Outage {
+    served: AtomicUsize,
+}
+
+#[async_trait]
+impl ModelProvider for Outage {
+    async fn complete(
+        &self,
+        _req: ModelRequest,
+        _sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        match self.served.fetch_add(1, Ordering::SeqCst) {
+            0 => Ok(ModelOutput {
+                message: Message {
+                    annotations: Default::default(),
+                    role: Role::Assistant,
+                    content: vec![Content::ToolCall(ToolCall {
+                        id: "inner-1".into(),
+                        name: "bash".into(),
+                        args: serde_json::json!({ "command": "echo step-one" }),
+                        ..ToolCall::default()
+                    })],
+                },
+                stop_reason: StopReason::ToolUse,
+                usage: Usage::default(),
+            }),
+            1 => Err(ProviderError::Network("dead link".into())),
+            _ => Ok(ModelOutput {
+                message: Message::text(Role::Assistant, "the report after the outage"),
+                stop_reason: StopReason::EndTurn,
+                usage: Usage::default(),
+            }),
+        }
+    }
+}
+
+/// The job id a start result names: what a restart and a fetch take.
+fn job_id(result: &rhema_core::ToolResult) -> String {
+    assert!(!result.is_error, "{}", result.content);
+    let start = result
+        .content
+        .find("job-")
+        .expect("a job id in the start result");
+    let rest = &result.content[start..];
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+        .unwrap_or(rest.len());
+    rest[..end].to_owned()
+}
+
+/// Waits until `id` leaves the status snapshot: a finished job leaves
+/// it at once, its finish line is read from the feed after.
+async fn wait_finished(handle: &rhema_subagents::SubagentHandle, id: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if handle.status().iter().all(|status| status.id != id) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "job {id} never finished: {:?}",
+            handle.status()
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// The child's one `turn` record, or the count of them when the
+/// ledger holds more.
+fn turn_record(session: &Session) -> rhema_submissions::Record {
+    let mut found = snapshot(session)
+        .unwrap()
+        .iter()
+        .filter(|record| record.kind == turn::kind())
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        found.len(),
+        1,
+        "the child holds exactly one turn record: {found:?}"
+    );
+    found.remove(0)
+}
+
+#[tokio::test]
+async fn a_transient_failure_then_a_restart_continues_the_same_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn SessionStore> = Arc::new(FileStore::new(dir.path()));
+    let parent = parent_id();
+    let provider = Arc::new(Outage {
+        served: AtomicUsize::new(0),
+    });
+    let shell = Arc::new(ShellTools::new(dir.path()));
+    // The inner tools execute the scripted `echo`, so the first run
+    // lands a real tool result in the child before it dies.
+    shell.install_approval(Arc::new(AllowAll));
+    let tools = Arc::new(
+        rhema_subagents::SubagentTools::new(provider, vec![def()], shell, "test-model")
+            .with_retry_ladders(Vec::new(), Vec::new()),
+    );
+    tools.attach_store(store.clone(), parent.clone());
+    let handle = tools.handle();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        run_id: "turn-1".into(),
+        ..ToolContext::default()
+    };
+    let start = ToolResolver::resolve(
+        tools.as_ref(),
+        ToolCall {
+            id: "c1".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({ "name": "worker", "prompt": "do the work" }),
+            ..ToolCall::default()
+        },
+        &ctx,
+    )
+    .await;
+    let id = job_id(&start);
+    let child = handle
+        .take_starts()
+        .pop()
+        .expect("the start named its child")
+        .child;
+    wait_finished(&handle, &id).await;
+    let failed = handle.take_finished();
+    assert_eq!(failed.len(), 1);
+    assert!(
+        failed[0].line.contains("finished with an error"),
+        "{}",
+        failed[0].line
+    );
+
+    // What the failed run left behind: its turn settled retryable and
+    // its committed step in the child, on disk.
+    let settled = store.load(&child).unwrap().expect("the child was saved");
+    assert!(matches!(
+        turn_record(&settled).outcome,
+        Some(Outcome::Failed {
+            retryable: true,
+            ..
+        })
+    ));
+    assert!(
+        settled.history.iter().any(|message| message
+            .content
+            .iter()
+            .any(|content| matches!(content,
+                Content::ToolResult(result) if result.content.contains("step-one")))),
+        "the first run's tool result is committed: {:?}",
+        settled.history
+    );
+
+    // The restart continues the same child, and it completes.
+    let restarted = handle.restart_failed_jobs();
+    assert_eq!(
+        restarted,
+        vec![rhema_subagents::Restarted {
+            id: id.clone(),
+            name: "worker".into(),
+        }]
+    );
+    wait_finished(&handle, &id).await;
+    assert_eq!(
+        handle.take_finished()[0].line,
+        "Subagent worker (job-1) has finished."
+    );
+
+    let continued = store.load(&child).unwrap().expect("the child was saved");
+    // The failed run's work is intact: its tool result still rides the
+    // history the restart continued.
+    assert!(
+        continued.history.iter().any(|message| message
+            .content
+            .iter()
+            .any(|content| matches!(content,
+                Content::ToolResult(result) if result.content.contains("step-one")))),
+        "the spent history is kept: {:?}",
+        continued.history
+    );
+    // The prompt was not duplicated: it is the one user message.
+    assert_eq!(
+        continued
+            .history
+            .iter()
+            .filter(|message| message.role == Role::User)
+            .count(),
+        1,
+        "{:?}",
+        continued.history
+    );
+    // The turn was re-armed, not re-submitted: one record, done.
+    let record = turn_record(&continued);
+    assert_eq!(record.status, Status::Done);
+    assert_eq!(
+        kind::report(&continued).as_deref(),
+        Some("the report after the outage")
+    );
+    // The report is the fetch's cache, and the parent adopts the same
+    // child it always owned.
+    let report = ToolResolver::resolve(
+        tools.as_ref(),
+        ToolCall {
+            id: "c2".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({ "id": id }),
+            ..ToolCall::default()
+        },
+        &ctx,
+    )
+    .await;
+    assert!(!report.is_error, "{}", report.content);
+    assert_eq!(report.content, "the report after the outage");
+}
+
+#[tokio::test]
+async fn a_resumed_child_answers_its_dangling_call_with_the_verify_state_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn SessionStore> = Arc::new(FileStore::new(dir.path()));
+    let parent = parent_id();
+    let child = kind::child_id(store.as_ref(), &parent, 5).expect("a short parent mints a child");
+    // A `Running` child whose tail is a dangling `bash` call: the shape
+    // a kill mid-tool leaves, with the shell's own tool name.
+    store
+        .save(&child, &child_session(&child, &parent, Status::Running))
+        .unwrap();
+
+    let tools = rhema_subagents::SubagentTools::new(
+        provider(),
+        vec![def()],
+        Arc::new(ShellTools::new(dir.path())),
+        "test-model",
+    );
+    tools.attach_store(store.clone(), parent);
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        run_id: "turn-1".into(),
+        ..ToolContext::default()
+    };
+
+    let report = tools.resume(&child, &ctx).await.expect("the tail resumes");
+    assert_eq!(report, "the rest of the work");
+
+    // The dangling call was revived, not merely closed: `bash` declares
+    // no replay safety, so it lands the verify-state failure the
+    // engine spells, the contract the parent's resume answers with.
+    let resumed = store.load(&child).unwrap().expect("the child was saved");
+    let results: Vec<&rhema_core::ToolResult> = resumed
+        .history
+        .iter()
+        .flat_map(|message| message.content.iter())
+        .filter_map(|content| match content {
+            Content::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1, "the call is answered exactly once");
+    assert_eq!(results[0].id, "c1");
+    assert!(results[0].is_error);
+    assert!(
+        results[0].content.contains("verify state before retrying"),
+        "the revival's own wording, not the close's: {}",
+        results[0].content
+    );
+}
+
+#[tokio::test]
+async fn a_first_run_starts_a_fresh_child() {
+    let dir = tempfile::tempdir().unwrap();
+    let store: Arc<dyn SessionStore> = Arc::new(FileStore::new(dir.path()));
+    let parent = parent_id();
+    let tools = Arc::new(rhema_subagents::SubagentTools::new(
+        provider(),
+        vec![def()],
+        Arc::new(ShellTools::new(dir.path())),
+        "test-model",
+    ));
+    tools.attach_store(store.clone(), parent);
+    let handle = tools.handle();
+    let ctx = ToolContext {
+        cwd: dir.path().to_path_buf(),
+        run_id: "turn-1".into(),
+        ..ToolContext::default()
+    };
+    let start = ToolResolver::resolve(
+        tools.as_ref(),
+        ToolCall {
+            id: "c1".into(),
+            name: "subagent".into(),
+            args: serde_json::json!({ "name": "worker", "prompt": "do the work" }),
+            ..ToolCall::default()
+        },
+        &ctx,
+    )
+    .await;
+    let id = job_id(&start);
+    let child = handle
+        .take_starts()
+        .pop()
+        .expect("the start named its child")
+        .child;
+    wait_finished(&handle, &id).await;
+
+    // The minted child names nothing when it starts, so the first run
+    // is the fresh one: the prompt, the answer, and nothing else.
+    let session = store.load(&child).unwrap().expect("the child was saved");
+    assert_eq!(session.history.len(), 2, "{:?}", session.history);
+    assert_eq!(session.history[0].role, Role::User);
+    assert!(matches!(
+        session.history[0].content.first(),
+        Some(Content::Text(text)) if text == "do the work"
+    ));
+    assert_eq!(session.history[1].role, Role::Assistant);
+    assert_eq!(turn_record(&session).status, Status::Done);
 }

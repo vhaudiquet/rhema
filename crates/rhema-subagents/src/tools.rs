@@ -13,9 +13,11 @@
 //! The spawned task runs the same inner path a synchronous call always
 //! ran: a fresh [`Agent`] over the stamped parent
 //! prompt with the named [`SubagentDef`]'s body appended, a bounded
-//! step loop on a
-//! fresh [`Session`] whose first message is the
-//! `prompt`, reading its history through the bounded transcript view.
+//! step loop over the run's session, reading its history through the
+//! bounded transcript view. A first run's session is fresh, its first
+//! message the `prompt`; a restart continues the child session the
+//! failed run already committed, its spent history intact, so nothing
+//! the old run earned is thrown away or re-run.
 //! The inner turn inherits five things and nothing else: where it
 //! rides, the call's optional `model` argument over the definition's
 //! frontmatter over the parent's provider and model, the first two
@@ -314,13 +316,15 @@ impl Inner {
     }
 
     /// Builds the inner agent one run rides: the stamped prompt with
-    /// the definition's body, the run's resolver, and the provider
-    /// wrapped in the job-tuned retry ladder.
+    /// the definition's body, the resolver the caller built over the
+    /// run's shell (the same resolver a continuation revives dangling
+    /// calls through), and the provider wrapped in the job-tuned retry
+    /// ladder.
     fn agent(
         &self,
         ride: &Ride,
         def: &SubagentDef,
-        inner_shell: &Arc<ShellTools>,
+        resolver: &Arc<dyn ToolResolver>,
         session_key: &str,
     ) -> Result<Agent, JobFailure> {
         // The inner system prompt: the stamp with this definition's
@@ -334,7 +338,6 @@ impl Inner {
         } else {
             format!("{}\n\n{}", self.base, def.body)
         };
-        let resolver = self.inner_resolver(inner_shell);
         // Each run wraps the provider the caller resolved in its own
         // fresh retry and transcript: the wrapper holds no state
         // across requests, so a per-run instance is the shared one's
@@ -351,7 +354,7 @@ impl Inner {
             rhema_transcript::attach(retrying, rhema_transcript::TranscriptSettings::default());
         Agent::builder()
             .provider(retrying)
-            .resolver(resolver)
+            .resolver(resolver.clone())
             .system(system)
             .params(ChatParams {
                 thinking: self.thinking,
@@ -374,7 +377,10 @@ impl Inner {
     /// and a `turn` record before the first model call, the history at
     /// every step boundary, and the settled record at the end. A kill
     /// anywhere in between leaves both, which is what the parent's
-    /// `adopt` and `recover` read.
+    /// `adopt` and `recover` read. A restart, the re-run of a job that
+    /// failed transiently, loads that child first: the ledger is
+    /// re-armed and the step loop continues the spent history where it
+    /// stopped, nothing the failed run committed is thrown away.
     #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
@@ -395,7 +401,8 @@ impl Inner {
         let session_key = child
             .map(|id| id.as_str().to_owned())
             .unwrap_or_else(|| format!("{}/subagent:{}", ctx.run_id, def.name));
-        let mut agent = self.agent(ride, def, inner_shell, &session_key)?;
+        let resolver = self.inner_resolver(inner_shell);
+        let mut agent = self.agent(ride, def, &resolver, &session_key)?;
         if let Some(target) = self.child_run(child) {
             agent.set_commit_hook(Some(target.commit_hook()));
         }
@@ -412,9 +419,34 @@ impl Inner {
             cancelled: ctx.cancelled.clone(),
         };
 
-        let mut session = Session::default();
         let mut child_run = self.child_run(child);
-        if let Some(run) = child_run.as_mut() {
+        // A restart reaches the child the first run already wrote: the
+        // history it committed is the work it did, so the re-run
+        // continues that session instead of building a fresh one over
+        // it. The branch is strictly conditional on the load, and a
+        // miss, the first run or a vanished file, keeps the fresh start
+        // below; a store that cannot answer fails the job rather than
+        // run blind over a file it could not read.
+        let mut session = Session::default();
+        let mut restart = false;
+        if let Some(run) = &child_run {
+            match run.store.load(&run.child) {
+                Ok(Some(loaded)) => {
+                    session = loaded;
+                    restart = true;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    return Err(JobFailure::Permanent(format!(
+                        "its child session could not be loaded: {err}"
+                    )));
+                }
+            }
+        }
+        if restart {
+            let run = child_run
+                .as_mut()
+                .expect("a restart only happens over a child run");
             kind::write_descriptor(
                 &mut session,
                 &kind::Descriptor {
@@ -424,17 +456,31 @@ impl Inner {
                     parent: run.parent.clone(),
                 },
             );
-            let at = rhema_submissions::now();
-            if let Ok(record) = rhema_submissions::turn::submit(&mut session, prompt, at)
-                && let Ok(started) =
-                    rhema_submissions::turn::start(&mut session, &record.id, prompt, at)
-            {
-                run.turn = Some(started.id);
-            }
-        }
-        session.history.push(Message::text(Role::User, prompt));
-        if let Some(run) = &child_run {
+            run.turn = prepare_restart(&mut session, prompt, resolver.as_ref(), &inner_ctx).await?;
             run.save(&session)?;
+        } else {
+            if let Some(run) = child_run.as_mut() {
+                kind::write_descriptor(
+                    &mut session,
+                    &kind::Descriptor {
+                        def: def.name.clone(),
+                        prompt: prompt.to_owned(),
+                        model: ride.spelling.clone(),
+                        parent: run.parent.clone(),
+                    },
+                );
+                let at = rhema_submissions::now();
+                if let Ok(record) = rhema_submissions::turn::submit(&mut session, prompt, at)
+                    && let Ok(started) =
+                        rhema_submissions::turn::start(&mut session, &record.id, prompt, at)
+                {
+                    run.turn = Some(started.id);
+                }
+            }
+            session.history.push(Message::text(Role::User, prompt));
+            if let Some(run) = &child_run {
+                run.save(&session)?;
+            }
         }
 
         let result = self
@@ -526,6 +572,122 @@ impl Inner {
     }
 }
 
+/// The index `prompt` occupies in the history, pushing it when it is
+/// not already the last user message: a continuation never duplicates
+/// the prompt, and the turn's `base` must read the message the work
+/// actually starts from.
+fn land_prompt(session: &mut Session, prompt: &str) -> u64 {
+    if let Some((index, message)) = session
+        .history
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, message)| message.role == Role::User)
+        && matches!(message.content.first(), Some(Content::Text(text)) if text == prompt)
+    {
+        return index as u64;
+    }
+    session.history.push(Message::text(Role::User, prompt));
+    (session.history.len() - 1) as u64
+}
+
+/// What a loaded child needs before its re-run steps: its own turn
+/// re-armed, or a new one when nothing is re-armable, and its dangling
+/// calls revived. Returns the turn the run settles.
+///
+/// The newest `turn` record is the child's current work. When it names
+/// this prompt and its status can go back to `Running`, it is re-armed
+/// in place: the failed run settled it `Failed { retryable: true }`,
+/// the one class a restart exists for, or a killed run left it for
+/// `reconcile` to call `Interrupted`, and [`rhema_submissions::retry`]
+/// takes both back to `Running`, keeping the id, the input it already
+/// landed, and the history it already cost. A queued one starts where
+/// its input now lands, the move [`SubagentTools::resume`] takes for
+/// its states. Everything else, a settled `Done`, a
+/// non-retryable failure, a record that names another prompt (a child
+/// reached by misuse), submits a fresh turn over the same history and
+/// lands the prompt once: the child keeps its spent history, the
+/// tail never receives the prompt twice.
+///
+/// Dangling calls are revived either way, through the same resolver
+/// the re-run steps through, after the approval hook is on the inner
+/// shell: a replay-safe call re-executes under that approval, an
+/// unsafe one lands the verify-state failure the engine's contract
+/// spells, and nothing dangles when the step loop takes over.
+async fn prepare_restart(
+    session: &mut Session,
+    prompt: &str,
+    resolver: &dyn ToolResolver,
+    ctx: &ToolContext,
+) -> Result<Option<rhema_submissions::SubmissionId>, JobFailure> {
+    let ledger = |err: rhema_submissions::SubmissionError| {
+        JobFailure::Permanent(format!("its child ledger could not be read: {err}"))
+    };
+    // A stale `Running` record, a child left mid-run by a killed
+    // process, first reads what its history says about it, the repair
+    // resume opens with; a settled record is terminal and no kind is
+    // asked.
+    let kinds = rhema_submissions::Kinds::new().with(Arc::new(rhema_submissions::turn::Turn));
+    rhema_submissions::reconcile(session, &kinds, rhema_submissions::now()).map_err(ledger)?;
+    let at = rhema_submissions::now();
+    let newest = rhema_submissions::snapshot(session)
+        .map_err(ledger)?
+        .iter()
+        .rev()
+        .find(|record| record.kind == rhema_submissions::turn::kind())
+        .cloned();
+    if let Some(record) = &newest
+        && let Ok(turn) =
+            serde_json::from_value::<rhema_submissions::turn::Payload>(record.payload.clone())
+        && turn.input == prompt
+    {
+        let id = record.id.clone();
+        let re_armed = match record.status {
+            // One `retry` for both: the turn keeps its id and its
+            // history, and `Running` is where the settle reads it. A
+            // `Failed` record that lost its retryable flag refuses,
+            // and the new-turn arm below takes over.
+            rhema_submissions::Status::Failed | rhema_submissions::Status::Interrupted => {
+                rhema_submissions::retry(session, &id, at).is_ok()
+            }
+            // The input never landed: start pins where it now will.
+            rhema_submissions::Status::Queued => {
+                let base = land_prompt(session, prompt);
+                rhema_submissions::start(
+                    session,
+                    &id,
+                    at,
+                    Some(serde_json::json!({ "input": prompt, "base": base })),
+                )
+                .is_ok()
+            }
+            _ => false,
+        };
+        if re_armed {
+            rhema_core::revive_dangling_calls(session, resolver, ctx).await;
+            return Ok(Some(id));
+        }
+    }
+    // No turn of this prompt can be re-armed: the child keeps its
+    // history and gets a new one.
+    let Ok(record) = rhema_submissions::turn::submit(session, prompt, at) else {
+        return Ok(None);
+    };
+    let base = land_prompt(session, prompt);
+    if rhema_submissions::start(
+        session,
+        &record.id,
+        at,
+        Some(serde_json::json!({ "input": prompt, "base": base })),
+    )
+    .is_err()
+    {
+        return Ok(None);
+    }
+    rhema_core::revive_dangling_calls(session, resolver, ctx).await;
+    Ok(Some(record.id))
+}
+
 /// Runs subagents behind the `subagent` tool.
 pub struct SubagentTools {
     inner: Inner,
@@ -585,7 +747,10 @@ impl SubagentTools {
     /// process left `Running` becomes `Interrupted` or `Queued`
     /// through the turn kind's own rules. A queued record starts the
     /// child from its prompt; an interrupted one retries and continues
-    /// the tail. Both settle and save when the run returns.
+    /// the tail. The tail's dangling calls are revived through the run's
+    /// own resolver, replay-safe ones re-run and unsafe ones land the
+    /// verify-state failure, before the turn resumes. Both settle and
+    /// save when the run returns.
     pub async fn resume(&self, child: &SessionId, ctx: &ToolContext) -> Result<String, String> {
         let children = self
             .inner
@@ -610,16 +775,19 @@ impl SubagentTools {
         let inner_shell = self
             .inner
             .inner_shell(&self.shell, self.shell.current_approval());
+        let resolver = self.inner.inner_resolver(&inner_shell);
         // The revived run keeps its child id: the resumed conversation
         // lands back on the sticky bucket the first run warmed.
         let mut agent = self
             .inner
-            .agent(&ride, def, &inner_shell, child.as_str())
+            .agent(&ride, def, &resolver, child.as_str())
             .map_err(|failure| failure.reason().to_owned())?;
 
         // Classify what the dead process left, then repair the tail:
-        // orphaned calls become synthetic failures so the model is not
-        // asked to answer a call that never returned.
+        // a dangling call is answered, a replay-safe one by re-running
+        // it and an unsafe one by a failure telling the model to verify
+        // state, so the model is never asked to answer a call that
+        // never returned.
         let kinds = rhema_submissions::Kinds::new().with(Arc::new(rhema_submissions::turn::Turn));
         rhema_submissions::reconcile(&mut session, &kinds, rhema_submissions::now())
             .map_err(|err| err.to_string())?;
@@ -652,7 +820,18 @@ impl SubagentTools {
                 _ => {}
             }
         }
-        rhema_core::close_orphaned_calls(&mut session.history);
+        // Revive through the resolver the inner agent steps through,
+        // after the approval hook is on that shell (a replay-safe call
+        // re-runs under this turn's approval, the parent's ordering
+        // rule) and before the turn resumes. One answer per dangling
+        // call, the engine's own contract, so nothing is left dangling
+        // and no close is needed after it.
+        let inner_ctx = ToolContext {
+            cwd: inner_shell.workspace().to_path_buf(),
+            run_id: format!("{}/subagent:{}", ctx.run_id, def.name),
+            cancelled: ctx.cancelled.clone(),
+        };
+        rhema_core::revive_dangling_calls(&mut session, resolver.as_ref(), &inner_ctx).await;
         agent.set_commit_hook(Some(
             ChildRun {
                 store: children.store.clone(),
@@ -666,12 +845,6 @@ impl SubagentTools {
             .store
             .save(child, &session)
             .map_err(|err| err.to_string())?;
-
-        let inner_ctx = ToolContext {
-            cwd: inner_shell.workspace().to_path_buf(),
-            run_id: format!("{}/subagent:{}", ctx.run_id, def.name),
-            cancelled: ctx.cancelled.clone(),
-        };
         let mut silent = rhema_core::OutputOnly(|_| {});
         let mut sink = Forwarder {
             progress: &mut silent,
@@ -1186,9 +1359,12 @@ impl SubagentTools {
 
     /// Restarts every transient-failed job: the registry resets the
     /// records and hands back the ingredients, and this re-spawns each
-    /// run under its own id. The names come back for the frontend's
-    /// notice; the re-runs announce themselves when they finish, into
-    /// the same ids the model already knows.
+    /// run under its own id. A re-run continues the child session the
+    /// failed run left, its spent history intact and its turn re-armed
+    /// in place, never a second start over the same work. The names
+    /// come back for the frontend's notice; the re-runs announce
+    /// themselves when they finish, into the same ids the model already
+    /// knows.
     pub fn restart_failed_jobs(&self) -> Vec<crate::registry::Restarted> {
         let Some(registry) = &self.registry else {
             return Vec::new();
@@ -2130,5 +2306,244 @@ mod tests {
             model: Some("m".into()),
         });
         assert_eq!(registry.status()[0].phase, RUNNING);
+    }
+
+    /// A probe resolver for the continuation's revival: `safe`
+    /// declares replay-safe (the posture a read-only tool carries),
+    /// everything else keeps the resolver default, and the executed
+    /// names are recorded, so an unsafe call that re-ran as a side
+    /// effect cannot pass unnoticed.
+    struct ReviveProbe {
+        ran: Mutex<Vec<String>>,
+    }
+
+    impl ReviveProbe {
+        fn executed(&self) -> Vec<String> {
+            self.ran
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl ToolResolver for ReviveProbe {
+        fn specs(&self) -> Vec<ToolSpec> {
+            Vec::new()
+        }
+
+        fn replay_safety(&self, name: &str) -> rhema_core::ReplaySafety {
+            if name == "safe" {
+                rhema_core::ReplaySafety::Safe
+            } else {
+                rhema_core::ReplaySafety::Unsafe
+            }
+        }
+
+        async fn resolve(&self, call: ToolCall, _ctx: &ToolContext) -> ToolResult {
+            self.ran
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(call.name.clone());
+            ToolResult::success(call.id, "re-ran")
+        }
+    }
+
+    /// A child as a transient failure left it: its turn settled
+    /// `Failed { retryable: true }`, its committed step in the
+    /// history, a dangling call block at the tail, exactly the shape a
+    /// restart loads off disk.
+    fn failed_child() -> (Session, rhema_submissions::SubmissionId) {
+        let mut session = Session::default();
+        let record = rhema_submissions::turn::submit(&mut session, "do the work", 1).unwrap();
+        let started = rhema_submissions::turn::start(&mut session, &record.id, "do the work", 2)
+            .unwrap()
+            .id;
+        session
+            .history
+            .push(Message::text(Role::User, "do the work"));
+        session.history.push(Message {
+            annotations: Default::default(),
+            role: Role::Assistant,
+            content: vec![
+                Content::ToolCall(ToolCall {
+                    id: "safe-1".into(),
+                    name: "safe".into(),
+                    args: json!({"look": "at this"}),
+                    ..ToolCall::default()
+                }),
+                Content::ToolCall(ToolCall {
+                    id: "bash-1".into(),
+                    name: "bash".into(),
+                    args: json!({"command": "echo ran"}),
+                    ..ToolCall::default()
+                }),
+            ],
+        });
+        rhema_submissions::settle(
+            &mut session,
+            &started,
+            rhema_submissions::Outcome::Failed {
+                error: "network error: dead link".into(),
+                retryable: true,
+            },
+            3,
+        )
+        .unwrap();
+        (session, started)
+    }
+
+    /// Every tool result in the history, in order, as
+    /// (id, is_error, content).
+    fn tool_results(session: &Session) -> Vec<(String, bool, String)> {
+        session
+            .history
+            .iter()
+            .flat_map(|message| message.content.iter())
+            .filter_map(|content| match content {
+                Content::ToolResult(result) => {
+                    Some((result.id.clone(), result.is_error, result.content.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The re-run of a transient failure re-arms the child's own turn,
+    /// never a second submit, and revives the failed run's dangling
+    /// calls: the replay-safe one re-executed and its result landed,
+    /// the unsafe one answered with the verify-state failure the
+    /// engine's contract spells, and the prompt is not pushed twice.
+    #[tokio::test]
+    async fn a_restart_re_arms_the_failed_turn_and_revives_the_tail() {
+        let (mut session, turn) = failed_child();
+        let probe = Arc::new(ReviveProbe {
+            ran: Mutex::new(Vec::new()),
+        });
+        let re_armed = prepare_restart(
+            &mut session,
+            "do the work",
+            probe.as_ref(),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap()
+        .expect("the failed turn is re-armable");
+        assert_eq!(re_armed, turn, "the same record, not a second submit");
+        let records = rhema_submissions::snapshot(&session).unwrap();
+        assert_eq!(records.len(), 1, "the ledger holds the one turn");
+        let record = records.get(&re_armed).unwrap();
+        assert_eq!(record.status, rhema_submissions::Status::Running);
+        assert!(
+            record.outcome.is_none(),
+            "the retry dropped the settled outcome"
+        );
+        assert_eq!(
+            session
+                .history
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .count(),
+            1,
+            "the prompt its turn already landed is not pushed again"
+        );
+        // The safe call re-ran through the resolver, the unsafe one
+        // never executed: the probe's log is the proof of separation.
+        assert_eq!(probe.executed(), vec!["safe".to_owned()]);
+        let results = tool_results(&session);
+        assert_eq!(
+            results[0],
+            ("safe-1".to_owned(), false, "re-ran".to_owned()),
+            "the safe call re-ran and its result landed"
+        );
+        assert_eq!(results[1].0, "bash-1");
+        assert!(
+            results[1].1 && results[1].2.contains("verify state before retrying"),
+            "the unsafe call reads the engine's verify-state failure: {}
+{}",
+            results[1].2,
+            results[1].1
+        );
+    }
+
+    /// A loaded child whose ledger has no re-armable turn (a done
+    /// child, a child reached with another prompt) keeps its history:
+    /// the settled turn stays settled, a new one is submitted over
+    /// the same session, and the prompt lands once, once only even
+    /// when it already sits in the tail.
+    #[tokio::test]
+    async fn a_child_without_a_re_armable_turn_gets_a_new_one_over_its_history() {
+        let mut session = Session::default();
+        let record = rhema_submissions::turn::submit(&mut session, "do the work", 1).unwrap();
+        let started =
+            rhema_submissions::turn::start(&mut session, &record.id, "do the work", 2).unwrap();
+        session
+            .history
+            .push(Message::text(Role::User, "do the work"));
+        session
+            .history
+            .push(Message::text(Role::Assistant, "the report"));
+        rhema_submissions::settle(
+            &mut session,
+            &started.id,
+            rhema_submissions::Outcome::Done,
+            3,
+        )
+        .unwrap();
+        let probe = Arc::new(ReviveProbe {
+            ran: Mutex::new(Vec::new()),
+        });
+
+        // The same prompt over a done child: no arm is taken, the
+        // settled record stands, and the prompt already in the tail is
+        // never duplicated.
+        let first = prepare_restart(
+            &mut session,
+            "do the work",
+            probe.as_ref(),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap()
+        .expect("a fresh turn is submitted");
+        assert_ne!(first, started.id, "the done turn is untouched");
+        let records = rhema_submissions::snapshot(&session).unwrap();
+        assert_eq!(
+            records.get(&started.id).unwrap().status,
+            rhema_submissions::Status::Done
+        );
+        let fresh = records.get(&first).unwrap();
+        assert_eq!(fresh.status, rhema_submissions::Status::Running);
+        assert_eq!(session.history.len(), 2, "the history stands as it was");
+
+        // Another prompt over the same child: it is pushed, once, at
+        // the tail, and the new turn reads it there.
+        let second = prepare_restart(
+            &mut session,
+            "another task",
+            probe.as_ref(),
+            &ToolContext::default(),
+        )
+        .await
+        .unwrap()
+        .expect("a fresh turn is submitted");
+        assert_ne!(second, first);
+        assert_eq!(
+            session.history.len(),
+            3,
+            "a new prompt is pushed exactly once"
+        );
+        assert_eq!(session.history.last().unwrap().role, Role::User);
+        let records = rhema_submissions::snapshot(&session).unwrap();
+        let payload: rhema_submissions::turn::Payload =
+            serde_json::from_value(records.get(&second).unwrap().payload.clone()).unwrap();
+        assert_eq!(payload.input, "another task");
+        assert_eq!(
+            payload.base,
+            Some(2),
+            "the turn reads where its input landed"
+        );
+        // Nothing dangled, so nothing re-ran.
+        assert!(probe.executed().is_empty());
     }
 }

@@ -180,7 +180,10 @@ resolve(call, ctx):
   provider; the taught list in the spec description is the factory's
   wire-time answers, while the resolution itself probes live, so a
   `/login` mid-session serves jobs started after it. A background
-  restart re-resolves the spelling the call carried.
+  restart re-resolves the spelling the call carried, and continues
+  the same child session: the failed turn's ledger record re-arms
+  in place and the spent history is the tail the re-run steps
+  through, never a fresh session over the child id.
 - **The inner context** clones the parent's `cancelled` flag, so a user
   stop reaches the subagent's tools, and the loop checks it between
   steps. The `run_id` carries the parent's: `turn-3` becomes
@@ -286,4 +289,5 @@ subagents on its own.
   `subagent_providers` config field carries the credential answers, and
   with none installed the session's provider is the only one, named as
   such in the spec. A restart re-resolves, so a re-run aims where the
-  credentials point when it runs.
+  credentials point when it runs, and lands on the child the
+  failed run left, not a blank slate.
