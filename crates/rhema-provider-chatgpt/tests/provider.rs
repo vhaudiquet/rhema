@@ -307,6 +307,82 @@ async fn a_non_2xx_response_keeps_its_status_and_message() {
 }
 
 #[tokio::test]
+async fn a_429_naming_retry_after_becomes_a_retryable_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "12")
+                .set_body_string(r#"{"error":{"message":"requests too fast"}}"#),
+        )
+        .mount(&server)
+        .await;
+
+    let request = rhema_core::ModelRequest {
+        system: None,
+        messages: vec![Message::text(Role::User, "hi")],
+        tools: vec![],
+        params: ChatParams::new("gpt-5.1-codex"),
+    };
+    let mut sink = Collector(vec![]);
+    let err = provider(&server.uri(), credential("access", None, 4_102_444_800))
+        .complete(request, &mut sink)
+        .await
+        .expect_err("the server rate limits the turn");
+
+    match &err {
+        ProviderError::RateLimited {
+            message,
+            retry_after,
+        } => {
+            assert_eq!(*retry_after, std::time::Duration::from_secs(12));
+            assert!(message.contains("requests too fast"), "got: {message}");
+        }
+        other => panic!("expected RateLimited, got: {other:?}"),
+    }
+    assert!(err.is_retryable(), "a short window clears in a retry");
+    assert!(sink.0.is_empty());
+}
+
+#[tokio::test]
+async fn a_429_naming_retry_after_ms_becomes_a_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after-ms", "2500")
+                .set_body_string(r#"{"error":{"message":"requests too fast"}}"#),
+        )
+        .mount(&server)
+        .await;
+
+    let request = rhema_core::ModelRequest {
+        system: None,
+        messages: vec![Message::text(Role::User, "hi")],
+        tools: vec![],
+        params: ChatParams::new("gpt-5.1-codex"),
+    };
+    let mut sink = Collector(vec![]);
+    let err = provider(&server.uri(), credential("access", None, 4_102_444_800))
+        .complete(request, &mut sink)
+        .await
+        .expect_err("the server rate limits the turn");
+
+    // The millisecond form is the more precise clock, read first: the
+    // wait is 2500ms, not a misparsed seconds count.
+    assert!(
+        matches!(
+            &err,
+            ProviderError::RateLimited { retry_after, .. }
+                if *retry_after == std::time::Duration::from_millis(2500)
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_models_listing_reads_the_visible_rows() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))

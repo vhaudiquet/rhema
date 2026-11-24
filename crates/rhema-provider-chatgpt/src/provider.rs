@@ -296,8 +296,9 @@ impl ModelListing for ChatGptProvider {
         }
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
+            return Err(response_error(status, &headers, &text));
         }
         let page: Value = response.json().await.map_err(|err| ProviderError::Api {
             message: format!("malformed chatgpt models page: {err}"),
@@ -315,7 +316,9 @@ impl ModelProvider for ChatGptProvider {
     /// when the transport fails or the stream closes before its
     /// terminal event, [`ProviderError::Api`] with the HTTP
     /// status on a non-2xx response (one 401-driven refresh and retry
-    /// included), and [`ProviderError::Api`] without one on a malformed
+    /// included; a 429 that names its reset is
+    /// [`ProviderError::RateLimited`] instead), and
+    /// [`ProviderError::Api`] without one on a malformed
     /// stream event, a mid-stream error, or a failed response.
     async fn complete(
         &self,
@@ -338,8 +341,9 @@ impl ModelProvider for ChatGptProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let headers = response.headers().clone();
             let text = response.text().await.unwrap_or_default();
-            return Err(api_error(status, &text));
+            return Err(response_error(status, &headers, &text));
         }
         drain_response(response, sink).await
     }
@@ -358,6 +362,50 @@ fn api_error(status: reqwest::StatusCode, raw: &str) -> ProviderError {
         ),
         status: Some(status.as_u16()),
     }
+}
+
+/// Maps a non-2xx response onto [`ProviderError`]: [`api_error`], except
+/// a 429 that names its reset becomes [`ProviderError::RateLimited`],
+/// so the retry ladder can wait out a per-minute window instead of
+/// failing the turn.
+fn response_error(
+    status: reqwest::StatusCode,
+    headers: &reqwest::header::HeaderMap,
+    raw: &str,
+) -> ProviderError {
+    let err = api_error(status, raw);
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return err;
+    }
+    match rate_limit_wait(headers) {
+        Some(retry_after) => ProviderError::RateLimited {
+            message: err.to_string(),
+            retry_after,
+        },
+        None => err,
+    }
+}
+
+/// The wait a 429 names, read from the most precise header first:
+/// `retry-after-ms`, then `retry-after` in seconds (an HTTP date is
+/// not read), the same sources and order the openai-compatible
+/// adapter reads. No wait named means the plain api error stands: a
+/// rate limit that cannot be metered is not one to sleep on.
+fn rate_limit_wait(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    let header = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    if let Some(ms) = header("retry-after-ms").and_then(|v| v.trim().parse::<f64>().ok()) {
+        return seconds(ms / 1000.0);
+    }
+    header("retry-after")
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .and_then(seconds)
+}
+
+/// A non-negative, finite number of seconds as a [`Duration`], the same
+/// safety the sibling adapters apply: a negative or absurd value reads
+/// as no wait.
+fn seconds(secs: f64) -> Option<Duration> {
+    Duration::try_from_secs_f64(secs).ok()
 }
 
 /// The message an error body carries, in the shapes this backend and
