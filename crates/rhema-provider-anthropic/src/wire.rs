@@ -59,9 +59,11 @@
 //!   stream as [`Event::ThinkingDelta`] and never reach the assembled
 //!   message, whose `signature_delta` pieces feed the block's replay
 //!   signature instead; a top-level `error` event fails the stream.
-//! - Usage merges per field: `message_start`'s nested `usage` carries the
-//!   input-token count, `message_delta`'s the final output-token count.
-//!   The totals normalize to the inclusive convention the other adapters
+//! - Usage merges per component: `message_start`'s nested `usage` carries
+//!   the input count, `message_delta`'s the final output count, and a
+//!   frame overwrites only the components it carries, so a delta naming
+//!   its cache reads alone cannot clobber the input total. The totals
+//!   normalize to the inclusive convention the other adapters
 //!   use: `input_tokens` counts the whole prompt, the uncached input
 //!   plus both cache subsets (writes bill near the full input price,
 //!   reads are the cached subset), and `cache_read_input_tokens` maps
@@ -69,9 +71,11 @@
 //!   reports its whole size, never just the new tokens.
 //! - Stop reasons: `end_turn` -> EndTurn, `tool_use` -> ToolUse,
 //!   `max_tokens` -> MaxTokens, `stop_sequence` -> StopSequence, anything
-//!   else -> Other. Anthropic's reason is authoritative, `tool_use` rides
-//!   the wire exactly when tool blocks were streamed, so, unlike the
-//!   sibling adapters, the assembled message never overrides it.
+//!   else -> Other. A streamed tool block outranks the wire's reason in
+//!   the finish, the siblings' convention: a repeat or late
+//!   `message_delta` must not downgrade a tool turn to `EndTurn`, which
+//!   the engine reads as "the model is done" and strands the calls it
+//!   asked for.
 //! - Models: `GET /v1/models` paginates with `has_more` + `after_id`
 //!   (cursor `last_id`). The list carries only id and display name;
 //!   description, ceilings, and pricing have no wire source and default
@@ -937,13 +941,18 @@ enum PartialBlock {
 /// streaming events as deltas arrive.
 ///
 /// Block indexes arrive in stream order, so the keyed map preserves the
-/// wire's block order in the assembled message. Usage is per-field
-/// last-wins: each frame carries only its own accounting.
+/// wire's block order in the assembled message. Usage merges per
+/// component: each frame carries only its own accounting, so an
+/// input-side component keeps the value a previous frame set.
 #[derive(Debug, Default)]
 pub struct ChunkAssembler {
     blocks: BTreeMap<u32, PartialBlock>,
     stop_reason: Option<String>,
     usage: Usage,
+    /// The input-side usage components a frame has set: a frame names
+    /// only the fields the server fills in, so they linger here between
+    /// merges and the input total is recomputed from the retained set.
+    inputs: InputComponents,
     /// Whether a `message_delta` arrived: the observable terminal of
     /// this wire's stream, the one event that carries the final stop
     /// reason and the usage.
@@ -986,11 +995,11 @@ impl ChunkAssembler {
             .as_ref()
             .and_then(|message| message.usage.as_ref())
         {
-            merge_usage(&mut self.usage, usage);
+            merge_usage(&mut self.usage, &mut self.inputs, usage);
             usage_frame = true;
         }
         if let Some(usage) = &event.usage {
-            merge_usage(&mut self.usage, usage);
+            merge_usage(&mut self.usage, &mut self.inputs, usage);
             usage_frame = true;
         }
         // The tally streams live: the prompt lands with `message_start`,
@@ -1226,9 +1235,36 @@ impl ChunkAssembler {
     }
 }
 
-/// Merges one wire usage frame into the running tally; absent fields keep
-/// the value a previous frame set.
-fn merge_usage(usage: &mut Usage, wire: &WireUsage) {
+/// The input-side usage components a frame has set, one per wire field.
+/// A frame carries only the fields the server filled in, so these linger
+/// between merges: a delta naming one component leaves the others intact,
+/// and the input total is recomputed from the retained set rather than
+/// clobbered by a partial frame.
+#[derive(Debug, Default)]
+struct InputComponents {
+    /// The API's own prompt count, absent both cache subsets.
+    input_tokens: u32,
+    /// The prompt subset written to the cache this request.
+    cache_writes: u32,
+    /// The prompt subset served from the cache.
+    cache_reads: u32,
+}
+
+/// Merges one wire usage frame into the running tally; a field the
+/// frame leaves out keeps the value a previous frame set.
+fn merge_usage(usage: &mut Usage, inputs: &mut InputComponents, wire: &WireUsage) {
+    if let Some(input) = wire.input_tokens {
+        inputs.input_tokens = input;
+    }
+    if let Some(writes) = wire.cache_creation_input_tokens {
+        inputs.cache_writes = writes;
+    }
+    if let Some(reads) = wire.cache_read_input_tokens {
+        inputs.cache_reads = reads;
+    }
+    if let Some(output) = wire.output_tokens {
+        usage.output_tokens = output;
+    }
     // The input total is inclusive: the API's own input_tokens count
     // excludes both cache subsets, so both fold in, the writes (which
     // bill near the full input price) and the reads (which the cached
@@ -1238,25 +1274,8 @@ fn merge_usage(usage: &mut Usage, wire: &WireUsage) {
     // whole prompt, cached the part of it served from cache. A prompt
     // fully served from cache reports its whole size, never just the
     // new tokens.
-    let input = match (
-        wire.input_tokens,
-        wire.cache_creation_input_tokens,
-        wire.cache_read_input_tokens,
-    ) {
-        (None, None, None) => None,
-        (input, writes, reads) => {
-            Some(input.unwrap_or(0) + writes.unwrap_or(0) + reads.unwrap_or(0))
-        }
-    };
-    if let Some(input) = input {
-        usage.input_tokens = input;
-    }
-    if let Some(output) = wire.output_tokens {
-        usage.output_tokens = output;
-    }
-    if let Some(cached) = wire.cache_read_input_tokens {
-        usage.cached_input_tokens = cached;
-    }
+    usage.input_tokens = inputs.input_tokens + inputs.cache_writes + inputs.cache_reads;
+    usage.cached_input_tokens = inputs.cache_reads;
 }
 
 /// Parses a block's accumulated `input_json_delta` text; an empty payload
@@ -1269,9 +1288,12 @@ fn parse_args(raw: &str) -> Value {
     serde_json::from_str(raw).unwrap_or_else(|_| serde_json::json!({ WRAPPED_ARGS_TEXT_KEY: raw }))
 }
 
-/// Maps the wire `stop_reason` onto rhema-core's stop reason. Anthropic's
-/// reason is authoritative, `tool_use` rides the wire exactly when tool
-/// blocks were streamed, so the assembled message never overrides it.
+/// Maps the wire `stop_reason` onto rhema-core's stop reason, the
+/// verdict for a message with no tool block: a streamed call outranks it
+/// in [`ChunkAssembler::finish`], the siblings' convention, so a late
+/// `message_delta` cannot downgrade a tool turn to `EndTurn`, which the
+/// engine reads as "the model is done" and strands the calls it asked
+/// for.
 fn stop_reason(stop_reason: Option<&str>) -> StopReason {
     match stop_reason {
         None | Some("") | Some("end_turn") => StopReason::EndTurn,
@@ -2027,6 +2049,35 @@ mod tests {
             Usage {
                 input_tokens: 22_149,
                 output_tokens: 2,
+                cached_input_tokens: 20_000,
+            }
+        );
+    }
+
+    #[test]
+    fn a_cache_read_delta_frame_keeps_the_input_total() {
+        // A usage frame may arrive with one component alone, the cache
+        // reads a `message_delta` re-reports: the input total `message_start`
+        // set must survive it, recomputed from the retained components
+        // rather than rebuilt from the delta's lone field.
+        let mut assembler = ChunkAssembler::new();
+        let mut sink = Collector::new();
+        for payload in [
+            r#"{"type":"message_start","message":{"id":"msg_4","type":"message","role":"assistant","usage":{"input_tokens":149,"output_tokens":1,"cache_creation_input_tokens":2000,"cache_read_input_tokens":20000}}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"cache_read_input_tokens":20000}}"#,
+            r#"{"type":"message_stop"}"#,
+        ] {
+            assembler
+                .push(event(payload), &mut sink)
+                .expect("event feeds");
+        }
+        let out = assembler.finish();
+
+        assert_eq!(
+            out.usage,
+            Usage {
+                input_tokens: 22_149,
+                output_tokens: 1,
                 cached_input_tokens: 20_000,
             }
         );

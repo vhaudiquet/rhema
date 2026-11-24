@@ -367,25 +367,34 @@ impl EventSink for Collector {
     }
 }
 
+/// The input-side components a frame has set, mirroring the retained
+/// state the assembler keeps between frames.
+#[derive(Debug, Default)]
+struct Inputs {
+    input: u32,
+    writes: u32,
+    reads: u32,
+}
+
 /// One wire frame folded into the running tally, on the inclusive
-/// convention the module documents: input folds in the cache reads and
-/// writes, absent fields keep the values a previous frame set.
-fn fold(mut tally: Usage, frame: &GenFrame) -> Usage {
-    let input = match (frame.input, frame.writes, frame.reads) {
-        (None, None, None) => None,
-        (input, writes, reads) => {
-            Some(input.unwrap_or(0) + writes.unwrap_or(0) + reads.unwrap_or(0))
-        }
-    };
-    if let Some(input) = input {
-        tally.input_tokens = input;
+/// convention the module documents: a component the frame names is
+/// overwritten, one it leaves out keeps the value a previous frame set,
+/// and the input total is recomputed from the retained components.
+fn fold(mut tally: Usage, inputs: &mut Inputs, frame: &GenFrame) -> Usage {
+    if let Some(input) = frame.input {
+        inputs.input = input;
+    }
+    if let Some(writes) = frame.writes {
+        inputs.writes = writes;
+    }
+    if let Some(reads) = frame.reads {
+        inputs.reads = reads;
     }
     if let Some(output) = frame.output {
         tally.output_tokens = output;
     }
-    if let Some(reads) = frame.reads {
-        tally.cached_input_tokens = reads;
-    }
+    tally.input_tokens = inputs.input + inputs.writes + inputs.reads;
+    tally.cached_input_tokens = inputs.reads;
     tally
 }
 
@@ -470,18 +479,19 @@ fn any_split_stream_assembles_to_the_documented_output(tc: TestCase) {
         .filter(|block| matches!(block, ScriptBlock::Call { .. }))
         .count();
     let mut tally = Usage::default();
+    let mut inputs = Inputs::default();
     let mut expected_usage = Vec::new();
     if let Some(start) = &script.start_usage {
-        tally = fold(tally, start);
+        tally = fold(tally, &mut inputs, start);
         expected_usage.push(tally);
     }
     // Every interim frame rode a block stop, and there is one stop per
     // block, so the frames beyond the block count never reach the wire.
     for frame in script.interim.iter().take(script.blocks.len()) {
-        tally = fold(tally, frame);
+        tally = fold(tally, &mut inputs, frame);
         expected_usage.push(tally);
     }
-    tally = fold(tally, &script.final_frame);
+    tally = fold(tally, &mut inputs, &script.final_frame);
     expected_usage.push(tally);
     assert_eq!(collector.usage, expected_usage, "the tally diverged");
     assert_eq!(output.usage, tally, "the final usage diverged");
