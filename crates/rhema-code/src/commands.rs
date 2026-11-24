@@ -74,6 +74,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: model,
     },
     CommandSpec {
+        name: "/switch",
+        description: "switch model for this session only (not saved)",
+        argument: Argument::Optional,
+        handler: switch,
+    },
+    CommandSpec {
         name: "/profile",
         description: "switch profile (work, personal)",
         argument: Argument::Optional,
@@ -262,6 +268,18 @@ fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
     match argument {
         None => app.open_picker(),
         Some(needle) => app.choose_model_by_id(needle),
+    }
+}
+
+fn switch(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
+    match argument {
+        Some(needle) => app.choose_session_model_by_id(needle),
+        None => {
+            app.push_notice(
+                "usage: /switch provider/model (this session only; /model saves the choice)",
+            );
+            Vec::new()
+        }
     }
 }
 

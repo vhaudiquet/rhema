@@ -45,6 +45,18 @@ use setup::{
     subagent_rows,
 };
 
+/// A `/switch` pick: the provider, instance, and model this session
+/// runs without the profile storing them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionModel {
+    /// The provider's config name, the spelling `Backend` answers to.
+    pub provider: String,
+    /// The instance the pick came from, when the catalog named one.
+    pub instance: Option<String>,
+    /// The model id.
+    pub model: String,
+}
+
 /// The whole application state.
 pub struct App {
     /// Config persistence seam.
@@ -82,6 +94,12 @@ pub struct App {
     /// The profile this session runs under: the `--profile` flag over the
     /// stored active profile. `/profile` switches it mid-session.
     pub session_profile: Option<String>,
+    /// The model `/switch` chose for this session alone: it overrides
+    /// the session profile's stored model while the process runs and
+    /// never reaches the config. A `/model` pick, a profile switch, or
+    /// an instance change clears it, the stored choice is the session's
+    /// again.
+    pub session_model: Option<SessionModel>,
     /// The starting session, used when the first agent is built.
     pub session: Session,
     /// The current screen.
@@ -606,6 +624,7 @@ impl App {
                     .clone()
                     .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned()),
             ),
+            session_model: None,
             options: setup.options,
             home: setup
                 .home

@@ -303,6 +303,9 @@ impl App {
             .save(&self.config)
             .map_err(|err| format!("cannot save config: {err}"))?;
         if adopted {
+            // A login that takes the session over speaks for the model
+            // too: a `/switch` pick from the previous backend goes.
+            self.session_model = None;
             self.session_profile = Some(tab.to_owned());
             self.backend = Some(backend.clone());
             self.provider = Some(backend.provider());
@@ -577,17 +580,48 @@ impl App {
         }
     }
 
-    /// A model was named for `/model <needle>`: resolve the needle
-    /// against the cached catalog's fully-qualified rows, `provider/id`,
-    /// the shape the palette completes and the picker displays, exact
-    /// match first, then a unique prefix, and switch, or say what went
-    /// missing. A bare id matches nothing on purpose: several providers
-    /// can serve one id, so the name carries its provider
-    /// (`opencode/glm-5.3-flash`, never just `glm-5.3-flash`). `/model`
-    /// with no needle opens the full picker instead.
+    /// A model was named for `/model <needle>`: resolve the needle and
+    /// switch, or say what went missing. `/model` with no needle opens
+    /// the full picker instead.
     pub fn choose_model_by_id(&mut self, needle: &str) -> Vec<Effect> {
-        // The active instance wins ties: the same model id may be served
-        // by several instances of one provider.
+        match self.resolve_model(needle) {
+            Ok((provider, instance, id)) => self.choose_model(provider, instance.as_deref(), &id),
+            Err(notice) => {
+                self.push_notice(&notice);
+                Vec::new()
+            }
+        }
+    }
+
+    /// A model was named for `/switch <needle>`: the pick re-resolves
+    /// the backend and rebuilds the agent like a `/model` pick, but it
+    /// stays out of the config, so the profile and the next launch keep
+    /// the stored model.
+    pub fn choose_session_model_by_id(&mut self, needle: &str) -> Vec<Effect> {
+        match self.resolve_model(needle) {
+            Ok((provider, instance, id)) => {
+                self.choose_session_model(provider, instance.as_deref(), &id)
+            }
+            Err(notice) => {
+                self.push_notice(&notice);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Resolves a `/model` or `/switch` needle against the cached
+    /// catalog's fully-qualified rows, `provider/id`, the shape the
+    /// palette completes and the picker displays, exact match first,
+    /// then a unique prefix. A bare id matches nothing on purpose:
+    /// several providers can serve one id, so the name carries its
+    /// provider (`opencode/glm-5.3-flash`, never just
+    /// `glm-5.3-flash`). The active instance wins ties: the same model
+    /// id may be served by several instances of one provider. `Err` is
+    /// the notice to show.
+    fn resolve_model(
+        &self,
+        needle: &str,
+    ) -> Result<(&'static str, Option<String>, String), String> {
         let active = self.effective().instance;
         let qualified =
             |entry: &crate::screens::CatalogModel| format!("{}/{}", entry.provider, entry.model.id);
@@ -630,20 +664,14 @@ impl App {
             None
         };
         match resolved {
-            Some((provider, instance, id)) => self.choose_model(provider, instance.as_deref(), &id),
-            None if exact_count > 1 || prefix_count > 1 => {
-                self.push_notice(&format!(
-                    "{} models match {needle:?}; name one fully or use /model",
-                    exact_count.max(prefix_count)
-                ));
-                Vec::new()
-            }
-            None => {
-                self.push_notice(&format!(
-                    "no model matches {needle:?} in the cached catalog; /model lists them"
-                ));
-                Vec::new()
-            }
+            Some(found) => Ok(found),
+            None if exact_count > 1 || prefix_count > 1 => Err(format!(
+                "{} models match {needle:?}; name one fully or use /model",
+                exact_count.max(prefix_count)
+            )),
+            None => Err(format!(
+                "no model matches {needle:?} in the cached catalog; /model lists them"
+            )),
         }
     }
 
@@ -688,6 +716,35 @@ impl App {
         }
     }
 
+    /// A model was chosen for this session alone (`/switch`): the
+    /// override lands in memory, then the backend and the agent rebuild
+    /// the way a persisted pick does.
+    pub(crate) fn choose_session_model(
+        &mut self,
+        provider: &str,
+        instance: Option<&str>,
+        id: &str,
+    ) -> Vec<Effect> {
+        if self.turn.running {
+            self.transcript
+                .push_notice("a turn is running; the model pick waits for it to finish");
+            return Vec::new();
+        }
+        match self.apply_session_model_choice(provider, instance, id) {
+            Ok(effects) => {
+                self.transcript.push_notice(&format!(
+                    "model switched to {provider}/{id} for this session; the profile keeps its stored model"
+                ));
+                self.screen = Screen::Chat;
+                effects
+            }
+            Err(err) => {
+                self.error = Some(err);
+                Vec::new()
+            }
+        }
+    }
+
     /// The model choice without the screen move: the pick persists into
     /// the session's profile, the backend re-resolves, and the agent
     /// rebuilds carrying the conversation over. The chat's picker path
@@ -699,28 +756,69 @@ impl App {
         instance: Option<&str>,
         id: &str,
     ) -> Result<Vec<Effect>, String> {
+        self.apply_choice(provider, instance, id, true)
+    }
+
+    /// The `/switch` half of [`Self::apply_model_choice`]: the pick
+    /// overrides the session's model in memory and leaves the config's
+    /// stored choice alone.
+    pub(crate) fn apply_session_model_choice(
+        &mut self,
+        provider: &str,
+        instance: Option<&str>,
+        id: &str,
+    ) -> Result<Vec<Effect>, String> {
+        self.apply_choice(provider, instance, id, false)
+    }
+
+    /// One model pick, persisted or session-only: write the choice where
+    /// `effective()` reads it back from, re-resolve the backend, and
+    /// rebuild the agent over the same conversation.
+    fn apply_choice(
+        &mut self,
+        provider: &str,
+        instance: Option<&str>,
+        id: &str,
+        persist: bool,
+    ) -> Result<Vec<Effect>, String> {
         let session = match &self.agent {
             Some(agent) => agent.session().clone(),
             None => self.session.clone(),
         };
-        // The write follows the session's profile, not the startup flag:
-        // after a mid-session /profile the pick must land where effective()
-        // reads it back from, profiles never inherit each other's model.
-        // The provider, and the instance it came from, moves with the
-        // model: a pick from another login's catalog switches the backend
-        // this session rides on.
-        let profile = self.session_profile.as_deref();
-        self.config.set_for_profile(profile, |settings| {
-            settings.provider = Some(provider.to_owned());
-            settings.instance = instance.map(str::to_owned);
-            settings.model = Some(id.to_owned());
-        });
-        if let Err(err) = self.store.save(&self.config) {
-            return Err(format!("cannot save config: {err}"));
+        if persist {
+            // The write follows the session's profile, not the startup
+            // flag: after a mid-session /profile the pick must land where
+            // effective() reads it back from, profiles never inherit each
+            // other's model. The provider, and the instance it came from,
+            // moves with the model: a pick from another login's catalog
+            // switches the backend this session rides on.
+            let profile = self.session_profile.as_deref();
+            self.config.set_for_profile(profile, |settings| {
+                settings.provider = Some(provider.to_owned());
+                settings.instance = instance.map(str::to_owned);
+                settings.model = Some(id.to_owned());
+            });
+            if let Err(err) = self.store.save(&self.config) {
+                return Err(format!("cannot save config: {err}"));
+            }
+            // The stored pick is the session's model again.
+            self.session_model = None;
+        } else {
+            self.session_model = Some(SessionModel {
+                provider: provider.to_owned(),
+                instance: instance.map(str::to_owned),
+                model: id.to_owned(),
+            });
         }
         let mut backend = match Backend::from_profile(&self.effective(), self.secret_store()) {
             Some(backend) => backend,
             None => {
+                // A session-only pick that cannot resolve leaves no
+                // override behind: effective() keeps the stored model,
+                // which is what the untouched agent still runs.
+                if !persist {
+                    self.session_model = None;
+                }
                 return Err(format!(
                     "no usable credentials for {provider}; /login first"
                 ));

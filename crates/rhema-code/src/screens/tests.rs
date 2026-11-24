@@ -2053,6 +2053,7 @@ fn the_command_table_lists_every_slash_command() {
         .collect();
     assert!(names.contains(&"/profile"));
     assert!(names.contains(&"/model"));
+    assert!(names.contains(&"/switch"));
     assert!(names.contains(&"/login"));
 }
 
@@ -2107,8 +2108,8 @@ fn arrows_navigate_the_palette_and_tab_completes() {
     chat.handle_key(key(KeyCode::Up), &[], &[], &[], &crate::icons::UNICODE);
     assert_eq!(chat.palette_index, 1);
     chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
-    assert_eq!(chat.input, "/profile");
-    assert_eq!(chat.cursor, "/profile".chars().count());
+    assert_eq!(chat.input, "/switch");
+    assert_eq!(chat.cursor, "/switch".chars().count());
 }
 
 #[test]
@@ -2206,6 +2207,45 @@ fn the_model_palette_narrows_and_tab_fills_the_argument() {
         chat.cursor,
         "/model openrouter/openrouter/auto".chars().count()
     );
+}
+
+#[test]
+fn the_switch_palette_completes_the_same_rows_under_its_own_command() {
+    let models = catalog(
+        "google",
+        vec![model("gemini-3.8-pro", "Gemini 3.8 Pro", true)],
+    );
+    let mut chat = ChatState::new();
+    for c in "/switch ".chars() {
+        chat.handle_key(
+            key(KeyCode::Char(c)),
+            &models,
+            &[],
+            &[],
+            &crate::icons::UNICODE,
+        );
+    }
+    let rows = crate::screens::palette_rows(
+        &chat.input,
+        chat.cursor,
+        &models,
+        &[],
+        &[],
+        &crate::icons::UNICODE,
+    );
+    assert!(
+        matches!(
+            rows.as_slice(),
+            [crate::screens::PaletteRow::Model {
+                command: "/switch",
+                ..
+            }]
+        ),
+        "the model row belongs to /switch: {rows:?}"
+    );
+    chat.handle_key(key(KeyCode::Tab), &models, &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.input, "/switch google/gemini-3.8-pro");
+    assert_eq!(chat.cursor, chat.input.chars().count());
 }
 
 #[test]

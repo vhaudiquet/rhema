@@ -518,12 +518,18 @@ impl ChatState {
                             self.input = spec.name.to_owned();
                             self.cursor = self.input.chars().count();
                         }
-                        PaletteRow::Model { provider, id, .. } => {
+                        PaletteRow::Model {
+                            command,
+                            provider,
+                            id,
+                            ..
+                        } => {
                             self.chips.clear();
                             // The argument is the fully-qualified name,
-                            // the only shape `/model` accepts, since a
-                            // bare id cannot name its provider.
-                            self.input = format!("/model {provider}/{id}");
+                            // the only shape `/model` and `/switch`
+                            // accept, since a bare id cannot name its
+                            // provider.
+                            self.input = format!("{command} {provider}/{id}");
                             self.cursor = self.input.chars().count();
                         }
                         PaletteRow::Profile { name, .. } => {

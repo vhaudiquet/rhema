@@ -2904,13 +2904,13 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // Sixteen commands, six visible rows: eight downs put the
+        // Eighteen commands, six visible rows: nine downs put the
         // selection on /retry, and the window must have followed it.
-        for _ in 0..8 {
+        for _ in 0..9 {
             app.chat
                 .handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
         }
-        assert_eq!(app.chat.palette_index, 8);
+        assert_eq!(app.chat.palette_index, 9);
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();

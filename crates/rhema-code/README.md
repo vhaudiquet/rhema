@@ -220,6 +220,7 @@ Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimo
 ## Documentation
 
 - `rhema onboard`: re-run the first-run wizard (profile, provider, model, colors, skills).
+- `/switch provider/model`: run this session on another model without writing the choice into the profile; the next launch returns to the stored model.
 - `/settings`: everything the wizard sets, plus profiles, appearance, subagents, usage, and about; the Profiles page adds, removes, and switches profiles and cycles each one's name color; the Skills page toggles skills on and off and shows each one's license.
 
 ## About

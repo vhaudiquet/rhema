@@ -858,9 +858,17 @@ impl App {
 
     /// The settings that apply to this session's profile: field-wise, the
     /// named profile (or the one chosen at startup) over the top-level
-    /// section. Computed on demand, it changes mid-session.
+    /// section. Computed on demand, it changes mid-session. A `/switch`
+    /// pick overrides the stored provider, instance, and model for as
+    /// long as the process runs; the config keeps what it stored.
     pub fn effective(&self) -> rhema_config::Profile {
-        self.config.effective(self.session_profile.as_deref())
+        let mut profile = self.config.effective(self.session_profile.as_deref());
+        if let Some(choice) = &self.session_model {
+            profile.provider = Some(choice.provider.clone());
+            profile.instance = choice.instance.clone();
+            profile.model = Some(choice.model.clone());
+        }
+        profile
     }
 
     /// The keychain this session resolves stored keys through, as the

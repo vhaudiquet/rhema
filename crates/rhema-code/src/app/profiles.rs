@@ -187,6 +187,9 @@ impl App {
                 .push_notice(&format!("already on profile {name}"));
             return Vec::new();
         }
+        // The profile moving in has its own stored model; a `/switch`
+        // pick made under the profile just left does not follow.
+        self.session_model = None;
         let effective = self.config.effective(Some(name));
         self.options.thinking = effective.thinking_effort();
         // Profiles are isolated, `bash` included: the offered set
@@ -412,6 +415,7 @@ impl App {
     /// credentials drops it.
     fn apply_onboarding_profile(&mut self, name: &str) {
         self.session_profile = Some(name.to_owned());
+        self.session_model = None;
         let effective = self.config.effective(Some(name));
         self.options.thinking = effective.thinking_effort();
         self.backend = Backend::from_profile(&effective, self.secret_store());
@@ -700,6 +704,9 @@ impl App {
         else {
             return Vec::new();
         };
+        // The activated instance brings its own stored model; a
+        // `/switch` pick made from another one does not follow.
+        self.session_model = None;
         // A stored model id only carries over when the provider stayed
         // the same: gpt-x means nothing to a llama.cpp server.
         let previous_provider = self.config.effective(Some(&tab)).provider;
@@ -807,6 +814,10 @@ impl App {
         }
         let mut effects = Vec::new();
         if self.session_profile.as_deref() == Some(tab.as_str()) {
+            // Removing a login may move the session off the provider a
+            // `/switch` pick named; the stored model is the profile's
+            // again, whatever remains.
+            self.session_model = None;
             let effective = self.config.effective(Some(&tab));
             match Backend::from_profile(&effective, self.secret_store()) {
                 Some(mut backend) => {

@@ -69,9 +69,12 @@ pub struct PaletteSandbox {
 pub enum PaletteRow {
     /// A slash command; completing replaces the whole input with its name.
     Command(&'static crate::commands::CommandSpec),
-    /// A model under `/model`; completing fills the argument. The
-    /// provider's config name prefixes the row and rides on the switch.
+    /// A model under `/model` or `/switch`; completing fills the
+    /// argument. The provider's config name prefixes the row and rides
+    /// on the switch.
     Model {
+        /// The command the row completes under.
+        command: &'static str,
         /// The provider's config name.
         provider: &'static str,
         /// The model id, the value completion inserts.
@@ -139,8 +142,13 @@ pub fn palette_rows(
     if !input.starts_with('/') {
         return path_completion_rows(input, cursor);
     }
-    if let Some(needle) = input.strip_prefix("/model ") {
-        let needle = needle.to_lowercase();
+    // Both model commands complete from the same catalog: `/model`
+    // stores the pick, `/switch` keeps it for the session.
+    let model_command = ["/model", "/switch"]
+        .into_iter()
+        .find(|command| input.starts_with(&format!("{command} ")));
+    if let Some(command) = model_command {
+        let needle = input[command.len()..].trim_start().to_lowercase();
         let rows: Vec<PaletteRow> = models
             .iter()
             .filter(|entry| {
@@ -153,6 +161,7 @@ pub fn palette_rows(
                     || entry.model.display_name.to_lowercase().contains(&needle)
             })
             .map(|entry| PaletteRow::Model {
+                command,
                 provider: entry.provider,
                 id: entry.model.id.clone(),
                 description: model_description(&entry.model, icons),

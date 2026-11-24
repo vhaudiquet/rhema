@@ -1435,6 +1435,79 @@ fn slash_model_with_a_unique_prefix_resolves_and_an_unknown_needle_says_so() {
 }
 
 #[test]
+fn slash_switch_changes_the_model_for_the_session_only() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        result: loaded("google", models()),
+    });
+    let effects = crate::commands::dispatch(&mut h.app, "/switch google/m-b");
+    assert_eq!(effects, vec![Effect::FetchUsage], "the rebuild is inline");
+    assert!(matches!(h.app.screen, Screen::Chat));
+    // The session runs on the picked model, the config keeps the
+    // stored one.
+    assert_eq!(h.app.effective().model.as_deref(), Some("m-b"));
+    assert_eq!(
+        h.app.session_model.as_ref().map(|pick| pick.model.as_str()),
+        Some("m-b")
+    );
+    assert_eq!(
+        h.store.load().unwrap().effective(None).model.as_deref(),
+        Some("m-a"),
+        "the pick never reaches the store"
+    );
+    assert!(h.app.transcript.lines().contains(&Line::Notice(
+        "model switched to google/m-b for this session; the profile keeps its stored model".into()
+    )));
+}
+
+#[test]
+fn slash_switch_without_a_needle_names_its_usage() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut h.app, "/switch");
+    assert!(matches!(
+        h.app.transcript.lines().last(),
+        Some(Line::Notice(text)) if text.starts_with("usage: /switch")
+    ));
+}
+
+#[test]
+fn a_persisted_model_pick_replaces_the_session_only_one() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        result: loaded("google", models()),
+    });
+    crate::commands::dispatch(&mut h.app, "/switch google/m-b");
+    assert_eq!(h.app.effective().model.as_deref(), Some("m-b"));
+    crate::commands::dispatch(&mut h.app, "/model google/m-a");
+    assert!(h.app.session_model.is_none(), "the stored pick wins");
+    assert_eq!(h.app.effective().model.as_deref(), Some("m-a"));
+    assert_eq!(
+        h.store.load().unwrap().effective(None).model.as_deref(),
+        Some("m-a")
+    );
+}
+
+#[test]
+fn a_profile_switch_drops_the_session_only_model() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        result: loaded("google", models()),
+    });
+    crate::commands::dispatch(&mut h.app, "/switch google/m-b");
+    assert_eq!(h.app.effective().model.as_deref(), Some("m-b"));
+    h.app
+        .config
+        .profiles
+        .insert("work".to_owned(), keyed_profile("openrouter", "work-key"));
+    crate::commands::dispatch(&mut h.app, "/profile work");
+    assert!(h.app.session_model.is_none());
+    assert_eq!(h.app.effective().model, None, "work stores no model");
+}
+
+#[test]
 fn a_resumed_session_continues_its_cost() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     let mut session = Session::default();
