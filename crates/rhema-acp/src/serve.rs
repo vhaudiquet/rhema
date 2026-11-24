@@ -626,7 +626,9 @@ async fn serve_connection(
                     // response.
                     let switched = match request.config_id.0.as_ref() {
                         "model" => app.switch_model(id, &value.0),
-                        "thinking" => app.switch_thinking(id, &value.0),
+                        "thinking" => app
+                            .switch_thinking(id, &value.0)
+                            .map(|(_, selects)| selects),
                         other => {
                             return Err(Error::invalid_params()
                                 .data(format!("unknown config option: {other:?}")));

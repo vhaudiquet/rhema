@@ -526,12 +526,14 @@ impl App {
 
     /// Swaps the session's reasoning effort: the agent is rebuilt over
     /// the session's existing history and current model, so only the
-    /// thinking changes. Returns both selects, as a model switch does.
+    /// thinking changes. Returns the effort that took, for callers
+    /// that echo it, beside the selects, as a model switch returns
+    /// them: the parse happened once, here.
     pub(crate) fn switch_thinking(
         &self,
         id: &str,
         value: &str,
-    ) -> Result<Vec<SessionConfigOption>, Error> {
+    ) -> Result<(ThinkingEffort, Vec<SessionConfigOption>), Error> {
         let effort = effort_of(value).ok_or_else(|| {
             Error::invalid_params().data(format!(
                 "thinking expects low, medium, or high; got {value:?}"
@@ -568,7 +570,7 @@ impl App {
             slot.agent = Some(agent);
             (slot.kind, slot.model.clone(), slot.catalog_rows.clone())
         };
-        Ok(self.config_selects(kind, &model, effort, &rows))
+        Ok((effort, self.config_selects(kind, &model, effort, &rows)))
     }
 
     /// The commands a prompt's first line can name. A client lists
@@ -632,11 +634,8 @@ impl App {
             });
         }
         match self.switch_thinking(id, args) {
-            Ok(selects) => Ok(CommandAnswer {
-                message: format!(
-                    "reasoning effort set to {}",
-                    effort_id(effort_of(args).expect("switch_thinking parsed it"))
-                ),
+            Ok((effort, selects)) => Ok(CommandAnswer {
+                message: format!("reasoning effort set to {}", effort_id(exposed(effort))),
                 selects,
             }),
             // A switch that cannot run (a turn in flight, an unknown
