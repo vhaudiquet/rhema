@@ -152,6 +152,6 @@ mod tests {
         let out = default_system(Path::new("/ws"));
         assert!(out.contains("bash"), "{out}");
         // The same description the API's tools array carries.
-        assert!(out.contains("Run a shell command (`bash -c`)"), "{out}");
+        assert!(out.contains("Run a bash script (`bash -c`)"), "{out}");
     }
 }

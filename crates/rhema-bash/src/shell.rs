@@ -67,19 +67,26 @@ impl ShellTools {
     pub fn builtin_specs() -> Vec<ToolSpec> {
         vec![ToolSpec::new(
             "bash",
-            "Run a shell command (`bash -c`) with the workspace root as \
-             working directory. Reading, listing, and editing files are \
-             shell work. Output is capped and the exit status reported; a \
-             non-zero exit comes back as an error. Commands run in the \
-             session's sandbox with no terminal: a program that waits for \
-             input or opens an editor fails instead of hanging, so use \
-             non-interactive forms (`git commit -m`, `-y`, `--no-pager`).",
+            "Run a bash script (`bash -c`) with the workspace root as \
+             working directory. The `command` string runs verbatim as a \
+             complete script body, not a single line: newlines, functions, \
+             loops, and `set -euo pipefail` work as written, so prefer a \
+             readable multi-line script over long `&&` chains. One call \
+             can carry several steps: batch independent reads and checks, \
+             and stop at the step whose output decides the next one, or \
+             add if/else blocks for a more complex workflow. \
+             Reading, listing, and editing files are shell work. Output is \
+             capped and the exit status reported. \
+             Commands run in the session's sandbox with \
+             no terminal: a program that waits for input or opens an \
+             editor fails instead of hanging, so use non-interactive \
+             forms (`git commit -m`, `-y`, `--no-pager`).",
             json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "The shell command to run."
+                        "description": "The bash command script body to run."
                     }
                 },
                 "required": ["command"]
