@@ -81,9 +81,23 @@ pub(crate) fn footer_folder(
 /// the screen arrives as tofu in a macOS tab. Color and the folder's
 /// bold are lost with it; the bar's leading margin space does not
 /// ride along either.
+///
+/// A working turn leads with the status strip's spinner frame, so a
+/// tab running rhema reads as busy from the tab bar. A turn parked on
+/// an approval does not spin: it waits on the user, not the model.
 pub(crate) fn window_title(app: &App) -> String {
     let (prefix, parents, folder) = footer_folder(&app.options.workspace, app.home.as_deref());
-    let mut title = String::from("ῥ · ");
+    let mut title = String::new();
+    if app.turn.running && app.turn.pending_approval.is_none() {
+        let elapsed = app
+            .turn
+            .started_at
+            .map(|started| started.elapsed())
+            .unwrap_or_default();
+        title.push(super::status::spinner_char(elapsed));
+        title.push(' ');
+    }
+    title.push_str("ῥ · ");
     title.push_str(&prefix);
     for parent in &parents {
         title.push_str(parent);

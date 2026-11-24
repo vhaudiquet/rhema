@@ -557,18 +557,15 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // title stack (xterm, kitty, WezTerm keep one), and the matching pop
     // in `restore_terminal` hands it back on exit; a terminal without a
     // stack ignores both and keeps the rhema title until the shell's
-    // next prompt overwrites it. The set itself rides OSC 0, the
-    // spelling every terminal takes. Decoration, not function: write
-    // failures are ignored, and a piped stdout takes no sequence at all.
+    // next prompt overwrites it. The title itself is set by the event
+    // loop, which re-sets it as the spinner turns. Decoration, not
+    // function: write failures are ignored, and a piped stdout takes no
+    // sequence at all.
     {
         use std::io::Write;
         let mut out = stdout();
         if out.is_terminal() {
-            let _ = write!(
-                out,
-                "\x1b[22;0t\x1b]0;{}\x07",
-                crate::ui::footer::window_title(&app)
-            );
+            let _ = write!(out, "\x1b[22;0t");
             let _ = out.flush();
         }
     }
@@ -810,8 +807,10 @@ async fn event_loop(
     for effect in std::mem::take(effects) {
         dispatch(terminal, app, tx, &mut status, effect);
     }
+    let mut title_set = String::new();
     loop {
         status.sync(app);
+        set_title(&mut title_set, app);
         terminal.draw(|frame| ui::render(app, frame))?;
         if app.logo_rect != logo_placed {
             match app.logo_rect {
@@ -952,6 +951,23 @@ async fn event_loop(
             }
         }
     }
+}
+
+/// Sets the window title over OSC 0 when it differs from the one last
+/// written: the spinner frame steps every 80ms during a turn, and an
+/// idle session writes nothing.
+fn set_title(last: &mut String, app: &App) {
+    use std::io::Write;
+    let title = ui::footer::window_title(app);
+    if *last == title {
+        return;
+    }
+    let mut out = stdout();
+    if out.is_terminal() {
+        let _ = write!(out, "\x1b]0;{title}\x07");
+        let _ = out.flush();
+    }
+    *last = title;
 }
 
 /// The placements the frame's card no longer holds: the slots that

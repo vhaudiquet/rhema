@@ -2263,6 +2263,26 @@ mod scroll_tests {
         assert_eq!(window_title(&app), "ῥ · …/c/d/e");
     }
 
+    /// A working turn leads the title with the spinner frame; an
+    /// approval parks it, and an idle session shows the plain title.
+    #[test]
+    fn the_window_title_spins_while_a_turn_works() {
+        use crate::ui::footer::window_title;
+        let mut app = chat_app();
+        app.home = Some(PathBuf::from("/home/u"));
+        app.options.workspace = PathBuf::from("/home/u/prjs/rhema");
+        assert_eq!(window_title(&app), "ῥ · prjs/rhema");
+        app.turn.running = true;
+        app.turn.started_at = None;
+        assert_eq!(window_title(&app), "⠋ ῥ · prjs/rhema");
+        app.turn.pending_approval = Some(rhema_core::ToolCall {
+            id: "c1".into(),
+            name: "bash".into(),
+            ..rhema_core::ToolCall::default()
+        });
+        assert_eq!(window_title(&app), "ῥ · prjs/rhema");
+    }
+
     /// The footer carries the folder badge: the trimmed workspace path
     /// with its folder at the end, the model a separator behind it.
     #[test]
