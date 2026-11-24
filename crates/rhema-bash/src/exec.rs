@@ -425,8 +425,56 @@ async fn kill_run(child: &mut tokio::process::Child, group: RunGroup) {
             .stderr(Stdio::null())
             .status()
             .await;
+        // Not every runtime honors the negative pid: the hardened and
+        // gVisor-class container daemons deliver positive-pid kills
+        // while group signals land nowhere, and the utility answers
+        // nothing the caller can see. `/proc` names the family
+        // directly — a session member (the `setsid` run's own) or a
+        // straggler still holding the child's process group — so
+        // each one pays a positive-pid `kill`, the form every
+        // runtime delivers. Best effort beside the group attempt: a
+        // host without `/proc` keeps the group kill above.
+        let family = session_family(pid).unwrap_or_default();
+        if !family.is_empty() {
+            let _ = tokio::process::Command::new("kill")
+                .arg("-KILL")
+                .args(family.iter().map(u32::to_string))
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .await;
+        }
     }
     let _ = child.wait().await;
+}
+
+/// The pids `/proc` names as the run's family: members of the
+/// session `leader` leads, or processes still holding its process
+/// group. Parsed from each `stat`'s tail past the last `)`, where
+/// the fourth and fifth fields are the pgroup and the session — the
+/// comm may carry spaces and parentheses of its own.
+#[cfg(feature = "local-shell")]
+fn session_family(leader: u32) -> Option<Vec<u32>> {
+    let entries = std::fs::read_dir("/proc").ok()?;
+    let mut family = Vec::new();
+    for entry in entries.flatten() {
+        let Some(Ok(pid)) = entry.file_name().to_str().map(|name| name.parse::<u32>()) else {
+            continue;
+        };
+        // The tail past `)` is `state ppid pgroup session ...`: the
+        // second and third name the membership. A stat gone missing
+        // means the process died between the listing and the read,
+        // which ends the sweep — the group kill above remains the
+        // floor.
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let fields = stat.rsplit_once(')')?.1.split_whitespace();
+        let group = fields.clone().nth(2)?.parse::<u32>().ok()?;
+        let session = fields.clone().nth(3)?.parse::<u32>().ok()?;
+        if (group == leader || session == leader) && pid != leader {
+            family.push(pid);
+        }
+    }
+    Some(family)
 }
 
 /// The whole seconds a budget names when it kills the run: ceiled,
