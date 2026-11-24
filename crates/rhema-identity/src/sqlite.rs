@@ -3,6 +3,10 @@
 //!, WAL and a busy timeout, the two-connections pattern the claw's
 //! stores established. Secrets sit in the file's `secret` column; file
 //! privacy is the consumer's job (0600 file, 0700 directory).
+//!
+//! The table is versioned as `PRAGMA user_version`, stamped at open: a
+//! file stamped by a newer build refuses to open rather than write to a
+//! schema it does not fully understand.
 
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
@@ -28,6 +32,13 @@ CREATE TABLE IF NOT EXISTS accounts (
 );
 ";
 
+/// The schema version this build reads and writes, stamped as the
+/// database's `PRAGMA user_version`. Version 1 is the first stamped
+/// shape: before the stamp shipped, every file this store opened held
+/// this same table, so an unstamped (`0`) file is a legacy one, not a
+/// different schema.
+const VERSION: u32 = 1;
+
 /// The durable identity store over its own connection to a SQLite file.
 /// Shareable behind an `Arc`; every operation takes `&self`.
 pub struct SqliteIdentityStore {
@@ -50,6 +61,11 @@ impl SqliteIdentityStore {
     }
 
     fn init(conn: rusqlite::Connection, durable: bool) -> Result<Self, IdentityError> {
+        // The stamp check is a plain read, and it must happen before the
+        // WAL switch below: that pragma writes the header, and a file
+        // from a newer build must open the door to nothing at all, not
+        // even a journal-mode flip.
+        migrate(&conn)?;
         if durable {
             // Same pragmas as the other stores on the same file: SQLite
             // stores the journal mode per database, and every connection
@@ -63,6 +79,31 @@ impl SqliteIdentityStore {
             conn: Mutex::new(conn),
         })
     }
+}
+
+/// Reads the database's schema version stamp and reconciles it with
+/// [`VERSION`], the one seam a future schema bump has.
+///
+/// `0` is a brand-new database or a legacy file from before versions
+/// were stamped: both hold today's exact shape, so both take the stamp.
+/// Racing openers each read `0` and each write the same `1`; the write
+/// is idempotent, so no interleaving can matter. A version above
+/// [`VERSION`] was written by a newer binary: refuse before writing a
+/// thing, so this build cannot corrupt a file it does not fully
+/// understand. A bump grows a match arm here, from the older version
+/// upward; none has shipped, so `0` is the whole ladder.
+fn migrate(conn: &rusqlite::Connection) -> Result<(), IdentityError> {
+    let found: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if found < 0 || found > i64::from(VERSION) {
+        return Err(IdentityError::Backend(Box::new(SchemaMismatch {
+            found,
+            supported: VERSION,
+        })));
+    }
+    if found == 0 {
+        conn.pragma_update(None, "user_version", VERSION)?;
+    }
+    Ok(())
 }
 
 impl IdentityStore for SqliteIdentityStore {
@@ -273,6 +314,31 @@ impl std::fmt::Display for UnknownKind {
 
 impl std::error::Error for UnknownKind {}
 
+/// The failure `migrate` rides inside [`IdentityError::Backend`]: the
+/// file's `user_version` stamp names a schema a newer build wrote. The
+/// message carries both sides of the gap, the stamp found and the
+/// version this build supports.
+#[derive(Debug)]
+struct SchemaMismatch {
+    /// The stamp the file carries.
+    found: i64,
+    /// The version this build reads and writes.
+    supported: u32,
+}
+
+impl std::fmt::Display for SchemaMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "accounts database schema version {} is not supported by this build \
+             (its version is {}); refusing to open",
+            self.found, self.supported
+        )
+    }
+}
+
+impl std::error::Error for SchemaMismatch {}
+
 /// Widens a row failure to the store's error: a hand-edited kind reads
 /// as [`IdentityError::Corrupt`], everything else keeps its backend
 /// shape.
@@ -443,5 +509,92 @@ mod tests {
         let reader = SqliteIdentityStore::open(&path).expect("second connection");
         writer.put(draft("acme")).expect("put");
         assert_eq!(reader.list().expect("list").len(), 1);
+    }
+
+    fn user_version(store: &SqliteIdentityStore) -> i64 {
+        let conn = store.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("the stamp reads")
+    }
+
+    #[test]
+    fn a_fresh_database_takes_the_stamp_and_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        let store = SqliteIdentityStore::open(&path).expect("opens");
+        let account = store.put(draft("acme")).expect("put");
+        assert_eq!(store.get(&account.id).expect("get").expect("row"), account);
+        assert_eq!(user_version(&store), 1);
+    }
+
+    #[test]
+    fn a_legacy_database_opens_reads_its_row_and_takes_the_stamp() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        // The file on disk before this release stamped versions: the
+        // table, one row, and `user_version` left at its 0 default.
+        {
+            let conn = rusqlite::Connection::open(&path).expect("hand open");
+            conn.execute_batch(SCHEMA).expect("hand schema");
+            conn.execute(
+                "INSERT INTO accounts \
+                 (id, label, service, url, username, secret_kind, secret,
+                  created_at, updated_at) \
+                 VALUES ('legacy', 'acme', 'github', NULL, NULL, 'token', 'tok', 0, 0)",
+                [],
+            )
+            .expect("hand row");
+        }
+        let store = SqliteIdentityStore::open(&path).expect("opens");
+        assert_eq!(
+            store.get("legacy").expect("get").expect("row"),
+            Account {
+                id: "legacy".into(),
+                label: "acme".into(),
+                service: "github".into(),
+                url: None,
+                username: None,
+                secret_kind: SecretKind::Token,
+                created_at: 0,
+                updated_at: 0,
+            }
+        );
+        assert_eq!(
+            store.secret("legacy").expect("secret").expect("row").value,
+            "tok"
+        );
+        assert_eq!(user_version(&store), 1);
+    }
+
+    #[test]
+    fn a_file_a_newer_build_stamped_refuses_to_open_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state.db");
+        {
+            let conn = rusqlite::Connection::open(&path).expect("hand open");
+            conn.execute_batch(SCHEMA).expect("hand schema");
+            conn.pragma_update(None, "user_version", 2).expect("stamp");
+        }
+        let before = std::fs::read(&path).expect("file reads");
+        let message = match SqliteIdentityStore::open(&path) {
+            Err(IdentityError::Backend(err)) => err.to_string(),
+            Err(other) => panic!("expected the backend refusal, got {other:?}"),
+            Ok(_) => panic!("a file from a newer build opened"),
+        };
+        // The refusal names both sides of the gap, so the operator
+        // knows which binary is the old one.
+        for expected in ["schema version 2", "its version is 1", "not supported"] {
+            assert!(message.contains(expected), "message: {message:?}");
+        }
+        assert_eq!(std::fs::read(&path).expect("file reads"), before);
+        assert!(!dir.path().join("state.db-wal").exists());
+        // Still stamped 2: the refusal wrote nothing, not the stamp.
+        {
+            let conn = rusqlite::Connection::open(&path).expect("hand reopen");
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("the stamp reads");
+            assert_eq!(version, 2);
+        }
     }
 }
