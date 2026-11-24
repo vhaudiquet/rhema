@@ -220,8 +220,9 @@ Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimo
 ## Documentation
 
 - `rhema onboard`: re-run the first-run wizard (profile, provider, model, colors, skills).
-- `/switch provider/model`: run this session on another model without writing the choice into the profile; the next launch returns to the stored model.
-- `/settings`: everything the wizard sets, plus profiles, appearance, subagents, usage, and about; the Profiles page adds, removes, and switches profiles and cycles each one's name color; the Skills page toggles skills on and off and shows each one's license.
+- `/model [provider/model]`: pick the model the profile runs. With no argument (or Ctrl-P) it opens the settings' Models page; with one it switches straight to it.
+- `/switch [provider/model]`: run this session on another model without writing the choice into the profile; the next launch returns to the stored model. With no argument it opens a picker over the catalog, and the pick rides the session alone.
+- `/settings`: everything the wizard sets, plus profiles, appearance, subagents, usage, and about. The Models page lists the catalog as a table under the page's own cursor — model, price in and out, capabilities, and context, each under its own bold column title — typing filters it (the column titles stay, and a filter that matches nothing says `no match` in the rows' own column), Enter (or a click) makes the pick the profile's model, and the row in use says so; the Providers page lists the logins; the Profiles page adds, removes, and switches profiles and cycles each one's name color; the Skills page toggles skills on and off and shows each one's license.
 
 ## About
 

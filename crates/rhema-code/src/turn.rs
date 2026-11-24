@@ -346,14 +346,22 @@ pub fn spawn_model_fetch(
                 }
             });
         }
-        let mut result = Vec::new();
+        // Each answer is reported the moment it lands: the picker draws
+        // the rows it has while the rest are still out, so one dead host
+        // cannot hold every other provider's catalog back for the fetch
+        // budget.
+        let mut remaining = set.len();
         while let Some(joined) = set.join_next().await {
-            if let Ok(entry) = joined {
-                result.push(entry);
-            }
+            remaining -= 1;
+            // A task that died without a slice still counts as answered:
+            // otherwise the page would spin on a provider forever.
+            let result = joined.into_iter().collect();
+            let _ = events.send(UiEvent::ModelsLoaded {
+                why: why.clone(),
+                result,
+                remaining,
+            });
         }
-        result.sort_by_key(|entry| entry.provider);
-        let _ = events.send(UiEvent::ModelsLoaded { why, result });
     })
 }
 

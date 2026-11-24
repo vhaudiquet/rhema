@@ -736,6 +736,65 @@ for it, and a profile without usable credentials drops the one it left.
 The finish step is the only writer of `onboarded: true`, so Esc-ing out
 halfway always reopens.
 
+**One model picker.** `ModelPicker`
+(`crates/rhema-code/src/screens/model_picker.rs`) owns the catalog
+rows, the filter, the selection, and the keys; `ui::model_picker`
+draws it into the rect its host hands it as a table: the model, its
+price in and out per million tokens, the capabilities it declares, and
+the context window, each in its own titled column, so a catalog reads
+down as well as across. The titles are typeset apart from the cells
+they name — bold, a tone brighter, a row of air under them — because a
+header that weighs what its rows weigh is a header nobody reads as one.
+The capability column badges what a listing says (`Cap.`, one glyph per
+capability, vision the only one the catalogs publish so far) and stays
+blank on a text-only model or one nobody described: absence of a badge
+is not a verdict, and the column is sized to hold more than one glyph.
+The columns line up by construction (every cell padded to its column,
+the in-use mark riding inside the model cell), they appear only when
+the catalog fills them, and a narrow pane drops them from the least to
+the most useful — out price, in price, capabilities — before it
+squeezes a name. They are measured over the whole catalog rather than
+over the rows a filter left, so the table does not reshuffle as you
+type, and a filter that matches nothing keeps its titles and says `no
+match` in the column the rows would have filled. Three hosts share it:
+the settings' Models page, the wizard's model step, and `/switch`'s
+full-screen screen. Its catalog arrives one provider at a time: each
+slice lands as its own event (`UiEvent::ModelsLoaded` carries how many
+providers are still out), so a dead instance cannot blank or delay the
+live ones, and the picker draws the rows it has while the rest are
+pending, picking them but holding the filter box back until the batch
+settles.
+
+**A model is a setting.** The Models page
+(`SettingsSection::Models`) is where a model pick persists, and
+`/model` and Ctrl-P redirect there instead of opening a screen of
+their own: one place picks and one page is written, the profile. The
+page has one cursor, the settings screen's own: the picker takes every
+key but the sidebar's (tabs and the horizontal arrows still move the
+sections), so printable keys filter, the vertical arrows walk the
+catalog, Enter picks, and a click on a drawn row picks it too. The
+list opens on the model in use, the page marks that row `· in use`,
+and a pick moves the cursor and the mark with it rather than closing
+the page. The block fills the page's body whatever the catalog holds —
+a table that shrank as rows were typed away would walk its filter box
+up from under the hands in it — and the filter line and the count sit
+at its foot, a row of air above them, the page footer naming the keys
+under that; the page itself
+keeps its air — two rows under the border for the title, three cells in
+from the sidebar, and the hints a row above the bottom border — and
+gives the top row back on a terminal too short to hold every section.
+Coming up on the page asks for a catalog whenever the cache holds none,
+however it was reached (the sidebar reaches it without going through
+`/model`), and the page spins while the fetch is out: `⠋ loading
+models…` stands where the filter box will be, the rows that landed stay
+under it, the providers that failed are named beside it, and the footer
+names only the keys that still answer.
+`/switch` keeps the full-screen screen because its pick is transient:
+it lands in `session_model` and leaves the profile's stored model
+alone, so it is an action, not a setting. A
+profile's stored model shows as the pinned row only when the catalog
+is empty, which is the `rhema onboard` rerun's keep-current row.
+
 **Bundled skills.** `commit-message` and `unslop` ship in the binary
 (`include_str!`) and seed into the global skills directory on start,
 never overwriting an existing file, and skipping disabled names. The

@@ -407,15 +407,21 @@ fn settings_arrows_move_the_sidebar_and_wrap() {
         "right wraps back"
     );
     settings.handle_key(key(KeyCode::Tab));
+    assert_eq!(settings.section, SettingsSection::Models);
+    settings.handle_key(key(KeyCode::Tab));
     assert_eq!(settings.section, SettingsSection::Profiles);
     settings.handle_key(key(KeyCode::Tab));
     assert_eq!(settings.section, SettingsSection::Sandbox);
+    // The Models page takes the typing keys but never the sidebar's, so
+    // a tab off it still moves on.
     settings.handle_key(key(KeyCode::Tab));
     assert_eq!(settings.section, SettingsSection::Appearance);
     settings.handle_key(key(KeyCode::Left));
     assert_eq!(settings.section, SettingsSection::Sandbox);
     settings.handle_key(key(KeyCode::Left));
     assert_eq!(settings.section, SettingsSection::Profiles);
+    settings.handle_key(key(KeyCode::Left));
+    assert_eq!(settings.section, SettingsSection::Models);
     settings.handle_key(key(KeyCode::Left));
     assert_eq!(settings.section, SettingsSection::Providers);
     // The row selection restarts with the page.
@@ -1270,7 +1276,7 @@ fn typing_filters_without_any_prefix() {
     let mut picker = picker();
     assert_eq!(
         picker.handle_key(key(KeyCode::Char('p'))),
-        PickerAction::None
+        ModelPickerAction::None
     );
     picker.handle_key(key(KeyCode::Char('R')));
     assert_eq!(picker.filter, "pR");
@@ -1290,8 +1296,8 @@ fn typing_filters_and_enter_chooses_the_highlighted_model() {
     }
     assert_eq!(
         picker.handle_key(key(KeyCode::Enter)),
-        PickerAction::Choose {
-            provider: "google",
+        ModelPickerAction::Choose {
+            provider: "google".into(),
             instance: None,
             id: "gemini-3.8-pro".into(),
         }
@@ -1377,7 +1383,7 @@ fn esc_leaves_directly_even_with_a_filter() {
     picker.handle_key(key(KeyCode::Char('t')));
     assert_eq!(
         picker.handle_key(key(KeyCode::Esc)),
-        PickerAction::BackToChat
+        ModelPickerAction::Back
     );
     // The filter is transient; leaving does not bother with it.
     assert_eq!(picker.filter, "t");
@@ -1387,7 +1393,10 @@ fn esc_leaves_directly_even_with_a_filter() {
 fn picker_enter_chooses_nothing_on_an_empty_list() {
     let mut picker = picker();
     picker.filter = "zzz".into();
-    assert_eq!(picker.handle_key(key(KeyCode::Enter)), PickerAction::None);
+    assert_eq!(
+        picker.handle_key(key(KeyCode::Enter)),
+        ModelPickerAction::None
+    );
 }
 
 #[test]
@@ -1397,13 +1406,10 @@ fn picker_esc_returns_to_the_chat() {
     let mut picker = picker();
     assert_eq!(
         picker.handle_key(key(KeyCode::Esc)),
-        PickerAction::BackToChat
+        ModelPickerAction::Back
     );
     let mut empty = PickerScreen::new(Vec::new());
-    assert_eq!(
-        empty.handle_key(key(KeyCode::Esc)),
-        PickerAction::BackToChat
-    );
+    assert_eq!(empty.handle_key(key(KeyCode::Esc)), ModelPickerAction::Back);
 }
 
 #[test]
@@ -1411,14 +1417,48 @@ fn picker_r_retries_only_from_the_error_state() {
     let mut picker = picker();
     assert_eq!(
         picker.handle_key(key(KeyCode::Char('r'))),
-        PickerAction::None
+        ModelPickerAction::None
     );
-    picker.status = PickerStatus::Error("network error".into());
+    picker.status = ModelPickerStatus::Error("network error".into());
+    assert!(picker.loading_since.is_none(), "nothing loaded yet");
     assert_eq!(
         picker.handle_key(key(KeyCode::Char('r'))),
-        PickerAction::Retry
+        ModelPickerAction::Retry
     );
-    assert_eq!(picker.status, PickerStatus::Loading);
+    assert_eq!(picker.status, ModelPickerStatus::Loading);
+    assert!(
+        picker.loading_since.is_some(),
+        "the retry restamps the spinner's clock"
+    );
+}
+
+/// A batch still out over rows that landed: arrows and Enter work,
+/// typing does not, because the filter box is not on screen yet.
+#[test]
+fn picker_picks_the_rows_that_landed_while_the_batch_is_out() {
+    let mut picker = picker();
+    picker.status = ModelPickerStatus::Loading;
+    assert!(picker.pickable(), "rows landed before the batch settled");
+    assert_eq!(
+        picker.handle_key(key(KeyCode::Char('m'))),
+        ModelPickerAction::None
+    );
+    assert_eq!(picker.filter, "", "typing waits for the filter box");
+    picker.handle_key(key(KeyCode::Down));
+    assert_eq!(picker.selected, 1, "the arrows still walk the rows");
+    assert!(matches!(
+        picker.handle_key(key(KeyCode::Enter)),
+        ModelPickerAction::Choose { .. }
+    ));
+    // Nothing landed and nothing to pick: only the escape answers.
+    let mut empty = PickerScreen::new(Vec::new());
+    empty.status = ModelPickerStatus::Loading;
+    assert!(!empty.pickable());
+    assert_eq!(
+        empty.handle_key(key(KeyCode::Enter)),
+        ModelPickerAction::None
+    );
+    assert_eq!(empty.handle_key(key(KeyCode::Esc)), ModelPickerAction::Back);
 }
 
 #[test]
@@ -3699,5 +3739,75 @@ fn a_paste_lands_in_the_decision_dialogs_input_not_its_kind_list() {
     assert_eq!(
         dialog.input, "JevNamed",
         "the suggestion plus the paste, no newline"
+    );
+}
+
+// The picker's pinned row: the profile's stored model, offered when the
+// catalog names nothing, hidden the moment a login's rows land.
+
+fn current(provider: &str, id: &str) -> CurrentModel {
+    CurrentModel {
+        provider: provider.to_owned(),
+        instance: Some(provider.to_owned()),
+        id: id.to_owned(),
+    }
+}
+
+#[test]
+fn the_current_model_is_the_only_row_while_the_catalog_is_empty() {
+    let mut picker = ModelPicker::new(Vec::new()).with_current(Some(current("google", "gemini-x")));
+    assert_eq!(picker.row_count(), 1, "the keep-current row alone");
+    assert_eq!(
+        picker.handle_key(key(KeyCode::Enter)),
+        ModelPickerAction::Choose {
+            provider: "google".into(),
+            instance: Some("google".into()),
+            id: "gemini-x".into(),
+        }
+    );
+}
+
+#[test]
+fn a_landed_catalog_hides_the_current_row() {
+    let mut picker = ModelPicker::new(catalog(
+        "google",
+        vec![model("gemini-3.8-pro", "Gemini 3.8 Pro", true)],
+    ))
+    .with_current(Some(current("google", "gemini-x")));
+    assert_eq!(picker.row_count(), 1);
+    assert_eq!(
+        picker.handle_key(key(KeyCode::Enter)),
+        ModelPickerAction::Choose {
+            provider: "google".into(),
+            instance: None,
+            id: "gemini-3.8-pro".into(),
+        },
+        "the catalog's rows are the choices, not the pinned one"
+    );
+}
+
+#[test]
+fn a_filter_hides_the_current_row_too() {
+    let mut picker = ModelPicker::new(Vec::new()).with_current(Some(current("google", "gemini-x")));
+    picker.filter = "gem".into();
+    // The pinned row is a fallback, not a filter result: a typed
+    // needle says the user is looking for a catalog row.
+    assert!(picker.rows().is_empty());
+    assert_eq!(
+        picker.handle_key(key(KeyCode::Enter)),
+        ModelPickerAction::None
+    );
+}
+
+#[test]
+fn the_picker_rows_carry_the_current_row_first() {
+    let picker = ModelPicker::new(Vec::new()).with_current(Some(current("google", "gemini-x")));
+    let rows = picker.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].provider(), "google");
+    assert_eq!(rows[0].id(), "gemini-x");
+    assert!(
+        rows[0].card().is_none(),
+        "the pinned row has no catalog card"
     );
 }

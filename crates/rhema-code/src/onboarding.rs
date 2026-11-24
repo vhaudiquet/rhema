@@ -15,7 +15,8 @@
 //! `onboarded` marker stays `false` until the finish step's Enter).
 
 use crate::screens::{
-    AddInstanceDialog, AddProfileDialog, CatalogModel, DialogAction, ProfileDialogAction, SkillRow,
+    AddInstanceDialog, AddProfileDialog, CurrentModel, DialogAction, ModelPicker,
+    ModelPickerAction, ProfileDialogAction, SkillRow,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::BTreeMap;
@@ -125,8 +126,10 @@ pub struct OnboardingScreen {
     pub row: usize,
     /// The login dialog while the Login step runs one.
     pub dialog: Option<AddInstanceDialog>,
-    /// The model rows, filled when the login's catalog lands.
-    pub models: Vec<CatalogModel>,
+    /// The model picker, the same widget `/model` opens: filled when a
+    /// login's catalog lands, or with the stored model as its pinned
+    /// row on a rerun.
+    pub picker: ModelPicker,
     /// The model the wizard landed on, for the finish summary.
     pub chosen_model: Option<String>,
     /// The provider the wizard logged into, for the finish summary.
@@ -169,7 +172,7 @@ impl OnboardingScreen {
             step: OnboardingStep::Welcome,
             row: 0,
             dialog: None,
-            models: Vec::new(),
+            picker: ModelPicker::new(Vec::new()).with_current(current_model(&stored)),
             chosen_model: None,
             chosen_provider: None,
             skills,
@@ -195,7 +198,8 @@ impl OnboardingScreen {
         self.default_profile = name;
         self.stored = stored;
         self.profiles = profiles;
-        self.models.clear();
+        self.picker.set_models(Vec::new());
+        self.picker.set_current(current_model(&self.stored));
         self.chosen_model = None;
         self.chosen_provider = None;
         self.go(OnboardingStep::Login);
@@ -206,6 +210,7 @@ impl OnboardingScreen {
     pub fn go(&mut self, step: OnboardingStep) {
         self.step = step;
         self.row = 0;
+        self.picker.selected = 0;
         self.error = None;
     }
 
@@ -221,9 +226,7 @@ impl OnboardingScreen {
                     2
                 }
             }
-            OnboardingStep::Model => {
-                self.models.len() + self.keep_current_model().is_some() as usize
-            }
+            OnboardingStep::Model => self.picker.row_count(),
             // One row per profile, then the add row.
             OnboardingStep::Profile => {
                 if self.profile_dialog.is_some() {
@@ -341,39 +344,24 @@ impl OnboardingScreen {
         }
     }
 
-    /// The model rows: a keep-current row when the profile already
-    /// carries a model (a `rhema onboard` rerun), then the fresh
-    /// login's catalog.
+    /// The model step hands its keys to the shared picker: typing
+    /// filters, arrows move, enter picks, esc walks back to the login.
     fn handle_model_key(&mut self, key: KeyEvent) -> OnboardingAction {
-        match key.code {
-            KeyCode::Up | KeyCode::Down => {
-                self.move_row(key.code == KeyCode::Down);
-                OnboardingAction::None
-            }
-            KeyCode::Enter => {
-                if self.keep_current_model().is_some() && self.row == 0 {
-                    let (provider, instance, id) = self.keep_current_model().unwrap();
-                    return OnboardingAction::ChooseModel {
-                        provider,
-                        instance,
-                        id,
-                    };
-                }
-                let offset = self.keep_current_model().is_some() as usize;
-                match self.models.get(self.row - offset) {
-                    Some(entry) => OnboardingAction::ChooseModel {
-                        provider: entry.provider.to_owned(),
-                        instance: entry.instance.clone(),
-                        id: entry.model.id.clone(),
-                    },
-                    None => OnboardingAction::None,
-                }
-            }
-            KeyCode::Esc => {
+        match self.picker.handle_key(key) {
+            ModelPickerAction::None | ModelPickerAction::Retry => OnboardingAction::None,
+            ModelPickerAction::Choose {
+                provider,
+                instance,
+                id,
+            } => OnboardingAction::ChooseModel {
+                provider,
+                instance,
+                id,
+            },
+            ModelPickerAction::Back => {
                 self.go(OnboardingStep::Login);
                 OnboardingAction::None
             }
-            _ => OnboardingAction::None,
         }
     }
 
@@ -382,12 +370,14 @@ impl OnboardingScreen {
     /// rerun path, where keeping is the common answer. `None` once a
     /// login populated the catalog: those rows are the real choices.
     pub fn keep_current_model(&self) -> Option<(String, Option<String>, String)> {
-        if !self.models.is_empty() {
-            return None;
+        match self.picker.rows().first()? {
+            crate::screens::PickerRow::Current(current) => Some((
+                current.provider.clone(),
+                current.instance.clone(),
+                current.id.clone(),
+            )),
+            crate::screens::PickerRow::Catalog(_) => None,
         }
-        let provider = self.stored.provider_name()?.to_owned();
-        let model = self.stored.model.clone()?;
-        Some((provider, self.stored.instance.clone(), model))
     }
 
     /// The profile rows: the config's profiles, then the add row.
@@ -464,9 +454,20 @@ impl OnboardingScreen {
     }
 }
 
+/// The profile's stored model as the picker's pinned row, when the
+/// profile names one.
+fn current_model(stored: &rhema_config::Profile) -> Option<CurrentModel> {
+    Some(CurrentModel {
+        provider: stored.provider_name()?.to_owned(),
+        instance: stored.instance.clone(),
+        id: stored.model.clone()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::screens::CatalogModel;
 
     fn profiles() -> BTreeMap<String, rhema_config::Profile> {
         rhema_config::Settings::default().profiles
@@ -556,7 +557,7 @@ mod tests {
     #[test]
     fn selecting_a_profile_moves_the_snapshots_and_drops_the_stale_catalog() {
         let mut screen = wizard();
-        screen.models = vec![CatalogModel {
+        screen.picker.set_models(vec![CatalogModel {
             provider: "google",
             instance: Some("google".into()),
             model: rhema_provider::ModelCard {
@@ -566,10 +567,10 @@ mod tests {
                 input_token_limit: None,
                 output_token_limit: None,
                 supports_vision: None,
-                generation_methods: vec![],
+                generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
             },
-        }];
+        }]);
         screen.chosen_model = Some("gemini-x".into());
         let stored = rhema_config::Profile {
             provider: Some("anthropic".into()),
@@ -580,7 +581,10 @@ mod tests {
         assert_eq!(screen.default_profile, "work");
         assert_eq!(screen.step, OnboardingStep::Login);
         assert_eq!(screen.stored.provider.as_deref(), Some("anthropic"));
-        assert!(screen.models.is_empty(), "another login's catalog is stale");
+        assert!(
+            screen.picker.models.is_empty(),
+            "another login's catalog is stale"
+        );
         assert!(screen.chosen_model.is_none());
     }
 
@@ -645,7 +649,7 @@ mod tests {
     #[test]
     fn the_model_step_chooses_the_highlighted_row() {
         let mut screen = wizard();
-        screen.models = vec![CatalogModel {
+        screen.picker.set_models(vec![CatalogModel {
             provider: "google",
             instance: Some("google".into()),
             model: rhema_provider::ModelCard {
@@ -655,10 +659,10 @@ mod tests {
                 input_token_limit: None,
                 output_token_limit: None,
                 supports_vision: None,
-                generation_methods: vec![],
+                generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
             },
-        }];
+        }]);
         screen.go(OnboardingStep::Model);
         match screen.handle_key(key(KeyCode::Enter)) {
             OnboardingAction::ChooseModel {
@@ -696,7 +700,7 @@ mod tests {
         );
         // A fresh login's catalog replaces it: those rows are the
         // choices then.
-        screen.models = vec![CatalogModel {
+        screen.picker.set_models(vec![CatalogModel {
             provider: "google",
             instance: Some("google".into()),
             model: rhema_provider::ModelCard {
@@ -706,10 +710,10 @@ mod tests {
                 input_token_limit: None,
                 output_token_limit: None,
                 supports_vision: None,
-                generation_methods: vec![],
+                generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
             },
-        }];
+        }]);
         assert_eq!(screen.row_count(), 1);
         assert_eq!(
             screen.handle_key(key(KeyCode::Enter)),

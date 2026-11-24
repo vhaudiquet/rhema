@@ -266,20 +266,23 @@ fn model(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
         return Vec::new();
     }
     match argument {
-        None => app.open_picker(),
+        None => app.open_model_settings(),
         Some(needle) => app.choose_model_by_id(needle),
     }
 }
 
+/// `/switch` opens the full-screen picker in its session mode: the pick
+/// re-resolves the backend and rebuilds the agent, and the profile keeps
+/// its stored model. `/model` persists, so it lives on the settings'
+/// Models page instead.
 fn switch(app: &mut App, argument: Option<&str>) -> Vec<Effect> {
+    if app.turn.running {
+        app.push_notice("a turn is running; /switch waits for it to finish");
+        return Vec::new();
+    }
     match argument {
         Some(needle) => app.choose_session_model_by_id(needle),
-        None => {
-            app.push_notice(
-                "usage: /switch provider/model (this session only; /model saves the choice)",
-            );
-            Vec::new()
-        }
+        None => app.open_picker(),
     }
 }
 

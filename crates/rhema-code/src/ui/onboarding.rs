@@ -125,11 +125,44 @@ pub(crate) fn render_onboarding(
         rail_area,
     );
 
-    let (body, footer) = onboarding_body(wizard, icons, theme, text_width);
+    let (body, footer) = onboarding_body(wizard, theme, text_width);
+    // The model step's rows are the shared picker, drawn under the
+    // step's heading rather than wrapped into its paragraph: it owns
+    // its scrolling and its highlight.
+    let picker_rows = if wizard.step == crate::onboarding::OnboardingStep::Model {
+        u16::try_from(body.len()).unwrap_or(u16::MAX)
+    } else {
+        content_area.height
+    };
+    let [body_area, picker_area] =
+        Layout::vertical([Constraint::Length(picker_rows), Constraint::Min(0)]).areas(content_area);
     frame.render_widget(
         Paragraph::new(body).block(Block::default().padding(Padding::new(2, 2, 1, 0))),
-        content_area,
+        body_area,
     );
+    if wizard.step == crate::onboarding::OnboardingStep::Model {
+        // Inset to the step body's own margin: two cells, the same the
+        // body's text keeps from the panel.
+        let picker_area = Rect {
+            x: picker_area.x + 2,
+            y: picker_area.y + 1,
+            width: picker_area.width.saturating_sub(4),
+            height: picker_area.height.saturating_sub(1),
+        };
+        super::model_picker::render_model_picker(
+            frame,
+            picker_area,
+            &wizard.picker,
+            icons,
+            theme,
+            &super::model_picker::PickerChrome {
+                title: None,
+                hints: "",
+                focused: true,
+                prompt: "",
+            },
+        );
+    }
     frame.render_widget(
         Paragraph::new(Line::from(footer)).block(Block::default().padding(Padding::horizontal(2))),
         footer_area,
@@ -188,7 +221,6 @@ pub(crate) fn connected_lines(
 /// modal shows, in the wizard's own pane.
 pub(crate) fn onboarding_body(
     wizard: &crate::onboarding::OnboardingScreen,
-    icons: &crate::icons::Icons,
     theme: &Theme,
     width: usize,
 ) -> (Vec<Line<'static>>, Vec<Span<'static>>) {
@@ -365,33 +397,16 @@ pub(crate) fn onboarding_body(
                 footer("enter select · esc back")
             }
         }
+        // The model rows are the shared picker drawn under this
+        // heading; `render_onboarding` gives it the room below.
         Step::Model => {
             title("Pick a model", &mut lines);
-            let mut index = 0;
-            if let Some((_, _, id)) = wizard.keep_current_model() {
-                let selected = index == wizard.row;
-                lines.push(Line::from(vec![
-                    super::chrome::marker(selected, theme),
-                    Span::raw(id.clone()).fg(if selected { theme.text } else { theme.text2 }),
-                    Span::raw("  · keep current").fg(theme.text3),
-                ]));
-                index += 1;
-            }
-            if wizard.models.is_empty() && index == 0 {
-                lines.push(Line::from(Span::raw("no models").fg(theme.text3)));
-            }
-            for entry in &wizard.models {
-                let selected = index == wizard.row;
-                let mut line = Line::from(vec![super::chrome::marker(selected, theme)]);
-                line.spans
-                    .extend(model_row(entry.provider, &entry.model, icons, theme).spans);
-                if selected {
-                    line = line.style(Style::default().bg(theme.elevated));
-                }
-                lines.push(line);
-                index += 1;
-            }
-            footer("enter choose · esc back")
+            // Nothing to type into or pick while the catalog is out.
+            footer(
+                wizard
+                    .picker
+                    .state_hints("type to filter · enter choose · esc back"),
+            )
         }
         Step::Profile => {
             if let Some(dialog) = &wizard.profile_dialog {

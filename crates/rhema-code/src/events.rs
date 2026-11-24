@@ -216,13 +216,18 @@ impl From<&Event<'_>> for OwnedEvent {
 pub enum UiEvent {
     /// A streaming or lifecycle event of the running turn.
     Engine(OwnedEvent),
-    /// A model-list fetch completed.
+    /// A model-list fetch reported.
     ModelsLoaded {
         /// What the fetch was for; the app routes the result accordingly.
         why: FetchWhy,
-        /// Per backend queried: provider, instance, and the fetched
-        /// models or the provider's error text.
+        /// The slices that landed: one per provider, sent as each answers
+        /// so a slow catalog never holds the others back. Empty when a
+        /// provider's task died without a result.
         result: Vec<CatalogFetch>,
+        /// How many providers of this fetch have yet to report. The app
+        /// keeps the page loading until this reaches zero, drawing the
+        /// rows that already landed.
+        remaining: usize,
     },
     /// A subscription-allowance fetch completed.
     UsageLoaded {

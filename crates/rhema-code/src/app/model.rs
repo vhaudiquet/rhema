@@ -368,6 +368,7 @@ impl App {
         &mut self,
         why: FetchWhy,
         result: Vec<crate::events::CatalogFetch>,
+        remaining: usize,
     ) -> Vec<Effect> {
         match why {
             FetchWhy::Login { backend, instance } => {
@@ -421,8 +422,8 @@ impl App {
                             settings.dialog = None;
                         }
                         // Where the login lands depends on the screen it
-                        // came from: the settings flow opens the picker
-                        // (skipping straight to the chat on a
+                        // came from: the settings flow opens the Models
+                        // page (skipping straight to the chat on a
                         // single-model server), the wizard advances to
                         // its own model step (or takes the single model
                         // straight to the colors step).
@@ -465,7 +466,7 @@ impl App {
                                 .cloned()
                                 .collect();
                             if let Screen::Onboarding(wizard) = &mut self.screen {
-                                wizard.models = rows;
+                                wizard.picker.set_models(rows);
                                 wizard.go(crate::onboarding::OnboardingStep::Model);
                             }
                             return vec![Effect::FetchUsage];
@@ -477,7 +478,9 @@ impl App {
                             let id = models[0].id.clone();
                             return self.choose_model(provider, Some(&instance), &id);
                         }
-                        self.screen = Screen::Picker(PickerScreen::new(self.models.clone()));
+                        // The pick persists to the profile the login
+                        // just filled, so it lands on the Models page.
+                        self.focus_settings_models();
                         // A login installs the backend it validated: that
                         // plan is the session's numbers now.
                         vec![Effect::FetchUsage]
@@ -527,24 +530,41 @@ impl App {
                 // total failure is the picker's error, and a partial one
                 // is named in its footer, a missing provider must never
                 // look like an empty one.
-                let (catalogs, failed): (Vec<_>, Vec<_>) =
-                    result.into_iter().partition(|entry| entry.result.is_ok());
-                for entry in catalogs.iter().chain(failed.iter()) {
+                // Each slice lands on its own event as its provider
+                // answers: it replaces that provider's slice of the
+                // catalog, and a slice no fetch asked about, a login that
+                // raced this one, survives. A dead provider can therefore
+                // never blank the live ones, and never delay them either.
+                for entry in result {
                     self.models.retain(|existing| {
                         existing.provider != entry.provider
                             || existing.instance.as_deref() != entry.instance.as_deref()
                     });
+                    if let Ok(models) = &entry.result {
+                        self.models.extend(models.iter().map(|model| {
+                            crate::screens::CatalogModel {
+                                provider: entry.provider,
+                                instance: entry.instance.clone(),
+                                model: model.clone(),
+                            }
+                        }));
+                    }
+                    // This provider's verdict replaces itself: one that
+                    // answered is no longer named among the missing.
+                    self.catalog_unavailable
+                        .retain(|name| *name != entry.provider);
+                    self.catalog_failed.retain(|name| *name != entry.provider);
+                    match &entry.result {
+                        Ok(_) => {}
+                        Err(CatalogFailure::Unavailable) => {
+                            self.catalog_unavailable.push(entry.provider);
+                        }
+                        Err(CatalogFailure::Error(message)) => {
+                            self.catalog_failed.push(entry.provider);
+                            self.catalog_error = Some(message.clone());
+                        }
+                    }
                 }
-                self.models.extend(catalogs.iter().flat_map(|entry| {
-                    let models = entry.result.as_deref().unwrap_or_default();
-                    models
-                        .iter()
-                        .map(move |model| crate::screens::CatalogModel {
-                            provider: entry.provider,
-                            instance: entry.instance.clone(),
-                            model: model.clone(),
-                        })
-                }));
                 self.models.sort_by(|a, b| {
                     a.provider
                         .cmp(b.provider)
@@ -554,26 +574,43 @@ impl App {
                 // The failure lists outlive the screen: a bootstrap fetch
                 // usually lands on the chat, and the picker opened later
                 // still has to say which providers are unavailable.
-                self.catalog_unavailable = providers_failing(&failed, |failure| {
-                    matches!(failure, CatalogFailure::Unavailable)
-                });
-                self.catalog_failed = providers_failing(&failed, |failure| {
-                    matches!(failure, CatalogFailure::Error(_))
-                });
+                // While providers are still out the page keeps loading
+                // and draws the rows that landed; the last to report
+                // settles the state.
+                if remaining == 0 {
+                    self.catalog_inflight = false;
+                }
+                let status = if remaining > 0 {
+                    ModelPickerStatus::Loading
+                } else if !self.models.is_empty()
+                    || (self.catalog_failed.is_empty() && self.catalog_unavailable.is_empty())
+                {
+                    ModelPickerStatus::Ready
+                } else {
+                    // Nothing to list and every provider said why: the
+                    // widget's own error, not an empty list.
+                    let message = self
+                        .catalog_error
+                        .clone()
+                        .unwrap_or_else(|| "no provider answered".to_owned());
+                    ModelPickerStatus::Error(message)
+                };
+                let fill = |picker: &mut crate::screens::ModelPicker| {
+                    picker.set_models(self.models.clone());
+                    picker.unavailable = self.catalog_unavailable.clone();
+                    picker.failed = self.catalog_failed.clone();
+                    picker.status = status.clone();
+                };
                 if let Screen::Picker(picker) = &mut self.screen {
-                    if catalogs.is_empty() {
-                        let message = failed
-                            .first()
-                            .and_then(|entry| entry.result.as_ref().err())
-                            .map(CatalogFailure::message)
-                            .unwrap_or_else(|| "no provider answered".to_owned());
-                        picker.status = PickerStatus::Error(message);
-                    } else {
-                        picker.set_models(self.models.clone());
-                        picker.unavailable = self.catalog_unavailable.clone();
-                        picker.failed = self.catalog_failed.clone();
-                        picker.status = PickerStatus::Ready;
-                    }
+                    fill(picker);
+                }
+                // The settings' Models page carries the same widget; a
+                // fetch that lands while it is open fills it too, keeping
+                // the cursor the user gave it and re-marking the model in
+                // use once the catalog names what the profile runs.
+                if let Screen::Settings(settings) = &mut self.screen {
+                    fill(&mut settings.model_picker);
+                    settings.mark_current_model();
                 }
                 Vec::new()
             }
@@ -582,7 +619,7 @@ impl App {
 
     /// A model was named for `/model <needle>`: resolve the needle and
     /// switch, or say what went missing. `/model` with no needle opens
-    /// the full picker instead.
+    /// the settings' Models page instead.
     pub fn choose_model_by_id(&mut self, needle: &str) -> Vec<Effect> {
         match self.resolve_model(needle) {
             Ok((provider, instance, id)) => self.choose_model(provider, instance.as_deref(), &id),
@@ -681,7 +718,7 @@ impl App {
     /// rebuild failure cannot strand the chat.
     pub(crate) fn choose_model(
         &mut self,
-        provider: &'static str,
+        provider: &str,
         instance: Option<&str>,
         id: &str,
     ) -> Vec<Effect> {
@@ -959,20 +996,4 @@ impl App {
             missing,
         ))
     }
-}
-
-/// The providers among `failed` whose failure `wanted` selects, sorted
-/// and deduplicated: one provider may fail on several instances.
-fn providers_failing(
-    failed: &[crate::events::CatalogFetch],
-    wanted: impl Fn(&CatalogFailure) -> bool,
-) -> Vec<&'static str> {
-    let mut providers: Vec<&'static str> = failed
-        .iter()
-        .filter(|entry| entry.result.as_ref().err().is_some_and(&wanted))
-        .map(|entry| entry.provider)
-        .collect();
-    providers.sort_unstable();
-    providers.dedup();
-    providers
 }

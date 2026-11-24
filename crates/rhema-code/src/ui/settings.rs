@@ -8,6 +8,15 @@ use super::dialogs::{
 };
 use super::*;
 
+/// The page's air: cells of padding on each side of its text, and rows
+/// above its title, so a page reads as a page and not as a wall of text
+/// against the frame. A short terminal gives the top row back: the
+/// sidebar's sections must all fit before the air matters.
+const PAGE_PAD: u16 = 3;
+const PAGE_TOP: u16 = 2;
+/// The height under which the top margin shrinks to one row.
+const PAGE_TOP_MIN_HEIGHT: u16 = 22;
+
 /// The settings screen: the sidebar of sections on the left, the selected
 /// section's page on the right, its key hints pinned to the bottom row.
 /// The settings screen: the sidebar of sections on the left, the
@@ -29,14 +38,22 @@ pub(crate) fn render_settings(
     frame.render_widget(block, area);
 
     // The sidebar holds its longest label, "Decision models", with
-    // the marker and the padding.
+    // the marker and the padding: two cells of air inside its edge, one
+    // against the page.
+    let top = if inner.height >= PAGE_TOP_MIN_HEIGHT {
+        PAGE_TOP
+    } else {
+        1
+    };
     let [sidebar_area, page_area] =
-        Layout::horizontal([Constraint::Length(19), Constraint::Min(24)]).areas(inner);
+        Layout::horizontal([Constraint::Length(20), Constraint::Min(24)]).areas(inner);
+    // The page keeps its hints off the bottom edge, one row of air
+    // above the border.
     let [content_area, footer_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(page_area);
-    // The content pane wraps at its true text width: two cells of
-    // padding on each side.
-    let text_width = content_area.width.saturating_sub(4) as usize;
+        Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).areas(page_area);
+    // The content pane wraps at its true text width, and the page sits
+    // two rows under the border, three cells in from the sidebar.
+    let text_width = content_area.width.saturating_sub(PAGE_PAD * 2) as usize;
 
     // The sidebar: the gear heading, a rule, then one row per section,
     // the selected one marked and lit. Every row is a click target; the
@@ -64,38 +81,114 @@ pub(crate) fn render_settings(
     for (index, section) in SettingsSection::ALL.iter().enumerate() {
         hits.push((
             Rect {
-                x: sidebar_area.x + 1,
-                y: sidebar_area.y + 3 + index as u16,
-                width: sidebar_area.width.saturating_sub(2),
+                x: sidebar_area.x + 2,
+                y: sidebar_area.y + top + 2 + index as u16,
+                width: sidebar_area.width.saturating_sub(3),
                 height: 1,
             },
             SettingsHit::Sidebar(*section),
         ));
     }
     frame.render_widget(
-        Paragraph::new(sidebar).block(Block::default().padding(Padding::new(1, 1, 1, 0))),
+        Paragraph::new(sidebar).block(Block::default().padding(Padding::new(2, 1, top, 0))),
         sidebar_area,
     );
 
     let (page, footer, row_hits) = settings_page(settings, theme, text_width);
+    // The Models page's rows are the shared picker's, drawn under the
+    // page's heading: one cursor, the page's, over one list.
+    let models_page = settings.section == SettingsSection::Models;
+    // The page scrolls to its selected row: a short terminal keeps the
+    // selection in view rather than clipping it.
+    let viewport = content_area.height.saturating_sub(1);
+    let scroll = if models_page {
+        0
+    } else {
+        row_hits
+            .iter()
+            .find(|(_, hit)| *hit == SettingsHit::PageRow(settings.row))
+            .map(|(line, _)| {
+                u16::try_from(*line)
+                    .unwrap_or(u16::MAX)
+                    .saturating_add(1)
+                    .saturating_sub(viewport)
+            })
+            .unwrap_or(0)
+    };
     frame.render_widget(
-        Paragraph::new(page).block(Block::default().padding(Padding::new(2, 2, 1, 0))),
+        Paragraph::new(page)
+            .scroll((scroll, 0))
+            .block(Block::default().padding(Padding::new(PAGE_PAD, PAGE_PAD, top, 0))),
         content_area,
     );
     // The interactive rows sit at their rendered line indices, every
     // line the page builder produced is already wrapped to the pane's
-    // text width, and the top padding offsets them one row down.
+    // text width, and the top padding offsets them one row down. Rows
+    // the scroll pushed out of the pane take no clicks.
     for (line_index, hit) in row_hits {
+        let line = u16::try_from(line_index).unwrap_or(u16::MAX);
+        let Some(visible) = line.checked_sub(scroll) else {
+            continue;
+        };
+        let y = content_area.y.saturating_add(top).saturating_add(visible);
+        if y >= content_area.y.saturating_add(content_area.height) {
+            continue;
+        }
         hits.push((
             Rect {
-                x: content_area.x + 2,
-                y: content_area.y + 1 + line_index as u16,
+                x: content_area.x + PAGE_PAD,
+                y,
                 width: text_width as u16,
                 height: 1,
             },
             hit,
         ));
     }
+    if models_page && content_area.height > top + 2 {
+        // Under the header the page builder laid out: title, rule, one
+        // row of air. The list sits on the page's own text column, so
+        // its cursor lands where every other page's row cursor lands,
+        // under the title, and its columns line up with the text around
+        // them. The block takes the page's whole body whatever the
+        // catalog holds: a filter box that slid up as rows were filtered
+        // away would move out from under the hands typing in it.
+        let header = top + 2;
+        let room = content_area.height - header;
+        let rows = super::model_picker::render_model_picker(
+            frame,
+            Rect {
+                x: content_area.x + PAGE_PAD,
+                y: content_area.y + header,
+                width: text_width as u16,
+                height: room,
+            },
+            &settings.model_picker,
+            icons,
+            theme,
+            &super::model_picker::PickerChrome {
+                title: None,
+                // The page footer carries the hints; the picker's own
+                // row stays the filter and the count.
+                hints: "",
+                focused: true,
+                prompt: "",
+            },
+        );
+        for (rect, index) in rows {
+            hits.push((rect, SettingsHit::PageRow(index)));
+        }
+    }
+    let footer = if models_page {
+        // The page's keys follow the list's state: filter and pick once
+        // the catalog settles, pick only while rows land, nothing but
+        // the escape when there is no list at all.
+        let hint = settings
+            .model_picker
+            .state_hints("type to filter · enter choose");
+        vec![Span::raw(hint.to_owned()).fg(theme.text3)]
+    } else {
+        footer
+    };
     frame.render_widget(
         Paragraph::new(Line::from(footer)).block(Block::default().padding(Padding::horizontal(2))),
         footer_area,
@@ -303,6 +396,8 @@ pub(crate) fn settings_page(
         Line::default(),
     ];
     match settings.section {
+        // The picker draws this page's rows under the heading.
+        SettingsSection::Models => (lines, Vec::new(), Vec::new()),
         SettingsSection::Providers => {
             let provider_value = match settings.stored.provider_name() {
                 None => Span::raw("None".to_owned()).fg(theme.warn),

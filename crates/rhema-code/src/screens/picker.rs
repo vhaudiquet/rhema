@@ -1,4 +1,7 @@
-//! The pickers: the model picker over the catalog, and the resume picker over saved sessions.
+//! The full-screen pickers: the model picker's screen host and the
+//! resume picker over saved sessions. The model picker's state and keys
+//! live in [`super::model_picker`], shared with the wizard and the
+//! settings' Providers page.
 
 use super::*;
 
@@ -85,201 +88,42 @@ impl ResumeScreen {
     }
 }
 
-// --- Settings ---
+// --- Model picker screen ---
 
-/// Where the picker stands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PickerStatus {
-    /// The model list is being fetched.
-    Loading,
-    /// Models are available.
-    Ready,
-    /// The fetch failed; the text is the provider's error. `r` retries.
-    Error(String),
-}
-
-/// What one picker keypress means.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PickerAction {
-    /// Nothing to do.
-    None,
-    /// The highlighted model was chosen, with its provider's config name
-    /// and the instance it came from: a pick from another provider or
-    /// instance switches the session's backend.
-    Choose {
-        /// The provider's config name.
-        provider: &'static str,
-        /// The instance's name in the profile.
-        instance: Option<String>,
-        /// The model's id.
-        id: String,
-    },
-    /// Return to the chat.
-    BackToChat,
-    /// Retry the failed model fetch.
-    Retry,
-}
-
-/// One pickable model, tagged with its provider's config name and the
-/// instance it came from: the row prefix, the filter's provider match,
-/// and the switch target on choose. A profile may hold several logins,
-/// including several of one provider, so a catalog spans both.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CatalogModel {
-    /// The provider's config name (`google`, `openrouter`, ...).
-    pub provider: &'static str,
-    /// The instance's name in the profile's registry.
-    pub instance: Option<String>,
-    /// The normalized model.
-    pub model: ModelCard,
-}
-
-/// The model picker: text chat models across every logged-in provider,
-/// sorted by provider then id, a type-to-filter prompt, and one
-/// highlighted row.
+/// The full-screen model picker: the shared [`ModelPicker`] over the
+/// whole terminal, `/switch`'s screen. The pick rides the session only;
+/// the persisted pick lives on the settings' Models page, where it is a
+/// setting like the rest.
 #[derive(Debug)]
 pub struct PickerScreen {
-    /// The models to pick from (text chat only).
-    pub models: Vec<CatalogModel>,
-    /// Providers whose fetch timed out while others answered; the
-    /// footer names them as unavailable, in the error color.
-    pub unavailable: Vec<&'static str>,
-    /// Providers whose fetch failed with their own error while others
-    /// succeeded; the footer names them so a missing catalog is never
-    /// silent.
-    pub failed: Vec<&'static str>,
-    /// The filter text; printable keys extend it without any prefix.
-    pub filter: String,
-    /// Index into the filtered list of the highlighted row.
-    pub selected: usize,
-    /// Current status.
-    pub status: PickerStatus,
+    /// The widget itself: rows, filter, selection, status.
+    pub picker: ModelPicker,
 }
 
 impl PickerScreen {
-    /// A picker over `models` (text chat models only, sorted by provider
-    /// then id), initially unfiltered.
-    pub fn new(mut models: Vec<CatalogModel>) -> Self {
-        models.retain(|entry| Self::usable(&entry.model));
-        models.sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
+    /// A `/switch` screen over `models`.
+    pub fn new(models: Vec<CatalogModel>) -> Self {
         Self {
-            models,
-            unavailable: Vec::new(),
-            failed: Vec::new(),
-            filter: String::new(),
-            selected: 0,
-            status: PickerStatus::Ready,
+            picker: ModelPicker::new(models),
         }
     }
 
-    /// The models this coding agent can drive: chat-capable rows. The
-    /// adapters only hand out text chat models, the id markers that
-    /// decide "text" are per-provider catalog knowledge, so this is just
-    /// the defensive line against a row without the chat marker.
-    fn usable(model: &ModelCard) -> bool {
-        model.supports_chat()
-    }
-
-    /// Replaces the model list (scoped and re-sorted) and clamps the
-    /// selection.
-    pub fn set_models(&mut self, models: Vec<CatalogModel>) {
-        let mut models = models;
-        models.retain(|entry| Self::usable(&entry.model));
-        self.models = models;
-        self.models
-            .sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
-        self.clamp_selection();
-    }
-
-    /// The models matching the filter: case-insensitive substring on the
-    /// rendered row, `provider/id`, so `openrouter/` names the provider's
-    /// whole catalog and `openrouter/anthropic` narrows inside it, or on
-    /// the display name, in the sorted order.
-    pub fn filtered(&self) -> Vec<&CatalogModel> {
-        let needle = self.filter.to_lowercase();
-        self.models
-            .iter()
-            .filter(|entry| {
-                let mut haystack = format!("{}/{}", entry.provider, entry.model.id);
-                if let Some(instance) = &entry.instance {
-                    haystack.push_str(&format!(" {instance}"));
-                }
-                needle.is_empty()
-                    || haystack.to_lowercase().contains(&needle)
-                    || entry.model.display_name.to_lowercase().contains(&needle)
-            })
-            .collect()
-    }
-
-    fn clamp_selection(&mut self) {
-        let count = self.filtered().len();
-        if count == 0 {
-            self.selected = 0;
-        } else if self.selected >= count {
-            self.selected = count - 1;
-        }
-    }
-
-    /// Handles one keypress. Typing filters by default: printable keys
-    /// extend the filter, arrows navigate, enter picks. Esc always
-    /// leaves, the filter is transient, nothing to clear first, and
-    /// returns to the chat. `q` stays a filter character on purpose:
-    /// models are named (qwen).
-    pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
-            return PickerAction::None;
-        }
-        if self.status == PickerStatus::Ready {
-            match key.code {
-                KeyCode::Char(c) => {
-                    self.filter.push(c);
-                    self.clamp_selection();
-                    return PickerAction::None;
-                }
-                KeyCode::Backspace => {
-                    self.filter.pop();
-                    self.clamp_selection();
-                    return PickerAction::None;
-                }
-                KeyCode::Up => {
-                    self.selected = self.selected.saturating_sub(1);
-                    return PickerAction::None;
-                }
-                KeyCode::Down => {
-                    self.selected =
-                        (self.selected + 1).min(self.filtered().len().saturating_sub(1));
-                    return PickerAction::None;
-                }
-                KeyCode::Enter => return self.choose(),
-                KeyCode::Esc => return PickerAction::BackToChat,
-                _ => return PickerAction::None,
-            }
-        }
-        // Loading or failed: only retry and leave are meaningful.
-        match key.code {
-            KeyCode::Char('r') if matches!(self.status, PickerStatus::Error(_)) => {
-                self.status = PickerStatus::Loading;
-                PickerAction::Retry
-            }
-            KeyCode::Esc => PickerAction::BackToChat,
-            _ => PickerAction::None,
-        }
-    }
-
-    /// Enter: choose the highlighted model; an empty list chooses nothing.
-    fn choose(&mut self) -> PickerAction {
-        if self.status != PickerStatus::Ready {
-            return PickerAction::None;
-        }
-        match self.filtered().get(self.selected) {
-            Some(entry) => PickerAction::Choose {
-                provider: entry.provider,
-                instance: entry.instance.clone(),
-                id: entry.model.id.clone(),
-            },
-            None => PickerAction::None,
-        }
+    /// Handles one keypress through the shared widget.
+    pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        self.picker.handle_key(key)
     }
 }
 
-// --- Chat input ---
+impl std::ops::Deref for PickerScreen {
+    type Target = ModelPicker;
+
+    fn deref(&self) -> &ModelPicker {
+        &self.picker
+    }
+}
+
+impl std::ops::DerefMut for PickerScreen {
+    fn deref_mut(&mut self) -> &mut ModelPicker {
+        &mut self.picker
+    }
+}

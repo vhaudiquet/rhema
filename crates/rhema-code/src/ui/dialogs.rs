@@ -1,5 +1,6 @@
-//! The dialogs: the add flows, the model and resume pickers, and the two
-//! modals, each a centered box drawn over the current screen.
+//! The dialogs: the add flows, the resume picker, and the two modals,
+//! each a centered box drawn over the current screen. The model picker's
+//! render lives in [`super::model_picker`].
 
 use super::*;
 
@@ -430,89 +431,6 @@ pub(crate) fn render_add_sandbox_dialog(
         Paragraph::new("arrows choose · enter stores · esc cancels").fg(theme.text3),
         status_area,
     );
-}
-
-pub(crate) fn render_picker(
-    frame: &mut Frame,
-    picker: &PickerScreen,
-    icons: &crate::icons::Icons,
-    theme: &Theme,
-) {
-    let area = frame.area();
-    let block = super::chrome::panel(Some("select a model"), theme);
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    if picker.status != PickerStatus::Ready {
-        let message = match &picker.status {
-            PickerStatus::Loading => Line::from("loading models…").fg(theme.text3),
-            // The body below renders only in the Ready state.
-            PickerStatus::Ready => Line::from(""),
-            PickerStatus::Error(message) => Line::from(vec![
-                Span::raw(message.clone()).red(),
-                Span::raw("  "),
-                Span::raw("press r to retry").fg(theme.text3),
-            ]),
-        };
-        frame.render_widget(
-            Paragraph::new(message).block(Block::default().padding(Padding::new(1, 1, 1, 0))),
-            inner,
-        );
-        return;
-    }
-
-    // The list and the footer must not share a row: a scrolled-to-bottom
-    // list draws its highlight on the last inner row, exactly where the
-    // footer paints.
-    let [list_area, footer_area] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(inner);
-
-    let filtered = picker.filtered();
-    let rows: Vec<ListItem> = filtered
-        .iter()
-        .map(|entry| ListItem::new(model_row(entry.provider, &entry.model, icons, theme)))
-        .collect();
-    let mut state = ListState::default();
-    state.select(Some(picker.selected));
-    // Without an explicit highlight the selection is invisible: ListState
-    // only offsets the scroll, the marker and style are opt-in.
-    frame.render_stateful_widget(
-        List::new(rows)
-            .highlight_symbol("❯ ")
-            .highlight_style(Style::default().bg(theme.elevated))
-            .style(Style::default().bg(theme.surface).fg(theme.text)),
-        list_area,
-        &mut state,
-    );
-
-    let mut footer = vec![
-        Span::raw("filter: "),
-        Span::raw(picker.filter.clone()).bold(),
-        Span::raw("▌").bold(),
-        Span::raw("  "),
-        Span::raw(format!("{} models", filtered.len())).fg(theme.text3),
-    ];
-    // A provider whose fetch timed out is unavailable, not merely
-    // empty; the red names the dead one while the live catalogs stay.
-    if !picker.unavailable.is_empty() {
-        footer.push(
-            Span::raw(format!(
-                "  · unavailable: {}",
-                picker.unavailable.join(", ")
-            ))
-            .fg(theme.error),
-        );
-    }
-    // A provider whose fetch failed while others answered: its absence
-    // from the list must read as an error, not as an empty catalog.
-    if !picker.failed.is_empty() {
-        footer.push(
-            Span::raw(format!("  · no models from {}", picker.failed.join(", "))).fg(theme.warn),
-        );
-    }
-    footer.push(Span::raw("  "));
-    footer.push(Span::raw("type to filter · enter choose · esc clear/quit").fg(theme.text3));
-    frame.render_widget(Paragraph::new(Line::from(footer)), footer_area);
 }
 
 /// The profile picker: same frame as the model picker, rows in the

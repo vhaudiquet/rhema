@@ -10,20 +10,17 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Padding
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Screen, SettingsHit};
-use crate::screens::{
-    Chip, PickerScreen, PickerStatus, ProviderCategory, SettingsSection, format_tokens,
-};
+use crate::screens::{Chip, ProviderCategory, SettingsSection, format_tokens};
 use crate::transcript::pretty_args;
 use rhema_core::Image;
-use rhema_provider::ModelCard;
 use std::path::Path;
 
 use dialogs::{
-    render_approval_modal, render_confirm_quit, render_picker, render_profile_picker,
-    render_resume_picker,
+    render_approval_modal, render_confirm_quit, render_profile_picker, render_resume_picker,
 };
 use footer::render_footer;
 use input::{input_rows, render_input};
+use model_picker::render_picker;
 use onboarding::render_onboarding;
 use overlay::render_command_palette;
 use pane::render_transcript;
@@ -35,6 +32,7 @@ pub(crate) mod chrome;
 mod dialogs;
 pub(crate) mod footer;
 mod input;
+mod model_picker;
 mod onboarding;
 mod overlay;
 mod pane;
@@ -353,37 +351,6 @@ fn display_host(url: &str) -> Option<&str> {
     let rest = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     (!host.is_empty()).then_some(host)
-}
-
-/// One picker row: `provider/` dim, id bright, then display name, price,
-/// the vision verdict, and context window dim. The verdict is tri-state
-/// like the catalog's: `None`, the common case, says nothing, because
-/// unknown is not a verdict.
-fn model_row(
-    provider: &str,
-    model: &ModelCard,
-    icons: &crate::icons::Icons,
-    theme: &Theme,
-) -> Line<'static> {
-    let mut details = String::new();
-    if let Some(pricing) = model.pricing {
-        details.push_str(&format!(
-            "${:.2}/M in · ${:.2}/M out · ",
-            pricing.input_per_mtok, pricing.output_per_mtok
-        ));
-    }
-    match model.supports_vision {
-        Some(true) => details.push_str(&format!("{} vision · ", icons.vision)),
-        Some(false) => details.push_str("no vision · "),
-        None => {}
-    }
-    details.push_str(&format!("{} ctx", format_tokens(model.input_token_limit)));
-    Line::from(vec![
-        Span::raw(format!("{provider}/")).fg(theme.text3),
-        Span::raw(model.id.clone()).bold(),
-        Span::raw("  "),
-        Span::raw(details).fg(theme.text3),
-    ])
 }
 
 /// Greedy word wrap over styled spans. A word wider than `width` is

@@ -5,7 +5,7 @@ use super::footer::footer_model;
 use super::settings::usage_k;
 use super::*;
 use crate::palette::DARK;
-use crate::screens::{CatalogModel, PickerScreen};
+use crate::screens::{CatalogModel, CurrentModel, ModelPicker, PickerScreen};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -203,28 +203,24 @@ fn the_add_dialog_frame_and_title_read_on_both_grounds() {
 }
 
 #[test]
-fn the_picker_row_names_the_vision_verdict_only_when_known() {
+fn the_picker_row_badges_only_the_capabilities_a_model_declares() {
     let mut card = model("m");
     let row_text = |card: &ModelCard| {
-        model_row("google", card, &crate::icons::UNICODE, &DARK)
+        super::model_picker::model_row("google", card, &crate::icons::UNICODE, &DARK, 80)
             .spans
             .iter()
             .map(|span| span.content.to_string())
             .collect::<String>()
     };
-    // Unknown says nothing: unknown is not a verdict.
-    assert!(!row_text(&card).contains("vision"), "{}", row_text(&card));
+    // A text-only model wears nothing, and neither does one nobody
+    // described: the column badges what is there, it does not grade.
+    assert!(!row_text(&card).contains('◉'), "{}", row_text(&card));
 
     card.supports_vision = Some(true);
-    assert!(row_text(&card).contains("◉ vision"), "{}", row_text(&card));
+    assert!(row_text(&card).contains('◉'), "{}", row_text(&card));
 
     card.supports_vision = Some(false);
-    let row = row_text(&card);
-    assert!(row.contains("no vision"), "{row}");
-    assert!(
-        !row.contains("◉"),
-        "the badge is earned, not the note: {row}"
-    );
+    assert!(!row_text(&card).contains('◉'), "{}", row_text(&card));
 }
 
 /// The Appearance page's toggles: the label column holds a space
@@ -401,13 +397,13 @@ fn the_usage_page_shows_the_detailed_split() {
     });
 
     let mut hits = Vec::new();
-    let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+    let mut terminal = Terminal::new(TestBackend::new(84, 40)).unwrap();
     terminal
         .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
         .unwrap();
     let text: String = (0..40)
         .map(|y| {
-            (0..80)
+            (0..84)
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>()
         })
@@ -459,7 +455,7 @@ fn the_usage_page_shows_the_detailed_split() {
 fn the_usage_page_shows_the_views_shape() {
     let draw = |settings: &crate::screens::SettingsScreen| {
         let mut hits = Vec::new();
-        let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(84, 40)).unwrap();
         terminal
             .draw(|frame| {
                 render_settings(frame, settings, &DARK, &crate::icons::UNICODE, &mut hits)
@@ -467,7 +463,7 @@ fn the_usage_page_shows_the_views_shape() {
             .unwrap();
         (0..40)
             .map(|y| {
-                (0..80)
+                (0..84)
                     .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                     .collect::<String>()
             })
@@ -519,12 +515,12 @@ fn the_usage_page_shows_the_views_shape() {
     });
     let text = draw(&settings);
     // The row wraps at the pane's width, so the note is matched in
-    // halves.
+    // pieces.
     assert!(
-        text.contains("under budget · 5 requests rode the"),
+        text.contains("under budget · 5 requests rode the log"),
         "{text}"
     );
-    assert!(text.contains("log whole"), "{text}");
+    assert!(text.contains("whole"), "{text}");
 
     settings.transcript = Some(rhema_transcript::TranscriptStats::default());
     let text = draw(&settings);
@@ -2075,7 +2071,7 @@ mod scroll_tests {
         settings.stored.provider = Some("copilot".into());
         settings.stored.instance = Some("work sub".into());
 
-        let backend = TestBackend::new(60, 17);
+        let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut hits = Vec::new();
         terminal
@@ -2826,6 +2822,7 @@ mod scroll_tests {
         let mut app = chat_app();
         app.on_event(crate::events::UiEvent::ModelsLoaded {
             why: crate::events::FetchWhy::Bootstrap,
+            remaining: 0,
             result: vec![crate::events::CatalogFetch {
                 provider: "google",
                 instance: None,
@@ -4248,4 +4245,744 @@ fn the_websearch_and_decision_pages_say_so_when_empty() {
         "{decision}"
     );
     assert!(decision.contains("+ Add a decision model..."), "{decision}");
+}
+
+/// The picker adapts to the width it is given: a narrow pane keeps the
+/// names and drops the price, capabilities, and context tail, which is
+/// what a host embedding it in a sidebar relies on.
+#[test]
+fn the_picker_drops_the_details_when_the_pane_is_narrow() {
+    let mut card = model("model-a");
+    card.input_token_limit = Some(200_000);
+    card.pricing = Some(rhema_provider::Pricing {
+        input_per_mtok: 1.25,
+        output_per_mtok: 10.0,
+        cached_input_per_mtok: None,
+    });
+    let picker = PickerScreen::new(vec![CatalogModel {
+        provider: "google",
+        instance: None,
+        model: card,
+    }]);
+    let rows = |width: u16| {
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal
+            .draw(|frame| render_picker(frame, &picker, &crate::icons::UNICODE, &DARK))
+            .unwrap();
+        (0..8)
+            .map(|y| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    let wide = rows(80).join("\n");
+    // The numbers sit in titled columns, not in a run-on tail.
+    assert!(wide.contains("Model"), "{wide}");
+    assert!(wide.contains("google/model-a  $1.25"), "{wide}");
+    assert!(wide.contains("Out"), "{wide}");
+    let narrow = rows(30).join("\n");
+    assert!(narrow.contains("google/model-a"), "{narrow}");
+    assert!(!narrow.contains("Out"), "the widest column goes: {narrow}");
+    let tiny = rows(20).join("\n");
+    assert!(tiny.contains("google/model-a"), "{tiny}");
+    assert!(!tiny.contains('$'), "the numbers go last: {tiny}");
+}
+
+/// The component draws into whatever rect a host hands it, down to a
+/// single row; the footer only appears when the area can spare it.
+#[test]
+fn the_picker_fills_a_short_inline_area() {
+    let picker = ModelPicker::new(vec![CatalogModel {
+        provider: "google",
+        instance: None,
+        model: model("model-a"),
+    }]);
+    let draw = |height: u16| {
+        let area = Rect::new(2, 1, 30, height);
+        let mut terminal = Terminal::new(TestBackend::new(36, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                super::model_picker::render_model_picker(
+                    frame,
+                    area,
+                    &picker,
+                    &crate::icons::UNICODE,
+                    &DARK,
+                    &super::model_picker::PickerChrome {
+                        title: Some("Models"),
+                        hints: "",
+                        focused: false,
+                        prompt: "",
+                    },
+                );
+            })
+            .unwrap();
+        (0..8)
+            .map(|y| {
+                (0..36)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    // Four rows: the title, the one model, and the status line.
+    let tall = draw(4).join("\n");
+    assert!(tall.contains("Models"), "{tall}");
+    assert!(tall.contains("❯ google/model-a"), "{tall}");
+    assert!(tall.contains("1 models"), "{tall}");
+    // One row: the model alone, no title and no footer.
+    let flat = draw(1).join("\n");
+    assert!(flat.contains("google/model-a"), "{flat}");
+    assert!(!flat.contains("Models"), "{flat}");
+    assert!(!flat.contains("1 models"), "{flat}");
+}
+
+/// The pinned current model reads as the profile's own, not as a catalog
+/// row: no price, no context, and an `in use` tag.
+#[test]
+fn the_current_row_reads_as_in_use() {
+    let picker = ModelPicker::new(Vec::new()).with_current(Some(CurrentModel {
+        provider: "google".into(),
+        instance: None,
+        id: "gemini-x".into(),
+    }));
+    let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+    terminal
+        .draw(|frame| {
+            super::model_picker::render_model_picker(
+                frame,
+                Rect::new(0, 0, 60, 6),
+                &picker,
+                &crate::icons::UNICODE,
+                &DARK,
+                &super::model_picker::PickerChrome {
+                    title: None,
+                    hints: "",
+                    focused: true,
+                    prompt: "",
+                },
+            );
+        })
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..6 {
+        for x in 0..60 {
+            text.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+        text.push(' ');
+    }
+    assert!(text.contains("❯ google/gemini-x"), "{text}");
+    assert!(text.contains("· in use"), "{text}");
+}
+
+/// A terminal too short for the whole page scrolls it to the selected
+/// row instead of clipping it, and the rows the scroll pushed out of
+/// the pane take no clicks.
+#[test]
+fn a_short_providers_page_scrolls_to_its_selected_row() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    for name in ["a", "b"] {
+        settings.stored.instances.insert(
+            name.to_owned(),
+            rhema_config::ProviderInstance {
+                provider: "llama-cpp".into(),
+                api_key: None,
+                secret_ref: None,
+                base_url: Some(format!("http://{name}:8080")),
+                api: None,
+            },
+        );
+    }
+    settings.stored.instance = Some("a".into());
+    // The add row is the last one; selecting it scrolls the pane.
+    settings.row = 2;
+
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let mut screen = String::new();
+    for y in 0..16 {
+        for x in 0..60 {
+            screen.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(screen.contains("+ Add a new instance..."), "{screen}");
+    let page_rows = hits
+        .iter()
+        .filter(|(_, hit)| matches!(hit, crate::app::SettingsHit::PageRow(_)))
+        .count();
+    assert_eq!(page_rows, 3, "two instances plus the add row: {screen}");
+}
+
+/// The Models page while the catalog is out says so: a spinner on the
+/// list's text column, no search box to type into, and the one key a
+/// keyless page answers to.
+#[test]
+fn the_models_page_spins_while_the_catalog_loads() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.focus_section(SettingsSection::Models);
+    settings.model_picker.start_loading();
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let mut screen = String::new();
+    for y in 0..14 {
+        for x in 0..60 {
+            screen.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(screen.contains("loading models…"), "{screen}");
+    let spinner = screen
+        .chars()
+        .find(|c| "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".contains(*c))
+        .expect("the loading line leads with a spinner");
+    assert_eq!(
+        spinner,
+        crate::ui::status::spinner_char(settings.model_picker.loading_for()),
+        "the frame steps off the picker's clock"
+    );
+    assert!(
+        !screen.contains("filter:"),
+        "no search box before a catalog: {screen}"
+    );
+    assert_eq!(
+        settings.enter_action(),
+        crate::screens::SettingsAction::ChooseModel,
+        "the page still routes Enter, its picker has nothing to give"
+    );
+    assert!(
+        screen.contains("esc back"),
+        "the one key that answers: {screen}"
+    );
+}
+
+/// While a batch is still out over rows that landed, the page draws
+/// those rows, spins where the filter box will be, names the provider
+/// that died, and offers the keys that still answer.
+#[test]
+fn the_models_page_draws_the_rows_that_landed_while_more_are_out() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.focus_section(SettingsSection::Models);
+    settings.model_picker.set_models(vec![CatalogModel {
+        provider: "google",
+        instance: None,
+        model: model("model-a"),
+    }]);
+    settings.stored.provider = Some("google".into());
+    settings.stored.model = Some("model-a".into());
+    settings.sync_current_model();
+    settings.model_picker.start_loading();
+    settings.model_picker.failed = vec!["llama-cpp"];
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let mut screen = String::new();
+    for y in 0..14 {
+        for x in 0..80 {
+            screen.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(
+        screen.contains("google/model-a"),
+        "the landed row: {screen}"
+    );
+    assert!(screen.contains("loading…"), "the spinner: {screen}");
+    assert!(
+        screen.contains("no models from llama-cpp"),
+        "the dead provider: {screen}"
+    );
+    assert!(!screen.contains("filter:"), "no filter box yet: {screen}");
+    assert!(
+        screen.contains("enter choose · esc back"),
+        "the keys that answer: {screen}"
+    );
+    let rows: Vec<usize> = hits
+        .iter()
+        .filter_map(|(_, hit)| match hit {
+            crate::app::SettingsHit::PageRow(index) => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, [0], "the landed row is clickable");
+}
+
+/// The Models page is the catalog as a page: one cursor, the page's,
+/// walking the list, a filter line always drawn, the model in use
+/// marked, and every drawn row clickable.
+#[test]
+fn the_models_page_lists_the_catalog_under_the_page_cursor() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.focus_section(SettingsSection::Models);
+    settings.model_picker.set_models(vec![
+        CatalogModel {
+            provider: "google",
+            instance: None,
+            model: model("model-a"),
+        },
+        CatalogModel {
+            provider: "google",
+            instance: None,
+            model: model("model-b"),
+        },
+    ]);
+    settings.stored.provider = Some("google".into());
+    settings.stored.model = Some("model-a".into());
+    settings.sync_current_model();
+    assert_eq!(
+        settings.model_picker.selected, 0,
+        "the cursor opens on the model in use"
+    );
+    settings.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+    assert_eq!(
+        settings.model_picker.selected, 1,
+        "the page cursor moves it"
+    );
+    assert_eq!(
+        settings.enter_action(),
+        crate::screens::SettingsAction::ChooseModel
+    );
+
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(60, 14)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let mut screen = String::new();
+    for y in 0..14 {
+        for x in 0..60 {
+            screen.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(screen.contains("Models"), "{screen}");
+    assert!(screen.contains("google/model-a"), "{screen}");
+    assert!(
+        screen.contains("❯ google/model-b"),
+        "the page cursor: {screen}"
+    );
+    assert!(screen.contains("· in use"), "the model that runs: {screen}");
+    assert!(screen.contains("filter:"), "the search box: {screen}");
+    assert!(
+        screen.contains("enter choose"),
+        "the page's hints: {screen}"
+    );
+    // The page's cursor sits in the page's own text column, under the
+    // title, where every other page's row marker sits; the id follows a
+    // cell later.
+    // The page's cursor sits in the page's own text column, under the
+    // title, where every other page's row marker sits; the id follows a
+    // cell later.
+    let row_cells = |y: u16| -> Vec<String> {
+        (0..60)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_owned())
+            .collect()
+    };
+    // Cells are one symbol each: a byte offset would miss on the
+    // multi-byte glyphs the sidebar draws.
+    let column_of = |y: u16, needle: &str| -> Option<usize> {
+        let cells = row_cells(y);
+        (0..cells.len()).find(|start| cells[*start..].concat().starts_with(needle))
+    };
+    let selected_row = (0..14)
+        .find(|y| row_cells(*y).concat().contains("google/model-b"))
+        .expect("the selected row is drawn");
+    let id_x = column_of(selected_row, "google/model-b").expect("the id is drawn");
+    assert_eq!(
+        row_cells(selected_row)[id_x - 2],
+        "❯",
+        "the marker sits before the id: {screen}"
+    );
+    let heading = (0..14)
+        .find(|y| row_cells(*y).concat().contains('⚙'))
+        .expect("the heading row");
+    assert_eq!(
+        column_of(heading, "Models"),
+        Some(id_x - 2),
+        "the list sits in the page's text column: {screen}"
+    );
+    let rows: Vec<usize> = hits
+        .iter()
+        .filter_map(|(_, hit)| match hit {
+            crate::app::SettingsHit::PageRow(index) => Some(*index),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rows, [0, 1], "each drawn row is clickable");
+}
+
+/// The catalog is a table: every column is titled, each title sits over
+/// its own cells (`Model` over the names it titles), and the in-use
+/// row's mark rides inside the model column so the numbers below it
+/// still line up.
+#[test]
+fn the_models_page_lays_the_catalog_out_in_titled_columns() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.focus_section(SettingsSection::Models);
+    let card = |id: &str, in_price: f64, out_price: f64, vision: bool, ctx: u64| {
+        let mut model = model(id);
+        model.pricing = Some(rhema_provider::Pricing {
+            input_per_mtok: in_price,
+            cached_input_per_mtok: None,
+            output_per_mtok: out_price,
+        });
+        model.supports_vision = Some(vision);
+        model.input_token_limit = Some(ctx);
+        model
+    };
+    settings.model_picker.set_models(vec![
+        crate::screens::CatalogModel {
+            provider: "mistral-vibe",
+            instance: None,
+            model: card("mistral-large-4-0", 0.70, 2.10, true, 1_048_576),
+        },
+        crate::screens::CatalogModel {
+            provider: "opencode",
+            instance: None,
+            model: card("glm-5.3", 1.40, 4.40, true, 1_048_576),
+        },
+    ]);
+    settings.stored.provider = Some("mistral-vibe".into());
+    settings.stored.model = Some("mistral-large-4-0".into());
+    settings.sync_current_model();
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(120, 26)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let row = |y: u16| -> Vec<String> {
+        (0..120)
+            .map(|x| terminal.backend().buffer()[(x, y)].symbol().to_owned())
+            .collect()
+    };
+    let column_of = |y: u16, needle: &str| -> Option<usize> {
+        let cells = row(y);
+        (0..cells.len()).find(|start| cells[*start..].concat().starts_with(needle))
+    };
+    let header = (0..26)
+        .find(|y| row(*y).concat().contains("Ctx"))
+        .expect("the header row");
+    let in_use_row = (0..26)
+        .find(|y| row(*y).concat().contains("mistral-vibe/mistral-large-4-0"))
+        .expect("the in-use row");
+    let other = (0..26)
+        .find(|y| row(*y).concat().contains("opencode/glm-5.3"))
+        .expect("the other row");
+    for (title, cells) in [
+        ("In", ["$0.70", "$1.40"]),
+        ("Out", ["$2.10", "$4.40"]),
+        ("Cap.", ["◉", "◉"]),
+        ("Ctx", ["1.0M", "1.0M"]),
+    ] {
+        let title_x = column_of(header, title).unwrap_or_else(|| panic!("{title} is titled"));
+        for (y, cell) in [(in_use_row, cells[0]), (other, cells[1])] {
+            assert_eq!(
+                column_of(y, cell),
+                Some(title_x),
+                "{title} sits over its cells"
+            );
+        }
+    }
+    // `Model` names the names, so it starts over them.
+    assert_eq!(
+        column_of(header, "Model"),
+        column_of(in_use_row, "mistral-vibe"),
+        "the model column's title"
+    );
+    // The mark rides in the model column, never in a number's.
+    assert!(
+        row(in_use_row)
+            .concat()
+            .contains("mistral-large-4-0  · in use"),
+        "the in-use mark: {}",
+        row(in_use_row).concat()
+    );
+}
+
+/// A narrow pane drops columns before it squeezes the names: an id
+/// differentiates models at its tail, so it keeps the room.
+#[test]
+fn a_narrow_pane_drops_the_columns_before_the_names() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.focus_section(SettingsSection::Models);
+    let mut card = model("zai-glm-5-3-flash-vibe-free");
+    card.input_token_limit = Some(262_144);
+    card.pricing = Some(rhema_provider::Pricing {
+        input_per_mtok: 0.15,
+        cached_input_per_mtok: None,
+        output_per_mtok: 0.50,
+    });
+    settings
+        .model_picker
+        .set_models(vec![crate::screens::CatalogModel {
+            provider: "mistral-vibe",
+            instance: None,
+            model: card,
+        }]);
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(64, 18)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let mut text = String::new();
+    for y in 0..18 {
+        for x in 0..64 {
+            text.push_str(terminal.backend().buffer()[(x, y)].symbol());
+        }
+    }
+    assert!(text.contains("Model"), "the names keep their title: {text}");
+    assert!(
+        !text.contains("$") && !text.contains("Ctx"),
+        "the numbers go: {text}"
+    );
+}
+
+/// The page keeps its air: two rows under the border for a tall
+/// terminal, three cells inside the sidebar, and the hints a row above
+/// the bottom border — with every section still on a short one.
+#[test]
+fn the_settings_page_keeps_its_air() {
+    let draw = |height: u16| -> Vec<String> {
+        let settings = crate::screens::SettingsScreen::new();
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(90, height)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        (0..height)
+            .map(|y| {
+                (0..90)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    };
+    let tall = draw(30);
+    let title = tall
+        .iter()
+        .position(|row| row.contains('⚙'))
+        .expect("the heading row");
+    assert_eq!(title, 3, "two rows of air under the border");
+    let inside = |row: &String| {
+        // The border's own cells are not the page's.
+        row.chars()
+            .skip(1)
+            .take(88)
+            .collect::<String>()
+            .trim()
+            .to_owned()
+    };
+    let last = (1..29)
+        .rev()
+        .find(|y| !inside(&tall[*y as usize]).is_empty())
+        .expect("the page draws something");
+    assert_eq!(last, 30 - 3, "the hints sit a row above the border");
+    // A short terminal gives the top row back: the sections all fit.
+    let short = draw(18);
+    for section in SettingsSection::ALL {
+        assert!(
+            short.iter().any(|row| row.contains(section.label())),
+            "{} on a short page",
+            section.label()
+        );
+    }
+}
+
+/// The titles read as titles: bold, a tone above the cells they name,
+/// with a row of air under them.
+#[test]
+fn the_catalog_titles_are_typeset_apart_from_their_cells() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.focus_section(SettingsSection::Models);
+    let mut card = model("glm-5.3");
+    card.input_token_limit = Some(1_048_576);
+    card.supports_vision = Some(true);
+    card.pricing = Some(rhema_provider::Pricing {
+        input_per_mtok: 1.40,
+        cached_input_per_mtok: None,
+        output_per_mtok: 4.40,
+    });
+    settings
+        .model_picker
+        .set_models(vec![crate::screens::CatalogModel {
+            provider: "opencode",
+            instance: None,
+            model: card,
+        }]);
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(110, 26)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let row = |y: usize| -> Vec<(String, ratatui::style::Style)> {
+        (0..110)
+            .map(|x| {
+                let cell = &terminal.backend().buffer()[(x as u16, y as u16)];
+                (cell.symbol().to_owned(), cell.style())
+            })
+            .collect()
+    };
+    let text = |y: usize| row(y).iter().map(|(s, _)| s.clone()).collect::<String>();
+    let header = (0..26)
+        .find(|y| text(*y).contains("Cap."))
+        .expect("the header");
+    let line = (0..26)
+        .find(|y| text(*y).contains("opencode/glm-5.3"))
+        .expect("the row");
+    assert!(line > header, "titles come first");
+    assert_eq!(line, header + 2, "a row of air under the titles");
+    // Past the sidebar: its labels are the screen's, not the table's.
+    for x in 24..110 {
+        let (symbol, style) = &row(header)[x];
+        if symbol.trim().is_empty() || "│╭╮╰╯─".contains(symbol.as_str()) {
+            continue;
+        }
+        assert!(
+            style.add_modifier.contains(Modifier::BOLD),
+            "the title cells are bold: {symbol:?}"
+        );
+    }
+    // The cells are not bold: the title has to stand apart from them.
+    let price = (0..110)
+        .find(|x| row(line)[*x].0 == "$")
+        .expect("the price cell");
+    assert!(!row(line)[price].1.add_modifier.contains(Modifier::BOLD));
+    assert_ne!(
+        row(line)[price].1.fg,
+        row(header)[price].1.fg,
+        "the title sits a tone apart from the cell under it"
+    );
+}
+
+/// The page hands the picker its whole body: a catalog that shrank the
+/// block as rows were filtered away would walk the filter box up out
+/// from under the hands typing in it.
+#[test]
+fn the_models_page_keeps_its_filter_box_where_it_stands() {
+    let draw = |count: usize| -> (usize, usize, usize) {
+        let mut settings = crate::screens::SettingsScreen::new();
+        settings.focus_section(SettingsSection::Models);
+        let cards = (0..count)
+            .map(|n| {
+                let mut card = model(&format!("model-{n}"));
+                card.input_token_limit = Some(1_048_576);
+                card.pricing = Some(rhema_provider::Pricing {
+                    input_per_mtok: 0.70,
+                    cached_input_per_mtok: None,
+                    output_per_mtok: 2.10,
+                });
+                crate::screens::CatalogModel {
+                    provider: "mistral-vibe",
+                    instance: None,
+                    model: card,
+                }
+            })
+            .collect();
+        settings.model_picker.set_models(cards);
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(100, 26)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        let text = |y: usize| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x as u16, y as u16)].symbol())
+                .collect::<String>()
+        };
+        let header = (0..26)
+            .find(|y| text(*y).contains("Model"))
+            .expect("the header");
+        let filter = (0..26)
+            .find(|y| text(*y).contains("filter:"))
+            .expect("the filter line");
+        (header, header + 2, filter)
+    };
+    let (header, first, filter) = draw(3);
+    assert_eq!(first, header + 2, "one row of air under the titles");
+    let (small_header, _, small_filter) = draw(1);
+    let (many_header, _, many_filter) = draw(12);
+    assert_eq!(small_header, header);
+    assert_eq!(many_header, header);
+    assert_eq!(
+        small_filter, many_filter,
+        "the filter box holds its row whatever the catalog holds"
+    );
+    assert!(filter > first, "the rows sit above the filter");
+}
+
+/// A filter that matches nothing keeps its titles and says so in the
+/// column the rows would have filled: the table does not collapse into
+/// a bare "no match", and the columns it names are the catalog's, not
+/// whatever the filter left.
+#[test]
+fn a_filter_with_no_match_keeps_the_titles_over_its_message() {
+    let draw = |filter: &str| -> (Vec<(usize, String)>, usize, String) {
+        let mut settings = crate::screens::SettingsScreen::new();
+        settings.focus_section(SettingsSection::Models);
+        let cards = ["aaaa-long-model-id", "b", "c-vision"]
+            .into_iter()
+            .map(|id| {
+                let mut card = model(id);
+                card.supports_vision = (id == "c-vision").then_some(true);
+                card.input_token_limit = Some(1_048_576);
+                card.pricing = Some(rhema_provider::Pricing {
+                    input_per_mtok: 0.70,
+                    cached_input_per_mtok: None,
+                    output_per_mtok: 2.10,
+                });
+                crate::screens::CatalogModel {
+                    provider: "mistral-vibe",
+                    instance: None,
+                    model: card,
+                }
+            })
+            .collect();
+        settings.model_picker.set_models(cards);
+        settings.model_picker.filter = filter.to_owned();
+        let mut hits = Vec::new();
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits)
+            })
+            .unwrap();
+        let text = |y: usize| {
+            (0..100)
+                .map(|x| terminal.backend().buffer()[(x as u16, y as u16)].symbol())
+                .collect::<String>()
+        };
+        let header = (0..18)
+            .find(|y| text(*y).contains("Cap."))
+            .expect("the header");
+        let titles = ["Model", "In", "Out", "Cap.", "Ctx"]
+            .into_iter()
+            .map(|title| (text(header).find(title).expect(title), title.to_owned()))
+            .collect();
+        (titles, header, text(header + 2))
+    };
+    let (full_titles, full_header, _) = draw("");
+    let (titles, header, message) = draw("zzzz");
+    assert_eq!(titles, full_titles, "the columns hold their places");
+    assert_eq!(header, full_header, "the titles hold their row");
+    assert!(message.contains("no match"), "{message}");
+    assert!(
+        !message.contains("Model"),
+        "the titles are a row of their own: {message}"
+    );
+    // Under the data, not under the marker column.
+    let indent = message.find("no match").expect("the message");
+    assert_eq!(
+        indent, full_titles[0].0,
+        "the message starts where a row does"
+    );
 }

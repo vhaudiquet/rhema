@@ -8,6 +8,10 @@ pub enum SettingsSection {
     /// The profile's provider, model, and logged-in instances, the
     /// login flow lives here now.
     Providers,
+    /// The models the profile can run, the catalog as a page: one row
+    /// per entry, the page's own cursor walking it, and the pick under
+    /// that cursor becoming the profile's model.
+    Models,
     /// The named profiles: add, remove, switch, and their name colors.
     Profiles,
     /// Where `bash` runs: the sandbox kinds, their instances, the
@@ -40,6 +44,7 @@ impl SettingsSection {
     /// Every section, in sidebar order.
     pub const ALL: &'static [SettingsSection] = &[
         SettingsSection::Providers,
+        SettingsSection::Models,
         SettingsSection::Profiles,
         SettingsSection::Sandbox,
         SettingsSection::Appearance,
@@ -57,6 +62,7 @@ impl SettingsSection {
     pub fn label(self) -> &'static str {
         match self {
             SettingsSection::Providers => "Providers",
+            SettingsSection::Models => "Models",
             SettingsSection::Profiles => "Profiles",
             SettingsSection::Sandbox => "Sandbox",
             SettingsSection::Appearance => "Appearance",
@@ -109,6 +115,10 @@ pub enum SettingsAction {
     /// The dialog closed (esc at any stage); a running flow task dies
     /// with it.
     CloseDialog,
+    /// Enter on a Models row: the pick becomes the profile's model.
+    ChooseModel,
+    /// `r` after a failed catalog fetch: ask again.
+    RetryModels,
     /// Cycle to the next color palette.
     CyclePalette,
     /// Toggle the theme.
@@ -370,6 +380,8 @@ pub struct SettingsScreen {
     pub section: SettingsSection,
     /// The selected row within the page's interactive rows (the
     /// Providers page's instance list, the Appearance page's toggles).
+    /// The Models page's cursor lives in its picker instead; see
+    /// [`Self::select_row`].
     pub row: usize,
     /// Appearance: the color palette on screen.
     pub colors: crate::palette::Palette,
@@ -392,6 +404,9 @@ pub struct SettingsScreen {
     pub stored: rhema_config::Profile,
     /// The add-instance dialog, when it is up.
     pub dialog: Option<AddInstanceDialog>,
+    /// The shared model picker, the Models page's list: the same widget
+    /// `/model` opens, and the wizard's model step.
+    pub model_picker: ModelPicker,
     // The Sandbox page's snapshot.
     /// What this machine offered at the startup probe: the rows'
     /// offered marks.
@@ -503,6 +518,7 @@ impl SettingsScreen {
             profile: "personal".to_owned(),
             stored: rhema_config::Profile::default(),
             dialog: None,
+            model_picker: ModelPicker::new(Vec::new()),
             sandbox_offered: crate::sandbox::SandboxAvailability::default(),
             sandbox_active: crate::args::SandboxChoice::Local,
             sandbox_remembered: None,
@@ -536,8 +552,67 @@ impl SettingsScreen {
         }
     }
 
-    /// Steps the sidebar one section, wrapping at the ends. The page's
-    /// row selection restarts at the top: the rows move with the page.
+    /// Lands on `section`: the page's row selection restarts at the
+    /// top, and the Models page puts its cursor on the model in use, so
+    /// Enter on an untouched page re-picks instead of jumping.
+    pub fn focus_section(&mut self, section: SettingsSection) {
+        self.section = section;
+        self.row = 0;
+        self.seed_model_cursor();
+    }
+
+    /// Where the model the profile runs sits in the picker's rows.
+    fn current_model_index(&self) -> Option<usize> {
+        let provider = self.stored.provider_name()?;
+        let id = self.stored.model.clone()?;
+        self.model_picker
+            .rows()
+            .iter()
+            .position(|row| row.provider() == provider && row.id() == id)
+    }
+
+    /// Puts the Models page's cursor on the row of the model in use.
+    fn seed_model_cursor(&mut self) {
+        if self.section == SettingsSection::Models
+            && let Some(index) = self.current_model_index()
+        {
+            self.model_picker.selected = index;
+        }
+    }
+
+    /// Reads the picker's current-model mark off the page's stored
+    /// profile, so the list names the model that runs.
+    pub fn mark_current_model(&mut self) {
+        let current = self
+            .stored
+            .provider_name()
+            .zip(self.stored.model.clone())
+            .map(|(provider, id)| CurrentModel {
+                provider,
+                instance: self.stored.instance.clone(),
+                id,
+            });
+        self.model_picker.set_current(current);
+    }
+
+    /// The mark, plus the cursor: after a pick the Models page lands on
+    /// the model it just made current.
+    pub fn sync_current_model(&mut self) {
+        self.mark_current_model();
+        self.seed_model_cursor();
+    }
+
+    /// Puts the page's cursor on row `index`, whatever the page lists:
+    /// the Models rows are the picker's.
+    pub fn select_row(&mut self, index: usize) {
+        if self.section == SettingsSection::Models {
+            self.model_picker.selected = index;
+        } else {
+            self.row = index;
+        }
+    }
+
+    /// Steps the sidebar one section, wrapping at the ends.
     fn step_section(&mut self, forward: bool) {
         let count = SettingsSection::ALL.len() as isize;
         let current = SettingsSection::ALL
@@ -545,8 +620,8 @@ impl SettingsScreen {
             .position(|section| *section == self.section)
             .unwrap_or(0) as isize;
         let step = if forward { 1 } else { -1 };
-        self.section = SettingsSection::ALL[(current + step).rem_euclid(count) as usize];
-        self.row = 0;
+        let section = SettingsSection::ALL[(current + step).rem_euclid(count) as usize];
+        self.focus_section(section);
     }
 
     /// The instance list as rendered rows: the stored instances in name
@@ -824,6 +899,9 @@ impl SettingsScreen {
                 Some(_) => SettingsAction::SetDefaultDecision,
                 None => SettingsAction::OpenDecisionDialog,
             },
+            // The Models page has one row per catalog entry, and Enter
+            // picks the one under the cursor.
+            SettingsSection::Models => SettingsAction::ChooseModel,
             SettingsSection::Update => match self.row {
                 0 => SettingsAction::CheckForUpdates,
                 _ if self.update.update_available() => SettingsAction::InstallUpdate,
@@ -990,6 +1068,23 @@ impl SettingsScreen {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return SettingsAction::None;
+        }
+        // The Models page's rows are the shared picker's: it takes every
+        // key, so typing filters, the vertical arrows walk the catalog,
+        // and the page has one cursor rather than two. The sidebar keys
+        // stay the page's, or the page would be a trap.
+        if self.section == SettingsSection::Models
+            && !matches!(
+                key.code,
+                KeyCode::Tab | KeyCode::BackTab | KeyCode::Left | KeyCode::Right
+            )
+        {
+            return match self.model_picker.handle_key(key) {
+                ModelPickerAction::None => SettingsAction::None,
+                ModelPickerAction::Back => SettingsAction::Back,
+                ModelPickerAction::Retry => SettingsAction::RetryModels,
+                ModelPickerAction::Choose { .. } => SettingsAction::ChooseModel,
+            };
         }
         match key.code {
             KeyCode::Left | KeyCode::BackTab => {

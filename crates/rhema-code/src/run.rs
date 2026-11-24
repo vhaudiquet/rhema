@@ -1015,6 +1015,15 @@ fn dispatch(
             if backends.is_empty() {
                 return;
             }
+            // A new batch starts from nothing: the names and the error of
+            // the last one are settled facts, not current ones, and this
+            // batch's own answers reset them one provider at a time.
+            if !matches!(why, crate::events::FetchWhy::Login { .. }) {
+                app.catalog_unavailable.clear();
+                app.catalog_failed.clear();
+                app.catalog_error = None;
+                app.catalog_inflight = true;
+            }
             spawn_model_fetch(backends, why, tx.clone());
         }
         Effect::GrabClipboard => {

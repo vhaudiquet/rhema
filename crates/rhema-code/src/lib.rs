@@ -91,8 +91,8 @@ pub use onboarding::{OnboardingAction, OnboardingScreen, OnboardingStep};
 pub use palette::{DARK, LIGHT, Palette, Theme, ThemeKind, parse_hex_color};
 pub use run::{exit_code, run};
 pub use screens::{
-    AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, ResumeAction,
-    ResumeScreen, SettingsAction, SettingsScreen, SettingsSection,
+    AddInstanceDialog, ChatAction, ChatState, ModelPicker, ModelPickerAction, PickerScreen,
+    ResumeAction, ResumeScreen, SettingsAction, SettingsScreen, SettingsSection,
 };
 pub use store::{ConfigStore, CustomPalette, CustomTokens, DiskStore, Document, MemoryStore};
 pub use transcript::{Line, Transcript};

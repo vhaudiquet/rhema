@@ -20,7 +20,7 @@ use crate::args::SandboxChoice;
 use crate::events::{CatalogFailure, FetchWhy, OwnedEvent, ResumedLoad, UiEvent};
 use crate::onboarding::{OnboardingAction, OnboardingScreen};
 use crate::screens::{
-    AddInstanceDialog, ChatAction, ChatState, PickerAction, PickerScreen, PickerStatus,
+    AddInstanceDialog, ChatAction, ChatState, ModelPickerAction, ModelPickerStatus, PickerScreen,
     ProfileAction, ProfileScreen, SettingsAction, SettingsScreen, SettingsSection, SkillRow,
     SkillSource, SubagentRow, SubagentSource,
 };
@@ -117,6 +117,12 @@ pub struct App {
     /// Providers whose last catalog fetch failed with their own error,
     /// by provider name.
     pub catalog_failed: Vec<&'static str>,
+    /// The last provider error a fetch reported, kept for the page that
+    /// has nothing to list: its rows give way to this text.
+    pub catalog_error: Option<String>,
+    /// A catalog fetch is out right now: the page that comes up waits on
+    /// it instead of asking again for the same answers.
+    pub catalog_inflight: bool,
     /// The agent; `None` while a turn runs (the turn task owns it).
     pub agent: Option<HostAgent>,
     /// The session's background shells, as the strip draws them: a
@@ -447,7 +453,8 @@ impl TurnState {
 /// One keypress routed to the active screen.
 enum Routed {
     Onboarding(OnboardingAction),
-    Picker(PickerAction),
+    /// `/switch`'s full-screen model picker.
+    Picker(ModelPickerAction),
     Profile(ProfileAction),
     Resume(crate::screens::ResumeAction),
     Settings(SettingsAction),
@@ -638,6 +645,8 @@ impl App {
             catalog_stale: false,
             catalog_unavailable: Vec::new(),
             catalog_failed: Vec::new(),
+            catalog_error: None,
+            catalog_inflight: false,
             agent,
             jobs,
             jobs_tag,

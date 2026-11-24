@@ -19,7 +19,6 @@ impl App {
             self.config_root.as_deref(),
             self.secret_store(),
         );
-        settings.section = section;
         settings.allowance = self.subscription.clone();
         settings.last_turn = self.usage;
         settings.transcript = self
@@ -28,6 +27,9 @@ impl App {
             .and_then(HostAgent::transcript_stats)
             .or(self.transcript_stats);
         settings.session_cost = self.session_cost;
+        settings.model_picker.set_models(self.models.clone());
+        settings.model_picker.unavailable = self.catalog_unavailable.clone();
+        settings.model_picker.failed = self.catalog_failed.clone();
         settings.sandbox_offered = self.sandbox_offered;
         settings.sandbox_active = self.active_sandbox();
         settings.sandbox_remembered = self
@@ -48,6 +50,8 @@ impl App {
             settings.stored.decision.as_ref(),
             self.secrets.as_deref(),
         );
+        settings.sync_current_model();
+        settings.focus_section(section);
         self.screen = Screen::Settings(Box::new(settings));
     }
 
@@ -885,6 +889,155 @@ impl App {
             && let Err(err) = self.rebuild_live_agent(false)
         {
             self.error = Some(err);
+        }
+    }
+
+    /// Lands the open settings screen on the Models page, its picker
+    /// seeded from the cached catalog: a login and an instance
+    /// activation both end here, the pick persisting to the profile
+    /// they just changed.
+    pub(crate) fn focus_settings_models(&mut self) {
+        let models = self.models.clone();
+        let unavailable = self.catalog_unavailable.clone();
+        let failed = self.catalog_failed.clone();
+        let Screen::Settings(settings) = &mut self.screen else {
+            return;
+        };
+        settings.model_picker.set_models(models);
+        settings.model_picker.unavailable = unavailable;
+        settings.model_picker.failed = failed;
+        settings.model_picker.status = ModelPickerStatus::Ready;
+        settings.mark_current_model();
+        settings.focus_section(SettingsSection::Models);
+    }
+
+    /// `/model` and Ctrl-P: the Models page of the settings screen, its
+    /// picker seeded from the cached catalog and refetched when the
+    /// cache is empty or stale. One place picks a model, and the page
+    /// under it is the one the pick writes to.
+    pub(crate) fn open_model_settings(&mut self) -> Vec<Effect> {
+        if self.turn.running {
+            self.transcript
+                .push_notice("a turn is running; the model pick waits for it to finish");
+            return Vec::new();
+        }
+        // No candidate, no list: the page would open with nothing in it
+        // and nothing saying why, and the run would drop the fetch.
+        if Backend::candidates_from_profile(&self.effective(), self.secret_store()).is_empty() {
+            self.transcript
+                .push_notice("no provider on this profile; /login first");
+            return Vec::new();
+        }
+        self.open_settings_at(SettingsSection::Models);
+        self.models_page_opened()
+    }
+
+    /// The Models page lists the cached catalog and asks for a fresh one
+    /// when the cache holds none: however the page is reached, a list
+    /// with nothing in it never sits there saying nothing.
+    pub(crate) fn models_page_opened(&mut self) -> Vec<Effect> {
+        if !self.models.is_empty() && !self.catalog_stale {
+            return Vec::new();
+        }
+        // A fetch already out answers for this page: asking again would
+        // double the network round trip.
+        if let Screen::Settings(settings) = &self.screen
+            && settings.model_picker.status == ModelPickerStatus::Loading
+        {
+            return Vec::new();
+        }
+        self.ask_models_catalog()
+    }
+
+    /// Asks every provider the profile holds for its catalog, the picker
+    /// spinning until the answers land. With no provider to ask, the
+    /// page says so where the rows would be: the runner would drop the
+    /// fetch and the picker would spin on nothing.
+    pub(crate) fn ask_models_catalog(&mut self) -> Vec<Effect> {
+        // A batch already out answers for this page: asking again would
+        // only spend a second round trip on the same providers.
+        if self.catalog_inflight {
+            if let Screen::Settings(settings) = &mut self.screen
+                && settings.section == SettingsSection::Models
+                && settings.model_picker.status == ModelPickerStatus::Ready
+            {
+                settings.model_picker.start_loading();
+            }
+            return Vec::new();
+        }
+        let no_candidate =
+            Backend::candidates_from_profile(&self.effective(), self.secret_store()).is_empty();
+        if let Screen::Settings(settings) = &mut self.screen
+            && settings.section == SettingsSection::Models
+        {
+            if no_candidate {
+                settings.model_picker.status = ModelPickerStatus::Error(
+                    "no provider on this profile · /login first".to_owned(),
+                );
+            } else {
+                settings.model_picker.start_loading();
+            }
+        }
+        if no_candidate {
+            return Vec::new();
+        }
+        self.catalog_stale = false;
+        vec![Effect::FetchModels(FetchWhy::Refresh)]
+    }
+
+    /// The Models page's Enter: the highlighted row becomes the
+    /// profile's model.
+    pub(crate) fn choose_picked_model(&mut self) -> Vec<Effect> {
+        let picked = match &self.screen {
+            Screen::Settings(settings) => settings.model_picker.selected_row().map(|row| {
+                (
+                    row.provider().to_owned(),
+                    row.instance().map(str::to_owned),
+                    row.id().to_owned(),
+                )
+            }),
+            _ => None,
+        };
+        let Some((provider, instance, id)) = picked else {
+            return Vec::new();
+        };
+        self.choose_settings_model(&provider, instance.as_deref(), &id)
+    }
+
+    /// A pick on the Models page: the choice persists as the profile's
+    /// model, the agent rebuilds over the conversation, and the page
+    /// stays open with its cursor on the new model.
+    pub(crate) fn choose_settings_model(
+        &mut self,
+        provider: &str,
+        instance: Option<&str>,
+        id: &str,
+    ) -> Vec<Effect> {
+        if self.turn.running {
+            self.transcript
+                .push_notice("a turn is running; the model pick waits for it to finish");
+            return Vec::new();
+        }
+        match self.apply_model_choice(provider, instance, id) {
+            Ok(effects) => {
+                // The page reads `stored`; the pick must land there or
+                // the Model field would keep the model it replaced.
+                let stored = self.effective();
+                if let Screen::Settings(settings) = &mut self.screen {
+                    settings.stored = stored;
+                    // The search resets and the mark and cursor follow
+                    // the model just picked.
+                    settings.model_picker.filter.clear();
+                    settings.sync_current_model();
+                }
+                self.transcript
+                    .push_notice(&format!("model switched to {provider}/{id}"));
+                effects
+            }
+            Err(err) => {
+                self.error = Some(err);
+                Vec::new()
+            }
         }
     }
 

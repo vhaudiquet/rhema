@@ -14,7 +14,11 @@ impl App {
                 self.transcript.apply(&owned);
                 Vec::new()
             }
-            UiEvent::ModelsLoaded { why, result } => self.on_models_loaded(why, result),
+            UiEvent::ModelsLoaded {
+                why,
+                result,
+                remaining,
+            } => self.on_models_loaded(why, result, remaining),
             UiEvent::LoginUpdate(update) => self.on_login_update(update),
             UiEvent::ApprovalRequested { call } => {
                 if self.turn.decline_all {

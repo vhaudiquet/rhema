@@ -205,8 +205,12 @@ impl App {
                     // A dialog is modal: clicks behind it do nothing.
                     return Vec::new();
                 }
-                settings.section = section;
-                settings.row = 0;
+                let was = settings.section == crate::screens::SettingsSection::Models;
+                settings.focus_section(section);
+                let entered = !was && settings.section == crate::screens::SettingsSection::Models;
+                if entered {
+                    return self.models_page_opened();
+                }
                 return Vec::new();
             }
             SettingsHit::PageRow(index) => {
@@ -222,7 +226,7 @@ impl App {
                 {
                     return Vec::new();
                 }
-                settings.row = index;
+                settings.select_row(index);
                 settings.enter_action()
             }
             SettingsHit::DialogCategory(index) => {
@@ -279,12 +283,22 @@ impl App {
             self.should_quit = true;
             return Vec::new();
         }
+        // The Models page asks for its catalog the moment it comes up:
+        // the section is read before the key moves it, because the key
+        // handler is what moves it.
+        let mut entered_models = false;
         let routed = match &mut self.screen {
             Screen::Onboarding(wizard) => Routed::Onboarding(wizard.handle_key(key)),
             Screen::Picker(picker) => Routed::Picker(picker.handle_key(key)),
             Screen::Profile(profile) => Routed::Profile(profile.handle_key(key)),
             Screen::Resume(resume) => Routed::Resume(resume.handle_key(key)),
-            Screen::Settings(settings) => Routed::Settings(settings.handle_key(key)),
+            Screen::Settings(settings) => {
+                let was = settings.section == crate::screens::SettingsSection::Models;
+                let action = settings.handle_key(key);
+                entered_models =
+                    !was && settings.section == crate::screens::SettingsSection::Models;
+                Routed::Settings(action)
+            }
             Screen::Chat => {
                 let profiles = self.palette_profiles();
                 let sandboxes = self.palette_sandboxes();
@@ -299,16 +313,28 @@ impl App {
         };
         match routed {
             Routed::Onboarding(action) => self.perform_onboarding(action),
-            Routed::Settings(action) => self.perform_settings(action),
-            Routed::Picker(PickerAction::Choose {
+            Routed::Settings(action) => {
+                // A page that comes up is a page that asks: leaving the
+                // sidebar for Models loads the list, not only /model.
+                let mut effects = self.perform_settings(action);
+                if entered_models {
+                    effects.extend(self.models_page_opened());
+                }
+                effects
+            }
+            // `/switch` is the only host of the full-screen picker: its
+            // pick rides this session alone and never reaches the config.
+            Routed::Picker(ModelPickerAction::Choose {
                 provider,
                 instance,
                 id,
-            }) => self.choose_model(provider, instance.as_deref(), &id),
-            Routed::Picker(PickerAction::BackToChat) => {
+            }) => self.choose_session_model(&provider, instance.as_deref(), &id),
+            Routed::Picker(ModelPickerAction::Back) => {
                 self.screen = Screen::Chat;
                 Vec::new()
             }
+            Routed::Picker(ModelPickerAction::Retry) => self.retry_fetch(),
+            Routed::Picker(ModelPickerAction::None) => Vec::new(),
             Routed::Profile(ProfileAction::Switch(name)) => self.switch_profile(&name),
             Routed::Profile(ProfileAction::BackToChat) => {
                 self.screen = Screen::Chat;
@@ -319,9 +345,7 @@ impl App {
                 self.screen = Screen::Chat;
                 Vec::new()
             }
-            Routed::Picker(PickerAction::Retry) => self.retry_fetch(),
-            Routed::Picker(PickerAction::None)
-            | Routed::Profile(ProfileAction::None)
+            Routed::Profile(ProfileAction::None)
             | Routed::Resume(crate::screens::ResumeAction::None) => Vec::new(),
             Routed::Chat(chat_action) => self.on_chat_key(key, chat_action),
         }
@@ -383,6 +407,13 @@ impl App {
                 // errors out), what Esc and a completed flow both want.
                 self.login_cancel = None;
                 Vec::new()
+            }
+            SettingsAction::ChooseModel => self.choose_picked_model(),
+            SettingsAction::RetryModels => {
+                if let Screen::Settings(settings) = &mut self.screen {
+                    settings.model_picker.start_loading();
+                }
+                vec![Effect::FetchModels(FetchWhy::Refresh)]
             }
             SettingsAction::CyclePalette => {
                 self.cycle_palette();
@@ -670,7 +701,7 @@ impl App {
         {
             // Other Ctrl combos (including Ctrl-P mid-turn) are inert.
             if key.code == KeyCode::Char('p') && !self.turn.running {
-                return self.open_picker();
+                return self.open_model_settings();
             }
             // Ctrl-V only asks; the read runs off this handler and
             // lands later as an event, so its effect is one this gate
@@ -828,8 +859,9 @@ impl App {
         vec![Effect::SteerTurn(text)]
     }
 
-    /// Ctrl-P mid-session: open the picker over the cached models,
-    /// fetching first when the cache is empty.
+    /// `/switch` opens the full-screen picker over the cached models,
+    /// fetching first when the cache is empty: the pick rides this
+    /// session alone. The persisted pick is the settings' Models page.
     pub fn open_picker(&mut self) -> Vec<Effect> {
         // No candidate, no list to show: the runner would silently drop
         // the fetch and the picker would spin on Loading forever.
@@ -839,20 +871,20 @@ impl App {
             return Vec::new();
         }
         let mut effects = Vec::new();
-        let mut status = PickerStatus::Ready;
         // A provider added since the last fetch must show up even when
         // the cache still holds the other providers' rows.
-        if self.models.is_empty() || self.catalog_stale {
-            status = PickerStatus::Loading;
+        let loading = self.models.is_empty() || self.catalog_stale;
+        if loading {
             effects.push(Effect::FetchModels(FetchWhy::Refresh));
             self.catalog_stale = false;
         }
-        self.screen = Screen::Picker(PickerScreen {
-            unavailable: self.catalog_unavailable.clone(),
-            failed: self.catalog_failed.clone(),
-            status,
-            ..PickerScreen::new(self.models.clone())
-        });
+        let mut picker = PickerScreen::new(self.models.clone());
+        picker.unavailable = self.catalog_unavailable.clone();
+        picker.failed = self.catalog_failed.clone();
+        if loading {
+            picker.start_loading();
+        }
+        self.screen = Screen::Picker(picker);
         effects
     }
 }

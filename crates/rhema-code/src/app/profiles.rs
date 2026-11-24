@@ -760,10 +760,14 @@ impl App {
             // that plan's numbers are the badge's to fetch.
             vec![Effect::FetchUsage]
         } else {
-            self.screen = Screen::Picker(PickerScreen {
-                status: PickerStatus::Loading,
-                ..PickerScreen::new(self.models.clone())
-            });
+            // No model survives the new instance: the Models page asks
+            // for one, and the pick persists to the profile that just
+            // moved.
+            self.focus_settings_models();
+            self.catalog_stale = false;
+            if let Screen::Settings(settings) = &mut self.screen {
+                settings.model_picker.start_loading();
+            }
             vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
         }
     }

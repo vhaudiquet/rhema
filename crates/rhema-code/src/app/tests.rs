@@ -2,7 +2,7 @@
 //! code they exercise, the tests share them from here.
 use super::*;
 use crate::events::OwnedEvent;
-use crate::screens::{LoginProvider, ProviderCategory, providers_in};
+use crate::screens::{LoginProvider, ModelPicker, ProviderCategory, providers_in};
 use crate::store::MemoryStore;
 use crate::transcript::Line;
 use rhema_config::secrets::SecretStore as _;
@@ -282,6 +282,30 @@ impl Approval for ScriptedApproval {
             .recv()
             == Ok(true)
     }
+}
+
+/// The Models page's picker: the list `/model` and Ctrl-P open.
+fn models_page(h: &Harness) -> &ModelPicker {
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.section, SettingsSection::Models, "the Models page");
+    &settings.model_picker
+}
+
+/// Tabs the sidebar to `section`, however many pages sit in between.
+fn tab_to(h: &mut Harness, section: SettingsSection) {
+    for _ in 0..SettingsSection::ALL.len() {
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        if settings.section == section {
+            return;
+        }
+        h.app
+            .on_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::empty()));
+    }
+    panic!("the sidebar never reached {section:?}");
 }
 
 fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
@@ -724,7 +748,9 @@ fn login_persists_the_key_without_opening_a_picker() {
     // is empty and the add marked it stale.
     let effects = crate::commands::dispatch(&mut h.app, "/model");
     assert_eq!(effects, vec![Effect::FetchModels(FetchWhy::Refresh)]);
-    assert!(matches!(h.app.screen, Screen::Picker(_)));
+    assert!(
+        matches!(&h.app.screen, Screen::Settings(settings) if settings.section == SettingsSection::Models)
+    );
     assert!(!h.app.catalog_stale);
 }
 
@@ -785,6 +811,7 @@ fn an_add_keeps_the_catalog_and_the_next_picker_refresh_merges_it() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     // /login, then the openrouter row and a key.
@@ -808,6 +835,7 @@ fn an_add_keeps_the_catalog_and_the_next_picker_refresh_merges_it() {
     assert_eq!(effects, vec![Effect::FetchModels(FetchWhy::Refresh)]);
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Refresh,
+        remaining: 0,
         result: [
             loaded("google", models()),
             loaded(
@@ -817,14 +845,10 @@ fn an_add_keeps_the_catalog_and_the_next_picker_refresh_merges_it() {
         ]
         .concat(),
     });
-    match &h.app.screen {
-        Screen::Picker(picker) => {
-            assert_eq!(picker.models.len(), 4, "google stays: {picker:?}");
-            let providers: Vec<&str> = picker.models.iter().map(|m| m.provider).collect();
-            assert_eq!(providers, ["google", "google", "openrouter", "openrouter"]);
-        }
-        _ => panic!("expected the picker"),
-    }
+    let picker = models_page(&h);
+    assert_eq!(picker.models.len(), 4, "google stays: {picker:?}");
+    let providers: Vec<&str> = picker.models.iter().map(|m| m.provider).collect();
+    assert_eq!(providers, ["google", "google", "openrouter", "openrouter"]);
 }
 
 #[test]
@@ -835,6 +859,7 @@ fn an_add_before_a_late_bootstrap_keeps_both_catalogs() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     for c in "/login".chars() {
@@ -853,6 +878,7 @@ fn an_add_before_a_late_bootstrap_keeps_both_catalogs() {
     // cache or the openrouter instance's place in the profile.
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     let providers: Vec<&str> = h.app.models.iter().map(|m| m.provider).collect();
@@ -1267,6 +1293,7 @@ fn refresh_merges_every_providers_catalog_and_names_the_failures() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: [
             loaded("google", models()),
             loaded("openrouter", vec![llama_model("openrouter/auto")]),
@@ -1278,21 +1305,18 @@ fn refresh_merges_every_providers_catalog_and_names_the_failures() {
     // the picker alive, and the footer names the gap.
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Refresh,
+        remaining: 0,
         result: [
             loaded("openrouter", vec![llama_model("openrouter/auto")]),
             failed("google", "gemini api error (HTTP 403): denied"),
         ]
         .concat(),
     });
-    match &h.app.screen {
-        Screen::Picker(picker) => {
-            assert_eq!(picker.status, PickerStatus::Ready);
-            assert_eq!(picker.failed, ["google"]);
-            assert_eq!(picker.models.len(), 1);
-            assert_eq!(picker.models[0].provider, "openrouter");
-        }
-        _ => panic!("expected the picker"),
-    }
+    let picker = models_page(&h);
+    assert_eq!(picker.status, ModelPickerStatus::Ready);
+    assert_eq!(picker.failed, ["google"]);
+    assert_eq!(picker.models.len(), 1);
+    assert_eq!(picker.models[0].provider, "openrouter");
 }
 
 #[test]
@@ -1302,18 +1326,15 @@ fn a_bootstrap_timeout_is_kept_for_the_next_picker() {
     // does not. The picker opens later and still names the dead one.
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: [loaded("google", models()), unavailable("llama-cpp")].concat(),
     });
     assert_eq!(h.app.catalog_unavailable, ["llama-cpp"]);
     h.app.on_key(ctrl('p'));
-    match &h.app.screen {
-        Screen::Picker(picker) => {
-            assert_eq!(picker.status, PickerStatus::Ready);
-            assert_eq!(picker.unavailable, ["llama-cpp"]);
-            assert!(picker.failed.is_empty());
-        }
-        _ => panic!("expected the picker"),
-    }
+    let picker = models_page(&h);
+    assert_eq!(picker.status, ModelPickerStatus::Ready);
+    assert_eq!(picker.unavailable, ["llama-cpp"]);
+    assert!(picker.failed.is_empty());
 }
 
 #[test]
@@ -1321,18 +1342,17 @@ fn a_provider_that_answers_again_leaves_the_unavailable_list() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: unavailable("llama-cpp"),
     });
     h.app.on_key(ctrl('p'));
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Refresh,
+        remaining: 0,
         result: loaded("llama-cpp", vec![llama_model("local/model")]),
     });
     assert!(h.app.catalog_unavailable.is_empty());
-    match &h.app.screen {
-        Screen::Picker(picker) => assert!(picker.unavailable.is_empty()),
-        _ => panic!("expected the picker"),
-    }
+    assert!(models_page(&h).unavailable.is_empty());
 }
 
 #[test]
@@ -1340,19 +1360,19 @@ fn a_total_catalog_failure_is_the_pickers_error() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     h.app.on_key(ctrl('p'));
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Refresh,
+        remaining: 0,
         result: failed("google", "gemini api error (HTTP 403): denied"),
     });
-    match &h.app.screen {
-        Screen::Picker(picker) => {
-            assert!(matches!(picker.status, PickerStatus::Error(_)));
-        }
-        _ => panic!("expected the picker"),
-    }
+    assert!(matches!(
+        models_page(&h).status,
+        ModelPickerStatus::Error(_)
+    ));
 }
 
 #[test]
@@ -1360,6 +1380,7 @@ fn slash_model_with_a_needle_switches_directly() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     for c in "/model google/m-b".chars() {
@@ -1389,6 +1410,7 @@ fn slash_model_with_a_unique_prefix_resolves_and_an_unknown_needle_says_so() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     for c in "/model google/m-".chars() {
@@ -1439,6 +1461,7 @@ fn slash_switch_changes_the_model_for_the_session_only() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     let effects = crate::commands::dispatch(&mut h.app, "/switch google/m-b");
@@ -1462,13 +1485,48 @@ fn slash_switch_changes_the_model_for_the_session_only() {
 }
 
 #[test]
-fn slash_switch_without_a_needle_names_its_usage() {
+fn slash_switch_without_a_needle_opens_the_picker() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        remaining: 0,
+        result: loaded("google", models()),
+    });
     crate::commands::dispatch(&mut h.app, "/switch");
-    assert!(matches!(
-        h.app.transcript.lines().last(),
-        Some(Line::Notice(text)) if text.starts_with("usage: /switch")
-    ));
+    match &h.app.screen {
+        Screen::Picker(picker) => {
+            assert!(!picker.models.is_empty(), "the cached catalog lists");
+        }
+        _ => panic!("expected the switch picker"),
+    }
+}
+
+/// The `/switch` picker's Enter is the session-only half of a pick: the
+/// backend rebuilds, the profile keeps its stored model.
+#[test]
+fn the_switch_picker_picks_without_saving() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        remaining: 0,
+        result: loaded("google", models()),
+    });
+    crate::commands::dispatch(&mut h.app, "/switch");
+    for c in "m-b".chars() {
+        h.app
+            .on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::empty()));
+    }
+    let effects = h
+        .app
+        .on_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+    assert_eq!(effects, vec![Effect::FetchUsage], "the rebuild is inline");
+    assert!(matches!(h.app.screen, Screen::Chat));
+    assert_eq!(h.app.effective().model.as_deref(), Some("m-b"));
+    assert_eq!(
+        h.store.load().unwrap().effective(None).model.as_deref(),
+        Some("m-a"),
+        "the pick never reaches the store"
+    );
 }
 
 #[test]
@@ -1476,6 +1534,7 @@ fn a_persisted_model_pick_replaces_the_session_only_one() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     crate::commands::dispatch(&mut h.app, "/switch google/m-b");
@@ -1494,6 +1553,7 @@ fn a_profile_switch_drops_the_session_only_model() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     crate::commands::dispatch(&mut h.app, "/switch google/m-b");
@@ -1525,6 +1585,7 @@ fn a_resumed_session_continues_its_cost() {
     // carries the total back into the file.
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     h.app.config.set_for_profile(Some("personal"), |settings| {
@@ -1826,6 +1887,7 @@ fn choosing_from_another_provider_switches_the_backend() {
     });
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: [
             loaded("google", models()),
             loaded("openrouter", vec![llama_model("openrouter/auto")]),
@@ -1839,7 +1901,10 @@ fn choosing_from_another_provider_switches_the_backend() {
     }
     let effects = h.app.on_key(key(KeyCode::Enter));
     assert_eq!(effects, vec![Effect::FetchUsage], "a pick rebuilds inline");
-    assert!(matches!(h.app.screen, Screen::Chat));
+    assert!(matches!(
+        &h.app.screen,
+        Screen::Settings(settings) if settings.section == SettingsSection::Models
+    ));
     assert!(matches!(
         h.app.backend,
         Some(Backend::OpenRouter { ref api_key }) if api_key == "o"
@@ -1869,6 +1934,7 @@ fn turn_costs_accumulate_from_the_model_pricing() {
     );
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         // $0.75/M in, $3.75/M out, cached input at a quarter, the
         // shape the google adapter bakes for a flash model.
         result: loaded(
@@ -2026,12 +2092,15 @@ fn activating_across_providers_drops_the_foreign_model() {
     crate::commands::dispatch(&mut h.app, "/login");
     // "home" sorts before "openai": the first row is it.
     let effects = h.app.on_key(key(KeyCode::Enter));
-    // gpt-5 means nothing to a llama.cpp server: the picker opens.
+    // gpt-5 means nothing to a llama.cpp server: the Models page opens.
     assert_eq!(
         effects,
         vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
     );
-    assert!(matches!(h.app.screen, Screen::Picker(_)));
+    assert!(
+        matches!(&h.app.screen, Screen::Settings(settings) if settings.section == SettingsSection::Models),
+        "the switch asks for a model, on the Models page"
+    );
     assert_eq!(
         h.store.load().unwrap().effective(None).model,
         None,
@@ -2278,12 +2347,18 @@ fn choosing_a_model_persists_it_and_builds_the_agent() {
     assert!(matches!(h.app.screen, Screen::Chat));
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     h.app.on_key(ctrl('p'));
     let effects = h.app.on_key(key(KeyCode::Enter));
     assert_eq!(effects, vec![Effect::FetchUsage]);
-    assert!(matches!(h.app.screen, Screen::Chat));
+    // A settings page keeps its place after the pick: the model in use
+    // moves under the cursor instead of the page closing.
+    assert!(matches!(
+        &h.app.screen,
+        Screen::Settings(settings) if settings.section == SettingsSection::Models
+    ));
     assert!(h.app.agent.is_some());
     assert_eq!(
         h.store.load().unwrap().effective(None).model.as_deref(),
@@ -2302,13 +2377,16 @@ fn ctrl_p_rebuild_preserves_the_session() {
     let mut h = harness(Some("k"), Some("m-a"), session);
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     // Warm cache: no refetch effect.
     assert!(h.app.on_key(ctrl('p')).is_empty());
-    assert!(matches!(&h.app.screen, Screen::Picker(_)));
+    assert!(matches!(&h.app.screen, Screen::Settings(_)));
+    // The cursor opens on m-a, the model in use: one step down is m-b.
     h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Enter));
+    h.app.on_key(key(KeyCode::Esc));
 
     assert!(matches!(h.app.screen, Screen::Chat));
     let agent = h.app.agent.as_ref().expect("rebuilt agent");
@@ -2333,6 +2411,7 @@ fn esc_when_idle_asks_and_y_quits() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     h.app.on_key(key(KeyCode::Esc));
@@ -2738,6 +2817,7 @@ fn chat_submit_guards() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     // An empty input never submits.
@@ -2985,8 +3065,8 @@ fn a_model_pick_under_a_running_turn_is_declined() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.on_key(ctrl('p'));
     assert!(
-        matches!(h.app.screen, Screen::Picker(_)),
-        "the picker sits open for the pick"
+        matches!(&h.app.screen, Screen::Settings(settings) if settings.section == SettingsSection::Models),
+        "the Models page sits open for the pick"
     );
     h.app.turn.running = true;
     let effects = h.app.choose_model("google", Some("google"), "m-z");
@@ -2998,8 +3078,8 @@ fn a_model_pick_under_a_running_turn_is_declined() {
         ))
     );
     assert!(
-        matches!(h.app.screen, Screen::Picker(_)),
-        "the picker stays up; the pick can be made again at idle"
+        matches!(&h.app.screen, Screen::Settings(settings) if settings.section == SettingsSection::Models),
+        "the page stays up; the pick can be made again at idle"
     );
     assert_ne!(
         h.app.effective().model.as_deref(),
@@ -4395,6 +4475,99 @@ fn slash_settings_opens_the_live_providers_page() {
 }
 
 #[test]
+fn slash_model_opens_the_models_page_of_the_settings() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        remaining: 0,
+        result: loaded("google", models()),
+    });
+    crate::commands::dispatch(&mut h.app, "/model");
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.section, SettingsSection::Models);
+    let rows = settings.model_picker.rows();
+    assert_eq!(rows.len(), 2, "the cached catalog");
+    // The cursor opens on the model the profile runs, not on the first
+    // row: Enter twice in a row must not switch anything by accident.
+    assert_eq!(rows[settings.model_picker.selected].id(), "m-a");
+}
+
+/// The Models page picks like `/model` always did: the choice persists,
+/// the backend rebuilds, the page stays open, and its list marks what
+/// runs.
+#[test]
+fn the_models_page_picks_and_persists() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        remaining: 0,
+        result: loaded("google", models()),
+    });
+    crate::commands::dispatch(&mut h.app, "/model");
+    let key = |code| KeyEvent::new(code, KeyModifiers::empty());
+    // Typing filters the list, not some other cursor.
+    for c in "m-b".chars() {
+        h.app.on_key(key(KeyCode::Char(c)));
+    }
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.model_picker.row_count(), 1, "the filter narrowed");
+    let effects = h.app.on_key(key(KeyCode::Enter));
+    assert_eq!(effects, vec![Effect::FetchUsage], "the rebuild is inline");
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("the pick keeps the page open");
+    };
+    assert_eq!(
+        settings.stored.model.as_deref(),
+        Some("m-b"),
+        "the page follows"
+    );
+    assert!(settings.model_picker.filter.is_empty(), "the search resets");
+    assert_eq!(
+        h.store.load().unwrap().effective(None).model.as_deref(),
+        Some("m-b"),
+        "a settings pick persists"
+    );
+    // The list names the model in use, and the cursor sits on it.
+    let rows = settings.model_picker.rows();
+    let selected = settings.model_picker.selected;
+    assert_eq!(rows[selected].id(), "m-b", "the cursor follows the pick");
+    assert_eq!(
+        settings
+            .model_picker
+            .current
+            .as_ref()
+            .map(|c| c.id.as_str()),
+        Some("m-b"),
+        "the mark follows too"
+    );
+
+    // Esc leaves the page for the chat, the way every settings page does.
+    h.app.on_key(key(KeyCode::Esc));
+    assert!(matches!(h.app.screen, Screen::Chat));
+}
+
+/// Ctrl-P is `/model` without the typing: the same page.
+#[test]
+fn ctrl_p_opens_the_models_page() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        remaining: 0,
+        result: loaded("google", models()),
+    });
+    h.app
+        .on_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.section, SettingsSection::Models);
+}
+
+#[test]
 fn slash_subagents_opens_the_definitions_page() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     crate::commands::dispatch(&mut h.app, "/subagents");
@@ -4681,11 +4854,7 @@ fn settings_toggles_the_theme_live_and_persists_it() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     assert_eq!(h.app.theme, crate::palette::DARK);
     crate::commands::dispatch(&mut h.app, "/settings");
-    // Three tabs: Profiles and Sandbox sit between Providers and
-    // Appearance.
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
+    tab_to(&mut h, SettingsSection::Appearance);
     h.app.on_key(key(KeyCode::Char('t')));
     assert_eq!(h.app.theme, crate::palette::LIGHT, "the swap is live");
     assert_eq!(h.store.load().unwrap().theme.as_deref(), Some("light"));
@@ -4699,9 +4868,7 @@ fn settings_toggles_the_theme_live_and_persists_it() {
 fn settings_toggles_the_icon_flavor_and_persists_it() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     crate::commands::dispatch(&mut h.app, "/settings");
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
+    tab_to(&mut h, SettingsSection::Appearance);
     h.app.on_key(key(KeyCode::Char('i')));
     assert_eq!(h.app.options.icons, crate::icons::Flavor::Nerd);
     assert!(
@@ -5048,6 +5215,7 @@ fn model_choice_lands_in_the_session_profile() {
     crate::commands::dispatch(&mut h.app, "/model");
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Refresh,
+        remaining: 0,
         result: loaded("google", models()),
     });
     // Enter picks the first row (the picker sorts by id): "m-a".
@@ -5122,10 +5290,13 @@ fn slash_profile_alone_opens_the_picker() {
 }
 
 #[test]
-fn slash_model_opens_the_picker_and_esc_returns_to_the_chat() {
+fn slash_model_opens_the_models_page_and_esc_returns_to_the_chat() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     crate::commands::dispatch(&mut h.app, "/model");
-    assert!(matches!(&h.app.screen, Screen::Picker(_)));
+    assert!(matches!(
+        &h.app.screen,
+        Screen::Settings(settings) if settings.section == SettingsSection::Models
+    ));
     h.app.on_key(key(KeyCode::Esc));
     assert!(matches!(h.app.screen, Screen::Chat));
 }
@@ -5302,12 +5473,13 @@ fn the_wizard_s_login_advances_to_its_own_model_step() {
             instance: Some("Google Gemini".into()),
         },
         result: loaded("google", models()),
+        remaining: 0,
     });
     let Screen::Onboarding(wizard) = &h.app.screen else {
         panic!("expected the wizard");
     };
     assert_eq!(wizard.step, crate::onboarding::OnboardingStep::Model);
-    assert_eq!(wizard.models.len(), 2);
+    assert_eq!(wizard.picker.models.len(), 2);
     // Pick the highlighted model: the agent builds and the step
     // lands on Colors.
     let effects = h.app.on_key(key(KeyCode::Enter));
@@ -5727,6 +5899,128 @@ fn a_rerun_shows_the_existing_configuration() {
     assert!(!text.contains("none yet"), "{text}");
 }
 
+/// The Models page asks for a catalog when it comes up without one,
+/// however it was reached: the sidebar reaches it without going through
+/// `/model`, and a page with nothing to list must not sit there quietly.
+#[test]
+fn entering_the_models_page_from_the_sidebar_fetches_an_empty_catalog() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut h.app, "/settings");
+    // Providers is the page /settings opens on; one tab reaches Models.
+    let effects = h.app.on_key(key(KeyCode::Tab));
+    assert_eq!(
+        effects,
+        vec![Effect::FetchModels(FetchWhy::Refresh)],
+        "the empty page asks"
+    );
+    assert_eq!(
+        models_page(&h).status,
+        ModelPickerStatus::Loading,
+        "and spins while it waits"
+    );
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Refresh,
+        remaining: 0,
+        result: loaded("google", models()),
+    });
+    let picker = models_page(&h);
+    assert_eq!(picker.status, ModelPickerStatus::Ready);
+    assert_eq!(picker.rows().len(), 2, "the answer lists");
+
+    // The cache is warm now: coming back asks nothing.
+    h.app.on_key(key(KeyCode::Tab));
+    let effects = h.app.on_key(key(KeyCode::Tab));
+    assert_eq!(effects, vec![], "a warm page asks nothing");
+}
+
+/// A batch reports one provider at a time: the rows that landed are up
+/// while the rest are out, a dead provider is named as soon as it
+/// answers, and the last report settles the page.
+#[test]
+fn a_catalog_lands_provider_by_provider() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut h.app, "/model");
+    // The dead one answers first, with nothing.
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Refresh,
+        result: failed("llama-cpp", "connection refused"),
+        remaining: 2,
+    });
+    let picker = models_page(&h);
+    assert_eq!(picker.status, ModelPickerStatus::Loading);
+    assert_eq!(picker.failed, ["llama-cpp"], "the dead provider is named");
+    // The first live catalog lands: its rows show while the rest are out.
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Refresh,
+        result: loaded("google", models()),
+        remaining: 1,
+    });
+    let picker = models_page(&h);
+    assert_eq!(picker.status, ModelPickerStatus::Loading, "still out");
+    assert_eq!(picker.rows().len(), 2, "the landed rows are up");
+    assert!(picker.pickable(), "a landed row can be picked");
+    // The last provider settles the page.
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Refresh,
+        result: loaded("openrouter", vec![llama_model("z-ai/glm-5.3")]),
+        remaining: 0,
+    });
+    let picker = models_page(&h);
+    assert_eq!(picker.status, ModelPickerStatus::Ready);
+    assert_eq!(picker.rows().len(), 3);
+    assert_eq!(picker.failed, ["llama-cpp"], "still named, still missing");
+}
+
+/// A batch already out answers the page that comes up: it spins on that
+/// one instead of spending a second round trip on the same providers.
+#[test]
+fn a_page_that_comes_up_during_a_fetch_waits_on_it() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.catalog_inflight = true;
+    let effects = crate::commands::dispatch(&mut h.app, "/model");
+    assert_eq!(effects, vec![], "no second fetch");
+    assert_eq!(
+        models_page(&h).status,
+        ModelPickerStatus::Loading,
+        "but the page still spins"
+    );
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        result: loaded("google", models()),
+        remaining: 0,
+    });
+    assert!(!h.app.catalog_inflight, "the batch is done");
+    let picker = models_page(&h);
+    assert_eq!(picker.status, ModelPickerStatus::Ready);
+    assert_eq!(picker.rows().len(), 2);
+}
+
+/// A click on the sidebar reaches Models the same way Tab does.
+#[test]
+fn a_click_on_the_models_row_fetches_an_empty_catalog() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    crate::commands::dispatch(&mut h.app, "/settings");
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| crate::ui::render(&mut h.app, frame))
+        .unwrap();
+    let row_y = h
+        .app
+        .settings_hits
+        .iter()
+        .find_map(|(area, hit)| {
+            matches!(
+                hit,
+                crate::app::SettingsHit::Sidebar(SettingsSection::Models)
+            )
+            .then_some(area.y)
+        })
+        .expect("the models row is clickable");
+    let effects = h.app.on_click(4, row_y);
+    assert_eq!(effects, vec![Effect::FetchModels(FetchWhy::Refresh)]);
+    assert_eq!(models_page(&h).status, ModelPickerStatus::Loading);
+}
+
 #[test]
 fn a_click_on_the_sidebar_switches_sections_and_a_row_acts() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
@@ -5773,11 +6067,7 @@ fn settings_toggles_the_background_live_and_persists_it() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     assert_eq!(h.app.theme, crate::palette::DARK);
     crate::commands::dispatch(&mut h.app, "/settings");
-    // Three tabs: Profiles and Sandbox sit between Providers and
-    // Appearance.
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
+    tab_to(&mut h, SettingsSection::Appearance);
     // Row 2 is the background row; enter and `b` both flip it.
     h.app.on_key(key(KeyCode::Down));
     h.app.on_key(key(KeyCode::Down));
@@ -5810,11 +6100,7 @@ fn settings_toggles_the_background_live_and_persists_it() {
 fn settings_cycles_the_cursor_style_and_persists_it() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     crate::commands::dispatch(&mut h.app, "/settings");
-    // Three tabs: Profiles and Sandbox sit between Providers and
-    // Appearance.
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
+    tab_to(&mut h, SettingsSection::Appearance);
     // Row 4 is the cursor row; enter and `s` both cycle it, and the
     // effect carries the shape to the terminal this frame.
     for _ in 0..4 {
@@ -5850,11 +6136,7 @@ fn settings_cycles_the_cursor_style_and_persists_it() {
 fn settings_toggles_the_scrollbar_and_persists_it() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     crate::commands::dispatch(&mut h.app, "/settings");
-    // Three tabs: Profiles and Sandbox sit between Providers and
-    // Appearance.
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
+    tab_to(&mut h, SettingsSection::Appearance);
     // Row 5 is the scrollbar row; enter and `r` both flip it.
     for _ in 0..5 {
         h.app.on_key(key(KeyCode::Down));
@@ -5875,11 +6157,7 @@ fn settings_cycles_the_palette_live_and_persists_it() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     assert_eq!(h.app.theme, crate::palette::DARK);
     crate::commands::dispatch(&mut h.app, "/settings");
-    // Three tabs: Profiles and Sandbox sit between Providers and
-    // Appearance.
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
-    h.app.on_key(key(KeyCode::Tab));
+    tab_to(&mut h, SettingsSection::Appearance);
     h.app.on_key(key(KeyCode::Char('c')));
     assert_eq!(
         h.app.options.colors,
@@ -6835,6 +7113,7 @@ fn a_model_switch_keeps_the_retry_offer() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
     h.app.on_event(UiEvent::ModelsLoaded {
         why: FetchWhy::Bootstrap,
+        remaining: 0,
         result: loaded("google", models()),
     });
     let agent = Box::new(h.app.agent.take().unwrap());
