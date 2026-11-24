@@ -27,7 +27,10 @@ Three crates, one seam and one crate per backend, the same shape as
   owns the writer, `next_id`, `encode_workspace`, and the `0700`/`0600`
   modes.
 - **`rhema-session-store-sqlite`** is one row per session, WAL,
-  `synchronous=FULL`, body as the same JSON the file format holds.
+  `synchronous=FULL`, body as the same JSON the file format holds. The
+  table's schema is stamped as `PRAGMA user_version` at open: an
+  unstamped file takes the stamp, and a file stamped above this
+  build's version refuses to open untouched.
 
 **In v1:**
 

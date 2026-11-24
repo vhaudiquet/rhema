@@ -11,6 +11,11 @@
 //! record. `opening_prompt` is computed once, at save, so `list` reads
 //! four columns and never parses a body.
 //!
+//! The schema carries a version in `PRAGMA user_version`, stamped at
+//! open. A file stamped with a newer version was written by a newer
+//! build; it refuses to open rather than write to a shape this build does
+//! not fully understand.
+//!
 //! The crate exists so a file-only frontend never compiles or links
 //! SQLite; a consumer that wants this backend depends on this crate and
 //! no other frontend changes.
@@ -38,6 +43,13 @@ CREATE TABLE IF NOT EXISTS sessions (
     body           TEXT NOT NULL
 ) STRICT;
 ";
+
+/// The schema version this build reads and writes, stamped as the
+/// database's `PRAGMA user_version`. Version 1 is the first stamped
+/// shape: before the stamp shipped, every file this crate opened held
+/// this same table, so an unstamped (`0`) file is a legacy one, not a
+/// different schema.
+const VERSION: u32 = 1;
 
 /// One upsert: whole-record replacement in one statement.
 const UPSERT: &str = "
@@ -80,6 +92,11 @@ impl SqliteStore {
     }
 
     fn init(conn: Connection, path: Option<PathBuf>) -> Result<Self, StoreError> {
+        // The stamp check is a plain read, and it must happen before
+        // the pragmas below: WAL itself writes the header, and a file
+        // from a newer build must open the door to nothing at all, not
+        // even a journal-mode flip.
+        migrate(&conn)?;
         // WAL keeps a concurrent reader from blocking the save path;
         // FULL fsyncs every commit before the statement returns.
         conn.pragma_update(None, "journal_mode", "WAL")
@@ -218,6 +235,34 @@ impl SessionStore for SqliteStore {
         }
         Ok(out)
     }
+}
+
+/// Reads the database's schema version stamp and reconciles it with
+/// [`VERSION`], the one seam a future schema bump has.
+///
+/// `0` is a brand-new database or a legacy file from before versions
+/// were stamped: both hold today's exact shape, so both take the stamp.
+/// Racing openers each read `0` and each write the same `1`; the write
+/// is idempotent, so no interleaving can matter. A version above
+/// [`VERSION`] was written by a newer binary: refuse before writing a
+/// thing, so this build cannot corrupt a file it does not fully
+/// understand. A bump grows a match arm here, from the older version
+/// upward; none has shipped, so `0` is the whole ladder.
+fn migrate(conn: &Connection) -> Result<(), StoreError> {
+    let found: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(backend)?;
+    if found < 0 || found > i64::from(VERSION) {
+        return Err(StoreError::Backend(format!(
+            "sessions database schema version {found} is not supported by \
+             this build (its version is {VERSION}); refusing to open"
+        )));
+    }
+    if found == 0 {
+        conn.pragma_update(None, "user_version", VERSION)
+            .map_err(backend)?;
+    }
+    Ok(())
 }
 
 /// Backend failures carry SQLite's message.
@@ -388,5 +433,81 @@ mod tests {
         let store = SqliteStore::open(&path).unwrap();
         assert_eq!(store.load(&id).unwrap(), Some(session_with("still here")));
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    fn user_version(store: &SqliteStore) -> i64 {
+        store
+            .lock()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_takes_the_stamp_and_round_trips() {
+        let (_dir, store) = temp_store();
+        let id = SessionId::new("fresh").unwrap();
+        store.save(&id, &session_with("stamp on open")).unwrap();
+        assert_eq!(
+            store.load(&id).unwrap(),
+            Some(session_with("stamp on open"))
+        );
+        assert_eq!(user_version(&store), 1);
+    }
+
+    #[test]
+    fn a_legacy_database_opens_reads_its_row_and_takes_the_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        // The file on disk before this release stamped versions: the
+        // table, one row, and `user_version` left at its 0 default.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            let body = serde_json::to_string(&session_with("stored before stamps")).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, saved_at, bytes, opening_prompt, body) \
+                 VALUES ('legacy', 7, 3, NULL, ?1)",
+                params![body],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(&path).unwrap();
+        let id = SessionId::new("legacy").unwrap();
+        assert_eq!(
+            store.load(&id).unwrap(),
+            Some(session_with("stored before stamps"))
+        );
+        assert_eq!(user_version(&store), 1);
+    }
+
+    #[test]
+    fn a_file_a_newer_build_stamped_refuses_to_open_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, saved_at, bytes, opening_prompt, body) \
+                 VALUES ('kept', 7, 3, NULL, '{}')",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+        let before = std::fs::read(&path).unwrap();
+        let message = match SqliteStore::open(&path) {
+            Err(StoreError::Backend(message)) => message,
+            Err(other) => panic!("expected the backend refusal, got {other:?}"),
+            Ok(_) => panic!("a file from a newer build opened"),
+        };
+        // The refusal names the mismatch and the supported version
+        // both, so the operator knows which side is old.
+        for expected in ["schema version 2", "its version is 1", "not supported"] {
+            assert!(message.contains(expected), "message: {message:?}");
+        }
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!sibling(&path, "-wal").exists());
+        assert!(!sibling(&path, "-shm").exists());
     }
 }

@@ -29,7 +29,12 @@ save, and `list` selects the metadata columns only, which is what makes
 a large picker cheap.
 
 `save` is one `INSERT ... ON CONFLICT(id) DO UPDATE`; `Ok` means the
-commit returned. SQLite writes the database and its `-wal`/`-shm`
+commit returned.
+
+The table carries a schema version as `PRAGMA user_version`, stamped
+at open: a pre-versioning file takes the stamp (1), and a file stamped
+with a newer version refuses to open rather than write a schema this
+build does not fully understand, leaving it untouched. SQLite writes the database and its `-wal`/`-shm`
 siblings with the process umask, so the crate tightens them to `0600`
 best effort after open and after the first save.
 
