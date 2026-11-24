@@ -34,6 +34,14 @@
 #![forbid(unsafe_code)]
 
 pub mod adapter;
+// The whole seconds a budget names, ceiled, never floored, so a
+// sub-second budget cannot render as `0s` — or reach a far-side
+// `timeout 0` prefix, which is no timeout at all — on the wire or
+// in a report. Ungated at the root because the protocol needs it
+// everywhere: a wasm client serializes the same ceiling a unix
+// host's spawned prefixes and reports use, one helper for the
+// whole fleet (the bash tool's own executor defines it).
+pub use rhema_bash::exec::budget_secs;
 #[cfg(feature = "spawn")]
 pub mod exec_util;
 #[cfg(feature = "spawn")]

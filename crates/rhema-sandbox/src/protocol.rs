@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{RunRequest, ToolProgress};
+use crate::{RunRequest, ToolProgress, budget_secs};
 
 /// Runs one command: [`ExecCall`] in, [`ExecReply`] out.
 pub const EXEC: &str = "/exec";
@@ -136,7 +136,7 @@ impl From<&RunRequest> for ExecCall {
         Self {
             command: request.command.clone(),
             cwd: Some(request.cwd.to_string_lossy().into_owned()),
-            timeout_secs: crate::exec_util::budget_secs(request.timeout),
+            timeout_secs: budget_secs(request.timeout),
         }
     }
 }

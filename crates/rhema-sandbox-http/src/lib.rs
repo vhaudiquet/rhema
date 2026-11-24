@@ -203,9 +203,9 @@ impl Sandbox for HttpSandbox {
         let call = ExecCall::from(&request);
         let reply: ExecReply = self.post(EXEC, &call).await?;
         if reply.timed_out {
-            return Err(SandboxError::Timeout(
-                rhema_sandbox::exec_util::budget_secs(request.timeout),
-            ));
+            return Err(SandboxError::Timeout(rhema_sandbox::budget_secs(
+                request.timeout,
+            )));
         }
         protocol::stream_reply(&reply, progress);
         Ok(RunOutcome {
