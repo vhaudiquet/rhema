@@ -183,7 +183,11 @@ during a turn, and a tool gets `ToolContext`, never `&mut Session`. A
 subagent and a shell job both start that way. Their record is written
 after the fact, from the tool result or from the first poll, and
 `Kind::adopt` rebuilds whatever the crash window swallowed before
-anything is read (§5, §10.1, §10.2). Their invariant is the weaker one:
+anything is read (§5, §10.1, §10.2). For a shell job the rebuild
+follows the subscription's seed rule: rows still `running` adopt
+(work that outlived the ledger), a row already `stopped` is history
+the feed would not announce, so it mints no fresh `Running` record
+to recover into that announcement Their invariant is the weaker one:
 the work's own state is durable first (the child session, the daemon's
 job), and the record catches up.
 

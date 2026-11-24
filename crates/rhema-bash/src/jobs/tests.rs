@@ -811,34 +811,70 @@ fn a_missing_backend_settles_the_record_failed() {
 
 #[cfg(unix)]
 #[test]
-fn adopt_rebuilds_the_records_that_are_missing() {
+fn adopt_rebuilds_the_running_records_that_are_missing() {
     use rhema_submissions::{Kinds, Status, reconcile, snapshot};
 
     let fake = Fake::new(&listing(&format!(
-        "{},{}",
+        "{},{},{}",
         tagged_entry("abc", "stopped", "s1", Some(0)),
-        tagged_entry("def", "running", "s2", None)
+        tagged_entry("def", "running", "s1", None),
+        tagged_entry("xyz", "running", "s2", None)
     )));
     let kind = kind::JobKind::at("s1", fake.backend.clone(), fake.dir.path().to_path_buf());
     let mut session = rhema_core::Session::default();
     let kinds = Kinds::new().with(std::sync::Arc::new(kind));
 
-    // Only this session's row is adopted; the other session's job is
-    // not ours to index.
+    // The running row nobody tracks is adopted; the stopped row and
+    // the other session's job are not. A stopped row is history the
+    // live feed's rule mints nothing for, and a fresh `Running`
+    // record of it would only settle into a phantom finish announced
+    // at resume, the bug this pins down.
     let changed = reconcile(&mut session, &kinds, 10).unwrap();
-    assert_eq!(changed.len(), 1);
+    // The adopted record's own settle stays `Interrupted` (re-attached,
+    // unannounced), never `Done`: only the fresh running row adopted.
+    assert!(
+        !changed.iter().any(|change| matches!(
+            change,
+            rhema_submissions::Change::Recovered {
+                to: Status::Done,
+                ..
+            }
+        )),
+        "history minted a phantom finish: {changed:?}"
+    );
     let after = snapshot(&session).unwrap();
     assert_eq!(after.len(), 1);
     let record = after.newest().unwrap();
-    assert_eq!(record.status, Status::Done);
+    assert_eq!(record.status, Status::Interrupted);
     let payload: kind::Payload = serde_json::from_value(record.payload.clone()).unwrap();
     assert_eq!(payload.tag, "s1");
-    assert_eq!(payload.id, "abc");
+    assert_eq!(payload.id, "def");
     assert_eq!(payload.command, "npm run dev");
 
     // A second pass adopts nothing.
     assert!(reconcile(&mut session, &kinds, 11).unwrap().is_empty());
     assert_eq!(snapshot(&session).unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stopped_row_nobody_tracked_is_not_adopted() {
+    use rhema_submissions::{Kinds, reconcile, snapshot};
+
+    let fake = Fake::new(&listing(&format!(
+        "{},{}",
+        tagged_entry("abc", "stopped", "s1", Some(1)),
+        tagged_entry("def", "stopped", "s1", Some(0))
+    )));
+    let kind = kind::JobKind::at("s1", fake.backend.clone(), fake.dir.path().to_path_buf());
+    let mut session = rhema_core::Session::default();
+    let kinds = Kinds::new().with(std::sync::Arc::new(kind));
+
+    // Both rows ended while nobody watched: history, not work to
+    // index, and nothing recovers into an announced finish.
+    let changed = reconcile(&mut session, &kinds, 10).unwrap();
+    assert!(changed.is_empty(), "history minted a change: {changed:?}");
+    assert!(snapshot(&session).unwrap().is_empty());
 }
 
 #[test]

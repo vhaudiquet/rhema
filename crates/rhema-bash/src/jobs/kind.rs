@@ -100,6 +100,15 @@ impl Kind for JobKind {
         }
     }
 
+    /// Adopts only the tag's `running` rows nobody tracks: a running
+    /// row is live work that mints and re-attaches the poller, while
+    /// a `stopped` row nobody tracked is history and mints nothing,
+    /// the live subscription's own rule. A fresh `Running` record of
+    /// an already-stopped row would settle the moment it recovered,
+    /// a phantom finish announced at resume for a job that ended
+    /// while nobody watched. A saved `Running` record is different:
+    /// it keeps its own settle at load, the down-time announce, which
+    /// is the intended one.
     fn adopt(&self, ctx: &AdoptCtx<'_>) -> Vec<serde_json::Value> {
         let Ok(rows) = self.listing(&self.tag) else {
             return Vec::new();
@@ -117,6 +126,7 @@ impl Kind for JobKind {
         rows.into_iter()
             .filter(|row| !known.contains(&row.id))
             .filter(|row| row.session.as_deref() == Some(self.tag.as_str()))
+            .filter(|row| row.status.starts_with("running"))
             .map(|row| {
                 serde_json::to_value(Payload {
                     tag: self.tag.clone(),
