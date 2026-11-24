@@ -122,8 +122,6 @@ impl AcpApproval {
                 Ok(response) => response,
                 // The connection or the turn is gone: decline so the turn
                 // unwinds instead of parking forever.
-                // The connection or the turn is gone: decline so the turn
-                // unwinds instead of parking forever.
                 Err(_) => return false,
             };
         match response.outcome {
