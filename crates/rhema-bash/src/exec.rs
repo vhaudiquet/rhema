@@ -728,10 +728,21 @@ mod tests {
         assert!(!marker.exists(), "the editor was launched");
     }
 
-    /// True while the process `pid` answers `kill -0`, the probe the
-    /// survival tests use; a reaped pid answers nothing.
+    /// True while the process `pid` is running, the probe the
+    /// survival tests use. `kill -0` alone answers for a corpse:
+    /// a SIGKILLed grandchild nobody reaped is a zombie, and one just
+    /// killed answers for the last schedule window before the kernel
+    /// lands the death. `/proc` names both corpses (`Z`, `X`); a host
+    /// without `/proc` falls back to the blunt `kill -0`, honest only
+    /// for the reaped.
     #[cfg(unix)]
     fn alive(pid: u32) -> bool {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            let state = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.trim().chars().next());
+            return !matches!(state, Some('Z') | Some('X') | Some('x'));
+        }
         std::process::Command::new("kill")
             .arg("-0")
             .arg(pid.to_string())
@@ -777,6 +788,14 @@ mod tests {
         .trim()
         .parse()
         .expect("a pid");
+        // The group kill was awaited before the call answered, so the
+        // SIGKILL stands delivered; the observable death is what lags,
+        // one schedule window. A live `sleep 300` answers for the
+        // whole bound, so a missed kill still fails here.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while alive(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         assert!(
             !alive(pid),
             "the background process outlived the budget's kill"
