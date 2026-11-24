@@ -854,7 +854,12 @@ so an end of a tracked job re-reads the record once, a moment
 later, before minting. The record is keyed by the session tag: a stop aimed at
 another session's job silences nothing on that side, and a stop
 from anywhere else (the user's own terminal, another session, the
-kernel) records nothing and announces as before.
+kernel) records nothing and announces as before. The suppression
+keeps the notice, not the settle: a suppressed stop still retires
+its ledger record at the frontend's next settle pass, because a
+record left `Running` is the one the next resume recovers as a job
+that ended behind the process's back, announcing the model's own
+long-finished order as if it were news.
 
 **Detection, exactly.** The subscription tracks the jobs whose
 events it has seen, first-seen order; a stream line that fails to

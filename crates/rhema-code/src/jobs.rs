@@ -32,7 +32,11 @@
 //! record the ids they stopped; the subscription reads the session's
 //! record before minting, so an ordered stop leaves the strip silently
 //! while a stop from anywhere else (the user's terminal, another
-//! session, the kernel) still announces. The record and the event
+//! session, the kernel) still announces. The suppression keeps the
+//! notice, not the settle: the end still retires the ledger record,
+//! because a record left Running is the one a later resume recovers
+//! into the very announcement the model never deserved. The record
+//! and the event
 //! race now that latency is the daemon's emit: `gob stop` returns
 //! before the shim's append lands, so an end re-reads the record once,
 //! a moment later, before minting.
@@ -131,8 +135,11 @@ struct Feed {
     /// would be a leak in a headless run that never drains; a missed
     /// start is adopted at the next load.
     started: Vec<JobStarted>,
-    /// Ids whose finish the subscription minted: the frontend settles
-    /// the ledger's record for each, without asking the daemon again.
+    /// Ids whose end the subscription retired: the frontend settles the
+    /// ledger's record for each, without asking the daemon again. A
+    /// minted finish lands here with its notice; a self-stop lands here
+    /// alone, so its record cannot resurface as a recovered finish at
+    /// the next load.
     finished_ids: Vec<String>,
 }
 
@@ -157,6 +164,13 @@ impl Feed {
                 command: row.command.clone(),
             });
         }
+    }
+
+    /// Notes an id the frontend should settle without a notice: a
+    /// self-stop retires its ledger record here, the one half of
+    /// [`Self::mint`] its suppression keeps.
+    fn note_settle(&mut self, id: &str) {
+        self.finished_ids.push(id.to_owned());
     }
 
     /// Mints one finish: the row as it was first seen, plus the exit
@@ -236,7 +250,9 @@ impl Watch {
 /// as running has finished: a stopped row gives the exit code, a
 /// vanished row finishes with none. An id in `stopped`, the
 /// session's self-stop record, leaves the running set without
-/// minting: the end was the model's own order. The running set keeps
+/// minting but still settles its record, so a later load cannot
+/// recover the stop into the finish the model never deserved: the
+/// end was the model's own order. The running set keeps
 /// the first-seen order, so finishes mint oldest first.
 ///
 /// A running row this subscription never tracked is adopted, with the
@@ -248,7 +264,7 @@ fn reconcile(watch: &mut Watch, feed: &mut Feed, rows: &[JobRow], stopped: &Hash
     for (id, last) in watch.running.drain(..) {
         match rows.iter().find(|row| row.id == id) {
             Some(row) if row.status.starts_with("running") => alive.push((id, row.clone())),
-            _ if stopped.contains(&id) => {}
+            _ if stopped.contains(&id) => feed.note_settle(&id),
             Some(row) => feed.mint(last, row.exit_code),
             None => feed.mint(last, None),
         }
@@ -292,6 +308,11 @@ fn on_event(watch: &mut Watch, feed: &mut Feed, stopped: &HashSet<String>, event
             watch.untrack(id);
             watch.finished.insert(event.row.id.clone());
             if stopped.contains(id) {
+                // The suppression keeps the notice, not the settle:
+                // the record must not outlive the turn as Running,
+                // or the next load recovers it into the very finish
+                // the order never deserved.
+                feed.note_settle(id);
                 return;
             }
             // A removal without a stop reports no code, and neither
@@ -400,8 +421,10 @@ impl JobsHandle {
         }
     }
 
-    /// Takes the backend ids whose finish the subscription minted: the
-    /// frontend settles the ledger's record for each.
+    /// Takes the backend ids the subscription retired: the frontend
+    /// settles the ledger's record for each. A minted finish and a
+    /// suppressed self-stop both land here; only the former carries a
+    /// notice.
     pub fn take_finished_ids(&self) -> Vec<String> {
         self.feed
             .lock()
@@ -775,7 +798,13 @@ kill "$2" 2>/dev/null"#,
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn();
-        if let Ok(mut slot) = child_slot.lock() {
+        // Poison only means a panic elsewhere; recovering keeps the
+        // child where the handle drop finds and kills it, instead of
+        // dropping it here and orphaning the event-stream process.
+        {
+            let mut slot = child_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *slot = Some(child);
         }
         // The seed, and every reconnect's reconcile: adopt what runs,
@@ -1056,6 +1085,10 @@ mod tests {
             "the job still left the running set"
         );
         assert!(feed.pending.is_empty(), "no notice for an ordered stop");
+        // The suppression keeps the notice, not the settle: the id
+        // still retires, or a resume recovers the record Running and
+        // announces the model's own stop as news.
+        assert_eq!(feed.finished_ids, ["abc".to_owned()]);
         // The `job rm` tail stays silent with it.
         on_event(
             &mut watch,
@@ -1118,6 +1151,8 @@ mod tests {
         );
         assert!(watch.running.is_empty());
         assert!(feed.pending.is_empty(), "the model ordered this end");
+        // The gap's stop settles like the live event's does.
+        assert_eq!(feed.finished_ids, ["abc".to_owned()]);
     }
 
     #[test]
