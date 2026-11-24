@@ -15,6 +15,10 @@
 //! after `save` returns cannot lose the transition. WAL mode keeps a
 //! concurrent reader (ops queries, a second process) from blocking the
 //! dispatcher's writes.
+//!
+//! The table carries a version in `PRAGMA user_version`, stamped at open:
+//! a file stamped by a newer build refuses to open rather than write to a
+//! schema it does not fully understand.
 
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};
@@ -39,6 +43,13 @@ CREATE TABLE IF NOT EXISTS key_record (
     record       TEXT NOT NULL
 );
 ";
+
+/// The schema version this build reads and writes, stamped as the
+/// database's `PRAGMA user_version`. Version 1 is the first stamped
+/// shape: before the stamp shipped, every file this store opened held
+/// this same table, so an unstamped (`0`) file is a legacy one, not a
+/// different schema.
+const VERSION: u32 = 1;
 
 /// A [`Store`] over a SQLite database (a file, or an in-memory database
 /// for tests and ephemeral use).
@@ -66,6 +77,11 @@ impl SqliteStore {
     }
 
     fn init(conn: rusqlite::Connection, durable: bool) -> Result<Self, StoreError> {
+        // The stamp check is a plain read, and it must happen before the
+        // pragmas below: WAL itself writes the header, and a file from a
+        // newer build must open the door to nothing at all, not even a
+        // journal-mode flip.
+        migrate(&conn)?;
         if durable {
             // WAL keeps a concurrent reader from blocking writes; FULL makes
             // every commit fsync before the statement returns, which is the
@@ -84,6 +100,40 @@ impl SqliteStore {
             conn: Mutex::new(conn),
         })
     }
+}
+
+/// Reads the database's schema version stamp and reconciles it with
+/// [`VERSION`], the one seam a future schema bump has.
+///
+/// `0` is a brand-new database or a legacy file from before versions
+/// were stamped: both hold today's exact shape, so both take the stamp.
+/// The check stays a plain read followed by one write for the `0` case,
+/// and that is all it can be here: the dispatcher's restart path
+/// ([`crate::Dispatcher::recover_all`]) already assumes this process is
+/// the only live one over the store, and the stamp asks for no more
+/// than that same single-node world. The one interleaving independent
+/// openers can produce is both reading `0` and both writing the same
+/// `1`; SQLite serializes the statements, the value is the same, and no
+/// dispatch or revision state rides on it. A version above [`VERSION`]
+/// was written by a newer binary: refuse before writing a thing, so
+/// this build cannot corrupt a file it does not fully understand. A
+/// bump grows a match arm here, from the older version upward; none
+/// has shipped, so `0` is the whole ladder.
+fn migrate(conn: &rusqlite::Connection) -> Result<(), StoreError> {
+    let found: i64 = conn
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(backend)?;
+    if found < 0 || found > i64::from(VERSION) {
+        return Err(StoreError::Backend(format!(
+            "dispatch database schema version {found} is not supported by \
+             this build (its version is {VERSION}); refusing to open"
+        )));
+    }
+    if found == 0 {
+        conn.pragma_update(None, "user_version", VERSION)
+            .map_err(backend)?;
+    }
+    Ok(())
 }
 
 /// Backend failures carry the engine's message; everything above the seam
@@ -217,6 +267,8 @@ impl Store for SqliteStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     #[test]
     fn a_record_round_trips_through_sqlite() {
@@ -264,6 +316,124 @@ mod tests {
                 actual: 1,
             } => {}
             other => panic!("expected a revision mismatch, got: {other:?}"),
+        }
+    }
+
+    /// The unit tests need file-backed databases here, and this crate
+    /// keeps no tempdir dev-dependency: the pattern of
+    /// `tests/sqlite_store.rs` serves, a unique name under the shared
+    /// temp dir, removed with its WAL siblings when the guard drops.
+    struct TempDb(PathBuf);
+
+    impl TempDb {
+        fn new(label: &str) -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            Self(std::env::temp_dir().join(format!(
+                "rhema-rsd-sqlite-{label}-{n}-{pid}.db",
+                pid = std::process::id()
+            )))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            for suffix in ["", "-wal", "-shm"] {
+                drop(std::fs::remove_file(sibling(&self.0, suffix)));
+            }
+        }
+    }
+
+    /// `<path><suffix>`, SQLite's naming for the WAL and shared-memory
+    /// siblings.
+    fn sibling(path: &Path, suffix: &str) -> PathBuf {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        PathBuf::from(name)
+    }
+
+    fn user_version(store: &SqliteStore) -> i64 {
+        let conn = store.conn.lock().unwrap_or_else(PoisonError::into_inner);
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_fresh_database_takes_the_stamp_and_round_trips() {
+        let db = TempDb::new("stamped");
+        let store = SqliteStore::open(db.path()).unwrap();
+        let key = ResourceKey::from("github:acme/widgets#142");
+        let mut record = KeyRecord::fresh(key.clone(), 7);
+        record.revision = 3;
+        store.save(record.clone(), None).unwrap();
+        assert_eq!(store.load(&key).unwrap(), Some(record));
+        assert_eq!(store.keys().unwrap(), vec![key]);
+        assert_eq!(user_version(&store), 1);
+    }
+
+    #[test]
+    fn a_legacy_database_opens_reads_its_row_and_takes_the_stamp() {
+        let db = TempDb::new("legacy");
+        // The file on disk before this release stamped versions: the
+        // table, one row, and `user_version` left at its 0 default.
+        let key = ResourceKey::from("github:acme/widgets#142");
+        {
+            let conn = rusqlite::Connection::open(db.path()).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            let record = KeyRecord::fresh(key.clone(), 7);
+            conn.execute(
+                "INSERT INTO key_record (resource_key, revision, updated_at, record) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    key.as_str(),
+                    record.revision as i64,
+                    record.updated_at as i64,
+                    serde_json::to_string(&record).unwrap()
+                ],
+            )
+            .unwrap();
+        }
+        let store = SqliteStore::open(db.path()).unwrap();
+        assert_eq!(
+            store.load(&key).unwrap(),
+            Some(KeyRecord::fresh(key.clone(), 7))
+        );
+        assert_eq!(user_version(&store), 1);
+    }
+
+    #[test]
+    fn a_file_a_newer_build_stamped_refuses_to_open_untouched() {
+        let db = TempDb::new("newer");
+        {
+            let conn = rusqlite::Connection::open(db.path()).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+        }
+        let before = std::fs::read(db.path()).unwrap();
+        let message = match SqliteStore::open(db.path()) {
+            Err(StoreError::Backend(message)) => message,
+            Err(other) => panic!("expected the backend refusal, got {other:?}"),
+            Ok(_) => panic!("a file from a newer build opened"),
+        };
+        // The refusal names both sides of the gap, so the operator
+        // knows which binary is the old one.
+        for expected in ["schema version 2", "its version is 1", "not supported"] {
+            assert!(message.contains(expected), "message: {message:?}");
+        }
+        assert_eq!(std::fs::read(db.path()).unwrap(), before);
+        assert!(!sibling(db.path(), "-wal").exists());
+        assert!(!sibling(db.path(), "-shm").exists());
+        // Still stamped 2: the refusal wrote nothing, not the stamp.
+        {
+            let conn = rusqlite::Connection::open(db.path()).unwrap();
+            let version: i64 = conn
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 2);
         }
     }
 }

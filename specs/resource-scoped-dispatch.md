@@ -275,7 +275,10 @@ updated_at     INTEGER
 On startup, any row with `state = leased` and `lease_expires < now()` is
 treated as abandoned and reset to `idle` (or `redispatch` if its queue is
 non-empty) before any new events are ingested. This is what makes the
-primitive crash-safe rather than merely race-safe.
+primitive crash-safe rather than merely race-safe. The shipped SQLite
+store stamps its schema as `PRAGMA user_version` at open — the
+submissions ledger's discipline — so a file a newer build wrote refuses
+to open untouched instead of corrupting on an unread layout.
 
 ## 8. Adapter examples
 
