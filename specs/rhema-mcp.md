@@ -555,8 +555,12 @@ crates/rhema-mcp/
   src/
     lib.rs          # re-exports; #![forbid(unsafe_code)]; module map
     protocol.rs     # MCP types + the subset's JSON-RPC envelope
-    client.rs       # one connection: stdio child or HTTP; pending map,
-                    # per-request timeouts, line cap, 404-reinit
+    client.rs       # one connection: handshake, call paths, pending
+                    # map, timeouts, cancellation, envelope checks
+    client/stdio.rs # the stdio child: line cap, stderr ring, id
+                    # routing, kill switch
+    client/http.rs  # Streamable HTTP: session POSTs, 404-reinit,
+                    # SSE answers
     manager.rs      # config → connections, single-flight connect,
                     # catalog, dispatch, respawn
     bridge.rs       # axum over the Unix socket; /servers /tools
