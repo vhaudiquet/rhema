@@ -42,6 +42,9 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Days since the Unix epoch to (year, month, day), Hinnant's
+# civil-date algorithm, shared by every stamp and rendering
+datealgo = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

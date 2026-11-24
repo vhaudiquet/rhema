@@ -28,6 +28,10 @@ async-trait = "0.1"
 serde_yaml = "0.9"
 # Test runtime
 tokio = { version = "1", features = ["macros", "rt"] }
+# Hinnant's civil-date algorithms: the one home of days-since-epoch
+# to (year, month, day), shared by the identity stamps, the memory
+# stamps, the acp wire's RFC 3339, and the environment report
+datealgo = "0.2"
 # Property-based tests: generated inputs for the SSE decoder's chunk
 # boundaries and the transcript's view invariants. Pinned exactly:
 # Hegel is beta and changes its API between releases.

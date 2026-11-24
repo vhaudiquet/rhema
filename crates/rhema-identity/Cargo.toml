@@ -23,6 +23,9 @@ store-contract = []
 serde = { workspace = true }
 # Typed public errors
 thiserror = { workspace = true }
+# Days since the Unix epoch to (year, month, day), Hinnant's
+# civil-date algorithm, shared by every stamp and rendering
+datealgo = { workspace = true }
 # The durable backend (`SqliteIdentityStore`), always bundled: no system
 # sqlite is required, so the build stays self-contained.
 rusqlite = { version = "0.40", features = ["bundled"] }

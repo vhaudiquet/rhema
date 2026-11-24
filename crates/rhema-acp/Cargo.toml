@@ -37,6 +37,10 @@ serde_json = { workspace = true }
 # what makes parking deadlock-free)
 tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "sync"] }
 
+# Days since the Unix epoch to (year, month, day), Hinnant's
+# civil-date algorithm, shared by every stamp and rendering
+datealgo = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

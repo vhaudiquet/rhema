@@ -27,6 +27,9 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 # Typed public errors
 thiserror = { workspace = true }
+# Days since the Unix epoch to (year, month, day), Hinnant's
+# civil-date algorithm, shared by every stamp and rendering
+datealgo = { workspace = true }
 # ToolResolver is an async seam
 async-trait = { workspace = true }
 

@@ -638,19 +638,13 @@ fn stamp_compact(unix_millis: u64) -> String {
     )
 }
 
-/// Days since the Unix epoch to `(year, month, day)`, Howard Hinnant's
-/// `civil_from_days`, proleptic Gregorian.
+/// Days since the Unix epoch to `(year, month, day)`, proleptic
+/// Gregorian: `datealgo`'s one copy of Hinnant's `civil_from_days`,
+/// saturated to its ±1.5 million-year range, never a panic.
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let year = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let day = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
-    (year + i64::from(month <= 2), month, day)
+    let days = days.clamp(datealgo::RD_MIN as i64, datealgo::RD_MAX as i64) as i32;
+    let (year, month, day) = datealgo::rd_to_date(days);
+    (i64::from(year), u32::from(month), u32::from(day))
 }
 
 /// The counter half of store-assigned ids: process-global and monotonic,
