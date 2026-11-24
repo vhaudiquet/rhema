@@ -94,11 +94,11 @@ pub(crate) async fn run_headless(args: RunArgs) -> anyhow::Result<()> {
 /// The body of the one-shot: everything from the stored config to the
 /// finished turn.
 pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<()> {
-    let mut config = match Config::load() {
-        Ok(config) => config,
+    let (mut config, config_loaded) = match Config::load() {
+        Ok(config) => (config, true),
         Err(err) => {
             eprintln!("warning: ignoring unreadable rhema config: {err}");
-            Config::default()
+            (Config::default(), false)
         }
     };
     migrate_stored_keys(&mut config);
@@ -330,11 +330,20 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     }
     // The workspace remembers the profile that served it, the same
     // memory the next launch here reads back. Best effort: a failed
-    // write warns without failing the turn.
+    // write warns without failing the turn. A config that never
+    // loaded is never saved: this run's document is defaults, and
+    // the write would replace the unreadable file wholesale.
     if config.last_profile_in(&workspace).as_deref() != Some(profile.as_str()) {
-        config.note_profile_in(&workspace, &profile);
-        if let Err(err) = config.save() {
-            eprintln!("warning: the profile choice was not remembered: {err}");
+        if config_loaded {
+            config.note_profile_in(&workspace, &profile);
+            if let Err(err) = config.save() {
+                eprintln!("warning: the profile choice was not remembered: {err}");
+            }
+        } else {
+            eprintln!(
+                "warning: the profile choice was not remembered: {}",
+                crate::store::UNLOADED_SAVE_REFUSAL
+            );
         }
     }
     let mut session = match &args.resume {
@@ -397,11 +406,20 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             );
             // The workspace remembers the sandbox kind that just served it,
             // the twin of the profile memory above. Best effort, the same
-            // style: a failed write warns without failing the run.
+            // style: a failed write warns without failing the run. A
+            // config that never loaded is not saved here either, the
+            // profile guard above again.
             if config.last_sandbox_in(&workspace).as_deref() != Some(choice.stored_name()) {
-                config.note_sandbox_in(&workspace, choice.stored_name());
-                if let Err(err) = config.save() {
-                    eprintln!("warning: the sandbox choice was not remembered: {err}");
+                if config_loaded {
+                    config.note_sandbox_in(&workspace, choice.stored_name());
+                    if let Err(err) = config.save() {
+                        eprintln!("warning: the sandbox choice was not remembered: {err}");
+                    }
+                } else {
+                    eprintln!(
+                        "warning: the sandbox choice was not remembered: {}",
+                        crate::store::UNLOADED_SAVE_REFUSAL
+                    );
                 }
             }
             Ok(())

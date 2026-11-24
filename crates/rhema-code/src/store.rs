@@ -339,6 +339,41 @@ impl ConfigStore for DiskStore {
     }
 }
 
+/// The refusal every save of a run whose config never loaded carries,
+/// so the TUI's error strip and the one-shot's stderr name the real
+/// problem: not this write, the load that preceded it.
+pub(crate) const UNLOADED_SAVE_REFUSAL: &str =
+    "the config failed to load, so rhema refuses to save over it; fix or back up the file";
+
+/// The store of a run whose config failed to load: reads pass
+/// through, writes are refused with [`UNLOADED_SAVE_REFUSAL`]. The
+/// load's degradation to defaults was only a warning; a later save
+/// of those defaults over the unreadable file is the irreversible
+/// step, so the whole run stays off that file and its own error
+/// channel names why. The user fixes or backs up the file, and the
+/// next run loads it and saves again.
+pub(crate) struct UnloadedGuardStore {
+    /// Reads delegate here.
+    inner: std::sync::Arc<dyn ConfigStore>,
+}
+
+impl UnloadedGuardStore {
+    /// Wraps `inner`, keeping its reads alive.
+    pub(crate) fn new(inner: std::sync::Arc<dyn ConfigStore>) -> Self {
+        Self { inner }
+    }
+}
+
+impl ConfigStore for UnloadedGuardStore {
+    fn load(&self) -> Result<Config, ConfigError> {
+        self.inner.load()
+    }
+
+    fn save(&self, _config: &Config) -> Result<(), ConfigError> {
+        Err(ConfigError::Store(UNLOADED_SAVE_REFUSAL.to_owned()))
+    }
+}
+
 /// An in-memory store for tests.
 #[derive(Debug, Default)]
 pub struct MemoryStore {
@@ -524,5 +559,28 @@ mod tests {
         let err =
             Document::load_from(&path).expect_err("a typo'd section key must not read as unset");
         assert!(err.to_string().contains("profles"), "names the key: {err}");
+    }
+
+    /// The guard store of a failed load: reads pass through, saves
+    /// refuse with the reason, nothing of the unreadable file is
+    /// touched by a run that holds defaults.
+    #[test]
+    fn an_unloaded_guard_store_passes_reads_through_and_refuses_saves() {
+        let before = Config {
+            theme: Some("light".to_owned()),
+            ..Config::default()
+        };
+        let inner: std::sync::Arc<dyn ConfigStore> =
+            std::sync::Arc::new(MemoryStore::new(before.clone()));
+        let guarded = UnloadedGuardStore::new(inner);
+        assert_eq!(guarded.load().unwrap().theme.as_deref(), Some("light"));
+        let mut edit = before.clone();
+        edit.theme = Some("dark".to_owned());
+        let err = guarded
+            .save(&edit)
+            .expect_err("a failed load must not save");
+        assert!(err.to_string().contains(UNLOADED_SAVE_REFUSAL), "{err}");
+        // The read is untouched by the attempt: no default leaked in.
+        assert_eq!(guarded.load().unwrap().theme.as_deref(), Some("light"));
     }
 }

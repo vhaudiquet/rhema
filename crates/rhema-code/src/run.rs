@@ -248,24 +248,39 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     let config_existed = rhema_config::Home::discover()
         .map(|home| home.config_file().exists())
         .unwrap_or(true);
-    let mut config = store.load().unwrap_or_else(|err| {
-        eprintln!("warning: ignoring unreadable rhema config: {err}");
-        Config::default()
-    });
+    let (mut config, config_loaded) = match store.load() {
+        Ok(config) => (config, true),
+        Err(err) => {
+            eprintln!("warning: ignoring unreadable rhema config: {err}");
+            (Config::default(), false)
+        }
+    };
     let onboard = !config_existed
         || config.onboarded == Some(false)
         || matches!(args.command, Some(crate::args::Command::Onboard));
     if onboard && config.onboarded != Some(false) {
-        config.onboarded = Some(false);
-        // A bundled skill that ships off starts in the disabled set,
-        // the set is the only switch, so its default state must be
-        // recorded, or seeding would read it as on.
-        for skill in crate::bundled::BUNDLED_SKILLS {
-            if !skill.default_on {
-                config.skills_disabled.insert(skill.name.to_owned());
+        // The marker is written only on a config that loaded: this
+        // run's document is defaults when it did not, and the write
+        // would already be the destruction the guard exists for.
+        // The wizard still opens below; its own save refuses the
+        // same way.
+        if !config_loaded {
+            eprintln!(
+                "warning: the onboarding marker was not written: {}",
+                crate::store::UNLOADED_SAVE_REFUSAL
+            );
+        } else {
+            config.onboarded = Some(false);
+            // A bundled skill that ships off starts in the disabled set,
+            // the set is the only switch, so its default state must be
+            // recorded, or seeding would read it as on.
+            for skill in crate::bundled::BUNDLED_SKILLS {
+                if !skill.default_on {
+                    config.skills_disabled.insert(skill.name.to_owned());
+                }
             }
+            let _ = config.save();
         }
-        let _ = config.save();
     }
     migrate_stored_keys(&mut config);
     // The bundled skills seed into the global directory before anything
@@ -491,6 +506,16 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         thinking,
         base_system: agent_base,
         save: args.save,
+    };
+    // A config that failed to load poisons every save downstream, not
+    // just this startup's: the wizard's finish, a settings pick, a
+    // profile change all persist this run's document, and that
+    // document is defaults. The guard store refuses each with the
+    // reason, so the file survives until the user fixes it.
+    let store: Arc<dyn ConfigStore> = if config_loaded {
+        store
+    } else {
+        Arc::new(crate::store::UnloadedGuardStore::new(store))
     };
     let (mut app, mut effects) = {
         let app = App::new(AppSetup {
