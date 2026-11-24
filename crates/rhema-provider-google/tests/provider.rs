@@ -1,6 +1,8 @@
 //! Offline integration tests: the provider against an in-process wiremock
 //! server speaking SSE. Zero network.
 
+use std::time::Duration;
+
 use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, Usage,
@@ -216,6 +218,182 @@ async fn a_non_2xx_response_maps_to_an_api_error_with_the_body_message() {
         other => panic!("expected Api error, got: {other:?}"),
     }
     assert!(sink.0.is_empty());
+}
+
+#[tokio::test]
+async fn a_429_with_a_retry_info_delay_becomes_a_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                // Both a header and a body detail: the body's own
+                // clock names the specific quota's wait, so it wins.
+                .insert_header("retry-after", "9")
+                .set_body_string(
+                    json!({
+                        "error": {
+                            "code": 429,
+                            "message": "Resource has been exhausted (e.g. daily quota).",
+                            "status": "RESOURCE_EXHAUSTED",
+                            "details": [{
+                                "@type": "type.googleapis.com/google.rpc.RetryInfo",
+                                "retryDelay": "30s"
+                            }]
+                        }
+                    })
+                    .to_string(),
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(
+            request("gemini-2.5-flash", vec![Message::text(Role::User, "hi")]),
+            &mut sink,
+        )
+        .await
+        .expect_err("a rate limit is an error");
+
+    match &err {
+        ProviderError::RateLimited {
+            message,
+            retry_after,
+        } => {
+            assert_eq!(*retry_after, Duration::from_secs(30));
+            assert!(
+                message.contains("Resource has been exhausted"),
+                "got: {message}"
+            );
+        }
+        other => panic!("expected RateLimited, got: {other:?}"),
+    }
+    assert!(err.is_retryable(), "a minute window clears in a retry");
+    assert!(sink.0.is_empty());
+}
+
+#[tokio::test]
+async fn a_429_with_only_the_retry_after_header_becomes_a_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "12")
+                .set_body_string(
+                    json!({
+                        "error": {
+                            "code": 429,
+                            "message": "Resource has been exhausted (e.g. daily quota).",
+                            "status": "RESOURCE_EXHAUSTED"
+                        }
+                    })
+                    .to_string(),
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(
+            request("gemini-2.5-flash", vec![Message::text(Role::User, "hi")]),
+            &mut sink,
+        )
+        .await
+        .expect_err("a rate limit is an error");
+
+    assert!(
+        matches!(
+            &err,
+            ProviderError::RateLimited { retry_after, .. }
+                if *retry_after == Duration::from_secs(12)
+        ),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_bare_429_stays_a_plain_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(429).set_body_string(
+                json!({
+                    "error": {
+                        "code": 429,
+                        "message": "Resource has been exhausted (e.g. daily quota).",
+                        "status": "RESOURCE_EXHAUSTED"
+                    }
+                })
+                .to_string(),
+            ),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(
+            request("gemini-2.5-flash", vec![Message::text(Role::User, "hi")]),
+            &mut sink,
+        )
+        .await
+        .expect_err("the server rejects the turn");
+
+    // A 429 that names no reset is a quota, not a short window: the
+    // door stays shut, the fleet's deliberate named-only convention.
+    assert_eq!(
+        err,
+        ProviderError::Api {
+            message: "gemini api error (HTTP 429): Resource has been exhausted (e.g. daily quota)."
+                .into(),
+            status: Some(429),
+        }
+    );
+    assert!(!err.is_retryable());
+    assert!(sink.0.is_empty());
+}
+
+#[tokio::test]
+async fn a_models_list_429_with_a_retry_after_becomes_a_rate_limit() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("retry-after", "7")
+                .set_body_string(
+                    json!({
+                        "error": {
+                            "code": 429,
+                            "message": "Resource has been exhausted (e.g. daily quota).",
+                            "status": "RESOURCE_EXHAUSTED"
+                        }
+                    })
+                    .to_string(),
+                ),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let err = provider
+        .list_models()
+        .await
+        .expect_err("a rate limit is an error");
+
+    assert!(
+        matches!(
+            &err,
+            ProviderError::RateLimited { retry_after, .. }
+                if *retry_after == Duration::from_secs(7)
+        ),
+        "{err:?}"
+    );
 }
 
 #[tokio::test]

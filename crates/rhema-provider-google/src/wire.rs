@@ -309,6 +309,27 @@ pub struct WireErrorDetail {
     /// gRPC-style status (e.g. `INVALID_ARGUMENT`).
     #[serde(default)]
     pub status: Option<String>,
+    /// Typed detail records, when the body explains its failure; a
+    /// quota reset rides one of the `RetryInfo` kind.
+    #[serde(default)]
+    pub details: Vec<WireErrorTypedDetail>,
+}
+
+/// One typed record of an error body's `details` array. Google folds
+/// its rpc helpers there, each discriminated by `@type`; the one this
+/// crate reads is
+/// `type.googleapis.com/google.rpc.RetryInfo`, whose `retryDelay`
+/// names how long the caller should wait.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WireErrorTypedDetail {
+    /// The record's type discriminator (`@type`).
+    #[serde(rename = "@type", default)]
+    pub kind: Option<String>,
+    /// A `RetryInfo` record's `retryDelay`, a proto duration string
+    /// (`"30s"`, `"5.5s"`) when the record is one.
+    #[serde(default)]
+    pub retry_delay: Option<String>,
 }
 
 impl WireErrorBody {
@@ -319,6 +340,19 @@ impl WireErrorBody {
             .as_ref()
             .and_then(|e| e.message.clone())
             .unwrap_or_else(|| raw.to_owned())
+    }
+
+    /// The quota reset a `RetryInfo` detail names, its `30s`-style
+    /// `retryDelay`, the one 429 source the error body itself carries.
+    pub fn retry_delay(&self) -> Option<&str> {
+        self.error
+            .as_ref()?
+            .details
+            .iter()
+            .find(|detail| {
+                detail.kind.as_deref() == Some("type.googleapis.com/google.rpc.RetryInfo")
+            })
+            .and_then(|detail| detail.retry_delay.as_deref())
     }
 }
 
@@ -1774,6 +1808,33 @@ mod tests {
 
         let unshaped: WireErrorBody = serde_json::from_str("not even json").unwrap_or_default();
         assert_eq!(unshaped.message("not even json"), "not even json");
+    }
+
+    #[test]
+    fn a_retry_info_detail_names_its_reset() {
+        let body: WireErrorBody = serde_json::from_str(
+            r#"{
+                "error": {
+                    "code": 429,
+                    "message": "Resource has been exhausted",
+                    "status": "RESOURCE_EXHAUSTED",
+                    "details": [
+                        {"@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                         "reason": "FREE_QUOTA"},
+                        {"@type": "type.googleapis.com/google.rpc.RetryInfo",
+                         "retryDelay": "5.5s"}
+                    ]
+                }
+            }"#,
+        )
+        .expect("error body parses");
+        assert_eq!(body.retry_delay(), Some("5.5s"));
+
+        let bare: WireErrorBody = serde_json::from_str(
+            r#"{"error":{"code":429,"message":"no","status":"RESOURCE_EXHAUSTED"}}"#,
+        )
+        .expect("error body parses");
+        assert_eq!(bare.retry_delay(), None);
     }
 
     #[test]

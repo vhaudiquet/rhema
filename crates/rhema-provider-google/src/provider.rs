@@ -8,8 +8,11 @@
 //! [`ProviderError`]: timeouts to [`ProviderError::Timeout`], other network
 //! failures to [`ProviderError::Network`], non-2xx responses (with the
 //! body's `error.message` when present) to [`ProviderError::Api`] with
-//! the HTTP status, and unparseable stream chunks to [`ProviderError::Api`]
-//! without one, as a protocol violation. A stream can also die mid-turn:
+//! the HTTP status, except a 429 that names its reset, which becomes
+//! [`ProviderError::RateLimited`] so the retry ladder can wait out a
+//! per-minute window instead of failing the turn, and unparseable
+//! stream chunks to [`ProviderError::Api`] without one, as a protocol
+//! violation. A stream can also die mid-turn:
 //! Gemini then sends a normal chunk-shaped `{"error": ...}` payload, which
 //! fails the same way, with the body's `error.message` when present.
 //!
@@ -91,6 +94,74 @@ fn network_error(err: reqwest::Error) -> ProviderError {
     }
 }
 
+/// The `retry-after` header's value, when the response carries one.
+/// Read before the body is taken, which consumes the response, so the
+/// value is copied out first.
+fn retry_after_header(response: &reqwest::Response) -> Option<String> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Maps a non-2xx response onto [`ProviderError`]: an api error with
+/// the body's message and status, except a 429 that names its reset
+/// becomes [`ProviderError::RateLimited`], so the retry ladder can wait
+/// out a per-minute window instead of failing the turn. Two sources
+/// name the reset, the `RetryInfo` detail the error body folds its
+/// quota facts into (`retryDelay`, a `30s`-style string) and the
+/// `retry-after` header in seconds; the body's own clock is the
+/// specific quota's wait, so it wins when both are present.
+fn response_error(
+    status: reqwest::StatusCode,
+    retry_after: Option<&str>,
+    body: &WireErrorBody,
+    raw: &str,
+) -> ProviderError {
+    let err = ProviderError::Api {
+        message: format!(
+            "gemini api error (HTTP {}): {}",
+            status.as_u16(),
+            body.message(raw)
+        ),
+        status: Some(status.as_u16()),
+    };
+    if status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return err;
+    }
+    let wait = body
+        .retry_delay()
+        .and_then(retry_delay)
+        .or_else(|| retry_after.and_then(header_seconds));
+    match wait {
+        Some(retry_after) => ProviderError::RateLimited {
+            message: err.to_string(),
+            retry_after,
+        },
+        None => err,
+    }
+}
+
+/// A `RetryInfo` `retryDelay` string (`"30s"`, `"5.5s"`, a proto
+/// duration spelling that never carries a minutes or hours unit) as the
+/// wait it names. A value no duration can hold, negative or absurd,
+/// reads as no wait: a rate limit that cannot be metered is not one to
+/// sleep on.
+fn retry_delay(raw: &str) -> Option<Duration> {
+    let secs = raw.trim().strip_suffix('s')?;
+    Duration::try_from_secs_f64(secs.trim().parse().ok()?).ok()
+}
+
+/// A `retry-after` header value in decimal seconds (an HTTP date is
+/// not read) as the wait it names; a value no duration can hold reads
+/// as no wait.
+fn header_seconds(raw: &str) -> Option<Duration> {
+    Duration::try_from_secs_f64(raw.trim().parse().ok()?).ok()
+}
+
 /// Parses one SSE payload as a response chunk and folds it into the
 /// assembler. An empty payload (keep-alive) is skipped.
 fn feed_chunk(
@@ -138,16 +209,15 @@ impl ModelListing for GoogleProvider {
                 .map_err(network_error)?;
             let status = response.status();
             if !status.is_success() {
+                let retry_after = retry_after_header(&response);
                 let text = response.text().await.unwrap_or_default();
                 let parsed: WireErrorBody = serde_json::from_str(&text).unwrap_or_default();
-                return Err(ProviderError::Api {
-                    message: format!(
-                        "gemini api error (HTTP {}): {}",
-                        status.as_u16(),
-                        parsed.message(&text)
-                    ),
-                    status: Some(status.as_u16()),
-                });
+                return Err(response_error(
+                    status,
+                    retry_after.as_deref(),
+                    &parsed,
+                    &text,
+                ));
             }
             let page: WireModelsPage = response.json().await.map_err(|err| ProviderError::Api {
                 message: format!("malformed models page: {err}"),
@@ -185,7 +255,8 @@ impl ModelProvider for GoogleProvider {
     /// Fails with [`ProviderError::InvalidRequest`] when the request
     /// cannot map onto the wire, [`ProviderError::Network`]/[`ProviderError::Timeout`]
     /// when the transport fails, [`ProviderError::Api`] with the HTTP
-    /// status on a non-2xx response, and [`ProviderError::Api`] without
+    /// status on a non-2xx response (a 429 that names its reset is
+    /// [`ProviderError::RateLimited`] instead), and [`ProviderError::Api`] without
     /// one on a malformed stream chunk or a mid-stream error chunk, and
     /// [`ProviderError::Network`] when the stream closes before its
     /// terminal chunk.
@@ -215,16 +286,15 @@ impl ModelProvider for GoogleProvider {
 
         let status = response.status();
         if !status.is_success() {
+            let retry_after = retry_after_header(&response);
             let text = response.text().await.unwrap_or_default();
             let parsed: WireErrorBody = serde_json::from_str(&text).unwrap_or_default();
-            return Err(ProviderError::Api {
-                message: format!(
-                    "gemini api error (HTTP {}): {}",
-                    status.as_u16(),
-                    parsed.message(&text)
-                ),
-                status: Some(status.as_u16()),
-            });
+            return Err(response_error(
+                status,
+                retry_after.as_deref(),
+                &parsed,
+                &text,
+            ));
         }
 
         let mut stream = response.bytes_stream();
