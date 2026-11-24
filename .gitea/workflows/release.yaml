@@ -1,7 +1,14 @@
 # The release channel: a v* tag ships the library closure to
 # crates.io, and the platform binaries under the installer channel.
 # The claw's images and helm chart now ship from the rhema-claw
-# repository; edge publishing on every main push lives in ci.yml. Release candidates (a v* tag with a
+# repository; edge publishing on every main push lives in ci.yml.
+# darwin-arm64 is the cross-forge leg, the one this runner cannot
+# build: the GitHub mirror's darwin-arm64.yaml builds it on the
+# mirror's hosted macOS runners and attaches it to the GitHub
+# release; the darwin-to-s3 job below imports it into the channel
+# before the manifest hashes, and mirror-to-github then attaches
+# every platform's tarball back onto that release, so both channels
+# serve the same bytes. Release candidates (a v* tag with a
 # prerelease suffix, v0.2.0-rc1) publish nothing, like pkh's release
 # jobs. The snap jobs are parked; the recipe in snap/snapcraft.yaml is
 # strict now, which needs no confinement approval from the store, so
@@ -25,9 +32,10 @@ jobs:
     # ships in the binary (the crates.io one waits for the patches).
     # The two cross legs link a vendored OpenSSL (`vendored-openssl`),
     # since the runner carries no target libssl; the native leg keeps
-    # the system one. darwin-arm64 is absent on purpose: it needs an
-    # Apple toolchain a Linux runner cannot carry. windows-amd64
-    # cross-builds with mingw; the mcp bridge stays unix-only there
+    # the system one. darwin-arm64 is built on the GitHub mirror
+    # (darwin-arm64.yaml on that side), attached to its release, and
+    # imported below by darwin-to-s3, so the manifest's platform set
+    # stays whole. windows-amd64 cross-builds with mingw; the mcp bridge stays unix-only there
     # (a session on windows wires no servers, see rhema-mcp's
     # bridge.rs) until a named-pipe transport lands.
     if: ${{ !contains(gitea.ref_name, '-') }}
@@ -125,12 +133,88 @@ jobs:
           aws s3 cp "dist/rhema-${{ matrix.name }}.tar.gz" \
             "s3://get/$version/" --endpoint-url "$endpoint"
 
+  darwin-to-s3:
+    # The darwin leg this runner cannot build, imported from where
+    # the mirror built it: poll the GitHub release for the tarball
+    # and its sha256 sidecar, verify the sidecar against the
+    # download, and land the tarball in the version dir as one more
+    # prefix the manifest will hash. The release's assets are public
+    # (the mirror repo is public), so no token reads them; what takes
+    # a token is publishing back, in mirror-to-github. A tag never
+    # pushed to the mirror fails here on the timeout, which is the
+    # runbook's "push both remotes" made mechanical.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install the AWS CLI
+        # Ubuntu 24.04 dropped the awscli package; the official v2
+        # bundle is the source of truth. Skipped where the runner
+        # image already ships aws.
+        run: |
+          if command -v aws >/dev/null; then
+            echo "aws already present"
+          else
+            sudo apt-get update
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -q /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install
+            rm -rf /tmp/aws /tmp/awscliv2.zip
+          fi
+          aws --version
+
+      - name: Import the darwin tarball
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RHEMA_DIST_ACCESS_KEY }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RHEMA_DIST_SECRET_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          tag="${GITHUB_REF_NAME}"
+          repo="vhaudiquet/rhema"
+          asset="rhema-darwin-arm64.tar.gz"
+          endpoint="https://s3.rhema.rs"
+          # The mirror's macos workflow mints the release when the
+          # tag reaches it; the asset stands when its build does. The
+          # timeout covers a cold rust toolchain on the runner.
+          url=""
+          sha=""
+          deadline=$((SECONDS + 2700))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            json="$(curl -fsSL \
+              "https://api.github.com/repos/$repo/releases/tags/$tag" 2>/dev/null || true)"
+            if [ -n "$json" ]; then
+              url="$(echo "$json" | jq -r \
+                ".assets[]? | select(.name == \"$asset\") | .browser_download_url" \
+                | head -1)"
+              sha="$(echo "$json" | jq -r \
+                ".assets[]? | select(.name == \"$asset.sha256\") | .browser_download_url" \
+                | head -1)"
+              if [ -n "$url" ] && [ "$url" != "null" ] \
+                && [ -n "$sha" ] && [ "$sha" != "null" ]; then
+                break
+              fi
+            fi
+            sleep 60
+          done
+          if [ -z "$url" ] || [ "$url" = "null" ]; then
+            echo "no $asset or its sidecar on the GitHub release $tag within 45 minutes" >&2
+            exit 1
+          fi
+          mkdir -p dist
+          curl -fsSL "$url" -o "dist/$asset"
+          curl -fsSL "$sha" -o "dist/$asset.sha256"
+          (cd dist && sha256sum -c "$asset.sha256" >/dev/null)
+          aws s3 cp "dist/$asset" "s3://get/$version/" --endpoint-url "$endpoint"
+
   release-manifest:
     # Hashes the tarballs as served (not as built), writes the version
     # dir's checksums.txt and the root manifest with the stable pointer
-    # repointed, only reached when every build leg above succeeded.
+    # repointed, only reached when every build leg above succeeded,
+    # the darwin import included: by then the version dir holds every
+    # platform the release ships.
     if: ${{ !contains(gitea.ref_name, '-') }}
-    needs: release-binaries
+    needs: [release-binaries, darwin-to-s3]
     runs-on: ubuntu-latest
     steps:
       - name: Install the AWS CLI
@@ -165,7 +249,7 @@ jobs:
           # file.
           names=$(aws s3 ls "s3://get/$version/" --endpoint-url "$endpoint" |
             awk '{print $4}' | sed -n 's/^rhema-\(.*\)\.tar\.gz$/\1/p' | sort)
-          for required in linux-amd64 linux-arm64 linux-riscv64; do
+          for required in linux-amd64 linux-arm64 linux-riscv64 darwin-arm64; do
             echo "$names" | grep -qx "$required" ||
               { echo "no rhema-$required.tar.gz under $version" >&2; exit 1; }
           done
@@ -190,6 +274,64 @@ jobs:
           } > dist/manifest.json
           aws s3 cp dist/checksums.txt "s3://get/$version/" --endpoint-url "$endpoint"
           aws s3 cp dist/manifest.json "s3://get/manifest.json" --endpoint-url "$endpoint"
+
+  mirror-to-github:
+    # The public mirror serves what the channel serves: every
+    # platform's tarball and the checksums, downloaded from
+    # get.rhema.rs as the installer downloads them (as-served bytes,
+    # what the manifest hashes) and attached to the GitHub release
+    # the darwin build already owns. One token use in one place: a
+    # fine-grained PAT with contents read+write on the mirror repo.
+    # A re-published tag replaces its assets rather than failing on
+    # the collision, the same overwrite the channel performs.
+    if: ${{ !contains(gitea.ref_name, '-') }}
+    needs: release-manifest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Attach the channel's binaries to the GitHub release
+        env:
+          GH_RELEASE_TOKEN: ${{ secrets.GH_RELEASE_TOKEN }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          repo="vhaudiquet/rhema"
+          tag="${GITHUB_REF_NAME}"
+          token="Authorization: Bearer ${GH_RELEASE_TOKEN}"
+          # darwin-to-s3 found this release before anything below
+          # ran, so the tag exists on the mirror and the release
+          # stands: not-found here is a real failure, not a race.
+          release="$(curl -fsSL -H "$token" \
+            "https://api.github.com/repos/$repo/releases/tags/$tag")"
+          id="$(echo "$release" | jq -r '.id')"
+          # The exact set the manifest hashed: checksums.txt's lines
+          # are the platform set, not this file's matrix.
+          mkdir -p dist
+          curl -fsSL "https://get.rhema.rs/$version/checksums.txt" -o dist/checksums.txt
+          names=$(awk '{print $2}' dist/checksums.txt \
+            | sed -n 's/^rhema-\(.*\)\.tar\.gz$/\1/p' | sort)
+          for name in $names; do
+            curl -fsSL "https://get.rhema.rs/$version/rhema-$name.tar.gz" \
+              -o "dist/rhema-$name.tar.gz"
+          done
+          upload() {
+            # $1 = file, $2 = asset name
+            ctype="application/gzip"
+            case "$2" in
+              checksums.txt) ctype="text/plain" ;;
+            esac
+            old="$(echo "$release" | jq -r --arg name "$2" \
+              '.assets[]? | select(.name == $name) | .id' | head -1)"
+            if [ -n "$old" ] && [ "$old" != "null" ]; then
+              curl -fsSL -X DELETE -H "$token" \
+                "https://api.github.com/repos/$repo/releases/assets/$old"
+            fi
+            curl -fsSL -X POST -H "$token" -H "Content-Type: $ctype" \
+              --data-binary "@$1" \
+              "https://uploads.github.com/repos/$repo/releases/$id/assets?name=$2" >/dev/null
+          }
+          for name in $names; do
+            upload "dist/rhema-$name.tar.gz" "rhema-$name.tar.gz"
+          done
+          upload dist/checksums.txt checksums.txt
 
   publish-crates-io:
     # The library closure to crates.io, in the order

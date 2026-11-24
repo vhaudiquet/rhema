@@ -1,0 +1,59 @@
+# darwin-arm64, the one leg the in-cluster runner cannot build: an
+# Apple toolchain never runs on a Linux host, so the public GitHub
+# mirror builds it instead — its hosted arm64 runners are free while
+# the mirror is public — and attaches the tarball to the GitHub
+# release, where the gitea release flow's darwin-to-s3 job finds it
+# and lands it in the get.rhema.rs channel. The trigger is the tag
+# reaching the mirror: releases push both remotes, and a tag that
+# never arrives fails the release on darwin-to-s3's timeout instead
+# of shipping without a platform. Rc tags build nothing, same as the
+# gitea side: a tag with a prerelease suffix releases nothing.
+name: darwin-arm64
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  darwin-binaries:
+    if: ${{ !contains(github.ref_name, '-') }}
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # The host is arm64 macOS: the plain build needs no cross
+      # toolchain, no OpenSSL (native-tls links the system Security
+      # framework), and no features beyond the defaults — the same
+      # shape the native linux-amd64 leg builds.
+      - name: Build
+        run: |
+          cargo build --release -p rhema-code
+          mkdir -p dist
+          cp target/release/rhema dist/rhema
+          tar -czf dist/rhema-darwin-arm64.tar.gz -C dist rhema
+          # The sidecar names the bare tarball, so the channel's
+          # verifier checks it from inside dist. BSD shasum's
+          # "hash  filename" line is the shape GNU sha256sum -c
+          # parses, and the gitea verifier runs GNU.
+          (cd dist && shasum -a 256 rhema-darwin-arm64.tar.gz \
+            > rhema-darwin-arm64.tar.gz.sha256)
+
+      - name: Attach to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          # A re-run of the same tag meets its own release: creation
+          # failure is tolerated, --clobber replaces the assets.
+          gh release create "$tag" --title "$tag" \
+            --notes "Binaries for $tag. The installer channel is get.rhema.rs; these assets are its mirror." \
+            || echo "the release already stands"
+          gh release upload "$tag" \
+            dist/rhema-darwin-arm64.tar.gz \
+            dist/rhema-darwin-arm64.tar.gz.sha256 \
+            --clobber
