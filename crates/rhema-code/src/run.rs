@@ -23,9 +23,7 @@ use crossterm::event::{
     KeyEventKind,
 };
 #[cfg(unix)]
-use crossterm::event::{
-    KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
-};
+use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
@@ -668,19 +666,14 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     outcome
 }
 
-/// Restores the terminal: raw mode off, alternate screen left. Errors are
-/// ignored so a restore attempt never panics (it runs in the panic hook).
-fn restore_terminal() {
-    let _ = crossterm::terminal::disable_raw_mode();
-    // The onboarding logo goes before the screens swap: a terminal that
-    // keeps alternate-screen images must not show one over the shell.
-    crate::term_image::clear();
-    // Each step writes on its own so one failure cannot skip the rest.
-    // The pops are the canonical bare `CSI < u` (crossterm's command
-    // emits the numbered `CSI <1u`, which a terminal may ignore), and
-    // the trailing push of zero flags masks any entry the pops could not
-    // remove, the effective encoding lands on legacy either way. All
-    // of it runs on the alternate screen, where the push happened.
+/// The kitty keyboard-protocol teardown every restore shares: the bare
+/// `CSI < u` pops (crossterm's command emits the numbered `CSI <1u`,
+/// which a terminal may ignore), and the trailing push of zero flags
+/// masks any entry the pops could not remove, the effective encoding
+/// lands on legacy either way. Each step writes on its own so one
+/// failure cannot skip the rest. Callers run it on the alternate
+/// screen, where the push happened.
+fn pop_kitty_flags() {
     use std::io::Write;
     let _ = write!(stdout(), "\x1b[<u");
     let _ = stdout().flush();
@@ -688,16 +681,38 @@ fn restore_terminal() {
     let _ = stdout().flush();
     let _ = write!(stdout(), "\x1b[>0u");
     let _ = stdout().flush();
+}
+
+/// Drops the paste and mouse captures: two modes no sub-process (an
+/// editor, a leaked previous run) can use.
+fn drop_capture_modes() {
+    use std::io::Write as _;
+    let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
+    let _ = stdout().flush();
+}
+
+/// Leaves the alternate screen, capture modes first: the same escape
+/// order every full teardown spells.
+fn leave_screen() {
+    use std::io::Write as _;
+    drop_capture_modes();
+    let _ = crossterm::execute!(stdout(), LeaveAlternateScreen);
+    let _ = stdout().flush();
+}
+
+/// Restores the terminal: raw mode off, alternate screen left. Errors are
+/// ignored so a restore attempt never panics (it runs in the panic hook).
+fn restore_terminal() {
+    let _ = crossterm::terminal::disable_raw_mode();
+    // The onboarding logo goes before the screens swap: a terminal that
+    // keeps alternate-screen images must not show one over the shell.
+    crate::term_image::clear();
+    pop_kitty_flags();
     // Only a session that wrote DECSCUSR puts the cursor back: a
     // default session never did, so the shell's own shape (a line under
     // shell integration) stays exactly as it was.
     crate::cursor::CursorStyle::restore();
-    let _ = crossterm::execute!(
-        stdout(),
-        DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    );
+    leave_screen();
     let _ = stdout().flush();
     // The program-status record goes with the session: an exited
     // interactive rhema leaves no badge behind (terminals that already
@@ -707,6 +722,7 @@ fn restore_terminal() {
     // the terminals that keep one (the push in run_tui paired this), a
     // terminal without one ignores the pop and leaves the title for the
     // shell to overwrite.
+    use std::io::Write as _;
     let _ = write!(stdout(), "\x1b[23;0t");
     let _ = stdout().flush();
 }
@@ -754,18 +770,12 @@ fn install_signal_restore() {
 /// modes it needs right after, this only stops a leak from
 /// compounding into a second broken run.
 fn heal_terminal() {
+    use std::io::Write as _;
     // The same spellings restore_terminal tears down with: the bare
-    // pops (crossterm's numbered pop a terminal may ignore), the
-    // zero-flag push masking any pop the terminal skipped, then the
-    // two capture modes.
-    use std::io::Write;
-    let _ = write!(stdout(), "\x1b[<u");
-    let _ = stdout().flush();
-    let _ = write!(stdout(), "\x1b[<u");
-    let _ = stdout().flush();
-    let _ = write!(stdout(), "\x1b[>0u");
-    let _ = stdout().flush();
-    let _ = crossterm::execute!(stdout(), DisableBracketedPaste, DisableMouseCapture);
+    // pops and the zero-flag mask, then the two capture modes. No
+    // alternate-screen leave: this runs before the screens swap.
+    pop_kitty_flags();
+    drop_capture_modes();
     let _ = stdout().flush();
 }
 
@@ -1158,19 +1168,15 @@ fn edit_in_editor(
     path: &std::path::Path,
     cursor: crate::cursor::CursorStyle,
 ) -> anyhow::Result<()> {
+    // The teardown is restore_terminal's own order and spellings —
+    // raw mode off, the bare kitty pops while still on the alternate
+    // screen they were pushed on, the captures dropped, the screen
+    // left — minus the exit-only steps (logo clear, cursor restore,
+    // status record, title) that belong to a run's end.
     use std::io::Write as _;
-    // The kitty flags pop before the screen they were pushed on is
-    // left, and each step runs on its own so one failure cannot skip
-    // the rest (the same order restore_terminal tears down in).
-    #[cfg(unix)]
-    let _ = crossterm::execute!(stdout(), PopKeyboardEnhancementFlags);
-    let _ = crossterm::execute!(
-        stdout(),
-        DisableBracketedPaste,
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    );
     let _ = disable_raw_mode();
+    pop_kitty_flags();
+    leave_screen();
     let _ = stdout().flush();
     let result = run_editor(path, None);
     let _ = enable_raw_mode();
