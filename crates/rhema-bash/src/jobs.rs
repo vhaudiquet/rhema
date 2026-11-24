@@ -373,6 +373,26 @@ fn unwrap_command(command: &[String]) -> String {
     }
 }
 
+/// One argv word re-embedded into the shell line the backend runs:
+/// bare when nothing in it loses meaning in `bash -c`'s parse,
+/// single-quoted otherwise, the shim's `shquote` spelling. The
+/// function forwards the line as argv words (`"$@"`), so a word with
+/// a space or any shell metacharacter would split or expand into
+/// something else when the line is reparsed: `job run echo "a  b"`
+/// must stay `echo 'a  b'`, not split into `echo a` and `b`.
+fn requote(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(c, '_' | '-' | '.' | '/' | ':' | '=' | '@' | '%' | ',' | '+')
+        });
+    if plain {
+        arg.to_owned()
+    } else {
+        format!("'{}'", arg.replace('\'', "'\\''"))
+    }
+}
+
 /// The session id a description is tagged with, if any: `[<id>] <cmd>`.
 fn owner_of(description: Option<&str>) -> Option<String> {
     let rest = description?.strip_prefix('[')?;
@@ -520,9 +540,12 @@ fn run_command(args: &[OsString], backend: &Path, cwd: &Path, session: Option<&s
         eprintln!("{NAME}: not wired in this shell (no {VAR_SESSION})");
         return EXIT_NOT_WIRED;
     };
+    // The line comes apart in the shell (the function forwards the
+    // model's words as argv) and goes back together here for `bash -c`
+    // to reparse: each word re-quoted, so quoting survives the trip.
     let command = args
         .iter()
-        .map(|arg| arg.to_string_lossy())
+        .map(|arg| requote(&arg.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ");
     let command = command.trim();

@@ -214,6 +214,15 @@ fn entry(id: &str, status: &str, description: &str, exit_code: Option<i32>) -> S
 }
 
 #[cfg(unix)]
+fn entry_with_command(id: &str, status: &str, description: &str, command: &str) -> String {
+    let escaped = command.replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "{{\"id\":\"{id}\",\"status\":\"{status}\",\"command\":[\"bash\",\"-c\",\"{escaped}\"],\
+         \"description\":\"{description}\",\"exit_code\":null,\"workdir\":null}}"
+    )
+}
+
+#[cfg(unix)]
 fn entry_in(
     id: &str,
     status: &str,
@@ -238,7 +247,9 @@ fn a_second_session_cannot_take_over_a_running_line() {
     let argv = vec![
         OsString::from("job"),
         OsString::from("run"),
-        OsString::from("npm run dev"),
+        OsString::from("npm"),
+        OsString::from("run"),
+        OsString::from("dev"),
     ];
     let code = call(&fake, &argv, Some("s2"));
     assert_eq!(code, 0);
@@ -258,7 +269,9 @@ fn the_same_session_asking_again_is_told_the_id() {
     let argv = vec![
         OsString::from("job"),
         OsString::from("run"),
-        OsString::from("npm run dev"),
+        OsString::from("npm"),
+        OsString::from("run"),
+        OsString::from("dev"),
     ];
     let code = call(&fake, &argv, Some("s1"));
     assert_eq!(code, 0);
@@ -272,7 +285,9 @@ fn a_free_line_starts_through_the_shell_wrapper() {
     let argv = vec![
         OsString::from("job"),
         OsString::from("run"),
-        OsString::from("npm run dev"),
+        OsString::from("npm"),
+        OsString::from("run"),
+        OsString::from("dev"),
     ];
     let code = call(&fake, &argv, Some("s7"));
     assert_eq!(code, 0);
@@ -280,6 +295,68 @@ fn a_free_line_starts_through_the_shell_wrapper() {
     assert!(
         calls.contains("add --description [s7] npm run dev -- bash -c npm run dev"),
         "the job did not start wrapped and tagged: {calls}"
+    );
+}
+
+#[test]
+fn a_shell_word_that_needs_no_quotes_stays_bare() {
+    // The plain word list reads back exactly as the model wrote it,
+    // which is what the dedupe and the `ls` column compare against.
+    assert_eq!(
+        ["npm", "run", "dev"]
+            .iter()
+            .map(|w| requote(w))
+            .collect::<Vec<_>>()
+            .join(" "),
+        "npm run dev"
+    );
+}
+
+#[test]
+fn a_word_with_spaces_is_quoted_back_together() {
+    // `job run echo "a  b"` hands the shim two words, and the line
+    // the backend runs must keep the double space as one argument.
+    assert_eq!(
+        ["echo", "a  b"]
+            .iter()
+            .map(|w| requote(w))
+            .collect::<Vec<_>>()
+            .join(" "),
+        "echo 'a  b'"
+    );
+    // Metacharacters ride quoted too: unquoted, `bash -c` would
+    // glob, expand, or split them on the reparse.
+    assert_eq!(requote("*"), "'*'");
+    assert_eq!(requote("$HOME"), "'$HOME'");
+    assert_eq!(requote("it's"), "'it'\\''s'");
+    assert_eq!(requote(""), "''");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_quoted_argument_round_trips_through_the_backend_line() {
+    // The listing shows the job the shim would have started, its
+    // command carrying the quoted form: the same words ask again and
+    // find their own row, so quoting survives the trip both ways.
+    let quoted = listing(&entry_with_command(
+        "abc",
+        "running",
+        "[s1] echo 'a  b'",
+        "echo 'a  b'",
+    ));
+    let fake = Fake::new(&quoted);
+    let argv = vec![
+        OsString::from("job"),
+        OsString::from("run"),
+        OsString::from("echo"),
+        OsString::from("a  b"),
+    ];
+    let code = call(&fake, &argv, Some("s1"));
+    assert_eq!(code, 0);
+    let calls = fake.calls();
+    assert!(
+        !calls.contains("add"),
+        "the quoted line must dedupe against its own row: {calls}"
     );
 }
 
@@ -295,7 +372,9 @@ fn a_stopped_job_does_not_block_a_new_one() {
     let argv = vec![
         OsString::from("job"),
         OsString::from("run"),
-        OsString::from("npm run dev"),
+        OsString::from("npm"),
+        OsString::from("run"),
+        OsString::from("dev"),
     ];
     assert_eq!(call(&fake, &argv, Some("s1")), 0);
     assert!(fake.calls().contains("add"), "{}", fake.calls());
@@ -448,7 +527,9 @@ fn a_missing_session_is_not_a_wired_shell() {
     let argv = vec![
         OsString::from("job"),
         OsString::from("run"),
-        OsString::from("npm run dev"),
+        OsString::from("npm"),
+        OsString::from("run"),
+        OsString::from("dev"),
     ];
     assert_eq!(call(&fake, &argv, None), EXIT_NOT_WIRED);
     assert!(fake.calls().is_empty(), "{}", fake.calls());
@@ -554,7 +635,9 @@ fn the_same_line_in_another_directory_is_a_different_job() {
     let argv = vec![
         OsString::from("job"),
         OsString::from("run"),
-        OsString::from("npm run dev"),
+        OsString::from("npm"),
+        OsString::from("run"),
+        OsString::from("dev"),
     ];
     assert_eq!(call(&fake, &argv, Some("s2")), 0);
     let calls = fake.calls();
