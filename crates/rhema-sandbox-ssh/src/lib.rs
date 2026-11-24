@@ -511,6 +511,16 @@ mod tests {
             session::split_port("[2001:db8::1]:22"),
             ("2001:db8::1", Some(22))
         );
+        // A bare unbracketed IPv6 literal is all host: more than one
+        // colon and no brackets means no port to split, or its
+        // numeric tail would parse as one.
+        assert_eq!(session::split_port("fe80::1"), ("fe80::1", None));
+        assert_eq!(session::split_port("2001:db8::1"), ("2001:db8::1", None));
+        // A bracketed form with no port: the whole bracketed literal.
+        assert_eq!(
+            session::split_port("[2001:db8::1]"),
+            ("[2001:db8::1]", None)
+        );
     }
 
     #[test]

@@ -129,12 +129,19 @@ impl Target {
 
 /// Splits a trailing `:port` off a destination, bracketed IPv6
 /// included. A colon that does not introduce a port stays part of
-/// the name, the way a scoped IPv6 literal does.
+/// the name, the way a scoped IPv6 literal does; and more than one
+/// colon with no brackets is a bare IPv6 literal (`fe80::1`), the
+/// whole string the host and no port to split, or its tail would
+/// parse (`fe80:` + `1`) and point the connection somewhere else
+/// entirely.
 pub(crate) fn split_port(rest: &str) -> (&str, Option<u16>) {
     if let Some((bracketed, port)) = rest.strip_prefix('[').and_then(|r| r.split_once("]:")) {
         if let Ok(port) = port.parse::<u16>() {
             return (bracketed, Some(port));
         }
+        return (rest, None);
+    }
+    if rest.matches(':').count() > 1 {
         return (rest, None);
     }
     match rest.rsplit_once(':') {
