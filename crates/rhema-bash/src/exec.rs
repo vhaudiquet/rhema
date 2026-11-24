@@ -257,9 +257,8 @@ impl ShellExecutor for LocalShell {
 
         // kill_on_drop so the timeout dropping the child handle kills the
         // process; without it an expired command would keep running.
-        let mut child = captured_command(&request.command, &request.cwd, &self.env)
-            .spawn()
-            .map_err(spawn_error)?;
+        let (mut command, group) = captured_command(&request.command, &request.cwd, &self.env);
+        let mut child = command.spawn().map_err(spawn_error)?;
         // One reader per stream, complete lines into one channel: each
         // line streams live through `progress` and lands in its
         // stream's tail for the result.
@@ -278,9 +277,8 @@ impl ShellExecutor for LocalShell {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(deadline) => {
-                    let _ = child.start_kill();
-                    let _ = child.wait().await;
-                    return Err(ShellError::Timeout(timeout.as_secs()));
+                    kill_run(&mut child, group).await;
+                    return Err(ShellError::Timeout(budget_secs(timeout)));
                 }
                 line = rx.recv() => match line {
                     Some((is_stderr, line)) => {
@@ -311,23 +309,27 @@ impl ShellExecutor for LocalShell {
                 // not a timer kill, the budget belongs to the deadline.
                 _ = tokio::time::sleep(CANCEL_TICK) => {
                     if cancelled.load(Ordering::Relaxed) {
-                        let _ = child.start_kill();
-                        let _ = child.wait().await;
+                        kill_run(&mut child, group).await;
                         return Err(ShellError::Cancelled);
                     }
                 }
             }
             if cancelled.load(Ordering::Relaxed) {
-                let _ = child.start_kill();
-                let _ = child.wait().await;
+                kill_run(&mut child, group).await;
                 return Err(ShellError::Cancelled);
             }
         }
-        let status = match tokio::time::timeout(timeout, child.wait()).await {
+        // Both streams closed: the budget's deadline, not a fresh one,
+        // wraps the exit wait, so a process that closed its pipes but
+        // never exits gets no second budget.
+        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
             Ok(Ok(status)) => status,
             // A process that closed its streams but never exits dies with
             // the handle; the caller reads a timeout like any other.
-            _ => return Err(ShellError::Timeout(timeout.as_secs())),
+            _ => {
+                kill_run(&mut child, group).await;
+                return Err(ShellError::Timeout(budget_secs(timeout)));
+            }
         };
         Ok(RunOutcome {
             stdout,
@@ -344,22 +346,26 @@ impl ShellExecutor for LocalShell {
 /// frontend's screen and keyboard. Without `setsid` the stdio contract
 /// still holds: stdin is `/dev/null`, so a reader gets EOF rather than
 /// the user's keys.
+///
+/// The answer pairs the command with [`RunGroup`]: the `setsid` run's
+/// direct child is a session and group leader of its own, so killing
+/// the whole family means signaling the negative pid.
 #[cfg(feature = "local-shell")]
 fn captured_command(
     command: &str,
     cwd: &Path,
     env: &[(String, String)],
-) -> tokio::process::Command {
+) -> (tokio::process::Command, RunGroup) {
     use std::process::Stdio;
 
     let bash = bash_executable();
-    let mut process = match setsid_executable() {
+    let (mut process, group) = match setsid_executable() {
         Some(setsid) => {
             let mut process = tokio::process::Command::new(setsid);
             process.arg(&bash);
-            process
+            (process, RunGroup::LedByChild)
         }
-        None => tokio::process::Command::new(&bash),
+        None => (tokio::process::Command::new(&bash), RunGroup::Inherited),
     };
     process
         .arg("-c")
@@ -376,7 +382,65 @@ fn captured_command(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    process
+    (process, group)
+}
+
+/// Whether a captured run's child leads the process group its
+/// background processes run in, the answer [`captured_command`] hands
+/// its caller so every kill path knows whom a negative pid reaches.
+#[cfg(feature = "local-shell")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunGroup {
+    /// The `setsid` run: the child is a session and process-group
+    /// leader of its own, so signaling `-<child pid>` kills the whole
+    /// family, the point the budget's promise ("every process it
+    /// started") rides on.
+    LedByChild,
+    /// No `setsid` on the host, or not unix: the child shares this
+    /// process's group, and killing that group would kill this
+    /// executor too, so the child alone can be killed.
+    Inherited,
+}
+
+/// Kills a run's child, and with it everything the child started
+/// where the run leads its own process group (see [`RunGroup`]): a
+/// background process the script left behind would otherwise outlive
+/// its parent's kill, `start_kill` reaches the direct child only.
+#[cfg(feature = "local-shell")]
+async fn kill_run(child: &mut tokio::process::Child, group: RunGroup) {
+    use std::process::Stdio;
+    let _ = child.start_kill();
+    if group == RunGroup::LedByChild
+        && let Some(pid) = child.id()
+    {
+        // The standalone `kill` utility takes the negative pid, which
+        // is the group leader's pid here: the child is the group,
+        // per `setsid`. Best effort: a group that already died, or a
+        // host without `kill`, leaves only the direct child, handled
+        // above.
+        let _ = tokio::process::Command::new("kill")
+            .arg("-KILL")
+            .arg(format!("-{pid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    let _ = child.wait().await;
+}
+
+/// The whole seconds a budget names when it kills the run: ceiled,
+/// never floored, so a sub-second budget cannot render as `0s` — or,
+/// worse, reach a far-side `timeout 0` prefix, which is no timeout at
+/// all. Every seconds boundary the exec fleet has, the direct
+/// executor's own report, the sandbox `timeout` prefixes, and the
+/// HTTP wire's `timeout_secs`, rounds through here, so they can never
+/// disagree. The kill landed inside the first second its model reads
+/// about.
+pub fn budget_secs(timeout: std::time::Duration) -> u64 {
+    timeout
+        .as_secs()
+        .saturating_add(u64::from(timeout.subsec_nanos() > 0))
 }
 
 /// Reads `stream` line by line into `tx`, tagged with its stream, until
@@ -662,6 +726,98 @@ mod tests {
             String::from_utf8_lossy(&executed.stderr)
         );
         assert!(!marker.exists(), "the editor was launched");
+    }
+
+    /// True while the process `pid` answers `kill -0`, the probe the
+    /// survival tests use; a reaped pid answers nothing.
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .arg("-0")
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    // The budget's promise ("kills the command, and every process it
+    // started") is only kept by a group kill: the `setsid` child is a
+    // group leader, and `start_kill` alone leaves the background
+    // processes behind, forever.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_budget_kills_the_background_grandchildren_too() {
+        if setsid_executable().is_none() {
+            return;
+        }
+        let shell = LocalShell::default();
+        let marker = tempfile::tempdir().expect("tempdir");
+        let realized = marker.path().join("grandchild.pid");
+        let script = format!("sleep 300 & echo $! > {}; sleep 300", realized.display());
+        let cancelled = AtomicBool::new(false);
+        let mut sink = OutputOnly(|_| {});
+        let error = shell
+            .run(
+                RunRequest {
+                    command: script,
+                    cwd: Path::new("/tmp").to_path_buf(),
+                    timeout: Duration::from_millis(500),
+                },
+                &cancelled,
+                &mut sink,
+            )
+            .await
+            .expect_err("the budget kills the run");
+        // The sub-second budget reports the second it killed in.
+        assert_eq!(error, ShellError::Timeout(1));
+        let pid: u32 = String::from_utf8_lossy(
+            &std::fs::read(&realized).expect("the grandchild's pid was written"),
+        )
+        .trim()
+        .parse()
+        .expect("a pid");
+        assert!(
+            !alive(pid),
+            "the background process outlived the budget's kill"
+        );
+        drop(marker);
+    }
+
+    // A process that closes its pipes but keeps running gets one
+    // budget, not a fresh one for the exit wait.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_process_that_closes_its_pipes_gets_no_second_budget() {
+        let shell = LocalShell::default();
+        let cancelled = AtomicBool::new(false);
+        let mut sink = OutputOnly(|_| {});
+        let started = std::time::Instant::now();
+        let error = shell
+            .run(
+                RunRequest {
+                    command: "exec >/dev/null 2>&1; sleep 300".to_owned(),
+                    cwd: Path::new("/tmp").to_path_buf(),
+                    timeout: Duration::from_millis(500),
+                },
+                &cancelled,
+                &mut sink,
+            )
+            .await
+            .expect_err("the budget kills the run");
+        assert_eq!(error, ShellError::Timeout(1));
+        assert!(
+            started.elapsed() < Duration::from_millis(950),
+            "the exit wait spent a second budget: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_sub_second_budget_reports_the_second_it_killed_in() {
+        assert_eq!(budget_secs(Duration::from_millis(500)), 1);
+        assert_eq!(budget_secs(Duration::from_secs(2)), 2);
+        assert_eq!(budget_secs(Duration::from_nanos(1)), 1);
     }
 
     #[tokio::test]
