@@ -28,8 +28,11 @@ pub fn opening_prompt(session: &Session) -> Option<String> {
 /// The budget is a byte prefix (`max` bytes, ellipsis included); the cut
 /// backs up to a character boundary, so multibyte text keeps its
 /// characters whole and may end shorter than `max`. ASCII text cuts at
-/// exactly `max` characters. This is the width the TUI's picker and
-/// argument rows have always used.
+/// exactly `max` characters. One exception: a budget that lands inside
+/// the first character shows that character whole instead of shrinking
+/// the row to the lone ellipsis, so a cut row always names something of
+/// its prompt. This is the width the TUI's picker and argument rows
+/// have always used.
 pub fn truncate_chars(text: &str, max: usize) -> String {
     if max == 0 {
         return String::new();
@@ -40,6 +43,9 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     let mut end = max - 1;
     while !text.is_char_boundary(end) {
         end -= 1;
+    }
+    if end == 0 {
+        end = text.chars().next().map_or(0, char::len_utf8);
     }
     format!("{}\u{2026}", &text[..end])
 }
@@ -110,5 +116,11 @@ mod tests {
         // backs up to the last whole character before the byte budget.
         assert_eq!(truncate_chars("ééééé", 3), "é\u{2026}");
         assert_eq!(truncate_chars("héllo wörld", 4), "hé\u{2026}");
+        // A budget landing inside the first character shows it whole
+        // rather than degenerating to the lone ellipsis: the row
+        // always names something of its prompt.
+        assert_eq!(truncate_chars("🎉 a prompt", 2), "🎉\u{2026}");
+        assert_eq!(truncate_chars("f", 1), "f");
+        assert_eq!(truncate_chars("first prompt", 1), "f\u{2026}");
     }
 }
