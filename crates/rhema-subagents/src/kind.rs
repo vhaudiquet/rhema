@@ -69,9 +69,37 @@ pub struct Descriptor {
 ///
 /// The picker uses this to offer conversations and not work: a child is
 /// a real session file, and resuming it as a conversation would be a
-/// second parent.
+/// second parent. The mark alone is not the verdict: a client-supplied
+/// conversation id may spell itself ".sub-", so the mark must follow a
+/// valid id and carry [`child_id`]'s minted tail, the identikit this
+/// process can check without asking a store — the same strictness
+/// [`is_child_of`] gets from its known parent.
 pub fn is_child(id: &SessionId) -> bool {
-    id.as_str().contains(CHILD_MARK)
+    let raw = id.as_str();
+    let Some(mark) = raw.rfind(CHILD_MARK) else {
+        return false;
+    };
+    // The last mark is the one minted last, so a child of a child still
+    // reads as a child: everything before it is a valid id, its parent.
+    SessionId::new(&raw[..mark]).is_ok() && is_minted_tail(&raw[mark + CHILD_MARK.len()..])
+}
+
+/// The tail [`child_id`] appends after the mark: the clock's stamp
+/// `{:016}`, its sequence `{:04}`, and the collision retry's `-{n:02}`
+/// when the mint needed one. The two shapes sit in one file; a mint
+/// format change changes this test with it.
+fn is_minted_tail(tail: &str) -> bool {
+    let stamp_of = |digits: &str, width: usize| {
+        digits.len() == width && digits.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    let mut parts = tail.split('-');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(stamp), Some(seq), retry, None)
+            if stamp_of(stamp, 16)
+                && stamp_of(seq, 4)
+                && retry.is_none_or(|retry| stamp_of(retry, 2))
+    )
 }
 
 /// Whether `id` is a child of `parent`: the prefix rule [`Kind::adopt`]
@@ -310,4 +338,41 @@ pub fn kind() -> KindName {
 /// The definition a child's descriptor names, from `defs`.
 pub fn definition<'a>(defs: &'a [SubagentDef], name: &str) -> Option<&'a SubagentDef> {
     defs.iter().find(|def| def.name == name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhema_session_store::SessionId;
+
+    fn id(raw: &str) -> SessionId {
+        SessionId::new(raw).unwrap()
+    }
+
+    /// The mint's own shape names a child, the retry suffix included,
+    /// and a child of a child still does: the last mark is the one
+    /// minted last.
+    #[test]
+    fn a_minted_id_is_a_child() {
+        let parent = id("0000000000000001-00");
+        let child = id("0000000000000001-00.sub-0000000000000000-0000");
+        assert!(is_child(&child));
+        assert!(is_child_of(&parent, &child));
+        assert!(is_child(&id(
+            "0000000000000001-00.sub-0000000000000000-0000-01"
+        )));
+        assert!(is_child(&id(
+            "0000000000000001-00.sub-0000000000000000-0000.sub-0000000000000001-0002"
+        )));
+    }
+
+    /// A client conversation id that merely contains ".sub-" is not a
+    /// child: the picker must not hide it behind work it never was.
+    #[test]
+    fn a_lookalike_id_is_not_a_child() {
+        assert!(!is_child(&id("report.sub-agent")));
+        assert!(!is_child(&id("report.sub-0000000000000000-000")));
+        assert!(!is_child(&id("sub-0000000000000000-0000")));
+        assert!(!is_child(&id("0000000000000001-00.subagent")));
+    }
 }

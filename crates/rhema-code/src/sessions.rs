@@ -377,7 +377,7 @@ mod picker_tests {
         let workspace = Path::new("/home/u/proj");
         let store = FileStore::scoped(&base, workspace);
         let parent = SessionId::new("0000000000000001-00").unwrap();
-        let child = SessionId::new("0000000000000001-00.sub-0000000000000002").unwrap();
+        let child = SessionId::new("0000000000000001-00.sub-0000000000000000-0002").unwrap();
         let mut session = Session::default();
         session.history.push(Message::text(Role::User, "a prompt"));
         store.save(&parent, &session).unwrap();
