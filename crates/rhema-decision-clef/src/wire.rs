@@ -63,15 +63,19 @@ pub fn request_body(request: &DecisionRequest, model: ClefModel) -> Value {
 }
 
 /// Unwraps Workers AI's envelope: `result` when `success` is true, the
-/// System One response as it stands. A `success` of false, or a
-/// missing `result`, is the failure the status says it is, with the
-/// `errors[].message` lines as the text. `status` is the HTTP status
-/// the envelope arrived with, so the mapping is the seam's own.
+/// System One response as it stands. A `success` of false, a missing
+/// `result`, or a `result` of null — success that names nothing — is
+/// the failure the status says it is, with the `errors[].message`
+/// lines as the text. `status` is the HTTP status the envelope arrived
+/// with, so the mapping is the seam's own.
 pub fn unwrap_envelope(body: &str, status: u16) -> Result<DecisionResponse, DecisionError> {
     let value: Value = serde_json::from_str(body)
         .map_err(|err| DecisionError::Parse(format!("not the Workers AI envelope: {err}")))?;
     let success = value.get("success").and_then(Value::as_bool) == Some(true);
-    let Some(result) = value.get("result").filter(|_| success) else {
+    let Some(result) = value
+        .get("result")
+        .filter(|result| success && !result.is_null())
+    else {
         // The failure's reasons are the detail the seam's status
         // mapping reads out of `errors[].message`.
         return Err(DecisionError::from_status(status, body));
@@ -159,6 +163,13 @@ mod tests {
     #[test]
     fn a_success_envelope_without_a_result_is_a_parse_error() {
         let err = unwrap_envelope(r#"{"success": true}"#, 200).unwrap_err();
+        assert!(
+            matches!(err, DecisionError::Http { status: 200, .. }),
+            "{err:?}"
+        );
+        // A null result is success that names nothing: the same
+        // failure as a missing one, not a later parse of null.
+        let err = unwrap_envelope(r#"{"success": true, "result": null}"#, 200).unwrap_err();
         assert!(
             matches!(err, DecisionError::Http { status: 200, .. }),
             "{err:?}"
