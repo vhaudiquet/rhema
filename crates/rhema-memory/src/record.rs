@@ -246,7 +246,13 @@ pub struct MemoryRecord {
     pub body: String,
     /// Millis since the Unix epoch; assigned once at creation.
     pub created_at: u64,
-    /// Millis since the Unix epoch; refreshed on every write.
+    /// Millis since the Unix epoch; refreshed when the record's
+    /// payload changes — a `put`, a supersede, a retract. A verify
+    /// refreshes only [`MemoryRecord::verified_at`]: a
+    /// re-confirmation is not a rewrite, so the ranker's and the
+    /// conflict sort's `updated_at` tiebreaks stay tests of content
+    /// age, and [`MemoryRecord::believed_since`] is where a fresh
+    /// check makes the belief younger.
     pub updated_at: u64,
     /// When the fact started to hold; defaults to `created_at`, and may
     /// name the past ("moved in last month") or the future.

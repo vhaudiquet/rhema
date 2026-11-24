@@ -153,6 +153,28 @@ mod tests {
         store_contract::run_rank_orders(&VolatileStore::new());
     }
 
+    /// The two stamps have two jobs: a verify moves only its own, so
+    /// the ranker's `updated_at` tiebreak keeps measuring content age.
+    /// The sleep gifts the verify its own millisecond; without it both
+    /// writes can share a stamp and the comparison proves nothing.
+    #[test]
+    fn a_verify_refreshes_only_the_verification_stamp() {
+        let store = VolatileStore::new();
+        let record = store
+            .put(MemoryDraft::new(Scope::Global, "still true"))
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let verified = store.verify(&record.id).unwrap();
+        assert!(
+            verified.verified_at.unwrap() > record.updated_at,
+            "the check's stamp moved"
+        );
+        assert_eq!(
+            verified.updated_at, record.updated_at,
+            "the write's stamp did not"
+        );
+    }
+
     #[test]
     fn a_search_reflects_the_latest_update() {
         let store = VolatileStore::new();

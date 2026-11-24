@@ -240,3 +240,39 @@ fn a_shared_arc_serves_concurrent_consumers() {
     assert_eq!(ids.len(), 8);
     assert_eq!(store.search(MemoryQuery::new("fact")).unwrap().len(), 8);
 }
+
+/// The durable twin of the volatile stamp test: the verify rewrites the
+/// file, and the write's stamp stays what `put` left in it. The sleep
+/// gifts the verify its own millisecond; stamps share one otherwise and
+/// the comparison proves nothing.
+#[test]
+fn a_verify_refreshes_only_the_verification_stamp() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store(&dir);
+    let record = store
+        .put(MemoryDraft::new(Scope::Global, "still true"))
+        .unwrap();
+    let file = dir.path().join(format!("{}.md", record.id));
+    let before = fs::read_to_string(&file).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    let verified = store.verify(&record.id).unwrap();
+
+    assert!(
+        verified.verified_at.unwrap() > record.updated_at,
+        "the check's stamp moved"
+    );
+    assert_eq!(
+        verified.updated_at, record.updated_at,
+        "the write's stamp did not"
+    );
+    let after = fs::read_to_string(&file).unwrap();
+    assert!(
+        after.contains(&format!("updated_at: {}", record.updated_at)),
+        "the file keeps the write's stamp: {after}"
+    );
+    assert!(before.contains("verified_at: null"), "{before}");
+    assert!(
+        after.contains(&format!("verified_at: {}", verified.verified_at.unwrap())),
+        "the file gains the check's stamp, nothing else: {after}"
+    );
+}
