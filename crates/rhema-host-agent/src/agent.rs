@@ -234,6 +234,12 @@ impl HostAgent {
             .as_ref()
             .map(|resolver| resolver.specs())
             .unwrap_or_default();
+        // A model with no vision gets no pixels: the mask rewrites
+        // image blocks into text notes on the request's own copy,
+        // after the transcript's view is built and before the wire.
+        // The session keeps them, so a rebuild over a vision model
+        // sends them again.
+        let provider = rhema_core::ImageMask::wrap(provider, config.supports_vision);
         let (provider, resolver, transcript) = match config.transcript {
             Some(settings) => {
                 extra.push(rhema_transcript::Zoom::spec());
@@ -872,6 +878,42 @@ mod provider_boundary_tests {
         // The session history is the message, verbatim, checkpointing
         // must carry the images byte-for-byte.
         assert_eq!(agent.session().history[0].content, seen[0]);
+    }
+
+    #[tokio::test]
+    async fn a_model_without_vision_gets_notes_instead_of_image_blocks() {
+        let recording = Arc::new(RecordingBlocks(Mutex::new(Vec::new())));
+        let mut agent = HostAgent::new(HostAgentConfig {
+            supports_vision: Some(false),
+            ..HostAgentConfig::new(recording.clone(), "m", std::env::temp_dir(), AllowAll)
+        })
+        .unwrap();
+        let message = Message::text_with_images(
+            Role::User,
+            "what is in this picture?",
+            vec![rhema_core::Image::new(
+                rhema_core::ImageMediaType::Png,
+                "aGVsbG8=",
+            )],
+        );
+        agent.turn_message(message, &mut NoopSink).await.unwrap();
+
+        let seen = recording.0.lock().unwrap();
+        assert_eq!(
+            seen[0],
+            vec![
+                Content::Text("what is in this picture?".into()),
+                Content::Text("[image omitted: image/png; the active model has no vision]".into()),
+            ]
+        );
+        // The log kept the pixels: the mask is a request projection,
+        // and a later vision model sends them again.
+        assert!(
+            agent.session().history[0]
+                .content
+                .iter()
+                .any(|block| matches!(block, Content::Image(_)))
+        );
     }
 
     #[tokio::test]

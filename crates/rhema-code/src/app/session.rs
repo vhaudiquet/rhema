@@ -947,6 +947,21 @@ impl App {
             .and_then(|entry| entry.model.pricing)
     }
 
+    /// Whether the model the session runs on accepts image input, when
+    /// the catalog names it: the same row lookup
+    /// [`Self::current_model_pricing`] makes. `Some(false)` installs
+    /// the agent's image mask; `None` is unknown, not "no", and sends
+    /// the images untouched.
+    pub(crate) fn current_supports_vision(&self) -> Option<bool> {
+        let effective = self.effective();
+        let model = effective.model.as_deref()?;
+        let active = self.backend.as_ref().map(Backend::config_name);
+        self.models
+            .iter()
+            .find(|entry| entry.model.id == model && Some(entry.provider) == active)
+            .and_then(|entry| entry.model.supports_vision)
+    }
+
     /// The background shells this session started, as the last event left
     /// them: running ones only, oldest first.
     pub(crate) fn job_entries(&self) -> Vec<crate::jobs::JobEntry> {

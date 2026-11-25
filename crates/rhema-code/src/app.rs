@@ -115,6 +115,10 @@ pub struct App {
     /// Cached model catalog, shared with the picker when it opens: every
     /// logged-in provider's models, each tagged with its provider.
     pub models: Vec<crate::screens::CatalogModel>,
+    /// Whether the live agent masks image blocks, the catalog's vision
+    /// verdict for the running model. A catalog that lands after the
+    /// agent was built clears it through `sync_vision_verdict`.
+    pub(crate) applied_vision: bool,
     /// A provider was added since the last catalog fetch: the picker
     /// must refresh before it lists, even when the cache is not empty.
     pub catalog_stale: bool,
@@ -659,6 +663,7 @@ impl App {
             session,
             screen,
             models: Vec::new(),
+            applied_vision: false,
             catalog_stale: false,
             catalog_unavailable: Vec::new(),
             catalog_failed: Vec::new(),

@@ -64,7 +64,7 @@ pub type SubagentProviders =
 #[derive(Clone)]
 pub struct HostAgentConfig {
     /// The model backend the agent runs on. [`HostAgent::new`] wraps
-    /// it (paste expansion, the transcript view) before the engine
+    /// it (the image mask, the transcript view) before the engine
     /// calls it; the field keeps the provider the config was built
     /// with, so a clone of the config builds another agent safely.
     ///
@@ -80,6 +80,16 @@ pub struct HostAgentConfig {
     /// Model identifier, passed through to
     /// [`ChatParams`](rhema_core::ChatParams).
     pub model: String,
+    /// Whether the model accepts image input: the tri-state from its
+    /// catalog card. [`HostAgent::new`] installs an image mask when
+    /// this is `Some(false)`, so a request carries a text note where an
+    /// image block would be and no base64 reaches a model that cannot
+    /// read it. The session keeps its images, so a switch back to a
+    /// vision model unmasks them by rebuilding the agent. `None` is
+    /// unknown, not "no", and sends the images untouched.
+    ///
+    /// [`HostAgent::new`]: crate::HostAgent::new
+    pub supports_vision: Option<bool>,
     /// System prompt stamped into every request. `None` uses the base
     /// prompt, [`base_system`](Self::base_system) when set, the
     /// built-in default otherwise; setting it *replaces* everything, it
@@ -303,6 +313,7 @@ impl HostAgentConfig {
             provider: Arc::new(provider),
             approval: Arc::new(approval),
             model: model.into(),
+            supports_vision: None,
             system: None,
             base_system: None,
             workspace: workspace.into(),

@@ -1333,6 +1333,41 @@ fn refresh_merges_every_providers_catalog_and_names_the_failures() {
 }
 
 #[test]
+fn a_catalog_verdict_masks_and_unmasks_the_agent_that_predates_it() {
+    let mut h = harness(Some("g"), Some("m-a"), Session::default());
+    // The agent opened before the catalog: no card, no mask.
+    assert!(!h.app.applied_vision);
+    let mut blind = model("m-a");
+    blind.supports_vision = Some(false);
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Bootstrap,
+        remaining: 0,
+        result: loaded("google", vec![blind]),
+    });
+    assert!(
+        h.app.applied_vision,
+        "the landed card masked the agent built before it"
+    );
+    // A later catalog names the model as one that sees: the mask
+    // leaves, and the request carries the log's images again.
+    let mut seeing = model("m-a");
+    seeing.supports_vision = Some(true);
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Refresh,
+        remaining: 0,
+        result: loaded("google", vec![seeing]),
+    });
+    assert!(!h.app.applied_vision, "the mask left with the card");
+    // Unknown is not "no": a card that names no verdict never masks.
+    h.app.on_event(UiEvent::ModelsLoaded {
+        why: FetchWhy::Refresh,
+        remaining: 0,
+        result: loaded("google", vec![model("m-a")]),
+    });
+    assert!(!h.app.applied_vision);
+}
+
+#[test]
 fn a_bootstrap_timeout_is_kept_for_the_next_picker() {
     let mut h = harness(Some("g"), Some("m-a"), Session::default());
     // The bootstrap lands on the chat: google answers, the LAN server

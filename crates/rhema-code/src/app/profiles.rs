@@ -229,6 +229,7 @@ impl App {
             self.backend = None;
             self.provider = None;
             self.agent = None;
+            self.applied_vision = false;
             self.models.clear();
             self.session = session;
             self.screen = Screen::Chat;
@@ -289,6 +290,9 @@ impl App {
                 self.provider = Some(provider);
                 self.models.clear();
                 self.agent = Some(agent);
+                // The catalog was cleared too: the new profile's card,
+                // and with it the mask, waits for its fetch to land.
+                self.applied_vision = false;
                 self.subagents = Some(subagents);
                 self.missing_tools = missing_tools;
                 self.screen = Screen::Chat;

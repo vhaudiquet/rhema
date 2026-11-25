@@ -21,6 +21,7 @@
 //!   the dangling-call close/revive pair
 //! - [`overlay`]: `Overlay`, one resolver over built-ins plus an
 //!   extension set
+//! - [`vision`]: request-time image masking for models with no vision
 //! - [`mock`]: scripted `MockProvider` (behind the `mock` feature)
 
 #![forbid(unsafe_code)]
@@ -36,6 +37,7 @@ pub mod provider;
 pub mod request;
 pub mod session;
 pub mod tool;
+pub mod vision;
 pub mod workspace;
 
 // Re-exported so implementors of the async seams can apply #[async_trait]
@@ -58,4 +60,5 @@ pub use tool::{
     OutputOnly, ReplaySafety, ToolCall, ToolContext, ToolProgress, ToolResolver, ToolResult,
     ToolStatus,
 };
+pub use vision::{ImageMask, mask_images};
 pub use workspace::{rhema_dir, runs_dir, subagents_dir};

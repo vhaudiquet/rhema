@@ -329,6 +329,10 @@ impl App {
                 .then(a.instance.cmp(&b.instance))
                 .then(a.model.id.cmp(&b.model.id))
         });
+        // The slice that just landed may carry the running model's
+        // vision verdict: a login that adopts another provider updates
+        // the mask now, not at the next rebuild.
+        self.sync_vision_verdict();
         Ok(adopted)
     }
 
@@ -571,6 +575,10 @@ impl App {
                         .then(a.instance.cmp(&b.instance))
                         .then(a.model.id.cmp(&b.model.id))
                 });
+                // The catalog that just landed names the running
+                // model's vision too: the agent built before the fetch
+                // masks or unmasks to match it.
+                self.sync_vision_verdict();
                 // The failure lists outlive the screen: a bootstrap fetch
                 // usually lands on the chat, and the picker opened later
                 // still has to say which providers are unavailable.
@@ -959,6 +967,31 @@ impl App {
         }
     }
 
+    /// A catalog landed: when it names the running model as one that
+    /// cannot see, and the live agent was built without knowing, the
+    /// agent is rebuilt so the image mask follows the card. A card
+    /// that turns out to accept images drops a mask the agent still
+    /// carries. The unknown verdict changes nothing either way: a
+    /// slice that vanished, a re-login clearing one, must not unmask
+    /// a model that may still be blind. A rebuild that cannot build
+    /// now (a running turn has the agent) is deferred to the turn's
+    /// end, the same queue the other mid-turn toggles use.
+    pub(crate) fn sync_vision_verdict(&mut self) {
+        match self.current_supports_vision() {
+            Some(false) if !self.applied_vision => {}
+            Some(true) if self.applied_vision => {}
+            _ => return,
+        }
+        if self.agent.is_none() && !self.turn.running {
+            // Nothing built to update, and no build in flight to
+            // defer: the next agent reads the verdict itself.
+            return;
+        }
+        if let Err(error) = self.rebuild_live_agent(false) {
+            self.push_notice(&error);
+        }
+    }
+
     /// Builds an agent over `session` with the current model and flags.
     /// The wire's registry handle rides beside the agent: a rebuilt
     /// agent carries a fresh registry, and the UI must read that one.
@@ -966,14 +999,18 @@ impl App {
     /// notice's feed, the rebuild re-probes, so the notice re-answers
     /// with it.
     pub(crate) fn build_agent(
-        &self,
+        &mut self,
         session: Session,
     ) -> Result<(HostAgent, rhema_subagents::SubagentHandle, Vec<String>), HostAgentError> {
         let provider = self
             .provider
             .clone()
             .ok_or(HostAgentError::Agent(AgentError::MissingProvider))?;
-        let (agent_config, subagents, missing) = session_agent_config(
+        // The card's verdict drives the agent's image mask: the
+        // session keeps its images, the request does not carry them
+        // into a model that cannot read them.
+        let supports_vision = self.current_supports_vision();
+        let (mut agent_config, subagents, missing) = session_agent_config(
             &self.mcp,
             &self.kits,
             &self.options,
@@ -992,10 +1029,9 @@ impl App {
             self.jobs.as_ref().map(crate::jobs::JobsHandle::steering),
             &self.jobs_tag,
         );
-        Ok((
-            HostAgent::from_session(agent_config, session)?,
-            subagents,
-            missing,
-        ))
+        agent_config.supports_vision = supports_vision;
+        let agent = HostAgent::from_session(agent_config, session)?;
+        self.applied_vision = supports_vision == Some(false);
+        Ok((agent, subagents, missing))
     }
 }

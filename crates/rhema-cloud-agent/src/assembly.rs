@@ -210,6 +210,9 @@ impl AgentAssembly {
             // No filesystem to read a USER.md from; a per-session
             // preference file is a later SessionConfig decision.
             user_preferences: None,
+            // The harness sends no card: an image the model cannot
+            // read is the provider's rejection, not a masked note.
+            supports_vision: None,
             // The commands run in the remote sandbox; no local
             // provision means no `see` function, so no section. The same
             // goes for `job`: its backend would have to be installed on
