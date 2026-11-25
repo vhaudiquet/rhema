@@ -115,6 +115,15 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         // session values; those are env.
         Some(crate::args::Command::Init { stub }) => {
             use rhema_bash::runtime::{Stub, stubs_text};
+            // The helper's directory carries `gob` beside it; every
+            // wired shell sees it on PATH.
+            if let Some(dir) = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            {
+                let dir = dir.to_string_lossy().replace('\'', "'\\''");
+                println!("export PATH='{dir}':\"$PATH\"");
+            }
             let mut stubs = Vec::with_capacity(stub.len());
             for raw in &stub {
                 match Stub::parse(raw) {

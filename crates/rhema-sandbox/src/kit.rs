@@ -411,13 +411,24 @@ pub fn place_shared(
     for sub in ["vision/staging", "jobs", "mcp"] {
         std::fs::create_dir_all(host_session.join(sub))?;
     }
-    write_init(&host_session, kits)?;
-    let sandbox_session = Path::new(&shared.sandbox).join("sessions").join(session);
+    let init = write_init(&host_session, kits)?;
     let helper = shared
         .install_dir(&KIT_VERSION.to_string())
         .join("rhema")
         .to_string_lossy()
         .into_owned();
+    // `gob` lands beside the helper; the shell's PATH names that
+    // directory so the jobs backend resolves.
+    let helper_dir = Path::new(&helper)
+        .parent()
+        .map(|dir| dir.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let text = std::fs::read_to_string(&init)?;
+    std::fs::write(
+        &init,
+        format!("export PATH={}:\"$PATH\"\n{text}", shquote(&helper_dir)),
+    )?;
+    let sandbox_session = Path::new(&shared.sandbox).join("sessions").join(session);
     let mut env = BTreeMap::new();
     env.insert(
         rhema_bash::init::VAR_BASH_ENV.to_owned(),
@@ -565,6 +576,14 @@ mod tests {
                 .into_owned()
         );
         assert!(Path::new(init).is_file());
+        let text = std::fs::read_to_string(init).unwrap();
+        assert!(
+            text.starts_with(&format!(
+                "export PATH='{}':",
+                dir.path().join("bin/1").display()
+            )),
+            "the helper's dir rides PATH for gob: {text}"
+        );
         assert_eq!(
             env.get("RHEMA_JOBS_BIN").map(String::as_str),
             Some(dir.path().join("bin/1/rhema").to_string_lossy().as_ref())
