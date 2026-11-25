@@ -223,6 +223,11 @@ pub enum Command {
     /// model, colors, skills. The terminal UI with the wizard forced
     /// on, whatever the config's marker says.
     Onboard,
+    /// Install the channel's newest release and exit: the same check
+    /// and the same installer the settings' Update page runs, with
+    /// plain lines on stdout. Exit 0 when this build is the newest or
+    /// the install landed, 1 when the check or the install failed.
+    Update,
     /// The MCP meta surface (`mcp servers | tools | schema | call`)
     /// plus the config verbs (`mcp add | list | remove`, which write a
     /// profile's `mcp_servers` and so work outside any wired shell),

@@ -110,6 +110,12 @@ pub const COMMANDS: &[CommandSpec] = &[
         handler: settings,
     },
     CommandSpec {
+        name: "/update",
+        description: "install the newest rhema",
+        argument: Argument::None,
+        handler: update,
+    },
+    CommandSpec {
         name: "/clear",
         description: "fresh session",
         argument: Argument::None,
@@ -439,6 +445,13 @@ fn login(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
 fn settings(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
     app.open_settings_at(crate::screens::SettingsSection::Providers);
     Vec::new()
+}
+
+/// `/update` runs the flow the settings' Update page runs: the check
+/// when this session has no answer yet, then the install of the newer
+/// release it finds. `rhema update` is the same flow outside the TUI.
+fn update(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {
+    app.start_update()
 }
 
 fn subagents(app: &mut App, _argument: Option<&str>) -> Vec<Effect> {

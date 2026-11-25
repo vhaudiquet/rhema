@@ -472,9 +472,10 @@ fn no_resolvable_key_opens_the_chat() {
     // Nothing gates the session anymore: a keyless config is a
     // chat whose footer says "no provider" in red; the wizard is
     // for the first run only.
-    let h = harness(None, None, Session::default());
+    let mut h = harness(None, None, Session::default());
     assert!(matches!(h.app.screen, Screen::Chat));
-    assert!(h.app.initial_effects().is_empty());
+    // No key, no model: the only startup fetch is the version check.
+    assert_eq!(h.app.initial_effects(), vec![Effect::CheckForUpdates]);
 }
 
 /// A store that refuses everything: the locked-keychain shape the
@@ -526,25 +527,33 @@ fn a_key_without_a_stored_model_opens_the_chat_quietly() {
     // No model stored is a red footer and /model one keystroke
     // away, not a gate: no fetch runs at startup and nothing but
     // the wizard stands between the user and the input box.
-    let h = harness(Some("k"), None, Session::default());
+    let mut h = harness(Some("k"), None, Session::default());
     assert!(matches!(h.app.screen, Screen::Chat));
     assert!(h.app.agent.is_none());
     // The catalog still warms: ctrl-p answers from the cache the
     // moment the user asks for a model.
     assert_eq!(
         h.app.initial_effects(),
-        vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
+        vec![
+            Effect::CheckForUpdates,
+            Effect::FetchModels(FetchWhy::Bootstrap),
+            Effect::FetchUsage
+        ]
     );
 }
 
 #[test]
 fn a_key_with_a_stored_model_opens_the_chat() {
-    let h = harness(Some("k"), Some("m-a"), Session::default());
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
     assert!(matches!(h.app.screen, Screen::Chat));
     assert!(h.app.agent.is_some());
     assert_eq!(
         h.app.initial_effects(),
-        vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
+        vec![
+            Effect::CheckForUpdates,
+            Effect::FetchModels(FetchWhy::Bootstrap),
+            Effect::FetchUsage
+        ]
     );
 }
 
@@ -7364,27 +7373,24 @@ fn the_mcp_mute_round_trips() {
 }
 
 #[test]
-fn the_update_page_checks_then_installs() {
+fn the_update_row_installs_a_known_release() {
     let mut h = harness(None, None, Session::default());
+    // No answer yet: the page is not in the sidebar, and the open lands
+    // on the first section instead. The one act of the page installs a
+    // newer release; with none known, the page has nothing to say.
     h.app.open_settings_at(SettingsSection::Update);
-    // Enter on the check row: the fetch effect leaves, the page shows
-    // the check as running.
-    let effects = h.app.on_key(key(KeyCode::Enter));
-    assert_eq!(effects, vec![Effect::CheckForUpdates]);
     let Screen::Settings(settings) = &h.app.screen else {
         panic!("expected the settings screen");
     };
-    assert_eq!(
-        settings.update.check,
-        crate::screens::UpdateCheck::Checking,
-        "the page keeps telling the truth"
-    );
+    assert!(!settings.sections().contains(&SettingsSection::Update));
+    assert_eq!(settings.section, SettingsSection::Providers);
 
     // The check answers with a release above this build: the state and
-    // the open page follow, and the install row raises its action.
+    // the open page follow, and the install row carries its action.
     h.app.on_event(UiEvent::UpdateChecked {
         result: Ok("99.0.0".to_owned()),
     });
+    h.app.open_settings_at(SettingsSection::Update);
     let Screen::Settings(settings) = &h.app.screen else {
         panic!("expected the settings screen");
     };
@@ -7396,7 +7402,6 @@ fn the_update_page_checks_then_installs() {
         settings.update.update_available(),
         "99.0.0 is above any build in tests"
     );
-    h.app.on_key(key(KeyCode::Down));
     let effects = h.app.on_key(key(KeyCode::Enter));
     assert_eq!(effects, vec![Effect::InstallUpdate]);
     let Screen::Settings(settings) = &h.app.screen else {
@@ -7422,6 +7427,10 @@ fn the_update_page_checks_then_installs() {
         )),
         "the install is noticed"
     );
+    assert!(
+        !h.app.update.update_pending(),
+        "a landed install retires the banner's ask"
+    );
 
     // A second Enter mid-run does not stack installers: a fresh
     // harness with the state mid-run re-checks the guard alone.
@@ -7438,24 +7447,38 @@ fn the_update_page_checks_then_installs() {
 }
 
 #[test]
-fn the_update_install_row_stays_inert_without_a_newer_release() {
+fn the_update_page_is_listed_only_while_a_release_exists() {
     let mut h = harness(None, None, Session::default());
-    h.app.open_settings_at(SettingsSection::Update);
+    h.app.open_settings_at(SettingsSection::Providers);
 
-    // No check yet: the install row lists but refuses the enter.
-    h.app.on_key(key(KeyCode::Down));
-    assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
+    // No answer yet: the sidebar holds every page but Update.
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(!settings.sections().contains(&SettingsSection::Update));
+    assert_eq!(
+        settings.sections().len(),
+        SettingsSection::ALL.len() - 1,
+        "only the Update page is held back"
+    );
 
-    // A check that failed says no too.
-    h.app.on_key(key(KeyCode::Up));
-    h.app.on_key(key(KeyCode::Enter));
+    // A check that failed lists it no more than none at all.
     h.app.on_event(UiEvent::UpdateChecked {
         result: Err("no answer within 30 s".to_owned()),
     });
-    h.app.on_key(key(KeyCode::Down));
-    assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(!settings.sections().contains(&SettingsSection::Update));
+    // And asking for it lands on the first page rather than a page the
+    // sidebar does not list.
+    h.app.open_settings_at(SettingsSection::Update);
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_eq!(settings.section, SettingsSection::Providers);
 
-    // So does a channel at or below this build.
+    // A channel at or below this build is no update either.
     h.app.on_event(UiEvent::UpdateChecked {
         result: Ok("0.0.1".to_owned()),
     });
@@ -7466,14 +7489,120 @@ fn the_update_install_row_stays_inert_without_a_newer_release() {
         !settings.update.update_available(),
         "the channel trails this build"
     );
-    assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
+    assert!(!settings.sections().contains(&SettingsSection::Update));
+
+    // A release above this build lists it, and stepping off it after a
+    // landed install retires it again.
+    h.app.on_event(UiEvent::UpdateChecked {
+        result: Ok("99.0.0".to_owned()),
+    });
+    h.app.open_settings_at(SettingsSection::Update);
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert!(settings.sections().contains(&SettingsSection::Update));
+    h.app.on_event(UiEvent::UpdateInstalled {
+        result: Ok("installed rhema 99.0.0 to ~/.local/bin/rhema".to_owned()),
+    });
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    // The open page stays readable with the install's verdict on it.
+    assert!(settings.sections().contains(&SettingsSection::Update));
+    assert_eq!(settings.section, SettingsSection::Update);
+    // Stepping away retires it: nothing is left to install.
+    h.app.on_key(key(KeyCode::Tab));
+    let Screen::Settings(settings) = &h.app.screen else {
+        panic!("expected the settings screen");
+    };
+    assert_ne!(settings.section, SettingsSection::Update);
+    assert!(!settings.sections().contains(&SettingsSection::Update));
+}
+
+/// `/update` is the whole flow in one word: the check when this session
+/// has no answer, and the install of the release it finds.
+#[test]
+fn the_update_command_checks_then_installs() {
+    let mut h = harness(None, None, Session::default());
+    let effects = crate::commands::dispatch(&mut h.app, "/update");
+    assert_eq!(effects, vec![Effect::CheckForUpdates]);
+    assert_eq!(
+        h.app.update.check,
+        crate::screens::UpdateCheck::Checking,
+        "the command marks the check running"
+    );
+    assert!(
+        h.app.update.install_after_check,
+        "the install waits on the answer"
+    );
+
+    // A newer release lands: the install follows without a second word.
+    let effects = h.app.on_event(UiEvent::UpdateChecked {
+        result: Ok("99.0.0".to_owned()),
+    });
+    assert_eq!(effects, vec![Effect::InstallUpdate]);
+    assert_eq!(h.app.update.install, crate::screens::UpdateInstall::Running);
+    assert!(!h.app.update.install_after_check, "the promise is spent");
+
+    // A known release skips the check: the same word installs at once.
+    h.app.update.check = crate::screens::UpdateCheck::Done(Ok("99.0.0".to_owned()));
+    h.app.update.install = crate::screens::UpdateInstall::Idle;
+    let effects = crate::commands::dispatch(&mut h.app, "/update");
+    assert_eq!(effects, vec![Effect::InstallUpdate]);
+
+    // A running install takes nothing: one installer at a time.
+    let effects = crate::commands::dispatch(&mut h.app, "/update");
+    assert!(effects.is_empty(), "the running install refuses a second");
+    assert!(
+        h.app
+            .transcript
+            .lines()
+            .contains(&Line::Notice("an update is already running".into())),
+        "the second ask is answered"
+    );
+}
+
+/// A channel at this build answers `/update` with the fact and no
+/// install, and a failed check says why.
+#[test]
+fn the_update_command_stops_when_nothing_is_newer() {
+    let mut h = harness(None, None, Session::default());
+    crate::commands::dispatch(&mut h.app, "/update");
+    let effects = h.app.on_event(UiEvent::UpdateChecked {
+        result: Ok(crate::update::current_version().to_owned()),
+    });
+    assert!(effects.is_empty(), "nothing to install");
+    assert_eq!(
+        h.app.update.install,
+        crate::screens::UpdateInstall::Idle,
+        "no install starts"
+    );
+    assert!(
+        h.app.transcript.lines().iter().any(|line| matches!(
+            line,
+            Line::Notice(text) if text.contains("is the newest release")
+        )),
+        "the answer is the fact: {:?}",
+        h.app.transcript.lines()
+    );
+
+    let mut h = harness(None, None, Session::default());
+    crate::commands::dispatch(&mut h.app, "/update");
+    h.app.on_event(UiEvent::UpdateChecked {
+        result: Err("no answer within 30 s".to_owned()),
+    });
+    assert!(h.app.transcript.lines().iter().any(|line| matches!(
+        line,
+        Line::Notice(text) if text.contains("the update check failed: no answer")
+    )));
 }
 
 #[test]
 fn the_update_states_survive_closing_the_settings() {
     let mut h = harness(None, None, Session::default());
+    // The startup check marks itself running before the first frame.
+    h.app.initial_effects();
     h.app.open_settings_at(SettingsSection::Update);
-    h.app.on_key(key(KeyCode::Enter));
     // Back to the chat and in again: the check's in-flight state
     // rides with the app, not the page snapshot.
     h.app.on_key(key(KeyCode::Esc));

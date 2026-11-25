@@ -223,6 +223,7 @@ Rhema Code reports what it is doing to the terminal, following [Mitchell Hashimo
 - `/model [provider/model]`: pick the model the profile runs. With no argument (or Ctrl-P) it opens the settings' Models page; with one it switches straight to it.
 - `/switch [provider/model]`: run this session on another model without writing the choice into the profile; the next launch returns to the stored model. With no argument it opens a picker over the catalog, and the pick rides the session alone.
 - `/settings`: everything the wizard sets, plus profiles, appearance, subagents, usage, and about. The Models page lists the catalog as a table under the page's own cursor — model, price in and out, capabilities, and context, each under its own bold column title — typing filters it (the column titles stay, and a filter that matches nothing says `no match` in the rows' own column), Enter (or a click) makes the pick the profile's model, and the row in use says so; the Providers page lists the logins; the Profiles page adds, removes, and switches profiles and cycles each one's name color; the Skills page toggles skills on and off and shows each one's license.
+- `/update`: check the distribution channel and install the newest release in place. Rhema Code runs the same check at every start and puts a line under the banner when a newer release exists. The `/settings` sidebar lists the Update page only while one does, beside this build's version and the channel's, and its Update now row runs the same install; `rhema update` runs it outside the TUI.
 
 ## About
 

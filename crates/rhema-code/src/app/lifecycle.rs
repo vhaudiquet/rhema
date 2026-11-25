@@ -86,6 +86,28 @@ impl App {
             UiEvent::UpdateChecked { result } => {
                 self.update.check = crate::screens::UpdateCheck::Done(result);
                 self.sync_update_page();
+                // `/update` asked for the install in the same breath: a
+                // newer release goes straight on from here, and anything
+                // else says why it stops.
+                if !self.update.install_after_check {
+                    return Vec::new();
+                }
+                self.update.install_after_check = false;
+                if self.update.update_available() {
+                    self.update.install = crate::screens::UpdateInstall::Running;
+                    self.sync_update_page();
+                    return vec![Effect::InstallUpdate];
+                }
+                let notice = match &self.update.check {
+                    crate::screens::UpdateCheck::Done(Ok(latest)) => {
+                        format!("rhema {latest} is the newest release; nothing to install")
+                    }
+                    crate::screens::UpdateCheck::Done(Err(err)) => {
+                        format!("the update check failed: {err}")
+                    }
+                    _ => "the update check failed".to_owned(),
+                };
+                self.transcript.push_notice(&notice);
                 Vec::new()
             }
             UiEvent::UpdateInstalled { result } => {

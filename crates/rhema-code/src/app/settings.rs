@@ -129,6 +129,28 @@ impl App {
         }
     }
 
+    /// Starts the update flow `/update` shares with `rhema update`: the
+    /// install when a newer release is already known, otherwise the
+    /// check, and the install follows its answer. A run already out is
+    /// left alone.
+    pub(crate) fn start_update(&mut self) -> Vec<Effect> {
+        use crate::screens::{UpdateCheck, UpdateInstall};
+        if self.update.install == UpdateInstall::Running {
+            self.push_notice("an update is already running");
+            return Vec::new();
+        }
+        if self.update.update_available() {
+            self.update.install = UpdateInstall::Running;
+            self.sync_update_page();
+            return vec![Effect::InstallUpdate];
+        }
+        self.update.install_after_check = true;
+        self.update.check = UpdateCheck::Checking;
+        self.sync_update_page();
+        self.push_notice("checking for updates");
+        vec![Effect::CheckForUpdates]
+    }
+
     /// Re-reads the Subagents page's snapshot: an edit happened in
     /// `$EDITOR` behind the app's back, and the rows must show it when
     /// the TUI re-enters. A no-op when the settings screen is not open.

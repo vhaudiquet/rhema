@@ -312,10 +312,11 @@ fn the_websearch_confirm_names_the_provider_and_its_answer() {
 }
 
 /// The Update page: this build's row, the channel's latest with its
-/// verdict, the two rows, and the dim install row before a check
-/// earned it.
+/// verdict, and the one install row, dim until a check earned it. The
+/// check row is gone; the startup check, `/update` and `rhema update`
+/// are how it is asked again, and the page says so.
 #[test]
-fn the_update_page_shows_the_versions_and_its_two_rows() {
+fn the_update_page_shows_the_versions_and_its_install_row() {
     let mut settings = crate::screens::SettingsScreen::new();
     settings.section = SettingsSection::Update;
     settings.update.check =
@@ -342,19 +343,30 @@ fn the_update_page_shows_the_versions_and_its_two_rows() {
         text.contains("up to date"),
         "the channel at this build is no update: {text}"
     );
-    assert!(text.contains("Check for updates..."), "{text}");
+    assert!(
+        !text.contains("Check for updates"),
+        "the page carries no check row: {text}"
+    );
     assert!(text.contains("Update now"), "{text}");
+    assert!(
+        text.contains("/update asks again"),
+        "the page names the way to ask again: {text}"
+    );
     assert!(
         !text.contains("downloading and installing"),
         "an idle install says nothing: {text}"
     );
 
-    // A newer release: the verdict flips, and the install run's
-    // outcome renders under the rows.
+    // A newer release: the verdict flips, the ask-again hint goes, and
+    // the install run's outcome renders under the row.
     settings.update.check = crate::screens::UpdateCheck::Done(Ok("99.0.0".to_owned()));
     settings.update.install = crate::screens::UpdateInstall::Running;
     let text = drawn(&settings);
     assert!(text.contains("update available"), "{text}");
+    assert!(
+        !text.contains("/update asks again"),
+        "an available release needs no hint: {text}"
+    );
     assert!(text.contains("downloading and installing"), "{text}");
 
     // A failed run names itself, not success.
@@ -579,7 +591,7 @@ fn the_settings_screen_draws_the_sidebar_and_the_page() {
     assert!(rows[0].trim().starts_with('╭'), "full border: {text}");
     assert!(text.contains("⚙"), "the gear heads the sidebar: {text}");
     assert!(text.contains("Settings"), "the sidebar heading: {text}");
-    for section in SettingsSection::ALL {
+    for section in settings.sections() {
         assert!(
             text.contains(section.label()),
             "{} sits in the sidebar: {text}",
@@ -611,7 +623,7 @@ fn the_settings_screen_draws_the_sidebar_and_the_page() {
     // Every sidebar row plus the instance and add rows are clickable.
     assert_eq!(
         hits.len(),
-        SettingsSection::ALL.len() + 2,
+        settings.sections().len() + 2,
         "sidebar rows and the two page rows register: {hits:?}"
     );
 }
@@ -689,7 +701,7 @@ fn the_subagents_page_lists_the_definitions_and_their_targets() {
     // Every sidebar row plus the two definition rows are clickable.
     assert_eq!(
         hits.len(),
-        SettingsSection::ALL.len() + 2,
+        settings.sections().len() + 2,
         "sidebar rows and the two page rows register: {hits:?}"
     );
 }
@@ -907,7 +919,7 @@ fn the_profiles_page_lists_the_registry_and_their_targets() {
     // Every sidebar row plus the two profile rows and the add row.
     assert_eq!(
         hits.len(),
-        SettingsSection::ALL.len() + 3,
+        settings.sections().len() + 3,
         "sidebar and page rows register: {hits:?}"
     );
 }
@@ -1695,6 +1707,61 @@ mod scroll_tests {
         assert!(
             rows[banner_row + 2].contains("ask the agent to install them"),
             "the strip names the ask: {rows:?}"
+        );
+    }
+
+    /// The startup check's answer rides the banner: one line under the
+    /// version label naming the three ways to install, gone once the
+    /// install landed.
+    #[test]
+    fn the_banner_announces_an_available_update() {
+        let mut app = chat_app();
+        app.update.check = crate::screens::UpdateCheck::Done(Ok("99.0.0".to_owned()));
+        let rows_at = |app: &mut App, width: u16| {
+            let backend = TestBackend::new(width, 12);
+            let mut terminal = Terminal::new(backend).unwrap();
+            terminal.draw(|frame| render(app, frame)).unwrap();
+            let buffer = terminal.backend().buffer();
+            (0..buffer.area.height)
+                .map(|y| {
+                    (0..buffer.area.width)
+                        .map(|x| buffer[(x, y)].symbol().to_owned())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let rows = rows_at(&mut app, 110);
+        let banner = rows
+            .iter()
+            .position(|row| row.contains(crate::VERSION_LABEL))
+            .expect("the banner draws");
+        assert!(
+            rows[banner + 1].contains("A new update is available."),
+            "the notice sits right under the version: {rows:?}"
+        );
+        assert!(
+            rows[banner + 1].contains("/update") && rows[banner + 1].contains("rhema update"),
+            "the notice carries both commands: {rows:?}"
+        );
+        assert!(
+            rows[banner + 1].contains("Settings -> Update"),
+            "the notice names the page: {rows:?}"
+        );
+        assert!(
+            rows[banner + 2].trim().is_empty(),
+            "the banner's blank row follows the notice: {rows:?}"
+        );
+
+        // The install landed: the new version is on disk and waiting for
+        // a restart, so the banner stops asking.
+        app.update.install =
+            crate::screens::UpdateInstall::Done(Ok("installed rhema 99.0.0".to_owned()));
+        let rows = rows_at(&mut app, 110);
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("A new update is available.")),
+            "a landed install retires the ask: {rows:?}"
         );
     }
 
@@ -2907,13 +2974,13 @@ mod scroll_tests {
         let mut app = chat_app();
         app.chat.input = "/".to_owned();
         app.chat.cursor = 1;
-        // Eighteen commands, six visible rows: nine downs put the
+        // Nineteen commands, six visible rows: ten downs put the
         // selection on /retry, and the window must have followed it.
-        for _ in 0..9 {
+        for _ in 0..10 {
             app.chat
                 .handle_key(key(KeyCode::Down), &[], &[], &[], &crate::icons::UNICODE);
         }
-        assert_eq!(app.chat.palette_index, 9);
+        assert_eq!(app.chat.palette_index, 10);
         let backend = TestBackend::new(60, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| render(&mut app, frame)).unwrap();
@@ -3863,7 +3930,7 @@ fn the_mcp_page_lists_the_servers_and_their_marks() {
     // clickable.
     assert_eq!(
         hits.len(),
-        SettingsSection::ALL.len() + 3,
+        settings.sections().len() + 3,
         "sidebar, page, and add rows register: {hits:?}"
     );
 
@@ -4793,7 +4860,7 @@ fn the_settings_page_keeps_its_air() {
     assert_eq!(last, 30 - 3, "the hints sit a row above the border");
     // A short terminal gives the top row back: the sections all fit.
     let short = draw(18);
-    for section in SettingsSection::ALL {
+    for section in crate::screens::SettingsScreen::new().sections() {
         assert!(
             short.iter().any(|row| row.contains(section.label())),
             "{} on a short page",

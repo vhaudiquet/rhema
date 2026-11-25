@@ -31,8 +31,9 @@
 //! - [`status`]: program status over OSC 7501, for the terminal's tabs
 //! - [`app`]: the state machine routing keys and events
 //! - [`turn`]: the tokio tasks (turn, model fetch)
-//! - [`update`]: the self-update seam: the channel's manifest check
-//!   and the install script run behind the settings' Update page
+//! - [`update`]: the self-update seam: the channel's manifest check,
+//!   run at startup and by `/update` and `rhema update`, and the
+//!   install script run behind the settings' Update page
 //! - [`ui`]: ratatui rendering, with `chrome` as its shared
 //!   panel/marker vocabulary of the menus
 //! - [`term_image`]: the onboarding logo and the prompt bubbles'

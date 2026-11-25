@@ -281,15 +281,16 @@ pub enum UiEvent {
         /// why the choice could not be stood up.
         result: Result<crate::sandbox::Sandboxed, String>,
     },
-    /// The Update page's version check answered: the channel's latest
-    /// version, or why the check failed.
+    /// The version check answered: the channel's latest version, or
+    /// why the check failed. The startup check, `/update` and the
+    /// Update page's answer all land here.
     UpdateChecked {
         /// The manifest's `stable` version, or the failure text.
         result: Result<String, String>,
     },
-    /// The Update page's install run finished: the script's output
-    /// tail, or the failure. A success means the new binary is on
-    /// disk; the running process keeps the old one until a restart.
+    /// The install run finished: the script's output tail, or the
+    /// failure. A success means the new binary is on disk; the running
+    /// process keeps the old one until a restart.
     UpdateInstalled {
         /// The installer's output tail, or the failure text.
         result: Result<String, String>,

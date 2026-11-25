@@ -52,10 +52,12 @@ mod headless;
 mod system;
 #[cfg(test)]
 mod tests;
+mod update;
 
 use headless::run_headless;
 pub(crate) use system::HARNESS;
 use system::{run_editor, system_command};
+use update::update_command;
 
 /// How long the loop waits for a crossterm event before it re-drains the
 /// channel and redraws.
@@ -144,6 +146,9 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
         Some(crate::args::Command::External(tokens)) => {
             std::process::exit(rhema_mcp::cli::run(&tokens));
         }
+        // The update verb prints for a pipe as happily as for a
+        // terminal, so it runs before the terminal check below.
+        Some(crate::args::Command::Update) => return update_command().await,
         Some(crate::args::Command::Run(run)) => return run_headless(run).await,
         Some(crate::args::Command::System { action }) => {
             return system_command(action, &args.workspace, args.profile.as_deref());
@@ -234,6 +239,10 @@ pub fn exit_code(err: &anyhow::Error) -> i32 {
 /// event loop until the app quits. The terminal is restored on every exit
 /// path, including panics.
 async fn run_tui(args: Args) -> anyhow::Result<()> {
+    // A finished update parked the image it ran from beside the new
+    // one, and windows could not delete it while that process held it.
+    // This start replaced it, so the leftover goes now.
+    crate::update::clear_stale_install();
     // Credential and session resolution happens BEFORE the terminal setup,
     // so early failures print as plain errors on a normal terminal.
     let store: Arc<dyn ConfigStore> = Arc::new(DiskStore);
@@ -516,7 +525,7 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
         Arc::new(crate::store::UnloadedGuardStore::new(store))
     };
     let (mut app, mut effects) = {
-        let app = App::new(AppSetup {
+        let mut app = App::new(AppSetup {
             store,
             config,
             backend,

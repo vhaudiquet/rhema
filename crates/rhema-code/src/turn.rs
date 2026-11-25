@@ -424,13 +424,14 @@ pub fn spawn_login_flow(
 }
 
 /// The wall-clock bound on one update check: the fetch tools carry
-/// shorter bounds of their own; this one keeps the Update page's
-/// `checking…` state honest even when a transfer trickles past them.
+/// shorter bounds of their own; this one keeps the `checking…` state
+/// honest even when a transfer trickles past them.
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Spawns the Update page's version check on a tokio task: the
-/// distribution manifest's fetch and parse run off the UI thread and
-/// report as [`UiEvent::UpdateChecked`].
+/// Spawns a version check on a tokio task: the distribution
+/// manifest's fetch and parse run off the UI thread and report as
+/// [`UiEvent::UpdateChecked`]. The startup check, `/update` and the
+/// Update page all spawn through here.
 pub fn spawn_update_check(events: UnboundedSender<UiEvent>) -> JoinHandle<()> {
     tokio::spawn(async move {
         let result =
@@ -447,7 +448,7 @@ pub fn spawn_update_check(events: UnboundedSender<UiEvent>) -> JoinHandle<()> {
     })
 }
 
-/// Spawns the Update page's install run on a tokio task: the published
+/// Spawns an install run on a tokio task: the published
 /// install script, a download of the whole release behind it, runs
 /// off the UI thread with no time bound and reports as
 /// [`UiEvent::UpdateInstalled`]. The running binary stays the old one

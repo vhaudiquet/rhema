@@ -689,13 +689,20 @@ impl App {
         Ok(app)
     }
 
-    /// Effects the runner must perform once, before the first draw.
-    pub fn initial_effects(&self) -> Vec<Effect> {
+    /// Effects the runner must perform once, before the first draw: the
+    /// version check on every start, and the catalog and the allowance
+    /// when a backend resolved. The check marks itself running here, so
+    /// the Update page and the banner tell the truth from the first
+    /// frame; its answer lands as `UiEvent::UpdateChecked`.
+    pub fn initial_effects(&mut self) -> Vec<Effect> {
+        self.update.check = crate::screens::UpdateCheck::Checking;
+        self.sync_update_page();
+        let mut effects = vec![Effect::CheckForUpdates];
         if self.backend.is_some() {
-            vec![Effect::FetchModels(FetchWhy::Bootstrap), Effect::FetchUsage]
-        } else {
-            Vec::new()
+            effects.push(Effect::FetchModels(FetchWhy::Bootstrap));
+            effects.push(Effect::FetchUsage);
         }
+        effects
     }
 }
 

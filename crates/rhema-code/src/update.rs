@@ -3,6 +3,14 @@
 //! Update page. Everything shells out to `curl` (else `wget`), the same
 //! tools and host the published installer uses; this crate carries no
 //! HTTP client of its own.
+//!
+//! ON WINDOWS the published `code.ps1` copies the new `rhema.exe` over
+//! the old one, and windows locks a running image against that copy
+//! (a rename it allows, a write it does not). An update started from
+//! the installed binary therefore renames the running image aside
+//! first, runs the installer, and puts the image back when the install
+//! did not land. The parked image is this process's own image, so it
+//! only becomes deletable at the next start, which clears it.
 
 use std::io::{ErrorKind, Write as _};
 use std::process::{Command, Stdio};
@@ -21,6 +29,18 @@ pub fn current_version() -> &'static str {
 /// The distribution base URL: `RHEMA_DIST_BASE` over the default.
 pub fn dist_base() -> String {
     std::env::var("RHEMA_DIST_BASE").unwrap_or_else(|_| DIST_BASE.to_owned())
+}
+
+/// Drops the image a finished update left beside the new binary.
+/// Windows cannot delete a running executable, so the install parks the
+/// running image under `rhema.exe.old` and this clears it on the next
+/// start, once the process that held it has exited. Best effort: a
+/// leftover file is litter, not a startup failure.
+pub fn clear_stale_install() {
+    #[cfg(windows)]
+    if let Some(dir) = install_dir() {
+        let _ = std::fs::remove_file(dir.join(PARKED_IMAGE));
+    }
 }
 
 /// The channel's latest release: the manifest's `stable` pointer, the
@@ -69,6 +89,11 @@ pub async fn run_installer() -> Result<String, String> {
 /// contract: the `installed rhema` line only prints once the binary
 /// landed. stdout is piped, and both powershell 5.1 and 7 land
 /// `Write-Host` text in redirected stdout.
+///
+/// The script copies the new image over `%LOCALAPPDATA%\Programs\rhema\rhema.exe`,
+/// which windows refuses while that file is the running one, so the
+/// running image steps aside first and comes back if the install did
+/// not land.
 #[cfg(windows)]
 fn run_powershell_installer_blocking(url: &str) -> Result<String, String> {
     let script = fetch_verified_script(url)?;
@@ -79,15 +104,16 @@ fn run_powershell_installer_blocking(url: &str) -> Result<String, String> {
         .map_err(|err| format!("cannot create the install script: {err}"))?;
     file.write_all(script.as_bytes())
         .map_err(|err| format!("cannot write the install script: {err}"))?;
-    let out = Command::new("powershell.exe")
-        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
-        .arg(file.path())
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| format!("cannot run powershell.exe: {err}"));
-    let out = out?;
+    let parked = park_running_image()?;
+    let out = match run_powershell(file.path()) {
+        Ok(out) => out,
+        Err(err) => {
+            return Err(match unpark_image(parked) {
+                Ok(()) => err,
+                Err(restore) => format!("{err}; {restore}"),
+            });
+        }
+    };
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -95,18 +121,120 @@ fn run_powershell_installer_blocking(url: &str) -> Result<String, String> {
     );
     let text = tail(&text, OUTPUT_TAIL_BYTES);
     if reports_install(&text) {
-        Ok(text)
-    } else {
-        Err(format!(
-            "the installer did not report an install{}{}",
-            if text.is_empty() { "" } else { ":" },
-            if text.is_empty() {
-                String::new()
-            } else {
-                format!("\n{text}")
-            }
-        ))
+        // The new image is in place. The parked one is this process's
+        // own image, locked until the process exits, and the next
+        // start clears it.
+        return Ok(text);
     }
+    let restored = unpark_image(parked);
+    let mut message = format!(
+        "the installer did not report an install{}{}",
+        if text.is_empty() { "" } else { ":" },
+        if text.is_empty() {
+            String::new()
+        } else {
+            format!("\n{text}")
+        }
+    );
+    if let Err(err) = restored {
+        message.push_str(&format!("; {err}"));
+    }
+    Err(message)
+}
+
+/// Runs the fetched installer with windows powershell, falling back to
+/// `pwsh.exe` on an image that carries only powershell 7. Both take the
+/// same flags; `-ExecutionPolicy` is a no-op where the setting does not
+/// exist.
+#[cfg(windows)]
+fn run_powershell(script: &std::path::Path) -> Result<std::process::Output, String> {
+    let build = |program: &str| {
+        let mut command = Command::new(program);
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    };
+    match build("powershell.exe").output() {
+        Ok(out) => Ok(out),
+        Err(err) if err.kind() == ErrorKind::NotFound => build("pwsh.exe")
+            .output()
+            .map_err(|err| format!("cannot run powershell.exe or pwsh.exe: {err}")),
+        Err(err) => Err(format!("cannot run powershell.exe: {err}")),
+    }
+}
+
+/// The name the running image waits under while the installer writes
+/// the new one.
+#[cfg(windows)]
+const PARKED_IMAGE: &str = "rhema.exe.old";
+
+/// The installer's destination on windows: the directory `code.ps1`
+/// copies `rhema.exe` into, `%LOCALAPPDATA%\Programs\rhema`.
+#[cfg(windows)]
+fn install_dir() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")?;
+    Some(
+        std::path::PathBuf::from(base)
+            .join("Programs")
+            .join("rhema"),
+    )
+}
+
+/// Moves the running image out of the installer's way, when this
+/// process runs from the path the installer writes. Windows refuses to
+/// write over a mapped executable but allows renaming it, so the
+/// parked file is a working image and the destination is free. A build
+/// started from anywhere else (a cargo target dir, a copy on PATH) has
+/// no lock to clear and stays put.
+#[cfg(windows)]
+fn park_running_image() -> Result<Option<std::path::PathBuf>, String> {
+    let Some(dir) = install_dir() else {
+        return Ok(None);
+    };
+    let target = dir.join("rhema.exe");
+    let me = std::env::current_exe()
+        .map_err(|err| format!("cannot read this executable's path: {err}"))?;
+    if !same_file(&me, &target) {
+        return Ok(None);
+    }
+    let parked = dir.join(PARKED_IMAGE);
+    // A leftover from an update this machine already restarted past.
+    let _ = std::fs::remove_file(&parked);
+    std::fs::rename(&target, &parked)
+        .map_err(|err| format!("cannot move the running rhema.exe aside: {err}"))?;
+    Ok(Some(parked))
+}
+
+/// Puts the parked image back at the installer's destination, after a
+/// run that did not land. A partial copy the installer left behind
+/// gives way to it.
+#[cfg(windows)]
+fn unpark_image(parked: Option<std::path::PathBuf>) -> Result<(), String> {
+    let Some(parked) = parked else {
+        return Ok(());
+    };
+    let Some(dir) = parked.parent() else {
+        return Ok(());
+    };
+    std::fs::rename(&parked, dir.join("rhema.exe"))
+        .map_err(|err| format!("cannot put the running rhema.exe back: {err}"))
+}
+
+/// Whether two paths name the same file: resolved, then compared
+/// without the case difference windows path spellings carry.
+#[cfg(windows)]
+fn same_file(left: &std::path::Path, right: &std::path::Path) -> bool {
+    let resolve = |path: &std::path::Path| {
+        std::fs::canonicalize(path)
+            .unwrap_or_else(|_| path.to_path_buf())
+            .to_string_lossy()
+            .to_lowercase()
+    };
+    resolve(left) == resolve(right)
 }
 
 /// The script's success line: `installed rhema <version> to <path>`.
@@ -119,7 +247,22 @@ fn reports_install(output: &str) -> bool {
 
 #[cfg(all(test, windows))]
 mod windows_tests {
-    use super::reports_install;
+    use super::{reports_install, same_file};
+
+    #[test]
+    fn the_running_image_is_recognized_by_either_spelling() {
+        // The shell's spelling and the exe's differ in case; a
+        // canonicalize that cannot resolve (the file is absent on a
+        // test box) falls back to the raw spelling.
+        assert!(same_file(
+            std::path::Path::new(r"C:\Users\u\Programs\rhema\rhema.exe"),
+            std::path::Path::new(r"c:\users\u\programs\rhema\RHEMA.EXE"),
+        ));
+        assert!(!same_file(
+            std::path::Path::new(r"C:\rhema.exe"),
+            std::path::Path::new(r"C:\rhema\rhema.exe"),
+        ));
+    }
 
     #[test]
     fn the_success_line_names_the_install() {

@@ -118,6 +118,19 @@ pub(crate) fn partition(lines: &[transcript::Line]) -> Vec<TranscriptBlock> {
     blocks
 }
 
+/// The banner's update line: the startup check found a release above
+/// this build. One sentence carrying the three ways to install it, in
+/// the color the settings page paints the same verdict.
+fn update_notice(theme: &Theme) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("A new update is available. Go to Settings -> Update, use ").fg(theme.warn),
+        Span::raw("/update").fg(theme.warn).bold(),
+        Span::raw(" or ").fg(theme.warn),
+        Span::raw("rhema update").fg(theme.warn).bold(),
+        Span::raw(".").fg(theme.warn),
+    ])
+}
+
 /// The missing tools strip as one transcript row: the dim label, the
 /// tool names in the text color, and the ask that installs them.
 pub(crate) fn missing_tools_line(app: &App, theme: &Theme) -> Line<'static> {
@@ -189,22 +202,27 @@ pub(crate) fn render_transcript(
     // separators. Blocks read apart: a prompt, a response, and a tool
     // run each end below a blank row, tool lines sit tight against
     // each other, notices and markdown take no trailing air.
-    let banner = [
-        Line::from(vec![
-            Span::raw("ῥ ").fg(theme.accent_text).bold(),
-            Span::raw("rhema").bold(),
-            // The TUI's name, lighter than the brand mark.
-            Span::raw(" code").fg(theme.accent_text),
-            // What tree this binary came from, floor-lit: identity,
-            // not content.
-            Span::raw(format!("  {}", crate::VERSION_LABEL)).fg(theme.text3),
-        ]),
-        Line::from(""),
-    ];
-    let mut rows: Vec<Line> = banner
-        .iter()
-        .flat_map(|line| wrap_line(line, width))
-        .collect();
+    let banner = Line::from(vec![
+        Span::raw("ῥ ").fg(theme.accent_text).bold(),
+        Span::raw("rhema").bold(),
+        // The TUI's name, lighter than the brand mark.
+        Span::raw(" code").fg(theme.accent_text),
+        // What tree this binary came from, floor-lit: identity,
+        // not content.
+        Span::raw(format!("  {}", crate::VERSION_LABEL)).fg(theme.text3),
+    ]);
+    let mut rows: Vec<Line> = wrap_line(&banner, width);
+    // The startup check's answer, when it found a release above this
+    // build: right under the banner that names the build, so the first
+    // screen says there is one. It scrolls away with the banner; the
+    // settings' Update page and `/update` stay.
+    if app.update.update_pending() {
+        rows.extend(wrap_line(&update_notice(theme), width));
+    }
+    // The banner always ends on a blank row, separating it (and the
+    // notice when there is one) from the conversation or the tools
+    // strip below.
+    rows.push(Line::from(""));
     // The startup tools strip: one row under the banner naming the
     // probed tools this machine misses, and the ask that installs them.
     // It rides the transcript canvas, so it shows once with the banner

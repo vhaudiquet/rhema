@@ -41,6 +41,11 @@ irm https://get.rhema.rs/code.ps1 | iex                    # Windows PowerShell
 On Windows, the agent's shell commands run through Git Bash. Install
 [Git for Windows](https://git-scm.com/download/win) first.
 
+After that, `rhema update` installs the channel's newest release. The TUI
+runs the same check at every start and names a newer release under its
+banner; the Update page of `/settings` and `/update` install it without
+leaving the terminal.
+
 See <a href="./crates/rhema-code/README.md">Rhema Code README.md</a> for more.
 
 ### Rhema Claw

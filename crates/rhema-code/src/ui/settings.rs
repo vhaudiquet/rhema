@@ -66,7 +66,8 @@ pub(crate) fn render_settings(
         ]),
         Line::from(Span::raw(rule).fg(theme.border_strong)),
     ];
-    for section in SettingsSection::ALL {
+    let sections = settings.sections();
+    for section in &sections {
         let selected = *section == settings.section;
         let style = if selected {
             Style::default().fg(theme.accent_text).bold()
@@ -78,7 +79,7 @@ pub(crate) fn render_settings(
             Span::styled(section.label().to_owned(), style),
         ]));
     }
-    for (index, section) in SettingsSection::ALL.iter().enumerate() {
+    for (index, section) in sections.iter().enumerate() {
         hits.push((
             Rect {
                 x: sidebar_area.x + 2,
@@ -1149,13 +1150,10 @@ pub(crate) fn settings_page(
             };
             lines.extend(settings_field("Latest", latest, theme, width));
             lines.push(Line::default());
-            // The two rows. The install row lists dim until a check
-            // earned it, a row that would refuse every enter must
-            // say so before the enter.
-            let rows = [
-                ("Check for updates...", true),
-                ("Update now", settings.update.update_available()),
-            ];
+            // The install row. It lists dim until a check earned it, a
+            // row that would refuse every enter must say so before the
+            // enter.
+            let rows = [("Update now", settings.update.update_available())];
             for (index, (label, enabled)) in rows.iter().enumerate() {
                 let selected = index == settings.row;
                 row_hits.push((lines.len(), SettingsHit::PageRow(index)));
@@ -1202,9 +1200,19 @@ pub(crate) fn settings_page(
                     ));
                 }
             }
+            // Where the check that earned a greyed row would be pressed
+            // is not the page's question: the startup check, `/update`
+            // and `rhema update` are the ways to ask again.
+            if !settings.update.update_available() {
+                lines.extend(settings_hint(
+                    "rhema checks at every start; /update asks again",
+                    theme,
+                    width,
+                ));
+            }
             (
                 lines,
-                footer("enter checks or installs · the install runs in the background"),
+                footer("enter installs · the install runs in the background"),
                 row_hits,
             )
         }

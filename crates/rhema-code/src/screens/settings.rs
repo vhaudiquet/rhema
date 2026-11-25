@@ -34,14 +34,19 @@ pub enum SettingsSection {
     /// The allowance, the session's cost, the last turn's tokens.
     Usage,
     /// This build beside the channel's latest release, and the
-    /// installer run behind the page's two rows.
+    /// installer run behind the page's install row. The sidebar lists
+    /// it only while a newer release is pending: the page's one act
+    /// installs it, and the startup check already knows whether one
+    /// exists.
     Update,
     /// Version, repository, paths.
     About,
 }
 
 impl SettingsSection {
-    /// Every section, in sidebar order.
+    /// Every section, in sidebar order. [`SettingsScreen::sections`]
+    /// is the subset the sidebar lists now: the Update page comes and
+    /// goes with the startup check's verdict.
     pub const ALL: &'static [SettingsSection] = &[
         SettingsSection::Providers,
         SettingsSection::Models,
@@ -198,8 +203,6 @@ pub enum SettingsAction {
     /// Enter on an instance row: `decide` asks it by default from the
     /// next call on.
     SetDefaultDecision,
-    /// Enter on the Update page's check row: the manifest fetch starts.
-    CheckForUpdates,
     /// Enter on the Update page's install row: the install script
     /// runs. The page only raises the action when a check found a
     /// newer release and no install is already out.
@@ -216,6 +219,11 @@ pub struct UpdatePage {
     pub check: UpdateCheck,
     /// The install run's state.
     pub install: UpdateInstall,
+    /// `/update`'s promise: the check it started turns into the install
+    /// when it finds a newer release. False for the startup check, which
+    /// only reports, and for the page's own row, which waits for the
+    /// answer.
+    pub install_after_check: bool,
 }
 
 impl UpdatePage {
@@ -228,6 +236,14 @@ impl UpdatePage {
             UpdateCheck::Done(Ok(latest))
                 if crate::update::is_newer(latest, crate::update::current_version())
         )
+    }
+
+    /// Whether the transcript banner should announce the release: an
+    /// update is available and nobody installed it yet. A finished
+    /// install keeps asking for a restart of a version already on disk
+    /// otherwise.
+    pub fn update_pending(&self) -> bool {
+        self.update_available() && !matches!(self.install, UpdateInstall::Done(Ok(_)))
     }
 }
 
@@ -554,11 +570,39 @@ impl SettingsScreen {
 
     /// Lands on `section`: the page's row selection restarts at the
     /// top, and the Models page puts its cursor on the model in use, so
-    /// Enter on an untouched page re-picks instead of jumping.
+    /// Enter on an untouched page re-picks instead of jumping. A
+    /// section the sidebar does not list now lands on the first one
+    /// that it does: the Update page sent to when there is nothing to
+    /// install never shows.
     pub fn focus_section(&mut self, section: SettingsSection) {
-        self.section = section;
+        self.section = if self.lists(section) {
+            section
+        } else {
+            SettingsSection::ALL[0]
+        };
         self.row = 0;
         self.seed_model_cursor();
+    }
+
+    /// The sidebar's sections, in order: every section but the Update
+    /// page when there is nothing to install. That page's one act
+    /// installs a newer release, and the startup check already knows
+    /// whether one exists, so a run with nothing to do never offers it.
+    /// The page stays while it is open, so a finished install's verdict
+    /// remains readable after the install retires the release.
+    pub fn sections(&self) -> Vec<SettingsSection> {
+        SettingsSection::ALL
+            .iter()
+            .copied()
+            .filter(|section| self.lists(*section))
+            .collect()
+    }
+
+    /// Whether the sidebar lists `section`.
+    fn lists(&self, section: SettingsSection) -> bool {
+        section != SettingsSection::Update
+            || self.update.update_pending()
+            || self.section == SettingsSection::Update
     }
 
     /// Where the model the profile runs sits in the picker's rows.
@@ -614,13 +658,14 @@ impl SettingsScreen {
 
     /// Steps the sidebar one section, wrapping at the ends.
     fn step_section(&mut self, forward: bool) {
-        let count = SettingsSection::ALL.len() as isize;
-        let current = SettingsSection::ALL
+        let sections = self.sections();
+        let count = sections.len() as isize;
+        let current = sections
             .iter()
             .position(|section| *section == self.section)
             .unwrap_or(0) as isize;
         let step = if forward { 1 } else { -1 };
-        let section = SettingsSection::ALL[(current + step).rem_euclid(count) as usize];
+        let section = sections[(current + step).rem_euclid(count) as usize];
         self.focus_section(section);
     }
 
@@ -834,7 +879,7 @@ impl SettingsScreen {
             // row; the MCP rows do not, hence its `+ 1`.
             SettingsSection::WebSearch => self.websearch.len(),
             SettingsSection::Decision => self.decision.len(),
-            SettingsSection::Update => 2,
+            SettingsSection::Update => 1,
             _ => 0,
         }
     }
@@ -902,11 +947,13 @@ impl SettingsScreen {
             // The Models page has one row per catalog entry, and Enter
             // picks the one under the cursor.
             SettingsSection::Models => SettingsAction::ChooseModel,
-            SettingsSection::Update => match self.row {
-                0 => SettingsAction::CheckForUpdates,
-                _ if self.update.update_available() => SettingsAction::InstallUpdate,
-                _ => SettingsAction::None,
-            },
+            SettingsSection::Update => {
+                if self.update.update_available() {
+                    SettingsAction::InstallUpdate
+                } else {
+                    SettingsAction::None
+                }
+            }
             _ => SettingsAction::None,
         }
     }
