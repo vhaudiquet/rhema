@@ -5824,7 +5824,19 @@ fn d_removes_a_profile_the_session_is_not_on() {
     if let Screen::Settings(settings) = &mut h.app.screen {
         settings.row = 1;
     }
+    // d arms the confirm; the profile still holds the row.
     h.app.on_key(key(KeyCode::Char('d')));
+    {
+        let Screen::Settings(settings) = &h.app.screen else {
+            panic!("expected the settings screen");
+        };
+        assert_eq!(settings.profile_confirm.as_deref(), Some("work"));
+    }
+    assert!(
+        h.app.config.profiles.contains_key("work"),
+        "d alone removes nothing"
+    );
+    h.app.on_key(key(KeyCode::Char('y')));
     assert!(!h.app.config.profiles.contains_key("work"));
     let stored = h.store.load().unwrap();
     assert!(stored.profiles.contains_key("personal"));
@@ -5855,6 +5867,7 @@ fn the_active_profile_refuses_removal() {
     // Row 0 is personal, the profile this session runs on. Its
     // removal is also what keeps the registry from emptying.
     h.app.on_key(key(KeyCode::Char('d')));
+    h.app.on_key(key(KeyCode::Char('y')));
     assert!(
         h.app.config.profiles.contains_key("personal"),
         "the session's profile stays"

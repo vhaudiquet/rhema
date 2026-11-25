@@ -2698,10 +2698,29 @@ fn the_profiles_page_moves_over_the_add_row_and_acts() {
         "the add row removes nothing"
     );
     screen.handle_key(key(KeyCode::Up));
+    // d arms the removal confirm; n leaves the row, y carries the
+    // removal out.
     assert_eq!(
         screen.handle_key(key(KeyCode::Char('d'))),
+        SettingsAction::None,
+        "d only arms the confirm"
+    );
+    assert_eq!(screen.profile_confirm.as_deref(), Some("work"));
+    assert_eq!(screen.selected_profile(), None, "the confirm blocks");
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char('n'))),
+        SettingsAction::None
+    );
+    assert_eq!(screen.profile_confirm, None, "n left the row alone");
+    screen.handle_key(key(KeyCode::Char('d')));
+    screen.handle_key(key(KeyCode::Esc));
+    assert_eq!(screen.profile_confirm, None, "esc left the row alone");
+    screen.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(
+        screen.handle_key(key(KeyCode::Char('y'))),
         SettingsAction::RemoveProfile
     );
+    assert_eq!(screen.profile_confirm, None, "the confirm spent itself");
     assert_eq!(
         screen.handle_key(key(KeyCode::Char('c'))),
         SettingsAction::CycleProfileColor

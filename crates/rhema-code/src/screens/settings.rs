@@ -470,6 +470,9 @@ pub struct SettingsScreen {
     pub profiles: Vec<ProfileRow>,
     /// The add-profile dialog, when it is up.
     pub add_profile: Option<AddProfileDialog>,
+    /// The profile name awaiting its removal confirmation, the `d`
+    /// key arms it, `y` confirms, `n` and esc leave the row alone.
+    pub profile_confirm: Option<String>,
     // The Skills page's snapshot.
     /// The discovered skills, global and workspace merged.
     pub skills: Vec<SkillRow>,
@@ -551,6 +554,7 @@ impl SettingsScreen {
             instance_confirm: None,
             profiles: Vec::new(),
             add_profile: None,
+            profile_confirm: None,
             skills: Vec::new(),
             skills_global_dir: None,
             skills_workspace_dir: String::new(),
@@ -773,7 +777,10 @@ impl SettingsScreen {
     /// The highlighted profile row; `None` on the add row, with the
     /// dialog up, or anywhere but the Profiles page.
     pub fn selected_profile(&self) -> Option<&str> {
-        if self.section != SettingsSection::Profiles || self.add_profile.is_some() {
+        if self.section != SettingsSection::Profiles
+            || self.add_profile.is_some()
+            || self.profile_confirm.is_some()
+        {
             return None;
         }
         self.profiles.get(self.row).map(|row| row.name.as_str())
@@ -961,8 +968,8 @@ impl SettingsScreen {
     /// Handles one keypress. The left/right arrows and tabs move the
     /// sidebar, the vertical arrows move the page's rows, esc or `q`
     /// backs out (dialog first, then the screen), enter acts on the
-    /// selected row, `d` removes: a profile at once, an instance or an
-    /// MCP server after its confirm, `c` cycles a profile's name
+    /// selected row, `d` removes: a profile, an instance, or an MCP
+    /// server after its confirm, `c` cycles a profile's name
     /// color (and colors the Appearance page),
     /// `e` edits the selected subagent, space toggles a skill or
     /// subagent or mutes an MCP server, and the Appearance page carries
@@ -1113,6 +1120,21 @@ impl SettingsScreen {
                 _ => SettingsAction::None,
             };
         }
+        if self.profile_confirm.is_some() {
+            // The removal confirm takes every key while it is up: esc
+            // must stay here, not back out of the screen behind it.
+            return match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    self.profile_confirm = None;
+                    SettingsAction::RemoveProfile
+                }
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
+                    self.profile_confirm = None;
+                    SettingsAction::None
+                }
+                _ => SettingsAction::None,
+            };
+        }
         // The Models page's picker answers Ctrl-A with its show-all
         // toggle; every other control key stays dead here.
         if key.modifiers.contains(KeyModifiers::CONTROL)
@@ -1166,7 +1188,12 @@ impl SettingsScreen {
                 SettingsAction::None
             }
             KeyCode::Char('d') if self.selected_profile().is_some() => {
-                SettingsAction::RemoveProfile
+                // Removal asks first: the confirm modal arms here and
+                // the y that answers it carries the removal out.
+                if let Some(name) = self.selected_profile() {
+                    self.profile_confirm = Some(name.to_owned());
+                }
+                SettingsAction::None
             }
             KeyCode::Char('d') if self.selected_sandbox_instance().is_some() => {
                 SettingsAction::RemoveSandboxInstance

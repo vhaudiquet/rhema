@@ -311,6 +311,32 @@ fn the_websearch_confirm_names_the_provider_and_its_answer() {
     assert!(text.contains("y/n"), "{text}");
 }
 
+/// The profile's removal confirm: the same modal, naming the profile.
+#[test]
+fn the_profile_confirm_names_the_profile_and_its_answer() {
+    let mut settings = crate::screens::SettingsScreen::new();
+    settings.section = crate::screens::SettingsSection::Profiles;
+    settings.profile_confirm = Some("work".to_owned());
+    let mut hits = Vec::new();
+    let mut terminal = Terminal::new(TestBackend::new(80, 40)).unwrap();
+    terminal
+        .draw(|frame| render_settings(frame, &settings, &DARK, &crate::icons::UNICODE, &mut hits))
+        .unwrap();
+    let text: String = (0..40)
+        .map(|y| {
+            (0..80)
+                .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect();
+    assert!(text.contains(" Confirmation "), "{text}");
+    assert!(
+        text.contains("Are you sure you want to delete profile work?"),
+        "{text}"
+    );
+    assert!(text.contains("y/n"), "{text}");
+}
+
 /// The Update page: this build's row, the channel's latest with its
 /// verdict, and the one install row, dim until a check earned it. The
 /// check row is gone; the startup check, `/update` and `rhema update`

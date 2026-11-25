@@ -354,11 +354,11 @@ pub(crate) fn render_mcp_confirm(frame: &mut Frame, name: &str, theme: &Theme) {
     );
 }
 
-/// The provider removal confirm: one small box asking about the one
-/// login, in the quit confirm's shape, `y` answers, `n` and esc leave
-/// the row alone.
-pub(crate) fn render_instance_confirm(frame: &mut Frame, name: &str, theme: &Theme) {
-    let question = format!("Are you sure you want to delete provider {name}?");
+/// The removal confirm: one small box asking about the one named row,
+/// in the quit confirm's shape, `y` answers, `n` and esc leave the row
+/// alone. `what` names the row kind, "provider" or "profile".
+pub(crate) fn render_deletion_confirm(frame: &mut Frame, what: &str, name: &str, theme: &Theme) {
+    let question = format!("Are you sure you want to delete {what} {name}?");
     let width = (question.chars().count() + 4).max(34) as u16;
     let area = centered(width, 4, frame.area());
     frame.render_widget(Clear, area);

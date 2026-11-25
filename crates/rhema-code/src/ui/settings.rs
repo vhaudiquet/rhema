@@ -4,7 +4,7 @@
 use super::dialogs::{
     render_add_decision_dialog, render_add_dialog, render_add_mcp_dialog,
     render_add_profile_dialog, render_add_sandbox_dialog, render_add_websearch_dialog,
-    render_instance_confirm, render_mcp_confirm,
+    render_deletion_confirm, render_mcp_confirm,
 };
 use super::*;
 
@@ -202,7 +202,8 @@ pub(crate) fn render_settings(
         || settings.mcp_confirm.is_some()
         || settings.websearch_confirm.is_some()
         || settings.decision_confirm.is_some()
-        || settings.instance_confirm.is_some();
+        || settings.instance_confirm.is_some()
+        || settings.profile_confirm.is_some();
     if modal {
         super::chrome::dim_backdrop(frame.buffer_mut(), theme);
     }
@@ -228,13 +229,16 @@ pub(crate) fn render_settings(
         render_mcp_confirm(frame, name, theme);
     }
     if let Some(name) = &settings.websearch_confirm {
-        render_instance_confirm(frame, name, theme);
+        render_deletion_confirm(frame, "provider", name, theme);
     }
     if let Some(name) = &settings.decision_confirm {
-        render_instance_confirm(frame, name, theme);
+        render_deletion_confirm(frame, "provider", name, theme);
     }
     if let Some(name) = &settings.instance_confirm {
-        render_instance_confirm(frame, name, theme);
+        render_deletion_confirm(frame, "provider", name, theme);
+    }
+    if let Some(name) = &settings.profile_confirm {
+        render_deletion_confirm(frame, "profile", name, theme);
     }
 }
 
