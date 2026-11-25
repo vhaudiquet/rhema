@@ -1025,6 +1025,7 @@ fn agent_config(
 /// the same truth; a sandboxed session answers empty.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn session_agent_config(
+    mcp: &crate::mcp_wire::Registry,
     options: &RunOptions,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
     model: Option<String>,
@@ -1137,7 +1138,7 @@ pub(crate) fn session_agent_config(
     // whose bash runs elsewhere never sees the section, because its
     // executor could not reach the socket or the provisioned env.
     if let Some(entry) =
-        crate::mcp_wire::wire_for_session(session_key, profile, disabled_mcp, sandboxed, bash_env)
+        mcp.wire_for_session(session_key, profile, disabled_mcp, sandboxed, bash_env)
     {
         config.shell_env.extend(entry.shell_env().clone());
         config.mcp_servers = entry.lines().to_vec();

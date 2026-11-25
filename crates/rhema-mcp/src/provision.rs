@@ -35,7 +35,8 @@ const RESERVED: &str = "mcp";
 /// touching both, this is the single source for both sides.
 /// The env var non-interactive bash reads its init file from.
 pub const VAR_BASH_ENV: &str = "BASH_ENV";
-/// The env var holding the session-dir bin link the stubs exec.
+/// The env var holding the binary the stubs exec: the running
+/// binary's path, the same shape the other wirings use.
 pub const VAR_BIN: &str = "RHEMA_MCP_BIN";
 /// The env var holding the bridge socket path.
 pub const VAR_BRIDGE: &str = "RHEMA_MCP_BRIDGE";
@@ -67,7 +68,7 @@ impl Drop for Provision {
     }
 }
 
-/// Provisions one agent session: init file, bin link, env map.
+/// Provisions one agent session: init file, env map.
 ///
 /// `bridge_socket` and `token` are the bridge's socket path and the
 /// per-agent token the wire layer generated; `session_tmp` is the
@@ -77,8 +78,8 @@ impl Drop for Provision {
 ///
 /// # Errors
 ///
-/// Filesystem failures: the per-agent dir cannot be created, the
-/// init file cannot be written, the bin cannot be linked or copied.
+/// Filesystem failures: the per-agent dir cannot be created or the
+/// init file cannot be written.
 pub fn provision(
     config: &McpConfig,
     bridge_socket: &Path,
@@ -99,8 +100,8 @@ pub fn provision(
 }
 
 /// [`provision`] over an explicit bin, the process-level test seam:
-/// production always execs `current_exe()` (the rhema binary), while
-/// a test execs the crate's own CLI target.
+/// production names `current_exe()` (the rhema binary) in the env,
+/// while a test names the crate's own CLI target.
 ///
 /// # Errors
 ///
@@ -120,17 +121,10 @@ pub fn provision_with_bin(
     // visible to the agent's commands and the init file is
     // infrastructure.
     let dir = rhema_bash::init::temp_dir(&format!("rhema-mcp-{agent_id}-{}", random_tag()))?;
-
-    // The bin: a hardlink into the per-agent dir, so a `cargo
-    // install` mid-session (which renames over the installed file)
-    // cannot pull the inode out from under running commands. A copy
-    // when the temp dir sits on another filesystem.
-    let bin = dir.join(bin_source.file_name().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the bin has no file name")
-    })?);
-    if std::fs::hard_link(bin_source, &bin).is_err() {
-        std::fs::copy(bin_source, &bin)?;
-    }
+    let mut cleanup = Cleanup {
+        dir: dir.clone(),
+        armed: true,
+    };
 
     // One stub per server, in config order; name conflicts with the
     // reserved `mcp` are skipped (the entry stays reachable via
@@ -162,7 +156,15 @@ pub fn provision_with_bin(
         rhema_bash::init::write(&dir, "rhema-mcp", bash_env, &format!("{meta}{stubs}"))?;
 
     let mut env = rhema_bash::init::env_with(&init_path);
-    env.insert(VAR_BIN.to_owned(), bin.to_string_lossy().into_owned());
+    // The stubs exec the running binary in place. The link formerly
+    // placed here pinned the inode across a mid-session `cargo
+    // install`, but it put a 400MB copy (or a link keeping the old
+    // inode alive) in every session dir; the other four wirings
+    // already point at `current_exe()` and accept the upgrade.
+    env.insert(
+        VAR_BIN.to_owned(),
+        bin_source.to_string_lossy().into_owned(),
+    );
     env.insert(
         VAR_BRIDGE.to_owned(),
         bridge_socket.to_string_lossy().into_owned(),
@@ -173,12 +175,28 @@ pub fn provision_with_bin(
         session_tmp.to_string_lossy().into_owned(),
     );
 
+    cleanup.armed = false;
     Ok(Provision {
         init_path,
         env,
         skipped,
         dir,
     })
+}
+
+/// Removes a half-provisioned dir when a step after its creation
+/// fails.
+struct Cleanup {
+    dir: PathBuf,
+    armed: bool,
+}
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
 }
 
 /// A short uniqueness tag for the per-agent dir name: time nanos
@@ -268,7 +286,7 @@ mod tests {
         let bin = provision.env.get(VAR_BIN).expect("bin var");
         assert!(
             Path::new(bin.as_str()).is_file(),
-            "the bin link exists: {bin}"
+            "the binary the env names exists: {bin}"
         );
         assert_eq!(
             provision.env.get(VAR_BRIDGE).map(String::as_str),
@@ -337,7 +355,7 @@ mod tests {
 
     #[test]
     fn the_per_agent_dir_is_private_and_disappears_on_drop() {
-        let (path, guard) = {
+        let (path, dir, guard) = {
             let provision = provision_two();
             let path = provision.init_path.clone();
             let dir = provision.dir.clone();
@@ -351,14 +369,15 @@ mod tests {
                 let mode = std::fs::metadata(&dir).expect("dir").permissions().mode();
                 assert_eq!(mode & 0o777, 0o700, "the dir is 0700, got {mode:o}");
             }
-            (dir, provision)
+            (path, dir, provision)
         };
         drop(guard);
         assert!(!path.exists(), "the init file went with the dir");
+        assert!(!dir.exists(), "the whole dir went with the guard");
     }
 
     #[test]
-    fn the_bin_is_hardlinked_into_the_dir_when_possible() {
+    fn the_stubs_exec_the_running_binary_in_place() {
         let provision = provision_two();
         let exe = std::env::current_exe().expect("current exe");
         let bin = provision
@@ -366,19 +385,19 @@ mod tests {
             .get(VAR_BIN)
             .map(PathBuf::from)
             .expect("bin var");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            let exe_ino = std::fs::metadata(&exe).expect("exe").ino();
-            let bin_ino = std::fs::metadata(&bin).expect("bin").ino();
-            // Same filesystem: the link is a link, not a copy. On a
-            // cross-device temp dir the copy branch runs and the
-            // inodes differ, which is also fine, the test asserts
-            // only what the layout guarantees.
-            if exe_ino == bin_ino {
-                // hardlink confirmed
-            }
-        }
-        assert!(bin.is_file());
+        assert_eq!(
+            bin, exe,
+            "the env names the running binary, it does not copy it"
+        );
+        let placed: Vec<_> = std::fs::read_dir(&provision.dir)
+            .expect("dir")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            placed,
+            vec![std::ffi::OsString::from("init.bash")],
+            "the provision dir holds the init file and nothing else"
+        );
     }
 }

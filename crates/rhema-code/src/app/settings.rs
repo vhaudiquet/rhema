@@ -278,7 +278,7 @@ impl App {
         // drop it and rebuild, and the very next turn's prompt lists
         // the new server. Same shape as the mute toggle's rebuild,
         // the conversation rides over.
-        crate::mcp_wire::rewire(self.mcp_session_key().as_str());
+        self.mcp.rewire(self.mcp_session_key().as_str());
         let _ = self.rebuild_live_agent(false);
         self.transcript.push_notice(&format!(
             "added the {name} server to this profile, the agent rebuilt with it"
@@ -320,7 +320,7 @@ impl App {
         self.refresh_mcp_page();
         // The surface shrank: drop the wiring so the rebuilt agent
         // stops advertising the removed server.
-        crate::mcp_wire::rewire(self.mcp_session_key().as_str());
+        self.mcp.rewire(self.mcp_session_key().as_str());
         let _ = self.rebuild_live_agent(false);
         self.transcript
             .push_notice(&format!("removed the {name} server"));

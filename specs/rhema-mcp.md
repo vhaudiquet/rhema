@@ -156,22 +156,31 @@ The env map, handed to `HostAgentConfig::shell_env`
 | var | value |
 |---|---|
 | `BASH_ENV` | the init file's absolute path |
-| `RHEMA_MCP_BIN` | **the binary copied (hardlinked) into the session dir**, not `current_exe()` (§12) |
+| `RHEMA_MCP_BIN` | **the running binary's path**, named in place like the other four wirings (§12) |
 | `RHEMA_MCP_BRIDGE` | the socket path |
 | `RHEMA_MCP_TOKEN` | a random hex string, per agent |
 | `RHEMA_MCP_TMP` | the session temp dir; `media/` lives under it (§5) |
 
-`RHEMA_MCP_BIN` points at a hardlink into the session dir (copy when the
-temp dir sits on another filesystem). A `cargo install` mid-session
-renames over the installed file; the link's inode survives, so neither
-failure mode review found (exec fails 126/127, or the new binary runs
-against the old bridge) can occur. `current_exe()` is only the link
-source.
+`RHEMA_MCP_BIN` is the path of the binary the frontend is running,
+the same shape `jobs`, `vision`, `search` and `decision` already use. A
+`cargo install` mid-session renames over the path, so a later command
+execs the new binary: it speaks the same CLI and bridge protocol, the
+same accepted exposure the other wirings carry, and a restart is the
+remedy if a future version breaks it. Copying the binary into the
+session dir bought a pinned inode at 400MB per session, and every
+orphaned link or copy kept the whole binary alive after a rebuild; the
+dir now holds a few KB of init file.
 
 Temp dir deletion on drop is best-effort: the outer bash of an in-flight
 command has already sourced the file, but a nested bash spawned after
 the drop reads a dead path and exits 127, same degradation class as the
 stale-bridge case. Accepted and documented.
+
+The frontend owns one MCP registry per app, and dropping the app drops
+the registry, its entries, and their session and provision dirs. There
+is no process static and no exit hook. A `SIGKILL`ed run leaves only
+its init file and socket behind (a few KB), which the system's temp
+cleanup reaps on its own schedule.
 
 Known limits, stated rather than fixed: children that exec instead of
 spawn bash (`xargs`, `find -exec`, `sudo` env stripping) cannot call
@@ -566,7 +575,7 @@ crates/rhema-mcp/
     bridge.rs       # axum over the Unix socket; /servers /tools
                     # /catalog /schema /call; token; 1 MiB cap
     provision.rs    # init file, function generation (via mcp-to-cli's
-                    # cli_safe), binary hardlink, env map, drop guard
+                    # cli_safe), binary path, env map, drop guard
     cli.rs          # __server dispatcher + the mcp meta verbs
     wire.rs         # the HostAgentConfig helper
   tests/            # fake stdio server by re-exec (§9), end-to-end
@@ -620,8 +629,8 @@ cheap insurance beside the kernel's check.
 10. **HTTP MUSTs**: the protocol-version header rides the second
     request; a 202 notification POST reads as success; a 404 with a
     session id triggers exactly one re-initialization.
-11. **Provision**: the env map is complete; the hardlinked (or copied)
-    binary executes; the drop guard removes the dir best-effort.
+11. **Provision**: the env map is complete; the named binary
+    executes; the drop guard removes the dir best-effort.
 12. **End-to-end over the mock provider** (wire tests): the model calls
     `bash` with an `mcp` or generated command, the result lands in
     history as any tool result, and the prompt section matches the
@@ -709,10 +718,12 @@ the README note rides the same commit. Both frontends set
   Guarded source order per review; every fact pinned as a test.
 - **Functions, never PATH executables.** Nothing to distribute, one
   temp dir to clean; the xargs limit is accepted and documented.
-- **Hardlink-or-copy the binary into the session dir**, over
-  referencing `current_exe()`: a mid-session `cargo install` renames
-  the file out from under the env var (exec 126/127) or slides a new
-  binary against the old bridge; a link to the old inode survives both.
+- **Reference the running binary**, as the other four wirings do: a
+  mid-session `cargo install` renames the file, so a later command
+  execs the new binary against the old bridge. That is an accepted
+  degradation, the same one `jobs`, `vision`, `search` and `decision`
+  carry; the copy it replaced put 400MB in every session dir and was
+  the temp-dir leak's payload.
 - **Manager in the agent process; bridge over a Unix socket + token.**
   Stateful servers must outlive bash commands; UDS beats loopback TCP
   locally on every axis that matters (no port to pick, kernel-enforced

@@ -14,7 +14,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write as _;
-use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -324,24 +323,16 @@ async fn the_real_binary_walks_the_discovery_story() -> Result<(), String> {
         bin,
     )
     .map_err(|e| e.to_string())?;
-    // The stubs' `$RHEMA_MCP_BIN`: provision moves the exec target
-    // into its per-agent dir, a hardlink of the rhema binary on one
-    // filesystem, a copy across a filesystem boundary, so the value
-    // is that path, not the source. Link identity pins it to the real
-    // binary on one filesystem; the preserved file name covers the
-    // copy (the test binary and the standalone CLI bin are named
-    // differently).
+    // The stubs' `$RHEMA_MCP_BIN`: provision names the running binary
+    // in place, the same shape the other wirings use, so the value is
+    // the source path and no copy lands in the provision dir.
     let wired = wiring
         .shell_env
         .get("RHEMA_MCP_BIN")
         .ok_or("the env map has no RHEMA_MCP_BIN")?;
-    let wired = Path::new(wired.as_str());
-    let source = std::fs::metadata(bin).map_err(|e| e.to_string())?;
-    let placed = std::fs::metadata(wired).map_err(|e| e.to_string())?;
-    let same_file = source.dev() == placed.dev() && source.ino() == placed.ino();
-    if !(same_file || wired.file_name() == bin.file_name()) {
+    if Path::new(wired.as_str()) != bin {
         return Err(format!(
-            "the stubs must exec the real binary, wired to {wired:?}"
+            "the stubs must exec the real binary, wired to {wired:?} not {bin:?}"
         ));
     }
 

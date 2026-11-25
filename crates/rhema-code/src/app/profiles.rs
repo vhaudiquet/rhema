@@ -247,6 +247,7 @@ impl App {
         // credential, not a copy per seam.
         let provider = backend.provider();
         let (agent_config, subagents, missing_tools) = session_agent_config(
+            &self.mcp,
             &self.options,
             self.sandboxed.as_ref(),
             effective.model.clone(),

@@ -276,7 +276,10 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         .or(bash_env);
     // MCP: the same local-only gate the TUI applies, a sandboxed
     // executor cannot reach the socket, so it advertises nothing.
-    if let Some(entry) = crate::mcp_wire::wire_for_session(
+    // The registry outlives the turn: the session dir behind the env
+    // must live as long as the commands it provisioned.
+    let mcp = crate::mcp_wire::Registry::new();
+    if let Some(entry) = mcp.wire_for_session(
         &profile,
         &effective,
         &config.disabled_mcp_servers,

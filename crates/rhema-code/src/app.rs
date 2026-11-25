@@ -73,6 +73,9 @@ pub struct App {
     /// transcript showed every one as a sent user line at submit time;
     /// this queue is the promise they reach the model in that order.
     pending_prompts: std::collections::VecDeque<String>,
+    /// The MCP wirings this process owns. Dropping the app drops the
+    /// entries, which removes their session and provision dirs.
+    pub(crate) mcp: crate::mcp_wire::Registry,
     /// The provider behind the backend.
     pub provider: Option<Arc<dyn ModelProvider>>,
     /// The startup flags.
@@ -546,6 +549,9 @@ impl App {
             }
         }
         let transcript = Transcript::from_history(&session.history);
+        // One registry per app: its entries own the MCP session dirs,
+        // so the app's own drop removes them.
+        let mcp = crate::mcp_wire::Registry::new();
         let screen = if setup.onboard {
             let workspace = crate::args::canonical(&setup.options.workspace);
             let agents = rhema_home.as_ref().map(|home| home.agents_skills());
@@ -578,6 +584,7 @@ impl App {
                         .map(Backend::provider)
                         .ok_or(AgentError::MissingProvider)?;
                     let (agent_config, subagents, missing_tools) = session_agent_config(
+                        &mcp,
                         &setup.options,
                         setup.sandboxed.as_ref(),
                         effective.model.clone(),
@@ -615,6 +622,7 @@ impl App {
         };
         let config_disabled_mcp = setup.config.disabled_mcp_servers.clone();
         let mut app = Self {
+            mcp,
             secrets: setup.secrets,
             // Read before `options` moves into the struct.
             theme: setup.options.resolved_theme(),

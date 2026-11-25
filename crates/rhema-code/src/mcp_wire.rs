@@ -1,6 +1,6 @@
 //! MCP wiring for the local frontends: one bridge, one provisioned
-//! env, one set of prompt lines, per session key, held for the
-//! process.
+//! env, one set of prompt lines, per session key, held in the
+//! registry its owner hands it.
 //!
 //! The gate is the spec's §10 rule: a sandboxed session wires
 //! nothing, so nothing advertises what cannot run (`RunRequest`
@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 use rhema_config::Profile;
 use rhema_config::mcp::McpConfig;
@@ -44,11 +44,26 @@ impl Entry {
 
 /// The registry: one entry per session key. A key is the profile's
 /// identity, switching profiles rewires; staying on one reuses the
-/// bridge and its already-spawned servers.
-static WIRED: OnceLock<Mutex<BTreeMap<String, Arc<Entry>>>> = OnceLock::new();
+/// bridge and its already-spawned servers. The owner holds it for as
+/// long as its sessions run, so dropping the owner drops every entry
+/// and removes their dirs, no static and no exit hook.
+pub(crate) struct Registry {
+    entries: Mutex<BTreeMap<String, Arc<Entry>>>,
+}
 
-fn registry() -> &'static Mutex<BTreeMap<String, Arc<Entry>>> {
-    WIRED.get_or_init(|| Mutex::new(BTreeMap::new()))
+impl Registry {
+    /// An empty registry.
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: Mutex::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The merged config for one session: the global file plus the
@@ -74,87 +89,90 @@ pub(crate) fn merged_config(profile: &Profile) -> McpConfig {
     }
 }
 
-/// Drops one session's wiring: the bridge stops, its spawned servers
-/// die, the next `wire_for_session` on this key builds fresh. The
-/// settings screen calls this when a server is ADDED or REMOVED,
-/// the tool surface changed, so the cached wiring is stale by
-/// definition. (The mute toggle deliberately does NOT rewire: its
-/// prompt-side filter hides the row without killing every other
-/// server's state, which is the whole point of the registry cache.)
-pub(crate) fn rewire(session_key: &str) {
-    if let Ok(mut reg) = registry().lock() {
-        // Removing drops the Arc<Entry>; if the old agent held no
-        // other reference the bridge dies here, before the rebuild's
-        // wire_for_session spawns a fresh one. An in-flight turn's
-        // calls fail against the dead socket and the model retries,
-        // the same shape as any server death.
-        reg.remove(session_key);
+impl Registry {
+    /// Drops one session's wiring: the bridge stops, its spawned servers
+    /// die, the next `wire_for_session` on this key builds fresh. The
+    /// settings screen calls this when a server is ADDED or REMOVED,
+    /// the tool surface changed, so the cached wiring is stale by
+    /// definition. (The mute toggle deliberately does NOT rewire: its
+    /// prompt-side filter hides the row without killing every other
+    /// server's state, which is the whole point of the registry cache.)
+    pub(crate) fn rewire(&self, session_key: &str) {
+        if let Ok(mut reg) = self.entries.lock() {
+            // Removing drops the Arc<Entry>; if the old agent held no
+            // other reference the bridge dies here, before the
+            // rebuild's wire_for_session spawns a fresh one. An
+            // in-flight turn's calls fail against the dead socket and
+            // the model retries, the same shape as any server death.
+            reg.remove(session_key);
+        }
     }
-}
 
-/// The wiring for one session, reusing an existing one on the same
-/// key. `None` when nothing is configured, everything is muted, or
-/// the session is sandboxed, all three mean "advertise nothing".
-pub(crate) fn wire_for_session(
-    session_key: &str,
-    profile: &Profile,
-    disabled: &BTreeSet<String>,
-    sandboxed: Option<&crate::sandbox::Sandboxed>,
-    bash_env: Option<std::ffi::OsString>,
-) -> Option<Arc<Entry>> {
-    if sandboxed.is_some() {
-        return None;
-    }
-    let mut reg = registry().lock().expect("mcp registry lock");
-    if let Some(entry) = reg.get(session_key) {
-        return Some(entry.clone());
-    }
-    let merged = merged_config(profile);
-    if merged.servers.is_empty() {
-        return None;
-    }
-    for notice in &merged.notices {
-        eprintln!("· {notice}");
-    }
-    let all_disabled = disabled;
-    if all_disabled.contains(&String::from("*")) {
-        return None;
-    }
-    // The session dir owns the socket's directory; the init file
-    // lives in its own 0700 provision dir inside the system temp dir,
-    // not here.
-    // A private, random session dir: `tempfile` creates it `0700`
-    // atomically, so another user cannot pre-create a symlink at a
-    // predictable path under the system temp dir. The bridge and the
-    // generated CLI share it through `RHEMA_MCP_TMP`, not through a
-    // fixed name.
-    let session_dir = tempfile::Builder::new()
-        .prefix("rhema-mcp-session-")
-        .tempdir()
+    /// The wiring for one session, reusing an existing one on the same
+    /// key. `None` when nothing is configured, everything is muted, or
+    /// the session is sandboxed, all three mean "advertise nothing".
+    pub(crate) fn wire_for_session(
+        &self,
+        session_key: &str,
+        profile: &Profile,
+        disabled: &BTreeSet<String>,
+        sandboxed: Option<&crate::sandbox::Sandboxed>,
+        bash_env: Option<std::ffi::OsString>,
+    ) -> Option<Arc<Entry>> {
+        if sandboxed.is_some() {
+            return None;
+        }
+        let mut reg = self.entries.lock().expect("mcp registry lock");
+        if let Some(entry) = reg.get(session_key) {
+            return Some(entry.clone());
+        }
+        let merged = merged_config(profile);
+        if merged.servers.is_empty() {
+            return None;
+        }
+        for notice in &merged.notices {
+            eprintln!("· {notice}");
+        }
+        let all_disabled = disabled;
+        if all_disabled.contains(&String::from("*")) {
+            return None;
+        }
+        // The session dir owns the socket's directory; the init file
+        // lives in its own 0700 provision dir inside the system temp dir,
+        // not here.
+        // A private, random session dir: `tempfile` creates it `0700`
+        // atomically, so another user cannot pre-create a symlink at a
+        // predictable path under the system temp dir. The bridge and the
+        // generated CLI share it through `RHEMA_MCP_TMP`, not through a
+        // fixed name.
+        let session_dir = tempfile::Builder::new()
+            .prefix("rhema-mcp-session-")
+            .tempdir()
+            .ok()?;
+        let wiring = rhema_mcp::wire(
+            &merged,
+            all_disabled,
+            session_dir.path(),
+            session_key,
+            bash_env,
+        )
         .ok()?;
-    let wiring = rhema_mcp::wire(
-        &merged,
-        all_disabled,
-        session_dir.path(),
-        session_key,
-        bash_env,
-    )
-    .ok()?;
-    for notice in &wiring.notices {
-        eprintln!("· {notice}");
+        for notice in &wiring.notices {
+            eprintln!("· {notice}");
+        }
+        if wiring.lines.is_empty() {
+            // Everything configured is muted: no wiring to keep. Dropping
+            // is the teardown, the Wiring's own Drop stops the bridge.
+            drop(wiring);
+            return None;
+        }
+        let entry = Arc::new(Entry {
+            wiring,
+            session_dir,
+        });
+        reg.insert(session_key.to_owned(), entry.clone());
+        Some(entry)
     }
-    if wiring.lines.is_empty() {
-        // Everything configured is muted: no wiring to keep. Dropping
-        // is the teardown, the Wiring's own Drop stops the bridge.
-        drop(wiring);
-        return None;
-    }
-    let entry = Arc::new(Entry {
-        wiring,
-        session_dir,
-    });
-    reg.insert(session_key.to_owned(), entry.clone());
-    Some(entry)
 }
 
 #[cfg(test)]
@@ -186,23 +204,27 @@ mod tests {
 
     #[test]
     fn rewire_replaces_the_wiring_for_its_key() {
+        let reg = Registry::new();
         let mut profile = Profile::default();
         profile
             .mcp_servers
             .insert("counter".to_owned(), entry("a counter"));
         let key = "rewire-key";
         let disabled = std::collections::BTreeSet::new();
-        let first = wire_for_session(key, &profile, &disabled, None, None).expect("wires");
-        let session = first.shell_env().get("RHEMA_MCP_TMP").cloned();
+        let first = reg
+            .wire_for_session(key, &profile, &disabled, None, None)
+            .expect("wires");
         let token_one = first
             .shell_env()
             .get("RHEMA_MCP_TOKEN")
             .cloned()
             .expect("token");
 
-        rewire(key);
+        reg.rewire(key);
 
-        let second = wire_for_session(key, &profile, &disabled, None, None).expect("rewires");
+        let second = reg
+            .wire_for_session(key, &profile, &disabled, None, None)
+            .expect("rewires");
         let token_two = second
             .shell_env()
             .get("RHEMA_MCP_TOKEN")
@@ -213,15 +235,54 @@ mod tests {
             "the rewire built a fresh wiring, not the cache"
         );
 
-        // Drop both wirings; the session dirs go with them.
+        let init = second
+            .shell_env()
+            .get("BASH_ENV")
+            .cloned()
+            .expect("init path");
+        let tmp = second
+            .shell_env()
+            .get("RHEMA_MCP_TMP")
+            .cloned()
+            .expect("session tmp");
+
+        // What the two dirs hold while they live: the provision dir
+        // is the init file alone, the session dir the bridge socket.
+        let provision_dir = std::path::Path::new(&init)
+            .parent()
+            .expect("the init file has a dir");
+        let placed: Vec<_> = std::fs::read_dir(provision_dir)
+            .expect("provision dir")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(
+            placed,
+            vec![std::ffi::OsString::from("init.bash")],
+            "no binary rides in the provision dir"
+        );
+        assert!(
+            std::path::Path::new(&tmp).join("mcp.sock").exists(),
+            "the session dir carries the bridge socket"
+        );
+
+        // The registry still caches the second entry; dropping the
+        // registry is the app's exit path.
         drop(first);
         drop(second);
-        if let Some(tmp) = session {
-            assert!(
-                !tmp.is_empty(),
-                "the provision dir existed while the wiring lived"
-            );
-        }
+        assert!(std::path::Path::new(&init).exists());
+        assert!(std::path::Path::new(&tmp).exists());
+
+        drop(reg);
+
+        assert!(
+            !std::path::Path::new(&init).exists(),
+            "the provision dir went with the entry"
+        );
+        assert!(
+            !std::path::Path::new(&tmp).exists(),
+            "the session dir went with the entry"
+        );
     }
 
     #[test]
@@ -230,14 +291,15 @@ mod tests {
         // work: no config means no bridge thread, no provision dir.
         let profile = Profile::default();
         assert!(
-            wire_for_session(
-                "empty-key",
-                &profile,
-                &BTreeSet::new(),
-                None as Option<&crate::sandbox::Sandboxed>,
-                None,
-            )
-            .is_none(),
+            Registry::new()
+                .wire_for_session(
+                    "empty-key",
+                    &profile,
+                    &BTreeSet::new(),
+                    None as Option<&crate::sandbox::Sandboxed>,
+                    None,
+                )
+                .is_none(),
             "nothing configured wires nothing"
         );
     }

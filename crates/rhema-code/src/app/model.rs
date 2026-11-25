@@ -974,6 +974,7 @@ impl App {
             .clone()
             .ok_or(HostAgentError::Agent(AgentError::MissingProvider))?;
         let (agent_config, subagents, missing) = session_agent_config(
+            &self.mcp,
             &self.options,
             self.sandboxed.as_ref(),
             self.effective().model.clone(),
