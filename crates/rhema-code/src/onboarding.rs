@@ -569,6 +569,8 @@ mod tests {
                 supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
+                family: None,
+                release_date: None,
             },
         }]);
         screen.chosen_model = Some("gemini-x".into());
@@ -661,6 +663,8 @@ mod tests {
                 supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
+                family: None,
+                release_date: None,
             },
         }]);
         screen.go(OnboardingStep::Model);
@@ -712,6 +716,8 @@ mod tests {
                 supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
+                family: None,
+                release_date: None,
             },
         }]);
         assert_eq!(screen.row_count(), 1);

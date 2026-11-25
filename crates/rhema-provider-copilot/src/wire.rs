@@ -98,6 +98,8 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
                 // Every kept model is offered through chat completions.
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
+                family: None,
+                release_date: None,
             })
         })
         .collect()

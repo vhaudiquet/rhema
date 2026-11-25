@@ -130,6 +130,8 @@ pub fn normalize_models(page: WireModelsPage) -> Vec<ModelCard> {
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: crate::pricing::model_pricing(&id),
                 id,
+                family: None,
+                release_date: None,
             }
         })
         .collect()

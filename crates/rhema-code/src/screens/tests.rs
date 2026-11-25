@@ -329,6 +329,8 @@ fn model(id: &str, display: &str, chat: bool) -> ModelCard {
             vec!["generateAudio".into()]
         },
         pricing: None,
+        family: None,
+        release_date: None,
     }
 }
 
@@ -1157,6 +1159,13 @@ fn a_click_can_pick_the_dialogs_provider_row() {
 }
 
 // --- Picker ---
+
+fn dated(id: &str, family: &str, release_date: &str) -> ModelCard {
+    let mut card = model(id, id, true);
+    card.family = Some(family.to_owned());
+    card.release_date = Some(release_date.to_owned());
+    card
+}
 
 fn catalog(provider: &'static str, models: Vec<ModelCard>) -> Vec<CatalogModel> {
     models
@@ -3797,6 +3806,85 @@ fn a_filter_hides_the_current_row_too() {
         picker.handle_key(key(KeyCode::Enter)),
         ModelPickerAction::None
     );
+}
+
+#[test]
+fn the_picker_hides_old_family_versions_and_stale_rows() {
+    let models = vec![
+        dated("glm-5.2", "glm", "2026-06-13"),
+        dated("glm-5.3", "glm", "2026-08-14"),
+        // Within a year, but two generations behind: the family rule
+        // hides it.
+        dated("glm-4.7", "glm", "2025-12-22"),
+        // The only row of its family, but more than a year old: the age
+        // rule hides it.
+        dated("glm-4.5-air", "glm-air", "2025-07-28"),
+        // No date: nothing to judge, so it stays.
+        model("glm-undated", "glm-undated", true),
+    ];
+    let picker =
+        ModelPicker::new(catalog("zai", models)).with_today(datealgo::date_to_rd((2026, 11, 24)));
+    let ids: Vec<&str> = picker
+        .filtered()
+        .iter()
+        .map(|entry| entry.model.id.as_str())
+        .collect();
+    assert_eq!(ids, ["glm-5.2", "glm-5.3", "glm-undated"]);
+}
+
+#[test]
+fn the_age_cutoff_is_a_year_to_the_day() {
+    let mut edge = model("edge", "edge", true);
+    edge.release_date = Some("2025-11-24".to_owned());
+    let mut stale = model("stale", "stale", true);
+    stale.release_date = Some("2025-11-23".to_owned());
+    let picker = ModelPicker::new(catalog("zai", vec![edge, stale]))
+        .with_today(datealgo::date_to_rd((2026, 11, 24)));
+    let ids: Vec<&str> = picker
+        .filtered()
+        .iter()
+        .map(|entry| entry.model.id.as_str())
+        .collect();
+    assert_eq!(ids, ["edge"]);
+}
+
+#[test]
+fn alt_a_shows_the_hidden_rows_and_a_plain_a_still_filters() {
+    let models = vec![
+        dated("glm-5.2", "glm", "2026-06-13"),
+        dated("glm-5.3", "glm", "2026-08-14"),
+        dated("glm-4.7", "glm", "2025-12-22"),
+    ];
+    let mut picker =
+        ModelPicker::new(catalog("zai", models)).with_today(datealgo::date_to_rd((2026, 11, 24)));
+    assert_eq!(picker.filtered().len(), 2, "the old version is hidden");
+
+    picker.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+    assert_eq!(picker.filtered().len(), 3, "alt-a shows the history");
+
+    picker.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
+    assert_eq!(picker.filtered().len(), 2, "alt-a hides it again");
+
+    picker.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
+    assert_eq!(picker.filter, "a", "a plain a is still a filter key");
+}
+
+#[test]
+fn same_day_variants_stay_together_at_the_family_cutoff() {
+    let models = vec![
+        dated("glm-6", "glm", "2026-09-01"),
+        dated("glm-6-air", "glm", "2026-09-01"),
+        dated("glm-5", "glm", "2026-08-01"),
+        dated("glm-4", "glm", "2026-07-01"),
+    ];
+    let picker =
+        ModelPicker::new(catalog("zai", models)).with_today(datealgo::date_to_rd((2026, 11, 24)));
+    let ids: Vec<&str> = picker
+        .filtered()
+        .iter()
+        .map(|entry| entry.model.id.as_str())
+        .collect();
+    assert_eq!(ids, ["glm-5", "glm-6", "glm-6-air"]);
 }
 
 #[test]

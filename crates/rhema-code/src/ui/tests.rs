@@ -24,6 +24,8 @@ fn model(id: &str) -> ModelCard {
         supports_vision: None,
         generation_methods: vec!["generateContent".to_owned()],
         pricing: None,
+        family: None,
+        release_date: None,
     }
 }
 
@@ -2409,6 +2411,8 @@ mod scroll_tests {
                 supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
+                family: None,
+                release_date: None,
             },
         });
         app.usage = Some(Usage {
@@ -2835,6 +2839,8 @@ mod scroll_tests {
                     supports_vision: None,
                     generation_methods: vec!["generateContent".into()],
                     pricing: None,
+                    family: None,
+                    release_date: None,
                 }]),
             }],
         });
@@ -4501,7 +4507,7 @@ fn the_models_page_draws_the_rows_that_landed_while_more_are_out() {
     );
     assert!(!screen.contains("filter:"), "no filter box yet: {screen}");
     assert!(
-        screen.contains("enter choose · esc back"),
+        screen.contains("enter choose · alt-a all · esc back"),
         "the keys that answer: {screen}"
     );
     let rows: Vec<usize> = hits

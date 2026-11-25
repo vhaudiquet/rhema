@@ -19,11 +19,12 @@ pub trait ModelListing: Send + Sync {
 }
 
 /// One model in a provider's catalog, normalized for consumers: the id
-/// the adapter's chat API accepts, the listing's display fields, and the
-/// adapter's price for it when known. Adapters decide which of their
-/// listed models are text chat models and `list_models` only hands out
-/// those, the marker data is per provider, so the verdict never rides on
-/// this row. Not `Eq`: the price is floating point.
+/// the adapter's chat API accepts, the listing's display fields, the
+/// adapter's price for it when known, and the family and release date
+/// the live catalog records. Adapters decide which of their listed
+/// models are text chat models and `list_models` only hands out those,
+/// the marker data is per provider, so the verdict never rides on this
+/// row. Not `Eq`: the price is floating point.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelCard {
     /// Model id usable as the request's `model` value (e.g.
@@ -53,6 +54,14 @@ pub struct ModelCard {
     /// curated knowledge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing: Option<crate::pricing::Pricing>,
+    /// The family the live catalog groups the model under (e.g. `glm`),
+    /// when known. The picker uses it to keep the newest versions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    /// Release date, `YYYY-MM-DD`, when the live catalog records one.
+    /// The picker hides a row more than a year old.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_date: Option<String>,
 }
 
 impl ModelCard {
@@ -79,6 +88,8 @@ mod tests {
             supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
+            family: None,
+            release_date: None,
         }
     }
 

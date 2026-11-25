@@ -899,6 +899,8 @@ impl From<WireModel> for ModelCard {
             // ListModels carries no pricing; the provider step bakes the
             // curated table in.
             pricing: None,
+            family: None,
+            release_date: None,
         }
     }
 }

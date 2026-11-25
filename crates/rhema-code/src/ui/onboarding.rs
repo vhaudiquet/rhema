@@ -405,7 +405,7 @@ pub(crate) fn onboarding_body(
             footer(
                 wizard
                     .picker
-                    .state_hints("type to filter · enter choose · esc back"),
+                    .state_hints("type to filter · enter choose · alt-a all · esc back"),
             )
         }
         Step::Profile => {

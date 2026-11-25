@@ -373,6 +373,8 @@ fn card(id: &str, context_length: Option<u64>) -> ModelCard {
         supports_vision: None,
         generation_methods: vec!["generateContent".to_owned()],
         pricing: None,
+        family: None,
+        release_date: None,
     }
 }
 

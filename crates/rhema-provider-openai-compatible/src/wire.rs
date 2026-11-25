@@ -660,6 +660,8 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
                 // The generic listing carries no prices; adapters with a
                 // richer catalog map their own.
                 pricing: None,
+                family: None,
+                release_date: None,
             })
         })
         .collect()
@@ -2518,6 +2520,8 @@ mod tests {
                 supports_vision: None,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
+                family: None,
+                release_date: None,
             })
         };
         // Generic servers load embedding, reranking, and speech models

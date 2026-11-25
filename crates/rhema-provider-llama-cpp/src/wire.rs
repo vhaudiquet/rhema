@@ -76,6 +76,8 @@ impl From<LlamaModel> for ModelCard {
             // Every listed model is offered through chat completions.
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
+            family: None,
+            release_date: None,
         }
     }
 }

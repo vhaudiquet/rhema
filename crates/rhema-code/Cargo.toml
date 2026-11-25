@@ -88,6 +88,9 @@ pulldown-cmark = "0.13"
 clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"
 serde_json = { workspace = true }
+# Civil dates for the picker's one-year cutoff; the workspace's one copy
+# of the calendar
+datealgo = { workspace = true }
 # Turn tasks and the unbounded UI event channel
 async-trait = { workspace = true }
 # The system clipboard, for ctrl-v as a paste key where the terminal

@@ -215,6 +215,8 @@ impl App {
                                 output_per_mtok: 3.0,
                                 cached_input_per_mtok: None,
                             }),
+                            family: None,
+                            release_date: None,
                         },
                     }]
                 }

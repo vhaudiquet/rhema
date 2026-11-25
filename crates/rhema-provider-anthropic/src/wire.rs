@@ -549,6 +549,8 @@ impl From<WireModel> for ModelCard {
             // Every listed model is offered through the Messages API.
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
+            family: None,
+            release_date: None,
         }
     }
 }

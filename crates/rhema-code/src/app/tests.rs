@@ -137,6 +137,8 @@ fn model(id: &str) -> ModelCard {
         supports_vision: None,
         generation_methods: vec!["generateContent".into()],
         pricing: None,
+        family: None,
+        release_date: None,
     }
 }
 
@@ -193,6 +195,8 @@ fn llama_model(id: &str) -> ModelCard {
         supports_vision: None,
         generation_methods: vec!["generateContent".to_owned()],
         pricing: None,
+        family: None,
+        release_date: None,
     }
 }
 

@@ -47,9 +47,9 @@ struct LiveListing {
 #[cfg(feature = "live")]
 #[async_trait]
 impl ModelListing for LiveListing {
-    /// The adapter's rows, with the catalog's facts in their blanks and
-    /// each family's older releases dropped. A failed fetch leaves the
-    /// rows exactly as the adapter returned them, history included.
+    /// The adapter's rows, with the catalog's facts in their blanks. A
+    /// failed fetch leaves the rows exactly as the adapter returned
+    /// them.
     ///
     /// # Errors
     ///
@@ -63,7 +63,6 @@ impl ModelListing for LiveListing {
         let mut models = models?;
         if let Some(catalog) = catalog {
             catalog.decorate(&self.provider, &mut models);
-            catalog.retain_latest(&self.provider, &mut models);
         }
         Ok(models)
     }
@@ -124,6 +123,8 @@ mod tests {
             supports_vision: None,
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
+            family: None,
+            release_date: None,
         }
     }
 
@@ -134,16 +135,6 @@ mod tests {
     impl ModelListing for Bare {
         async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
             Ok(vec![bare(self.0)])
-        }
-    }
-
-    /// A listing with several bare cards, in the order given.
-    struct Cards(&'static [&'static str]);
-
-    #[async_trait]
-    impl ModelListing for Cards {
-        async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-            Ok(self.0.iter().map(|id| bare(id)).collect())
         }
     }
 
@@ -192,25 +183,6 @@ mod tests {
         );
         assert_eq!(card.input_token_limit, Some(1_000_000));
         assert_eq!(card.supports_vision, Some(true));
-    }
-
-    #[tokio::test]
-    async fn older_family_releases_are_dropped() {
-        const HISTORY: &str = r#"{
-          "zai": { "models": {
-            "glm-4.7": { "family": "glm", "release_date": "2025-12-22" },
-            "glm-5.2": { "family": "glm", "release_date": "2026-06-13" },
-            "glm-5.3": { "family": "glm", "release_date": "2026-08-14" }
-          }}
-        }"#;
-        let live = listing(
-            "zai",
-            Arc::new(Cards(&["glm-4.7", "glm-5.2", "glm-5.3"])),
-            cache(Arc::new(Fixed(HISTORY))),
-        );
-        let models = live.list_models().await.expect("the listing answers");
-        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
-        assert_eq!(ids, ["glm-5.2", "glm-5.3"]);
     }
 
     #[tokio::test]

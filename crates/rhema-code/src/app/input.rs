@@ -884,7 +884,7 @@ impl App {
         if loading {
             picker.start_loading();
         }
-        self.screen = Screen::Picker(picker);
+        self.screen = Screen::Picker(Box::new(picker));
         effects
     }
 }

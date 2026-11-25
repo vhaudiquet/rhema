@@ -184,7 +184,7 @@ pub(crate) fn render_settings(
         // the escape when there is no list at all.
         let hint = settings
             .model_picker
-            .state_hints("type to filter · enter choose");
+            .state_hints("type to filter · enter choose · alt-a all");
         vec![Span::raw(hint.to_owned()).fg(theme.text3)]
     } else {
         footer

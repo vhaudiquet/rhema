@@ -3967,6 +3967,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "crossterm",
+ "datealgo",
  "image",
  "openssl",
  "pulldown-cmark",

@@ -929,6 +929,8 @@ pub fn normalize_models(page: &Value) -> Vec<ModelCard> {
                 supports_vision,
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
+                family: None,
+                release_date: None,
             })
         })
         .collect()

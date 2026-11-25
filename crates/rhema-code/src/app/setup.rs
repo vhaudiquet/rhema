@@ -765,7 +765,7 @@ pub enum Screen {
     /// marks the config onboarded.
     Onboarding(Box<OnboardingScreen>),
     /// Choose a model.
-    Picker(PickerScreen),
+    Picker(Box<PickerScreen>),
     /// Switch the profile the session runs under.
     Profile(ProfileScreen),
     /// Pick a saved session of this workspace to continue.

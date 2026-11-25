@@ -100,20 +100,8 @@ its context window from the gateway row and no price.
 | `limit.output` | output ceiling |
 | `modalities.input` | `supports_vision` |
 | `tool_call`, `reasoning` | exposed on `Facts`, not yet on the card |
-| `family`, `knowledge`, `release_date`, `open_weights`, `canonical_model_id` | exposed on `Facts` |
-
-## Older versions
-
-After filling blanks, the wrapper keeps each family's newest two
-release dates and drops the older rows. Models released on the same
-date stay or go together, so a `-flash` and a `-flashx` sibling are
-never split. A card with no catalog row, no family, or no release
-date stays: the rule hides only what it can date. On Z.ai's `glm`
-family that removes 4.6 and 4.7 and keeps 5.2 and 5.3; the 5.3 flash
-pair is a family of its own.
-
-A failed fetch leaves the listing exactly as the adapter returned it,
-so an offline start shows the full history.
+| `family`, `release_date` | copied to the card, where the picker hides old versions |
+| `knowledge`, `open_weights`, `canonical_model_id` | exposed on `Facts` |
 
 ## Tests
 

@@ -171,6 +171,8 @@ impl From<WireModel> for ModelCard {
             supports_vision,
             generation_methods: vec!["generateContent".to_owned()],
             pricing,
+            family: None,
+            release_date: None,
         }
     }
 }

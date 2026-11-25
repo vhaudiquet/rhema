@@ -566,7 +566,7 @@ pub(crate) fn render_picker(
         theme,
         &PickerChrome {
             title: None,
-            hints: "type to filter · enter choose · esc back",
+            hints: "type to filter · enter choose · alt-a all · esc back",
             focused: true,
             prompt: "",
         },

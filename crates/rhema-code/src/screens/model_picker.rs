@@ -4,8 +4,17 @@
 //! onboarding wizard's model step, and the settings' Providers page all
 //! show one widget with one set of semantics.
 
+use std::collections::{BTreeMap, HashSet};
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use rhema_provider::ModelCard;
+
+/// How many release dates one family keeps: its current lineup and the
+/// generation before it. Models sharing a date stay together.
+const KEEP_RELEASES: usize = 2;
+
+/// How old a release can be before the picker hides it, in days.
+const MAX_AGE_DAYS: i32 = 365;
 
 /// One pickable model, tagged with its provider's config name and the
 /// instance it came from: the row prefix, the filter's provider match,
@@ -115,12 +124,21 @@ impl<'a> PickerRow<'a> {
 
 /// The model picker: text chat models across every logged-in provider,
 /// sorted by provider then id, a type-to-filter prompt, and one
-/// highlighted row. The host owns the rect, the title, and what a pick
-/// means; this type owns the rows and the keys.
+/// highlighted row. Older versions stay hidden until `alt-a` asks for
+/// them. The host owns the rect, the title, and what a pick means; this
+/// type owns the rows and the keys.
 #[derive(Debug)]
 pub struct ModelPicker {
     /// The models to pick from (text chat only).
     pub models: Vec<CatalogModel>,
+    /// Indices into [`Self::models`] of the rows the age and family
+    /// rules hide: a family's releases older than its newest two dates,
+    /// and anything more than a year old.
+    hidden: HashSet<usize>,
+    /// Days since 1970-01-01 the age rule measures against.
+    today: i32,
+    /// Whether [`Self::hidden`] is ignored: the `alt-a` toggle.
+    pub show_all: bool,
     /// The profile's stored model, offered when [`Self::models`] is
     /// empty and hidden as soon as the catalog names anything.
     pub current: Option<CurrentModel>,
@@ -146,12 +164,13 @@ pub struct ModelPicker {
 
 impl ModelPicker {
     /// A picker over `models` (text chat models only, sorted by provider
-    /// then id), initially unfiltered.
-    pub fn new(mut models: Vec<CatalogModel>) -> Self {
-        models.retain(|entry| Self::usable(&entry.model));
-        models.sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
-        Self {
-            models,
+    /// then id), initially unfiltered, with older versions hidden.
+    pub fn new(models: Vec<CatalogModel>) -> Self {
+        let mut picker = Self {
+            models: Vec::new(),
+            hidden: HashSet::new(),
+            today: today(),
+            show_all: false,
             current: None,
             unavailable: Vec::new(),
             failed: Vec::new(),
@@ -159,7 +178,19 @@ impl ModelPicker {
             selected: 0,
             status: ModelPickerStatus::Ready,
             loading_since: None,
-        }
+        };
+        picker.install(models);
+        picker
+    }
+
+    /// The same picker with the age rule measured from `today`, the test
+    /// seam that keeps the one-year cutoff out of the wall clock.
+    #[cfg(test)]
+    pub fn with_today(mut self, today: i32) -> Self {
+        self.today = today;
+        self.hidden = hidden_rows(&self.models, today);
+        self.clamp_selection();
+        self
     }
 
     /// Enters the loading state, stamping the clock its spinner steps on.
@@ -182,7 +213,7 @@ impl ModelPicker {
         if self.status == ModelPickerStatus::Ready {
             ready
         } else if self.pickable() {
-            "enter choose · esc back"
+            "enter choose · alt-a all · esc back"
         } else {
             "esc back"
         }
@@ -211,14 +242,19 @@ impl ModelPicker {
         model.supports_chat()
     }
 
-    /// Replaces the model list (scoped and re-sorted) and clamps the
-    /// selection.
+    /// Replaces the model list (scoped, re-sorted, and re-judged) and
+    /// clamps the selection.
     pub fn set_models(&mut self, models: Vec<CatalogModel>) {
-        let mut models = models;
+        self.install(models);
+    }
+
+    /// Filters to chat-capable rows, sorts, judges the age and family
+    /// rules, and clamps the selection.
+    fn install(&mut self, mut models: Vec<CatalogModel>) {
         models.retain(|entry| Self::usable(&entry.model));
+        models.sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
+        self.hidden = hidden_rows(&models, self.today);
         self.models = models;
-        self.models
-            .sort_by(|a, b| a.provider.cmp(b.provider).then(a.model.id.cmp(&b.model.id)));
         self.clamp_selection();
     }
 
@@ -229,14 +265,17 @@ impl ModelPicker {
         self.clamp_selection();
     }
 
-    /// The models matching the filter: case-insensitive substring on the
-    /// rendered row, `provider/id`, so `openrouter/` names the provider's
-    /// whole catalog and `openrouter/anthropic` narrows inside it, or on
-    /// the display name, in the sorted order.
+    /// The models matching the filter: the rows the age and family
+    /// rules hide are left out unless [`Self::show_all`], and the rest
+    /// match a case-insensitive substring of `provider/id`, the
+    /// instance name, or the display name, in the sorted order.
     pub fn filtered(&self) -> Vec<&CatalogModel> {
         let needle = self.filter.to_lowercase();
         self.models
             .iter()
+            .enumerate()
+            .filter(|(index, _)| self.show_all || !self.hidden.contains(index))
+            .map(|(_, entry)| entry)
             .filter(|entry| {
                 let mut haystack = format!("{}/{}", entry.provider, entry.model.id);
                 if let Some(instance) = &entry.instance {
@@ -249,9 +288,10 @@ impl ModelPicker {
             .collect()
     }
 
-    /// The whole catalog, the filter aside: what a table's columns are
-    /// measured over, so narrowing the rows does not resize the table
-    /// and a "no match" list keeps the titles that name its columns.
+    /// The whole catalog, the search and age filters aside: what a
+    /// table's columns are measured over, so narrowing the rows does not
+    /// resize the table and a "no match" list keeps the titles that name
+    /// its columns.
     pub fn catalog(&self) -> &[CatalogModel] {
         &self.models
     }
@@ -295,6 +335,14 @@ impl ModelPicker {
     /// leaves, the filter is transient, nothing to clear first. `r` stays
     /// a filter character on purpose: models are named (qwen).
     pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
+        // `alt-a` toggles the hidden rows from any state; a plain `a`
+        // stays a filter character.
+        if matches!(key.code, KeyCode::Char('a' | 'A')) && key.modifiers.contains(KeyModifiers::ALT)
+        {
+            self.show_all = !self.show_all;
+            self.clamp_selection();
+            return ModelPickerAction::None;
+        }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return ModelPickerAction::None;
         }
@@ -368,4 +416,64 @@ impl ModelPicker {
             None => ModelPickerAction::None,
         }
     }
+}
+
+/// Days since 1970-01-01, UTC: the clock the age rule reads.
+fn today() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| (elapsed.as_secs() / 86_400) as i32)
+        .unwrap_or(0)
+}
+
+/// A `YYYY-MM-DD` release date as days since 1970-01-01. A malformed
+/// or missing date answers `None`, and the row stays visible.
+fn day_of(date: &str) -> Option<i32> {
+    let mut parts = date.split('-');
+    let year = parts.next()?.parse::<i32>().ok()?;
+    let month = parts.next()?.parse::<u8>().ok()?;
+    let day = parts.next()?.parse::<u8>().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(datealgo::date_to_rd((year, month, day)))
+}
+
+/// The indices the picker hides: a family's rows older than its newest
+/// two release dates, and any row more than [`MAX_AGE_DAYS`] old. A row
+/// without a usable date stays; the family rule only applies where the
+/// catalog names a family.
+fn hidden_rows(models: &[CatalogModel], today: i32) -> HashSet<usize> {
+    let mut releases: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
+    let mut days: Vec<Option<i32>> = Vec::with_capacity(models.len());
+    for entry in models {
+        let day = entry.model.release_date.as_deref().and_then(day_of);
+        days.push(day);
+        if let (Some(family), Some(day)) = (entry.model.family.as_deref(), day) {
+            releases.entry(family).or_default().push(day);
+        }
+    }
+    let mut newest: BTreeMap<&str, Vec<i32>> = BTreeMap::new();
+    for (family, mut dates) in releases {
+        dates.sort_unstable();
+        dates.dedup();
+        dates.reverse();
+        dates.truncate(KEEP_RELEASES);
+        newest.insert(family, dates);
+    }
+    models
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| {
+            let day = days[index]?;
+            let stale = today.saturating_sub(day) > MAX_AGE_DAYS;
+            let retired = entry
+                .model
+                .family
+                .as_deref()
+                .and_then(|family| newest.get(family))
+                .is_some_and(|kept| !kept.contains(&day));
+            (stale || retired).then_some(index)
+        })
+        .collect()
 }
