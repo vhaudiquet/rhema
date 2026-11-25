@@ -43,15 +43,15 @@ impl Feature {
 /// What placement must supply for a kit to work.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Needs {
-    /// The helper binary the stubs name.
-    pub helper: bool,
-    /// A live path both sides see (the MCP socket).
-    pub socket: bool,
-    /// A per-session directory for state.
-    pub state: bool,
-    /// The host reads the state from its side.
-    pub host_read: bool,
-    /// The generated function carries provider credentials.
+    /// An executable and an init file (every kit).
+    pub exec: bool,
+    /// State the host must read (jobs, vision): a shared root or a
+    /// `read_file` pull.
+    pub shared_state: bool,
+    /// A live host endpoint (MCP, and search/decide if they take the
+    /// bridge).
+    pub bridge: bool,
+    /// Host-side config or keys (search, decide).
     pub secrets: bool,
 }
 
@@ -59,26 +59,23 @@ impl Needs {
     /// A macro over the helper and its per-session state: jobs and
     /// vision.
     pub const MACRO: Self = Self {
-        helper: true,
-        socket: false,
-        state: true,
-        host_read: true,
+        exec: true,
+        shared_state: true,
+        bridge: false,
         secrets: false,
     };
     /// A macro whose CLI talks to host providers: search and decide.
     pub const HOST_CALL: Self = Self {
-        helper: true,
-        socket: false,
-        state: false,
-        host_read: false,
+        exec: true,
+        shared_state: false,
+        bridge: false,
         secrets: true,
     };
-    /// The MCP bridge: the only kit that needs a live path.
+    /// The MCP bridge: the only kit that needs a live endpoint.
     pub const MCP: Self = Self {
-        helper: true,
-        socket: true,
-        state: false,
-        host_read: false,
+        exec: true,
+        shared_state: true,
+        bridge: true,
         secrets: false,
     };
 }
