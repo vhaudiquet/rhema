@@ -106,6 +106,42 @@ pub async fn run(args: Args) -> anyhow::Result<()> {
             argv.extend(rest);
             std::process::exit(rhema_mcp::cli::run(&argv));
         }
+        Some(crate::args::Command::KitVersion) => {
+            println!("{}", rhema_bash::runtime::KIT_VERSION);
+            std::process::exit(0);
+        }
+        // The static init file: one call per kit install, printed for
+        // the host to write beside the helper. The file carries no
+        // session values; those are env.
+        Some(crate::args::Command::Init { feature, stub }) => {
+            use rhema_bash::runtime::{Feature, Kit, Needs, Stub, init_text};
+            let feature = match feature.as_str() {
+                "jobs" => Feature::Jobs,
+                "vision" => Feature::Vision,
+                "search" => Feature::Search,
+                "decision" => Feature::Decision,
+                "mcp" => Feature::Mcp,
+                other => {
+                    eprintln!("unknown kit feature `{other}`");
+                    std::process::exit(2);
+                }
+            };
+            let mut stubs = Vec::with_capacity(stub.len());
+            for raw in &stub {
+                match Stub::parse(raw) {
+                    Ok(parsed) => stubs.push(parsed),
+                    Err(err) => {
+                        eprintln!("{err}");
+                        std::process::exit(2);
+                    }
+                }
+            }
+            print!(
+                "{}",
+                init_text(&[Kit::new(feature, stubs, Needs::default())])
+            );
+            std::process::exit(0);
+        }
         // The vision CLI owns the process: its exit code is ours, its
         // stderr is the model's error text.
         Some(crate::args::Command::Vision { args: rest }) => {

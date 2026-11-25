@@ -20,6 +20,9 @@
 //!   answers as shell output, one provider and model per profile
 //! - [`init`]: the one `BASH_ENV` init-file provisioner the macros
 //!   and the MCP bridge share
+//! - [`runtime`]: the kit description and the one init-file generator
+//!   a helper writes inside a sandbox
+//!   (`specs/rhema-runtime-kit.md`)
 //!
 //! # Consumers
 //!
@@ -35,6 +38,7 @@ pub mod decision;
 pub mod exec;
 pub mod init;
 pub mod jobs;
+pub mod runtime;
 pub mod shell;
 pub mod vision;
 pub mod websearch;

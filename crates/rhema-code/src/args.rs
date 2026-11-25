@@ -241,6 +241,23 @@ pub enum Command {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<std::ffi::OsString>,
     },
+    /// Prints the runtime kit version. The installer checks it after
+    /// a copy and the host compares it before using an install.
+    #[command(name = "__kit-version")]
+    KitVersion,
+    /// Prints the static init file for a kit: the helper's `__init`
+    /// mode, called once per install. `--stub` names one function and
+    /// repeats: `job=RHEMA_JOBS_BIN:__jobs`.
+    #[command(name = "__init")]
+    Init {
+        /// The kit's feature: `jobs`, `vision`, `search`, `decision`,
+        /// or `mcp`.
+        #[arg(long, default_value = "jobs")]
+        feature: String,
+        /// One stub, `name=bin_var:args`, args whitespace-separated.
+        #[arg(long = "stub", value_name = "NAME=BIN_VAR:ARGS")]
+        stub: Vec<String>,
+    },
     /// The pass-through that makes the agent shell's `see` macro work:
     /// `rhema __vision …` execs this binary in the vision CLI, which
     /// stages the piped bytes (or the named files) into the session's

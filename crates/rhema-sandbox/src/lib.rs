@@ -46,6 +46,7 @@ pub use rhema_bash::exec::budget_secs;
 pub mod exec_util;
 #[cfg(feature = "spawn")]
 pub mod fsroot;
+pub mod kit;
 #[cfg(feature = "mock")]
 pub mod mock;
 pub mod protocol;
