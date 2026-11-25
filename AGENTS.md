@@ -72,6 +72,9 @@ Rules:
     turns a rhema-config `PROVIDERS` spelling plus resolved
     credentials into the turn provider and the catalog listing, one
     row per kind (`crates/rhema-provider-registry/`)
+  - `model-catalog`: the live models.dev fetch, its disk cache, and
+    the listing decorator the provider registry installs
+    (`crates/rhema-model-catalog/`)
   - `websearch`: the web search seam: the `WebSearchProvider` trait,
     the query and result vocabulary, the fallback chain, and the
     markdown renderer (`crates/rhema-websearch/`)

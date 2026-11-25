@@ -20,10 +20,14 @@ rhema-provider-mistral = { path = "../rhema-provider-mistral", version = "0.4.2"
 rhema-provider-openai-compatible = { path = "../rhema-provider-openai-compatible", version = "0.4.2" }
 rhema-provider-openrouter = { path = "../rhema-provider-openrouter", version = "0.4.2" }
 rhema-provider-opencode = { path = "../rhema-provider-opencode", version = "0.4.2" }
+# The facts decorator over every listing this crate assembles
+rhema-model-catalog = { path = "../rhema-model-catalog", version = "0.4.2" }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# The test-install hook points the catalog cache at the mock endpoint
+rhema-model-catalog = { path = "../rhema-model-catalog", version = "0.4.2", features = ["testing"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 # In-process HTTP mock for offline route tests
 wiremock = "0.6"

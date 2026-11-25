@@ -37,11 +37,12 @@ pub struct ModelCard {
     pub input_token_limit: Option<u64>,
     /// Output ceiling in tokens, when advertised.
     pub output_token_limit: Option<u64>,
-    /// Whether the model accepts image input, when the listing or the
-    /// adapter's own knowledge says so. Tri-state: `None`, the common
-    /// case, is unknown, not "no": most listings carry no modality
-    /// data. A `Some` verdict rides the catalog row; sending an image
-    /// to a `false` model fails server-side.
+    /// Whether the model accepts image input, when the listing carries
+    /// the modality. Tri-state: `None`, the common case, is unknown,
+    /// not "no". An adapter sets this only from a wire field: the live
+    /// model catalog fills the blanks, and a curated guess here would
+    /// outrank it and stay wrong. Sending an image to a `false` model
+    /// fails server-side.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_vision: Option<bool>,
     /// What the listing says the model can do; chat-capable rows carry

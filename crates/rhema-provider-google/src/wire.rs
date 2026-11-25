@@ -880,11 +880,9 @@ pub struct WireModel {
 }
 
 impl From<WireModel> for ModelCard {
-    /// Every chat model this listing keeps accepts image input, so the row
-    /// states `Some(true)`: the ListModels response carries no modality
-    /// field to read, but the rows that would disagree, image generation,
-    /// video, speech, and the other non-chat families, are already
-    /// excluded by id (`is_text`) before a picker sees them.
+    /// The ListModels response carries no modality field. A blanket
+    /// `Some(true)` here would outrank the live catalog and could not
+    /// be corrected, so the verdict stays for the catalog.
     fn from(wire: WireModel) -> Self {
         Self {
             id: wire
@@ -896,7 +894,7 @@ impl From<WireModel> for ModelCard {
             description: wire.description,
             input_token_limit: wire.input_token_limit,
             output_token_limit: wire.output_token_limit,
-            supports_vision: Some(true),
+            supports_vision: None,
             generation_methods: wire.supported_generation_methods,
             // ListModels carries no pricing; the provider step bakes the
             // curated table in.
@@ -1856,9 +1854,8 @@ mod tests {
         assert_eq!(model.output_token_limit, None);
         assert!(model.supports_chat());
         assert!(is_text(&model));
-        // Every chat row the listing keeps takes images: no modality
-        // field on the wire, so the verdict is by exclusion.
-        assert_eq!(model.supports_vision, Some(true));
+        // No modality on the wire: the live catalog answers vision.
+        assert_eq!(model.supports_vision, None);
 
         let tts: ModelCard = serde_json::from_str::<WireModel>(
             r#"{

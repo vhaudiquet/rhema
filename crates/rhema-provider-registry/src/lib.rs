@@ -12,6 +12,12 @@
 //! stays with the caller is policy: the retry wrapper, the default
 //! model, the credential resolution itself, a registry row here is
 //! wiring, not settings.
+//!
+//! Every listing [`build`] returns carries the model-facts decorator
+//! from `rhema-model-catalog`: the adapter's rows gain the published
+//! price, context, and capability facts where their own listing left
+//! them blank. The adapter stays the authority on which ids exist and
+//! on what it priced itself.
 #![forbid(unsafe_code)]
 
 use std::sync::Arc;
@@ -166,10 +172,21 @@ pub fn build(
             }
             assembled(provider)
         }
-        "opencode" => build_opencode(&keyed()?, base_url, None),
+        // build_opencode installs the facts decorator itself, because
+        // the frontends also call it directly for a kept conversation.
+        "opencode" => return Ok(build_opencode(&keyed()?, base_url, None)),
         _ => return Err(BuildError::Unknown(name.to_owned())),
     };
-    Ok(built)
+    Ok(with_facts(name, built))
+}
+
+/// Installs the model-facts decorator over the adapter's listing:
+/// every catalog fetch fills the blanks the adapter left from the live
+/// models.dev catalog `rhema-model-catalog` caches. The adapter still
+/// decides which ids exist and what it measured itself.
+fn with_facts(name: &str, mut built: Built) -> Built {
+    built.listing = rhema_model_catalog::decorate_listing(name, built.listing);
+    built
 }
 
 /// The OpenCode row, with the conversation id a caller keeping one
@@ -189,7 +206,7 @@ pub fn build_opencode(api_key: &str, base_url: Option<&str>, session_id: Option<
     // the only thing this kind addresses, so the Responses API is its
     // default dialect.
     provider = provider.with_api(Api::Responses);
-    assembled(provider)
+    with_facts("opencode", assembled(provider))
 }
 
 /// The dialect the `openai` kind speaks: the home route is OpenAI

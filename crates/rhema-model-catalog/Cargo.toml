@@ -1,0 +1,40 @@
+[package]
+name = "rhema-model-catalog"
+description = "The live model-facts catalog: models.dev rows joined onto the adapters' cards"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[features]
+default = ["live"]
+# The runtime models.dev fetch, its disk cache, and the decorator's
+# ability to fill anything. Off for a host without sockets, where
+# `decorate_listing` passes the adapter's rows through untouched.
+live = ["dep:reqwest", "dep:tokio", "rhema-provider/http-client"]
+# The cache-install hook integration tests use to point the process at
+# a mock endpoint, never part of a normal build.
+testing = []
+
+[dependencies]
+# The ProviderError the decorating listing returns unchanged
+rhema-core = { path = "../rhema-core", version = "0.4.2" }
+# ModelCard, Pricing, and the ModelListing seam the decorator wraps
+rhema-provider = { path = "../rhema-provider", version = "0.4.2", default-features = false }
+# The decorator implements an async trait
+async-trait = { workspace = true }
+# The cache envelope and the facts records
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The models.dev transport, through the shared client settings
+reqwest = { version = "0.12", optional = true }
+# The refresh lock, the fetch timeout, and the cache file
+tokio = { workspace = true, optional = true, features = ["macros", "sync", "time", "fs", "rt"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+
+[lints]
+workspace = true

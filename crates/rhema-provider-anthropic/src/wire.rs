@@ -531,19 +531,8 @@ pub struct WireModel {
     pub display_name: String,
 }
 
-/// Whether a listed model accepts image input, as far as this adapter
-/// knows. The models list carries no modality field, so this is curated
-/// knowledge: every `claude`-prefixed id is a Claude 3+ chat model, and
-/// every Claude 3+ model takes images, the same honesty basis as the
-/// pricing other adapters bake into their listings. Anything else (Z.ai's
-/// route serves non-claude ids too) stays unknown, not guessed.
-fn vision_of(id: &str) -> Option<bool> {
-    id.starts_with("claude").then_some(true)
-}
-
 impl From<WireModel> for ModelCard {
     fn from(wire: WireModel) -> Self {
-        let supports_vision = vision_of(&wire.id);
         Self {
             id: wire.id,
             display_name: wire.display_name,
@@ -553,7 +542,10 @@ impl From<WireModel> for ModelCard {
             description: String::new(),
             input_token_limit: None,
             output_token_limit: None,
-            supports_vision,
+            // The list carries no modality field. A curated rule here
+            // would outrank the live catalog and could not be
+            // corrected, so the verdict stays for the catalog.
+            supports_vision: None,
             // Every listed model is offered through the Messages API.
             generation_methods: vec!["generateContent".to_owned()],
             pricing: None,
@@ -2455,28 +2447,23 @@ mod tests {
         assert_eq!(models[0].generation_methods, vec!["generateContent"]);
         assert_eq!(models[0].pricing, None);
         assert!(models[0].supports_chat());
-        // The one catalog fact the list's rows do carry is the curated
-        // vision rule: every claude-prefixed id takes images.
-        assert_eq!(models[0].supports_vision, Some(true));
+        // No modality on the wire: the live catalog answers vision.
+        assert_eq!(models[0].supports_vision, None);
     }
 
     #[test]
-    fn the_vision_verdict_follows_the_id_and_unknown_ids_stay_unknown() {
-        let claude: ModelCard = WireModel {
-            id: "claude-sonnet-4-5".to_owned(),
-            display_name: "Claude Sonnet 4.5".to_owned(),
+    fn the_wire_carries_no_vision_verdict() {
+        // Both Anthropic and Z.ai rows reach the catalog through this
+        // type; neither list publishes a modality, so neither row
+        // guesses one.
+        for id in ["claude-sonnet-4-5", "glm-5.3"] {
+            let card: ModelCard = WireModel {
+                id: id.to_owned(),
+                display_name: id.to_owned(),
+            }
+            .into();
+            assert_eq!(card.supports_vision, None);
         }
-        .into();
-        assert_eq!(claude.supports_vision, Some(true));
-
-        // Z.ai's route serves non-claude ids too; their facts belong to
-        // the provider's catalog, not to a guessed rule here.
-        let foreign: ModelCard = WireModel {
-            id: "glm-5.3".to_owned(),
-            display_name: "GLM 5.3".to_owned(),
-        }
-        .into();
-        assert_eq!(foreign.supports_vision, None);
     }
 
     #[test]

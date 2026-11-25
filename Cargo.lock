@@ -4181,6 +4181,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "rhema-model-catalog"
+version = "0.4.2"
+dependencies = [
+ "async-trait",
+ "reqwest",
+ "rhema-core",
+ "rhema-provider",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "rhema-prompt"
 version = "0.4.2"
 dependencies = [
@@ -4363,6 +4376,7 @@ name = "rhema-provider-registry"
 version = "0.4.2"
 dependencies = [
  "rhema-core",
+ "rhema-model-catalog",
  "rhema-provider",
  "rhema-provider-anthropic",
  "rhema-provider-chatgpt",

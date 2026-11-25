@@ -225,18 +225,11 @@ struct DeepSeekFacts {
     cached_input_per_mtok: f64,
     input_per_mtok: f64,
     output_per_mtok: f64,
-    /// Whether the model accepts image input. DeepSeek's vision guide
-    /// documents `deepseek-flash` as accepting images, while
-    /// `deepseek-v4-pro` stays text-only; the generic `/models` listing
-    /// carries no modality, so the catalog states the verdict.
-    vision: bool,
 }
 
 const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
     DeepSeekFacts {
         id: "deepseek-flash",
-        // Accepts text and images, per DeepSeek's vision guide.
-        vision: true,
         context: 1_048_576,
         output: 393_216,
         cached_input_per_mtok: 0.006,
@@ -245,8 +238,6 @@ const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
     },
     DeepSeekFacts {
         id: "deepseek-v4-pro",
-        // Text-only chat, per DeepSeek's model documentation.
-        vision: false,
         context: 1_048_576,
         output: 393_216,
         cached_input_per_mtok: 0.044,
@@ -263,9 +254,8 @@ fn decorate_deepseek(models: &mut [ModelCard]) {
         if let Some(row) = DEEPSEEK_CATALOG.iter().find(|row| row.id == model.id) {
             model.input_token_limit = Some(row.context);
             model.output_token_limit = Some(row.output);
-            // Unknown ids stay `None`: a generic server exposes no
-            // modality metadata, and no verdict beats a guessed one.
-            model.supports_vision = Some(row.vision);
+            // The generic listing exposes no modality; the live catalog
+            // answers vision for both the table's ids and unknown ones.
             model.pricing = Some(Pricing {
                 input_per_mtok: row.input_per_mtok,
                 output_per_mtok: row.output_per_mtok,
@@ -791,8 +781,8 @@ mod tests {
         let flash = &models[0];
         assert_eq!(flash.input_token_limit, Some(1_048_576));
         assert_eq!(flash.output_token_limit, Some(393_216));
-        // Flash accepts images; the pro row is text-only.
-        assert_eq!(flash.supports_vision, Some(true));
+        // Vision is the live catalog's fact, not the table's.
+        assert_eq!(flash.supports_vision, None);
         let pricing = flash.pricing.expect("flash is priced");
         assert_eq!(pricing.input_per_mtok, 0.30);
         assert_eq!(pricing.output_per_mtok, 1.20);
@@ -800,7 +790,7 @@ mod tests {
 
         let pro = &models[1];
         assert_eq!(pro.pricing.expect("pro is priced").input_per_mtok, 1.32);
-        assert_eq!(pro.supports_vision, Some(false));
+        assert_eq!(pro.supports_vision, None);
 
         // The server's own facts win: a decorated listing leaves unknown
         // models exactly as the endpoint described them, modality
