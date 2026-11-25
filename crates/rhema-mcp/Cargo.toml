@@ -18,9 +18,10 @@ tokio = { workspace = true, features = ["process", "io-util", "net", "sync", "ti
 # second HTTP stack
 hyper = { version = "1", default-features = false, features = ["http1", "client"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "tokio"] }
-# HTTPS for remote Streamable HTTP endpoints. rustls with webpki roots,
-# the same trust store the provider crates' reqwest builds use.
-hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "ring", "webpki-tokio"] }
+# HTTPS for remote Streamable HTTP endpoints. rustls with webpki roots
+# and the aws-lc-rs provider, which reqwest links too; two providers in
+# one process would leave rustls unable to pick a default.
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "tls12", "aws-lc-rs", "webpki-tokio"] }
 http-body-util = "0.1"
 bytes = "1"
 rhema-config = { version = "0.4.2", path = "../rhema-config" }

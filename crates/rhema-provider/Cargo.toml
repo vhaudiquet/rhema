@@ -35,7 +35,7 @@ async-trait = { workspace = true }
 # on `http-client`: a wasm host has no sockets to look names up in.
 tokio = { workspace = true, features = ["time"] }
 # The client builder behind the `http-client` feature
-reqwest = { version = "0.12", optional = true }
+reqwest = { version = "0.13", optional = true }
 
 [dev-dependencies]
 # The login-flow tests run on the test runtime; start_paused (test-util)

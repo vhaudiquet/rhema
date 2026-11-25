@@ -18,7 +18,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 # HTTP client for the model catalog and Vibe's browser sign-in
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 # Vibe's sign-in starts the browser flow and polls it
 tokio = { workspace = true, features = ["time"] }
 # PKCE: a CSPRNG verifier (S256) and the URL-safe base64 both sides use

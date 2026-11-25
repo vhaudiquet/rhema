@@ -29,7 +29,7 @@ async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The models.dev transport, through the shared client settings
-reqwest = { version = "0.12", optional = true }
+reqwest = { version = "0.13", optional = true }
 # The refresh lock, the fetch timeout, and the cache file
 tokio = { workspace = true, optional = true, features = ["macros", "sync", "time", "fs", "rt"] }
 

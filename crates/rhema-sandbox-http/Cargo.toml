@@ -31,9 +31,9 @@ serde_json = { workspace = true }
 # pin mirrors the rest of the workspace's. Native-only: reqwest's own
 # wasm client is `!Send` under the transport's `Send` contract, and
 # workerd gives wasm no sockets anyway.
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
-    "rustls-tls",
+    "rustls",
 ], optional = true }
 
 [dev-dependencies]

@@ -17,7 +17,7 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 # HTTP + SSE streaming against the ChatGPT backend, and the OAuth
 # authorization-code exchange the login flow runs
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream", "form"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # The login callback listener, its timeout, and the token mutex shared
 # across awaited calls
