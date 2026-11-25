@@ -21,7 +21,7 @@
 use std::time::Duration;
 
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -299,7 +299,7 @@ impl Pkce {
     /// A fresh 64-byte verifier and its challenge.
     fn generate() -> Self {
         let mut bytes = [0u8; 64];
-        rand::thread_rng().fill_bytes(&mut bytes);
+        rand::rng().fill_bytes(&mut bytes);
         let verifier = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
         let challenge = s256_challenge(&verifier);
         Self {
@@ -319,7 +319,7 @@ fn s256_challenge(verifier: &str) -> String {
 /// conversation's prompt-cache key.
 pub(crate) fn random_token() -> String {
     let mut bytes = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 

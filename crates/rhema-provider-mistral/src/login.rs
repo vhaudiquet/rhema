@@ -17,7 +17,7 @@
 use std::time::Duration;
 
 use base64::Engine;
-use rand::RngCore;
+use rand::Rng;
 use reqwest::Url;
 use sha2::{Digest, Sha256};
 
@@ -350,7 +350,7 @@ fn http_client() -> reqwest::Client {
 /// A fresh 64-byte PKCE verifier.
 fn random_verifier() -> String {
     let mut bytes = [0u8; 64];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::rng().fill_bytes(&mut bytes);
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 

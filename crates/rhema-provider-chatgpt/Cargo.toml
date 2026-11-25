@@ -23,7 +23,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # across awaited calls
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time"] }
 # PKCE: a CSPRNG verifier (S256) and the URL-safe base64 both sides use
-rand = "0.8"
+rand = "0.10"
 sha2 = "0.11"
 base64 = "0.23"
 
