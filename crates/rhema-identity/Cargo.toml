@@ -28,7 +28,7 @@ thiserror = { workspace = true }
 datealgo = { workspace = true }
 # The durable backend (`SqliteIdentityStore`), always bundled: no system
 # sqlite is required, so the build stays self-contained.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3"

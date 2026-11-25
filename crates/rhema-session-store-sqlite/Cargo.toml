@@ -15,7 +15,7 @@ rhema-session-store = { path = "../rhema-session-store", version = "0.4.2" }
 rhema-core = { path = "../rhema-core", version = "0.4.2" }
 # Bundled: no system sqlite, and the same version rhema-rsd locks, so
 # the workspace builds one copy.
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.43", features = ["bundled"] }
 # The body is the same pretty JSON the file format holds
 serde_json = { workspace = true }
 
