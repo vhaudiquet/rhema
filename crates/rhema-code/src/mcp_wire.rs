@@ -370,6 +370,7 @@ mod tests {
             instance_lock: None,
             managed: None,
             shared: Some(rhema_sandbox::kit::SharedRoot::new(root.path())),
+            session: Default::default(),
         };
         let reg = Registry::new();
         let disabled = std::collections::BTreeSet::new();

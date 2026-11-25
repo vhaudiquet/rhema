@@ -2391,6 +2391,7 @@ mod scroll_tests {
             instance_lock: None,
             managed: None,
             shared: None,
+            session: Default::default(),
         });
         app.config.set_for_profile(Some("personal"), |profile| {
             profile.sandbox = Some(rhema_config::SandboxSettings {

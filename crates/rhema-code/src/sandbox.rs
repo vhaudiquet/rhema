@@ -107,7 +107,7 @@ pub struct Sandboxed {
     /// The shared session tree's guard, when this session placed kits.
     /// Dropping it removes the tree; the field keeps it alive as long
     /// as the frontend keeps this assembly.
-    session: std::sync::Mutex<Option<rhema_sandbox::kit::SessionDir>>,
+    pub(crate) session: std::sync::Mutex<Option<rhema_sandbox::kit::SessionDir>>,
 }
 
 /// The backend of a managed instance, the stop argv's program.

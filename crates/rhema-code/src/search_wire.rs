@@ -428,6 +428,7 @@ mod sandbox_tests {
             instance_lock: None,
             managed: None,
             shared: shared.then(|| rhema_sandbox::kit::SharedRoot::new(dir.path())),
+            session: Default::default(),
         };
         (sandboxed, dir)
     }
