@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use rhema_bash::runtime::{Feature, KIT_VERSION, Kit, Needs};
 
@@ -66,8 +67,9 @@ pub struct SharedRoot {
     /// The same directory as the sandbox sees it.
     pub sandbox: String,
     /// Whether a Unix socket on the share accepts `connect()` from the
-    /// sandbox: true for a bind mount and a disk device; ecrou's
-    /// virtiofs is unproven, so its MCP bridge stays off.
+    /// sandbox: true for a bind mount and a disk device, and for
+    /// ecrou's virtiofs by default; a failed bind turns MCP off at
+    /// runtime.
     pub unix_socket: bool,
 }
 
@@ -329,6 +331,7 @@ pub async fn ensure_shared(
         }
     }
 
+    sweep(shared);
     let version = KIT_VERSION.to_string();
     let install = shared.install_dir(&version);
     let sandbox_install = Path::new(&shared.sandbox).join("bin").join(&version);
@@ -428,11 +431,8 @@ pub async fn ensure_shared(
 /// # Errors
 ///
 /// A directory or file cannot be written.
-pub fn place_shared(
-    shared: &SharedRoot,
-    session: &str,
-    kits: &[Kit],
-) -> std::io::Result<BTreeMap<String, String>> {
+pub fn place_shared(shared: &SharedRoot, session: &str, kits: &[Kit]) -> std::io::Result<Placed> {
+    sweep(shared);
     let host_session = shared.session_dir(session);
     for sub in ["vision/staging", "jobs", "mcp"] {
         std::fs::create_dir_all(host_session.join(sub))?;
@@ -493,7 +493,59 @@ pub fn place_shared(
         .cloned()
         .unwrap_or_else(|| session.to_owned());
     std::fs::write(host_session.join("jobs/session"), tag)?;
-    Ok(env)
+    Ok(Placed {
+        env,
+        init,
+        helper,
+        skipped: Vec::new(),
+        session: SessionDir { path: host_session },
+    })
+}
+
+/// The session age after which a start sweep removes a tree, the
+/// spec's seven days: a live session is much younger, a killed host's
+/// leftovers are much older.
+const SESSION_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// The install age after which a start sweep removes a version, the
+/// spec's 30 days. The running version is never removed.
+const INSTALL_MAX_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Removes a crashed host's leftovers: session trees older than seven
+/// days, and helper versions older than 30 days other than this
+/// process's. One level deep, no symlinks, errors ignored.
+pub fn sweep(shared: &SharedRoot) {
+    sweep_dir(&shared.host.join("sessions"), SESSION_MAX_AGE, None);
+    sweep_dir(
+        &shared.host.join("bin"),
+        INSTALL_MAX_AGE,
+        Some(&KIT_VERSION.to_string()),
+    );
+}
+
+fn sweep_dir(dir: &Path, max_age: Duration, keep: Option<&str>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if keep.is_some_and(|keep| name.to_str() == Some(keep)) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let Ok(modified) = entry.metadata().and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age > max_age) {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Runs the sandbox-side installer once, records the version, and
@@ -595,7 +647,8 @@ mod tests {
             vec![Stub::new("job", "RHEMA_JOBS_BIN", vec!["__jobs".into()]).unwrap()],
             Needs::MACRO,
         );
-        let env = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
+        let placed = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
+        let env = placed.env;
         let init = env.get("BASH_ENV").expect("init");
         assert_eq!(
             init,
@@ -633,7 +686,8 @@ mod tests {
         kit.vars
             .insert("BASH_ENV".into(), "/host/tmp/init.bash".into());
         kit.vars.insert("RHEMA_SEARCH_CHAIN".into(), "[]".into());
-        let env = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
+        let placed = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
+        let env = placed.env;
         assert_eq!(
             env.get("BASH_ENV").map(String::as_str),
             Some(
@@ -647,6 +701,50 @@ mod tests {
             env.get("RHEMA_SEARCH_CHAIN").map(String::as_str),
             Some("[]")
         );
+    }
+
+    #[test]
+    fn a_placed_session_removes_its_tree_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = SharedRoot::new(dir.path());
+        let kit = kit(Feature::Jobs, Needs::MACRO);
+        let placed = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
+        let tree = dir.path().join("sessions/s1");
+        assert!(tree.is_dir());
+        drop(placed);
+        assert!(!tree.exists(), "the guard owns the session tree");
+    }
+
+    #[cfg(unix)]
+    fn age(path: &Path, days: u64) {
+        let file = std::fs::File::open(path).unwrap();
+        let when = SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60);
+        file.set_times(std::fs::FileTimes::new().set_modified(when))
+            .unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_start_sweep_removes_stale_state_and_keeps_the_live_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = SharedRoot::new(dir.path());
+        let stale = shared.session_dir("old");
+        let fresh = shared.session_dir("fresh");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::create_dir_all(&fresh).unwrap();
+        age(&stale, 8);
+        let old_bin = shared.host.join("bin/1");
+        let current_bin = shared.install_dir(&KIT_VERSION.to_string());
+        std::fs::create_dir_all(&old_bin).unwrap();
+        std::fs::create_dir_all(&current_bin).unwrap();
+        age(&old_bin, 31);
+
+        sweep(&shared);
+
+        assert!(!stale.exists(), "a stale session goes");
+        assert!(fresh.exists(), "a fresh session stays");
+        assert!(!old_bin.exists(), "a stale version goes");
+        assert!(current_bin.exists(), "the running version stays");
     }
 
     #[test]

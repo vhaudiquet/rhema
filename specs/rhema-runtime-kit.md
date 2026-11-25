@@ -216,7 +216,10 @@ it:
   owned by the sandbox user, before creating a new one. The sweep stays
   one level deep, ignores errors, and follows no symlink.
 - **Shared root.** The per-session directory under the root gets the
-  same guard on the host side, and the same age sweep at startup.
+  same guard on the host side, and the same age sweep at startup:
+  `place_shared` returns the `SessionDir` guard, the frontend keeps it
+  for the session's life, and `kit::sweep` removes trees older than
+  seven days and versions older than 30 days.
 - **Install and init.** These are not per-session. A version is removed
   only when it is older than 30 days and is not the version the session
   uses; the running version and its init are never swept.
@@ -266,7 +269,7 @@ prompt section is set only for placed kits.
 | docker | yes, second bind mount | yes | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, mcp; search/decide after §8 |
 | lxd container | yes, disk device | yes | yes | same as docker | jobs, vision, mcp; search/decide after §8 |
 | lxd vm | no | yes (seed) | yes | unproven | search/decide (scoped config); jobs/vision pull |
-| ecrou | yes, extra share (virtiofs) | n/a | yes | unproven | jobs, vision, mcp if the UDS crosses |
+| ecrou | yes, extra share (virtiofs) | n/a | yes | unproven: MCP on, bind failure leaves it off | vision; jobs stay off (one boot per command) |
 | ssh | no | yes | yes | yes (remote forward) | mcp, search/decide, jobs/vision by pull |
 | http | no | `PUT` (size cap) | yes | no | jobs/vision by pull; search/decide once the helper fits |
 
@@ -493,8 +496,9 @@ backend actually did, not what the table predicted.
 Status: the env channel, the local placement, the docker/lxd/ecrou
 runtime mounts, the in-sandbox installer, and the shared MCP bridge
 are in. Search and decide ride the injected-env route behind
-`sandbox.inject_credentials`. Ecrou's MCP bridge stays off
-(`SharedRoot::unix_socket = false`) until the UDS spike.
+`sandbox.inject_credentials`. Ecrou now enables the MCP bridge over
+its virtiofs share; the UDS is unproven there, so a failed bind keeps
+MCP off and leaves the other kits running.
 
 Jobs and vision now provision their state under the shared session
 tree and the shell's env names those paths. Vision works on docker,

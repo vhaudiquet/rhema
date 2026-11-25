@@ -104,6 +104,10 @@ pub struct Sandboxed {
     /// has one: the install, the MCP socket, and the session tree
     /// live under it, and the sandbox sees the host path itself.
     pub(crate) shared: Option<SharedRoot>,
+    /// The shared session tree's guard, when this session placed kits.
+    /// Dropping it removes the tree; the field keeps it alive as long
+    /// as the frontend keeps this assembly.
+    session: std::sync::Mutex<Option<rhema_sandbox::kit::SessionDir>>,
 }
 
 /// The backend of a managed instance, the stop argv's program.
@@ -381,9 +385,10 @@ pub async fn assemble(
                         None
                     }
                 });
-            shared = runtime
-                .as_ref()
-                .map(|root| SharedRoot::without_unix_socket(root));
+            // The virtiofs share carries a Unix socket; the bridge
+            // binds it and the guest connects. Unproven on ecrou, so a
+            // failed bind leaves MCP off and the other kits untouched.
+            shared = runtime.as_ref().map(SharedRoot::new);
             let sandbox = EcrouSandbox::new(image, root, host_workspace.clone());
             let sandbox = if profile.sandbox_persist() {
                 sandbox.with_persist(name)
@@ -483,6 +488,7 @@ pub async fn assemble(
         instance_lock,
         managed,
         shared,
+        session: std::sync::Mutex::new(None),
     })
 }
 
@@ -491,6 +497,14 @@ impl Sandboxed {
     /// backend mounts one.
     pub(crate) fn shared(&self) -> Option<&SharedRoot> {
         self.shared.as_ref()
+    }
+
+    /// Keeps the placed session tree alive until this assembly drops.
+    pub(crate) fn keep_session(&self, session: rhema_sandbox::kit::SessionDir) {
+        *self
+            .session
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
     }
 
     /// Puts the assembled tool set and the seeded skill list on a

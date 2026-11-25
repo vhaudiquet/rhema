@@ -349,7 +349,12 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         None
     } else if let Some(shared) = sandboxed.as_ref().and_then(|s| s.shared()) {
         match rhema_sandbox::kit::place_shared(shared, &key, &kits) {
-            Ok(env) => Some(env),
+            Ok(placed) => {
+                if let Some(sandboxed) = sandboxed.as_ref() {
+                    sandboxed.keep_session(placed.session);
+                }
+                Some(placed.env)
+            }
             Err(err) => {
                 eprintln!("warning: the sandbox kit placement failed: {err}");
                 None

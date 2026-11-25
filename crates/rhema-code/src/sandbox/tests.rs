@@ -680,6 +680,7 @@ fn the_assembly_applies_tools_before_and_workspace_after_the_wire_order() {
         instance_lock: None,
         managed: None,
         shared: None,
+        session: std::sync::Mutex::new(None),
     };
     let mut config = HostAgentConfig::new(
         Arc::new(Unused),

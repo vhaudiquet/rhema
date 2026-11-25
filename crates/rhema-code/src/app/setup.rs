@@ -1207,7 +1207,12 @@ pub(crate) fn session_agent_config(
     } else if let Some(shared) = sandboxed.and_then(|s| s.shared()) {
         let key = crate::mcp_wire::runtime_session_key(session_key);
         match rhema_sandbox::kit::place_shared(shared, &key, &kits) {
-            Ok(env) => Some(env),
+            Ok(placed) => {
+                if let Some(sandboxed) = sandboxed {
+                    sandboxed.keep_session(placed.session);
+                }
+                Some(placed.env)
+            }
             Err(err) => {
                 eprintln!("warning: the sandbox kit placement failed: {err}");
                 None
