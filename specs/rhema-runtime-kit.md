@@ -19,7 +19,7 @@ mode. They are `job`, `see`, `search`, `decide`, and `mcp` (with one
 stub per server). Today every one of them is host-only.
 
 **In scope:** one kit description shared by the five; placement into a
-local temp dir, a sandbox-visible workspace dir, or an uploaded dir;
+local temp dir, a backend-shared dir, or an uploaded dir;
 the env channel that makes `BASH_ENV` and the bin variable arrive; the
 helper executable's resolution and versioning; the capability matrix
 that decides which kit a backend can carry; tests and a rollout.
@@ -92,8 +92,9 @@ four things where a mistake is a reviewed failure:
 `rhema_bash::init` already owns 3's text and 4's map. This spec grows it
 into a `runtime` module (or renames it): `Kit`, `Needs`, `Capabilities`,
 `Layout`, and `KitDir`. The placement that talks to a sandbox lives
-above, in `rhema-code` (§12.1), because `rhema-sandbox` depends on
-`rhema-bash`, never the reverse.
+in `rhema-sandbox::kit` (§12.1), because every frontend already depends
+on that crate and `rhema-sandbox` depends on `rhema-bash`, never the
+reverse.
 
 ## 3. Placement
 
@@ -125,22 +126,55 @@ socket's parent) on the sandbox side before the session starts.
 
 ### 3.1 The runtime root
 
-| placement | root | cleanup |
-|---|---|---|
-| local | the system temp dir, per-session name | `TempDir`/guard on drop, as today |
-| shared | `<workspace>/.rhema/runtime/<feature>/<session>/` | guard on drop; stale dirs are 1 KB |
-| uploaded | host staging, then `<sandbox-workspace>/.rhema/runtime/...` | guard on drop, best-effort remote remove |
+For a sharing backend, the root is a directory the host and the
+sandbox both see. The backend chooses it, not the workspace:
 
-The workspace is the only directory every non-local backend can share,
-and `.rhema` is already the workspace's private convention (ecrou's
-git-env adds it to `.git/info/exclude`). The runtime root is a sibling
-of the session store, never inside a checkout path the model is
-expected to edit.
+```rust
+pub struct SharedRoot {
+    /// Where the host writes.
+    pub host: PathBuf,
+    /// The same directory as the sandbox sees it.
+    pub sandbox: String,
+}
+
+pub enum Root {
+    /// A directory mounted into the sandbox (docker, lxd, ecrou).
+    Shared(SharedRoot),
+    /// No shared directory: the kit uploads (ssh, http).
+    Upload,
+}
+```
+
+The host path is per user: `RHEMA_RUNTIME_DIR`, then
+`$XDG_RUNTIME_DIR/rhema`, then `$TMPDIR/rhema-<uid>`, all mode `0700`.
+A daemon with no login session falls back to
+`$HOME/.cache/rhema/runtime`. The ecrou backend keeps its own scratch
+rule when the snap cannot see the chosen root.
+
+Each sharing backend mounts the root at the same path:
+
+- docker: a second `-v` in `docker_run_argv`; `mounts_current` learns
+  the runtime mount too, or every assembly would read the set as stale
+  and recreate the container.
+- lxd: a `runtime` disk device beside `workspace`, through the
+  idempotent `lxd_device`.
+- ecrou: an extra share on every exec, the way the capture dir already
+  takes one; the number of shares the CLI accepts is a spike item.
+
+| placement | host root | sandbox path | cleanup |
+|---|---|---|---|
+| local | the system temp dir | the same path | `TempDir`/guard on drop |
+| shared | the per-user runtime root, mounted | the same path | guard on drop; stale dirs are 1 KB |
+| uploaded | host staging | the sandbox runtime dir | guard on drop, best-effort remote remove |
+
+A sharing backend that cannot add the mount falls back to
+`<workspace>/.rhema/runtime`, and a backend with no shared directory
+uploads. The workspace is the exception, not the rule.
 
 ### 3.2 The runtime tree
 
 ```text
-<workspace>/.rhema/runtime/
+<runtime-root>/
   bin/<sha256>/rhema          # one copy per binary build, shared by all five
   mcp/<session-key>/
     init.bash
@@ -159,7 +193,8 @@ expected to edit.
 The helper is content-hashed and survives the session; the per-session
 dirs do not. A rebuild produces a new hash, so a running session keeps
 its copy; the old hash is removed by a sweep once no manifest
-names it (v1: leave it; v2: sweep).
+names it (v1: leave it; v2: sweep). The fallback layout is the same
+tree under `<workspace>/.rhema/runtime`.
 
 ### 3.3 The chain
 
@@ -175,8 +210,8 @@ Two small types replace the `sandboxed.is_none()` test:
 
 ```rust
 pub struct Capabilities {
-    /// A directory both sides see at the same path.
-    pub shared_fs: bool,
+    /// A directory both sides see, when the backend can mount one.
+    pub shared_root: Option<SharedRoot>,
     /// `Sandbox::write_file` can carry a helper and an init file.
     pub upload: bool,
     /// The sandbox can dial a host TCP endpoint.
@@ -200,13 +235,13 @@ kit that cannot be placed is skipped with a debug notice, the same
 fail-closed behavior as today's gate. The prompt section is set only for
 placed kits.
 
-| backend | shared_fs | upload | inbound_net | kits in v1 |
+| backend | shared root | upload | inbound_net | kits in v1 |
 |---|---|---|---|---|
 | local | n/a | n/a | n/a | all |
-| docker | yes (bind mount) | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, mcp; search/decide after §8 |
-| lxd container | yes (disk device) | yes | same as docker | jobs, vision, mcp; search/decide after §8 |
+| docker | yes, second bind mount | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, mcp; search/decide after §8 |
+| lxd container | yes, disk device | yes | same as docker | jobs, vision, mcp; search/decide after §8 |
 | lxd vm | no | yes (seed) | unproven | search/decide (scoped config); jobs/vision need a state mirror |
-| ecrou | yes (virtiofs) | n/a | unproven | jobs, vision, mcp if the UDS crosses |
+| ecrou | yes, extra share (virtiofs) | n/a | unproven | jobs, vision, mcp if the UDS crosses |
 | ssh | no | yes | yes (remote forward) | mcp, search/decide; jobs/vision need a state mirror |
 | http | no | `PUT` (size cap) | no | none in v1; search/decide once the helper fits |
 
@@ -220,7 +255,7 @@ capabilities, not by adding another `if sandboxed`.
 ```rust
 pub enum Bridge {
     None,
-    Unix { path: String },   // shared_fs
+    Unix { path: String },   // shared_root
     Tcp { addr: String },    // uploaded, via a tunnel
 }
 ```
@@ -269,7 +304,7 @@ needs them.
 Two stages, so the plumbing comes before the packaging:
 
 - **v1, mounted only:** copy the full `rhema` binary into
-  `<workspace>/.rhema/runtime/bin/<sha256>/rhema`, once per workspace,
+  `<runtime-root>/bin/<sha256>/rhema`, once per user,
   shared by all five kits. 400 MB, but one copy, not one per session,
   and it needs no new target. This makes docker, lxd and ecrou work.
 - **v2, all backends:** a `rhema-cli` target (or a `runtime-kit`
@@ -286,7 +321,7 @@ notice, never a half-working shell.
 For an image that already ships the helper (docker, lxd, a persisted
 ecrou), the kit can name it by path instead of copying; the manifest
 records which source won, so a debugging session knows whether the
-sandbox's copy or the workspace's is in play.
+sandbox's copy or the runtime root's is in play.
 
 ## 8. Per-feature needs
 
@@ -316,14 +351,16 @@ user opts in. This is a user-facing security choice, not a plumbing default.
 - Runtime dirs are `0700`; init files and helper copies `0600`; the UDS
   `0600`; media `0700`, files `0600` (the CLI already enforces the last
   two).
-- The token is the bridge's auth. A socket in the workspace is visible
-  to the user's own processes; the token, not the path, is the boundary.
+- The token is the bridge's auth. A socket in a shared root is visible
+  to the host user's processes; the token, not the path, is the boundary.
 - The helper is content-hashed; an installed helper must match
   `__kit-version`, or the kit is skipped.
 - No init file carries a secret. The only secret-bearing file considered
   is §8's scoped config, mode `0600`, only on explicit opt-in.
-- `.rhema/runtime` joins the workspace's git exclude the same way the
-  ecrou git-env already excludes `.rhema/`.
+- The fallback root `<workspace>/.rhema/runtime` joins the workspace's
+  git exclude the same way the ecrou git-env already excludes `.rhema/`.
+  The primary root sits outside the checkout, so a checkout never holds
+  the helper or a live socket.
 - Uploads never take a model-influenced path: the placer chooses the
   names, the sandbox path is built from the session key and the
   content hash.
@@ -346,9 +383,9 @@ user opts in. This is a user-facing security choice, not a plumbing default.
 1. **Kit types and local placement.** Move the five wirings onto
    `Kit`/`KitDir` with no behavior change; the local path stays a temp
    dir. Two days.
-2. **Shared placement.** `<workspace>/.rhema/runtime`; the full-binary
-   helper; docker first, then lxd; MCP first, then jobs and vision. The
-   ecrou UDS spike runs here. Three days.
+2. **Shared placement.** The per-user root and the three mounts; the
+   full-binary helper; docker first, then lxd; MCP first, then jobs and
+   vision. The ecrou UDS spike runs here. Four to five days.
 3. **Uploads and the small helper.** `rhema-cli`; ssh upload plus a
    remote forward; switch every kit. A week.
 4. **search/decide secrets decision and http.** After the §8 decision;
@@ -359,14 +396,23 @@ backend actually did, not what the table predicted.
 
 ## 12. Decisions
 
-1. **The kit is pure; the placer is in `rhema-code`.** `rhema-bash`
-   owns `Kit`, `Needs`, `Capabilities`, `Layout`, and the init text;
-   `rhema-code` owns `place` and the `Sandbox` calls. This keeps the
-   dependency order (`rhema-bash ← rhema-sandbox ← rhema-code`) and
-   lets the tests drive placement with the mock sandbox.
-2. **The shared root is `<workspace>/.rhema/runtime`.** It is the only
-   directory a mounted sandbox and the host both see, and `.rhema` is
-   already the workspace's private convention.
+1. **The kit and the placer are library code, not frontend code.**
+   `rhema-bash` owns the pure `Kit`, `Needs`, `Capabilities`, `Layout`,
+   and the init text. `rhema-sandbox::kit`, behind a `kit` feature, owns
+   `place` and the `Sandbox` calls. `rhema-code`, `rhema-cloud-agent`,
+   and the external claw call the same function; none of them owns it.
+   The cloud agent adds the sandbox handle its frontend already drives.
+   `rhema-code`'s own doc calls the crate a leaf consumer, and a
+   non-terminal frontend must not pull ratatui and crossterm to place a
+   file. `Sandboxed` keeps the `Arc<dyn Sandbox>` it builds today (it is
+   dropped after the executor wraps it); placement needs the handle for
+   `write_file`.
+2. **The runtime root is per user and backend-mounted; the workspace is
+   the fallback.** A checkout is where the user's code lives, not where
+   a 400 MB helper and live sockets belong. The backend adds a mount for
+   a dedicated root; only a backend that cannot mount falls back to
+   `<workspace>/.rhema/runtime`, and only upload-only backends skip the
+   root altogether.
 3. **v1 copies the full binary; v2 ships a small CLI.** The copy is the
    smallest change that makes mounted backends work; the small target is
    the real fix for every sandbox copy.
@@ -383,9 +429,13 @@ backend actually did, not what the table predicted.
 
 - **Copy the binary per session (today).** The leak that started this work;
   a 400 MB copy per session and a pinned inode per orphan. Rejected.
-- **Bind-mount the host's temp dir into every sandbox.** Not every
+- **Mount the host's whole temp dir into every sandbox.** Not every
   backend can (ssh and http have no mount; ecrou's `/tmp` is private),
-  and it exposes the whole temp dir, not the one socket. Rejected.
+  and it exposes every user's temp files. Rejected in favor of a
+  dedicated per-user root, mounted by the backends that can.
+- **Put the runtime under `<workspace>/.rhema/runtime`.** It needs no
+  new mount, but it puts a 400 MB helper and live sockets in the user's
+  checkout. Kept as the fallback.
 - **A pure-bash client over the socket.** `${RHEMA_BIN} __server` does
   chunking, schema, SSE framing, media, and retries; `nc -U`, `socat`,
   and `jq` are not guaranteed in a sandbox, and a second client would
@@ -398,14 +448,20 @@ backend actually did, not what the table predicted.
 
 - Does a Unix socket on ecrou's virtiofs share accept `connect()` from
   the guest? This is the phase 2 spike; it decides whether ecrou gets
-  the shared-FS path or the TCP fallback.
+  the shared-root path or the TCP fallback.
+- Can every backend add the runtime mount to an instance a stored target
+  names? A user-owned container is not ours to recreate just to add a
+  mount; the fallback is upload or the workspace root.
+- Where does the root live when no login session exists (a cloud agent,
+  a daemon)? `$XDG_RUNTIME_DIR` is absent there, so the cache fallback
+  carries the lifecycle.
 - For ssh, who allocates the forwarded port, and how does a stale
   forward get reclaimed when a session dies?
 - Search/decide: scoped config or host bridge? The answer changes
   whether their `Needs.bridge` is `true`.
 - Http: can its `PUT` cap rise, or does a helper need an install URL
   the sandbox fetches itself?
-- Should the helper cache be per workspace (the proposal) or per user,
-  shared across workspaces to save the 400 MB in v1?
+- Should the helper cache be per user (the proposal) or per workspace?
+  Per user saves the 400 MB when one user works in several trees.
 - When the small helper ships, does the full `rhema` binary keep the
   hidden modes, or do they leave `rhema-code` entirely?
