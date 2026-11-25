@@ -135,7 +135,10 @@ pub struct Document {
     /// workspace's absolute path. Startup reopens a directory on its
     /// last-used profile, a per-directory memory, never a global
     /// switch, so parallel instances in different directories stay
-    /// independent.
+    /// independent. A subfolder that has no record of its own inherits
+    /// the nearest recorded ancestor's, so choosing a profile once in a
+    /// project applies to its whole tree until a subfolder chooses its
+    /// own.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub last_profile_by_workspace: BTreeMap<String, String>,
     /// The last sandbox kind each workspace ran `bash` under, keyed by
@@ -275,17 +278,22 @@ impl Document {
     }
 
     /// The profile `workspace` last served a turn under, when one was
-    /// recorded. The name is returned as stored, the caller decides
-    /// whether that profile still exists and can serve turns.
+    /// recorded. A folder inherits the profile of its nearest recorded
+    /// ancestor, so choosing a profile once in a project applies to
+    /// every subfolder by default; a subfolder's own record, written
+    /// when it chooses a different profile, wins over the ancestor's.
+    /// The name is returned as stored, the caller decides whether that
+    /// profile still exists and can serve turns.
     pub fn last_profile_in(&self, workspace: &Path) -> Option<String> {
-        self.last_profile_by_workspace
-            .get(&workspace.to_string_lossy().into_owned())
-            .cloned()
+        remembered_in(&self.last_profile_by_workspace, workspace).cloned()
     }
 
     /// Records `profile` as the last one `workspace` served a turn
-    /// under. A no-op when the map already holds the name, so a turn per
-    /// keystroke never rewrites the file.
+    /// under. A no-op when the effective memory (this folder, or the
+    /// nearest recorded ancestor it inherits from) already holds the
+    /// name, so a turn per keystroke never rewrites the file; choosing
+    /// a different profile writes this folder's own record, which then
+    /// wins over the ancestor's for this subtree.
     pub fn note_profile_in(&mut self, workspace: &Path, profile: &str) {
         let changed = self.last_profile_in(workspace).as_deref() != Some(profile);
         if changed {
@@ -313,6 +321,21 @@ impl Document {
                 .insert(workspace.to_string_lossy().into_owned(), kind.to_owned());
         }
     }
+}
+
+/// The value `workspace` or its nearest recorded ancestor maps to:
+/// the folder's own record first, then each ancestor's, nearest first,
+/// so a choice made once in a folder reaches its subfolders until one
+/// of them makes its own. Ancestors compare by path component, never by
+/// string prefix: `/proj` is not an ancestor of `/proj-other`. Keys are
+/// stored the way [`Path::to_string_lossy`] spells them, the same
+/// spelling both recording and lookup use, and an empty ancestor (the
+/// relative root) never matches.
+fn remembered_in<'a>(map: &'a BTreeMap<String, String>, workspace: &Path) -> Option<&'a String> {
+    workspace
+        .ancestors()
+        .filter(|path| !path.as_os_str().is_empty())
+        .find_map(|path| map.get(path.to_string_lossy().as_ref()))
 }
 
 /// Reads and writes the persisted rhema document.
@@ -506,6 +529,53 @@ mod tests {
         assert_eq!(
             loaded.last_profile_in(Path::new("/home/u/proj")).as_deref(),
             Some("personal")
+        );
+    }
+
+    #[test]
+    fn a_subfolder_inherits_its_nearest_ancestors_profile() {
+        let mut config = Document::default();
+        config.note_profile_in(Path::new("/home/u/proj"), "work");
+        // The choice reaches the whole tree, not just the exact folder
+        // it was made in.
+        assert_eq!(
+            config
+                .last_profile_in(Path::new("/home/u/proj/src"))
+                .as_deref(),
+            Some("work")
+        );
+        assert_eq!(
+            config
+                .last_profile_in(Path::new("/home/u/proj/src/deep"))
+                .as_deref(),
+            Some("work")
+        );
+        // A sibling is not a descendant: only ancestors lend a memory.
+        assert_eq!(
+            config.last_profile_in(Path::new("/home/u/proj-other")),
+            None
+        );
+        // A deeper record wins over the ancestor's, and its own
+        // subfolders inherit the deeper choice.
+        config.note_profile_in(Path::new("/home/u/proj/src"), "personal");
+        assert_eq!(
+            config
+                .last_profile_in(Path::new("/home/u/proj/src"))
+                .as_deref(),
+            Some("personal")
+        );
+        assert_eq!(
+            config
+                .last_profile_in(Path::new("/home/u/proj/src/deep"))
+                .as_deref(),
+            Some("personal")
+        );
+        // The ancestor's other children keep inheriting it.
+        assert_eq!(
+            config
+                .last_profile_in(Path::new("/home/u/proj/docs"))
+                .as_deref(),
+            Some("work")
         );
     }
 

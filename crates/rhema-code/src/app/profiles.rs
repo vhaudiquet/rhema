@@ -865,9 +865,12 @@ impl App {
 
     /// Records the session's profile as the last one this workspace
     /// chose or ran with, an explicit `/profile` switch or a turn's
-    /// start, so the next launch here opens on it. Written only on
-    /// change; a failure surfaces in the status strip like every other
-    /// config write, neither the switch nor the turn is blocked by it.
+    /// start, so the next launch here opens on it. A subfolder inherits
+    /// its nearest recorded ancestor's choice, so a switch inside one
+    /// writes that folder's own record and overrides the ancestor for
+    /// its subtree. Written only on change; a failure surfaces in the
+    /// status strip like every other config write, neither the switch
+    /// nor the turn is blocked by it.
     pub(crate) fn remember_profile(&mut self) {
         let Some(profile) = self.session_profile.clone() else {
             return;

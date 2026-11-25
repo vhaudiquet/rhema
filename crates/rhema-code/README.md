@@ -99,7 +99,7 @@ An editor launches the above command and directly talks ACP with Rhema Code.
 
 ### Profiles
 
-Rhema Code ships with two default profiles `work` and `personal` that let you manage your different subscription contexts. Each profile can store any amount of subscription instances.
+Rhema Code ships with two default profiles `work` and `personal` that let you manage your different subscription contexts. Each profile can store any amount of subscription instances. The profile you choose in a folder is remembered there, and its subfolders inherit it until one of them chooses its own.
 
 The add dialog opens on three groups: Subscriptions, API / Pay-as-you-go, and Local/Custom. Each group lists only its providers, so the subscriptions stay apart from metered keys and a local server. The API and Local/Custom groups both offer a Custom OpenAI-compatible API row, which asks for the endpoint's base URL and a key; hosted providers use their own fixed routes and ask only for the key.
 

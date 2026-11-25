@@ -1234,9 +1234,12 @@ pub(crate) fn estimate_history_tokens(history: &[Message]) -> u64 {
 /// profile this workspace last served a turn under while it still can,
 /// else the default profile while it can serve turns, otherwise the
 /// first stored profile that can (the registry's order), a logged-in
-/// profile must not open the login screen. Isolation still holds: this
-/// only picks the section up front, and nothing reads across profiles
-/// afterwards. An explicit flag never reaches here.
+/// profile must not open the login screen. The workspace memory walks
+/// ancestors ([`crate::store::Document::last_profile_in`]), so a
+/// profile chosen once in a folder reaches all its subfolders until one
+/// chooses its own. Isolation still holds: this only picks the section
+/// up front, and nothing reads across profiles afterwards. An explicit
+/// flag never reaches here.
 pub(crate) fn startup_profile(
     config: &crate::store::Config,
     workspace: &Path,

@@ -3528,7 +3528,21 @@ fn a_workspace_reopens_on_the_profile_it_last_used() {
     // workspace memory wins over the personal default.
     config.note_profile_in(Path::new("/proj"), "work");
     assert_eq!(startup_profile(&config, Path::new("/proj"), None), "work");
-    // Another directory has no memory: the default stands.
+    // The project's choice reaches its subfolders by default.
+    assert_eq!(
+        startup_profile(&config, Path::new("/proj/src"), None),
+        "work"
+    );
+    assert_eq!(
+        startup_profile(&config, Path::new("/proj/src/deep"), None),
+        "work"
+    );
+    // A sibling is not a subfolder, and another directory has no
+    // memory: the default stands.
+    assert_eq!(
+        startup_profile(&config, Path::new("/proj-other"), None),
+        "personal"
+    );
     assert_eq!(
         startup_profile(&config, Path::new("/other"), None),
         "personal"
@@ -3542,6 +3556,43 @@ fn a_workspace_reopens_on_the_profile_it_last_used() {
     assert_eq!(
         startup_profile(&config, Path::new("/proj"), None),
         "personal"
+    );
+}
+
+#[test]
+fn a_switch_in_a_subfolder_overrides_the_inherited_profile() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app
+        .config
+        .profiles
+        .insert("work".to_owned(), keyed_profile("openrouter", "work-key"));
+    // The project chose work; this session is in one of its subfolders
+    // and is about to choose personal there.
+    h.app.options.workspace = PathBuf::from("/proj/src");
+    h.app.config.note_profile_in(Path::new("/proj"), "work");
+    h.app.session_profile = Some("work".to_owned());
+    crate::commands::dispatch(&mut h.app, "/profile personal");
+
+    // The subfolder's own record wins for its subtree...
+    let stored = h.store.load().unwrap();
+    assert_eq!(
+        stored.last_profile_in(Path::new("/proj/src")).as_deref(),
+        Some("personal")
+    );
+    assert_eq!(
+        stored
+            .last_profile_in(Path::new("/proj/src/deep"))
+            .as_deref(),
+        Some("personal")
+    );
+    // ...and leaves the project's record and its other subtrees alone.
+    assert_eq!(
+        stored.last_profile_in(Path::new("/proj")).as_deref(),
+        Some("work")
+    );
+    assert_eq!(
+        stored.last_profile_in(Path::new("/proj/docs")).as_deref(),
+        Some("work")
     );
 }
 
