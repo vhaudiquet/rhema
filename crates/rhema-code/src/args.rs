@@ -250,10 +250,6 @@ pub enum Command {
     /// repeats: `job=RHEMA_JOBS_BIN:__jobs`.
     #[command(name = "__init")]
     Init {
-        /// The kit's feature: `jobs`, `vision`, `search`, `decision`,
-        /// or `mcp`.
-        #[arg(long, default_value = "jobs")]
-        feature: String,
         /// One stub, `name=bin_var:args`, args whitespace-separated.
         #[arg(long = "stub", value_name = "NAME=BIN_VAR:ARGS")]
         stub: Vec<String>,

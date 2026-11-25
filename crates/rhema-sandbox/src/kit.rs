@@ -219,24 +219,85 @@ impl Drop for SessionDir {
     }
 }
 
-/// Places `kits` under a shared root every side sees: installs the
-/// helper once per version, writes the session tree and its init file,
-/// and returns the env. Kits the gate refuses are listed in `skipped`
-/// and left out of both the init and the env.
+/// The sandbox-side installer: a command that installs the helper
+/// into the directory `{dir}` names. The host builds it from a
+/// checksum-verified release or an uploaded tarball; the sandbox runs
+/// it, so the helper matches the sandbox's OS and architecture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installer {
+    /// The shell command; every `{dir}` is replaced by the quoted
+    /// install directory, sandbox path.
+    pub command: String,
+}
+
+impl Installer {
+    /// An installer command.
+    pub fn new(command: impl Into<String>) -> Self {
+        Self {
+            command: command.into(),
+        }
+    }
+
+    fn for_dir(&self, dir: &str) -> String {
+        self.command.replace("{dir}", &shquote(dir))
+    }
+}
+
+/// How long an install or an init generation may run.
+const INSTALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Runs one helper command in the sandbox, with the install budget
+/// and no env: the command names its paths itself.
+async fn run_command(
+    sandbox: &dyn crate::Sandbox,
+    command: String,
+    what: &str,
+) -> Result<crate::RunOutcome, KitError> {
+    use std::sync::atomic::AtomicBool;
+
+    let request = crate::RunRequest {
+        command,
+        cwd: "/".into(),
+        timeout: INSTALL_BUDGET,
+        env: BTreeMap::new(),
+    };
+    let mut progress = rhema_core::OutputOnly(|_| {});
+    let outcome = sandbox
+        .run(request, &AtomicBool::new(false), &mut progress)
+        .await
+        .map_err(|err| KitError::Probe(format!("{what}: {err}")))?;
+    if outcome.code != Some(0) {
+        let detail = String::from_utf8_lossy(&outcome.stderr);
+        let detail = detail.trim();
+        return Err(KitError::Probe(if detail.is_empty() {
+            format!("{what} exited {:?}", outcome.code)
+        } else {
+            format!("{what} exited {:?}: {detail}", outcome.code)
+        }));
+    }
+    Ok(outcome)
+}
+
+/// Places `kits` under a shared root every side sees: runs the
+/// sandbox-side installer once per kit version when the install is
+/// missing, checks the installed helper's `__kit-version` with it,
+/// and has the helper generate the session's init file. Kits the gate
+/// refuses are listed in `skipped` and left out of both the init and
+/// the env.
 ///
-/// The helper is a host build copied into the shared root. An
-/// install from a release archive for the sandbox's own architecture
-/// is the next step; a wrong-architecture copy is caught when the
-/// install's `__kit-version` runs in the sandbox.
+/// The host never copies its own binary here. The installer is the
+/// sandbox's, built by the host from a release for the sandbox's
+/// target; an install that cannot run is caught by the version probe.
 ///
 /// # Errors
 ///
-/// A directory or file cannot be written, or an existing install
-/// names another kit version.
-pub fn ensure_shared(
+/// A directory or file cannot be written, the installer or the
+/// helper fails, or the install names another kit version.
+pub async fn ensure_shared(
+    sandbox: &dyn crate::Sandbox,
     shared: &SharedRoot,
     session: &str,
-    helper: &Path,
+    installer: &Installer,
     kits: &[Kit],
     caps: &Capabilities,
 ) -> Result<Placed, KitError> {
@@ -246,9 +307,6 @@ pub fn ensure_shared(
         match decide(&kit.needs, caps) {
             Decision::Shared => decided.push(kit.clone()),
             Decision::Sandbox => {
-                // A shared placement cannot carry a kit whose state
-                // must stay sandbox-side; the caller uses the
-                // sandbox placement for those.
                 skipped.push((kit.feature, "needs a sandbox-side placement"));
             }
             Decision::Skip(reason) => skipped.push((kit.feature, reason)),
@@ -257,32 +315,23 @@ pub fn ensure_shared(
 
     let version = KIT_VERSION.to_string();
     let install = shared.install_dir(&version);
-    std::fs::create_dir_all(&install)?;
+    let sandbox_install = Path::new(&shared.sandbox).join("bin").join(&version);
     let version_file = install.join(".kit-version");
-    if version_file.is_file() {
-        let found = std::fs::read_to_string(&version_file)
-            .unwrap_or_default()
-            .trim()
-            .to_owned();
-        if !found.is_empty() && found != version {
-            return Err(KitError::Version {
-                found,
-                wanted: KIT_VERSION,
-            });
-        }
+    let installed = install.join("rhema").is_file()
+        && std::fs::read_to_string(&version_file)
+            .map(|found| found.trim() == version)
+            .unwrap_or(false);
+    if !installed {
+        std::fs::create_dir_all(&install)?;
+        run_command(
+            sandbox,
+            installer.for_dir(&sandbox_install.to_string_lossy()),
+            "the kit installer",
+        )
+        .await?;
+        std::fs::write(&version_file, &version)?;
     }
-    let target = install.join("rhema");
-    if !target.is_file() {
-        let staged = install.join("rhema.tmp");
-        std::fs::copy(helper, &staged)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))?;
-        }
-        std::fs::rename(&staged, &target)?;
-    }
-    std::fs::write(&version_file, &version)?;
+    verify(sandbox, shared).await?;
 
     let session_dir = shared.session_dir(session);
     for sub in ["vision/staging", "jobs", "mcp"] {
@@ -291,25 +340,24 @@ pub fn ensure_shared(
     let session_file = session_dir.join("jobs/session");
     std::fs::write(&session_file, session)?;
 
+    let sandbox_session = Path::new(&shared.sandbox).join("sessions").join(session);
+    let helper = sandbox_install.join("rhema");
     let init = session_dir.join("init.sh");
-    std::fs::write(&init, rhema_bash::runtime::init_text(&decided))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&init, std::fs::Permissions::from_mode(0o600))?;
+    let sandbox_init = sandbox_session.join("init.sh");
+    let mut command = format!("{} __init", shquote(&helper.to_string_lossy()));
+    for kit in &decided {
+        for stub in &kit.stubs {
+            command.push_str(&format!(" --stub {}", shquote(&stub.flag())));
+        }
     }
+    command.push_str(&format!(" > {}", shquote(&sandbox_init.to_string_lossy())));
+    run_command(sandbox, command, "the init generator").await?;
 
-    let sandbox_root = Path::new(&shared.sandbox);
-    let sandbox_install = sandbox_root.join("bin").join(&version);
-    let sandbox_session = sandbox_root.join("sessions").join(session);
-    let helper = sandbox_install.join("rhema").to_string_lossy().into_owned();
+    let helper = helper.to_string_lossy().into_owned();
     let mut env = BTreeMap::new();
     env.insert(
         "BASH_ENV".to_owned(),
-        sandbox_session
-            .join("init.sh")
-            .to_string_lossy()
-            .into_owned(),
+        sandbox_init.to_string_lossy().into_owned(),
     );
     for kit in &decided {
         for stub in &kit.stubs {
@@ -354,31 +402,17 @@ pub fn ensure_shared(
 /// The sandbox cannot run the helper, the helper exits nonzero, or
 /// its version differs.
 pub async fn verify(sandbox: &dyn crate::Sandbox, shared: &SharedRoot) -> Result<(), KitError> {
-    use std::sync::atomic::AtomicBool;
-    use std::time::Duration;
-
     let version = KIT_VERSION.to_string();
     let helper = Path::new(&shared.sandbox)
         .join("bin")
         .join(&version)
         .join("rhema");
-    let request = crate::RunRequest {
-        command: format!("{} __kit-version", shquote(&helper.to_string_lossy())),
-        cwd: "/".into(),
-        timeout: Duration::from_secs(10),
-        env: BTreeMap::new(),
-    };
-    let mut progress = rhema_core::OutputOnly(|_| {});
-    let outcome = sandbox
-        .run(request, &AtomicBool::new(false), &mut progress)
-        .await
-        .map_err(|err| KitError::Probe(err.to_string()))?;
-    if outcome.code != Some(0) {
-        return Err(KitError::Probe(format!(
-            "the helper exited {:?}",
-            outcome.code
-        )));
-    }
+    let outcome = run_command(
+        sandbox,
+        format!("{} __kit-version", shquote(&helper.to_string_lossy())),
+        "the helper's version probe",
+    )
+    .await?;
     let found = String::from_utf8_lossy(&outcome.stdout).trim().to_owned();
     if found != version {
         return Err(KitError::Version {
@@ -462,25 +496,41 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_shared_placement_writes_the_env_the_init_and_the_session() {
+    #[tokio::test]
+    async fn a_shared_placement_installs_and_generates() {
+        use crate::mock::ScriptedSandbox;
         let dir = tempfile::tempdir().unwrap();
-        let helper = dir.path().join("host-rhema");
-        std::fs::write(&helper, "#!/bin/sh\n").unwrap();
         let shared = SharedRoot::new(dir.path().join("runtime"));
         let kit = Kit::new(
             Feature::Jobs,
             vec![Stub::new("job", "RHEMA_JOBS_BIN", vec!["__jobs".into()]).unwrap()],
             Needs::MACRO,
         );
-        let placed = ensure_shared(
-            &shared,
-            "s1",
-            &helper,
-            &[kit],
-            &Capabilities::mounted(SharedRoot::new(dir.path())),
-        )
-        .unwrap();
+        let sandbox = ScriptedSandbox::new();
+        for outcome in [
+            crate::RunOutcome {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                code: Some(0),
+            },
+            crate::RunOutcome {
+                stdout: b"1\n".to_vec(),
+                stderr: Vec::new(),
+                code: Some(0),
+            },
+            crate::RunOutcome {
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+                code: Some(0),
+            },
+        ] {
+            sandbox.push_run(Ok(outcome));
+        }
+        let installer = Installer::new("install-rhema {dir}");
+        let caps = Capabilities::mounted(shared.clone());
+        let placed = ensure_shared(&sandbox, &shared, "s1", &installer, &[kit], &caps)
+            .await
+            .unwrap();
         assert!(
             placed.env["BASH_ENV"].ends_with("/sessions/s1/init.sh"),
             "{:?}",
@@ -492,9 +542,12 @@ mod tests {
             placed.env
         );
         assert_eq!(placed.env["RHEMA_SESSION"], "s1");
-        let text = std::fs::read_to_string(&placed.init).unwrap();
-        assert!(text.contains("job()"), "{text}");
-        assert!(shared.install_dir("1").join("rhema").is_file());
+        assert!(shared.install_dir("1").join(".kit-version").is_file());
+        let commands = sandbox.executed();
+        assert!(commands[0].contains("install-rhema"), "{commands:?}");
+        assert!(commands[1].contains("__kit-version"), "{commands:?}");
+        assert!(commands[2].contains("__init"), "{commands:?}");
+        assert!(commands[2].contains("--stub"), "{commands:?}");
         let session = placed.session.path().to_path_buf();
         assert!(session.join("jobs/session").is_file());
         drop(placed);
