@@ -125,6 +125,17 @@ pub fn assemble_chain(
     assemble_chain_with(|name| std::env::var(name).ok(), profile, secrets)
 }
 
+/// The chain's entries as `(name, kind, key)`: what
+/// [`assemble_chain`] would build, without building the HTTP clients.
+/// A frontend that hands the chain to another process serializes this
+/// instead of the providers.
+pub fn selections(
+    profile: Option<&Profile>,
+    secrets: Option<&dyn SecretStore>,
+) -> Vec<(String, String, String)> {
+    selections_with(|name| std::env::var(name).ok(), profile, secrets)
+}
+
 /// [`assemble_chain`] over a caller-supplied environment, the seam
 /// tests drive instead of mutating the process environment.
 pub fn assemble_chain_with(
@@ -133,7 +144,7 @@ pub fn assemble_chain_with(
     secrets: Option<&dyn SecretStore>,
 ) -> Option<Arc<Chain>> {
     let mut chain = Chain::new();
-    for (name, kind, key) in selections(env, profile, secrets) {
+    for (name, kind, key) in selections_with(env, profile, secrets) {
         let Ok(provider) = build(&kind, Some(key)) else {
             continue;
         };
@@ -162,7 +173,7 @@ pub fn would_wire_with(
     profile: Option<&Profile>,
     secrets: Option<&dyn SecretStore>,
 ) -> bool {
-    !selections(env, profile, secrets).is_empty()
+    !selections_with(env, profile, secrets).is_empty()
 }
 
 /// The providers the chain would carry, as name, kind, and key: the
@@ -170,7 +181,7 @@ pub fn would_wire_with(
 /// resolves and whose kind spells something in [`KINDS`], and over
 /// none of those the env-only tier, one entry per kind whose variable
 /// resolves, in the fixed kind order.
-fn selections(
+fn selections_with(
     env: impl Fn(&str) -> Option<String>,
     profile: Option<&Profile>,
     secrets: Option<&dyn SecretStore>,

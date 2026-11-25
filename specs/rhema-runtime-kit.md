@@ -388,8 +388,8 @@ same way.
 |---|---|---|---|---|---|
 | jobs | yes | yes: the jobs dir, or a pull | no | no | `gob` comes with the install |
 | vision | yes | yes: the staging dir, or a pull | no | no | fs-disjoint pulls the staged files |
-| search | yes | no | maybe | yes | the hidden mode resolves the profile's providers and keys |
-| decide | yes | no | maybe | yes | same |
+| search | yes | no | no | yes: injected | the host resolves the chain, the sandbox gets it in env |
+| decide | yes | no | no | yes: injected | same, one active instance |
 | mcp | yes | yes: the socket's dir | yes | no | servers stay host-side in v1 |
 
 The host-read state is two things: vision's staging dir (the images the
@@ -400,18 +400,23 @@ media is written and read in the sandbox; the host sees it through
 vision only when the model attaches an image. `search` and `decide`
 keep no state.
 
-The kit unifies the helper and the shared-state placement. The fourth is
-an open decision:
+The kit unifies the helper and the shared-state placement. Credentials
+take the injected-env route in v1:
 
-- **Scoped config file:** write the profile's provider settings and the
-  needed keys into `<runtime>/config` mode `0600`, and let the helper
-  read it. Simple, but copies secrets into the sandbox.
-- **Host bridge:** search/decide call a host endpoint like MCP does.
-  Keeps keys on the host, costs a bridge and a protocol.
-
-Recommendation: reuse the MCP bridge's transport for search and decide,
-and do not write secrets into a sandbox on the mounted path unless the
-user opts in. This is a user-facing security choice, not a plumbing default.
+- The host resolves the profile and the keychain, then puts the result
+  in the session env: `RHEMA_SEARCH_CHAIN` (a JSON array of
+  `{name, provider, key}`, one per configured entry) and
+  `RHEMA_DECISION_INSTANCE` (the active instance with its key, model,
+  and base URL filled in). The helper builds the chain from those
+  variables; it never reads a config file or a secret store in the
+  sandbox.
+- The switch is `sandbox.inject_credentials` (default false). Every
+  command the model runs can read the variables, so turning this on is
+  a trust decision about the sandbox, not a plumbing default.
+- The host bridge stays the v2 option for keeping keys out of the
+  sandbox. It costs a request/response protocol beside the MCP
+  transport; the env route costs nothing and leaks the keys to the
+  guest.
 
 ## 9. Security
 
@@ -424,8 +429,9 @@ user opts in. This is a user-facing security choice, not a plumbing default.
   checksum-verified tarball, and must report a compatible
   `__kit-version`; otherwise the kit is skipped. The install never
   replaces the user's own `rhema`.
-- No init file carries a secret. The only secret-bearing file considered
-  is §8's scoped config, mode `0600`, only on explicit opt-in.
+- No init file carries a secret. Search and decide keys ride the
+  session env, only when `sandbox.inject_credentials` is on; every
+  command in the sandbox can read them.
 - The fallback root `<workspace>/.rhema/runtime` joins the workspace's
   git exclude the same way the ecrou git-env already excludes `.rhema/`.
   The primary root sits outside the checkout, so a checkout never holds
@@ -484,12 +490,13 @@ user opts in. This is a user-facing security choice, not a plumbing default.
 Each phase lands green, and the spec's matrix is updated with what the
 backend actually did, not what the table predicted.
 
-Status: the env channel, the local placement, the docker/lxd runtime
-mounts, the in-sandbox installer, and the shared MCP bridge are in.
-Ecrou mounts the root as a second share; its MCP bridge stays off
-(`SharedRoot::unix_socket = false`) until the UDS spike. Jobs and vision
-still wait on the host-side state paths (jobs steering, vision
-attachments); search and decide wait on the §8 secrets choice.
+Status: the env channel, the local placement, the docker/lxd/ecrou
+runtime mounts, the in-sandbox installer, and the shared MCP bridge
+are in. Search and decide ride the injected-env route behind
+`sandbox.inject_credentials`. Ecrou's MCP bridge stays off
+(`SharedRoot::unix_socket = false`) until the UDS spike. Jobs and
+vision still wait on the host-side state paths (jobs steering, vision
+attachments).
 
 ## 12. Decisions
 

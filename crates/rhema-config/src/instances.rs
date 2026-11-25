@@ -461,6 +461,11 @@ pub struct SandboxSettings {
     /// Unset is on; `false` restores the one-command rootfs, where
     /// only the workspace persists.
     pub persist: Option<bool>,
+    /// Whether the host resolves the search and decision providers and
+    /// hands their keys to the sandbox's helper. Off by default: a key
+    /// in the sandbox is readable by every command the model runs, so
+    /// turning it on is a deliberate trust decision.
+    pub inject_credentials: bool,
 }
 
 impl fmt::Debug for SandboxSettings {

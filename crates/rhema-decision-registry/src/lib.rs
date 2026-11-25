@@ -208,6 +208,31 @@ pub fn resolve(
     resolve_with(|name| std::env::var(name).ok(), profile, secrets)
 }
 
+/// The instance [`resolve`] would build, plus the key it would use,
+/// without building the provider: what a frontend hands to another
+/// process. A profile instance with no key still returns, with `None`,
+/// so the call reports the missing key where it runs instead of the
+/// macro vanishing.
+pub fn selection(
+    profile: Option<&Profile>,
+    secrets: Option<&dyn SecretStore>,
+) -> Option<(DecisionInstance, Option<String>)> {
+    selection_with(|name| std::env::var(name).ok(), profile, secrets)
+}
+
+/// [`selection`] over a caller-supplied environment.
+fn selection_with(
+    env: impl Fn(&str) -> Option<String>,
+    profile: Option<&Profile>,
+    secrets: Option<&dyn SecretStore>,
+) -> Option<(DecisionInstance, Option<String>)> {
+    if let Some((_, instance)) = profile.and_then(Profile::active_decision_instance) {
+        let key = instance.api_key(secrets);
+        return Some((instance.clone(), key));
+    }
+    environment_tier(env).map(|(instance, key)| (instance, Some(key)))
+}
+
 /// [`resolve`] over a caller-supplied environment, the seam tests
 /// drive instead of mutating the process environment.
 pub fn resolve_with(

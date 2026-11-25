@@ -320,6 +320,7 @@ impl EcrouSandbox {
             &shares,
             workdir,
             &request.command,
+            &request.env,
             git_env,
             self.persist.as_deref(),
             persist_reset,

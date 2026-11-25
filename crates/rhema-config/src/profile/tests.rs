@@ -624,6 +624,7 @@ fn a_profile_round_trips_with_a_full_sandbox_section() {
                 vm: Some(true),
                 image: Some("alpine:3.23".into()),
                 persist: None,
+                inject_credentials: false,
             }),
         )]),
         ..Settings::default()
@@ -677,6 +678,7 @@ fn the_sandbox_fields_read_back_through_the_profile() {
         vm: Some(true),
         image: Some(" alpine:3.23 ".into()),
         persist: None,
+        inject_credentials: false,
     });
     assert_eq!(profile.sandbox_kind().as_deref(), Some("ssh"));
     assert_eq!(profile.sandbox_url().as_deref(), Some("http://box:7331"));

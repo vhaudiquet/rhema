@@ -29,6 +29,11 @@ use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_decision::{DecisionError, DecisionProvider, DecisionRequest, Question};
 
+/// The resolved instance the host hands a sandboxed helper: the
+/// profile's active decision entry with its key filled in. The local
+/// mode never sees it; its config and keychain are here.
+const VAR_INSTANCE: &str = "RHEMA_DECISION_INSTANCE";
+
 /// The usage text the mode prints on stderr, and the model reads, on
 /// an invocation it cannot serve as typed.
 const USAGE: &str = "decide: ask a decision model (Jev, Clef, or one OpenRouter routes to) typed questions about a state
@@ -69,21 +74,37 @@ pub(crate) fn wire_for_session(
     sandboxed: Option<&crate::sandbox::Sandboxed>,
     bash_env: Option<OsString>,
 ) -> Option<Arc<rhema_bash::decision::Wiring>> {
-    if sandboxed.is_some() {
+    // The gate answers the only question the settings can: does this
+    // profile name a provider, or does the environment tier serve
+    // one? The provider itself is not cached; the mode handler
+    // resolves fresh per invocation, so a provider configured
+    // mid-session lands without a restart.
+    let (mut instance, key) = rhema_decision_registry::selection(Some(profile), secrets)?;
+    // The injected route needs both the opt-in and a mounted root the
+    // helper was installed under. ssh and http have neither; their
+    // sandbox cache path is v2.
+    let mounted = sandboxed.and_then(|s| s.shared()).is_some();
+    let inject = mounted && profile.sandbox_inject_credentials();
+    if sandboxed.is_some() && !inject {
         return None;
     }
-    // The gate answers the only question the settings can: does this
-    // profile name a provider whose key resolves? The provider itself
-    // is not cached; the mode handler resolves fresh per invocation,
-    // so a provider configured mid-session lands without a restart.
-    rhema_decision_registry::is_configured(Some(profile), secrets).then_some(())?;
     let mut reg = registry().lock().expect("decision wire registry lock");
     if let Some(wiring) = reg.get(session_key) {
         return Some(wiring.clone());
     }
     let bin = std::env::current_exe().ok()?;
-    let wiring =
-        Arc::new(rhema_bash::decision::provision_with_bin(bash_env, &bin, session_key).ok()?);
+    let mut wiring = rhema_bash::decision::provision_with_bin(bash_env, &bin, session_key).ok()?;
+    if inject {
+        // The profile resolved here; the sandbox gets the one instance
+        // and its key, not a config file it cannot read.
+        instance.api_key = key;
+        instance.secret_ref = None;
+        wiring.shell_env.insert(
+            VAR_INSTANCE.to_owned(),
+            serde_json::to_string(&instance).ok()?,
+        );
+    }
+    let wiring = Arc::new(wiring);
     reg.insert(session_key.to_owned(), wiring.clone());
     Some(wiring)
 }
@@ -258,16 +279,6 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
             return rhema_bash::decision::EXIT_USAGE;
         }
     };
-    let Some(profile_name) = std::env::var(rhema_bash::decision::VAR_PROFILE)
-        .ok()
-        .filter(|name| !name.trim().is_empty())
-    else {
-        eprintln!(
-            "decide: not wired in this shell (no {})",
-            rhema_bash::decision::VAR_PROFILE
-        );
-        return rhema_bash::decision::EXIT_NOT_WIRED;
-    };
     let invocation = match shape {
         Shape::Shorthand(invocation) => invocation,
         Shape::Stdin { json } => Invocation {
@@ -294,6 +305,28 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
             Invocation { json, request }
         }
     };
+    // The sandboxed helper: the host resolved the instance and handed
+    // it over as env. No config file, no keychain, no profile lookup.
+    if let Some(instance) = injected_instance() {
+        let key = instance.api_key.clone().unwrap_or_default();
+        return match rhema_decision_registry::build(&instance, key) {
+            Ok(provider) => run(&invocation, provider),
+            Err(err) => {
+                eprintln!("decide: {err}");
+                1
+            }
+        };
+    }
+    let Some(profile_name) = std::env::var(rhema_bash::decision::VAR_PROFILE)
+        .ok()
+        .filter(|name| !name.trim().is_empty())
+    else {
+        eprintln!(
+            "decide: not wired in this shell (no {})",
+            rhema_bash::decision::VAR_PROFILE
+        );
+        return rhema_bash::decision::EXIT_NOT_WIRED;
+    };
     // The stored settings, the headless run's convention: an
     // unreadable file is the default document, never an error wall.
     let doc = crate::store::Config::load().unwrap_or_default();
@@ -315,6 +348,17 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
             1
         }
     }
+}
+
+/// The instance the host handed this process, when
+/// [`VAR_INSTANCE`] holds one.
+fn injected_instance() -> Option<rhema_config::DecisionInstance> {
+    instance_from_injected(&std::env::var(VAR_INSTANCE).ok()?)
+}
+
+/// [`injected_instance`] over the raw value, the seam tests drive.
+fn instance_from_injected(raw: &str) -> Option<rhema_config::DecisionInstance> {
+    serde_json::from_str(raw).ok()
 }
 
 /// Reads a request off a reader, bounded, with the same messages the
@@ -554,5 +598,107 @@ mod tests {
         let good = r#"{"state": "s", "questions": {"q": {"type": "noul", "instructions": "x"}}}"#;
         assert!(read_request(good.as_bytes()).is_ok());
         assert!(read_request("garbage".as_bytes()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+    use crate::args::SandboxChoice;
+    use crate::sandbox::Sandboxed;
+    use rhema_bash::ShellTools;
+    use rhema_config::{DecisionInstance, DecisionSettings, SandboxSettings};
+    use std::sync::Arc;
+
+    fn sandboxed() -> (Sandboxed, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let sandboxed = Sandboxed {
+            choice: SandboxChoice::Docker,
+            target: "test".to_owned(),
+            tools: Arc::new(ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+            shared: Some(rhema_sandbox::kit::SharedRoot::new(dir.path())),
+        };
+        (sandboxed, dir)
+    }
+
+    fn profile(inject: bool) -> Profile {
+        Profile {
+            sandbox: Some(SandboxSettings {
+                inject_credentials: inject,
+                ..SandboxSettings::default()
+            }),
+            decision: Some(DecisionSettings {
+                instance: None,
+                instances: BTreeMap::from([(
+                    "local".to_owned(),
+                    DecisionInstance {
+                        provider: "jev".into(),
+                        api_key: Some("literal-key".into()),
+                        model: Some("m".into()),
+                        base_url: Some("http://box".into()),
+                        ..DecisionInstance::default()
+                    },
+                )]),
+            }),
+            ..Profile::default()
+        }
+    }
+
+    #[test]
+    fn the_active_instance_crosses_in_env_when_opted_in() {
+        let (sandboxed, _dir) = sandboxed();
+        let wiring = wire_for_session(
+            "sandbox-decision-inject",
+            &profile(true),
+            None,
+            Some(&sandboxed),
+            None,
+        )
+        .expect("the opted-in session wires");
+        let raw = wiring
+            .shell_env
+            .get(VAR_INSTANCE)
+            .expect("the instance env");
+        assert!(raw.contains("literal-key"), "{raw}");
+        assert!(raw.contains("http://box"), "{raw}");
+        assert!(raw.contains("\"model\":\"m\""), "{raw}");
+    }
+
+    #[test]
+    fn without_the_opt_in_a_sandboxed_session_does_not_wire() {
+        let (sandboxed, _dir) = sandboxed();
+        assert!(
+            wire_for_session(
+                "sandbox-decision-no-inject",
+                &profile(false),
+                None,
+                Some(&sandboxed),
+                None,
+            )
+            .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod injected_tests {
+    use super::instance_from_injected;
+
+    #[test]
+    fn a_host_resolved_instance_parses() {
+        let raw = r#"{"provider":"jev","api_key":"k","model":"m","base_url":"http://box"}"#;
+        let instance = instance_from_injected(raw).expect("the host's shape parses");
+        assert_eq!(instance.provider, "jev");
+        assert_eq!(instance.api_key.as_deref(), Some("k"));
+        assert_eq!(instance.base_url.as_deref(), Some("http://box"));
+    }
+
+    #[test]
+    fn a_malformed_instance_falls_through() {
+        assert!(instance_from_injected("not json").is_none());
     }
 }

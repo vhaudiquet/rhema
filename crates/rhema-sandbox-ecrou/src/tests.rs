@@ -6,6 +6,7 @@ use crate::gitenv::{GIT_GUARDS, render_pairs};
 use crate::tail::append_capped;
 use rhema_sandbox::OutputOnly;
 use rhema_sandbox::exec_util::EXEC_TAIL_BYTES;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -145,6 +146,7 @@ fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
         &["/w:/w"],
         "/w",
         "echo hi",
+        &BTreeMap::new(),
         None,
         Some("proj-1"),
         false,
@@ -163,6 +165,7 @@ fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
         &["/w:/w"],
         "/w",
         "echo hi",
+        &BTreeMap::new(),
         None,
         Some("proj-1"),
         true,
@@ -181,6 +184,7 @@ fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
         &["/w:/w"],
         "/w",
         "echo hi",
+        &BTreeMap::new(),
         None,
         None,
         false,
@@ -207,6 +211,7 @@ fn the_run_argv_names_capture_share_workdir_then_the_payload() {
         &["/home/me/proj:/home/me/proj"],
         "/home/me/proj/src",
         "echo hi",
+        &BTreeMap::new(),
         None,
         None,
         false,
@@ -232,6 +237,35 @@ fn the_run_argv_names_capture_share_workdir_then_the_payload() {
 }
 
 #[test]
+fn the_request_env_rides_as_pairs_ahead_of_the_image() {
+    let env = BTreeMap::from([(
+        "RHEMA_SEARCH_CHAIN".to_owned(),
+        "[{\"name\":\"exa\",\"provider\":\"exa\",\"key\":\"k\"}]".to_owned(),
+    )]);
+    let argv = run_argv(
+        "ecrou",
+        "ubuntu",
+        Path::new("/tmp/io"),
+        &["/w:/w"],
+        "/w",
+        "echo hi",
+        &env,
+        None,
+        None,
+        false,
+    );
+    let at = argv
+        .iter()
+        .position(|a| a == "--env")
+        .expect("the env pair is in the argv");
+    assert_eq!(
+        argv[at + 1],
+        "RHEMA_SEARCH_CHAIN=[{\"name\":\"exa\",\"provider\":\"exa\",\"key\":\"k\"}]"
+    );
+    assert!(at < argv.iter().position(|a| a == "ubuntu").unwrap());
+}
+
+#[test]
 fn the_runtime_share_rides_beside_the_workspace() {
     let argv = run_argv(
         "ecrou",
@@ -243,6 +277,7 @@ fn the_runtime_share_rides_beside_the_workspace() {
         ],
         "/home/me/proj",
         "echo hi",
+        &BTreeMap::new(),
         None,
         None,
         false,
@@ -276,6 +311,7 @@ fn the_run_argv_points_git_at_the_staged_config_only_when_staged() {
         &["/home/me/proj:/home/me/proj"],
         "/home/me/proj",
         "echo hi",
+        &BTreeMap::new(),
         Some(&env),
         None,
         false,
@@ -298,6 +334,7 @@ fn the_run_argv_points_git_at_the_staged_config_only_when_staged() {
         &["/w:/w"],
         "/w",
         "echo hi",
+        &BTreeMap::new(),
         None,
         None,
         false,

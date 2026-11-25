@@ -1,6 +1,7 @@
 //! The ecrou CLI from this side: the payload line's shell, the
 //! scratch both sides see, and the argv one boot crosses with.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::gitenv::GitEnv;
@@ -116,6 +117,7 @@ pub(crate) fn run_argv(
     shares: &[&str],
     workdir: &str,
     command: &str,
+    env: &BTreeMap<String, String>,
     git_env: Option<&GitEnv>,
     persist: Option<&str>,
     persist_reset: bool,
@@ -135,6 +137,10 @@ pub(crate) fn run_argv(
         argv.push((*share).to_owned());
     }
     argv.extend(["--workdir".to_owned(), workdir.to_owned()]);
+    for (key, value) in env {
+        argv.push("--env".to_owned());
+        argv.push(format!("{key}={value}"));
+    }
     if let Some(env) = git_env {
         argv.push("--env".to_owned());
         argv.push(format!("GIT_CONFIG_GLOBAL={}", env.guest_config_path));

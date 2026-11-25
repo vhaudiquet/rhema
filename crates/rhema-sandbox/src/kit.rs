@@ -383,6 +383,16 @@ pub async fn ensure_shared(
             env.insert(key.clone(), value.clone());
         }
     }
+    // Last: a wiring that provisioned its own init file carries a
+    // BASH_ENV pointing at a host temp path. The shared file is the
+    // only one the sandbox can read.
+    env.insert(
+        rhema_bash::init::VAR_BASH_ENV.to_owned(),
+        sandbox_session
+            .join("init.sh")
+            .to_string_lossy()
+            .into_owned(),
+    );
     env.insert(
         "RHEMA_VISION_STAGING".to_owned(),
         sandbox_session
@@ -446,13 +456,6 @@ pub fn place_shared(
     )?;
     let sandbox_session = Path::new(&shared.sandbox).join("sessions").join(session);
     let mut env = BTreeMap::new();
-    env.insert(
-        rhema_bash::init::VAR_BASH_ENV.to_owned(),
-        sandbox_session
-            .join("init.sh")
-            .to_string_lossy()
-            .into_owned(),
-    );
     for kit in kits {
         for stub in &kit.stubs {
             env.insert(stub.bin_var.clone(), helper.clone());
@@ -461,6 +464,16 @@ pub fn place_shared(
             env.insert(key.clone(), value.clone());
         }
     }
+    // Last: a wiring that provisioned its own init file carries a
+    // BASH_ENV pointing at a host temp path. The shared file is the
+    // only one the sandbox can read.
+    env.insert(
+        rhema_bash::init::VAR_BASH_ENV.to_owned(),
+        sandbox_session
+            .join("init.sh")
+            .to_string_lossy()
+            .into_owned(),
+    );
     env.insert(
         "RHEMA_VISION_STAGING".to_owned(),
         sandbox_session
@@ -605,6 +618,30 @@ mod tests {
             Some(dir.path().join("bin/1/rhema").to_string_lossy().as_ref())
         );
         assert!(dir.path().join("sessions/s1/jobs/session").is_file());
+    }
+
+    #[test]
+    fn a_kit_init_never_replaces_the_shared_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = SharedRoot::new(dir.path());
+        let mut kit = kit(Feature::Search, Needs::HOST_CALL);
+        kit.vars
+            .insert("BASH_ENV".into(), "/host/tmp/init.bash".into());
+        kit.vars.insert("RHEMA_SEARCH_CHAIN".into(), "[]".into());
+        let env = place_shared(&shared, "s1", std::slice::from_ref(&kit)).unwrap();
+        assert_eq!(
+            env.get("BASH_ENV").map(String::as_str),
+            Some(
+                dir.path()
+                    .join("sessions/s1/init.sh")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        assert_eq!(
+            env.get("RHEMA_SEARCH_CHAIN").map(String::as_str),
+            Some("[]")
+        );
     }
 
     #[test]

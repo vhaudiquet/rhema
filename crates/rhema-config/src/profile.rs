@@ -642,6 +642,16 @@ impl Profile {
             .and_then(|s| s.persist)
             .unwrap_or(true)
     }
+
+    /// Whether the host hands the resolved search and decision
+    /// credentials to the sandbox's helper. Off by default; see
+    /// [`crate::SandboxSettings::inject_credentials`].
+    pub fn sandbox_inject_credentials(&self) -> bool {
+        self.sandbox
+            .as_ref()
+            .map(|s| s.inject_credentials)
+            .unwrap_or(false)
+    }
 }
 #[cfg(test)]
 mod tests;

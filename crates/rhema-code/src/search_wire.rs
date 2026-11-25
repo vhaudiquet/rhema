@@ -26,6 +26,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 
+/// The resolved chain the host hands a sandboxed helper: a JSON array
+/// of `{name, provider, key}`, the profile resolved host-side. The
+/// local mode never sees it; its config and keychain are here.
+const VAR_CHAIN: &str = "RHEMA_SEARCH_CHAIN";
+
 /// The usage text the mode prints on stderr, and the model reads, on
 /// a query it cannot serve as typed.
 const USAGE: &str = "search: web search through this session's providers
@@ -57,21 +62,42 @@ pub(crate) fn wire_for_session(
     sandboxed: Option<&crate::sandbox::Sandboxed>,
     bash_env: Option<std::ffi::OsString>,
 ) -> Option<Arc<rhema_bash::websearch::Wiring>> {
-    if sandboxed.is_some() {
-        return None;
-    }
     // The gate answers the only question the settings can: does this
     // profile have providers to try? The chain itself is not cached;
     // the mode handler assembles fresh per invocation, so added
     // providers land without a restart.
-    rhema_websearch_registry::assemble_chain(Some(profile), secrets)?;
+    let selected = rhema_websearch_registry::selections(Some(profile), secrets);
+    if selected.is_empty() {
+        return None;
+    }
+    // The injected route needs both the opt-in and a mounted root the
+    // helper was installed under. ssh and http have neither; their
+    // sandbox cache path is v2.
+    let mounted = sandboxed.and_then(|s| s.shared()).is_some();
+    let inject = mounted && profile.sandbox_inject_credentials();
+    if sandboxed.is_some() && !inject {
+        return None;
+    }
     let mut reg = registry().lock().expect("search wire registry lock");
     if let Some(wiring) = reg.get(session_key) {
         return Some(wiring.clone());
     }
     let bin = std::env::current_exe().ok()?;
-    let wiring =
-        Arc::new(rhema_bash::websearch::provision_with_bin(bash_env, &bin, session_key).ok()?);
+    let mut wiring = rhema_bash::websearch::provision_with_bin(bash_env, &bin, session_key).ok()?;
+    if inject {
+        // The profile resolved here; the sandbox gets the instances
+        // and their keys, not a config file it cannot read.
+        let payload: Vec<serde_json::Value> = selected
+            .iter()
+            .map(|(name, provider, key)| {
+                serde_json::json!({"name": name, "provider": provider, "key": key})
+            })
+            .collect();
+        wiring
+            .shell_env
+            .insert(VAR_CHAIN.to_owned(), serde_json::to_string(&payload).ok()?);
+    }
+    let wiring = Arc::new(wiring);
     reg.insert(session_key.to_owned(), wiring.clone());
     Some(wiring)
 }
@@ -175,6 +201,11 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
             return rhema_bash::websearch::EXIT_USAGE;
         }
     };
+    // The sandboxed helper: the host resolved the chain and handed it
+    // over as env. No config file, no keychain, no profile lookup.
+    if let Some(chain) = injected_chain() {
+        return run(&invocation, &chain);
+    }
     let Some(profile_name) = std::env::var(rhema_bash::websearch::VAR_PROFILE)
         .ok()
         .filter(|name| !name.trim().is_empty())
@@ -205,6 +236,36 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
         return 1;
     };
     run(&invocation, &chain)
+}
+
+/// One host-resolved entry, the shape [`VAR_CHAIN`] carries.
+#[derive(serde::Deserialize)]
+struct InjectedEntry {
+    name: String,
+    provider: String,
+    key: String,
+}
+
+/// The chain the host handed this process, when [`VAR_CHAIN`] holds
+/// one. A malformed value falls through to the local path, which then
+/// reports the missing config; the host's serializer cannot produce
+/// one, so this is the corrupt-env case, not a settings error.
+fn injected_chain() -> Option<rhema_websearch::Chain> {
+    chain_from_injected(&std::env::var(VAR_CHAIN).ok()?)
+}
+
+/// [`injected_chain`] over the raw value, the seam tests drive.
+fn chain_from_injected(raw: &str) -> Option<rhema_websearch::Chain> {
+    let entries: Vec<InjectedEntry> = serde_json::from_str(raw).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    let mut chain = rhema_websearch::Chain::new();
+    for entry in entries {
+        let provider = rhema_websearch_registry::build(&entry.provider, Some(entry.key)).ok()?;
+        chain.push(entry.name, provider);
+    }
+    Some(chain)
 }
 
 #[cfg(test)]
@@ -344,5 +405,99 @@ mod runtime_tests {
             .await
             .unwrap();
         assert_eq!(code, 0, "the mock answers, the mode exits clean");
+    }
+}
+
+#[cfg(test)]
+mod sandbox_tests {
+    use super::*;
+    use crate::args::SandboxChoice;
+    use crate::sandbox::Sandboxed;
+    use rhema_bash::ShellTools;
+    use rhema_config::{SandboxSettings, WebSearchInstance};
+    use std::sync::Arc;
+
+    fn sandboxed(shared: bool) -> (Sandboxed, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let sandboxed = Sandboxed {
+            choice: SandboxChoice::Docker,
+            target: "test".to_owned(),
+            tools: Arc::new(ShellTools::new("/workspace")),
+            workspace: "/workspace".to_owned(),
+            skills: Vec::new(),
+            instance_lock: None,
+            managed: None,
+            shared: shared.then(|| rhema_sandbox::kit::SharedRoot::new(dir.path())),
+        };
+        (sandboxed, dir)
+    }
+
+    fn profile(inject: bool) -> Profile {
+        let mut profile = Profile {
+            sandbox: Some(SandboxSettings {
+                inject_credentials: inject,
+                ..SandboxSettings::default()
+            }),
+            ..Profile::default()
+        };
+        profile.websearch.insert(
+            "exa-work".into(),
+            WebSearchInstance {
+                provider: "exa".into(),
+                api_key: Some("literal-key".into()),
+                secret_ref: None,
+            },
+        );
+        profile.websearch_order = vec!["exa-work".into()];
+        profile
+    }
+
+    #[test]
+    fn the_resolved_chain_crosses_in_env_when_opted_in() {
+        let (sandboxed, _dir) = sandboxed(true);
+        let wiring = wire_for_session(
+            "sandbox-search-inject",
+            &profile(true),
+            None,
+            Some(&sandboxed),
+            None,
+        )
+        .expect("the opted-in session wires");
+        let raw = wiring.shell_env.get(VAR_CHAIN).expect("the chain env");
+        assert!(raw.contains("exa-work"), "{raw}");
+        assert!(raw.contains("literal-key"), "{raw}");
+    }
+
+    #[test]
+    fn without_the_opt_in_a_sandboxed_session_does_not_wire() {
+        let (sandboxed, _dir) = sandboxed(true);
+        assert!(
+            wire_for_session(
+                "sandbox-search-no-inject",
+                &profile(false),
+                None,
+                Some(&sandboxed),
+                None,
+            )
+            .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod injected_tests {
+    use super::chain_from_injected;
+
+    #[test]
+    fn a_host_resolved_chain_builds() {
+        let raw = r#"[{"name":"exa-work","provider":"exa","key":"k"}]"#;
+        assert!(chain_from_injected(raw).is_some());
+    }
+
+    #[test]
+    fn an_empty_or_malformed_chain_falls_through() {
+        assert!(chain_from_injected("[]").is_none());
+        assert!(chain_from_injected("{}").is_none());
+        assert!(chain_from_injected("not json").is_none());
     }
 }
