@@ -4,6 +4,8 @@
 //! bookkeeping, the capacity/race/panic edges. Zero network, zero real
 //! time.
 
+#![cfg(feature = "driver")]
+
 mod common;
 
 use std::sync::Arc;
@@ -11,9 +13,11 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use common::{DEBOUNCE, TTL, config, event, register, setup, setup_with, the_key};
-use rhema_autonomous_agent::async_trait;
-use rhema_autonomous_agent::{Driver, Handler, SessionContext};
-use rhema_rsd::{DispatchError, DispatcherConfig, IngestResult, KeyState, Outcome, ResourceKey};
+use rhema_rsd::async_trait;
+use rhema_rsd::{
+    DispatchError, DispatcherConfig, Driver, Handler, IngestResult, KeyState, Outcome, ResourceKey,
+    SessionContext,
+};
 use tokio::sync::{Notify, mpsc};
 
 /// A handler the test paces step by step: it waits at `start` before its

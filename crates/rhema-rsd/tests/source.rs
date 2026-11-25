@@ -2,14 +2,18 @@
 //! through its own `name`/`key_fn` report, feeding a real dispatcher,
 //! the fed count, the landed inbox, and the dedup on replay. Zero network.
 
+#![cfg(feature = "driver")]
+
 mod common;
 
 use std::sync::{Arc, Mutex};
 
 use common::DEBOUNCE;
-use rhema_autonomous_agent::async_trait;
-use rhema_autonomous_agent::{Source, SourceError};
-use rhema_rsd::{DispatchError, Dispatcher, Event, IngestResult, KeyFn, KeyState, ResourceKey};
+use rhema_rsd::async_trait;
+use rhema_rsd::{
+    DispatchError, Dispatcher, Event, IngestResult, KeyFn, KeyState, ResourceKey, Source,
+    SourceError,
+};
 
 /// A detection stream that replays a fixed feed into the dispatcher and
 /// records what the dispatcher did with every event it was handed.

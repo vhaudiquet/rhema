@@ -382,18 +382,20 @@ Requested work has a durable record too. `rhema-submissions` keeps one ledger un
   a second process protocol would be a small reinvention of it. Home:
   the consumer, not the framework. The 0.5.0 review cut the whole
   resident tool seam (`Allowlist`, the `Tool` trait, the registry and
-  its filtered resolver, `ResolverChain`, the manifest loader) from
-  `rhema-autonomous-agent`: the 0.4.0 consumer audit showed the loop
-  half imports none of it, every allowlist in the wild is permissive,
-  every tool arrives as manifest plus operation, and the registry is
+  its filtered resolver, `ResolverChain`, the manifest loader) from the
+  resident tier: the 0.4.0 consumer audit showed the loop half
+  (`Source`, `Driver`, `SessionContext`) imports none of it, every
+  allowlist in the wild is permissive, every tool arrives as manifest
+  plus operation, and the registry is
   built, filled, and flattened into a resolver in the same breath at
   every call site, packaging for one consumer, not framework API. The
   claw owns its tooling from here, claw-local per family: a
   `TOOL.yaml` loader over its embedded manifests beside the registered
   builtins, or inline specs next to the operation, whichever the
   family prefers. Custom native tools are one `rhema_core`
-  `ToolResolver` impl, no framework machinery; the resident tier keeps
-  only the `Source`/`Driver` loop.
+  `ToolResolver` impl, no framework machinery. The loop itself moved
+  into `rhema-rsd` behind the `driver` feature, so the crate that
+  defines keys and leases also ships the one loop that drives them.
 
 ---
 
@@ -428,7 +430,7 @@ a debugging session there.
 
 The crate publishes to crates.io; its one consumer, the Durable Object,
 lives in the `rhema-cloudflare-code` repository and pins it there, the
-same arrangement the claw keeps with `rhema-autonomous-agent`. A second
+same arrangement the claw keeps with `rhema-rsd`. A second
 cloud frontend on Vercel (an axum server, since removed) proved
 the extraction was real. What it proved still stands: the sync `Store`
 contract is workable, because the engine's commit hook calls it from
@@ -743,8 +745,9 @@ one, and a hollow dot on the ones ahead. After the welcome the wizard
 asks for the default profile: the config's profiles, `personal` and
 `work` on a fresh setup, plus an add row that creates a new empty one.
 The pick becomes the session's profile and the workspace's remembered
-one, so the login and model steps write there; the backend re-resolves
-for it, and a profile without usable credentials drops the one it left.
+one, inherited by its subfolders until one of them chooses its own, so
+the login and model steps write there; the backend re-resolves for it,
+and a profile without usable credentials drops the one it left.
 The finish step is the only writer of `onboarded: true`, so Esc-ing out
 halfway always reopens.
 

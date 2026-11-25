@@ -4302,18 +4302,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rhema-autonomous-agent"
-version = "0.4.2"
-dependencies = [
- "async-trait",
- "rhema-core",
- "rhema-rsd",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
 name = "rhema-bash"
 version = "0.4.2"
 dependencies = [
@@ -4787,6 +4775,7 @@ dependencies = [
 name = "rhema-rsd"
 version = "0.4.2"
 dependencies = [
+ "async-trait",
  "rhema-core",
  "rusqlite",
  "serde",

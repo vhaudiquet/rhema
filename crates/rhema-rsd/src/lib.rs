@@ -23,11 +23,11 @@
 //!
 //! # The driver owns the loop
 //!
-//! This crate has no threads, tasks, or timers. All time-dependent behavior
-//! (debounce windows, lease TTL, admission TTL, recovery sweeps) is
-//! evaluated lazily against an injected [`Clock`] at call time, so the crate
-//! stays embeddable and every timing is deterministic in tests
-//! ([`FixedClock`]). The embedder drives the loop:
+//! The dispatcher has no threads, tasks, or timers. All time-dependent
+//! behavior (debounce windows, lease TTL, admission TTL, recovery sweeps)
+//! is evaluated lazily against an injected [`Clock`] at call time, so the
+//! state machine stays embeddable and every timing is deterministic in
+//! tests ([`FixedClock`]). The embedder drives the loop:
 //!
 //! ```text
 //! dispatcher.register_source("github", key_fn);
@@ -49,6 +49,11 @@
 //!     wait_for_events_or_time();
 //! }
 //! ```
+//!
+//! The `driver` feature ships that loop as code: [`driver::Driver`] with
+//! the [`driver::Handler`] seam and the [`driver::Source`]
+//! contract, one task per admitted key. Without the feature this crate
+//! stays runtime-free and the pseudocode above is the whole contract.
 //!
 //! `ingest` never dispatches: it records the event, opens (or resets) the
 //! debounce window, and returns. `admit` is the lazy dispatch step, it
@@ -119,6 +124,8 @@
 //! - [`volatile`]: the in-process `VolatileStore`
 //! - [`sqlite`]: the durable `SqliteStore` (`sqlite` feature)
 //! - [`dispatcher`]: the `Dispatcher` state machine
+//! - [`driver`]: `Driver`, `Handler`, `SessionContext`, and the `Source`
+//!   contract (`driver` feature)
 //! - [`store_contract`]: replayable Store behavioral suite (`store-contract` feature)
 
 #![forbid(unsafe_code)]
@@ -126,6 +133,8 @@
 pub mod clock;
 pub mod config;
 pub mod dispatcher;
+#[cfg(feature = "driver")]
+pub mod driver;
 pub mod error;
 pub mod event;
 pub mod key;
@@ -142,6 +151,12 @@ pub mod volatile;
 pub use clock::{Clock, FixedClock, SystemClock};
 pub use config::DispatcherConfig;
 pub use dispatcher::Dispatcher;
+// Re-exported so implementors of the driver's async seams can apply
+// #[async_trait] without adding the crate themselves.
+#[cfg(feature = "driver")]
+pub use async_trait::async_trait;
+#[cfg(feature = "driver")]
+pub use driver::{Driver, Handler, SessionContext, Source, SourceError};
 pub use error::{Conflict, DispatchError, Expired, StoreError};
 pub use event::{Event, InboxItem, KeyFn};
 pub use key::ResourceKey;

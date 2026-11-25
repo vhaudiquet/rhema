@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{DEBOUNCE, event, register_github, setup, the_key};
+use common::{DEBOUNCE, event, register, setup, the_key};
 use rhema_core::{Content, Message, Role, ToolCall};
 use rhema_rsd::{KeyState, Outcome};
 use serde_json::json;
@@ -12,7 +12,7 @@ use serde_json::json;
 #[test]
 fn a_dispatcher_session_round_trips_with_its_wrapped_core_state() {
     let (dispatcher, clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
     clock.advance(DEBOUNCE);

@@ -5,14 +5,14 @@
 
 mod common;
 
-use common::{DEBOUNCE, event, register_github, setup, the_key};
+use common::{DEBOUNCE, event, register, setup, the_key};
 use rhema_core::{Message, Role};
 use rhema_rsd::{IngestResult, KeyState, Outcome};
 
 #[test]
 fn assignment_live_comments_and_clean_release_end_at_idle() {
     let (dispatcher, clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
 
     // 1. The assignment comment arrives at an idle key: recorded, debounce
@@ -91,7 +91,7 @@ fn assignment_live_comments_and_clean_release_end_at_idle() {
 #[test]
 fn a_comment_between_last_poll_and_release_reacquires_the_same_session() {
     let (dispatcher, clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
 
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();

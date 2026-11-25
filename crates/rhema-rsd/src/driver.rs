@@ -1,35 +1,48 @@
-//! The lease-driven handler loop (spec §3): admitted keys become handler
-//! runs.
+//! The embedder loop (spec §3): admitted keys become handler runs.
 //!
 //! The [`Driver`] closes the dispatcher's guarantees around an embedder's
 //! [`Handler`]: every admitted key is acquired, the handler runs against
-//! a [`SessionContext`], the resumable session and the live inbox, and
-//! the run ends checkpointed and released with the handler's outcome.
-//! One handler per key at a time is the dispatcher's lease, not the
-//! driver's word.
+//! a [`SessionContext`] carrying the resumable session and the live
+//! inbox, and the run ends checkpointed and released with the handler's
+//! outcome. One handler per key at a time is the dispatcher's lease, not
+//! the driver's word.
 //!
 //! Two disciplines keep a run inside its lease:
 //!
 //! - **Poll to live.** [`SessionContext::poll_inbox`] renews the lease
-//!   before draining, every poll is the §4 heartbeat of the *lease*, an
-//!   entirely different thing from the forbidden model-invoking timer.
-//!   The batch comes back whole: fold it into one reasoning step (spec
-//!   §3's batching decision), never one step per item.
+//!   before draining; every poll is the §4 heartbeat of the *lease*, a
+//!   different thing from the forbidden model-invoking timer. The batch
+//!   comes back whole: fold it into one reasoning step (spec §3's
+//!   batching decision), never one step per item.
 //! - **The model is never the detector.** The handler's deterministic
-//!   setup, classification, allowlist resolution, happens before its
+//!   setup (classification, allowlist resolution) happens before its
 //!   first model call; this loop never reaches the provider itself.
+//!
+//! The dispatcher stays runtime-free; this module is the one place that
+//! needs an executor, for the task per admitted key in
+//! [`Driver::run_once`]. It is behind the `driver` feature.
+//!
+//! Build an agent on top by implementing [`Handler`] over
+//! `rhema_core`'s engine, installing [`SessionContext::commit_hook`]
+//! through the engine's `set_commit_hook`, and handing the driver one
+//! [`Source`] per input stream.
 
 use std::sync::Arc;
 
 use rhema_core::{CommitError, CommitHook};
-use rhema_rsd::{DispatchError, Dispatcher, InboxItem, Lease, Outcome, ResourceKey, Session};
 use tokio::task::JoinSet;
+
+use crate::{DispatchError, Dispatcher, InboxItem, Lease, Outcome, ResourceKey, Session};
+
+pub mod source;
+
+pub use source::{Source, SourceError};
 
 /// The key-ownership predicate [`Driver::owning`] takes: which keys
 /// this driver's handler answers.
 pub type OwnsKey = dyn Fn(&ResourceKey) -> bool + Send + Sync;
 
-use crate::async_trait;
+use async_trait::async_trait;
 
 /// The embedder's answer to one dispatch: do the work, report the
 /// outcome. Deterministic setup first; delivery is at-least-once, so
@@ -55,7 +68,7 @@ pub struct SessionContext {
 
 impl SessionContext {
     /// Renews the lease and drains the inbox: every undelivered event
-    /// since the last poll, oldest first, the trigger included, on the
+    /// since the last poll, oldest first, the trigger included on the
     /// first call. Fold the returned batch into one reasoning step.
     pub async fn poll_inbox(&mut self) -> Result<Vec<InboxItem>, DispatchError> {
         self.lease = self.dispatcher.renew(&self.lease)?;
@@ -107,17 +120,17 @@ pub struct Driver {
 }
 
 impl Driver {
-    /// A driver whose leases are held for `"autonomous-agent"`.
+    /// A driver whose leases are held for `"rhema"`.
     pub fn new(dispatcher: Arc<Dispatcher>, handler: Arc<dyn Handler>) -> Self {
         Self {
             dispatcher,
             handler,
-            holder: "autonomous-agent".to_owned(),
+            holder: "rhema".to_owned(),
             owns: None,
         }
     }
 
-    /// Names the lease holder (ops visibility on `rhema_rsd::KeyStatus`).
+    /// Names the lease holder (ops visibility on [`crate::KeyStatus`]).
     pub fn with_holder(mut self, holder: impl Into<String>) -> Self {
         self.holder = holder.into();
         self
@@ -132,7 +145,7 @@ impl Driver {
         self
     }
 
-    /// Startup recovery (RSD spec §7): sweeps leases a dead process left
+    /// Startup recovery (spec §7): sweeps leases a dead process left
     /// behind. Call once, before the first [`Self::run_once`].
     pub async fn bootstrap(&self) -> Result<(), DispatchError> {
         self.dispatcher.recover()
@@ -199,8 +212,8 @@ impl Driver {
 #[cfg(test)]
 mod commit_hook_tests {
     use super::*;
+    use crate::{DispatcherConfig, FixedClock, VolatileStore};
     use rhema_core::{Message, Role};
-    use rhema_rsd::{DispatcherConfig, FixedClock, VolatileStore};
 
     #[test]
     fn the_commit_hook_persists_the_engine_state_under_the_run_lease() {

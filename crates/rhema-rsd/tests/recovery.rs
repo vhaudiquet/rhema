@@ -6,7 +6,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{DEBOUNCE, TTL, config, event, register_github, the_key};
+use common::{DEBOUNCE, TTL, config, event, register, the_key};
 use rhema_core::{Message, Role};
 use rhema_rsd::{Dispatcher, FixedClock, KeyState, Outcome, VolatileStore};
 
@@ -17,7 +17,7 @@ fn crashed(with_unpolled_event: bool) -> (Arc<VolatileStore>, Arc<FixedClock>) {
     let clock = Arc::new(FixedClock::new(1_000));
     let store = Arc::new(VolatileStore::new());
     let dispatcher = Arc::new(Dispatcher::new(config(), clock.clone(), store.clone()));
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
     clock.advance(DEBOUNCE);
@@ -79,7 +79,7 @@ fn recover_sends_an_expired_lease_with_queued_events_to_reacquire() {
 #[test]
 fn recover_leaves_a_live_lease_alone() {
     let (dispatcher, clock) = common::setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
     clock.advance(DEBOUNCE);
@@ -96,7 +96,7 @@ fn recover_leaves_a_live_lease_alone() {
 #[test]
 fn list_active_reports_only_leased_keys_without_sweeping() {
     let (dispatcher, clock) = common::setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
     clock.advance(DEBOUNCE);
@@ -117,7 +117,7 @@ fn crashed_fresh_lease(with_unpolled_event: bool) -> (Arc<VolatileStore>, Arc<Fi
     let clock = Arc::new(FixedClock::new(1_000));
     let store = Arc::new(VolatileStore::new());
     let dispatcher = Arc::new(Dispatcher::new(config(), clock.clone(), store.clone()));
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
     clock.advance(DEBOUNCE);

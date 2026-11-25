@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{DEBOUNCE, TTL, config, event, register_github, setup, the_key};
+use common::{DEBOUNCE, TTL, config, event, register, setup, the_key};
 use rhema_core::Message;
 use rhema_rsd::{
     Conflict, DispatchError, Dispatcher, Expired, FixedClock, IngestResult, KeyRecord, KeyState,
@@ -16,7 +16,7 @@ use rhema_rsd::{
 /// t = 1_100, so the board starts clean.
 fn leased() -> (Arc<Dispatcher>, Arc<FixedClock>, ResourceKey, Lease) {
     let (dispatcher, clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
     clock.advance(DEBOUNCE);
@@ -92,7 +92,7 @@ fn a_leased_record_without_a_lease_is_reset_and_acquired() {
     let clock = Arc::new(FixedClock::new(1_000));
     let store = Arc::new(VolatileStore::new());
     let dispatcher = Dispatcher::new(config(), clock, store.clone());
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     // The shape only a hand-edited store row carries: leased, with no
     // lease to name. The sweep must end it in-band, not leave it for
@@ -192,7 +192,7 @@ fn a_release_from_a_superseded_lease_is_a_revision_conflict() {
 #[test]
 fn two_dispatchers_share_one_store_but_not_a_private_one() {
     let (dispatcher, clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
     clock.advance(DEBOUNCE);

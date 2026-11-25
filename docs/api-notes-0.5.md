@@ -42,6 +42,14 @@ The `progress` HRTBs item 2 complained about are gone. The retry ladder's callba
 
 Landed as: the four modules deleted. The crate is the loop only (`Source`/`SourceError`, `Driver`/`Handler`/`SessionContext`, the `async_trait` re-export); `serde`/`serde_yaml` leave its dependency list and `serde_json` moves to dev-deps. Tool injection was never this crate's to provide: it is `rhema_core::ToolResolver`, untouched. The claw ports its native families (consents, attachments, phone) to claw-local resolvers, the manifest loader moving with them if the folder convention survives; its CRUD families become `clawctl` verbs over the daemon's HTTP surface, which already serves every verb. Spec §8's TOOL.yaml entry records the new home and the decision not to build `run: { exec }` (user-written tools are MCP's job). No `Chain` lands in rhema-core: the host composes through `Overlay`, and the claw's one chain site folds `Overlay`s or keeps a local struct.
 
+## 8. The resident loop moved into `rhema-rsd` (landed)
+
+After item 7 the crate was `Source`, `SourceError`, `Handler`, `Driver` and `SessionContext`: 313 lines with the tests, no implementation of `Source` or `Handler` anywhere inside it, one consumer, and the spec already naming those types (§3, §5). The reference implementation was shipping the spec's `Handler` in a sibling package.
+
+Landed as: `rhema_rsd::driver`, behind a `driver` feature that brings `tokio` and `async-trait`. The dispatcher keeps its promise, no threads, tasks or timers; the crate docs and the module docs say which half needs the executor. The crate is gone from the workspace; the 0.4.x versions stay on crates.io and want yanking at release time. Both integration suites moved into `rhema-rsd/tests` behind `#![cfg(feature = "driver")]`. The pseudocode loop in `lib.rs` stays, now with a link to the code that runs it, so an embedder that wants the standard shape can take it.
+
+The claw's port is mechanical: `rhema_autonomous_agent::X` becomes `rhema_rsd::X` with `features = ["driver"]`, and the default lease holder prints as `rhema` instead of `autonomous-agent`.
+
 ## Verified clean in this batch (no action needed)
 
 The five crate-level READMEs with code (rhema-code, rhema-session-store, -file, -sqlite, rhema-submissions) verified against source: 0 broken commands, 0 non-compiling examples, 0 phantom features. The only doc edits made are the two in rhema-code's README (the `background: native` default and the fluff sentence). The install-block URL is network-form and was not reachable from this host; it matches `DIST_BASE`/update.rs and the release pipeline owns it.

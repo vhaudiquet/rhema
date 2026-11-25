@@ -109,8 +109,9 @@ Rules:
   - `identity`: the agent accounts layer: the `IdentityStore`
     contract, its stores, and the use-never-read secret rule
     (`crates/rhema-identity/`)
-  - `rsd`: resource-scoped dispatch: the dispatcher and its stores
-    (`crates/rhema-rsd/`)
+  - `rsd`: resource-scoped dispatch: the dispatcher and its stores,
+    plus the optional `driver` feature (sources, the handler seam, the
+    lease-driven loop) (`crates/rhema-rsd/`)
   - `session-store`: the saved-session seam: the `SessionStore` trait,
     the validated id, the picker row, the error, and the replayable
     contract suite (`crates/rhema-session-store/`)
@@ -129,10 +130,8 @@ Rules:
     contract, the ICS, CalDAV, and Google feed adapters, the
     normalized occurrence vocabulary, and the default reminder source
     (`rhema-claw` repository, `integrations/rhema-calendar-integration/`)
-  - `autonomous-agent`: the resident-agent core tier: sources and the
-    lease-driven driver (`crates/rhema-autonomous-agent/`)
-  - `claw`: the resident agent daemon: the first autonomous-agent
-    consumer (`rhema-claw` repository)
+  - `claw`: the resident agent daemon: the first consumer of RSD's
+    `driver` loop (`rhema-claw` repository)
   - `acp`: the Agent Client Protocol adapter and the `rhema acp`
     subcommand (`crates/rhema-acp/`)
   - `config`: the framework's stored section (profiles, the

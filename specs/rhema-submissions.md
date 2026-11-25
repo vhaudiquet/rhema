@@ -532,7 +532,7 @@ already depends on for `Session`.
 
 It is deliberately **not** in `rhema-host-agent`: that crate is one
 *assembly* of agents (prompt, tools, approval, resolver), and a turn
-belongs to any assembly. `rhema-autonomous-agent`, a harness, a
+belongs to any assembly. `rhema-rsd`'s `driver` feature, a harness, a
 benchmark runner all drive the same `rhema_core::Agent`, so the turn
 kind has to be available to all of them. It is not in `rhema-core`
 either, because core must not know what a submission is: the dependency

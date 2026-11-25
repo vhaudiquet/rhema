@@ -3,12 +3,12 @@
 //!
 //! A source owns one input stream, a forge watch set, a webhook
 //! receiver, and never invokes the model: its `detect` pass is the
-//! gate-before-LLM check, and cadence belongs to the daemon's loop, not
+//! gate-before-LLM check, and cadence belongs to the embedder's loop, not
 //! to the source or to any timer inside this crate.
 
 use std::sync::Arc;
 
-use rhema_rsd::{DispatchError, KeyFn};
+use crate::{DispatchError, KeyFn};
 
 /// Why a detection pass failed: the backend call, or the dispatcher seam
 /// behind the ingest.
@@ -31,8 +31,9 @@ pub trait Source: Send + Sync {
     /// `"github"`); matches the dispatcher's registered source.
     fn name(&self) -> &str;
 
-    /// The key function: event to `ResourceKey`. Reported so a consumer
-    /// can register sources without reaching into the implementation.
+    /// The key function: event to [`ResourceKey`](crate::ResourceKey).
+    /// Reported so an embedder can register sources without reaching into
+    /// the implementation.
     fn key_fn(&self) -> Arc<KeyFn>;
 
     /// One detection pass: poll the outside world, ingest what changed.

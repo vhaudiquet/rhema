@@ -6,7 +6,7 @@ mod common;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use common::{DEBOUNCE, event, register_github, setup_with};
+use common::{DEBOUNCE, event, register, setup_with};
 use rhema_core::{Message, Role};
 use rhema_rsd::{DispatcherConfig, KeyState, Outcome, ResourceKey};
 
@@ -20,7 +20,7 @@ async fn concurrent_tasks_acquire_distinct_keys_under_the_global_cap() {
         debounce_window_millis: 0, // due immediately: the race is on acquire
         ..common::config()
     });
-    register_github(&dispatcher);
+    register(&dispatcher);
 
     // All events land up front, so every task's key is due before any of
     // them acquires.

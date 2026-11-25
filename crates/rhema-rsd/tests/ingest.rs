@@ -3,13 +3,13 @@
 
 mod common;
 
-use common::{DEBOUNCE, Event, event, register_github, setup, the_key};
+use common::{DEBOUNCE, Event, event, register, setup, the_key};
 use rhema_rsd::{DispatchError, IngestResult, KeyState};
 
 #[test]
 fn a_burst_at_an_idle_key_coalesces_into_one_dispatch() {
     let (dispatcher, clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
 
     for id in ["e1", "e2", "e3"] {
@@ -39,7 +39,7 @@ fn a_burst_at_an_idle_key_coalesces_into_one_dispatch() {
 #[test]
 fn a_replayed_event_id_is_deduplicated() {
     let (dispatcher, _clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
 
     assert_eq!(
@@ -62,7 +62,7 @@ fn a_replayed_event_id_is_deduplicated() {
 #[test]
 fn an_event_while_leased_lands_live_without_a_state_change() {
     let (dispatcher, clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
     let key = the_key();
 
     dispatcher.ingest(event(key.as_str(), "e1")).unwrap();
@@ -93,7 +93,7 @@ fn an_event_while_leased_lands_live_without_a_state_change() {
 #[test]
 fn an_unknown_source_is_rejected() {
     let (dispatcher, _clock) = setup();
-    register_github(&dispatcher);
+    register(&dispatcher);
 
     let event = Event {
         id: "e1".into(),

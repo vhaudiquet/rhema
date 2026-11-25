@@ -19,6 +19,11 @@ store-contract = []
 # The durable SQLite `Store` (spec §7's minimum viable store). Bundled:
 # no system sqlite is required, so the build stays self-contained.
 sqlite = ["dep:rusqlite"]
+# The embedder loop (spec §3): the `Source` and `Handler` seam and the
+# `Driver` that turns admitted keys into concurrent handler runs. Off by
+# default: the dispatcher stays runtime-free, and this feature is the one
+# place that needs an executor.
+driver = ["dep:tokio", "dep:async-trait"]
 
 [dependencies]
 # The RSD session wraps rhema-core's caller-owned session; checkpointing
@@ -29,12 +34,18 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Typed public errors
 thiserror = { workspace = true }
+# The driver's object-safe `Source` and `Handler` seams (feature `driver`)
+async-trait = { workspace = true, optional = true }
+# One task per admitted key, spawned by `Driver::run_once` (feature `driver`)
+tokio = { workspace = true, optional = true }
 
 # Durable dispatch state (feature `sqlite`): one row per resource key
 rusqlite = { version = "0.43", features = ["bundled"], optional = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+# The driver suites: a current-thread runtime, `#[tokio::test]`, and the
+# channels and yields the handlers use to pace a run
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 
 [lints]
 workspace = true

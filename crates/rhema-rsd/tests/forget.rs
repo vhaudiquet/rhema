@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{TTL, config, event, register_github, the_key};
+use common::{TTL, config, event, register, the_key};
 use rhema_rsd::{
     Conflict, DispatchError, Dispatcher, FixedClock, IngestResult, KeyState, Session, Store,
     VolatileStore,
@@ -18,7 +18,7 @@ fn harness() -> (Arc<Dispatcher>, Arc<FixedClock>, Arc<VolatileStore>) {
     let store = Arc::new(VolatileStore::new());
     let clock = Arc::new(FixedClock::new(1_000));
     let dispatcher = Arc::new(Dispatcher::new(config(), clock.clone(), store.clone()));
-    register_github(&dispatcher);
+    register(&dispatcher);
     (dispatcher, clock, store)
 }
 

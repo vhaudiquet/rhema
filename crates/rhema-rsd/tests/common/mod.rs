@@ -9,8 +9,10 @@ use std::sync::Arc;
 
 pub use rhema_rsd::Event;
 
-use rhema_rsd::{Dispatcher, DispatcherConfig, FixedClock, ResourceKey, VolatileStore};
+use rhema_rsd::{Dispatcher, DispatcherConfig, FixedClock, KeyFn, ResourceKey, VolatileStore};
 
+/// The suite's source name.
+pub const SOURCE: &str = "github";
 /// Debounce window used across suites (milliseconds).
 pub const DEBOUNCE: u64 = 100;
 /// Lease TTL used across suites (milliseconds).
@@ -45,22 +47,23 @@ pub fn setup_with(config: DispatcherConfig) -> (Arc<Dispatcher>, Arc<FixedClock>
     (dispatcher, clock)
 }
 
-/// Registers the suite's `github` source: the resource key is the payload's
-/// `key` field.
-pub fn register_github(dispatcher: &Dispatcher) {
-    dispatcher.register_source(
-        "github",
-        Arc::new(|event| {
-            ResourceKey::from(event.payload["key"].as_str().unwrap_or("github:unknown"))
-        }),
-    );
+/// Registers the suite's source: the resource key is the payload's `key`
+/// field.
+pub fn register(dispatcher: &Dispatcher) {
+    dispatcher.register_source(SOURCE, key_fn());
+}
+
+/// The suite's key function, exposed separately so a `Source` contract test
+/// can compare a source's own report against it.
+pub fn key_fn() -> Arc<KeyFn> {
+    Arc::new(|event| ResourceKey::from(event.payload["key"].as_str().unwrap_or("unknown")))
 }
 
 /// A `github` event naming `key`, with `id` as its dedup id.
 pub fn event(key: &str, id: &str) -> Event {
     Event {
         id: id.into(),
-        source: "github".into(),
+        source: SOURCE.into(),
         payload: serde_json::json!({ "key": key }),
         received_at: 0,
     }

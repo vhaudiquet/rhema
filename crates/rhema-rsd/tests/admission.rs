@@ -6,7 +6,7 @@ mod common;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use common::{ADMISSION, DEBOUNCE, config, event, register_github, setup_with};
+use common::{ADMISSION, DEBOUNCE, config, event, register, setup_with};
 use rhema_rsd::{DispatchError, DispatcherConfig, KeyFn, KeyState, Outcome, ResourceKey};
 
 /// Note on ordering: `"gitea:..."` sorts before `"github:..."`, and #142
@@ -36,7 +36,7 @@ fn acquiring_past_the_global_cap_is_refused() {
         max_concurrent_leases: 1,
         ..config()
     });
-    register_github(&dispatcher);
+    register(&dispatcher);
     let k1 = github_key(142);
     let k2 = github_key(143);
     dispatcher.ingest(event(k1.as_str(), "e1")).unwrap();
@@ -56,7 +56,7 @@ fn blocked_keys_wait_in_fifo_admission_order() {
         max_concurrent_leases: 1,
         ..config()
     });
-    register_github(&dispatcher);
+    register(&dispatcher);
     let k1 = github_key(142);
     let k2 = github_key(143);
     dispatcher.ingest(event(k1.as_str(), "e1")).unwrap();
@@ -86,7 +86,7 @@ fn an_admission_ttl_expiry_sends_the_key_back_through_debounce() {
         max_concurrent_leases: 1,
         ..config()
     });
-    register_github(&dispatcher);
+    register(&dispatcher);
     let k1 = github_key(142);
     let k2 = github_key(143);
     dispatcher.ingest(event(k1.as_str(), "e1")).unwrap();
@@ -120,7 +120,7 @@ fn per_source_caps_hold_while_other_sources_proceed() {
         max_concurrent_per_source: BTreeMap::from([("github".into(), 1)]),
         ..config()
     });
-    register_github(&dispatcher);
+    register(&dispatcher);
     dispatcher.register_source("gitea", gitea_key_fn());
     let k_github_1 = github_key(142);
     let k_github_2 = github_key(143);
@@ -160,7 +160,7 @@ fn a_late_event_while_the_cap_is_taken_queues_for_the_next_slot() {
         max_concurrent_leases: 1,
         ..config()
     });
-    register_github(&dispatcher);
+    register(&dispatcher);
     let k1 = github_key(142);
     let k2 = github_key(143);
     dispatcher.ingest(event(k1.as_str(), "e1")).unwrap();

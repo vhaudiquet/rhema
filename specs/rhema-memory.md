@@ -227,7 +227,7 @@ delimiter (the frontmatter ends at the *second* delimiter line).
 | Consumer | Wiring | Status |
 |---|---|---|
 | `rhema-host-agent` | `MemoryResolver` alongside `CodingTools`. The engine takes one resolver, so the host agent grows a composition seam (chain or merge), a small `agent`-scoped change there, not here. | next |
-| `rhema-autonomous-agent` / `rhema-claw` | The claw composes `MemoryResolver` into its dispatch chain as-is, a claw-local resolver beside the shell's; the framework ships the `ToolResolver` seam only, no registry (the 0.5.0 cut). | follows |
+| `rhema-claw` | The claw composes `MemoryResolver` into its dispatch chain as-is, a claw-local resolver beside the shell's; the framework ships the `ToolResolver` seam only, no registry (the 0.5.0 cut). | follows |
 | `rhema-code` | Inherits whatever the coding agent wires; `/memory` curation UI is a later roadmap item, not v1. | later |
 
 The bootstrap instruction ("you have a memory; search it when context is
