@@ -129,7 +129,11 @@ fn runtime_root() -> std::io::Result<PathBuf> {
         PathBuf::from(dir)
     } else if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         PathBuf::from(dir).join("rhema")
-    } else if let Some(tmp) = std::env::var_os("TMPDIR") {
+    } else if let Some(tmp) = std::env::var_os("TMPDIR")
+        && !cfg!(target_os = "macos")
+    {
+        // Docker Desktop shares `$HOME`, not the per-user temp tree;
+        // macOS falls through to the cache dir below.
         let user = std::env::var("USER").unwrap_or_else(|_| "user".to_owned());
         let user: String = user
             .chars()
