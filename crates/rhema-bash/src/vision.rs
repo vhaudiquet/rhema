@@ -138,8 +138,11 @@ static WIRED: OnceLock<Option<Arc<Wiring>>> = OnceLock::new();
 pub fn wire(bash_env: Option<OsString>) -> Option<&'static Arc<Wiring>> {
     WIRED
         .get_or_init(|| {
+            let dir = crate::init::temp_dir("rhema-vision").ok()?;
             let bin = std::env::current_exe().ok()?;
-            provision_inner(bash_env, &bin, false).map(Arc::new).ok()
+            provision_in_dir(dir, bash_env, &bin, false)
+                .map(Arc::new)
+                .ok()
         })
         .as_ref()
 }
@@ -154,17 +157,31 @@ pub fn wire(bash_env: Option<OsString>) -> Option<&'static Arc<Wiring>> {
 /// Filesystem failures: the dir cannot be created or the init file
 /// cannot be written.
 pub fn provision_with_bin(bash_env: Option<OsString>, bin: &Path) -> std::io::Result<Wiring> {
-    provision_inner(bash_env, bin, true)
+    let dir = crate::init::temp_dir("rhema-vision")?;
+    provision_in_dir(dir, bash_env, bin, true)
+}
+
+/// Provisions the state into `dir`, the shared-root placement: the
+/// sandbox session tree owns the directory, and the returned wiring
+/// keeps it alive for the process's life. No init file: the shared
+/// kit init is the only one a sandbox reads.
+///
+/// # Errors
+///
+/// The staging directory cannot be created.
+pub fn provision_shared(dir: PathBuf) -> std::io::Result<Wiring> {
+    let bin = std::env::current_exe()?;
+    provision_in_dir(dir, None, &bin, false)
 }
 
 /// The state provision; `write_init` is this module's test seam (see
 /// [`crate::jobs`]).
-fn provision_inner(
+fn provision_in_dir(
+    dir: PathBuf,
     bash_env: Option<OsString>,
     bin: &Path,
     write_init: bool,
 ) -> std::io::Result<Wiring> {
-    let dir = crate::init::temp_dir("rhema-vision")?;
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging)?;
     let (init_path, mut shell_env) = if write_init {
@@ -353,6 +370,20 @@ mod tests {
         bytes.extend_from_slice(&[0, 0, 0, 13]);
         bytes.extend_from_slice(b"IHDR");
         bytes
+    }
+
+    #[test]
+    fn a_shared_provision_uses_the_given_dir_and_cleans_it_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vision");
+        let wiring = provision_shared(path.clone()).unwrap();
+        assert!(path.join("staging").is_dir());
+        assert_eq!(
+            wiring.shell_env.get(VAR_STAGING).map(String::as_str),
+            Some(path.join("staging").display().to_string().as_str())
+        );
+        drop(wiring);
+        assert!(!path.exists(), "the wiring owns the shared directory");
     }
 
     #[test]

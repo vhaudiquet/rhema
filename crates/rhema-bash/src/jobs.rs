@@ -184,8 +184,9 @@ pub fn wire(bash_env: Option<OsString>, session: &str) -> Option<&'static Arc<Wi
             if !available() {
                 return None;
             }
+            let dir = crate::init::temp_dir("rhema-jobs").ok()?;
             let bin = std::env::current_exe().ok()?;
-            provision_inner(bash_env, &bin, session, false)
+            provision_in_dir(dir, bash_env, &bin, session, false)
                 .map(Arc::new)
                 .ok()
         })
@@ -284,19 +285,35 @@ pub fn provision_with_bin(
     bin: &Path,
     session: &str,
 ) -> std::io::Result<Wiring> {
-    provision_inner(bash_env, bin, session, true)
+    let dir = crate::init::temp_dir("rhema-jobs")?;
+    provision_in_dir(dir, bash_env, bin, session, true)
+}
+
+/// Provisions the state into `dir`, the shared-root placement: the
+/// sandbox session tree owns the directory, and the returned wiring
+/// keeps it alive for the process's life. The tag file lands at
+/// `dir/session`, the path the shared kit env names. No init file: the
+/// shared kit init is the only one a sandbox reads.
+///
+/// # Errors
+///
+/// The directory or the tag file cannot be written.
+pub fn provision_shared(dir: PathBuf, session: &str) -> std::io::Result<Wiring> {
+    let bin = std::env::current_exe()?;
+    provision_in_dir(dir, None, &bin, session, false)
 }
 
 /// The state provision. `write_init` is the test seam: production
 /// places one kit init file for every surface and leaves this dir
 /// without one; a test of this module's own stub asks for the file.
-fn provision_inner(
+fn provision_in_dir(
+    dir: PathBuf,
     bash_env: Option<OsString>,
     bin: &Path,
     session: &str,
     write_init: bool,
 ) -> std::io::Result<Wiring> {
-    let dir = crate::init::temp_dir("rhema-jobs")?;
+    std::fs::create_dir_all(&dir)?;
     let (init_path, mut shell_env) = if write_init {
         let body = crate::init::function(NAME, VAR_BIN, MODE);
         let path = crate::init::write(&dir, "rhema-bash", bash_env, &body)?;

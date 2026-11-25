@@ -1046,6 +1046,14 @@ pub(crate) fn session_agent_config(
     rhema_subagents::SubagentHandle,
     Vec<String>,
 ) {
+    // A sandboxed session's jobs run in the sandbox's gob; the host
+    // poller reads this host's, so its finish feed would announce the
+    // wrong daemon. The model polls `job ls` instead.
+    let jobs_steering = if sandboxed.is_some() {
+        None
+    } else {
+        jobs_steering
+    };
     let mut config = agent_config(
         provider.clone(),
         options,
@@ -1077,13 +1085,32 @@ pub(crate) fn session_agent_config(
     // Every kit this session places shares one init file: the stub
     // text is static, the per-session values are env. The wirings
     // still provision their state and prompt section; the kit owns
-    // the file and its env. A sandboxed session waits for the shared
-    // placement, so the local gate stays for now.
+    // the file and its env. A mounted sandbox takes jobs and vision
+    // state from the shared session tree; ssh and http have no root
+    // yet, so they get neither.
     let inherited = std::env::var_os("BASH_ENV");
     let mut kits = Vec::new();
-    let jobs_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::jobs::wire(None, jobs_tag))
-        .flatten();
+    // A mounted sandbox keeps jobs and vision state under its shared
+    // session tree; the wirings live in the process registry because
+    // dropping one deletes the directory. A sandbox with no shared
+    // root (ssh, http) gets neither yet.
+    let key = crate::mcp_wire::runtime_session_key(session_key);
+    let shared_kits = sandboxed
+        .and_then(|sandboxed| sandboxed.shared())
+        .map(|shared| crate::shared_kit::wire(shared, &key, jobs_tag));
+    let jobs_ephemeral =
+        sandboxed.is_some_and(|sandboxed| sandboxed.choice == crate::args::SandboxChoice::Ecrou);
+    let jobs_wiring = if sandboxed.is_some() {
+        if jobs_ephemeral {
+            // A job's gob daemon dies with the boot; every command is
+            // a fresh machine, so `job run` would always fail.
+            None
+        } else {
+            shared_kits.as_ref().and_then(|kits| kits.jobs.clone())
+        }
+    } else {
+        rhema_bash::jobs::wire(None, jobs_tag).cloned()
+    };
     if let Some(wiring) = &jobs_wiring {
         kits.push(kit_for(
             Feature::Jobs,
@@ -1096,9 +1123,11 @@ pub(crate) fn session_agent_config(
             Needs::MACRO,
         ));
     }
-    let vision_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::vision::wire(None))
-        .flatten();
+    let vision_wiring = if sandboxed.is_some() {
+        shared_kits.as_ref().and_then(|kits| kits.vision.clone())
+    } else {
+        rhema_bash::vision::wire(None).cloned()
+    };
     if let Some(wiring) = &vision_wiring {
         kits.push(kit_for(
             Feature::Vision,
@@ -1205,6 +1234,18 @@ pub(crate) fn session_agent_config(
         }
         if let Some(entry) = &mcp_entry {
             config.mcp_servers = entry.lines().to_vec();
+        }
+        // The env names the sandbox's staging path; the host attaches
+        // from the same directory through its own path.
+        if let Some(vision) = &vision_wiring {
+            if let Some(tools) = config.tools.as_deref() {
+                tools.set_vision_inbox(
+                    vision
+                        .shell_env
+                        .get(rhema_bash::vision::VAR_STAGING)
+                        .map(std::path::PathBuf::from),
+                );
+            }
         }
     }
     config.disabled_mcp_servers = disabled_mcp.clone();

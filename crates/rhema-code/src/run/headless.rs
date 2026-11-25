@@ -218,9 +218,23 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let kits_registry = crate::kits::Registry::new();
     let inherited = std::env::var_os("BASH_ENV");
     let mut kits = Vec::new();
-    let jobs_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::jobs::wire(None, &jobs_tag))
-        .flatten();
+    let key = crate::mcp_wire::runtime_session_key(&profile);
+    let shared_kits = sandboxed
+        .as_ref()
+        .and_then(|sandboxed| sandboxed.shared())
+        .map(|shared| crate::shared_kit::wire(shared, &key, &jobs_tag));
+    let jobs_ephemeral = sandboxed
+        .as_ref()
+        .is_some_and(|sandboxed| sandboxed.choice == crate::args::SandboxChoice::Ecrou);
+    let jobs_wiring = if sandboxed.is_some() {
+        if jobs_ephemeral {
+            None
+        } else {
+            shared_kits.as_ref().and_then(|kits| kits.jobs.clone())
+        }
+    } else {
+        rhema_bash::jobs::wire(None, &jobs_tag).cloned()
+    };
     if let Some(wiring) = &jobs_wiring {
         kits.push(crate::app::kit_for(
             rhema_bash::runtime::Feature::Jobs,
@@ -238,12 +252,16 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     // next step boundary instead of waiting for a `job ls` that never
     // comes. The one-shot has no idle path: a job outliving the run is
     // the daemon's, and a later run sees it only through `job ls`.
-    let jobs = (jobs_wiring.is_some())
+    // The host poller reads this host's gob; a sandboxed run's jobs
+    // live in the sandbox's, so no finish feed is possible here.
+    let jobs = (sandboxed.is_none() && jobs_wiring.is_some())
         .then(|| crate::jobs::JobsHandle::spawn(jobs_tag.clone()))
         .flatten();
-    let vision_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::vision::wire(None))
-        .flatten();
+    let vision_wiring = if sandboxed.is_some() {
+        shared_kits.as_ref().and_then(|kits| kits.vision.clone())
+    } else {
+        rhema_bash::vision::wire(None).cloned()
+    };
     if let Some(wiring) = &vision_wiring {
         kits.push(crate::app::kit_for(
             rhema_bash::runtime::Feature::Vision,
@@ -330,7 +348,6 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let placed_env = if kits.is_empty() {
         None
     } else if let Some(shared) = sandboxed.as_ref().and_then(|s| s.shared()) {
-        let key = crate::mcp_wire::runtime_session_key(&profile);
         match rhema_sandbox::kit::place_shared(shared, &key, &kits) {
             Ok(env) => Some(env),
             Err(err) => {
@@ -359,6 +376,16 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         }
         if let Some(entry) = &mcp_entry {
             agent_config.mcp_servers = entry.lines().to_vec();
+        }
+        if let Some(vision) = &vision_wiring {
+            if let Some(tools) = agent_config.tools.as_deref() {
+                tools.set_vision_inbox(
+                    vision
+                        .shell_env
+                        .get(rhema_bash::vision::VAR_STAGING)
+                        .map(std::path::PathBuf::from),
+                );
+            }
         }
     }
     agent_config.disabled_mcp_servers = config.disabled_mcp_servers.clone();

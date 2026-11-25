@@ -494,9 +494,15 @@ Status: the env channel, the local placement, the docker/lxd/ecrou
 runtime mounts, the in-sandbox installer, and the shared MCP bridge
 are in. Search and decide ride the injected-env route behind
 `sandbox.inject_credentials`. Ecrou's MCP bridge stays off
-(`SharedRoot::unix_socket = false`) until the UDS spike. Jobs and
-vision still wait on the host-side state paths (jobs steering, vision
-attachments).
+(`SharedRoot::unix_socket = false`) until the UDS spike.
+
+Jobs and vision now provision their state under the shared session
+tree and the shell's env names those paths. Vision works on docker,
+lxd, and ecrou. Jobs work on docker and lxd; ecrou boots a machine per
+command, so the gob daemon dies with it. Host-side jobs steering is
+off for sandboxed sessions: the poller reads the host's gob, not the
+sandbox's, so the model polls `job ls`. SSH and HTTP still wait on
+their install path.
 
 ## 12. Decisions
 

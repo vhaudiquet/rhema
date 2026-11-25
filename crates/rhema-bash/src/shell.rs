@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -53,7 +53,7 @@ pub struct ShellTools {
     /// env map carries the path (`RHEMA_VISION_STAGING`), so a
     /// frontend's wiring lights the inbox up through [`Self::with_env`]
     /// alone.
-    vision_inbox: Option<PathBuf>,
+    vision_inbox: RwLock<Option<PathBuf>>,
     /// The approval hook installed for the current turn; `None` rejects
     /// calls.
     pending: Mutex<Option<Arc<dyn Approval>>>,
@@ -128,7 +128,7 @@ impl ShellTools {
         Self {
             workspace: canonicalized(workspace.into()),
             exec,
-            vision_inbox: None,
+            vision_inbox: RwLock::new(None),
             pending: Mutex::new(None),
             env: std::sync::RwLock::new(BTreeMap::new()),
         }
@@ -160,15 +160,28 @@ impl ShellTools {
     /// runs its own inner `ShellTools` (the subagents extension) uses to
     /// inherit its parent's inbox, since it builds on
     /// [`Self::with_executor`], which reads no env map.
-    pub fn with_vision_inbox(mut self, inbox: Option<PathBuf>) -> Self {
-        self.vision_inbox = inbox;
+    pub fn with_vision_inbox(self, inbox: Option<PathBuf>) -> Self {
+        self.set_vision_inbox(inbox);
         self
+    }
+
+    /// Sets the staging directory images attach from after construction.
+    /// A frontend that learns its wiring env after the tools are built
+    /// (the sandbox assembly does) calls this before the first turn.
+    pub fn set_vision_inbox(&self, inbox: Option<PathBuf>) {
+        *self
+            .vision_inbox
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = inbox;
     }
 
     /// The staging directory images attach from, when a frontend wired
     /// the [`crate::vision`] macro for this shell.
-    pub fn vision_inbox(&self) -> Option<&Path> {
-        self.vision_inbox.as_deref()
+    pub fn vision_inbox(&self) -> Option<PathBuf> {
+        self.vision_inbox
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// The working directory every command starts in.
@@ -253,8 +266,8 @@ impl ShellTools {
         {
             Ok(executed) => {
                 let mut result = finished(call.id, executed);
-                if let Some(staging) = &self.vision_inbox {
-                    crate::vision::attach(staging, &mut result);
+                if let Some(staging) = self.vision_inbox() {
+                    crate::vision::attach(&staging, &mut result);
                 }
                 result
             }
@@ -601,6 +614,14 @@ mod executor_tests {
         let inner = ShellTools::with_executor(tools.workspace().to_path_buf(), tools.executor());
         assert_eq!(inner.workspace(), tools.workspace());
         assert!(Arc::ptr_eq(&inner.executor(), &tools.executor()));
+    }
+
+    #[test]
+    fn the_vision_inbox_is_settable_after_construction() {
+        let tools = ShellTools::with_executor("/tmp", crate::exec::default_executor());
+        assert_eq!(tools.vision_inbox(), None);
+        tools.set_vision_inbox(Some(PathBuf::from("/staging")));
+        assert_eq!(tools.vision_inbox(), Some(PathBuf::from("/staging")));
     }
 
     #[tokio::test]

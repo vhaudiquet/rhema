@@ -77,6 +77,7 @@ pub mod sandbox;
 pub mod screens;
 pub(crate) mod search_wire;
 pub mod sessions;
+pub(crate) mod shared_kit;
 pub mod status;
 pub mod store;
 pub mod term_image;

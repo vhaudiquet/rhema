@@ -38,7 +38,6 @@
 //! parent driver's turn loop, and a nested job would have none. A
 //! nested call runs to its report inside the job's step loop.
 
-use std::path::Path;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
@@ -206,10 +205,11 @@ impl Inner {
     ) -> Arc<ShellTools> {
         let shell = Arc::new(
             ShellTools::with_executor(parent.workspace().to_path_buf(), parent.executor())
-                // The executor carries the wiring's env, so `see` exists in
-                // the inner commands; the inbox inherits so their staged
-                // images attach to the inner results.
-                .with_vision_inbox(parent.vision_inbox().map(Path::to_path_buf)),
+                // The parent's env names the kit init, the helper, and
+                // the staging directory; the inbox inherits so the inner
+                // commands' staged images attach to the inner results.
+                .with_shell_env(&parent.shell_env())
+                .with_vision_inbox(parent.vision_inbox()),
         );
         if let Some(hook) = hook {
             shell.install_approval(hook);
