@@ -85,8 +85,9 @@ pub(crate) struct App {
     options: AcpOptions,
     /// The profile resolved once at startup: credentials, model, thinking.
     effective: rhema_config::Profile,
-    /// The keychain the profile's `secret_ref`s resolve through.
-    secrets: rhema_config::secrets::KeyringSecretStore,
+    /// The secret store the profile's `secret_ref`s resolve through;
+    /// `None` when no home resolves, leaving the literal tier.
+    secrets: Option<std::sync::Arc<dyn rhema_config::secrets::SecretStore>>,
     /// The rendered base prompt from the user's SYSTEM.md, when present.
     base_system: Option<String>,
     /// Where sessions persist; `None` when no cache dir exists (turns
@@ -125,18 +126,36 @@ impl App {
                 Settings::default()
             }
         };
+        let home = rhema_config::Home::discover().ok();
+        let secrets = home.as_ref().map(|home| home.secret_store());
+        // The same one-way keyring import the TUI and headless runs
+        // use. An injected config or scripted provider is a test, not a
+        // startup: never touch the machine's keyring there.
+        #[cfg(feature = "mock")]
+        let injected = options.config.is_some() || options.mock_replies.is_some();
+        #[cfg(not(feature = "mock"))]
+        let injected = false;
+        if !injected && let (Some(home), Some(secrets)) = (&home, &secrets) {
+            let imported = config.import_legacy_secrets(
+                &rhema_config::secrets::KeyringSecretReader::for_home(home),
+                secrets.as_ref(),
+            );
+            if imported > 0 {
+                eprintln!(
+                    "rhema-acp: copied {imported} key(s) from the OS keyring into the encrypted store"
+                );
+            }
+        }
         let effective = config.effective(options.profile.as_deref());
-        let base_system = rhema_config::Home::discover()
-            .ok()
+        let base_system = home
+            .as_ref()
             .map(|home| home.system_prompt())
             .and_then(|path| std::fs::read_to_string(path).ok());
         let base = options.session_dir.clone().or_else(|| base_dir().ok());
         Self {
             options,
             effective,
-            secrets: rhema_config::secrets::KeyringSecretStore::named(
-                rhema_config::secrets::RHEMA_SERVICE,
-            ),
+            secrets,
             base_system,
             base,
             sessions: Mutex::new(HashMap::new()),
@@ -169,7 +188,7 @@ impl App {
             self.options.provider.as_deref(),
             self.options.model.as_deref(),
             self.options.llama_url.as_deref(),
-            Some(&self.secrets),
+            self.secrets.as_deref(),
         ) {
             Ok(resolved) => resolved,
             Err(err) => {
@@ -227,7 +246,7 @@ impl App {
         backend::catalog(
             &self.effective,
             self.options.llama_url.as_deref(),
-            Some(&self.secrets),
+            self.secrets.as_deref(),
         )
         .await
     }
@@ -486,7 +505,7 @@ impl App {
                     kind,
                     &self.effective,
                     self.options.llama_url.as_deref(),
-                    Some(&self.secrets),
+                    self.secrets.as_deref(),
                 )
                 .map_err(|message| Error::invalid_params().data(message))?
                 .ok_or_else(|| {

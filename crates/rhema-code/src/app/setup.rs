@@ -30,7 +30,7 @@ pub struct AppSetup {
     pub sessions_base: Option<PathBuf>,
     /// The startup flags.
     pub options: RunOptions,
-    /// The keychain fresh logins place keys in and removed logins
+    /// The secret store fresh logins place keys in and removed logins
     /// clean up after; `None` keeps every key in the file (tests, or a
     /// runner that opted out).
     pub secrets: Option<Arc<dyn rhema_config::secrets::SecretStore>>,
@@ -364,10 +364,10 @@ impl Backend {
                 .unwrap_or("missing API key");
             match secrets {
                 // A store that does not answer reads as "not in the
-                // store": say so, or a locked keychain reads as a key
+                // store": say so, or an unreadable store reads as a key
                 // the user never stored.
                 Some(store) if !store.reachable() => format!(
-                    "{help}, the system keychain is locked or unreachable, \
+                    "{help}, the secret store is unavailable or its key is missing, \
                      so the stored keys were unreadable"
                 ),
                 _ => help.to_owned(),
@@ -1056,7 +1056,7 @@ pub(crate) fn session_agent_config(
     // reads: one backend per kind, instance first, so a stored proxy
     // or local endpoint is not silently replaced by the vendor
     // default. Built here where `Backend::from_kind` lives; `None` (no
-    // keychain) leaves the session's provider the only one, and the
+    // secret store) leaves the session's provider the only one, and the
     // tool's spec says so.
     config.subagent_providers = secrets.map(|secrets| {
         let profile = profile.clone();

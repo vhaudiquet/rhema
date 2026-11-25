@@ -3502,7 +3502,7 @@ fn the_decision_rows_show_the_default_the_kinds_model_and_the_add_row_last() {
     // A dangling name falls back to the first, the rule says.
     section.instance = Some("gone".into());
     assert!(crate::screens::decision_rows(Some(&section), None)[0].default);
-    // No section, no keychain: an empty page is the add row alone.
+    // No section, no store: an empty page is the add row alone.
     assert!(crate::screens::decision_rows(None, None)[0].add);
 }
 

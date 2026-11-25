@@ -360,7 +360,7 @@ impl App {
 
     /// The add-provider dialog's accepted provider: the instance
     /// lands in the profile's `websearch` map, the key goes through
-    /// [`rhema_config::Profile::place_websearch_key`] (keychain first,
+    /// [`rhema_config::Profile::place_websearch_key`] (secret store first,
     /// the literal when no store accepts it), the name joins the
     /// chain order at the end, and the config persists. The running
     /// agent rebuilds, because a first provider flips the wiring
@@ -403,7 +403,7 @@ impl App {
         }
         self.refresh_websearch_page();
         let where_note = match location {
-            Some(rhema_config::KeyLocation::Keychain) => "the key went to the keychain",
+            Some(rhema_config::KeyLocation::Store) => "the key went to the encrypted store",
             _ => "the key stayed in the config file",
         };
         let _ = self.rebuild_live_agent(false);
@@ -433,7 +433,7 @@ impl App {
         let Some(removed) = removed else {
             return Vec::new();
         };
-        // The keychain entry goes with the instance, the same rule the
+        // The secret-store entry goes with the instance, the same rule the
         // provider logins follow: a removed key must not stay in the
         // chain. Best effort; a store that refuses leaves the entry,
         // and that must not pass silently.
@@ -442,7 +442,7 @@ impl App {
             && let Err(err) = store.delete(&id)
         {
             self.error = Some(format!(
-                "the provider is removed, but its keychain entry could not be deleted: {err}"
+                "the provider is removed, but its secret-store entry could not be deleted: {err}"
             ));
         }
         if !self.save_config() {
@@ -536,7 +536,7 @@ impl App {
 
     /// The add-instance dialog's accepted instance: it lands in the
     /// profile's `decision` section, the key goes through
-    /// [`rhema_config::Profile::place_decision_key`] (keychain first,
+    /// [`rhema_config::Profile::place_decision_key`] (secret store first,
     /// the literal when no store accepts it), and the config
     /// persists. The running agent rebuilds, because a first instance
     /// flips the wiring gate: the function and the section exist from
@@ -587,7 +587,7 @@ impl App {
         }
         self.refresh_decision_page();
         let where_note = match location {
-            Some(rhema_config::KeyLocation::Keychain) => "the key went to the keychain",
+            Some(rhema_config::KeyLocation::Store) => "the key went to the encrypted store",
             _ => "the key stayed in the config file",
         };
         let _ = self.rebuild_live_agent(false);
@@ -629,7 +629,7 @@ impl App {
         let Some(removed) = removed else {
             return Vec::new();
         };
-        // The keychain entry goes with the instance, the same rule the
+        // The secret-store entry goes with the instance, the same rule the
         // provider logins follow: a removed key must not stay in the
         // chain. Best effort; a store that refuses leaves the entry,
         // and that must not pass silently.
@@ -638,7 +638,7 @@ impl App {
             && let Err(err) = store.delete(&id)
         {
             self.error = Some(format!(
-                "the instance is removed, but its keychain entry could not be deleted: {err}"
+                "the instance is removed, but its secret-store entry could not be deleted: {err}"
             ));
         }
         if !self.save_config() {

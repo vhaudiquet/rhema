@@ -103,7 +103,7 @@ Rhema Code ships with two default profiles `work` and `personal` that let you ma
 
 The add dialog opens on three groups: Subscriptions, API / Pay-as-you-go, and Local/Custom. Each group lists only its providers, so the subscriptions stay apart from metered keys and a local server. The API and Local/Custom groups both offer a Custom OpenAI-compatible API row, which asks for the endpoint's base URL and a key; hosted providers use their own fixed routes and ask only for the key.
 
-Login keys are stored in your system keychain (macOS Keychain, Windows Credential Manager, or the freedesktop Secret Service) whenever one is reachable, the config file then holds only an opaque reference to the entry, and fall back to the file itself on machines without one (containers, headless boxes). Logging in again replaces the keychain entry; forgetting the instance deletes it. Environment variables still outrank everything stored.
+Login keys are stored in an encrypted file under the config directory (`secrets.age`), with its generated key under the state directory (`secrets.key`), and the config file holds only an opaque reference to the entry. The split means a config directory copied without the state root carries no readable credential. The write path has no OS keyring and no passphrase prompt, so this works the same on a desktop, over SSH, and in a container; it protects against another user and an accidental read, not against a process running as you. On the first start after upgrading from the old keyring backend, a local session reads the old OS keyring once and copies every config `secret_ref` the encrypted store is missing, leaving the old entries in place; an SSH session skips that read, because the keyring is what does not answer there. Run Rhema locally once, or set `RHEMA_IMPORT_KEYRING=1` when the keyring is reachable over SSH; `RHEMA_IMPORT_KEYRING=0` skips the read everywhere. If the store refuses, the key stays in the file itself, the historical fallback. If `secrets.key` is lost, the ciphertext cannot be opened; delete `secrets.age` and log in again. Logging in again replaces the entry; forgetting the instance deletes it. Environment variables still outrank everything stored.
 
 ### ChatGPT subscriptions
 
@@ -173,7 +173,7 @@ decide < request.json          # several questions over one state, or a structur
 
 Each answer comes back as one line: the pick, the distribution in brackets, the confidence where the model reports one. `--json` (before the verb) prints the raw response. The function appears only when the profile has a provider; the prompt's `Decision models` section documents it then.
 
-A profile holds any number of named decision instances under `decision:` and names the one `decide` asks (`instance`; unset, the first). There is no fallback from one vendor to another, and no flag picks another per call. Keys follow the same tiers as every other key (environment, keychain, stored literal):
+A profile holds any number of named decision instances under `decision:` and names the one `decide` asks (`instance`; unset, the first). There is no fallback from one vendor to another, and no flag picks another per call. Keys follow the same tiers as every other key (environment, secret store, stored literal):
 
 ```yaml
 profiles:
@@ -183,7 +183,7 @@ profiles:
       instances:
         jev:
           provider: jev
-          api_key: ...                # or secret_ref from the keychain
+          api_key: ...                # or secret_ref from the secret store
           model: jev-latest           # or jev-preview, a pinned version
         clef:
           provider: clef
@@ -198,7 +198,7 @@ profiles:
 
 A `base_url` on a Jev instance points the call at any server that speaks the same `/v1/systemone` wire (Ollaya, vLLM, SGLang, llama.cpp serving Clef or another open decision model). Without a `decision` section the environment serves: `TYPESAFE_API_KEY`, `CLOUDFLARE_AUTH_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID`, or `OPENROUTER_API_KEY`, the first that resolves. Sandboxed sessions wire nothing, since their shell cannot reach this host's keys. `specs/rhema-decision.md` is the design.
 
-The **Decision models** page of `/settings` edits this section: the add row's dialog picks the kind (Jev, Clef, OpenRouter, or a custom Jev endpoint, which asks for the server's URL too), names the instance, and takes the key, which goes to the keychain as the Providers page's do; Clef also asks for its account id. Enter on a row makes it the default, `d` removes it with its keychain entry. The model stays a file matter: each row shows what a blank asks, the kind's default.
+The **Decision models** page of `/settings` edits this section: the add row's dialog picks the kind (Jev, Clef, OpenRouter, or a custom Jev endpoint, which asks for the server's URL too), names the instance, and takes the key, which goes to the secret store as the Providers page's do; Clef also asks for its account id. Enter on a row makes it the default, `d` removes it with its secret-store entry. The model stays a file matter: each row shows what a blank asks, the kind's default.
 
 ### Where bash runs
 

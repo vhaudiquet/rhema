@@ -266,29 +266,40 @@ Requested work has a durable record too. `rhema-submissions` keeps one ledger un
   the whole set instead (`Home::relocated`): its config base as given,
   and its own name, the base's final component, dot stripped, under
   the state and cache bases, so godcode's artifacts never land under
-  `rhema/`. The credential separation matches: the keychain namespace
-  is per frontend, the directory nesting is per family, and both are
-  decisions a frontend states once at its construction site.
-- ~~**Where provider API keys live**~~, **decided:** the OS keychain
-  behind a tiny `SecretStore` seam in `rhema-config` (`secrets`):
-  get/set/delete of one opaque value per id, over the `keyring` crate
-  (macOS Keychain, Windows Credential Manager, the Linux Secret
-  Service). An instance holds either the literal `api_key`, the
-  fallback where no keychain answers (containers, headless boxes), or
-  an opaque `secret_ref` naming its entry under the frontend's
-  keychain namespace (the reference frontend's is `rhema`; a second
-  frontend names its own, so two frontends sharing a machine never
-  share credentials by accident); resolution reads the environment,
-  then the keychain, then the literal, and an unreachable store reads
-  as "not in the store", never as a lost key. `Profile::place_key`
-  (logins) and `Settings::migrate_secrets` (frontend startup) prefer
-  the chain and fall back to the file; forgetting an instance deletes
-  its entry.
+  `rhema/`. The credential separation matches: the secret store lives
+  under each frontend's own home, so a relocated frontend's ciphertext
+  and key follow its own directories, and both are decisions a
+  frontend states once at its construction site.
+- ~~**Where provider API keys live**~~, **decided:** an encrypted file
+  store behind a tiny `SecretStore` seam in `rhema-config`
+  (`secrets`): get/set/delete of one opaque value per id, over one age
+  ciphertext (`<config>/secrets.age`) and one generated X25519
+  identity (`<state>/secrets.key`). The split is the point: a config
+  directory copied or synced without the state root carries no
+  readable credential. The write path has no OS keyring, no
+  passphrase, and no prompt, so the runtime is the same on a desktop,
+  over SSH, and in a container. An instance holds either the literal
+  `api_key`, the
+  fallback when the store refuses, or an opaque `secret_ref` naming
+  its entry in the local store; resolution reads the environment, then
+  the store, then the literal, and an unreadable store reads as "not
+  in the store", never as a lost key. `Profile::place_key` (logins)
+  and `Settings::migrate_secrets` (frontend startup) prefer the store
+  and fall back to the file; forgetting an instance deletes its entry.
+  A ciphertext with no identity is reported as an error, never
+  silently replaced. The old OS keyring is read one way, by
+  `KeyringSecretReader`, which has no set or delete: a local start
+  copies every config `secret_ref` the file store is missing and
+  leaves the keyring entry in place, and an SSH start skips the
+  attempt unless `RHEMA_IMPORT_KEYRING` forces it (`=0` refuses it
+  everywhere). The import is idempotent, never overwrites a file-store value, and leaves the
+  config unchanged. A user who first upgrades over SSH either runs
+  Rhema locally once or logs in again.
   `rhema-identity` is deliberately not the home: its accounts are the
   deployment's identities behind use-never-read, its SQLite backend
   stores secrets as plaintext columns, and a provider key is the
   user's per-profile credential, not an account. When identity grows
-  its promised keychain backend, that backend consumes the `keyring`
+  its promised keychain backend, that backend consumes a keychain
   crate directly, as its SQLite backend consumes `rusqlite`, a
   shared mechanism, not a shared crate.
 - ~~**How a running turn gets something only a human can give**~~,

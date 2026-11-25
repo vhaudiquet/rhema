@@ -1,7 +1,7 @@
 //! The `rhema system` utilities and their renderer: the prompt
 //! preview's markdown-to-ANSI path, the theme it picks from config,
 //! and the edit/restore/show actions, all model-free and provider-free.
-//! `show` reads the keychain once, and only when the profile names a
+//! `show` reads the secret store once, and only when the profile names a
 //! search provider: the section must say what the session would wire,
 //! and a key that lives only there still wires.
 
@@ -30,22 +30,14 @@ pub(crate) fn system_command(
             if let Some(problem) = rhema_bash::jobs::backend_problem() {
                 eprintln!("warning: background jobs disabled: {problem}");
             }
-            // The session's own keychain decides whether the search
-            // section exists: a key that lives only there still wires
-            // in the session, so the preview reads it. The read only
-            // happens when a profile names search instances.
-            let secrets = rhema_config::secrets::KeyringSecretStore::named(
-                rhema_config::secrets::RHEMA_SERVICE,
-            );
-            let prompt = system_show_at(
-                rhema_config::Home::discover()
-                    .ok()
-                    .map(|home| home.system_prompt())
-                    .as_deref(),
-                workspace,
-                profile,
-                Some(&secrets),
-            )?;
+            // The session's own secret store decides whether the
+            // search section exists: a key that lives only there still
+            // wires in the session, so the preview reads it. The read
+            // only happens when a profile names search instances.
+            let home = rhema_config::Home::discover().ok();
+            let secrets = home.as_ref().map(|home| home.secret_store());
+            let system = home.as_ref().map(|home| home.system_prompt());
+            let prompt = system_show_at(system.as_deref(), workspace, profile, secrets.as_deref())?;
             // Styled markdown on a terminal; the byte-exact prompt when
             // piped, the same contract the one-shot keeps.
             if stdout().is_terminal() {
@@ -288,7 +280,7 @@ pub(crate) fn system_show_at_with_mcp(
         }
         // Search exists only when a provider and its key resolve:
         // the wire's own gate, without building a provider. The
-        // keychain is read here, the one credential touch the
+        // secret store is read here, the one credential touch the
         // utilities make, and only when the profile names search
         // instances at all.
         if search_section(kind.as_deref(), effective.as_ref(), secrets) {
@@ -319,7 +311,7 @@ pub(crate) fn system_show_at_with_mcp(
 
 /// The search section's rule: a local session, and the wire's own
 /// gate open. Setup asks the gate once, in `wire_for_session`; the
-/// preview asks the same question here, with the session's keychain
+/// preview asks the same question here, with the session's secret store
 /// rather than its own provisioning.
 pub(crate) fn search_section(
     kind: Option<&str>,

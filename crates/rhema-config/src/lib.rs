@@ -7,8 +7,8 @@
 //! whatever file, directory, or format it keeps them in; the [`Store`]
 //! seam a frontend implements to put them wherever it likes; the
 //! [`Home`] of directory conventions; and the [`secrets`] seam, whose
-//! OS keychain backend is namespaced per frontend, so two frontends
-//! never share credentials by accident.
+//! encrypted file backend lives under each frontend's own home, so two
+//! frontends never share credentials by accident.
 //!
 //! The reference frontend keeps its whole file, the [`Settings`]
 //! section beside its own UI section, at
@@ -28,13 +28,15 @@
 //! llama.cpp servers, a work and a personal Copilot sub, with one of
 //! them active (`provider` + `instance`).
 //!
-//! A key lives in one of two places: the OS keychain, which the
-//! settings reference by an opaque `secret_ref` ([`secrets`]), or the
-//! store itself as the literal `api_key`, the fallback on machines
-//! with no reachable keychain. [`Profile::place_key`] and
-//! [`Settings::migrate_secrets`] prefer the keychain and only fall
-//! back to the literal when the store refuses; resolution reads the
-//! keychain first on every tier.
+//! A key lives in one of two places: the encrypted secret store, which
+//! the settings reference by an opaque `secret_ref` ([`secrets`]), or
+//! the store itself as the literal `api_key`, the fallback when the
+//! secret store refuses. [`Profile::place_key`] and
+//! [`Settings::migrate_secrets`] prefer the secret store and only fall
+//! back to the literal when it refuses; resolution reads the store
+//! first on every tier. A machine upgrading from the old OS keyring
+//! copies its entries one way ([`Settings::import_legacy_secrets`]);
+//! nothing writes back there.
 //!
 //! Environment variables (`RHEMA_PROVIDER`, `GEMINI_API_KEY`,
 //! `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`,

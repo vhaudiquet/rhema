@@ -3,47 +3,69 @@
 //!
 //! The config file stores, per provider instance, either the key
 //! itself (the historical shape, still the fallback) or an opaque
-//! `secret_ref` naming a keychain entry. The [`SecretStore`] trait is
-//! the seam between the two: get, set, and delete of one opaque value
-//! per id, nothing more, no accounts, no metadata, no model-facing
-//! surface. The OS keychain backend ([`KeyringSecretStore`], the
-//! `keyring` crate over macOS Keychain, Windows Credential Manager,
-//! and the Linux Secret Service) is the point; [`VolatileSecretStore`]
-//! serves tests.
+//! `secret_ref` naming a store entry. The [`SecretStore`] trait is the
+//! seam between the two: get, set, and delete of one opaque value per
+//! id, nothing more, no accounts, no metadata, no model-facing
+//! surface.
 //!
-//! Availability is per operation, never assumed at startup: a machine
-//! with no keychain (a container, a headless box) reports errors from
-//! every call, and the resolution tiers in [`crate::Profile`] treat
-//! that as "not in the store", falling through to the literal. A save
-//! that could not reach the store keeps the key in the file, the
-//! pre-keychain behavior, never a lost credential.
+//! The backend is [`EncryptedFileSecretStore`]: one age ciphertext
+//! under the config root and one generated X25519 identity under the
+//! state root. It needs no OS keyring and no user input, so it behaves
+//! the same on a desktop, over SSH, and in a container. A ciphertext
+//! copied on its own carries no readable credential. [`VolatileSecretStore`]
+//! serves tests. A frontend asks its [`crate::Home`] for a store.
+//!
+//! [`KeyringSecretReader`] is the one-way importer for machines that
+//! used the old OS keyring: it reads entries, never writes or deletes,
+//! so the migration cannot resurrect the locked-store failures in the
+//! write path. A local start copies the config's missing `secret_ref`s
+//! once; an SSH start skips it unless `RHEMA_IMPORT_KEYRING` forces
+//! the attempt.
+//!
+//! Availability is per operation, never assumed at startup. A missing
+//! identity beside an existing ciphertext is reported as
+//! [`SecretError::MissingKey`], never treated as an empty store, so a
+//! write cannot replace the ciphertext it cannot read.
 
 #![forbid(unsafe_code)]
 
+mod file;
+
+pub use file::EncryptedFileSecretStore;
+
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// The reference frontend's keychain service name: the namespace the
-/// rhema frontend's credentials live under. Another frontend names
-/// its own, two frontends sharing a namespace would share
-/// credentials by accident, and the OS keeps its per-binary access
-/// lists either way.
+/// The reference frontend's old OS keyring service name: the namespace
+/// the pre-file-store backend wrote under. The read-only importer reads
+/// it; nothing writes there any more. A relocated frontend's name comes
+/// from its [`crate::Home`].
 pub const RHEMA_SERVICE: &str = "rhema";
 
-/// Why a secret-store operation failed. Resolution treats every error
+/// Why a secret-store operation failed. Resolution treats a read error
 /// as "not in the store"; the variants exist for callers that want to
-/// say *why* a key could not be placed.
+/// say why a key could not be placed.
 #[derive(Debug, thiserror::Error)]
 pub enum SecretError {
-    /// The platform provides no reachable credential store: no keychain
-    /// session, no Secret Service on the bus, no backend for this
-    /// target at all.
-    #[error("no reachable credential store on this platform")]
+    /// The platform provides no reachable credential store.
+    #[error("no reachable secret store on this platform")]
     NoStore,
+    /// The ciphertext exists but its identity does not. Writing a new
+    /// identity here would destroy the old ciphertext, so callers must
+    /// surface this instead.
+    #[error(
+        "the secret store is missing its key: {key} (restore it, or delete {store} to start over)"
+    )]
+    MissingKey {
+        /// The key file the ciphertext expected.
+        key: String,
+        /// The ciphertext that needs that key.
+        store: String,
+    },
     /// The store refused or fumbled the operation.
-    #[error("credential store: {0}")]
+    #[error("secret store: {0}")]
     Backend(String),
 }
 
@@ -62,78 +84,92 @@ pub trait SecretStore: Send + Sync {
     /// not an error: deletion is idempotent.
     fn delete(&self, id: &str) -> Result<bool, SecretError>;
 
-    /// Whether the store answers at all, probed honestly: one write of
-    /// a throwaway entry and its removal. A read of a fresh id cannot
-    /// tell a locked keyring from an absent key, so the write is what
-    /// gets probed, a locked or missing store refuses it. Frontends
-    /// run this before blaming a missing key on the config. Stores
-    /// that cannot fail answer yes; the default serves them.
+    /// Whether the store answers at all, probed honestly. A file store
+    /// reports a ciphertext it cannot decrypt, a missing identity, and
+    /// an unreadable file. Frontends run this before blaming a missing
+    /// key on the config. Stores that cannot fail answer yes; the
+    /// default serves them.
     fn reachable(&self) -> bool {
         true
     }
 }
 
-/// The OS keychain backend: every id is an entry under the service
-/// name the store was built with, [`RHEMA_SERVICE`] for the
-/// reference frontend, the frontend's own name otherwise, so two
-/// frontends keep separate credential namespaces. Availability is
-/// decided per operation by the platform, so one value serves a whole
-/// process.
-#[derive(Debug, Clone)]
-pub struct KeyringSecretStore {
-    service: std::borrow::Cow<'static, str>,
+/// The read-only side of the old OS keyring: get, never set or
+/// delete. Kept separate from [`SecretStore`] so a migration cannot
+/// write to the legacy backend by accident.
+pub trait LegacySecretStore: Send + Sync {
+    /// The value stored under `id`, `None` when absent. An unreachable
+    /// keyring is an error; the importer treats every error as "cannot
+    /// migrate this id" and leaves the config alone.
+    fn get(&self, id: &str) -> Result<Option<String>, SecretError>;
 }
 
-impl KeyringSecretStore {
-    /// The store for one frontend's namespace.
+/// Reads the OS keyring the pre-file-store versions wrote to. The
+/// reader only calls `get_password`; it never probes by writing and
+/// never deletes, so a locked or unreachable keyring is a quiet skip,
+/// not a prompt loop. [`KeyringSecretReader::for_home`] disables it in
+/// an SSH session unless `RHEMA_IMPORT_KEYRING` says otherwise; the
+/// first error disables the instance for the rest of the start.
+#[derive(Debug)]
+pub struct KeyringSecretReader {
+    service: std::borrow::Cow<'static, str>,
+    enabled: bool,
+    available: AtomicBool,
+}
+
+impl KeyringSecretReader {
+    /// The reader for one frontend home: its old service name from
+    /// [`crate::Home::legacy_keyring_service`], enabled only for a
+    /// local session or an explicit `RHEMA_IMPORT_KEYRING` override.
+    pub fn for_home(home: &crate::Home) -> Self {
+        let force = std::env::var("RHEMA_IMPORT_KEYRING").ok();
+        Self {
+            service: home.legacy_keyring_service().into(),
+            enabled: keyring_import_allowed(force.as_deref(), remote_session()),
+            available: AtomicBool::new(true),
+        }
+    }
+
+    /// A reader over an explicit service name, for a frontend that
+    /// used a namespace of its own rather than [`crate::Home`]. The
+    /// local/override gate is the same as [`Self::for_home`].
     pub fn named(service: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        let force = std::env::var("RHEMA_IMPORT_KEYRING").ok();
         Self {
             service: service.into(),
+            enabled: keyring_import_allowed(force.as_deref(), remote_session()),
+            available: AtomicBool::new(true),
+        }
+    }
+
+    /// A reader that answers [`SecretError::NoStore`] without touching
+    /// the OS: tests, and a frontend that opted out of the import.
+    pub fn disabled() -> Self {
+        Self {
+            service: RHEMA_SERVICE.into(),
+            enabled: false,
+            available: AtomicBool::new(true),
         }
     }
 }
 
-impl SecretStore for KeyringSecretStore {
+impl LegacySecretStore for KeyringSecretReader {
     fn get(&self, id: &str) -> Result<Option<String>, SecretError> {
-        let entry = self.open(id)?;
+        if !self.enabled || !self.available.load(Ordering::Relaxed) {
+            return Err(SecretError::NoStore);
+        }
+        let entry = keyring::v1::Entry::new(self.service.as_ref(), id).map_err(|err| {
+            self.available.store(false, Ordering::Relaxed);
+            translate(err)
+        })?;
         match entry.get_password() {
             Ok(value) => Ok(Some(value)),
             Err(keyring::v1::Error::NoEntry) => Ok(None),
-            Err(err) => Err(translate(err)),
+            Err(err) => {
+                self.available.store(false, Ordering::Relaxed);
+                Err(translate(err))
+            }
         }
-    }
-
-    fn set(&self, id: &str, value: &str) -> Result<(), SecretError> {
-        self.open(id)?.set_password(value).map_err(translate)
-    }
-
-    fn delete(&self, id: &str) -> Result<bool, SecretError> {
-        let entry = self.open(id)?;
-        match entry.delete_credential() {
-            Ok(()) => Ok(true),
-            Err(keyring::v1::Error::NoEntry) => Ok(false),
-            Err(err) => Err(translate(err)),
-        }
-    }
-
-    fn reachable(&self) -> bool {
-        // The write decides: a locked collection and an unreachable
-        // store both refuse it. A store that took the write but
-        // fumbled the delete reads as unreachable, leaving the probe
-        // entry behind, its id is unique to this call and its value
-        // is not a secret.
-        let id = fresh_id();
-        if self.set(&id, "reachability probe").is_err() {
-            return false;
-        }
-        self.delete(&id).unwrap_or_default()
-    }
-}
-
-impl KeyringSecretStore {
-    /// Opens the id's entry under this store's service.
-    fn open(&self, id: &str) -> Result<keyring::v1::Entry, SecretError> {
-        keyring::v1::Entry::new(self.service.as_ref(), id).map_err(translate)
     }
 }
 
@@ -143,6 +179,33 @@ fn translate(err: keyring::v1::Error) -> SecretError {
     match err {
         keyring::v1::Error::NoStorageAccess(_) => SecretError::NoStore,
         other => SecretError::Backend(other.to_string()),
+    }
+}
+
+/// Whether this process looks like an SSH session: OpenSSH sets at
+/// least one of these on every platform. The keyring importer leaves
+/// such a session alone by default, because the OS keyring is exactly
+/// what does not answer there.
+pub fn remote_session() -> bool {
+    ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .iter()
+        .any(|key| std::env::var_os(key).is_some())
+}
+
+/// The importer's gate: `RHEMA_IMPORT_KEYRING` forces or refuses the
+/// attempt; absent, an SSH session refuses it and a local one allows
+/// it.
+fn keyring_import_allowed(force: Option<&str>, remote: bool) -> bool {
+    match force.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value)
+            if ["0", "false", "no", "off"]
+                .iter()
+                .any(|off| value.eq_ignore_ascii_case(off)) =>
+        {
+            false
+        }
+        Some(_) => true,
+        None => !remote,
     }
 }
 
@@ -175,7 +238,7 @@ impl SecretStore for VolatileSecretStore {
     }
 }
 
-/// A fresh keychain-entry id: wall-clock millis, the clock's sub-milli
+/// A fresh secret-store id: wall-clock millis, the clock's sub-milli
 /// nanos, and a process counter in hex. The id is a handle, not a
 /// secret, it only has to be unique within one machine's config, and
 /// stable once stored in the file.
@@ -253,6 +316,24 @@ mod tests {
     }
 
     #[test]
+    fn the_keyring_import_gate_respects_ssh_and_override() {
+        assert!(!keyring_import_allowed(None, true));
+        assert!(keyring_import_allowed(None, false));
+        assert!(keyring_import_allowed(Some("1"), true));
+        assert!(!keyring_import_allowed(Some("0"), false));
+        assert!(!keyring_import_allowed(Some("off"), false));
+        assert!(!keyring_import_allowed(Some(""), true));
+    }
+
+    #[test]
+    fn a_disabled_keyring_reader_never_touches_the_os() {
+        assert!(matches!(
+            KeyringSecretReader::disabled().get("any-id"),
+            Err(SecretError::NoStore)
+        ));
+    }
+
+    #[test]
     fn fresh_ids_differ_and_fit_the_entry_shape() {
         let first = fresh_id();
         let second = fresh_id();
@@ -260,7 +341,7 @@ mod tests {
         for id in [first, second] {
             assert!(
                 id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
-                "ids stay keyring-safe: {id}"
+                "ids stay store-safe: {id}"
             );
         }
     }

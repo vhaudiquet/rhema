@@ -91,7 +91,7 @@ pub(crate) fn wire_for_session(
 /// One parsed invocation: the request, and whether to print the raw
 /// response instead of the lines. `parse` is the mode's whole argv
 /// contract, `run` its whole behavior, so both are testable without a
-/// process or a keychain.
+/// process or a secret store.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Invocation {
     /// The request the call runs.
@@ -301,12 +301,13 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
     // name the config lost reads as the default profile, the same
     // leniency `effective` applies to an absent flag.
     let profile = doc.effective(Some(&profile_name));
-    let secrets =
-        rhema_config::secrets::KeyringSecretStore::named(rhema_config::secrets::RHEMA_SERVICE);
+    let secrets = rhema_config::Home::discover()
+        .ok()
+        .map(|home| home.secret_store());
     // The profile's default instance, else the environment tier; the
     // registry's text says which entry or variable falls short when
     // neither builds.
-    let provider = rhema_decision_registry::resolve(Some(&profile), Some(&secrets));
+    let provider = rhema_decision_registry::resolve(Some(&profile), secrets.as_deref());
     match provider {
         Ok(provider) => run(&invocation, provider),
         Err(err) => {

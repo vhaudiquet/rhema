@@ -78,7 +78,7 @@ pub(crate) fn wire_for_session(
 
 /// One parsed invocation: the query text and the two flags. `parse`
 /// is the mode's whole argv contract, `run` its whole behavior, so
-/// both are testable without a process or a keychain.
+/// both are testable without a process or a secret store.
 #[derive(Clone)]
 pub(crate) struct Invocation {
     /// The query text, the flags-free remainder joined with spaces.
@@ -192,9 +192,10 @@ pub fn cli_run(argv: &[OsString]) -> i32 {
     // name the config lost reads as the default profile, the same
     // leniency `effective` applies to an absent flag.
     let profile = doc.effective(Some(&profile_name));
-    let secrets =
-        rhema_config::secrets::KeyringSecretStore::named(rhema_config::secrets::RHEMA_SERVICE);
-    let Some(chain) = rhema_websearch_registry::assemble_chain(Some(&profile), Some(&secrets))
+    let secrets = rhema_config::Home::discover()
+        .ok()
+        .map(|home| home.secret_store());
+    let Some(chain) = rhema_websearch_registry::assemble_chain(Some(&profile), secrets.as_deref())
     else {
         eprintln!(
             "search: no provider is configured for profile \"{profile_name}\" (settings \

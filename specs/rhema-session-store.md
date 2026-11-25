@@ -113,7 +113,7 @@ rhema-session-store = { path = "../rhema-session-store", version = "0.3.0", feat
 ```
 
 A consumer that only needs the trait depends on the seam alone and
-pulls neither rusqlite nor the keyring that `rhema-config` carries.
+pulls neither rusqlite nor `rhema-config`.
 
 ---
 
@@ -663,7 +663,7 @@ crates/rhema-host-agent` must return no session writer. After step 6,
 ## 12. Decisions
 
 - **One backend per crate.** It matches the family and keeps the seam
-  free of `rhema-config`, `keyring`, and `rusqlite`; the TUI's dependency
+  free of `rhema-config` and `rusqlite`; the TUI's dependency
   graph cannot grow a backend it does not use. Two extra crates for a
   public seam with two backends is the family's normal cost, not
   over-splitting. Splitting later would change every consumer's

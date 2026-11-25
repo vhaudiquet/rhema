@@ -2,8 +2,37 @@ use super::*;
 
 use crate::instances::ProviderInstance;
 use crate::instances::tests::{UnreachableStore, decision_settings, websearch_instance};
-use crate::secrets::VolatileSecretStore;
+use crate::secrets::{KeyringSecretReader, VolatileSecretStore};
 use rhema_core::request::ThinkingEffort;
+
+/// A test-only legacy source: the volatile store's map behind the
+/// read-only seam, plus a call count so a test can prove a ref the
+/// file store already holds never reaches the keyring at all.
+struct LegacyMap {
+    values: VolatileSecretStore,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl LegacyMap {
+    fn new() -> Self {
+        Self {
+            values: VolatileSecretStore::new(),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl crate::secrets::LegacySecretStore for LegacyMap {
+    fn get(&self, id: &str) -> Result<Option<String>, crate::secrets::SecretError> {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::secrets::SecretStore::get(&self.values, id)
+    }
+}
 
 #[test]
 fn disabled_skills_round_trip_and_default_to_quiet() {
@@ -431,7 +460,7 @@ fn migrate_secrets_moves_websearch_literals_into_the_chain() {
 }
 
 #[test]
-fn migrate_secrets_moves_the_decision_literals_into_the_keychain() {
+fn migrate_secrets_moves_the_decision_literals_into_the_store() {
     let mut settings = Settings::default();
     let mut profile = Profile::default();
     let mut decision = decision_settings(&[("clef-work", "clef"), ("jev", "jev")]);
@@ -458,4 +487,118 @@ fn migrate_secrets_moves_the_decision_literals_into_the_keychain() {
     let id = instance.secret_ref.clone().unwrap();
     assert_eq!(store.get(&id).unwrap().as_deref(), Some("plain"));
     assert_eq!(settings.migrate_secrets(&store), 0, "idempotent");
+}
+
+#[test]
+fn old_keyring_refs_are_copied_without_touching_the_config() {
+    let mut settings = Settings::default();
+    let mut profile = Profile::default();
+    profile.instances.insert(
+        "google".into(),
+        ProviderInstance {
+            provider: "google".into(),
+            api_key: None,
+            secret_ref: Some("ref-provider".into()),
+            base_url: None,
+            api: None,
+        },
+    );
+    profile.instances.insert(
+        "missing".into(),
+        ProviderInstance {
+            provider: "openai".into(),
+            api_key: None,
+            secret_ref: Some("ref-missing".into()),
+            base_url: None,
+            api: None,
+        },
+    );
+    let mut web = websearch_instance("exa");
+    web.secret_ref = Some("ref-web".into());
+    profile.websearch.insert("exa".into(), web);
+    let mut decision = decision_settings(&[("jev", "jev")]);
+    decision.instances.get_mut("jev").unwrap().secret_ref = Some("ref-decision".into());
+    profile.decision = Some(decision);
+    settings.profiles.insert("personal".into(), profile);
+
+    let legacy = LegacyMap::new();
+    legacy.values.set("ref-provider", "sk-provider").unwrap();
+    legacy.values.set("ref-web", "sk-web").unwrap();
+    legacy.values.set("ref-decision", "sk-decision").unwrap();
+
+    let store = VolatileSecretStore::new();
+    store.set("ref-web", "already-there").unwrap();
+    let before = settings.clone();
+    assert_eq!(settings.import_legacy_secrets(&legacy, &store), 2);
+    assert_eq!(settings, before, "the import never rewrites the config");
+    assert_eq!(
+        store.get("ref-provider").unwrap().as_deref(),
+        Some("sk-provider")
+    );
+    assert_eq!(
+        store.get("ref-web").unwrap().as_deref(),
+        Some("already-there"),
+        "an existing file-store value wins"
+    );
+    assert_eq!(
+        store.get("ref-decision").unwrap().as_deref(),
+        Some("sk-decision")
+    );
+    assert_eq!(store.get("ref-missing").unwrap(), None);
+    // Idempotent: the file store has them now.
+    assert_eq!(settings.import_legacy_secrets(&legacy, &store), 0);
+}
+
+#[test]
+fn an_unreachable_old_keyring_leaves_every_ref_alone() {
+    let mut settings = Settings::default();
+    settings.set_for_profile(Some("personal"), |profile| {
+        profile.instances.insert(
+            "google".into(),
+            ProviderInstance {
+                provider: "google".into(),
+                api_key: None,
+                secret_ref: Some("ref-1".into()),
+                base_url: None,
+                api: None,
+            },
+        );
+    });
+    let store = VolatileSecretStore::new();
+    assert_eq!(
+        settings.import_legacy_secrets(&KeyringSecretReader::disabled(), &store),
+        0
+    );
+    assert_eq!(store.get("ref-1").unwrap(), None);
+}
+
+#[test]
+fn a_ref_the_file_store_has_never_reaches_the_keyring() {
+    let mut settings = Settings::default();
+    settings.set_for_profile(Some("personal"), |profile| {
+        for (name, id) in [("google", "ref-present"), ("openai", "ref-missing")] {
+            profile.instances.insert(
+                name.into(),
+                ProviderInstance {
+                    provider: name.into(),
+                    api_key: None,
+                    secret_ref: Some(id.into()),
+                    base_url: None,
+                    api: None,
+                },
+            );
+        }
+    });
+    let legacy = LegacyMap::new();
+    legacy.values.set("ref-present", "old").unwrap();
+    legacy.values.set("ref-missing", "old").unwrap();
+    let store = VolatileSecretStore::new();
+    store.set("ref-present", "new").unwrap();
+    assert_eq!(settings.import_legacy_secrets(&legacy, &store), 1);
+    assert_eq!(legacy.calls(), 1, "only the missing ref asked the keyring");
+    assert_eq!(
+        store.get("ref-present").unwrap().as_deref(),
+        Some("new"),
+        "the file-store value wins"
+    );
 }

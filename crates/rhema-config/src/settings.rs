@@ -5,7 +5,7 @@ use crate::error::ConfigError;
 use crate::instances::migrate_instance_key;
 use crate::privacy::{private_dir, private_write_atomic};
 use crate::profile::Profile;
-use crate::secrets::SecretStore;
+use crate::secrets::{LegacySecretStore, SecretStore};
 use crate::store::{Store, YamlStore};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -105,7 +105,7 @@ impl Settings {
         apply(self.profiles.entry(name).or_default());
     }
 
-    /// Moves every stored literal key into the keychain, instance by
+    /// Moves every stored literal key into the secret store, instance by
     /// instance, best effort: one the store refuses stays literal.
     /// Returns the number moved. Idempotent, an instance already
     /// carrying only its `secret_ref` is skipped, so calling this on
@@ -142,6 +142,40 @@ impl Settings {
             }
         }
         moved
+    }
+
+    /// Copies every config `secret_ref` the file store does not already
+    /// hold from the old read-only OS keyring. Returns how many values
+    /// were copied. The config is unchanged, the legacy entries are not
+    /// deleted, and a ref already in `secrets` is left alone, so the
+    /// call is idempotent and safe on every start.
+    pub fn import_legacy_secrets(
+        &self,
+        legacy: &dyn LegacySecretStore,
+        secrets: &dyn SecretStore,
+    ) -> usize {
+        let mut imported = 0;
+        for profile in self.profiles.values() {
+            let provider = profile
+                .instances
+                .values()
+                .filter_map(|instance| instance.secret_ref.as_deref());
+            let websearch = profile
+                .websearch
+                .values()
+                .filter_map(|instance| instance.secret_ref.as_deref());
+            let decision = profile
+                .decision
+                .iter()
+                .flat_map(|decision| decision.instances.values())
+                .filter_map(|instance| instance.secret_ref.as_deref());
+            for id in provider.chain(websearch).chain(decision) {
+                if import_legacy_ref(id, legacy, secrets) {
+                    imported += 1;
+                }
+            }
+        }
+        imported
     }
 
     /// Loads the settings from the reference file; a missing file is
@@ -241,3 +275,16 @@ impl SettingsDocument {
 }
 #[cfg(test)]
 mod tests;
+
+/// One legacy copy: only when the destination is reachable and lacks
+/// the id, and only when the old keyring has a value. Every failure is
+/// a quiet skip; the next start retries the refs still missing.
+fn import_legacy_ref(id: &str, legacy: &dyn LegacySecretStore, secrets: &dyn SecretStore) -> bool {
+    if !matches!(secrets.get(id), Ok(None)) {
+        return false;
+    }
+    match legacy.get(id) {
+        Ok(Some(value)) => secrets.set(id, &value).is_ok(),
+        _ => false,
+    }
+}

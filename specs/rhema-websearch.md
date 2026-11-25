@@ -36,7 +36,7 @@ of the `see`/`job` family. If wiring this needed a new type in
   `rhema-provider-registry` precedent at search scale (§12.5).
 - `rhema-config`: per-profile websearch instances and their chain
   order, keys on the same three tiers as provider keys: environment,
-  keychain, stored literal.
+  secret store, stored literal.
 - `rhema-bash::websearch`: the `search` function's init file,
   the wiring, the prompt section.
 - `rhema-host-agent`: one prompt-section field, `websearch`.
@@ -56,7 +56,7 @@ of the `see`/`job` family. If wiring this needed a new type in
 - ❌ **Sandboxed and cloud sessions.** The macro is local-only, gated
   exactly like vision, jobs, and MCP: a session whose bash runs
   elsewhere cannot exec the frontend's binary, and a cloud sandbox
-  holds no keychain and no config file.
+  holds no secret store and no config file.
 - ❌ **A public `rhema websearch` CLI.** Settings change through the
   TUI or the file. The MCP verbs got a CLI because servers are
   installed from shell one-liners; nothing here has shown that need.
@@ -155,7 +155,7 @@ profiles:
     websearch:
       brave-main:
         provider: brave
-        # secret_ref preferred, api_key the no-keychain fallback
+        # secret_ref preferred, api_key the no-store fallback
         secret_ref: "1731…-…-0007"
       exa-work:
         provider: exa
@@ -177,7 +177,7 @@ profiles:
 pub struct WebSearchInstance {
     pub provider: String,   // brave | exa | tavily
     pub api_key: Option<String>,    // redacted in Debug
-    pub secret_ref: Option<String>, // keychain id, fresh_id() shape
+    pub secret_ref: Option<String>, // store id, fresh_id() shape
 }
 ```
 
@@ -186,7 +186,7 @@ tiers in order:
 
 1. The provider kind's environment variable: `BRAVE_SEARCH_API_KEY`
    (or `BRAVE_API_KEY`), `EXA_API_KEY`, `TAVILY_API_KEY`.
-2. The keychain entry `secret_ref` names, through the `SecretStore`
+2. The secret-store entry `secret_ref` names, through the `SecretStore`
    seam.
 3. The stored literal `api_key`.
 
@@ -372,7 +372,7 @@ place, so a fourth vendor is one arm there and no frontend edits.
   their taxonomy arms; a giant snippet trims.
 - `rhema-bash` (via `init`): init file text (predecessor line, guard, the
   function's shape), env map contents, section verbatim.
-- `rhema-config`: the tiers (env wins over keychain wins over
+- `rhema-config`: the tiers (env wins over secret store wins over
   literal), Debug redaction, order entries naming no instance skipped,
   instances missing from the order inert, unknown `provider` spelling
   fails registry build at use time, not load time.
@@ -413,12 +413,12 @@ the same wiring, the same gate, the same profile.
 in the sidebar, after Providers (it is per-profile credentials; the
 position is a one-line move if it reads wrong). Rows, one per
 instance: chain position, instance name, kind, where the key lives
-(keychain, stored, environment). Actions:
+(secret store, stored, environment). Actions:
 
 - `n`: add. The dialog asks kind (Brave, Exa, Tavily), instance name
   (default from the kind), API key (masked input). The key goes
-  through `place_key`: keychain first, stored literal when the
-  keychain refuses, the provider-key behavior. New instances append
+  through `place_key`: secret store first, stored literal when the
+  secret store refuses, the provider-key behavior. New instances append
   to `websearch_order`.
 - `d`: remove, from the map and the order.
 - `↑`/`↓` on a row: move it within `websearch_order`.
@@ -473,7 +473,7 @@ Each commit is green on the three checks in AGENTS.md.
    vocabulary where tests run offline and every consumer gets the
    same policy.
 4. **Keys never enter the shell environment.** The function execs the
-   binary; the binary resolves the keychain and the file in-process.
+   binary; the binary resolves the secret store and the file in-process.
    `env` in the agent's shell shows `RHEMA_SEARCH_PROFILE`, never a
    key, and the prompt section says nothing about keys.
 5. **A registry crate for three arms.** The alternative, `build` in
@@ -511,7 +511,7 @@ Each commit is green on the three checks in AGENTS.md.
 - A user-authored global `websearch.yaml` beside `mcp.yaml`, if
   hand-editing demand shows.
 - The sandbox and cloud story: the macro needs the binary and the
-  keychain where bash runs; a sandbox daemon holding a delegated
+  secret store where bash runs; a sandbox daemon holding a delegated
   chain is a design of its own.
 - Per-instance knobs (safe search, search depth, regions) once a use
   names one.

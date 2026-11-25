@@ -210,8 +210,8 @@ impl App {
     }
 
     /// Persists a login: the instance lands in `tab`'s profile (its key
-    /// in the keychain when the store takes it, the file when it does
-    /// not; a re-login's old keychain entry goes first), and the
+    /// in the secret store when the store takes it, the file when it does
+    /// not; a re-login's old secret-store entry goes first), and the
     /// catalog's slice for the instance replaces itself. `activate`
     /// makes the session ride this backend; when false, an existing
     /// active provider is left untouched, and only a profile with no
@@ -254,7 +254,7 @@ impl App {
             } => (Some(api_key.clone()), None, None),
         };
         let secrets = self.secrets.as_deref();
-        let mut keychain_delete_failure: Option<String> = None;
+        let mut secret_delete_failure: Option<String> = None;
         // Onboarding always makes the new provider the session's. The
         // add-only path adopts it only when the session has no backend
         // and the profile names no provider, so a second provider never
@@ -265,7 +265,7 @@ impl App {
         let mut adopted = activate;
         self.config.set_for_profile(Some(tab), |settings| {
             // A re-login replaces the instance wholesale; its old
-            // keychain entry must not linger, but a store that refuses
+            // store entry must not linger, but a store that refuses
             // the delete must not pass silently either, or the secret
             // outlives the login that named it.
             if let Some(old) = settings.instances.get(instance)
@@ -273,7 +273,7 @@ impl App {
                 && let Some(store) = secrets
                 && let Err(err) = store.delete(id)
             {
-                keychain_delete_failure = Some(err.to_string());
+                secret_delete_failure = Some(err.to_string());
             }
             if activate || adopt_unset {
                 settings.provider = Some(provider.to_owned());
@@ -294,9 +294,9 @@ impl App {
                 settings.place_key(instance, key, secrets);
             }
         });
-        if let Some(err) = keychain_delete_failure {
+        if let Some(err) = secret_delete_failure {
             self.error = Some(format!(
-                "re-logged in, but the previous keychain entry could not be deleted: {err}"
+                "re-logged in, but the previous secret-store entry could not be deleted: {err}"
             ));
         }
         self.store

@@ -101,8 +101,20 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             (Config::default(), false)
         }
     };
-    migrate_stored_keys(&mut config);
-    let secrets = KeyringSecretStore::named(rhema_config::secrets::RHEMA_SERVICE);
+    let home = rhema_config::Home::discover().ok();
+    let secrets = home.as_ref().map(|home| home.secret_store());
+    migrate_stored_keys(&mut config, secrets.as_deref());
+    // The same one-way keyring import the TUI runs, for a headless
+    // start on a machine upgrading from the old backend.
+    if let (Some(home), Some(secrets)) = (&home, &secrets) {
+        let imported = config.import_legacy_secrets(
+            &rhema_config::secrets::KeyringSecretReader::for_home(home),
+            secrets.as_ref(),
+        );
+        if imported > 0 {
+            eprintln!("· copied {imported} key(s) from the OS keyring into the encrypted store");
+        }
+    }
     // Same profile resolution as the TUI: an explicit --profile is
     // honored as named, a directory with a remembered profile reopens on
     // it, an absent one starts on a profile that can serve turns. No
@@ -113,7 +125,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let profile = args
         .profile
         .clone()
-        .unwrap_or_else(|| startup_profile(&config, &workspace, Some(&secrets)));
+        .unwrap_or_else(|| startup_profile(&config, &workspace, secrets.as_deref()));
     let effective = config.effective(Some(&profile));
     // RHEMA_PROVIDER (inside provider_name) wins over the stored
     // profile, the same env-wins convention the keys follow. Nothing
@@ -123,7 +135,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         .ok_or_else(|| anyhow::anyhow!(crate::app::NO_PROVIDER_HELP))?;
     // The same resolution the TUI's startup runs; a failure names the
     // fix, because headless has no login screen to fall through to.
-    let backend = Backend::from_profile_or_help(&effective, Some(&secrets))
+    let backend = Backend::from_profile_or_help(&effective, secrets.as_deref())
         .map_err(|message| anyhow::anyhow!("{message}"))?;
     // One provider instance serves the main agent and the subagent
     // wrapper: a token-backed adapter keeps one refreshed credential,
@@ -178,7 +190,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
                 non_local,
                 &effective,
                 &workspace,
-                Some(&secrets),
+                secrets.as_deref(),
                 base_system.as_deref(),
             )
             .await?,
@@ -236,7 +248,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let search_wiring = crate::search_wire::wire_for_session(
         &profile,
         &effective,
-        Some(&secrets),
+        secrets.as_deref(),
         sandboxed.as_ref(),
         bash_env.clone(),
     );
@@ -251,7 +263,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let decision_wiring = crate::decision_wire::wire_for_session(
         &profile,
         &effective,
-        Some(&secrets),
+        secrets.as_deref(),
         sandboxed.as_ref(),
         bash_env.clone(),
     );
@@ -286,7 +298,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         let profile = effective.clone();
         let secrets = secrets.clone();
         Arc::new(move |kind: &str| {
-            Backend::from_kind(kind, &profile, Some(&secrets)).map(|backend| backend.provider())
+            Backend::from_kind(kind, &profile, secrets.as_deref()).map(|backend| backend.provider())
         }) as rhema_host_agent::SubagentProviders
     });
     // The prompt's optional sections, the TUI's gate read headless:

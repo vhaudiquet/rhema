@@ -169,7 +169,7 @@ mod system_tests {
     /// The search section's two gates: a local session, and the wire's
     /// own gate open. A preview that skipped the first would promise a
     /// `search` a sandboxed session lacks; one that skipped the second
-    /// would hide the function a keychain key wires. The keyless half
+    /// would hide the function a store key wires. The keyless half
     /// of the gate is the registry's own test, where the environment is
     /// injected rather than read.
     #[test]
@@ -243,7 +243,7 @@ mod system_tests {
     /// drift, and `decision` did: setup wired the macro, the preview
     /// stayed silent. This test pins each preview gate to the wire
     /// the assembly runs, over every profile shape: for the same
-    /// profile and keychain, the section renders exactly when the
+    /// profile and store, the section renders exactly when the
     /// session would wire, both directions, so a gate that changes on
     /// one side alone fails here.
     #[test]

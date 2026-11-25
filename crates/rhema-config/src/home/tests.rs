@@ -36,3 +36,15 @@ fn the_reference_layout_nests_the_family_under_rhema() {
     assert_eq!(home.state, PathBuf::from("/home/u/.local/state/rhema"));
     assert_eq!(home.cache, PathBuf::from("/home/u/.cache/rhema"));
 }
+
+#[test]
+fn the_legacy_keyring_service_follows_the_frontend_name() {
+    assert_eq!(
+        Home::under_home(Path::new("/home/u")).legacy_keyring_service(),
+        "rhema"
+    );
+    assert_eq!(
+        Home::at("/home/u".into(), "/home/u/.godcode".into()).legacy_keyring_service(),
+        "godcode"
+    );
+}

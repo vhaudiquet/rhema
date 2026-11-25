@@ -99,7 +99,7 @@ pub enum WebSearchDialogAction {
 }
 
 /// The pop-in dialog over the web search page: pick the kind, name
-/// the instance, enter the key. The key lands in the keychain when
+/// the instance, enter the key. The key lands in the secret store when
 /// the store accepts it, the app's `place_websearch_key` decides, the
 /// dialog only carries the text.
 #[derive(Debug)]

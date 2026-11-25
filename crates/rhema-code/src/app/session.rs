@@ -871,7 +871,7 @@ impl App {
         profile
     }
 
-    /// The keychain this session resolves stored keys through, as the
+    /// The secret store this session resolves stored keys through, as the
     /// resolution tier under the environment; `None` reads literals only.
     pub fn secret_store(&self) -> Option<&dyn rhema_config::secrets::SecretStore> {
         self.secrets.as_deref()

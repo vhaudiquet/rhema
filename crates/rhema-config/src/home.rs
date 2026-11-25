@@ -123,6 +123,35 @@ impl Home {
         self.config.join("config.yaml")
     }
 
+    /// The encrypted secret store: the age ciphertext, under the
+    /// config base. A config directory copied or synced without the
+    /// state root carries no readable credential.
+    pub fn secrets_file(&self) -> PathBuf {
+        self.config.join("secrets.age")
+    }
+
+    /// The generated key that opens [`Self::secrets_file`], under the
+    /// state root, deliberately apart from the ciphertext.
+    pub fn secrets_key(&self) -> PathBuf {
+        self.state.join("secrets.key")
+    }
+
+    /// The secret store for this home: the encrypted file backend,
+    /// built over the two paths above.
+    pub fn secret_store(&self) -> std::sync::Arc<dyn crate::secrets::SecretStore> {
+        std::sync::Arc::new(crate::secrets::EncryptedFileSecretStore::for_home(self))
+    }
+
+    /// The OS keyring service name the pre-file-store versions wrote
+    /// under: `rhema` for the reference frontend, the frontend's own
+    /// name for a relocated one. The read-only importer reads this
+    /// namespace; nothing writes there any more. A frontend that used a
+    /// service of its own passes it to
+    /// [`crate::secrets::KeyringSecretReader::named`] instead.
+    pub fn legacy_keyring_service(&self) -> String {
+        frontend_name(&self.config)
+    }
+
     /// The user-wide skills directory (`<config>/skills`); a workspace
     /// can add more under its own root.
     pub fn skills(&self) -> PathBuf {

@@ -61,7 +61,7 @@ pub struct SessionModel {
 pub struct App {
     /// Config persistence seam.
     pub store: Arc<dyn ConfigStore>,
-    /// The keychain logins place keys in; `None` keeps them in the file.
+    /// The secret store logins place keys in; `None` keeps them in the file.
     pub secrets: Option<Arc<dyn rhema_config::secrets::SecretStore>>,
     /// The config as currently held; mutations persist through `store`.
     pub config: Config,

@@ -4,8 +4,8 @@
 //!
 //! - its own directory (`~/.godcode`), not the rhema one;
 //! - its own format (JSON, here, anything serde speaks would do);
-//! - its own keychain namespace (`godcode`), so its credentials never
-//!   mix with the rhema frontend's;
+//! - its own encrypted secret store (`~/.godcode/secrets.age`), so its
+//!   credentials never mix with the rhema frontend's;
 //! - the framework's [`Settings`] as one embedded section, so profiles
 //!   and the persisted switches survive the trip through a format the
 //!   framework never sees.
@@ -14,7 +14,6 @@
 //! [`Store`], hand the driver a [`Home`]. Run with `cargo run -p
 //! rhema-config --example godcode`.
 
-use rhema_config::secrets::{KeyringSecretStore, SecretStore as _};
 use rhema_config::{ConfigError, Home, Settings, Store};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -76,7 +75,7 @@ fn main() -> Result<(), ConfigError> {
     let store = GodCodeStore {
         path: home.config.join("config.json"),
     };
-    let secrets = KeyringSecretStore::named("godcode");
+    let secrets = home.secret_store();
 
     // The section loads from a format the framework never parses.
     let mut settings = store.load()?;
@@ -87,13 +86,23 @@ fn main() -> Result<(), ConfigError> {
     let reloaded = store.load()?;
     assert_eq!(reloaded, settings);
 
-    // The keychain namespace is GodCode's: a placed key lands in the
-    // `godcode` service, invisible to the rhema frontend's store.
+    // The one-way startup migration: no refs in this demo's fresh
+    // section, so it is a no-op, but a real frontend gets its old
+    // `godcode` keyring entries copied here.
+    let _ = settings.import_legacy_secrets(
+        &rhema_config::secrets::KeyringSecretReader::for_home(&home),
+        secrets.as_ref(),
+    );
+
+    // The store is GodCode's: the ciphertext sits under `~/.godcode`,
+    // the generated key under its own state root, invisible to the rhema
+    // frontend's store.
     let probe_reachable = secrets.reachable();
     println!(
-        "godcode: settings at {}, state at {}, cache at {}, keychain service `godcode` ({})",
+        "godcode: settings at {}, secret store at {}, key at {}, cache at {} ({})",
         home.config_file().display(),
-        home.state.display(),
+        home.secrets_file().display(),
+        home.secrets_key().display(),
         home.cache.display(),
         if probe_reachable {
             "reachable"
@@ -105,7 +114,7 @@ fn main() -> Result<(), ConfigError> {
     let platform = rhema_config::Platform {
         home,
         store: std::sync::Arc::new(store),
-        secrets: std::sync::Arc::new(secrets),
+        secrets,
     };
     let _ = platform; // the assembly point for the host agent
     Ok(())

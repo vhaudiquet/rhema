@@ -298,7 +298,7 @@ impl Profile {
     }
 
     /// The stored key for `provider` without the environment tier: the
-    /// keychain entry first, then the literal. Callers that run their
+    /// secret-store entry first, then the literal. Callers that run their
     /// own environment precedence (the claw's discovery) read this
     /// instead of [`Profile::api_key`].
     pub fn stored_provider_key(
@@ -311,7 +311,7 @@ impl Profile {
     }
 
     /// The stored key of one instance without the environment tier:
-    /// the keychain entry `secret_ref` names, then the literal. A
+    /// the secret-store entry `secret_ref` names, then the literal. A
     /// store that cannot be reached reads as "not in the store", the
     /// next tier serves, never a lost credential.
     pub fn stored_instance_key(
@@ -335,7 +335,7 @@ impl Profile {
     }
 
     /// The key an instance serves: the provider's environment variables
-    /// first, then the stored key, keychain, then literal.
+    /// first, then the stored key, secret store, then literal.
     /// Whitespace-only values count as unset at every tier.
     pub fn instance_api_key(
         &self,
@@ -349,7 +349,7 @@ impl Profile {
         )
     }
 
-    /// Places a just-entered key on the named instance: the keychain,
+    /// Places a just-entered key on the named instance: the secret store,
     /// when the store accepts it, the instance then carries only its
     /// `secret_ref`, else the literal, the shape machines without a
     /// store have always held. `None` when no instance bears `name`.
@@ -382,7 +382,7 @@ impl Profile {
     }
 
     /// Places a just-entered key on the named web search instance:
-    /// the keychain, when the store accepts it, the instance then
+    /// the secret store, when the store accepts it, the instance then
     /// carries only its `secret_ref`, else the literal. `None` when
     /// no instance bears `name`.
     pub fn place_websearch_key(
@@ -414,12 +414,12 @@ impl Profile {
     /// the three instance kinds share
     /// ([`Self::place_key`], [`Self::place_websearch_key`], and
     /// [`Self::place_decision_key`], which differ only in the map
-    /// they name the instance in): the keychain, when the store
+    /// they name the instance in): the secret store, when the store
     /// accepts it, the instance then carries only its `secret_ref`,
     /// else the literal, the shape machines without a store have
     /// always held.
     ///
-    /// A blank key clears both tiers, deleting the keychain entry a
+    /// A blank key clears both tiers, deleting the secret-store entry a
     /// stale `secret_ref` would otherwise keep live; a store that
     /// refuses leaves the literal in place and drops the old ref
     /// with its entry so `stored_instance_key` never prefers a key
@@ -433,7 +433,7 @@ impl Profile {
         let trimmed = key.trim();
         if trimmed.is_empty() {
             // Clearing removes both tiers: a stale `secret_ref` would
-            // otherwise keep the old keychain value live.
+            // otherwise keep the old secret store value live.
             if let (Some(store), Some(id)) = (secrets, secret_ref.take()) {
                 let _ = store.delete(&id);
             }
@@ -453,9 +453,9 @@ impl Profile {
             Ok(()) => {
                 *secret_ref = Some(id);
                 *api_key = None;
-                KeyLocation::Keychain
+                KeyLocation::Store
             }
-            // The keychain refused: the file keeps the key, the
+            // The secret store refused: the file keeps the key, the
             // behavior it has always had. Nothing is lost.
             Err(_) => {
                 // Drop the old ref with its entry: keeping it would
@@ -471,7 +471,7 @@ impl Profile {
     }
 
     /// Places a just-entered key on the named decision instance:
-    /// the keychain, when the store accepts it, the instance then
+    /// the secret store, when the store accepts it, the instance then
     /// carries only its `secret_ref`, else the literal,
     /// [`Profile::place_key`]'s rule. `None` when no instance bears
     /// `name`.
@@ -547,7 +547,7 @@ impl Profile {
     }
 
     /// The bearer token the `http` sandbox authenticates with:
-    /// `RHEMA_SANDBOX_TOKEN`, then the keychain entry `token_ref`
+    /// `RHEMA_SANDBOX_TOKEN`, then the secret-store entry `token_ref`
     /// names, then the literal `token`. Whitespace-only values count
     /// as unset at every tier.
     pub fn sandbox_token(&self, secrets: Option<&dyn SecretStore>) -> Option<String> {
@@ -559,7 +559,7 @@ impl Profile {
     }
 
     /// The stored sandbox token without the environment tier: the
-    /// keychain entry `token_ref` names first, then the literal
+    /// secret-store entry `token_ref` names first, then the literal
     /// `token`. A store that cannot be reached reads as "not in the
     /// store", the next tier serves, never a lost token. Callers that
     /// run their own environment precedence read this instead of

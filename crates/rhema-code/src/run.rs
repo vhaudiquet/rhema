@@ -30,7 +30,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use rhema_acp::AcpOptions;
-use rhema_config::secrets::KeyringSecretStore;
+use rhema_config::secrets::SecretStore;
 use rhema_core::{Event as ModelEvent, EventSink, Session};
 use rhema_host_agent::HostAgent;
 use rhema_session_store_file::PathStore;
@@ -71,18 +71,18 @@ fn resolve_base_system(path: Option<&std::path::Path>) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// Moves the config's stored literal keys into the system keychain,
-/// best effort, rewriting the file so the move is recorded. Machines
-/// without a keychain keep their literals, the pre-keychain behavior,
-/// retried here on every start.
-fn migrate_stored_keys(config: &mut Config) {
-    let moved = config.migrate_secrets(&KeyringSecretStore::named(
-        rhema_config::secrets::RHEMA_SERVICE,
-    ));
+/// Moves the config's stored literal keys into the encrypted file
+/// store, best effort, rewriting the file so the move is recorded. A
+/// failed move keeps its literal, retried here on every start.
+fn migrate_stored_keys(config: &mut Config, secrets: Option<&dyn SecretStore>) {
+    let Some(secrets) = secrets else {
+        return;
+    };
+    let moved = config.migrate_secrets(secrets);
     if moved == 0 {
         return;
     }
-    eprintln!("· moved {moved} provider key(s) into the system keychain");
+    eprintln!("· moved {moved} provider key(s) into the encrypted secret store");
     if let Err(err) = config.save() {
         eprintln!("warning: the config file still names the moved keys: {err}");
     }
@@ -246,15 +246,16 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     // Credential and session resolution happens BEFORE the terminal setup,
     // so early failures print as plain errors on a normal terminal.
     let store: Arc<dyn ConfigStore> = Arc::new(DiskStore);
+    // One home for the whole run: the config path, the skills folder,
+    // and the secret store all come from it.
+    let home = rhema_config::Home::discover()?;
     // The wizard runs when no config existed or the last wizard never
     // finished (`onboarded: Some(false)`), and when `rhema onboard` said
     // so. An existing config from before the wizard has no marker and
     // reads as onboarded, upgrading never replays it. The marker is
     // written up front so a wizard abandoned halfway (a key added, then
     // a ctrl-c) reopens here next start instead of reading as complete.
-    let config_existed = rhema_config::Home::discover()
-        .map(|home| home.config_file().exists())
-        .unwrap_or(true);
+    let config_existed = home.config_file().exists();
     let (mut config, config_loaded) = match store.load() {
         Ok(config) => (config, true),
         Err(err) => {
@@ -289,14 +290,23 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
             let _ = config.save();
         }
     }
-    migrate_stored_keys(&mut config);
+    let secrets: Arc<dyn SecretStore> = home.secret_store();
+    migrate_stored_keys(&mut config, Some(secrets.as_ref()));
+    // The old OS keyring is read once, here, for refs the encrypted
+    // store is missing. The reader is one-way and stays out of an SSH
+    // session unless RHEMA_IMPORT_KEYRING says otherwise.
+    let imported = config.import_legacy_secrets(
+        &rhema_config::secrets::KeyringSecretReader::for_home(&home),
+        secrets.as_ref(),
+    );
+    if imported > 0 {
+        eprintln!("· copied {imported} key(s) from the OS keyring into the encrypted store");
+    }
     // The bundled skills seed into the global directory before anything
     // discovers them, the wizard's skills step and the agent's prompt
     // both read the same folders. Best effort: a read-only config
     // directory only means fewer skills.
-    if let Ok(dir) = rhema_config::Home::discover().map(|home| home.skills())
-        && let Err(err) = crate::bundled::seed(&dir, &config.skills_disabled)
-    {
+    if let Err(err) = crate::bundled::seed(&home.skills(), &config.skills_disabled) {
         eprintln!("warning: the bundled skills were not seeded: {err}");
     }
     // A backend that is installed but too old would advertise `job` and
@@ -305,11 +315,8 @@ async fn run_tui(args: Args) -> anyhow::Result<()> {
     if let Some(problem) = rhema_bash::jobs::backend_problem() {
         eprintln!("warning: background jobs disabled: {problem}");
     }
-    // The session's keychain: startup resolution reads it, and the app
-    // places fresh logins in it and cleans up after removals.
-    let secrets: Arc<dyn rhema_config::secrets::SecretStore> = Arc::new(KeyringSecretStore::named(
-        rhema_config::secrets::RHEMA_SERVICE,
-    ));
+    // The session's secret store: startup resolution reads it, and the
+    // app places fresh logins in it and cleans up after removals.
     // Without an explicit --profile the session starts on the profile
     // this workspace last used, or on the default/first one that can
     // serve turns, a logged-in profile never opens the login screen.
@@ -1145,7 +1152,7 @@ fn dispatch(
         }
         Effect::AssembleSandbox(choice) => {
             // The assembly reads the profile, the workspace, and the
-            // base system as they stood at the pick; the keychain Arc
+            // base system as they stood at the pick; the secret store Arc
             // crosses because the task outlives the borrow.
             let profile = app.effective();
             let workspace = app.options.workspace.clone();

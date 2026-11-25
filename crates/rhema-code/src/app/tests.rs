@@ -212,7 +212,7 @@ fn test_call() -> ToolCall {
 struct Harness {
     app: App,
     store: Arc<MemoryStore>,
-    /// The keychain the app places logins in, when the test gave it
+    /// The store the app places logins in, when the test gave it
     /// one.
     secrets: Option<Arc<rhema_config::secrets::VolatileSecretStore>>,
     /// The scratch sessions cache /clear backs up into and allocates
@@ -316,7 +316,7 @@ fn harness(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harn
     harness_inner(api_key, model, session, None)
 }
 
-/// A harness whose app places logins in a volatile keychain.
+/// A harness whose app places logins in a volatile store.
 fn harness_with_secrets(api_key: Option<&str>, model: Option<&str>, session: Session) -> Harness {
     harness_inner(
         api_key,
@@ -478,7 +478,7 @@ fn no_resolvable_key_opens_the_chat() {
     assert_eq!(h.app.initial_effects(), vec![Effect::CheckForUpdates]);
 }
 
-/// A store that refuses everything: the locked-keychain shape the
+/// A store that refuses everything: the unreadable-store shape the
 /// reachability probe exists to catch.
 struct LockedStore;
 
@@ -501,25 +501,25 @@ impl rhema_config::secrets::SecretStore for LockedStore {
 }
 
 #[test]
-fn a_locked_keychain_is_named_by_the_missing_key_help() {
+fn an_unreadable_store_is_named_by_the_missing_key_help() {
     let profile = rhema_config::Profile {
         provider: Some("google".into()),
         ..rhema_config::Profile::default()
     };
     let err = Backend::from_profile_or_help(&profile, Some(&LockedStore)).unwrap_err();
     assert!(err.contains("GEMINI_API_KEY"), "{err}");
-    assert!(err.contains("locked or unreachable"), "{err}");
+    assert!(err.contains("secret store is unavailable"), "{err}");
 }
 
 #[test]
-fn the_plain_missing_key_help_names_no_keychain() {
+fn the_plain_missing_key_help_names_no_store() {
     let profile = rhema_config::Profile {
         provider: Some("google".into()),
         ..rhema_config::Profile::default()
     };
     let err = Backend::from_profile_or_help(&profile, None).unwrap_err();
     assert!(err.contains("GEMINI_API_KEY"), "{err}");
-    assert!(!err.contains("keychain"), "{err}");
+    assert!(!err.contains("secret store"), "{err}");
 }
 
 #[test]
@@ -768,7 +768,7 @@ fn login_persists_the_key_without_opening_a_picker() {
 }
 
 #[test]
-fn a_login_places_its_key_in_the_keychain_and_the_file_stays_clean() {
+fn a_login_places_its_key_in_the_store_and_the_file_stays_clean() {
     let mut h = harness_with_secrets(None, None, Session::default());
     let secrets = Arc::clone(h.secrets.as_ref().unwrap());
     descend_to_credential(&mut h, LoginProvider::Google);
@@ -780,7 +780,7 @@ fn a_login_places_its_key_in_the_keychain_and_the_file_stays_clean() {
     let effective = h.store.load().unwrap().effective(None);
     let instance = &effective.instances["Google Gemini"];
     assert_eq!(instance.api_key, None, "the file holds no key");
-    let id = instance.secret_ref.as_deref().expect("the keychain ref");
+    let id = instance.secret_ref.as_deref().expect("the store ref");
     assert_eq!(secrets.get(id).unwrap().as_deref(), Some("secret"));
     // The session's own resolution reads the chain: the login
     // serves turns with no literal anywhere.
@@ -794,7 +794,7 @@ fn a_login_places_its_key_in_the_keychain_and_the_file_stays_clean() {
 }
 
 #[test]
-fn removing_an_instance_deletes_its_keychain_entry() {
+fn removing_an_instance_deletes_its_store_entry() {
     let mut h = harness_with_secrets(Some("g"), Some("m"), Session::default());
     let secrets = Arc::clone(h.secrets.as_ref().unwrap());
     // The profile's one instance logs in through the chain: the
@@ -1689,7 +1689,7 @@ fn a_resumed_session_shows_its_saved_usage() {
 }
 
 #[test]
-fn removing_a_websearch_provider_deletes_its_keychain_entry() {
+fn removing_a_websearch_provider_deletes_its_store_entry() {
     let mut h = harness_with_secrets(Some("k"), None, Session::default());
     h.secrets
         .as_ref()
@@ -7726,14 +7726,14 @@ fn adding_a_websearch_provider_places_its_key_and_enrolls_it() {
         }
     }
     // Enter routes the dialog's Submit through the app: the config
-    // write, the keychain placement, the persist.
+    // write, the store placement, the persist.
     let effects = h.app.on_key(key(KeyCode::Enter));
     let _ = effects;
     let stored = h.store.load().unwrap().effective(Some("personal"));
     let instance = &stored.websearch["brave-main"];
     assert_eq!(instance.provider, "brave");
     assert_eq!(instance.api_key, None, "the file holds no key");
-    let id = instance.secret_ref.as_deref().expect("the keychain ref");
+    let id = instance.secret_ref.as_deref().expect("the store ref");
     assert_eq!(secrets.get(id).unwrap().as_deref(), Some("sk-1"));
     assert_eq!(
         stored.websearch_order,
@@ -7929,7 +7929,7 @@ fn a_paste_reaches_the_websearch_dialogs_input() {
         "the paste landed, the trailing newline did not"
     );
     // Enter stores it, and the pasted key rides the whole way: the
-    // keychain holds what the dialog carried.
+    // store holds what the dialog carried.
     let effects = h.app.on_key(key(KeyCode::Enter));
     let _ = effects;
     let secrets = Arc::clone(h.secrets.as_ref().unwrap());
@@ -7937,7 +7937,7 @@ fn a_paste_reaches_the_websearch_dialogs_input() {
     let id = stored.websearch["Work key"]
         .secret_ref
         .as_ref()
-        .expect("the keychain ref");
+        .expect("the store ref");
     assert_eq!(secrets.get(id).unwrap().as_deref(), Some("sk-pasted-123"));
 }
 
@@ -8588,14 +8588,14 @@ fn adding_a_decision_model_places_its_key_and_persists() {
         }
     }
     // Enter routes the dialog's Submit through the app: the config
-    // write, the keychain placement, the persist.
+    // write, the store placement, the persist.
     assert_eq!(h.app.on_key(key(KeyCode::Enter)), vec![]);
     let stored = h.store.load().unwrap().effective(Some("personal"));
     let section = stored.decision.as_ref().expect("the section exists");
     let instance = &section.instances["jev-main"];
     assert_eq!(instance.provider, "jev");
     assert_eq!(instance.api_key, None, "the file holds no key");
-    let id = instance.secret_ref.as_deref().expect("the keychain ref");
+    let id = instance.secret_ref.as_deref().expect("the store ref");
     assert_eq!(secrets.get(id).unwrap().as_deref(), Some("sk-1"));
     assert_eq!(
         section.instance, None,
@@ -8709,7 +8709,7 @@ fn enter_on_a_decision_row_sets_the_default_without_a_rebuild() {
 }
 
 #[test]
-fn removing_the_default_decision_model_clears_it_and_its_keychain_entry() {
+fn removing_the_default_decision_model_clears_it_and_its_store_entry() {
     let mut h = harness_with_secrets(None, None, Session::default());
     let secrets = Arc::clone(h.secrets.as_ref().unwrap());
     h.app.config.set_for_profile(Some("personal"), |p| {
@@ -8755,7 +8755,7 @@ fn removing_the_default_decision_model_clears_it_and_its_keychain_entry() {
     assert_eq!(
         secrets.get("ref-1").unwrap(),
         None,
-        "the keychain entry went too"
+        "the store entry went too"
     );
     let crate::Screen::Settings(settings) = &h.app.screen else {
         panic!("settings open");

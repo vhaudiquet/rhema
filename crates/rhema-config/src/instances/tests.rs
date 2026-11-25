@@ -6,7 +6,7 @@ use crate::settings::Settings;
 use std::collections::BTreeSet;
 
 /// A store that answers nothing: the shape a machine without a
-/// keychain presents.
+/// store presents.
 pub(crate) struct UnreachableStore;
 
 impl crate::secrets::SecretStore for UnreachableStore {
@@ -181,7 +181,7 @@ fn the_sandbox_env_names_follow_the_same_env_wins_convention() {
 }
 
 #[test]
-fn the_websearch_key_tiers_env_then_keychain_then_literal() {
+fn the_websearch_key_tiers_env_then_store_then_literal() {
     // The environment tier, purely: the closure stands in for
     // std::env, set_var is unsafe under the crate's forbid.
     let env = |name: &str| (name == "TAVILY_API_KEY").then(|| " env-key ".to_owned());
@@ -194,7 +194,7 @@ fn the_websearch_key_tiers_env_then_keychain_then_literal() {
         .as_deref(),
         Some("env-key")
     );
-    // Then the keychain, then the literal, trims included.
+    // Then the store, then the literal, trims included.
     let mut instance = websearch_instance("tavily");
     instance.api_key = Some(" file-key ".into());
     let store = VolatileSecretStore::new();
@@ -237,7 +237,7 @@ fn a_websearch_entry_round_trips_and_rejects_unknown_fields() {
 // ---- decision model instances ------------------------------
 
 #[test]
-fn the_decision_key_tiers_env_then_keychain_then_literal() {
+fn the_decision_key_tiers_env_then_store_then_literal() {
     let env = |name: &str| (name == "TYPESAFE_API_KEY").then(|| " env-key ".to_owned());
     assert_eq!(
         resolve_key(env, decision_env_names("jev"), Some(" file-key ".into())).as_deref(),

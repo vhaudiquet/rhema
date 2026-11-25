@@ -786,7 +786,7 @@ impl App {
         }) else {
             return Vec::new();
         };
-        // The keychain entry goes with the instance: a removed login
+        // The secret-store entry goes with the instance: a removed login
         // must not leave its key in the chain. Best effort, a store
         // that refuses leaves the entry; it holds no live reference.
         let mut removed = None;
@@ -804,12 +804,12 @@ impl App {
         if let Some(id) = removed.and_then(|old| old.secret_ref)
             && let Some(store) = self.secret_store()
         {
-            // The login leaves the config either way; a keychain
+            // The login leaves the config either way; a secret store
             // that refuses the delete leaves the secret behind, and
             // that must not pass silently.
             if let Err(err) = store.delete(&id) {
                 self.error = Some(format!(
-                    "the login is removed, but its keychain entry could not be deleted: {err}"
+                    "the login is removed, but its secret-store entry could not be deleted: {err}"
                 ));
             }
         }

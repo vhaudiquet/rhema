@@ -81,7 +81,7 @@ in `rhema-core`, the boundary would be wrong; it does not.
 - ❌ **Sandboxed and cloud sessions.** Local-only, gated exactly like
   vision, jobs, search, and MCP: a session whose bash runs elsewhere
   cannot exec the frontend's binary, and a cloud sandbox holds no
-  keychain and no config file.
+  secret store and no config file.
 - ❌ **A public `rhema decision` CLI.** Settings change through the
   file. Nothing here has shown the need the MCP verbs had.
 
@@ -186,7 +186,7 @@ profiles:
       instances:
         jev:
           provider: jev
-          secret_ref: "1731…-…-0007"     # or api_key, the no-keychain fallback
+          secret_ref: "1731…-…-0007"     # or api_key, the no-store fallback
           model: jev-preview             # jev-latest when unset
         clef:
           provider: clef
@@ -220,7 +220,7 @@ profiles:
 Key resolution, at use time, for the default instance: the vendor
 kind's environment variable (`TYPESAFE_API_KEY`; `CLOUDFLARE_AUTH_TOKEN`
 or `CLOUDFLARE_API_TOKEN`; `OPENROUTER_API_KEY`, the turn providers'
-variable), then the keychain entry `secret_ref` names, then the
+variable), then the secret-store entry `secret_ref` names, then the
 stored literal. The account id resolves the same way against
 `CLOUDFLARE_ACCOUNT_ID`, then the stored `account_id`.
 
@@ -388,7 +388,7 @@ frontend edits.
   `error.message` is `Invalid` and a 402 a `Http`.
 - `rhema-decision-registry`: every kind builds; the errors name their
   cause; the default is the named instance else the first; keys
-  resolve through the keychain; the default never falls to another
+  resolve through the secret store; the default never falls to another
   vendor or the environment, and a keyless, unknown, or mis-modeled
   one is its own error naming the entry; the environment tier, for a
   profile holding no instance, walks the fixed order (a vendor's key
@@ -401,7 +401,7 @@ frontend edits.
 - `rhema-config`: the section round-trips and is strict at both
   levels, nulled reads as absent, an empty section is no instance,
   the default is the named instance else the first; the tiers, Debug
-  redaction, the key placed on the keychain or the file, the
+  redaction, the key placed on the secret store or the file, the
   migration over every instance, unknown fields loud, the section
   absent while unset.
 - `rhema-code`: `parse` over every verb and flag shape, `--instance`
@@ -418,9 +418,9 @@ frontend edits.
   the account; the custom endpoint adds the URL, refused without
   `http://`, and opens the key line on `local`); a paste lands in
   the input and never on the kind list; through `on_key`, an add
-  places its key on the keychain and persists, Clef's account and the
+  places its key on the secret store and persists, Clef's account and the
   endpoint land in the file, enter on a row persists the default,
-  removal takes the default and the keychain entry with it and an
+  removal takes the default and the secret-store entry with it and an
   emptied section leaves the profile; the frames at 80 columns: one
   add row, the hints inside the dialog's width, the key masked to its
   length, the empty page's hint.
@@ -472,7 +472,7 @@ place, `decision_wire.rs`, called by both.
   enter on a row writes `decision.instance` and persists with no
   rebuild, the mode reads the profile per call; a removal drops the
   instance, clears the default when it was the one, deletes the
-  keychain entry, drops an emptied section, and rebuilds when the
+  secret-store entry, drops an emptied section, and rebuilds when the
   last one went. The dialog's rendering is the web search dialog's,
   lifted into `render_staged_dialog` over the kind list and the one
   input line. No slash command of its own: `/settings` is the way

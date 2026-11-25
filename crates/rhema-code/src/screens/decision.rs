@@ -79,7 +79,7 @@ pub struct DecisionRow {
     /// The endpoint, when the instance names its own.
     pub base_url: Option<String>,
     /// Whether a key resolves for the instance: the environment's,
-    /// the keychain's, or the file's.
+    /// the secret store's, or the file's.
     pub keyed: bool,
     /// Whether `decide` asks this instance by default.
     pub default: bool,
@@ -219,7 +219,7 @@ pub struct DecisionBuilt {
 
 /// The pop-in dialog over the Decision models page: pick the kind,
 /// name the instance, answer the kind's own stages (an endpoint, an
-/// account id), enter the key. The key lands in the keychain when the
+/// account id), enter the key. The key lands in the secret store when the
 /// store accepts it, the app's `submit_decision_provider` decides;
 /// the dialog only carries the text.
 #[derive(Debug)]

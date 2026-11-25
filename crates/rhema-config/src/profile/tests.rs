@@ -429,11 +429,11 @@ fn an_opencode_instance_honors_its_stored_route() {
     );
 }
 
-/// The keychain tier serves before the literal, an unreachable
+/// The store tier serves before the literal, an unreachable
 /// store falls through to it, and the environment tier is covered
 /// by the pure resolver tests above.
 #[test]
-fn the_keychain_tier_serves_before_the_literal() {
+fn the_store_tier_serves_before_the_literal() {
     use crate::secrets::VolatileSecretStore;
     let mut profile = Profile::default();
     profile.upsert_instance(
@@ -455,7 +455,7 @@ fn the_keychain_tier_serves_before_the_literal() {
     let store = VolatileSecretStore::new();
     // No entry yet: the literal serves.
     assert_eq!(key_of(&profile, Some(&store)).as_deref(), Some("file-key"));
-    // The entry lands: the keychain outranks the literal.
+    // The entry lands: the store outranks the literal.
     store.set("ref-1", "chain-key").unwrap();
     assert_eq!(key_of(&profile, Some(&store)).as_deref(), Some("chain-key"));
     // An unreachable store reads as "not in the store": the literal
@@ -464,7 +464,7 @@ fn the_keychain_tier_serves_before_the_literal() {
         key_of(&profile, Some(&UnreachableStore)).as_deref(),
         Some("file-key")
     );
-    // No store at all, the pre-keychain callers, same answer.
+    // No store at all, the pre-store callers, same answer.
     assert_eq!(key_of(&profile, None).as_deref(), Some("file-key"));
 }
 
@@ -490,7 +490,7 @@ fn place_key_prefers_the_chain_and_falls_back_to_the_file() {
     let store = VolatileSecretStore::new();
     assert_eq!(
         profile.place_key("anthropic", " sk-new ", Some(&store)),
-        Some(KeyLocation::Keychain)
+        Some(KeyLocation::Store)
     );
     let instance = profile.instance_for_provider("anthropic").unwrap().1;
     assert_eq!(instance.api_key, None);
@@ -530,7 +530,7 @@ fn place_key_prefers_the_chain_and_falls_back_to_the_file() {
 }
 
 #[test]
-fn clearing_a_key_drops_its_stale_keychain_entry() {
+fn clearing_a_key_drops_its_stale_store_entry() {
     use crate::secrets::VolatileSecretStore;
     let mut profile = Profile::default();
     profile.upsert_instance(
@@ -560,7 +560,7 @@ fn clearing_a_key_drops_its_stale_keychain_entry() {
 }
 
 #[test]
-fn a_file_fallback_drops_a_stale_keychain_ref() {
+fn a_file_fallback_drops_a_stale_store_ref() {
     use crate::secrets::VolatileSecretStore;
     let mut profile = Profile::default();
     profile.upsert_instance(
@@ -709,7 +709,7 @@ fn the_sandbox_fields_read_back_through_the_profile() {
 }
 
 #[test]
-fn the_sandbox_token_tiers_run_keychain_then_literal() {
+fn the_sandbox_token_tiers_run_store_then_literal() {
     use crate::secrets::VolatileSecretStore;
     let profile = sandboxed_profile(SandboxSettings {
         kind: Some("http".into()),
@@ -724,7 +724,7 @@ fn the_sandbox_token_tiers_run_keychain_then_literal() {
         profile.stored_sandbox_token(Some(&store)).as_deref(),
         Some("file-token")
     );
-    // The entry lands: the keychain outranks the literal. (The env
+    // The entry lands: the store outranks the literal. (The env
     // tier outranks both, the resolver test above.)
     store.set("ref-sandbox", "chain-token").unwrap();
     assert_eq!(
@@ -739,13 +739,13 @@ fn the_sandbox_token_tiers_run_keychain_then_literal() {
             .as_deref(),
         Some("file-token")
     );
-    // A blank keychain entry counts as unset: the literal serves.
+    // A blank store entry counts as unset: the literal serves.
     store.set("ref-sandbox", "  ").unwrap();
     assert_eq!(
         profile.stored_sandbox_token(Some(&store)).as_deref(),
         Some("file-token")
     );
-    // No store at all, the pre-keychain callers, same answer.
+    // No store at all, the pre-store callers, same answer.
     assert_eq!(
         profile.stored_sandbox_token(None).as_deref(),
         Some("file-token")
@@ -788,7 +788,7 @@ fn place_websearch_key_prefers_the_chain_and_falls_back_to_the_file() {
     let store = VolatileSecretStore::new();
     assert_eq!(
         profile.place_websearch_key("brave-main", " sk-new ", Some(&store)),
-        Some(KeyLocation::Keychain)
+        Some(KeyLocation::Store)
     );
     let instance = &profile.websearch["brave-main"];
     assert_eq!(instance.api_key, None);
@@ -862,7 +862,7 @@ fn the_profile_file_carries_the_section_only_when_filled() {
 }
 
 #[test]
-fn place_decision_key_prefers_the_keychain_and_falls_back_to_the_file() {
+fn place_decision_key_prefers_the_store_and_falls_back_to_the_file() {
     let mut profile = Profile::default();
     assert_eq!(
         profile.place_decision_key("jev", "k", None),
@@ -874,7 +874,7 @@ fn place_decision_key_prefers_the_keychain_and_falls_back_to_the_file() {
     let store = VolatileSecretStore::new();
     assert_eq!(
         profile.place_decision_key("jev", " sk-new ", Some(&store)),
-        Some(KeyLocation::Keychain)
+        Some(KeyLocation::Store)
     );
     let instance = &profile.decision.as_ref().unwrap().instances["jev"];
     assert_eq!(instance.api_key, None);

@@ -134,7 +134,7 @@ async fn serve_connection(
     transport: impl agent_client_protocol::ConnectTo<Agent>,
     options: AcpOptions,
 ) -> anyhow::Result<()> {
-    // Startup reads, the config file, the keychain behind the
+    // Startup reads, the config file, the secret store behind the
     // profile's `secret_ref`s, the user's SYSTEM.md, are blocking,
     // and this async context owns a scheduler: the work hops to the
     // blocking pool instead of parking a worker.

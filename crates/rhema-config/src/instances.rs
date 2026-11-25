@@ -54,11 +54,11 @@ pub struct ProviderInstance {
     /// `opencode`, `copilot`, `chatgpt`, `mistral`, or `mistral-vibe`.
     pub provider: String,
     /// The API key (the bearer key for a llama.cpp server), when the
-    /// instance needs one and the keychain does not hold it.
+    /// instance needs one and the secret store does not hold it.
     /// Environment variables still win at use time.
     pub api_key: Option<String>,
-    /// The keychain entry holding the key, when it is not in this
-    /// file: an opaque id under the frontend's keychain service,
+    /// The secret-store entry holding the key, when it is not in this
+    /// file: an opaque id under the frontend's secret-store file,
     /// resolved through the [`crate::secrets`] seam. Written by
     /// [`crate::profile::Profile::place_key`] and [`crate::settings::Settings::migrate_secrets`]; a
     /// literal `api_key` and a live `secret_ref` never hold the same
@@ -75,13 +75,13 @@ pub struct ProviderInstance {
     /// without the route sets back to chat completions).
     pub api: Option<ProviderApi>,
 }
-/// The two fields the literal-to-keychain migration touches, so the
+/// The two fields the literal-to-store migration touches, so the
 /// three instance kinds (provider, web search, decision) share one
 /// loop body instead of three copies.
 pub(crate) trait KeyedInstance {
     /// The literal `api_key`, when the file holds one.
     fn literal_key(&self) -> Option<String>;
-    /// The keychain entry's id, when one is referenced.
+    /// The secret-store entry's id, when one is referenced.
     fn secret_ref(&self) -> Option<String>;
     /// Records a successful move: the id is the key's new home, the
     /// literal is gone.
@@ -126,9 +126,9 @@ impl KeyedInstance for DecisionInstance {
         self.api_key = None;
     }
 }
-/// One literal-to-keychain move, the body every `migrate_secrets`
-/// loop shares: a blank key moves nothing, a keychain that refuses
-/// leaves the literal in place, a keychain that accepts leaves the
+/// One literal-to-store move, the body every `migrate_secrets`
+/// loop shares: a blank key moves nothing, a secret store that refuses
+/// leaves the literal in place, a secret store that accepts leaves the
 /// `secret_ref`. Returns 1 when a key moved.
 pub(crate) fn migrate_instance_key(
     instance: &mut impl KeyedInstance,
@@ -176,11 +176,11 @@ pub struct WebSearchInstance {
     /// consumer's to resolve or reject (the registry does, at use
     /// time, not load time).
     pub provider: String,
-    /// The API key, when the keychain does not hold it. Environment
+    /// The API key, when the secret store does not hold it. Environment
     /// variables still win at use time.
     pub api_key: Option<String>,
-    /// The keychain entry holding the key, when it is not in this
-    /// file: an opaque id under the frontend's keychain service,
+    /// The secret-store entry holding the key, when it is not in this
+    /// file: an opaque id under the frontend's secret-store file,
     /// resolved through the [`crate::secrets`] seam. Written by
     /// [`crate::profile::Profile::place_websearch_key`] and
     /// [`crate::settings::Settings::migrate_secrets`]; a literal `api_key` and a live
@@ -200,7 +200,7 @@ impl fmt::Debug for WebSearchInstance {
 
 impl WebSearchInstance {
     /// The key this instance serves: the provider kind's environment
-    /// variables first, then the stored key, keychain, then literal.
+    /// variables first, then the stored key, secret store, then literal.
     /// Whitespace-only values count as unset at every tier, the
     /// provider-instance rule.
     pub fn api_key(&self, secrets: Option<&dyn SecretStore>) -> Option<String> {
@@ -213,7 +213,7 @@ impl WebSearchInstance {
 }
 
 /// The stored key of one web search instance without the environment
-/// tier: the keychain entry `secret_ref` names, then the literal. A
+/// tier: the secret-store entry `secret_ref` names, then the literal. A
 /// store that cannot be reached reads as "not in the store", the
 /// next tier serves, never a lost credential.
 fn stored_websearch_key(
@@ -259,11 +259,11 @@ pub struct DecisionInstance {
     /// registry does, at use time, not load time).
     pub provider: String,
     /// The API key (Jev, OpenRouter) or Workers AI API token (Clef),
-    /// when the keychain does not hold it. Environment variables
+    /// when the secret store does not hold it. Environment variables
     /// still win at use time.
     pub api_key: Option<String>,
-    /// The keychain entry holding the key, when it is not in this
-    /// file: an opaque id under the frontend's keychain service,
+    /// The secret-store entry holding the key, when it is not in this
+    /// file: an opaque id under the frontend's secret-store file,
     /// resolved through the [`crate::secrets`] seam. Written by
     /// [`crate::profile::Profile::place_decision_key`] and
     /// [`crate::settings::Settings::migrate_secrets`]; a literal `api_key` and a live
@@ -306,7 +306,7 @@ impl fmt::Debug for DecisionInstance {
 
 impl DecisionInstance {
     /// The key this instance serves: the vendor kind's environment
-    /// variables first, then the stored key, keychain, then literal.
+    /// variables first, then the stored key, secret store, then literal.
     /// Whitespace-only values count as unset at every tier, the
     /// provider-instance rule.
     pub fn api_key(&self, secrets: Option<&dyn SecretStore>) -> Option<String> {
@@ -329,7 +329,7 @@ impl DecisionInstance {
     }
 }
 /// The stored key of one decision instance without the environment
-/// tier: the keychain entry `secret_ref` names, then the literal. A
+/// tier: the secret-store entry `secret_ref` names, then the literal. A
 /// store that cannot be reached reads as "not in the store", the
 /// next tier serves, never a lost credential.
 fn stored_decision_key(
@@ -429,9 +429,9 @@ pub struct SandboxSettings {
     /// The `http` sandbox's base URL.
     pub url: Option<String>,
     /// A literal bearer token for the `http` sandbox, the fallback
-    /// where no keychain answers, never the first choice.
+    /// where no secret store answers, never the first choice.
     pub token: Option<String>,
-    /// The keychain entry holding the `http` token, resolved through
+    /// The secret-store entry holding the `http` token, resolved through
     /// the [`crate::secrets`] seam, [`ProviderInstance`]'s `secret_ref`
     /// pattern. A literal `token` and a live `token_ref` never hold
     /// the same secret at rest.

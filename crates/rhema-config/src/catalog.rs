@@ -4,10 +4,10 @@
 /// Where [`crate::profile::Profile::place_key`] landed a credential.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyLocation {
-    /// The OS keychain: the instance carries only the entry's
-    /// `secret_ref`.
-    Keychain,
-    /// The config file itself: no keychain answered, so the literal
+    /// The encrypted secret store: the instance carries only the
+    /// entry's `secret_ref`.
+    Store,
+    /// The config file itself: the store refused, so the literal
     /// stayed, the shape the file has always held.
     File,
 }
