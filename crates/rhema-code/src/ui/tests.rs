@@ -4507,7 +4507,7 @@ fn the_models_page_draws_the_rows_that_landed_while_more_are_out() {
     );
     assert!(!screen.contains("filter:"), "no filter box yet: {screen}");
     assert!(
-        screen.contains("enter choose · alt-a all · esc back"),
+        screen.contains("enter choose · ctrl-a all · esc back"),
         "the keys that answer: {screen}"
     );
     let rows: Vec<usize> = hits

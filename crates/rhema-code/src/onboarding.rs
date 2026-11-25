@@ -288,7 +288,11 @@ impl OnboardingScreen {
                 }
             };
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // The model step's picker answers Ctrl-A with its show-all
+        // toggle; every other control key stays dead here.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !(self.step == OnboardingStep::Model && matches!(key.code, KeyCode::Char('a' | 'A')))
+        {
             return OnboardingAction::None;
         }
         match self.step {
@@ -646,6 +650,18 @@ mod tests {
             screen.handle_key(key(KeyCode::Up)),
             OnboardingAction::SetPalette(all[all.len() - 1])
         );
+    }
+
+    #[test]
+    fn the_model_step_passes_ctrl_a_to_the_picker() {
+        let mut screen = wizard();
+        screen.go(OnboardingStep::Model);
+        assert!(!screen.picker.show_all);
+        assert_eq!(
+            screen.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            OnboardingAction::None
+        );
+        assert!(screen.picker.show_all);
     }
 
     #[test]

@@ -761,8 +761,8 @@ match` in the column the rows would have filled. Three hosts share it:
 the settings' Models page, the wizard's model step, and `/switch`'s
 full-screen screen. The picker hides a family's rows older than its
 newest two release dates and any row more than a year old, measured
-from the day it opens; Alt-A brings the hidden rows back, and the
-footer names the key. The family and release date travel on the
+from the day it opens; Ctrl-A brings the hidden rows back (Alt-A
+works where Option sends Meta), and the footer names the key. The family and release date travel on the
 `ModelCard`, filled by the live catalog, so the rule needs no second
 lookup. Its catalog arrives one provider at a time: each
 slice lands as its own event (`UiEvent::ModelsLoaded` carries how many

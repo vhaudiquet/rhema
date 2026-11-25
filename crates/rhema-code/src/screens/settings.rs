@@ -1066,7 +1066,12 @@ impl SettingsScreen {
                 _ => SettingsAction::None,
             };
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) {
+        // The Models page's picker answers Ctrl-A with its show-all
+        // toggle; every other control key stays dead here.
+        if key.modifiers.contains(KeyModifiers::CONTROL)
+            && !(self.section == SettingsSection::Models
+                && matches!(key.code, KeyCode::Char('a' | 'A')))
+        {
             return SettingsAction::None;
         }
         // The Models page's rows are the shared picker's: it takes every

@@ -124,7 +124,7 @@ impl<'a> PickerRow<'a> {
 
 /// The model picker: text chat models across every logged-in provider,
 /// sorted by provider then id, a type-to-filter prompt, and one
-/// highlighted row. Older versions stay hidden until `alt-a` asks for
+/// highlighted row. Older versions stay hidden until `ctrl-a` asks for
 /// them. The host owns the rect, the title, and what a pick means; this
 /// type owns the rows and the keys.
 #[derive(Debug)]
@@ -137,7 +137,7 @@ pub struct ModelPicker {
     hidden: HashSet<usize>,
     /// Days since 1970-01-01 the age rule measures against.
     today: i32,
-    /// Whether [`Self::hidden`] is ignored: the `alt-a` toggle.
+    /// Whether [`Self::hidden`] is ignored: the `ctrl-a` toggle.
     pub show_all: bool,
     /// The profile's stored model, offered when [`Self::models`] is
     /// empty and hidden as soon as the catalog names anything.
@@ -213,7 +213,7 @@ impl ModelPicker {
         if self.status == ModelPickerStatus::Ready {
             ready
         } else if self.pickable() {
-            "enter choose · alt-a all · esc back"
+            "enter choose · ctrl-a all · esc back"
         } else {
             "esc back"
         }
@@ -335,9 +335,12 @@ impl ModelPicker {
     /// leaves, the filter is transient, nothing to clear first. `r` stays
     /// a filter character on purpose: models are named (qwen).
     pub fn handle_key(&mut self, key: KeyEvent) -> ModelPickerAction {
-        // `alt-a` toggles the hidden rows from any state; a plain `a`
-        // stays a filter character.
-        if matches!(key.code, KeyCode::Char('a' | 'A')) && key.modifiers.contains(KeyModifiers::ALT)
+        // Ctrl-A toggles the hidden rows from any state; Alt-A does too,
+        // for terminals where Option sends Meta. A plain `a` stays a
+        // filter character.
+        if matches!(key.code, KeyCode::Char('a' | 'A'))
+            && (key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT))
         {
             self.show_all = !self.show_all;
             self.clamp_selection();

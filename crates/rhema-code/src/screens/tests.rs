@@ -3833,6 +3833,22 @@ fn the_picker_hides_old_family_versions_and_stale_rows() {
 }
 
 #[test]
+fn settings_passes_ctrl_a_to_the_models_picker() {
+    let models = vec![
+        dated("glm-5.2", "glm", "2026-06-13"),
+        dated("glm-5.3", "glm", "2026-08-14"),
+        dated("glm-4.7", "glm", "2025-12-22"),
+    ];
+    let mut settings = SettingsScreen::new();
+    settings.section = SettingsSection::Models;
+    settings.model_picker =
+        ModelPicker::new(catalog("zai", models)).with_today(datealgo::date_to_rd((2026, 11, 24)));
+    assert_eq!(settings.model_picker.filtered().len(), 2);
+    settings.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(settings.model_picker.filtered().len(), 3);
+}
+
+#[test]
 fn the_age_cutoff_is_a_year_to_the_day() {
     let mut edge = model("edge", "edge", true);
     edge.release_date = Some("2025-11-24".to_owned());
@@ -3849,7 +3865,7 @@ fn the_age_cutoff_is_a_year_to_the_day() {
 }
 
 #[test]
-fn alt_a_shows_the_hidden_rows_and_a_plain_a_still_filters() {
+fn ctrl_a_shows_the_hidden_rows_and_a_plain_a_still_filters() {
     let models = vec![
         dated("glm-5.2", "glm", "2026-06-13"),
         dated("glm-5.3", "glm", "2026-08-14"),
@@ -3859,11 +3875,11 @@ fn alt_a_shows_the_hidden_rows_and_a_plain_a_still_filters() {
         ModelPicker::new(catalog("zai", models)).with_today(datealgo::date_to_rd((2026, 11, 24)));
     assert_eq!(picker.filtered().len(), 2, "the old version is hidden");
 
-    picker.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
-    assert_eq!(picker.filtered().len(), 3, "alt-a shows the history");
+    picker.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL));
+    assert_eq!(picker.filtered().len(), 3, "ctrl-a shows the history");
 
     picker.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT));
-    assert_eq!(picker.filtered().len(), 2, "alt-a hides it again");
+    assert_eq!(picker.filtered().len(), 2, "a second press hides it again");
 
     picker.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty()));
     assert_eq!(picker.filter, "a", "a plain a is still a filter key");
