@@ -146,22 +146,32 @@ Each sharing backend mounts the root at the same path:
 A sharing backend that cannot add the mount falls back to
 `<workspace>/.rhema/runtime`, and a backend with no shared directory
 uses a sandbox-side cache. The workspace is the exception, not the rule.
+The root then holds only the helper install and the MCP socket; the
+session state is sandbox-side (§3.2).
 
 ### 3.2 The runtime tree
 
 ```text
-<runtime-root>/
+<runtime-root>/               # shared, when the backend mounts one
   bin/<version>/              # installed by the sandbox, not copied from the host
     rhema                     # plus gob, which jobs needs
     init-<kit>.sh             # generated once, static per stub set
   mcp/<session-key>/
     mcp.sock
-    media/
-  jobs/<session-key>/
-    session/                  # the jobs state both sides read
-  vision/<session-key>/
-    staging/                  # the images the host attaches
+
+<sandbox-tmp>/rhema-<session>/
+  vision/staging/             # the images the host pulls and attaches
+  jobs/session/               # the jobs state the host pulls
+  mcp/media/                  # large payloads the model reads in place
 ```
+
+The shared root holds the install (so a recreated container keeps it)
+and the socket. The state tree is the sandbox's own temp dir, created
+per session with `mktemp -d` at mode `0700`; the host pulls it through
+`read_file`. A backend with no shared root has only this tree, and its
+socket is TCP or absent. When the sandbox's `/tmp` does not survive a
+command (ecrou with persistence off), the state tree moves under the
+shared root, or the kit is skipped.
 
 The helper install survives the session; the per-session dirs do not.
 A new version installs beside the old one, and a sweep removes a
@@ -246,7 +256,11 @@ the approvals, and the media. The sandbox's `mcp` function runs
 prints the JSON-RPC result. The servers outlive the call and cannot be
 spawned from the sandbox, which is why this is a socket and not a file:
 only the listening process can create it, and it must sit on a path
-both sides see. No shared path means TCP (ssh) or no MCP (http).
+both sides see. A bind mount on the same Linux kernel carries it; the
+docker daemon's own socket is the precedent. A named volume is awkward
+because its host path belongs to the daemon. A VM boundary (lxd vm,
+ecrou's virtiofs, Docker Desktop) is the spike. No shared path means
+TCP (ssh) or no MCP (http).
 
 `Bridge` is what the MCP kit needs and the other four may grow into:
 
@@ -353,11 +367,11 @@ same way.
 | mcp | yes | yes: the socket's dir | yes | no | servers stay host-side in v1 |
 
 The host-read state is two things: vision's staging dir (the images the
-host attaches) and jobs' session dir (the host's steering feed). Either
-can be pulled through `read_file` instead of a shared root. MCP media
-is written and read in the sandbox; the host sees it through vision
-only when the model attaches an image. `search` and `decide` keep no
-state.
+host attaches) and jobs' session dir (the host's steering feed). They
+live in the sandbox's per-session temp dir and are pulled through
+`read_file`; a shared root only saves the pull. MCP media is written
+and read in the sandbox; the host sees it through vision only when the
+model attaches an image. `search` and `decide` keep no state.
 
 The kit unifies the helper and the shared-state placement. The fourth is
 an open decision:
@@ -460,9 +474,10 @@ backend actually did, not what the table predicted.
    version.** The function bodies are already static
    (`job() { "$RHEMA_JOBS_BIN" __jobs "$@"; }`), and the per-session
    values are env. One file, no chain, no host write, no shared root.
-8. **The shared root is for the socket and host-read state.** It is a
-   transport shortcut, not storage: vision and jobs can pull through
-   `read_file`, and only the MCP socket needs a live shared path.
+8. **The shared root is for the socket and the install; state is
+   sandbox-side.** Vision and jobs keep their state in the sandbox's
+   per-session temp dir and the host pulls it through `read_file`. Only
+   the MCP socket needs a live shared path.
 
 ## 13. Alternatives considered
 
@@ -512,6 +527,9 @@ backend actually did, not what the table predicted.
   today.
 - For an airgapped sandbox, should the host fetch the target's tarball
   and upload it, rather than the sandbox reaching `get.rhema.rs`?
+- Does `read_file` carry a multi-megabyte staged image? If the file API
+  caps at 512 KiB, vision on an fs-disjoint backend needs a larger
+  transfer or a shared root.
 - Should the helper install be per sandbox instance or per user path?
   A persisted container keeps it; a recreated one reinstalls unless the
   runtime root's `bin/` survives.
