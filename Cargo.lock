@@ -4269,7 +4269,7 @@ name = "rhema-bash"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rhema-core",
  "rhema-submissions",
  "serde",
@@ -4303,7 +4303,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "crossterm",
  "datealgo",
@@ -4483,7 +4483,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "clap",
  "futures-util",
@@ -4581,7 +4581,7 @@ name = "rhema-provider-chatgpt"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "futures-util",
  "rand 0.8.8",
  "reqwest",
@@ -4651,7 +4651,7 @@ name = "rhema-provider-mistral"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rand 0.8.8",
  "reqwest",
  "rhema-core",
@@ -4767,7 +4767,7 @@ name = "rhema-sandbox-docker"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rhema-sandbox",
  "tempfile",
  "tokio",
@@ -4778,7 +4778,7 @@ name = "rhema-sandbox-ecrou"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rhema-sandbox",
  "tempfile",
  "tokio",
@@ -4789,7 +4789,7 @@ name = "rhema-sandbox-http"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "reqwest",
  "rhema-sandbox",
  "serde",
@@ -4802,7 +4802,7 @@ name = "rhema-sandbox-local"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rhema-sandbox",
  "tempfile",
  "tokio",
@@ -4813,7 +4813,7 @@ name = "rhema-sandbox-lxd"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rhema-sandbox",
  "tempfile",
  "tokio",
@@ -4824,7 +4824,7 @@ name = "rhema-sandbox-ssh"
 version = "0.4.2"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "rhema-sandbox",
  "rhema-sandbox-ssh",
  "russh",

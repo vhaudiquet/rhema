@@ -14,7 +14,7 @@ authors.workspace = true
 rhema-sandbox = { path = "../rhema-sandbox", version = "0.4.2", features = ["spawn"] }
 async-trait = { workspace = true }
 # File contents cross the seed staging base64
-base64 = "0.22"
+base64 = "0.23"
 # The `timeout` child, the seed's `git`/`tar` runs, the cancel tick's timer
 tokio = { workspace = true, features = ["process", "io-util", "time", "fs"] }
 

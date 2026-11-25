@@ -24,7 +24,7 @@ russh-config = "0.65"
 async-trait = { workspace = true }
 # The tarball seed is staged base64-side only: the bytes stream raw to
 # the remote `tar`, base64 rides for the file routes
-base64 = "0.22"
+base64 = "0.23"
 # The `ssh` child, buffered reads, the cancel tick's timer
 tokio = { workspace = true, features = ["process", "io-util", "time"] }
 

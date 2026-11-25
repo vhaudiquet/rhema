@@ -25,7 +25,7 @@ tokio = { workspace = true, features = ["net", "io-util", "sync", "time"] }
 # PKCE: a CSPRNG verifier (S256) and the URL-safe base64 both sides use
 rand = "0.8"
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
