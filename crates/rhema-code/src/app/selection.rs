@@ -5,8 +5,8 @@
 //! The terminal owns the pointer while the TUI runs (mouse capture is on
 //! for the wheel and the settings clicks), so selection cannot be the
 //! terminal's own: the transcript keeps its drawn rows and maps the drag
-//! onto them. The release copies the text, the way a terminal's copy
-//! does.
+//! onto them. The release copies the text, and Ctrl-C copies it again
+//! while the highlight lives, the way a terminal's copy does.
 
 use ratatui::layout::Rect;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};

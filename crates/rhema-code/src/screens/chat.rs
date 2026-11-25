@@ -356,7 +356,7 @@ impl ChatState {
         self.delete_range(self.byte_offset(), self.byte_offset_at(end));
     }
 
-    /// Handles one keypress. Ctrl combos are the app's (quit, model
+    /// Handles one keypress. Ctrl combos are the app's (copy, model
     /// picker); Esc is the app's (approval decline / quit confirm). The
     /// model catalog, profile registry, and sandbox instances feed the
     /// `/model`, `/profile`, and `/sandbox` palette rows; empty slices

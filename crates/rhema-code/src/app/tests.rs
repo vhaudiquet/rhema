@@ -2646,6 +2646,98 @@ fn a_drag_on_the_scroll_rail_moves_the_window_not_a_selection() {
     assert!(!h.app.rail_drag);
 }
 
+/// A transcript view with one drawn row, `hello`, and a selection
+/// covering `hell` (click at column 0, drag to column 3).
+fn selected_hello(h: &mut Harness) {
+    h.app.transcript_view = crate::app::selection::TranscriptView {
+        area: ratatui::layout::Rect::new(0, 0, 20, 4),
+        top: 0,
+        rows: vec!["hello".to_owned()],
+        rail: None,
+    };
+    h.app.on_mouse_down(0, 0);
+    h.app.on_mouse_drag(3, 0);
+    h.app.finish_selection(3, 0);
+    assert!(h.app.selection.is_some(), "the drag leaves a selection");
+}
+
+#[test]
+fn a_bare_modifier_press_keeps_the_selection() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    selected_hello(&mut h);
+    h.app.on_key(KeyEvent::new(
+        KeyCode::Modifier(crossterm::event::ModifierKeyCode::LeftShift),
+        KeyModifiers::SHIFT,
+    ));
+    assert!(
+        h.app.selection.is_some(),
+        "a modifier alone is not a command and must not erase the highlight"
+    );
+}
+
+#[test]
+fn ctrl_shift_c_copies_the_selection_instead_of_quitting() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    selected_hello(&mut h);
+    // The kitty alternate-key parse leaves the shifted C under CONTROL.
+    h.app
+        .on_key(KeyEvent::new(KeyCode::Char('C'), KeyModifiers::CONTROL));
+    assert!(!h.app.should_quit, "the copy key does not quit");
+    assert!(
+        h.app.selection.is_some(),
+        "the highlight stays after a copy"
+    );
+}
+
+#[test]
+fn ctrl_shift_c_from_a_terminal_that_keeps_shift_copies() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    selected_hello(&mut h);
+    h.app.on_key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    ));
+    assert!(!h.app.should_quit, "the copy key does not quit");
+    assert!(
+        h.app.selection.is_some(),
+        "the highlight stays after a copy"
+    );
+}
+
+#[test]
+fn ctrl_c_copies_and_never_quits() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    selected_hello(&mut h);
+    h.app.on_key(ctrl('c'));
+    assert!(!h.app.should_quit, "Ctrl-C is the copy key, not quit");
+    assert!(
+        h.app.selection.is_some(),
+        "the highlight stays after a copy"
+    );
+}
+
+#[test]
+fn ctrl_c_with_nothing_selected_is_inert() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.on_key(ctrl('c'));
+    assert!(!h.app.should_quit, "a stray Ctrl-C must not quit");
+    assert_eq!(h.app.chat.input, "", "and must not type anything");
+}
+
+#[test]
+fn altgr_c_keeps_typing_instead_of_copying() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    h.app.on_key(KeyEvent::new(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL | KeyModifiers::ALT,
+    ));
+    assert!(!h.app.should_quit);
+    assert_eq!(
+        h.app.chat.input, "c",
+        "AltGr composes text; Ctrl-Alt-C is not a copy"
+    );
+}
+
 #[test]
 fn a_key_clears_the_selection() {
     let mut h = harness(Some("k"), Some("m-a"), Session::default());
@@ -3278,10 +3370,10 @@ fn reasoning_previews_and_vanishes_when_output_starts() {
 }
 
 #[test]
-fn ctrl_c_and_ctrl_d_quit_from_any_screen() {
+fn ctrl_d_quits_from_any_screen_and_ctrl_c_does_not() {
     let mut h = harness(None, None, Session::default());
     h.app.on_key(ctrl('c'));
-    assert!(h.app.should_quit);
+    assert!(!h.app.should_quit, "Ctrl-C copies, it does not quit");
 
     let mut h = harness(None, None, Session::default());
     h.app.on_key(ctrl('d'));

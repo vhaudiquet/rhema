@@ -8,6 +8,20 @@ use super::*;
 /// the input is a prompt, not a file drop target.
 const MAX_PASTE_BYTES: usize = 1024 * 1024;
 
+/// Whether the key is the transcript's copy shortcut: Ctrl-C, with or
+/// without Shift, as a terminal copies.
+///
+/// AltGr arrives as `CONTROL|ALT` and composes a character instead (on
+/// AZERTY, `@` is AltGr+0), so a char carrying ALT is text, not a
+/// shortcut. Ctrl-Shift-C needs no special case: the kitty alternate-key
+/// report leaves the shifted `C`, and a terminal that keeps modifiers
+/// sends `c` with `SHIFT`, both under `CONTROL`.
+fn is_copy_key(key: KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Char('c' | 'C'))
+}
+
 impl App {
     /// In-band decline for a slash input no table row matches.
     pub fn unknown_command(&mut self, name: &str) {
@@ -143,13 +157,22 @@ impl App {
             return false;
         }
         self.on_mouse_drag(x, y);
+        self.copy_selection();
+        true
+    }
+
+    /// Copies the selected transcript text to the clipboard and keeps
+    /// the selection, so the highlight stays and another press copies
+    /// the same text. Returns whether there was text to copy.
+    pub(crate) fn copy_selection(&mut self) -> bool {
         let Some(selection) = self.selection else {
-            return true;
+            return false;
         };
         let text = super::selection::text(&self.transcript_view, selection);
-        if !text.is_empty() {
-            crate::screens::clipboard::write(&text);
+        if text.is_empty() {
+            return false;
         }
+        crate::screens::clipboard::write(&text);
         true
     }
 
@@ -269,16 +292,30 @@ impl App {
     /// Routes one keypress to the current screen, then the app-level
     /// handling (modals, quit, effects).
     pub fn on_key(&mut self, key: KeyEvent) -> Vec<Effect> {
-        // Any key ends the selection's life: the highlight is a pointer
-        // artifact, not transcript content.
+        // A modifier pressed on its own is not a command: the kitty
+        // protocol reports every key, so shift, control, and alt arrive
+        // as events too. They must not end the selection, or the shift
+        // a user presses before the copy key would erase the highlight
+        // it is about to copy.
+        if matches!(key.code, KeyCode::Modifier(_)) {
+            return Vec::new();
+        }
+        // Ctrl-C copies the transcript selection, the terminal's copy
+        // key. The selection stays, so the highlight does and a second
+        // press copies again; there is no "nothing selected" fallback,
+        // so a stray Ctrl-C is inert rather than fatal.
+        if is_copy_key(key) {
+            self.copy_selection();
+            return Vec::new();
+        }
+        // Any other key ends the selection's life: the highlight is a
+        // pointer artifact, not transcript content.
         self.selection = None;
-        // Ctrl-C and Ctrl-D (EOF) quit immediately, from any screen,
-        // modal or not.
+        // Ctrl-D (EOF) quits immediately, from any screen, modal or
+        // not. Ctrl-C is the copy key and never quits; on the chat
+        // screen Esc opens the quit confirm.
         if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(
-                key.code,
-                KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('d') | KeyCode::Char('D')
-            )
+            && matches!(key.code, KeyCode::Char('d') | KeyCode::Char('D'))
         {
             self.should_quit = true;
             return Vec::new();

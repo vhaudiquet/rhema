@@ -207,7 +207,8 @@ pub struct App {
     /// cells a mouse selection maps onto.
     pub(crate) transcript_view: selection::TranscriptView,
     /// The selection over the transcript, while one is in flight or was
-    /// just copied. Keys, the wheel, and a fresh click clear it.
+    /// just copied. Keys other than the copy shortcut, the wheel, and a
+    /// fresh click clear it.
     pub(crate) selection: Option<selection::Selection>,
     /// Whether the left button is dragging the transcript's scroll rail
     /// rather than selecting text.
