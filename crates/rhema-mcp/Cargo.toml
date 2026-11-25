@@ -27,7 +27,7 @@ rhema-config = { version = "0.4.2", path = "../rhema-config" }
 axum.workspace = true
 async-stream = "0.3.6"
 futures-util = "0.3.34"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.23"
 clap = "4.6.7"
 # The mapping crate: its own repository and release line

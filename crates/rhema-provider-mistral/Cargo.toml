@@ -23,7 +23,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { workspace = true, features = ["time"] }
 # PKCE: a CSPRNG verifier (S256) and the URL-safe base64 both sides use
 rand = "0.8"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.23"
 
 [dev-dependencies]
