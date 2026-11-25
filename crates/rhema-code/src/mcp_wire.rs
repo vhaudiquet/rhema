@@ -199,6 +199,12 @@ impl Registry {
         let (session_dir, helper) = match sandboxed {
             Some(sandboxed) => {
                 let shared = sandboxed.shared()?;
+                // A share that cannot carry a Unix socket has no bridge
+                // to bind. Ecrou's virtiofs is unproven; the mount still
+                // serves the file kits.
+                if !shared.unix_socket {
+                    return None;
+                }
                 let helper = shared.install_dir(&KIT_VERSION.to_string()).join("rhema");
                 // The kit placement installs the helper in the shared
                 // root; until it is there the stub has nothing to exec,

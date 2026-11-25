@@ -63,6 +63,17 @@ pub(crate) fn scratch_dir() -> std::io::Result<tempfile::TempDir> {
     }
 }
 
+/// The runtime root ecrou can actually see: the snap's private `/tmp`
+/// hides the host's, so a snap install keeps its runtime under the
+/// snap's durable area; a native build uses the default.
+pub fn shared_root(default: &Path) -> std::path::PathBuf {
+    let lookup = snap_lookup_path().and_then(|p| std::fs::canonicalize(p).ok());
+    match snap_common(lookup.as_deref()) {
+        Some(root) => root.join("rhema-runtime"),
+        None => default.to_path_buf(),
+    }
+}
+
 /// Resolve the `ecrou` name the way exec will, so the capture scratch
 /// lands where the binary that writes it can reach. The backend
 /// spawns the name bare, so the search is PATH's own.
@@ -102,7 +113,7 @@ pub(crate) fn run_argv(
     bin: &str,
     image: &str,
     capture: &Path,
-    share: &str,
+    shares: &[&str],
     workdir: &str,
     command: &str,
     git_env: Option<&GitEnv>,
@@ -118,11 +129,12 @@ pub(crate) fn run_argv(
         "--quiet".to_owned(),
         "--capture".to_owned(),
         capture.to_string_lossy().into_owned(),
-        "-v".to_owned(),
-        share.to_owned(),
-        "--workdir".to_owned(),
-        workdir.to_owned(),
     ];
+    for share in shares {
+        argv.push("-v".to_owned());
+        argv.push((*share).to_owned());
+    }
+    argv.extend(["--workdir".to_owned(), workdir.to_owned()]);
     if let Some(env) = git_env {
         argv.push("--env".to_owned());
         argv.push(format!("GIT_CONFIG_GLOBAL={}", env.guest_config_path));

@@ -484,6 +484,13 @@ user opts in. This is a user-facing security choice, not a plumbing default.
 Each phase lands green, and the spec's matrix is updated with what the
 backend actually did, not what the table predicted.
 
+Status: the env channel, the local placement, the docker/lxd runtime
+mounts, the in-sandbox installer, and the shared MCP bridge are in.
+Ecrou mounts the root as a second share; its MCP bridge stays off
+(`SharedRoot::unix_socket = false`) until the UDS spike. Jobs and vision
+still wait on the host-side state paths (jobs steering, vision
+attachments); search and decide wait on the §8 secrets choice.
+
 ## 12. Decisions
 
 1. **The kit and the placer are library code, not frontend code.**

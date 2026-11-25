@@ -65,6 +65,10 @@ pub struct SharedRoot {
     pub host: PathBuf,
     /// The same directory as the sandbox sees it.
     pub sandbox: String,
+    /// Whether a Unix socket on the share accepts `connect()` from the
+    /// sandbox: true for a bind mount and a disk device; ecrou's
+    /// virtiofs is unproven, so its MCP bridge stays off.
+    pub unix_socket: bool,
 }
 
 impl SharedRoot {
@@ -72,7 +76,19 @@ impl SharedRoot {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let host = path.into();
         let sandbox = host.to_string_lossy().into_owned();
-        Self { host, sandbox }
+        Self {
+            host,
+            sandbox,
+            unix_socket: true,
+        }
+    }
+
+    /// A root whose share carries files but not a working Unix socket.
+    pub fn without_unix_socket(path: impl Into<PathBuf>) -> Self {
+        Self {
+            unix_socket: false,
+            ..Self::new(path)
+        }
     }
 
     /// The helper install for one kit version.

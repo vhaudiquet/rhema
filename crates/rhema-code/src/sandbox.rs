@@ -154,13 +154,19 @@ fn runtime_root() -> std::io::Result<PathBuf> {
             "no RHEMA_RUNTIME_DIR, XDG_RUNTIME_DIR, TMPDIR, or HOME",
         ));
     };
-    std::fs::create_dir_all(&candidate)?;
+    ensure_private_dir(&candidate)?;
+    Ok(candidate)
+}
+
+/// Creates `path` `0700`, the runtime tree's mode.
+fn ensure_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&candidate, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
     }
-    Ok(candidate)
+    Ok(())
 }
 
 /// The root, or a notice when the host offers none: the kits that need
@@ -361,11 +367,32 @@ pub async fn assemble(
             // so a session's installs are its next command's starting
             // point. `sandbox.persist: false` restores the one-command
             // rootfs, where only the workspace persists.
+            // The runtime root rides an extra share on every boot. The
+            // snap's private `/tmp` cannot see the host's root, so a
+            // snap install keeps it under the snap's durable area.
+            let runtime = mounted_runtime()
+                .map(|root| rhema_sandbox_ecrou::shared_root(&root))
+                .and_then(|root| match ensure_private_dir(&root) {
+                    Ok(()) => Some(root),
+                    Err(err) => {
+                        eprintln!(
+                            "warning: no ecrou runtime share, the sandbox kits stay off: {err}"
+                        );
+                        None
+                    }
+                });
+            shared = runtime
+                .as_ref()
+                .map(|root| SharedRoot::without_unix_socket(root));
             let sandbox = EcrouSandbox::new(image, root, host_workspace.clone());
             let sandbox = if profile.sandbox_persist() {
                 sandbox.with_persist(name)
             } else {
                 sandbox
+            };
+            let sandbox = match &runtime {
+                Some(root) => sandbox.with_shared_root(root.to_string_lossy()),
+                None => sandbox,
             };
             Arc::new(sandbox)
         }

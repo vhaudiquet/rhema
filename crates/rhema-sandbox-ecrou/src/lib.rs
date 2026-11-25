@@ -62,6 +62,8 @@ use rhema_sandbox::fsroot::FsRoot;
 use rhema_sandbox::{RunOutcome, RunRequest, Sandbox, SandboxError, ToolProgress, WorkspaceSeed};
 
 mod cli;
+
+pub use cli::shared_root;
 mod gitenv;
 mod tail;
 
@@ -113,6 +115,9 @@ pub struct EcrouSandbox {
     /// The backend binary every boot spawns: `ecrou` in production, a
     /// fake the tests substitute.
     pub(crate) bin: String,
+    /// The runtime root shared in at its own path on every boot, when
+    /// the session has one: the kit install and the per-session tree.
+    pub(crate) shared: Option<String>,
 }
 
 impl EcrouSandbox {
@@ -125,7 +130,16 @@ impl EcrouSandbox {
             workspace: workspace.into(),
             persist: None,
             bin: "ecrou".to_owned(),
+            shared: None,
         }
+    }
+
+    /// Shares the host runtime root at its own path on every boot. A
+    /// one-shot guest sees the install and the session tree through
+    /// the workspace-share mechanism.
+    pub fn with_shared_root(mut self, path: impl Into<String>) -> Self {
+        self.shared = Some(path.into());
+        self
     }
 
     /// Names the persisted state rootfs changes land in. The key is
@@ -293,11 +307,17 @@ impl EcrouSandbox {
     ) -> Result<RunOutcome, SandboxError> {
         use std::process::Stdio;
 
+        let mount_share = format!("{mount}:{mount}");
+        let mut shares = vec![mount_share];
+        if let Some(shared) = &self.shared {
+            shares.push(format!("{shared}:{shared}"));
+        }
+        let shares: Vec<&str> = shares.iter().map(String::as_str).collect();
         let argv = run_argv(
             &self.bin,
             &self.image,
             capture.path(),
-            &format!("{mount}:{mount}"),
+            &shares,
             workdir,
             &request.command,
             git_env,

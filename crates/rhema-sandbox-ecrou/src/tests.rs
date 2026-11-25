@@ -142,7 +142,7 @@ fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
         "ecrou",
         "ubuntu",
         Path::new("/tmp/io"),
-        "/w:/w",
+        &["/w:/w"],
         "/w",
         "echo hi",
         None,
@@ -160,7 +160,7 @@ fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
         "ecrou",
         "ubuntu",
         Path::new("/tmp/io"),
-        "/w:/w",
+        &["/w:/w"],
         "/w",
         "echo hi",
         None,
@@ -178,7 +178,7 @@ fn the_persist_state_rides_as_run_flags_ahead_of_the_image() {
         "ecrou",
         "ubuntu",
         Path::new("/tmp/io"),
-        "/w:/w",
+        &["/w:/w"],
         "/w",
         "echo hi",
         None,
@@ -204,7 +204,7 @@ fn the_run_argv_names_capture_share_workdir_then_the_payload() {
         "ecrou",
         "ubuntu",
         Path::new("/tmp/io"),
-        "/home/me/proj:/home/me/proj",
+        &["/home/me/proj:/home/me/proj"],
         "/home/me/proj/src",
         "echo hi",
         None,
@@ -231,6 +231,36 @@ fn the_run_argv_names_capture_share_workdir_then_the_payload() {
     assert!(argv[argv.len() - 1].starts_with("if command -v bash"));
 }
 
+#[test]
+fn the_runtime_share_rides_beside_the_workspace() {
+    let argv = run_argv(
+        "ecrou",
+        "ubuntu",
+        Path::new("/tmp/io"),
+        &[
+            "/home/me/proj:/home/me/proj",
+            "/run/user/1000/rhema:/run/user/1000/rhema",
+        ],
+        "/home/me/proj",
+        "echo hi",
+        None,
+        None,
+        false,
+    );
+    let shares: Vec<&str> = argv
+        .windows(2)
+        .filter(|pair| pair[0] == "-v")
+        .map(|pair| pair[1].as_str())
+        .collect();
+    assert_eq!(
+        shares,
+        [
+            "/home/me/proj:/home/me/proj",
+            "/run/user/1000/rhema:/run/user/1000/rhema"
+        ]
+    );
+}
+
 /// The staged env rides as one `--env GIT_CONFIG_GLOBAL=...` pair
 /// ahead of the image, and without a staged config there is no
 /// pair: git inside behaves as it always has.
@@ -243,7 +273,7 @@ fn the_run_argv_points_git_at_the_staged_config_only_when_staged() {
         "ecrou",
         "ubuntu",
         Path::new("/tmp/io"),
-        "/home/me/proj:/home/me/proj",
+        &["/home/me/proj:/home/me/proj"],
         "/home/me/proj",
         "echo hi",
         Some(&env),
@@ -265,7 +295,7 @@ fn the_run_argv_points_git_at_the_staged_config_only_when_staged() {
         "ecrou",
         "ubuntu",
         Path::new("/tmp/io"),
-        "/w:/w",
+        &["/w:/w"],
         "/w",
         "echo hi",
         None,
