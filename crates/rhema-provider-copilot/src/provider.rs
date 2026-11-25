@@ -14,8 +14,10 @@
 //! (its `proxy-ep` claim names the per-plan proxy host), falling back
 //! to the exchange response's `endpoints.api`, then [`DEFAULT_API_BASE`].
 //!
-//! The chat and models calls speak the OpenAI dialect, the wire
-//! constraints are [`crate::wire`]'s. The proxy rejects requests that
+//! The chat, Responses, and models calls speak the OpenAI dialect, the
+//! wire constraints are [`crate::wire`]'s; the route is learned from the
+//! models page's `supported_endpoints` and from the chat endpoint's own
+//! rejection. The proxy rejects requests that
 //! do not look like an editor integration, so every call carries the
 //! editor headers (`Copilot-Integration-Id`, `Editor-Version`, the
 //! `X-GitHub-Api-Version` the endpoints understand) beside the bearer
@@ -26,6 +28,7 @@
 //! the non-streaming calls (token exchange, models list) under a 20s
 //! overall timeout. Streaming calls get no total timeout.
 
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -39,7 +42,10 @@ use rhema_provider::{
 };
 use rhema_provider_anthropic::{AnthropicProvider, ReqwestTransport};
 use rhema_provider_openai_compatible::provider::{
-    drain_chat_stream, network_error as dialect_network_error,
+    drain_chat_stream, drain_responses_stream, network_error as dialect_network_error,
+};
+use rhema_provider_openai_compatible::responses::{
+    ResponsesRequest, request_body as responses_request_body,
 };
 use rhema_provider_openai_compatible::wire::{
     ChatCompletionRequest, OPENAI_COMPATIBLE, WireErrorBody, request_body,
@@ -315,6 +321,11 @@ pub struct CopilotProvider {
     /// `tokens` at send time, and the wire is the native Anthropic
     /// adapter's, breakpoints included.
     messages: OnceLock<Arc<AnthropicProvider>>,
+    /// Model ids the proxy serves only on the Responses API, learned
+    /// from the models page's `supported_endpoints` and from the chat
+    /// endpoint's own rejection. One provider serves every listed model,
+    /// so the route is remembered per id.
+    responses_only: Arc<AsyncMutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for CopilotProvider {
@@ -324,6 +335,7 @@ impl std::fmt::Debug for CopilotProvider {
         f.debug_struct("CopilotProvider")
             .field("tokens", &self.tokens)
             .field("messages", &self.messages)
+            .field("responses_only", &self.responses_only)
             .finish()
     }
 }
@@ -339,6 +351,7 @@ impl CopilotProvider {
                 &github_token.into(),
             )),
             messages: OnceLock::new(),
+            responses_only: Arc::new(AsyncMutex::new(HashSet::new())),
         }
     }
 
@@ -537,6 +550,22 @@ impl ModelListing for CopilotProvider {
             message: format!("malformed models page: {err}"),
             status: None,
         })?;
+        // Learn the endpoint each model answers on before dropping the
+        // page: the rows the pager shows carry it, and a later turn has
+        // no other place to read it.
+        for entry in page
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(id) = entry.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            if crate::wire::model_route(entry) == Some(crate::wire::ChatRoute::Responses) {
+                self.remember_responses(id).await;
+            }
+        }
         Ok(crate::wire::normalize_models(&page))
     }
 }
@@ -565,6 +594,13 @@ impl ModelProvider for CopilotProvider {
         if req.params.model.starts_with("claude") {
             return self.complete_messages(req, sink).await;
         }
+        // The proxy serves a growing set of models on the Responses API
+        // alone. The models page names them ahead of time; a turn that
+        // still reaches the chat endpoint learns it from the rejection
+        // and stays on the route after that.
+        if self.needs_responses(&req.params.model).await {
+            return self.complete_responses(&req, sink).await;
+        }
         let body = request_body(&req, &OPENAI_COMPATIBLE);
         let mut token = self.tokens.fresh().await?;
         let mut response = self.post_chat(&token, &body).await?;
@@ -581,6 +617,10 @@ impl ModelProvider for CopilotProvider {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::BAD_REQUEST && names_another_endpoint(&text) {
+                self.remember_responses(&req.params.model).await;
+                return self.complete_responses(&req, sink).await;
+            }
             return Err(api_error(status, &text));
         }
 
@@ -591,6 +631,44 @@ impl ModelProvider for CopilotProvider {
 }
 
 impl CopilotProvider {
+    /// Whether the proxy serves `model` only on the Responses API.
+    async fn needs_responses(&self, model: &str) -> bool {
+        self.responses_only.lock().await.contains(model)
+    }
+
+    /// Records that `model` answers on the Responses API, so every later
+    /// turn skips the chat endpoint.
+    async fn remember_responses(&self, model: &str) {
+        self.responses_only.lock().await.insert(model.to_owned());
+    }
+
+    /// Completes a turn on the Responses-API route, the one the proxy
+    /// serves newer OpenAI models on. The token refresh chore is the chat
+    /// route's: a 401 forces one exchange and one retry.
+    async fn complete_responses(
+        &self,
+        req: &ModelRequest,
+        sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        let body = responses_request_body(req, &OPENAI_COMPATIBLE);
+        let mut token = self.tokens.fresh().await?;
+        let mut response = self.post_responses(&token, &body).await?;
+
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            self.tokens.invalidate().await;
+            token = self.tokens.fresh().await?;
+            response = self.post_responses(&token, &body).await?;
+        }
+
+        let status = response.status();
+        if !status.is_success() {
+            let text = response.text().await.unwrap_or_default();
+            return Err(api_error(status, &text));
+        }
+
+        drain_responses_stream(response, sink).await
+    }
+
     /// Sends one chat-completions request with `token`'s credentials.
     async fn post_chat(
         &self,
@@ -608,6 +686,32 @@ impl CopilotProvider {
             .await
             .map_err(network_error)
     }
+
+    /// Sends one Responses-API request with `token`'s credentials.
+    async fn post_responses(
+        &self,
+        token: &CopilotToken,
+        body: &ResponsesRequest,
+    ) -> Result<reqwest::Response, ProviderError> {
+        let url = format!("{}/responses", token.api_base);
+        self.tokens
+            .http
+            .post(&url)
+            .bearer_auth(&token.token)
+            .editor_headers()
+            .json(body)
+            .send()
+            .await
+            .map_err(network_error)
+    }
+}
+
+/// Whether the chat endpoint's rejection names another endpoint for the
+/// model, rather than a real fault in the request: the proxy's wording
+/// when a model answers only on the Responses API.
+fn names_another_endpoint(raw: &str) -> bool {
+    raw.to_ascii_lowercase()
+        .contains("not accessible via the /chat/completions")
 }
 
 #[cfg(test)]

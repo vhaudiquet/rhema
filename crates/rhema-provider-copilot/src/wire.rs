@@ -1,5 +1,5 @@
-//! Copilot's slice of the OpenAI chat-completions wire: only the
-//! internal-user endpoint parsing that is Copilot's alone.
+//! Copilot's slice of the OpenAI wire: the internal-user endpoint
+//! parsing and the model-to-endpoint routing that are Copilot's alone.
 //!
 //! The shared chat-completions vocabulary, request building, chunk
 //! assembly, the SSE drain, lives in
@@ -8,7 +8,10 @@
 //! dialect verbatim: the proxy takes the OpenAI spellings of effort and
 //! reasoning replay as-is. Everything else, roles, image parts,
 //! tool-call fragment assembly, the `[DONE]` sentinel, is the shared
-//! dialect's behavior, documented there.
+//! dialect's behavior, documented there. The newer models the proxy
+//! serves only on `POST {api}/responses` speak that crate's Responses
+//! wire too; [`model_route`] reads the models page's
+//! `supported_endpoints` to route them.
 //!
 //! What remains here is the seat side: `GET {api}/copilot_internal/user`,
 //! GitHub's internal (undocumented, editor-load-bearing) seat endpoint,
@@ -95,7 +98,8 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
                     .and_then(|l| l.get("max_output_tokens"))
                     .and_then(Value::as_u64),
                 supports_vision: None,
-                // Every kept model is offered through chat completions.
+                // Every kept row is a chat model; which endpoint serves
+                // it is the provider's route, not a generation method.
                 generation_methods: vec!["generateContent".to_owned()],
                 pricing: None,
                 family: None,
@@ -103,6 +107,37 @@ pub fn normalize_models(page: &serde_json::Value) -> Vec<ModelCard> {
             })
         })
         .collect()
+}
+
+/// The chat endpoint a model is served on, as the models page's
+/// `supported_endpoints` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChatRoute {
+    /// `POST {api}/chat/completions`.
+    ChatCompletions,
+    /// `POST {api}/responses`, named without chat completions: the newer
+    /// OpenAI models the proxy serves on the Responses API alone.
+    Responses,
+}
+
+/// The route the models page names for one model entry, `None` when the
+/// entry carries no endpoints. A model that names both keeps chat
+/// completions: it answers there, and only the chat endpoint's own
+/// rejection moves it.
+pub(crate) fn model_route(entry: &Value) -> Option<ChatRoute> {
+    let endpoints = entry.get("supported_endpoints")?.as_array()?;
+    let includes = |endpoint: &str| {
+        endpoints
+            .iter()
+            .any(|value| value.as_str() == Some(endpoint))
+    };
+    if includes("/responses") && !includes("/chat/completions") {
+        Some(ChatRoute::Responses)
+    } else if includes("/chat/completions") {
+        Some(ChatRoute::ChatCompletions)
+    } else {
+        None
+    }
 }
 
 /// The seat's premium-request allowance: `remaining` out of the cycle's
@@ -123,4 +158,42 @@ pub fn allowance(user: &WireCopilotUser) -> Option<Allowance> {
         amount,
         kind: "premium".to_owned(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ChatRoute, model_route};
+    use serde_json::json;
+
+    #[test]
+    fn the_models_page_names_the_endpoint_that_serves_each_model() {
+        let responses_only = json!({
+            "id": "gpt-6-luna",
+            "supported_endpoints": ["/responses"]
+        });
+        assert_eq!(model_route(&responses_only), Some(ChatRoute::Responses));
+
+        // Both endpoints: chat completions is the one that answers, and
+        // there is no reason to move a working model.
+        let both = json!({
+            "id": "gpt-5.4",
+            "supported_endpoints": ["/chat/completions", "/responses"]
+        });
+        assert_eq!(model_route(&both), Some(ChatRoute::ChatCompletions));
+
+        let chat_only = json!({
+            "id": "gpt-4.1",
+            "supported_endpoints": ["/chat/completions"]
+        });
+        assert_eq!(model_route(&chat_only), Some(ChatRoute::ChatCompletions));
+
+        // The Messages-only Claude rows never reach this route, and a
+        // page without endpoints leaves the provider on its default.
+        let messages = json!({
+            "id": "claude-sonnet-4-5",
+            "supported_endpoints": ["/v1/messages"]
+        });
+        assert_eq!(model_route(&messages), None);
+        assert_eq!(model_route(&json!({"id": "gpt-4.1"})), None);
+    }
 }

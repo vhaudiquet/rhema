@@ -5,13 +5,14 @@
 //! no personal token: a long-lived GitHub OAuth token, produced by the
 //! [`login`] module's device flow, is exchanged for a short-lived
 //! Copilot token the provider caches and refreshes ahead of expiry, and
-//! the proxy's `endpoints.api` base serves the chat-completions calls
-//! (`POST {api}/chat/completions`, `GET {api}/models`, decoded through
-//! the shared [`SseDecoder`](rhema_provider::SseDecoder) into
+//! the proxy's `endpoints.api` base serves the calls
+//! (`POST {api}/chat/completions`, or `POST {api}/responses` for the
+//! models the proxy serves only there, and `GET {api}/models`, decoded
+//! through the shared [`SseDecoder`](rhema_provider::SseDecoder) into
 //! rhema-core [`Event`](rhema_core::Event)s). The wire mapping
 //! constraints, roles, tool-call fragments, stop reasons, the
-//! capabilities-based models filter, are documented in the [`wire`]
-//! module.
+//! capabilities-based models filter, the endpoint routing, are
+//! documented in the [`wire`] module.
 //!
 //! ```
 //! use rhema_core::{ChatParams, Event, EventSink, Message, ModelProvider, Role};

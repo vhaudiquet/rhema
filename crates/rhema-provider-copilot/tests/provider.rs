@@ -384,6 +384,151 @@ async fn list_models_keeps_the_chat_rows() {
     assert_eq!(models[0].pricing, None);
 }
 
+/// A Responses-API stream: two text deltas, then the terminal event
+/// with its usage, the shape the shared drain expects.
+fn responses_sse() -> String {
+    [
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"Hel\"}\n\n",
+        "data: {\"type\":\"response.output_text.delta\",\"delta\":\"lo\"}\n\n",
+        "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":2}}}\n\n",
+    ]
+    .concat()
+}
+
+#[tokio::test]
+async fn a_model_the_chat_endpoint_disowns_moves_to_responses_and_stays_there() {
+    let server = MockServer::start().await;
+    mount_exchange(&server, &server.uri(), 4_102_444_800, 1).await;
+    // The chat endpoint names the route once; the turn moves, and the
+    // next turn goes straight there without asking chat again.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(serde_json::json!({ "model": "gpt-6-luna" })))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"model \"gpt-6-luna\" is not accessible via the /chat/completions endpoint"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .and(header("Authorization", "Bearer tid=abc;exp=1;ctu=1;"))
+        .and(header("Copilot-Integration-Id", "vscode-chat"))
+        .and(body_partial_json(
+            serde_json::json!({ "model": "gpt-6-luna" }),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_sse()),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let p = provider(&server.uri());
+    let request = rhema_core::ModelRequest {
+        system: None,
+        messages: vec![Message::text(Role::User, "say hello")],
+        tools: vec![],
+        params: ChatParams::new("gpt-6-luna"),
+    };
+    let mut sink = Collector(vec![]);
+    for turn in 0..2 {
+        let output = p
+            .complete(request.clone(), &mut sink)
+            .await
+            .unwrap_or_else(|err| panic!("turn {turn}: {err:?}"));
+        assert_eq!(output.stop_reason, StopReason::EndTurn);
+        assert_eq!(output.usage.input_tokens, 7);
+        assert_eq!(output.message.content, vec![Content::Text("Hello".into())]);
+    }
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn the_models_page_teaches_the_route_before_the_first_turn() {
+    let server = MockServer::start().await;
+    mount_exchange(&server, &server.uri(), 4_102_444_800, 1).await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    r#"{"data":[
+                        {"id":"gpt-6-luna","name":"GPT-6 Luna","supported_endpoints":["/responses"],
+                         "capabilities":{"type":"chat","limits":{"max_context_window_tokens":400000,"max_output_tokens":128000}}},
+                        {"id":"gpt-4.1","name":"GPT-4.1","supported_endpoints":["/chat/completions","/responses"],
+                         "capabilities":{"type":"chat"}}]}"#,
+                ),
+        )
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/responses"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(responses_sse()),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let p = provider(&server.uri());
+    let models = p.list_models().await.expect("the listing lands");
+    assert_eq!(models.len(), 2);
+
+    let request = rhema_core::ModelRequest {
+        system: None,
+        messages: vec![Message::text(Role::User, "say hello")],
+        tools: vec![],
+        params: ChatParams::new("gpt-6-luna"),
+    };
+    let mut sink = Collector(vec![]);
+    let output = p
+        .complete(request, &mut sink)
+        .await
+        .expect("the learned route serves the turn");
+    assert_eq!(output.message.content, vec![Content::Text("Hello".into())]);
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_chat_400_that_is_not_a_route_hint_stays_the_servers_answer() {
+    let server = MockServer::start().await;
+    mount_exchange(&server, &server.uri(), 4_102_444_800, 1).await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(400).set_body_string(r#"{"error":{"message":"bad request"}}"#),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let request = rhema_core::ModelRequest {
+        system: None,
+        messages: vec![Message::text(Role::User, "hi")],
+        tools: vec![],
+        params: ChatParams::new("gpt-4.1"),
+    };
+    let mut sink = Collector(vec![]);
+    let err = provider(&server.uri())
+        .complete(request, &mut sink)
+        .await
+        .expect_err("the server refuses, and no route is named");
+    assert_eq!(
+        err,
+        ProviderError::Api {
+            message: "copilot api error (HTTP 400): bad request".into(),
+            status: Some(400),
+        }
+    );
+    server.verify().await;
+}
+
 /// Records events as their debug strings; `Event` borrows, so this
 /// keeps the assertions format-based.
 struct Collector(Vec<String>);
