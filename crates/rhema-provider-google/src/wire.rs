@@ -37,6 +37,13 @@
 //!   stream can also fail mid-turn with a `data: {"error": ...}` chunk
 //!   (then closing it), which surfaces as the same
 //!   [`ProviderError::Api`].
+//! - Thinking rides one of two knobs: Gemini 3 and later take
+//!   `thinkingLevel`, a named depth, while 2.5 and earlier take
+//!   `thinkingBudget`, a token count. [`ThinkingStyle`] picks from the
+//!   model id, and the provider retries the other knob when the server
+//!   rejects the one the name implied. `gemini-3-pro-preview` is the one
+//!   documented level family without a `MEDIUM`, so that level maps to
+//!   `HIGH` there.
 
 use std::collections::HashMap;
 
@@ -196,24 +203,72 @@ pub struct WireGenerationConfig {
     /// Stop sequences, when any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stop_sequences: Vec<String>,
-    /// Thinking controls, when the driver named a level: the API's knob
-    /// is a token budget, and the thoughts are requested so they stream.
+    /// Thinking controls, when the driver named a level: one of the two
+    /// knobs the model speaks, and the thoughts requested so they stream.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_config: Option<WireThinkingConfig>,
 }
 
-/// The `thinkingConfig` request field: a reasoning budget with the
-/// thought summary turned on, so the thinking streams as it happens.
+/// The `thinkingConfig` request field: a reasoning depth and the thought
+/// summary turned on, so the thinking streams as it happens. The depth is
+/// a named level on Gemini 3 and later, a token budget on 2.5 and
+/// earlier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WireThinkingConfig {
-    /// The reasoning token budget.
-    pub thinking_budget: u32,
+    /// The reasoning token budget, on the budget form only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u32>,
+    /// The reasoning depth (`"LOW"`, `"MEDIUM"`, `"HIGH"`), on the level
+    /// form only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<&'static str>,
     /// Always `true`: thought summaries stream as [`Event::ThinkingDelta`].
     pub include_thoughts: bool,
 }
 
-/// The reasoning budget a thinking level maps onto.
+/// Which thinking knob a model speaks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThinkingStyle {
+    /// Gemini 3 and later: `thinkingLevel`, a named depth. Earlier models
+    /// reject the field.
+    Level,
+    /// Gemini 2.5 and earlier: `thinkingBudget`, a token count. Gemini 3
+    /// replaced it.
+    Budget,
+}
+
+impl ThinkingStyle {
+    /// The knob `model` speaks. Gemini 3 and later take the named level;
+    /// 2.5 and earlier the budget. An id with no Gemini version keeps the
+    /// budget, the knob that shipped.
+    pub fn for_model(model: &str) -> Self {
+        let model = model.trim();
+        let model = model.strip_prefix("models/").unwrap_or(model);
+        let rest = model.strip_prefix("gemini-").unwrap_or(model);
+        // A version component is at most two digits; a longer run is a
+        // date, not a major version.
+        let major = rest
+            .split(['-', '.'])
+            .filter_map(|part| part.parse::<u32>().ok())
+            .find(|number| *number <= 99);
+        match major {
+            Some(major) if major >= 3 => Self::Level,
+            _ => Self::Budget,
+        }
+    }
+
+    /// The other knob: what a request retries with when the server
+    /// rejects this one for its model.
+    pub fn other(self) -> Self {
+        match self {
+            Self::Level => Self::Budget,
+            Self::Budget => Self::Level,
+        }
+    }
+}
+
+/// The reasoning budget a thinking level maps onto, on the budget form.
 fn thinking_budget(thinking: ThinkingEffort) -> Option<u32> {
     match thinking {
         ThinkingEffort::Default => None,
@@ -221,6 +276,52 @@ fn thinking_budget(thinking: ThinkingEffort) -> Option<u32> {
         ThinkingEffort::Medium => Some(16_384),
         ThinkingEffort::High => Some(32_768),
     }
+}
+
+/// The depth a thinking level maps onto, on the level form. The one
+/// documented family without a `MEDIUM`, `gemini-3-pro-preview`, takes
+/// `HIGH` for it.
+fn thinking_level(thinking: ThinkingEffort, model: &str) -> Option<&'static str> {
+    match thinking {
+        ThinkingEffort::Default => None,
+        ThinkingEffort::Low => Some("LOW"),
+        ThinkingEffort::Medium if is_gemini_3_pro(model) => Some("HIGH"),
+        ThinkingEffort::Medium => Some("MEDIUM"),
+        ThinkingEffort::High => Some("HIGH"),
+    }
+}
+
+/// Whether `model` is the one documented level family whose set skips
+/// `MEDIUM`: `gemini-3-pro-preview` and its aliases, but not the 3.1
+/// refresh, which added the level.
+fn is_gemini_3_pro(model: &str) -> bool {
+    let model = model.trim();
+    let model = model.strip_prefix("models/").unwrap_or(model);
+    model.starts_with("gemini-3-pro")
+}
+
+/// The thinking config for `thinking` in `style`'s form, `None` at the
+/// default.
+fn thinking_config(
+    thinking: ThinkingEffort,
+    style: ThinkingStyle,
+    model: &str,
+) -> Option<WireThinkingConfig> {
+    if thinking == ThinkingEffort::Default {
+        return None;
+    }
+    Some(match style {
+        ThinkingStyle::Budget => WireThinkingConfig {
+            thinking_budget: thinking_budget(thinking),
+            thinking_level: None,
+            include_thoughts: true,
+        },
+        ThinkingStyle::Level => WireThinkingConfig {
+            thinking_budget: None,
+            thinking_level: thinking_level(thinking, model),
+            include_thoughts: true,
+        },
+    })
 }
 
 // --- Response wire types (deserialize) ---
@@ -363,6 +464,22 @@ impl WireErrorBody {
 /// Fails with [`ProviderError::InvalidRequest`] when the model is unset or
 /// the request would produce no contents (Gemini rejects empty `contents`).
 pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, ProviderError> {
+    request_body_with(req, ThinkingStyle::for_model(&req.params.model))
+}
+
+/// Builds the `GenerateContentRequest` for `req`, with the thinking
+/// level in `style`'s form. [`request_body`] picks the style from the
+/// model; the provider calls this to retry the other form when a server
+/// rejects the one the model name implied.
+///
+/// # Errors
+///
+/// Fails with [`ProviderError::InvalidRequest`] when the model is unset
+/// or the request has no messages to send.
+pub fn request_body_with(
+    req: &ModelRequest,
+    style: ThinkingStyle,
+) -> Result<GenerateContentRequest, ProviderError> {
     if req.params.model.trim().is_empty() {
         return Err(ProviderError::InvalidRequest(
             "chat params have no model".into(),
@@ -511,11 +628,7 @@ pub fn request_body(req: &ModelRequest) -> Result<GenerateContentRequest, Provid
                 .collect(),
         }]
     });
-    let thinking_config =
-        thinking_budget(req.params.thinking).map(|thinking_budget| WireThinkingConfig {
-            thinking_budget,
-            include_thoughts: true,
-        });
+    let thinking_config = thinking_config(req.params.thinking, style, &req.params.model);
     let generation_config = (req.params.temperature.is_some()
         || req.params.top_p.is_some()
         || req.params.max_tokens.is_some()
@@ -1532,6 +1645,98 @@ mod tests {
         req.params.thinking = ThinkingEffort::Default;
         let body =
             serde_json::to_value(request_body(&req).expect("body builds")).expect("serializes");
+        assert!(body.get("generationConfig").is_none(), "{body}");
+    }
+
+    #[test]
+    fn a_gemini_3_model_takes_a_named_level_and_an_older_one_the_budget() {
+        let make = |model: &str, thinking| ModelRequest {
+            system: None,
+            messages: vec![Message::text(Role::User, "hello")],
+            tools: Vec::new(),
+            params: ChatParams {
+                model: model.into(),
+                temperature: None,
+                max_tokens: None,
+                thinking,
+                top_p: None,
+                stop: Vec::new(),
+                session_id: None,
+            },
+        };
+
+        // Gemini 3 and later take the named level; 2.5 and earlier the
+        // budget.
+        for model in [
+            "gemini-3.8-flash",
+            "gemini-3.1-pro-preview",
+            "gemini-4-carbon",
+            "models/gemini-3-flash-preview",
+        ] {
+            assert_eq!(
+                ThinkingStyle::for_model(model),
+                ThinkingStyle::Level,
+                "{model}"
+            );
+        }
+        for model in [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+            "gemini-2.0-flash",
+            "models/gemini-2.5-flash",
+        ] {
+            assert_eq!(
+                ThinkingStyle::for_model(model),
+                ThinkingStyle::Budget,
+                "{model}"
+            );
+        }
+
+        let body = serde_json::to_value(
+            request_body(&make("gemini-3.8-flash", ThinkingEffort::High)).expect("body builds"),
+        )
+        .expect("serializes");
+        let thinking = &body["generationConfig"]["thinkingConfig"];
+        assert_eq!(thinking["thinkingLevel"], "HIGH");
+        assert_eq!(thinking["includeThoughts"], true);
+        assert!(thinking.get("thinkingBudget").is_none(), "{body}");
+
+        // The one documented level family without MEDIUM takes HIGH.
+        let body = serde_json::to_value(
+            request_body(&make("gemini-3-pro-preview", ThinkingEffort::Medium))
+                .expect("body builds"),
+        )
+        .expect("serializes");
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "HIGH"
+        );
+        // The 3.1 refresh added the level.
+        let body = serde_json::to_value(
+            request_body(&make("gemini-3.1-pro-preview", ThinkingEffort::Medium))
+                .expect("body builds"),
+        )
+        .expect("serializes");
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+            "MEDIUM"
+        );
+
+        // An older model keeps the budget and sends no level.
+        let body = serde_json::to_value(
+            request_body(&make("gemini-2.5-pro", ThinkingEffort::High)).expect("body builds"),
+        )
+        .expect("serializes");
+        let thinking = &body["generationConfig"]["thinkingConfig"];
+        assert_eq!(thinking["thinkingBudget"], 32_768);
+        assert_eq!(thinking["includeThoughts"], true);
+        assert!(thinking.get("thinkingLevel").is_none(), "{body}");
+
+        // Default sends no thinking config at all.
+        let body = serde_json::to_value(
+            request_body(&make("gemini-3.8-flash", ThinkingEffort::Default)).expect("body builds"),
+        )
+        .expect("serializes");
         assert!(body.get("generationConfig").is_none(), "{body}");
     }
 

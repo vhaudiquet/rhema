@@ -266,7 +266,37 @@ impl ModelProvider for GoogleProvider {
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
         let req = req.normalized();
-        let body = crate::wire::request_body(&req)?;
+        let style = crate::wire::ThinkingStyle::for_model(&req.params.model);
+        match self.stream(&req, style, sink).await {
+            // A model the id rule cannot place is worth one retry: the
+            // API names the knob it wants, or says it takes no thinking
+            // at all, and a new release must not strand the turn over
+            // either.
+            Err(err) => match thinking_retry(&req, &err, style) {
+                Some(ThinkingRetry::Form(other)) => self.stream(&req, other, sink).await,
+                Some(ThinkingRetry::None) => {
+                    let mut plain = req.clone();
+                    plain.params.thinking = rhema_core::request::ThinkingEffort::Default;
+                    self.stream(&plain, style, sink).await
+                }
+                None => Err(err),
+            },
+            result => result,
+        }
+    }
+}
+
+impl GoogleProvider {
+    /// Sends one turn with `style`'s thinking form and drains its stream.
+    /// The retry on a thinking-form rejection lives in
+    /// [`ModelProvider::complete`], above this.
+    async fn stream(
+        &self,
+        req: &ModelRequest,
+        style: crate::wire::ThinkingStyle,
+        sink: &mut dyn EventSink,
+    ) -> Result<ModelOutput, ProviderError> {
+        let body = crate::wire::request_body_with(req, style)?;
         let model = req.params.model.trim();
         // `models/` is the wire prefix; accept both spellings.
         let model = model.strip_prefix("models/").unwrap_or(model);
@@ -330,6 +360,55 @@ impl ModelProvider for GoogleProvider {
         }
         Ok(assembler.finish())
     }
+}
+
+/// What to retry with when the API rejects the thinking config for its
+/// model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThinkingRetry {
+    /// The other form, at the same level.
+    Form(crate::wire::ThinkingStyle),
+    /// No thinking config at all: the model takes none.
+    None,
+}
+
+/// The retry `err` calls for, `None` for every failure that is not the
+/// API rejecting `style` for its model. A request with no thinking level
+/// cannot hit the rejection, and a retry on an unrelated 400 would spend
+/// the turn twice.
+fn thinking_retry(
+    req: &ModelRequest,
+    err: &ProviderError,
+    style: crate::wire::ThinkingStyle,
+) -> Option<ThinkingRetry> {
+    if req.params.thinking == rhema_core::request::ThinkingEffort::Default {
+        return None;
+    }
+    let ProviderError::Api {
+        status: Some(400),
+        message,
+    } = err
+    else {
+        return None;
+    };
+    let message = message.to_ascii_lowercase();
+    let unsupported = message.contains("not supported") || message.contains("unsupported");
+    let names = |knobs: &[&str]| knobs.iter().any(|knob| message.contains(knob));
+    let rejected = match style {
+        crate::wire::ThinkingStyle::Budget => {
+            names(&["thinking budget", "thinkingbudget", "thinking_budget"]) && unsupported
+        }
+        crate::wire::ThinkingStyle::Level => {
+            names(&["thinking level", "thinkinglevel", "thinking_level"]) && unsupported
+        }
+    };
+    if rejected {
+        return Some(ThinkingRetry::Form(style.other()));
+    }
+    // A generic refusal names only the thinking config, not a knob: the
+    // model takes none, so the turn runs with the field dropped rather
+    // than failing.
+    (message.contains("thinking") && unsupported).then_some(ThinkingRetry::None)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@
 
 use std::time::Duration;
 
+use rhema_core::request::ThinkingEffort;
 use rhema_core::{
     ChatParams, Content, Event, EventSink, Message, ModelProvider, ModelRequest, ProviderError,
     Role, StopReason, ToolCall, Usage,
@@ -560,4 +561,202 @@ async fn an_empty_page_with_a_next_token_ends_the_pagination() {
         .await
         .expect("request recording is on");
     assert_eq!(received.len(), 1);
+}
+
+#[tokio::test]
+async fn a_rejected_thinking_knob_retries_in_the_other_form() {
+    let server = MockServer::start().await;
+    // The id rule reads 2.5 as the budget form, but the server says this
+    // model wants the named level: the retry follows the server.
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-flash:streamGenerateContent"))
+        .and(query_param("alt", "sse"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"code":400,"message":"Thinking budget is not supported for this model. Use thinkingLevel instead.","status":"INVALID_ARGUMENT"}}"#,
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.5-flash:streamGenerateContent"))
+        .and(query_param("alt", "sse"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body()),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut request = request("gemini-2.5-flash", vec![Message::text(Role::User, "hi")]);
+    request.params.thinking = ThinkingEffort::High;
+    let mut sink = Collector(vec![]);
+    provider
+        .complete(request, &mut sink)
+        .await
+        .expect("the retry lands");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 2);
+    let first: Value = serde_json::from_slice(&received[0].body).expect("json body");
+    assert_eq!(
+        first["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        32_768
+    );
+    assert!(
+        first["generationConfig"]["thinkingConfig"]
+            .get("thinkingLevel")
+            .is_none(),
+        "{first}"
+    );
+    let second: Value = serde_json::from_slice(&received[1].body).expect("json body");
+    assert_eq!(
+        second["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "HIGH"
+    );
+    assert!(
+        second["generationConfig"]["thinkingConfig"]
+            .get("thinkingBudget")
+            .is_none(),
+        "{second}"
+    );
+}
+
+#[tokio::test]
+async fn a_level_rejection_retries_with_the_budget() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-3.8-flash:streamGenerateContent"))
+        .and(query_param("alt", "sse"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"code":400,"message":"Thinking level is not supported for this model.","status":"INVALID_ARGUMENT"}}"#,
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-3.8-flash:streamGenerateContent"))
+        .and(query_param("alt", "sse"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body()),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut request = request("gemini-3.8-flash", vec![Message::text(Role::User, "hi")]);
+    request.params.thinking = ThinkingEffort::Medium;
+    let mut sink = Collector(vec![]);
+    provider
+        .complete(request, &mut sink)
+        .await
+        .expect("the retry lands");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 2);
+    let first: Value = serde_json::from_slice(&received[0].body).expect("json body");
+    assert_eq!(
+        first["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "MEDIUM"
+    );
+    let second: Value = serde_json::from_slice(&received[1].body).expect("json body");
+    assert_eq!(
+        second["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        16_384
+    );
+    assert!(
+        second["generationConfig"]["thinkingConfig"]
+            .get("thinkingLevel")
+            .is_none(),
+        "{second}"
+    );
+}
+
+#[tokio::test]
+async fn an_unrelated_400_is_never_retried_as_a_thinking_knob() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-3.8-flash:streamGenerateContent"))
+        .and(query_param("alt", "sse"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"code":400,"message":"bad request","status":"INVALID_ARGUMENT"}}"#,
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut request = request("gemini-3.8-flash", vec![Message::text(Role::User, "hi")]);
+    request.params.thinking = ThinkingEffort::High;
+    let mut sink = Collector(vec![]);
+    let err = provider
+        .complete(request, &mut sink)
+        .await
+        .expect_err("the server refuses");
+    assert!(
+        matches!(
+            err,
+            ProviderError::Api {
+                status: Some(400),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    server.verify().await;
+}
+
+#[tokio::test]
+async fn a_thinking_refusal_drops_the_config_for_a_model_that_takes_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.0-flash:streamGenerateContent"))
+        .and(query_param("alt", "sse"))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"code":400,"message":"Thinking is not supported for this model.","status":"INVALID_ARGUMENT"}}"#,
+        ))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/models/gemini-2.0-flash:streamGenerateContent"))
+        .and(query_param("alt", "sse"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body()),
+        )
+        .mount(&server)
+        .await;
+
+    let provider = GoogleProvider::new("test-key").with_base_url(server.uri());
+    let mut request = request("gemini-2.0-flash", vec![Message::text(Role::User, "hi")]);
+    request.params.thinking = ThinkingEffort::Medium;
+    let mut sink = Collector(vec![]);
+    provider
+        .complete(request, &mut sink)
+        .await
+        .expect("the plain retry lands");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    assert_eq!(received.len(), 2);
+    let first: Value = serde_json::from_slice(&received[0].body).expect("json body");
+    assert_eq!(
+        first["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+        16_384
+    );
+    let second: Value = serde_json::from_slice(&received[1].body).expect("json body");
+    assert!(second.get("generationConfig").is_none(), "{second}");
 }
