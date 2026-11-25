@@ -269,6 +269,7 @@ fn instance_cwd(mounted: bool, workspace: &str, cwd: &str) -> Option<String> {
 /// its own `--cwd`, preferred over the shim's `cd` prefix, cleaner,
 /// and no shell quoting for the directory. Nothing after `--` is
 /// quoted: the argv rides the exec API intact, no shell reparse.
+#[cfg(test)]
 fn exec_argv(
     instance: &str,
     mounted: bool,
@@ -278,12 +279,40 @@ fn exec_argv(
     command: &str,
     user: Option<(u32, u32)>,
 ) -> Vec<String> {
+    exec_argv_env(
+        instance,
+        mounted,
+        workspace,
+        timeout_secs,
+        cwd,
+        command,
+        user,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// The env-carrying twin: `lxc exec --env KEY=VALUE`, so `BASH_ENV`
+/// reaches the top-level bash.
+fn exec_argv_env(
+    instance: &str,
+    mounted: bool,
+    workspace: &str,
+    timeout_secs: u64,
+    cwd: &str,
+    command: &str,
+    user: Option<(u32, u32)>,
+    env: &std::collections::BTreeMap<String, String>,
+) -> Vec<String> {
     let mut argv = vec!["lxc".to_owned(), "exec".to_owned()];
     if let Some(dir) = instance_cwd(mounted, workspace, cwd) {
         argv.push("--cwd".to_owned());
         argv.push(dir);
     }
     argv.extend(user_flags(user));
+    for (key, value) in env {
+        argv.push("--env".to_owned());
+        argv.push(format!("{key}={value}"));
+    }
     argv.extend([
         instance.to_owned(),
         "--".to_owned(),
@@ -416,7 +445,7 @@ impl Sandbox for LxdSandbox {
             Some(_) => under_workspace(&self.workspace, &request.cwd.to_string_lossy()),
             None => request.cwd.to_string_lossy().into_owned(),
         };
-        let argv = exec_argv(
+        let argv = exec_argv_env(
             &self.instance,
             self.root.is_some(),
             &self.workspace,
@@ -424,6 +453,7 @@ impl Sandbox for LxdSandbox {
             &cwd,
             &request.command,
             self.user,
+            &request.env,
         );
         let child = tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -596,6 +626,16 @@ mod tests {
             LxdSandbox::mounted("rhema-sandbox-test", root, "/home/me/proj"),
             dir,
         )
+    }
+
+    #[test]
+    fn the_exec_argv_carries_the_request_env() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("BASH_ENV".to_owned(), "/x/init.sh".to_owned());
+        let argv = exec_argv_env("box", true, "/workspace", 30, "/", "echo hi", None, &env);
+        let flag = argv.iter().position(|arg| arg == "--env").unwrap();
+        assert_eq!(argv[flag + 1], "BASH_ENV=/x/init.sh");
+        assert!(flag < argv.iter().position(|arg| arg == "box").unwrap());
     }
 
     #[test]
@@ -815,6 +855,8 @@ mod tests {
                         command: "echo hi".into(),
                         cwd: cwd.into(),
                         timeout: Duration::from_secs(30),
+
+                        ..Default::default()
                     },
                     &AtomicBool::new(false),
                     &mut OutputOnly(|_| {}),
@@ -835,6 +877,8 @@ mod tests {
                     command: "echo hi".into(),
                     cwd: "/".into(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut OutputOnly(|_| {}),
@@ -1008,6 +1052,8 @@ mod tests {
                 command: "echo hello-from-lxd".into(),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(30),
+
+                ..Default::default()
             },
         )
         .await;

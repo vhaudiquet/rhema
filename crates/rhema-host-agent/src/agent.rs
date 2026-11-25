@@ -217,6 +217,11 @@ impl HostAgent {
                 &config.shell_env,
             ))
         });
+        // The sandbox assembly builds its tools before the wirings add
+        // their env; the config's map is the one all five kits share.
+        if !config.shell_env.is_empty() {
+            tools.set_shell_env(&config.shell_env);
+        }
         let resolver: Arc<dyn ToolResolver> = match config.extra_resolver.clone() {
             Some(extra) => Arc::new(Overlay::new(tools.clone(), extra)),
             None => tools.clone(),

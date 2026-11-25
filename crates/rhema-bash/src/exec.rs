@@ -30,7 +30,7 @@ use rhema_core::ToolProgress;
 /// working directory, a host path for a host executor, a POSIX path
 /// inside a sandbox (it rides through the `PathBuf` unchanged); and
 /// `timeout` is the wall-clock budget past which the run is killed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunRequest {
     /// The command line, run with `bash -c`.
     pub command: String,
@@ -42,6 +42,10 @@ pub struct RunRequest {
     /// process it started, past it, and reports
     /// [`ShellError::Timeout`].
     pub timeout: Duration,
+    /// Environment layered over the inherited one for this run only.
+    /// A host executor sets it on the child; a sandbox carries it to
+    /// the far side, where the backend applies it before `bash -c`.
+    pub env: BTreeMap<String, String>,
 }
 
 /// What one command left behind: the captured streams and the exit code.
@@ -257,7 +261,14 @@ impl ShellExecutor for LocalShell {
 
         // kill_on_drop so the timeout dropping the child handle kills the
         // process; without it an expired command would keep running.
-        let (mut command, group) = captured_command(&request.command, &request.cwd, &self.env);
+        let mut env: Vec<(String, String)> = self.env.iter().cloned().collect();
+        env.extend(
+            request
+                .env
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        let (mut command, group) = captured_command(&request.command, &request.cwd, &env);
         let mut child = command.spawn().map_err(spawn_error)?;
         // One reader per stream, complete lines into one channel: each
         // line streams live through `progress` and lands in its
@@ -641,12 +652,37 @@ mod tests {
                     command: command.to_owned(),
                     cwd: Path::new("/tmp").to_path_buf(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut sink,
             )
             .await
             .expect("the command runs")
+    }
+
+    #[tokio::test]
+    async fn a_request_env_reaches_the_command() {
+        let shell = LocalShell::default();
+        let cancelled = AtomicBool::new(false);
+        let mut sink = OutputOnly(|_| {});
+        let mut env = BTreeMap::new();
+        env.insert("RHEMA_TEST_ENV".to_owned(), "carried".to_owned());
+        let executed = shell
+            .run(
+                RunRequest {
+                    command: "printf '%s' \"$RHEMA_TEST_ENV\"".to_owned(),
+                    cwd: Path::new("/tmp").to_path_buf(),
+                    timeout: Duration::from_secs(30),
+                    env,
+                },
+                &cancelled,
+                &mut sink,
+            )
+            .await
+            .expect("the command runs");
+        assert_eq!(String::from_utf8_lossy(&executed.stdout), "carried\n");
     }
 
     #[tokio::test]
@@ -761,6 +797,8 @@ mod tests {
                     command: "git -c user.name=t -c user.email=t@example.com commit".to_owned(),
                     cwd: dir.path().to_path_buf(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut sink,
@@ -822,6 +860,8 @@ mod tests {
                     command: script,
                     cwd: Path::new("/tmp").to_path_buf(),
                     timeout: Duration::from_millis(500),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut sink,
@@ -866,6 +906,8 @@ mod tests {
                     command: "exec >/dev/null 2>&1; sleep 300".to_owned(),
                     cwd: Path::new("/tmp").to_path_buf(),
                     timeout: Duration::from_millis(500),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut sink,
@@ -900,6 +942,8 @@ mod tests {
                     command: "seq 1 300000".to_owned(),
                     cwd: Path::new("/tmp").to_path_buf(),
                     timeout: Duration::from_secs(60),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut sink,

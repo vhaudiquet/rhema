@@ -290,13 +290,40 @@ fn cd_prefix(cwd: &str) -> Option<String> {
 /// rides as one quoted word: the far end reparses the command
 /// string with the login shell, so an unquoted script would reach
 /// `bash -c` as a word list.
+#[cfg(test)]
 fn exec_command(timeout_secs: u64, cwd: &str, command: &str) -> String {
+    exec_command_env(
+        timeout_secs,
+        cwd,
+        command,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// The env-carrying twin: `env 'K=V' ...` ahead of `timeout`, so the
+/// login shell's `timeout` and the `bash` under it see the vars, the
+/// kit's `BASH_ENV` included.
+fn exec_command_env(
+    timeout_secs: u64,
+    cwd: &str,
+    command: &str,
+    env: &std::collections::BTreeMap<String, String>,
+) -> String {
     let script = match cd_prefix(cwd) {
         Some(prefix) => format!("{prefix}{command}"),
         None => command.to_owned(),
     };
+    let env_prefix = if env.is_empty() {
+        String::new()
+    } else {
+        let words: Vec<String> = env
+            .iter()
+            .map(|(key, value)| shquote(&format!("{key}={value}")))
+            .collect();
+        format!("env {} ", words.join(" "))
+    };
     format!(
-        "timeout --kill-after=5 {timeout_secs} bash -c {}",
+        "{env_prefix}timeout --kill-after=5 {timeout_secs} bash -c {}",
         shquote(&script)
     )
 }
@@ -362,10 +389,11 @@ impl Sandbox for SshSandbox {
         // rides in the script. The wall holds the budget plus the
         // kill grace, so a black-holed channel abandons itself with
         // the request's own timeout, not a pending forever.
-        self.call(&exec_command(
+        self.call(&exec_command_env(
             rhema_sandbox::exec_util::budget_secs(request.timeout),
             &request.cwd.to_string_lossy(),
             &request.command,
+            &request.env,
         ))
         .await?
         .run(&request, cancelled, progress, request.timeout + EXEC_GRACE)
@@ -562,7 +590,18 @@ mod tests {
     // -- the command strings ----------------------------------------------
 
     #[test]
-    fn the_exec_command_carries_the_timeout_prefix_and_the_cd() {
+    fn the_exec_command_prefixes_the_request_env() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("BASH_ENV".to_owned(), "/x/init.sh".to_owned());
+        let command = exec_command_env(30, "/src", "echo hi", &env);
+        assert!(
+            command.starts_with("env 'BASH_ENV=/x/init.sh' timeout --kill-after=5 30 bash -c "),
+            "{command}"
+        );
+    }
+
+    #[test]
+    fn the_exec_command_quotes_the_script_as_one_word() {
         assert_eq!(
             exec_command(30, "/src", "echo hi"),
             "timeout --kill-after=5 30 bash -c 'cd '\\''/src'\\'' && echo hi'"
@@ -998,6 +1037,8 @@ mod tests {
                     command: "echo hi".into(),
                     cwd: "/".into(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &AtomicBool::new(false),
                 &mut OutputOnly(|line| lines.push(line.to_owned())),
@@ -1018,6 +1059,8 @@ mod tests {
                 command: "sleep 5".into(),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(1),
+
+                ..Default::default()
             },
         )
         .await
@@ -1042,6 +1085,8 @@ mod tests {
             cwd: "/".into(),
             // The budget the model reads when the wall ends the run.
             timeout: Duration::from_secs(1),
+
+            ..Default::default()
         };
         let started = std::time::Instant::now();
         let error = call
@@ -1073,6 +1118,8 @@ mod tests {
                 command: "echo broken >&2; exit 3".into(),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(30),
+
+                ..Default::default()
             },
         )
         .await
@@ -1104,6 +1151,8 @@ mod tests {
                 command: format!("rm -rf {}", sandbox.workspace),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(30),
+
+                ..Default::default()
             },
         )
         .await;
@@ -1195,6 +1244,8 @@ mod tests {
                 command: format!("rm -rf {remote}"),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(30),
+
+                ..Default::default()
             },
         )
         .await;
@@ -1244,6 +1295,8 @@ mod tests {
                 command: format!("rm -rf {remote}"),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(30),
+
+                ..Default::default()
             },
         )
         .await;

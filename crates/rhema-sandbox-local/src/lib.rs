@@ -60,6 +60,8 @@ impl LocalSandbox {
                     command,
                     cwd: "/".into(),
                     timeout: SEED_BUDGET,
+
+                    ..Default::default()
                 },
                 &AtomicBool::new(false),
                 &mut OutputOnly(|_| {}),
@@ -116,6 +118,7 @@ impl Sandbox for LocalSandbox {
             .arg(&request.command)
             .current_dir(cwd)
             .envs(exec_util::NONINTERACTIVE_ENV.iter().copied())
+            .envs(request.env.iter())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -203,7 +206,20 @@ mod tests {
             command: command.to_owned(),
             cwd: "/".into(),
             timeout: Duration::from_secs(30),
+
+            ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn the_request_env_reaches_the_command() {
+        let (sandbox, _dir) = sandbox();
+        let mut request = request("printf '%s' \"$RHEMA_TEST_ENV\"");
+        request
+            .env
+            .insert("RHEMA_TEST_ENV".to_owned(), "carried".to_owned());
+        let executed = run(&sandbox, request).await.expect("the command runs");
+        assert_eq!(String::from_utf8_lossy(&executed.stdout), "carried\n");
     }
 
     /// One exec through the sandbox with nothing cancelled and nothing
@@ -321,6 +337,8 @@ mod tests {
                 command: "ls".into(),
                 cwd: "/workspace".into(),
                 timeout: Duration::from_secs(30),
+
+                ..Default::default()
             },
         )
         .await
@@ -363,6 +381,8 @@ mod tests {
                 command: "sleep 5".into(),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(1),
+
+                ..Default::default()
             },
         )
         .await
@@ -423,6 +443,8 @@ mod tests {
                 command: "pwd".into(),
                 cwd: "/../etc".into(),
                 timeout: Duration::from_secs(30),
+
+                ..Default::default()
             },
         )
         .await

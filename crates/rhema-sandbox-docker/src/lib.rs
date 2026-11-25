@@ -144,6 +144,7 @@ fn container_cwd(workspace: &str, cwd: &str) -> Option<String> {
 /// <container> timeout --kill-after=5 <secs> bash -c <command>`.
 /// `docker exec` has its own `--workdir`, preferred over the shim's
 /// `cd` prefix, cleaner, and no shell quoting for the directory.
+#[cfg(test)]
 fn exec_argv(
     container: &str,
     workspace: &str,
@@ -151,6 +152,29 @@ fn exec_argv(
     cwd: &str,
     command: &str,
     user: Option<(u32, u32)>,
+) -> Vec<String> {
+    exec_argv_env(
+        container,
+        workspace,
+        timeout_secs,
+        cwd,
+        command,
+        user,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// The env-carrying twin: `docker exec --env KEY=VALUE` for every
+/// entry, so the kit's vars (and `BASH_ENV`) reach the top-level bash,
+/// not only the command it runs.
+fn exec_argv_env(
+    container: &str,
+    workspace: &str,
+    timeout_secs: u64,
+    cwd: &str,
+    command: &str,
+    user: Option<(u32, u32)>,
+    env: &std::collections::BTreeMap<String, String>,
 ) -> Vec<String> {
     let mut argv = vec!["docker".to_owned(), "exec".to_owned()];
     if let Some(dir) = container_cwd(workspace, cwd) {
@@ -160,6 +184,10 @@ fn exec_argv(
     if let Some((uid, gid)) = user {
         argv.push("--user".to_owned());
         argv.push(format!("{uid}:{gid}"));
+    }
+    for (key, value) in env {
+        argv.push("--env".to_owned());
+        argv.push(format!("{key}={value}"));
     }
     argv.extend([
         container.to_owned(),
@@ -197,13 +225,14 @@ impl Sandbox for DockerSandbox {
         // workspace's own path); the workdir join wants mount-relative
         // ones.
         let cwd = under_workspace(&self.workspace, &request.cwd.to_string_lossy());
-        let argv = exec_argv(
+        let argv = exec_argv_env(
             &self.container,
             &self.workspace,
             rhema_sandbox::exec_util::budget_secs(request.timeout),
             &cwd,
             &request.command,
             self.user,
+            &request.env,
         );
         let child = tokio::process::Command::new(&argv[0])
             .args(&argv[1..])
@@ -274,6 +303,16 @@ mod tests {
             DockerSandbox::new("rhema-sandbox-test", root, "/workspace"),
             dir,
         )
+    }
+
+    #[test]
+    fn the_exec_argv_carries_the_request_env() {
+        let mut env = std::collections::BTreeMap::new();
+        env.insert("BASH_ENV".to_owned(), "/x/init.sh".to_owned());
+        let argv = exec_argv_env("box", "/workspace", 30, "/", "echo hi", None, &env);
+        let flag = argv.iter().position(|arg| arg == "--env").unwrap();
+        assert_eq!(argv[flag + 1], "BASH_ENV=/x/init.sh");
+        assert!(flag < argv.iter().position(|arg| arg == "box").unwrap());
     }
 
     #[test]
@@ -421,6 +460,8 @@ mod tests {
                     command: "pwd".into(),
                     cwd: "workspace".into(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &AtomicBool::new(false),
                 &mut OutputOnly(|_| {}),
@@ -442,6 +483,8 @@ mod tests {
                     command: "pwd".into(),
                     cwd: "/../etc".into(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &AtomicBool::new(false),
                 &mut OutputOnly(|_| {}),
@@ -464,6 +507,8 @@ mod tests {
                     command: "echo hi".into(),
                     cwd: "/".into(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut OutputOnly(|_| {}),
@@ -680,6 +725,8 @@ mod tests {
                     command: "echo hi".into(),
                     cwd: "/".into(),
                     timeout: Duration::from_secs(30),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut OutputOnly(|line| lines.push(line.to_owned())),
@@ -706,6 +753,8 @@ mod tests {
                 command: "sleep 5".into(),
                 cwd: "/".into(),
                 timeout: Duration::from_secs(1),
+
+                ..Default::default()
             },
         )
         .await

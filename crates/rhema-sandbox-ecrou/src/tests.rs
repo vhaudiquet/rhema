@@ -117,6 +117,8 @@ fn request(command: &str) -> RunRequest {
         command: command.to_owned(),
         cwd: "/".into(),
         timeout: Duration::from_secs(30),
+
+        ..Default::default()
     }
 }
 
@@ -409,6 +411,8 @@ async fn a_persisted_state_carries_a_write_across_two_boots() {
             command: "mkdir -p /opt && echo persisted > /opt/marker && echo wrote".into(),
             cwd: "/".into(),
             timeout: Duration::from_secs(60),
+
+            ..Default::default()
         },
     )
     .await
@@ -421,6 +425,8 @@ async fn a_persisted_state_carries_a_write_across_two_boots() {
             command: "cat /opt/marker".into(),
             cwd: "/".into(),
             timeout: Duration::from_secs(60),
+
+            ..Default::default()
         },
     )
     .await
@@ -440,6 +446,8 @@ async fn a_persisted_state_carries_a_write_across_two_boots() {
             command: "echo dirty > /opt/marker; exit 3".into(),
             cwd: "/".into(),
             timeout: Duration::from_secs(60),
+
+            ..Default::default()
         },
     )
     .await
@@ -452,6 +460,8 @@ async fn a_persisted_state_carries_a_write_across_two_boots() {
             command: "cat /opt/marker".into(),
             cwd: "/".into(),
             timeout: Duration::from_secs(60),
+
+            ..Default::default()
         },
     )
     .await
@@ -477,6 +487,8 @@ async fn a_commit_inside_the_machine_is_the_hosts_commit() {
             command: "command -v git".into(),
             cwd: dir.path().to_owned(),
             timeout: Duration::from_secs(30),
+
+            ..Default::default()
         },
     )
     .await
@@ -517,6 +529,8 @@ async fn a_commit_inside_the_machine_is_the_hosts_commit() {
             command: "git commit -q --allow-empty -m from-the-machine".into(),
             cwd: root.to_owned(),
             timeout: Duration::from_secs(60),
+
+            ..Default::default()
         },
     )
     .await
@@ -687,6 +701,8 @@ async fn a_dot_dot_working_directory_is_refused() {
             command: "pwd".into(),
             cwd: "/../etc".into(),
             timeout: Duration::from_secs(30),
+
+            ..Default::default()
         },
     )
     .await
@@ -769,6 +785,8 @@ async fn the_shared_workspace_is_the_same_tree_both_sides() {
             command: "cat note.txt && echo guest >> note.txt".into(),
             cwd: ws.into(),
             timeout: Duration::from_secs(30),
+
+            ..Default::default()
         },
     )
     .await
@@ -795,6 +813,8 @@ async fn a_command_past_its_budget_is_a_timeout_and_the_machine_dies() {
             command: "sleep 60".into(),
             cwd: "/".into(),
             timeout: Duration::from_secs(2),
+
+            ..Default::default()
         },
     )
     .await
@@ -842,6 +862,8 @@ async fn the_persist_retry_does_not_extend_the_budget() {
             command: "true".into(),
             cwd: "/".into(),
             timeout: Duration::from_secs(2),
+
+            ..Default::default()
         },
     )
     .await

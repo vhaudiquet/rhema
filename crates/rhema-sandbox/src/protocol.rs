@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::{RunRequest, ToolProgress, budget_secs};
 
@@ -43,6 +44,11 @@ pub struct ExecCall {
     /// Wall-clock budget in seconds; the sandbox kills the command,
     /// and every process it started, past it.
     pub timeout_secs: u64,
+    /// Environment for this run, layered over the daemon's own. The
+    /// kit's `BASH_ENV` and bin vars ride here; an older daemon that
+    /// does not know the key ignores it, and the kit is skipped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 /// What a command left behind: the reply body of [`EXEC`].
@@ -137,6 +143,7 @@ impl From<&RunRequest> for ExecCall {
             command: request.command.clone(),
             cwd: Some(request.cwd.to_string_lossy().into_owned()),
             timeout_secs: budget_secs(request.timeout),
+            env: request.env.clone(),
         }
     }
 }
@@ -155,6 +162,8 @@ mod tests {
             command: "sleep 0.1".to_owned(),
             cwd: std::path::PathBuf::from("/"),
             timeout: std::time::Duration::from_millis(500),
+
+            ..Default::default()
         });
         assert_eq!(
             call.timeout_secs, 1,
@@ -172,6 +181,23 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&call).unwrap(),
             serde_json::from_str::<serde_json::Value>(wire).unwrap(),
+        );
+    }
+
+    #[test]
+    fn an_exec_call_carries_the_env() {
+        let request = RunRequest {
+            command: "echo hi".to_owned(),
+            cwd: std::path::PathBuf::from("/"),
+            timeout: std::time::Duration::from_secs(1),
+            env: [("BASH_ENV".to_owned(), "/x/init.sh".to_owned())]
+                .into_iter()
+                .collect(),
+        };
+        let call = ExecCall::from(&request);
+        assert_eq!(
+            serde_json::to_value(&call).unwrap()["env"]["BASH_ENV"],
+            "/x/init.sh"
         );
     }
 

@@ -83,6 +83,8 @@ mod tests {
                     command: "x".to_owned(),
                     cwd: "/".into(),
                     timeout: Duration::from_secs(1),
+
+                    ..Default::default()
                 },
                 &cancelled,
                 &mut sink,

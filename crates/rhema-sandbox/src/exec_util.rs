@@ -513,6 +513,8 @@ mod tests {
             command: "sleep 300".to_owned(),
             cwd: std::path::PathBuf::from("/"),
             timeout: std::time::Duration::from_millis(500),
+
+            ..Default::default()
         };
         let error = run_child_within(
             child,
@@ -557,6 +559,8 @@ mod tests {
             // The budget the model reads: the wall is what ends the
             // run here, and the two stay apart.
             timeout: Duration::from_secs(30),
+
+            ..Default::default()
         };
         let started = std::time::Instant::now();
         let error = run_child_within(

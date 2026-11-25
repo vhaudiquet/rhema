@@ -57,6 +57,10 @@ pub struct ShellTools {
     /// The approval hook installed for the current turn; `None` rejects
     /// calls.
     pending: Mutex<Option<Arc<dyn Approval>>>,
+    /// Environment every command runs with, the wiring's map. A
+    /// sandbox executor carries it to the far side; the local one sets
+    /// it on the child as well.
+    env: std::sync::RwLock<BTreeMap<String, String>>,
 }
 
 impl ShellTools {
@@ -115,6 +119,7 @@ impl ShellTools {
     pub fn with_env(workspace: impl Into<PathBuf>, env: &BTreeMap<String, String>) -> Self {
         Self::with_executor(workspace, crate::exec::default_executor_with(env))
             .with_vision_inbox(env.get(crate::vision::VAR_STAGING).map(PathBuf::from))
+            .with_shell_env(env)
     }
 
     /// Tools rooted at `workspace` whose commands run on `exec`, the
@@ -125,7 +130,30 @@ impl ShellTools {
             exec,
             vision_inbox: None,
             pending: Mutex::new(None),
+            env: std::sync::RwLock::new(BTreeMap::new()),
         }
+    }
+
+    /// Sets the env map every command runs with, after construction.
+    /// A frontend that learns its wiring env after the tools are built
+    /// (the sandbox assembly does) calls this before the agent's first
+    /// turn; later calls replace the map.
+    pub fn set_shell_env(&self, env: &BTreeMap<String, String>) {
+        *self.env.write().unwrap_or_else(PoisonError::into_inner) = env.clone();
+    }
+
+    /// The builder twin of [`Self::set_shell_env`].
+    pub fn with_shell_env(self, env: &BTreeMap<String, String>) -> Self {
+        self.set_shell_env(env);
+        self
+    }
+
+    /// The env map every command runs with.
+    pub fn shell_env(&self) -> BTreeMap<String, String> {
+        self.env
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Lights the vision inbox up explicitly, the seam a resolver that
@@ -216,6 +244,7 @@ impl ShellTools {
                     command,
                     cwd: self.workspace.clone(),
                     timeout: BASH_TIMEOUT,
+                    env: self.shell_env(),
                 },
                 cancelled,
                 progress,
@@ -408,6 +437,7 @@ mod executor_tests {
     struct Scripted {
         outcome: Result<RunOutcome, ShellError>,
         commands: Mutex<Vec<String>>,
+        envs: Mutex<Vec<BTreeMap<String, String>>>,
         streamed: Mutex<Vec<String>>,
     }
 
@@ -420,6 +450,7 @@ mod executor_tests {
                     code: Some(0),
                 }),
                 commands: Mutex::new(Vec::new()),
+                envs: Mutex::new(Vec::new()),
                 streamed: Mutex::new(Vec::new()),
             }
         }
@@ -437,6 +468,10 @@ mod executor_tests {
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(request.command);
+            self.envs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(request.env.clone());
             progress.output("streamed line\n");
             self.streamed
                 .lock()
@@ -501,6 +536,7 @@ mod executor_tests {
             let executor = Arc::new(Scripted {
                 outcome: Err(outcome),
                 commands: Mutex::new(Vec::new()),
+                envs: Mutex::new(Vec::new()),
                 streamed: Mutex::new(Vec::new()),
             });
             let tools = ShellTools::with_executor("/tmp", executor);
@@ -520,6 +556,7 @@ mod executor_tests {
                 code: Some(3),
             }),
             commands: Mutex::new(Vec::new()),
+            envs: Mutex::new(Vec::new()),
             streamed: Mutex::new(Vec::new()),
         });
         let tools = ShellTools::with_executor("/tmp", executor);
@@ -529,6 +566,30 @@ mod executor_tests {
         assert_eq!(result.code, Some(3));
         assert!(result.content.contains("exit code 3"));
         assert!(result.content.contains("--- stderr ---\ntrace\n"));
+    }
+
+    #[tokio::test]
+    async fn the_wiring_env_rides_every_request() {
+        let executor = Arc::new(Scripted::ok(""));
+        let mut env = BTreeMap::new();
+        env.insert("RHEMA_TEST_ENV".to_owned(), "one".to_owned());
+        let tools = ShellTools::with_executor("/tmp", executor.clone()).with_shell_env(&env);
+        tools.install_approval(Arc::new(AllowAll));
+        let _ = tools.resolve(call("true"), &ToolContext::default()).await;
+        // Learned after construction, as the sandbox assembly does.
+        env.insert("RHEMA_TEST_ENV".to_owned(), "two".to_owned());
+        tools.set_shell_env(&env);
+        let _ = tools.resolve(call("true"), &ToolContext::default()).await;
+        let envs = executor.envs.lock().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(envs.len(), 2);
+        assert_eq!(
+            envs[0].get("RHEMA_TEST_ENV").map(String::as_str),
+            Some("one")
+        );
+        assert_eq!(
+            envs[1].get("RHEMA_TEST_ENV").map(String::as_str),
+            Some("two")
+        );
     }
 
     #[tokio::test]

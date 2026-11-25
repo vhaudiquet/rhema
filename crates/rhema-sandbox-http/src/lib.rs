@@ -381,6 +381,8 @@ mod tests {
             command: command.to_owned(),
             cwd: "/workspace".into(),
             timeout: Duration::from_secs(120),
+
+            ..Default::default()
         }
     }
 
