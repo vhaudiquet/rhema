@@ -561,10 +561,18 @@ pub async fn assemble(
     // No shared root, by posture or by a failed helper install: run
     // the same installer into a sandbox-side cache. The MCP store puts
     // that cache on PATH and reads the config through the shell.
-    if shared.is_none()
-        && let Err(err) = install_mcp_client(&*sandbox, &workspace_string).await
-    {
-        eprintln!("warning: the sandbox MCP client did not install, its prompt stays off: {err}");
+    if shared.is_none() {
+        if choice == SandboxChoice::Ecrou && !profile.sandbox_persist() {
+            // A one-command rootfs loses the install before the next
+            // probe can see it. Say so instead of paying for it.
+            eprintln!(
+                "warning: MCP stays off on a non-persistent ecrou sandbox; enable sandbox.persist"
+            );
+        } else if let Err(err) = install_mcp_client(&*sandbox, &workspace_string).await {
+            eprintln!(
+                "warning: the sandbox MCP client did not install, its prompt stays off: {err}"
+            );
+        }
     }
     // The assembly is done, devices, provision, and seed all landed
     // under the exclusive hold. Downgrade to the session's shared
