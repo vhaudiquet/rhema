@@ -1,7 +1,8 @@
 # rhema-runtime-kit, what a generated bash function needs and how it crosses a sandbox
 
-> **Status:** design draft, 2026-11-25. Decisions in §12, the rollout
-> in §11. Nothing here is implemented yet.
+> **Status:** v1 scope frozen, 2026-11-25. v1 is local, docker, and
+> lxd containers, for jobs, vision, and mcp. Decisions in §12, rollout
+> in §11, open items in §14. Nothing here is implemented yet.
 > **Grounding:** `specs/rhema-sandbox.md` (the seam and its two
 > families), `specs/rhema-mcp.md` (§5, §10, §12), `rhema-bash::init`
 > (today's provisioner), `app/setup.rs` (the five gates).
@@ -146,8 +147,8 @@ Each sharing backend mounts the root at the same path:
 A sharing backend that cannot add the mount falls back to
 `<workspace>/.rhema/runtime`, and a backend with no shared directory
 uses a sandbox-side cache. The workspace is the exception, not the rule.
-The root then holds only the helper install and the MCP socket; the
-session state is sandbox-side (§3.2).
+The root then holds the install, the MCP socket, and the session tree
+when it is shared; without a root the tree is the sandbox's own (§3.2).
 
 ### 3.2 The runtime tree
 
@@ -158,17 +159,20 @@ session state is sandbox-side (§3.2).
     init-<kit>.sh             # generated once, static per stub set
   mcp/<session-key>/
     mcp.sock
+  sessions/<session-key>/
+    vision/staging/           # images the host reads or pulls
+    jobs/session/             # jobs state the host reads or pulls
+    mcp/media/                # large payloads the model reads in place
 
-<sandbox-tmp>/rhema-<session>/
-  vision/staging/             # the images the host pulls and attaches
-  jobs/session/               # the jobs state the host pulls
-  mcp/media/                  # large payloads the model reads in place
+<sandbox-tmp>/rhema-<session>/  # only when there is no shared root
+  vision/staging/
+  jobs/session/
+  mcp/media/
 ```
 
-The shared root holds the install (so a recreated container keeps it)
-and the socket. The state tree is the sandbox's own temp dir, created
-per session with `mktemp -d` at mode `0700`; the host pulls it through
-`read_file`. A backend with no shared root has only this tree, and its
+With a shared root, the session tree sits under it at mode `0700` and
+the host reads it directly. Without one, the same tree is the sandbox's
+`mktemp -d` directory and the host pulls it through `read_file`; the
 socket is TCP or absent. When the sandbox's `/tmp` does not survive a
 command (ecrou with persistence off), the state tree moves under the
 shared root, or the kit is skipped.
@@ -198,6 +202,28 @@ the installed helper, so a sandbox with no shared root still has it.
 One exception: the MCP stubs are one function per configured server,
 so the stub set, not the session, picks the file. Sessions with the
 same servers share it.
+
+### 3.4 Cleanup
+
+The sandbox temp dir cannot ride a host `TempDir`, so the placer owns
+it:
+
+- **Normal end.** The bridge unlinks its socket, then the placer runs
+  `rm -rf -- <dir>` in the sandbox, with a short timeout and errors
+  ignored. The path is the placer's own record, never model input.
+- **Host crash.** Nothing runs. The next session's start sweeps
+  `${TMPDIR:-/tmp}/rhema-*` dirs that are older than seven days and
+  owned by the sandbox user, before creating a new one. The sweep stays
+  one level deep, ignores errors, and follows no symlink.
+- **Shared root.** The per-session directory under the root gets the
+  same guard on the host side, and the same age sweep at startup.
+- **Install and init.** These are not per-session. A version is removed
+  only when it is older than 30 days and is not the version the session
+  uses; the running version and its init are never swept.
+
+A stale socket is handled separately: the bridge tries to connect to an
+existing path, and unlinks it when the connect is refused (nobody
+listening), before binding.
 
 ## 4. Capabilities and the gate
 
@@ -368,10 +394,11 @@ same way.
 
 The host-read state is two things: vision's staging dir (the images the
 host attaches) and jobs' session dir (the host's steering feed). They
-live in the sandbox's per-session temp dir and are pulled through
-`read_file`; a shared root only saves the pull. MCP media is written
-and read in the sandbox; the host sees it through vision only when the
-model attaches an image. `search` and `decide` keep no state.
+live in the per-session tree: under the shared root when there is one,
+otherwise in the sandbox's temp dir, pulled through `read_file`. MCP
+media is written and read in the sandbox; the host sees it through
+vision only when the model attaches an image. `search` and `decide`
+keep no state.
 
 The kit unifies the helper and the shared-state placement. The fourth is
 an open decision:
@@ -412,19 +439,39 @@ user opts in. This is a user-facing security choice, not a plumbing default.
 | failure | behavior |
 |---|---|
 | no helper source, a failed install, or an incompatible version | that kit is skipped, debug notice, the session runs |
-| upload fails | that kit is skipped, the host staging dir is removed |
+| the installer script cannot be delivered | that kit is skipped, with the reason |
 | UDS cannot connect in the sandbox | MCP is skipped; jobs/vision/search/decide are unaffected |
 | ecrou's virtiofs cannot carry a UDS | MCP falls back to TCP if the backend has inbound_net, else skipped |
-| a stale session dir | a few KB; the per-session guard removes it on the normal path, a sweep is v2 |
-| a stale helper version | left for the sweep; the session keeps its own path |
+| a stale session dir | the drop guard removes it; a start sweep removes dirs older than seven days |
+| a stale helper version | removed by the 30-day sweep unless it is the running version |
+
+### 10.1 Tests
+
+- **Matrix.** For each backend capability set, each kit's `Needs` maps
+  to placed or skipped, and the prompt section follows.
+- **Init.** `__init` emits every stub, guards a missing env with the
+  "not available" message, and is byte-stable for a stub set.
+- **Local placement.** The existing wiring tests keep passing with the
+  generated init; `BASH_ENV` and the bin vars reach the command.
+- **Shared placement.** The mock sandbox sees the root and the socket
+  dir; drop removes the dir and unlinks the socket.
+- **Sandbox placement.** The mock sees `mktemp -d`, the install probe,
+  `__init`, the state pull, and the drop `rm -rf`.
+- **Stale sweep.** An old `rhema-*` dir goes, a fresh one stays, and a
+  directory owned by another user stays.
+- **Bridge.** A real UDS in a temp dir accepts a connection, drop
+  unlinks it, and a stale socket is rebound.
+- **Failure.** A failed install, an old `__kit-version`, and a missing
+  helper each skip the kit with a notice and leave the session running.
 
 ## 11. Rollout
 
 0. **Env channel.** `RunRequest.env` and the `ShellTools` map;
    verify with the scripted sandbox. One day.
 1. **Kit types, the static init, and local placement.** Move the five
-   wirings onto `Kit` and the helper's `__init`; no behavior change; the
-   local path stays a temp dir. Three days.
+   wirings onto `Kit` and the helper's `__init`; add the cleanup guard
+   and the matrix/init tests; no behavior change; the local path stays a
+   temp dir. Three days.
 2. **Shared placement and the installer.** The per-user root, the three
    mounts, the probe/install/recheck path, and `gob`; docker first, then
    lxd; MCP first, then jobs and vision. The ecrou UDS spike runs here.
@@ -454,7 +501,7 @@ backend actually did, not what the table predicted.
    the fallback.** A checkout is where the user's code lives, not where
    a helper and live sockets belong. The backend adds a mount for
    a dedicated root; only a backend that cannot mount falls back to
-   `<workspace>/.rhema/runtime`, and only upload-only backends skip the
+   `<workspace>/.rhema/runtime`, and only sandbox-only backends skip the
    root altogether.
 3. **The sandbox installs the helper; nothing copies the host's binary.**
    A copy only works on the same OS and architecture, and a debug build
@@ -474,10 +521,14 @@ backend actually did, not what the table predicted.
    version.** The function bodies are already static
    (`job() { "$RHEMA_JOBS_BIN" __jobs "$@"; }`), and the per-session
    values are env. One file, no chain, no host write, no shared root.
-8. **The shared root is for the socket and the install; state is
-   sandbox-side.** Vision and jobs keep their state in the sandbox's
-   per-session temp dir and the host pulls it through `read_file`. Only
-   the MCP socket needs a live shared path.
+8. **The shared root is for the socket, the install, and the session
+   tree when one exists.** Without it, the session tree is the
+   sandbox's temp dir and the host pulls it. Only the MCP socket needs
+   a live shared path.
+9. **Cleanup is a drop guard plus a start sweep.** A sandbox dir cannot
+   ride a host `TempDir`, so the placer removes it explicitly, and the
+   next start ages out what a crash left. The sweep is one level deep,
+   owned by the sandbox user, and older than seven days.
 
 ## 13. Alternatives considered
 
@@ -512,7 +563,7 @@ backend actually did, not what the table predicted.
   the shared-root path or the TCP fallback.
 - Can every backend add the runtime mount to an instance a stored target
   names? A user-owned container is not ours to recreate just to add a
-  mount; the fallback is upload or the workspace root.
+  mount; the fallback is a sandbox-side cache or the workspace root.
 - Where does the root live when no login session exists (a cloud agent,
   a daemon)? `$XDG_RUNTIME_DIR` is absent there, so the cache fallback
   carries the lifecycle.
