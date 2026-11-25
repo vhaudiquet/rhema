@@ -47,9 +47,9 @@ struct LiveListing {
 #[cfg(feature = "live")]
 #[async_trait]
 impl ModelListing for LiveListing {
-    /// The adapter's rows, with the catalog's facts in their blanks.
-    /// A failed fetch leaves the rows exactly as the adapter returned
-    /// them.
+    /// The adapter's rows, with the catalog's facts in their blanks and
+    /// each family's older releases dropped. A failed fetch leaves the
+    /// rows exactly as the adapter returned them, history included.
     ///
     /// # Errors
     ///
@@ -63,6 +63,7 @@ impl ModelListing for LiveListing {
         let mut models = models?;
         if let Some(catalog) = catalog {
             catalog.decorate(&self.provider, &mut models);
+            catalog.retain_latest(&self.provider, &mut models);
         }
         Ok(models)
     }
@@ -86,13 +87,13 @@ mod tests {
     }"#;
 
     /// A source with one fixed body.
-    struct Fixed;
+    struct Fixed(&'static str);
 
     #[async_trait]
     impl Source for Fixed {
         async fn fetch(&self, _etag: Option<&str>) -> Result<Fetched, String> {
             Ok(Fetched::Fresh {
-                body: BODY.to_owned(),
+                body: self.0.to_owned(),
                 etag: None,
             })
         }
@@ -112,22 +113,37 @@ mod tests {
         Arc::new(CatalogCache::new(source, None))
     }
 
+    /// A card whose identity is the only thing known.
+    fn bare(id: &str) -> ModelCard {
+        ModelCard {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            description: String::new(),
+            input_token_limit: None,
+            output_token_limit: None,
+            supports_vision: None,
+            generation_methods: vec!["generateContent".to_owned()],
+            pricing: None,
+        }
+    }
+
     /// A listing with one card, its identity the only thing known.
     struct Bare(&'static str);
 
     #[async_trait]
     impl ModelListing for Bare {
         async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
-            Ok(vec![ModelCard {
-                id: self.0.to_owned(),
-                display_name: self.0.to_owned(),
-                description: String::new(),
-                input_token_limit: None,
-                output_token_limit: None,
-                supports_vision: None,
-                generation_methods: vec!["generateContent".to_owned()],
-                pricing: None,
-            }])
+            Ok(vec![bare(self.0)])
+        }
+    }
+
+    /// A listing with several bare cards, in the order given.
+    struct Cards(&'static [&'static str]);
+
+    #[async_trait]
+    impl ModelListing for Cards {
+        async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
+            Ok(self.0.iter().map(|id| bare(id)).collect())
         }
     }
 
@@ -161,7 +177,7 @@ mod tests {
         let live = listing(
             "anthropic",
             Arc::new(Bare("claude-sonnet-4-6")),
-            cache(Arc::new(Fixed)),
+            cache(Arc::new(Fixed(BODY))),
         );
         let models = live.list_models().await.expect("the bare listing answers");
         let card = &models[0];
@@ -179,6 +195,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn older_family_releases_are_dropped() {
+        const HISTORY: &str = r#"{
+          "zai": { "models": {
+            "glm-4.7": { "family": "glm", "release_date": "2025-12-22" },
+            "glm-5.2": { "family": "glm", "release_date": "2026-06-13" },
+            "glm-5.3": { "family": "glm", "release_date": "2026-08-14" }
+          }}
+        }"#;
+        let live = listing(
+            "zai",
+            Arc::new(Cards(&["glm-4.7", "glm-5.2", "glm-5.3"])),
+            cache(Arc::new(Fixed(HISTORY))),
+        );
+        let models = live.list_models().await.expect("the listing answers");
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, ["glm-5.2", "glm-5.3"]);
+    }
+
+    #[tokio::test]
     async fn a_failed_catalog_fetch_leaves_the_listing_as_it_came() {
         let live = listing(
             "anthropic",
@@ -193,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_listing_stays_failed() {
-        let live = listing("anthropic", Arc::new(Broken), cache(Arc::new(Fixed)));
+        let live = listing("anthropic", Arc::new(Broken), cache(Arc::new(Fixed(BODY))));
         assert!(live.list_models().await.is_err());
     }
 

@@ -1,7 +1,7 @@
 //! The models.dev projection and the lookup that turns a provider id
 //! into a model's published facts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rhema_provider::Pricing;
 use serde::{Deserialize, Serialize};
@@ -188,6 +188,10 @@ const ALIASES: &[(&str, &str, &str)] = &[
     ("mistral", "mistral-large-4-0", "mistral-large-4"),
 ];
 
+/// How many release dates one family keeps: its current lineup and
+/// the generation before it. Models sharing a date stay together.
+const KEEP_RELEASES: usize = 2;
+
 /// The explicit alias for a provider key and id, when the table has
 /// one.
 fn alias<'a>(provider_key: &str, id: &'a str) -> Option<&'a str> {
@@ -275,6 +279,40 @@ impl Catalog {
                 card.pricing = facts.pricing;
             }
         }
+    }
+
+    /// Drops each family's rows older than its newest two release
+    /// dates. Models released on the same date stay or go together, so
+    /// a flash and a flashx sibling are never split. A card the
+    /// catalog cannot place, with no row, family, or date, stays: the
+    /// rule removes only what it can date.
+    pub fn retain_latest(&self, provider: &str, models: &mut Vec<rhema_provider::ModelCard>) {
+        let mut releases: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for card in models.iter() {
+            if let Some(facts) = self.facts(provider, &card.id)
+                && let (Some(family), Some(date)) = (facts.family, facts.release_date)
+            {
+                releases.entry(family).or_default().insert(date);
+            }
+        }
+        let keep: BTreeMap<String, BTreeSet<String>> = releases
+            .into_iter()
+            .map(|(family, dates)| {
+                let newest = dates.into_iter().rev().take(KEEP_RELEASES).collect();
+                (family, newest)
+            })
+            .collect();
+        models.retain(|card| {
+            let Some(facts) = self.facts(provider, &card.id) else {
+                return true;
+            };
+            let (Some(family), Some(date)) =
+                (facts.family.as_deref(), facts.release_date.as_deref())
+            else {
+                return true;
+            };
+            keep.get(family).is_some_and(|dates| dates.contains(date))
+        });
     }
 
     /// The row for an id: exact, case-insensitive, explicit alias,
@@ -565,6 +603,77 @@ mod tests {
         assert_eq!(models[0].input_token_limit, Some(272_000));
         assert_eq!(models[0].supports_vision, Some(true));
         assert_eq!(models[0].pricing.unwrap().output_per_mtok, 8.5);
+    }
+
+    const HISTORY: &str = r#"{
+      "zai": { "models": {
+        "glm-4.6": { "family": "glm", "release_date": "2025-09-30" },
+        "glm-4.7": { "family": "glm", "release_date": "2025-12-22" },
+        "glm-5.2": { "family": "glm", "release_date": "2026-06-13" },
+        "glm-5.3": { "family": "glm", "release_date": "2026-08-14" },
+        "glm-4.7-flash": { "family": "glm-flash", "release_date": "2026-01-19" },
+        "glm-5.3-flash": { "family": "glm-flash", "release_date": "2026-08-26" },
+        "glm-5.3-flashx": { "family": "glm-flash", "release_date": "2026-09-18" },
+        "glm-4.5-air": { "family": "glm-air", "release_date": "2025-07-28" },
+        "glm-undated": { "family": "glm" }
+      }}
+    }"#;
+
+    #[test]
+    fn retain_latest_keeps_two_release_dates_per_family() {
+        let catalog = Catalog::parse(HISTORY).expect("the history parses");
+        let mut models: Vec<_> = [
+            "glm-4.6",
+            "glm-4.7",
+            "glm-5.2",
+            "glm-5.3",
+            "glm-4.7-flash",
+            "glm-5.3-flash",
+            "glm-5.3-flashx",
+            "glm-4.5-air",
+            "glm-undated",
+            "unlisted",
+        ]
+        .iter()
+        .map(|id| card(id, None, None, None))
+        .collect();
+        catalog.retain_latest("zai", &mut models);
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        // glm keeps 5.3 and 5.2; glm-flash keeps the two 5.3 variants;
+        // a one-date family, an undated row, and an unlisted id stay.
+        assert_eq!(
+            ids,
+            [
+                "glm-5.2",
+                "glm-5.3",
+                "glm-5.3-flash",
+                "glm-5.3-flashx",
+                "glm-4.5-air",
+                "glm-undated",
+                "unlisted"
+            ]
+        );
+    }
+
+    #[test]
+    fn retain_latest_cuts_by_date_not_row_count() {
+        const TIES: &str = r#"{
+          "zai": { "models": {
+            "glm-6": { "family": "glm", "release_date": "2026-09-01" },
+            "glm-6-air": { "family": "glm", "release_date": "2026-09-01" },
+            "glm-5": { "family": "glm", "release_date": "2026-08-01" },
+            "glm-4": { "family": "glm", "release_date": "2026-07-01" }
+          }}
+        }"#;
+        let catalog = Catalog::parse(TIES).expect("the ties parse");
+        let mut models: Vec<_> = ["glm-6", "glm-6-air", "glm-5", "glm-4"]
+            .iter()
+            .map(|id| card(id, None, None, None))
+            .collect();
+        catalog.retain_latest("zai", &mut models);
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        // Both same-day variants stay; the third date is dropped.
+        assert_eq!(ids, ["glm-6", "glm-6-air", "glm-5"]);
     }
 
     fn card(
