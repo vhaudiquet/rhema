@@ -19,7 +19,7 @@ mode. They are `job`, `see`, `search`, `decide`, and `mcp` (with one
 stub per server). Today every one of them is host-only.
 
 **In scope:** one kit description shared by the five; placement into a
-local temp dir, a backend-shared dir, or an uploaded dir;
+local temp dir, a backend-shared dir, or a sandbox-side cache;
 the env channel that makes `BASH_ENV` and the bin variable arrive; the
 helper executable's resolution and versioning; the capability matrix
 that decides which kit a backend can carry; tests and a rollout.
@@ -66,65 +66,39 @@ A kit is a pure description, no filesystem work:
 pub struct Kit {
     /// `jobs`, `vision`, `search`, `decision`, `mcp`.
     pub feature: Feature,
-    /// The init file's body: the function definitions, in sandbox
-    /// coordinates for paths the body embeds.
-    pub body: String,
-    /// The bin variable (`RHEMA_MCP_BIN`, …) and the helper it names.
-    pub bin_var: &'static str,
+    /// The stubs this feature adds: one for a macro, one per configured
+    /// MCP server.
+    pub stubs: Vec<Stub>,
     /// Env entries besides `BASH_ENV` and the bin var (token, profile,
-    /// media dir, staging dir).
+    /// media dir, staging dir, session file).
     pub vars: BTreeMap<String, String>,
     /// What placement must supply.
     pub needs: Needs,
-    /// The predecessor init file's sandbox path, for the chain.
-    pub inherited: Option<String>,
 }
 ```
 
-The wiring owns the body and its variables, as today. The kit owns the
-four things where a mistake is a reviewed failure:
+The wiring owns the stubs and the variables. The kit owns the four
+things where a mistake is a reviewed failure:
 
 1. **Layout.** Where the directory is and what it is called.
-2. **Executable.** Which binary the bin variable names and how it got
-   there.
-3. **Init.** The header, the guarded predecessor source, and the mode
-   of the file.
+2. **Executable.** Which binary the stubs name and how it got there.
+3. **Init.** The generated file, its stub set, and its mode.
 4. **Env.** `BASH_ENV` and the bin variable, in sandbox coordinates.
 
-`rhema_bash::init` already owns 3's text and 4's map. This spec grows it
-into a `runtime` module (or renames it): `Kit`, `Needs`, `Capabilities`,
-`Layout`, and `KitDir`. The placement that talks to a sandbox lives
+`rhema_bash::init` already generates the stub text and the env map. The
+installed helper exposes that generator as `__init`, so the sandbox
+writes its own file (§3.3). The placement that talks to a sandbox lives
 in `rhema-sandbox::kit` (§12.1), because every frontend already depends
 on that crate and `rhema-sandbox` depends on `rhema-bash`, never the
 reverse.
 
 ## 3. Placement
 
-`KitDir` is the one thing a wiring is handed:
-
-```rust
-pub enum KitDir {
-    /// Local session: the system temp dir, as today.
-    Host(PathBuf),
-    /// Shared 1:1 with the sandbox (docker, lxd, ecrou).
-    Shared(PathBuf),
-    /// Host staging, uploaded to `sandbox` after the wiring writes it.
-    Upload { host: PathBuf, sandbox: String },
-}
-
-impl KitDir {
-    /// Where the wiring writes `init.bash` and its state dirs.
-    fn write_dir(&self) -> &Path;
-    /// The path the sandbox's bash must see for `name`.
-    fn sandbox_path(&self, name: &str) -> String;
-}
-```
-
-The wiring writes to `write_dir()` and writes `sandbox_path()` values
-into any path it embeds (the inherited `BASH_ENV`). When the two differ,
-the placer uploads `init.bash` and the files the wiring created, and
-creates the empty state dirs (`media/`, `staging/`, `session/`, the
-socket's parent) on the sandbox side before the session starts.
+A `Kit` is placed, not written. The placer does three things: ensure
+the runtime root (or a sandbox-side cache when there is no shared root),
+install the helper (§7), and generate the init file with it (§3.3). The
+host writes no file of its own, so there is no staging directory and no
+upload of an init.
 
 ### 3.1 The runtime root
 
@@ -142,8 +116,8 @@ pub struct SharedRoot {
 pub enum Root {
     /// A directory mounted into the sandbox (docker, lxd, ecrou).
     Shared(SharedRoot),
-    /// No shared directory: the kit uploads (ssh, http).
-    Upload,
+    /// No shared directory: a sandbox-side cache (ssh, http).
+    Sandbox,
 }
 ```
 
@@ -167,11 +141,11 @@ Each sharing backend mounts the root at the same path:
 |---|---|---|---|
 | local | the system temp dir | the same path | `TempDir`/guard on drop |
 | shared | the per-user runtime root, mounted | the same path | guard on drop; stale dirs are 1 KB |
-| uploaded | host staging | the sandbox's cache dir (`$XDG_CACHE_HOME/rhema/kit/...`) | guard on drop, best-effort remote remove |
+| sandbox | none | the sandbox's cache dir (`$XDG_CACHE_HOME/rhema/kit/...`) | guard on drop, best-effort remote remove |
 
 A sharing backend that cannot add the mount falls back to
 `<workspace>/.rhema/runtime`, and a backend with no shared directory
-uploads. The workspace is the exception, not the rule.
+uses a sandbox-side cache. The workspace is the exception, not the rule.
 
 ### 3.2 The runtime tree
 
@@ -179,32 +153,41 @@ uploads. The workspace is the exception, not the rule.
 <runtime-root>/
   bin/<version>/              # installed by the sandbox, not copied from the host
     rhema                     # plus gob, which jobs needs
+    init-<kit>.sh             # generated once, static per stub set
   mcp/<session-key>/
-    init.bash
     mcp.sock
     media/
   jobs/<session-key>/
-    init.bash
     session/                  # the jobs state both sides read
   vision/<session-key>/
-    init.bash
     staging/                  # the images the host attaches
-  search/<session-key>/init.bash
-  decision/<session-key>/init.bash
 ```
 
 The helper install survives the session; the per-session dirs do not.
 A new version installs beside the old one, and a sweep removes a
-version once no session names it (v1: leave it; v2: sweep). The
-fallback layout is the same tree under `<workspace>/.rhema/runtime`.
+version once no session names it (v1: leave it; v2: sweep). Under
+`Root::Sandbox`, the same `bin/<version>/` lives in the sandbox cache;
+the fallback layout is the same tree under `<workspace>/.rhema/runtime`.
 
-### 3.3 The chain
+### 3.3 The init file
 
-The five init files form one lineage: jobs, vision, search, decision,
-mcp. Each kit's `inherited` is the previous kit's **sandbox-side**
-`init.bash`, and `BASH_ENV` is the last one's. The placer builds the
-chain in order and only then resolves the env map, so an uploaded chain
-never writes a host path into a sandbox file.
+The features do not chain files. The installed helper generates one
+file per `KIT_VERSION` and stub set:
+
+    <install>/init-<kit>.sh
+
+The host runs `<helper> __init ... > path` once, after install, and
+sets `BASH_ENV` to it. Every session uses the same file: the function
+bodies are already static (`job() { "$RHEMA_JOBS_BIN" __jobs "$@"; }`),
+and the values that differ per session (bin, token, staging, jobs
+session, media) are env entries. A feature whose env is absent exits
+with "not available in this session".
+
+The file is not uploaded and is not in a shared root; it lives beside
+the installed helper, so a sandbox with no shared root still has it.
+One exception: the MCP stubs are one function per configured server,
+so the stub set, not the session, picks the file. Sessions with the
+same servers share it.
 
 ## 4. Capabilities and the gate
 
@@ -216,6 +199,8 @@ pub struct Capabilities {
     pub shared_root: Option<SharedRoot>,
     /// `Sandbox::write_file` can carry a helper and an init file.
     pub upload: bool,
+    /// The host can read the sandbox's files (`read_file`).
+    pub pull: bool,
     /// The sandbox can dial a host TCP endpoint.
     pub inbound_net: bool,
 }
@@ -223,7 +208,8 @@ pub struct Capabilities {
 pub struct Needs {
     /// An executable and an init file (every kit).
     pub exec: bool,
-    /// A directory both sides read and write (jobs, vision, mcp media).
+    /// State the host must read (jobs, vision): a shared root or a
+    /// `read_file` pull.
     pub shared_state: bool,
     /// A live host endpoint (mcp; search/decide if they take the bridge).
     pub bridge: bool,
@@ -232,25 +218,35 @@ pub struct Needs {
 }
 ```
 
-`session_agent_config` asks `needs.satisfied_by(caps)` per kit, and a
-kit that cannot be placed is skipped with a debug notice, the same
-fail-closed behavior as today's gate. The prompt section is set only for
-placed kits.
+`session_agent_config` asks `needs.satisfied_by(caps)` per kit: a kit's
+`shared_state` needs a `shared_root` or `pull`, and its `bridge` needs a
+`shared_root` or `inbound_net`. A kit that cannot be placed is skipped
+with a debug notice, the same fail-closed behavior as today's gate. The
+prompt section is set only for placed kits.
 
-| backend | shared root | upload | inbound_net | kits in v1 |
+| backend | shared root | upload | pull | inbound_net | kits in v1 |
 |---|---|---|---|---|
-| local | n/a | n/a | n/a | all |
-| docker | yes, second bind mount | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, mcp; search/decide after §8 |
-| lxd container | yes, disk device | yes | same as docker | jobs, vision, mcp; search/decide after §8 |
-| lxd vm | no | yes (seed) | unproven | search/decide (scoped config); jobs/vision need a state mirror |
-| ecrou | yes, extra share (virtiofs) | n/a | unproven | jobs, vision, mcp if the UDS crosses |
-| ssh | no | yes | yes (remote forward) | mcp, search/decide; jobs/vision need a state mirror |
-| http | no | `PUT` (size cap) | no | none in v1; search/decide once the helper fits |
+| local | n/a | n/a | n/a | n/a | all |
+| docker | yes, second bind mount | yes | yes | UDS on the mount; a TCP fallback binds a host interface | jobs, vision, mcp; search/decide after §8 |
+| lxd container | yes, disk device | yes | yes | same as docker | jobs, vision, mcp; search/decide after §8 |
+| lxd vm | no | yes (seed) | yes | unproven | search/decide (scoped config); jobs/vision pull |
+| ecrou | yes, extra share (virtiofs) | n/a | yes | unproven | jobs, vision, mcp if the UDS crosses |
+| ssh | no | yes | yes | yes (remote forward) | mcp, search/decide, jobs/vision by pull |
+| http | no | `PUT` (size cap) | yes | no | jobs/vision by pull; search/decide once the helper fits |
 
 The table is the decision point: a backend is supported by declaring
 capabilities, not by adding another `if sandboxed`.
 
 ## 5. Transport
+
+`mcp` is the one kit whose state is live. The bridge is a host process
+holding the MCP client sessions (stdio children or HTTP connections),
+the approvals, and the media. The sandbox's `mcp` function runs
+`rhema __mcp`; that process connects to the bridge over the socket and
+prints the JSON-RPC result. The servers outlive the call and cannot be
+spawned from the sandbox, which is why this is a socket and not a file:
+only the listening process can create it, and it must sit on a path
+both sides see. No shared path means TCP (ssh) or no MCP (http).
 
 `Bridge` is what the MCP kit needs and the other four may grow into:
 
@@ -258,7 +254,7 @@ capabilities, not by adding another `if sandboxed`.
 pub enum Bridge {
     None,
     Unix { path: String },   // shared_root
-    Tcp { addr: String },    // uploaded, via a tunnel
+    Tcp { addr: String },    // no shared root, via a tunnel
 }
 ```
 
@@ -296,8 +292,8 @@ executor). `ShellTools` carries the map independently of its executor:
   command rather than silently dropping the map.
 
 Ordering in `session_agent_config` today is `apply_tools` first, env
-extend second. It becomes: build the kit chain, place it, collect the
-env, then build/attach the tools. The sandbox assembly already runs
+extend second. It becomes: build the kit list, ensure the root and the
+init, collect the env, then build/attach the tools. The sandbox assembly already runs
 before the session config, so the placer has `Capabilities` when it
 needs them.
 
@@ -338,12 +334,9 @@ helper that reports a compatible `KIT_VERSION` is fine, so the host does
 not need its exact build. A helper that is too old gets the current
 release installed beside it, and the host's own binary is untouched.
 
-A dev build that is not published is the one case the installer cannot
-cover. The fallbacks, in order:
-
-- same OS and architecture: upload `current_exe`;
-- `RHEMA_KIT_HELPER` names a target-matched artifact to upload;
-- otherwise the kit is skipped, with a notice naming the target.
+A dirty dev build is not published. There is no upload fallback for
+now: the installer turns up a release that does not satisfy
+`KIT_VERSION`, and the kit is skipped with a notice naming the target.
 
 The small `rhema-cli` target remains v2: a smaller download, fewer
 dependencies, and one place to keep `KIT_VERSION`. It is installed the
@@ -353,11 +346,18 @@ same way.
 
 | feature | helper | shared state | bridge | secrets | note |
 |---|---|---|---|---|---|
-| jobs | yes | yes: the jobs dir, the host's steering feed reads it | no | no | the sandbox needs `gob` too |
-| vision | yes | yes: the staging dir the host drains | no | no | fs-disjoint needs an image transfer or a sandbox-side attach |
+| jobs | yes | yes: the jobs dir, or a pull | no | no | `gob` comes with the install |
+| vision | yes | yes: the staging dir, or a pull | no | no | fs-disjoint pulls the staged files |
 | search | yes | no | maybe | yes | the hidden mode resolves the profile's providers and keys |
 | decide | yes | no | maybe | yes | same |
-| mcp | yes | yes: socket + media | yes | no | servers stay host-side in v1 |
+| mcp | yes | yes: the socket's dir | yes | no | servers stay host-side in v1 |
+
+The host-read state is two things: vision's staging dir (the images the
+host attaches) and jobs' session dir (the host's steering feed). Either
+can be pulled through `read_file` instead of a shared root. MCP media
+is written and read in the sandbox; the host sees it through vision
+only when the model attaches an image. `search` and `decide` keep no
+state.
 
 The kit unifies the helper and the shared-state placement. The fourth is
 an open decision:
@@ -389,9 +389,9 @@ user opts in. This is a user-facing security choice, not a plumbing default.
   git exclude the same way the ecrou git-env already excludes `.rhema/`.
   The primary root sits outside the checkout, so a checkout never holds
   the helper or a live socket.
-- Uploads never take a model-influenced path: the placer chooses the
-  names, the sandbox path is built from the session key and the
-  kit version.
+- The only host-to-sandbox file is the installer script, fetched and
+  checksum-checked by the host, at a path the placer chooses. State
+  files are written by the sandbox's own tools, not uploaded.
 
 ## 10. Failure modes
 
@@ -408,15 +408,15 @@ user opts in. This is a user-facing security choice, not a plumbing default.
 
 0. **Env channel.** `RunRequest.env` and the `ShellTools` map;
    verify with the scripted sandbox. One day.
-1. **Kit types and local placement.** Move the five wirings onto
-   `Kit`/`KitDir` with no behavior change; the local path stays a temp
-   dir. Two days.
+1. **Kit types, the static init, and local placement.** Move the five
+   wirings onto `Kit` and the helper's `__init`; no behavior change; the
+   local path stays a temp dir. Three days.
 2. **Shared placement and the installer.** The per-user root, the three
    mounts, the probe/install/recheck path, and `gob`; docker first, then
    lxd; MCP first, then jobs and vision. The ecrou UDS spike runs here.
    Five to six days.
-3. **Uploads and the small helper.** `rhema-cli`; ssh upload plus a
-   remote forward; switch every kit. A week.
+3. **The small helper.** `rhema-cli`; the ssh install plus a remote
+   forward; switch every kit. A week.
 4. **search/decide secrets decision and http.** After the §8 decision;
    http waits for a helper that fits its cap or an install path.
 
@@ -456,6 +456,13 @@ backend actually did, not what the table predicted.
    disappears from `setup.rs`; the gate is per kit and per backend.
 6. **Fail closed.** A kit that cannot be placed is absent from the
    prompt and the shell; it never half-works.
+7. **The init file is generated inside the sandbox and static per kit
+   version.** The function bodies are already static
+   (`job() { "$RHEMA_JOBS_BIN" __jobs "$@"; }`), and the per-session
+   values are env. One file, no chain, no host write, no shared root.
+8. **The shared root is for the socket and host-read state.** It is a
+   transport shortcut, not storage: vision and jobs can pull through
+   `read_file`, and only the MCP socket needs a live shared path.
 
 ## 13. Alternatives considered
 
@@ -472,6 +479,9 @@ backend actually did, not what the table predicted.
 - **Put the runtime under `<workspace>/.rhema/runtime`.** It needs no
   new mount, but it puts a helper and live sockets in the user's
   checkout. Kept as the fallback.
+- **Write the init per session from the host and chain five files.** The
+  bodies are static and the values are env; the chain only composes
+  text. Rejected: one generated file per kit version.
 - **A pure-bash client over the socket.** `${RHEMA_BIN} __server` does
   chunking, schema, SSE framing, media, and retries; `nc -U`, `socat`,
   and `jq` are not guaranteed in a sandbox, and a second client would
