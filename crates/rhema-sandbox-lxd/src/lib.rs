@@ -293,6 +293,7 @@ fn exec_argv(
 
 /// The env-carrying twin: `lxc exec --env KEY=VALUE`, so `BASH_ENV`
 /// reaches the top-level bash.
+#[allow(clippy::too_many_arguments)]
 fn exec_argv_env(
     instance: &str,
     mounted: bool,

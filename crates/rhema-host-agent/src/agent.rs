@@ -155,7 +155,7 @@ pub fn stamped_system_with_sections(
 /// a field could ship without its argument, and `websearch` did: the
 /// config set it and the prompt never carried it. Here a section the
 /// config holds is a section the prompt has.
-fn config_sections<'a>(config: &'a HostAgentConfig) -> Vec<(&'a str, serde_json::Value)> {
+fn config_sections(config: &HostAgentConfig) -> Vec<(&str, serde_json::Value)> {
     let mut sections: Vec<(&str, serde_json::Value)> = Vec::new();
     for (name, text) in [
         ("environment", config.environment.as_deref()),

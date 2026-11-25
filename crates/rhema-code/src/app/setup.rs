@@ -1214,15 +1214,15 @@ pub(crate) fn session_agent_config(
         }
         // The env names the sandbox's staging path; the host attaches
         // from the same directory through its own path.
-        if let Some(vision) = &vision_wiring {
-            if let Some(tools) = config.tools.as_deref() {
-                tools.set_vision_inbox(
-                    vision
-                        .shell_env
-                        .get(rhema_bash::vision::VAR_STAGING)
-                        .map(std::path::PathBuf::from),
-                );
-            }
+        if let Some(vision) = &vision_wiring
+            && let Some(tools) = config.tools.as_deref()
+        {
+            tools.set_vision_inbox(
+                vision
+                    .shell_env
+                    .get(rhema_bash::vision::VAR_STAGING)
+                    .map(std::path::PathBuf::from),
+            );
         }
     }
     config.shell_env.extend(mcp.env.clone());

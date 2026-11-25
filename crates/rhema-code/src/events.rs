@@ -213,6 +213,7 @@ impl From<&Event<'_>> for OwnedEvent {
 }
 
 /// One message from the turn/fetch/login tasks to the UI loop.
+#[allow(clippy::large_enum_variant)]
 pub enum UiEvent {
     /// A streaming or lifecycle event of the running turn.
     Engine(OwnedEvent),
