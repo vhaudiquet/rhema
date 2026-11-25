@@ -19,12 +19,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::Client;
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     ContentBlock, ContentChunk, Cost, SessionNotification, SessionUpdate, TextContent, ToolCall,
     ToolCallContent, ToolCallId, ToolCallLocation, ToolCallStatus, ToolCallUpdate,
     ToolCallUpdateFields, ToolKind, UsageUpdate,
 };
-use agent_client_protocol::{Client, ConnectionTo};
 use rhema_core::{Event, EventSink, Usage};
 use rhema_provider::Pricing;
 
@@ -86,7 +87,7 @@ impl SessionMeter {
 /// Forwards engine events to the client as session updates.
 pub(crate) struct AcpSink {
     cx: ConnectionTo<Client>,
-    session_id: agent_client_protocol::schema::v1::SessionId,
+    session_id: agent_client_protocol::v1::schema::SessionId,
     /// The in-flight call: id, name, and its assembled JSON arguments.
     pending: Option<(String, String, String)>,
     /// The session's shared meter; every step lands here.
@@ -103,7 +104,7 @@ impl AcpSink {
     /// A sink bound to one session on one connection.
     pub(crate) fn new(
         cx: ConnectionTo<Client>,
-        session_id: agent_client_protocol::schema::v1::SessionId,
+        session_id: agent_client_protocol::v1::schema::SessionId,
     ) -> Self {
         Self {
             cx,

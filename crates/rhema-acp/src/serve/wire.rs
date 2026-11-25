@@ -67,14 +67,14 @@ pub(crate) fn title_of(prompt: &str) -> Option<String> {
 pub(crate) fn session_usage(
     app: &App,
     id: &str,
-) -> Option<agent_client_protocol::schema::v1::Usage> {
+) -> Option<agent_client_protocol::v1::schema::Usage> {
     let meter = app.meter(id)?;
     let meter = meter
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (total, input, output, cached_read, _cost) = meter.totals();
     Some(
-        agent_client_protocol::schema::v1::Usage::new(total, input, output)
+        agent_client_protocol::v1::schema::Usage::new(total, input, output)
             .cached_read_tokens(cached_read),
     )
 }

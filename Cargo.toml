@@ -46,7 +46,7 @@ minijinja = { version = "3", default-features = false, features = ["serde", "deb
 # (see crates/rhema-acp). `unstable_end_turn_token_usage` lets the agent
 # attach per-turn token totals to the `session/prompt` response; the
 # field is additive on the wire, so clients without it ignore it.
-agent-client-protocol = { version = "3.3", features = ["unstable_end_turn_token_usage"] }
+agent-client-protocol = { version = "5.6", features = ["unstable_end_turn_token_usage"] }
 
 # The tarball the installer serves is this profile's output. Release
 # builds already carry no debug info, but the linker still writes the

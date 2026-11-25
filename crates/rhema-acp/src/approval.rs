@@ -19,12 +19,13 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::Client;
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     PermissionOption, PermissionOptionId, PermissionOptionKind, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SessionId, ToolCallId, ToolCallStatus,
     ToolCallUpdate, ToolCallUpdateFields, ToolKind,
 };
-use agent_client_protocol::{Client, ConnectionTo};
 use rhema_core::ToolCall;
 use rhema_host_agent::Approval;
 

@@ -10,7 +10,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::schema::{
     AuthenticateRequest, CancelNotification, ContentBlock, InitializeRequest, InitializeResponse,
     LoadSessionRequest, NewSessionRequest, NewSessionResponse, PermissionOptionId, PromptRequest,
     PromptResponse, RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
@@ -182,7 +182,7 @@ fn thinking_current(options: &[SessionConfigOption]) -> Option<String> {
         .iter()
         .find(|option| option.category.as_ref() == Some(&SessionConfigOptionCategory::ThoughtLevel))
         .and_then(|option| match &option.kind {
-            agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
+            agent_client_protocol::v1::schema::SessionConfigKind::Select(select) => {
                 Some(select.current_value.0.to_string())
             }
             _ => None,
@@ -209,7 +209,7 @@ async fn with_agent<T>(
     permissions: Permissions,
     answer: RequestPermissionOutcome,
     scenario: impl AsyncFnOnce(
-        agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+        agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
     ) -> agent_client_protocol::Result<T>,
 ) -> agent_client_protocol::Result<T> {
     let (agent_end, client_end) = Channel::duplex();
@@ -217,7 +217,7 @@ async fn with_agent<T>(
         let _ = rhema_acp::serve_over(agent_end, options).await;
     });
     Client
-        .builder()
+        .v1()
         .on_receive_notification(
             {
                 let updates = updates.clone();
@@ -240,7 +240,7 @@ async fn with_agent<T>(
 }
 
 async fn initialize(
-    cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    cx: &agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
 ) -> InitializeResponse {
     cx.send_request(InitializeRequest::new(
         agent_client_protocol::schema::ProtocolVersion::V1,
@@ -251,7 +251,7 @@ async fn initialize(
 }
 
 async fn new_session(
-    cx: &agent_client_protocol::ConnectionTo<agent_client_protocol::Agent>,
+    cx: &agent_client_protocol::v1::ConnectionTo<agent_client_protocol::Agent>,
     workspace: &Path,
 ) -> NewSessionResponse {
     cx.send_request(NewSessionRequest::new(workspace.to_path_buf()))
@@ -825,7 +825,7 @@ async fn authenticate_reports_unresolvable_credentials() {
             initialize(&cx).await;
             let error = cx
                 .send_request(AuthenticateRequest::new(
-                    agent_client_protocol::schema::v1::AuthMethodId::new("rhema-stored"),
+                    agent_client_protocol::v1::schema::AuthMethodId::new("rhema-stored"),
                 ))
                 .block_task()
                 .await
@@ -844,7 +844,7 @@ async fn authenticate_reports_unresolvable_credentials() {
                 .expect_err("session/new must demand auth without credentials");
             assert_eq!(
                 session.code,
-                agent_client_protocol::schema::v1::ErrorCode::AuthRequired
+                agent_client_protocol::v1::schema::ErrorCode::AuthRequired
             );
             Ok(())
         },
@@ -887,11 +887,11 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 })
                 .expect("session/new advertises a Model select");
             let kind = match &select.kind {
-                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => select,
+                agent_client_protocol::v1::schema::SessionConfigKind::Select(select) => select,
                 _ => panic!("the Model option is a select"),
             };
             assert_eq!(kind.current_value.0.as_ref(), "mock/mock");
-            let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(choices) =
+            let agent_client_protocol::v1::schema::SessionConfigSelectOptions::Ungrouped(choices) =
                 &kind.options
             else {
                 panic!("the Model select's choices are ungrouped");
@@ -935,7 +935,7 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 .expect_err("an unknown kind must not switch");
             assert_eq!(
                 bogus.code,
-                agent_client_protocol::schema::v1::ErrorCode::InvalidParams
+                agent_client_protocol::v1::schema::ErrorCode::InvalidParams
             );
 
             // A model switch rebuilds the agent over the history; the
@@ -958,7 +958,7 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 })
                 .expect("the response carries the Model select");
             match &select.kind {
-                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
+                agent_client_protocol::v1::schema::SessionConfigKind::Select(select) => {
                     assert_eq!(select.current_value.0.as_ref(), "mock/other-model");
                 }
                 _ => panic!("the Model option is a select"),
@@ -983,7 +983,7 @@ async fn the_model_picker_advertises_the_active_model_and_switches_it() {
                 })
                 .expect("the response carries the Model select");
             match &select.kind {
-                agent_client_protocol::schema::v1::SessionConfigKind::Select(select) => {
+                agent_client_protocol::v1::schema::SessionConfigKind::Select(select) => {
                     assert_eq!(select.current_value.0.as_ref(), "mock/third-model");
                 }
                 _ => panic!("the Model option is a select"),
@@ -1139,12 +1139,12 @@ async fn the_thinking_select_switches_effort() {
                     option.category.as_ref() == Some(&SessionConfigOptionCategory::ThoughtLevel)
                 })
                 .expect("the thinking select ships");
-            let agent_client_protocol::schema::v1::SessionConfigKind::Select(select) =
+            let agent_client_protocol::v1::schema::SessionConfigKind::Select(select) =
                 &thinking.kind
             else {
                 panic!("the thinking option is a select");
             };
-            let agent_client_protocol::schema::v1::SessionConfigSelectOptions::Ungrouped(choices) =
+            let agent_client_protocol::v1::schema::SessionConfigSelectOptions::Ungrouped(choices) =
                 &select.options
             else {
                 panic!("the thinking select's choices are ungrouped");
@@ -1177,7 +1177,7 @@ async fn the_thinking_select_switches_effort() {
                 .expect_err("default is not an exposed level");
             assert_eq!(
                 default.code,
-                agent_client_protocol::schema::v1::ErrorCode::InvalidParams
+                agent_client_protocol::v1::schema::ErrorCode::InvalidParams
             );
 
             // An unknown effort is a named parameter error.
@@ -1192,7 +1192,7 @@ async fn the_thinking_select_switches_effort() {
                 .expect_err("an unknown effort must not switch");
             assert_eq!(
                 bogus.code,
-                agent_client_protocol::schema::v1::ErrorCode::InvalidParams
+                agent_client_protocol::v1::schema::ErrorCode::InvalidParams
             );
 
             // Switching rebuilds the agent over the same history; the

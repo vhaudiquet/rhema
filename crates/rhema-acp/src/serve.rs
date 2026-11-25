@@ -32,7 +32,8 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::schema::v1::{
+use agent_client_protocol::v1::ConnectionTo;
+use agent_client_protocol::v1::schema::{
     AgentCapabilities, AuthMethod, AuthMethodAgent, AuthMethodId, AuthenticateRequest,
     AuthenticateResponse, AvailableCommand, AvailableCommandInput, AvailableCommandsUpdate,
     CancelNotification, ConfigOptionUpdate, ContentBlock, ContentChunk, Implementation,
@@ -44,7 +45,7 @@ use agent_client_protocol::schema::v1::{
     ToolCallStatus, ToolCallUpdate, ToolCallUpdateFields, UnstructuredCommandInput,
 };
 use agent_client_protocol::{
-    Agent, Client, ConnectionTo, Error, Stdio, on_receive_notification, on_receive_request,
+    Agent, Client, Error, Stdio, on_receive_notification, on_receive_request,
 };
 use anyhow::Context;
 use rhema_config::Settings;
@@ -144,7 +145,7 @@ async fn serve_connection(
             .context("the ACP app failed to start")?,
     );
     let result = Agent
-        .builder()
+        .v1()
         .name("rhema")
         .on_receive_request(
             async move |_request: InitializeRequest, responder, _cx| {
