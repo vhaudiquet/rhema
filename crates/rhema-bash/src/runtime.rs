@@ -13,9 +13,9 @@ use std::collections::BTreeMap;
 /// The kit contract's version: the init file shape and the helper's
 /// modes. Bumped when either changes, so an installed helper from an
 /// older contract is replaced instead of silently missing a mode.
-pub const KIT_VERSION: u32 = 2;
+pub const KIT_VERSION: u32 = 3;
 
-/// The five generated surfaces.
+/// The generated surfaces.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Feature {
     /// Background shells: `job`.
@@ -26,8 +26,6 @@ pub enum Feature {
     Search,
     /// Typed decision answers: `decide`.
     Decision,
-    /// MCP servers: one stub per configured server.
-    Mcp,
 }
 
 impl Feature {
@@ -38,7 +36,6 @@ impl Feature {
             Self::Vision => "vision",
             Self::Search => "search",
             Self::Decision => "decision",
-            Self::Mcp => "mcp",
         }
     }
 }
@@ -51,8 +48,7 @@ pub struct Needs {
     /// State the host must read (jobs, vision): a shared root or a
     /// `read_file` pull.
     pub shared_state: bool,
-    /// A live host endpoint (MCP, and search/decide if they take the
-    /// bridge).
+    /// A live host endpoint, when a frontend wires one.
     pub bridge: bool,
     /// Host-side config or keys (search, decide).
     pub secrets: bool,
@@ -73,13 +69,6 @@ impl Needs {
         shared_state: false,
         bridge: false,
         secrets: true,
-    };
-    /// The MCP bridge: the only kit that needs a live endpoint.
-    pub const MCP: Self = Self {
-        exec: true,
-        shared_state: true,
-        bridge: true,
-        secrets: false,
     };
 }
 

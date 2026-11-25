@@ -190,7 +190,7 @@ pub(crate) fn system_show_at(
     profile: Option<&str>,
     secrets: Option<&dyn rhema_config::secrets::SecretStore>,
 ) -> anyhow::Result<String> {
-    let mcp = mcp_preview_lines(profile);
+    let mcp = mcp_preview_text(profile);
     system_show_at_with_mcp(path, workspace, profile, mcp, secrets)
 }
 
@@ -201,7 +201,7 @@ pub(crate) fn system_show_at_with_mcp(
     path: Option<&std::path::Path>,
     workspace: &std::path::Path,
     profile: Option<&str>,
-    mcp: Vec<rhema_config::mcp::McpServerLine>,
+    mcp: Option<String>,
     secrets: Option<&dyn rhema_config::secrets::SecretStore>,
 ) -> anyhow::Result<String> {
     let workspace = std::fs::canonicalize(workspace).unwrap_or_else(|_| workspace.to_path_buf());
@@ -258,8 +258,8 @@ pub(crate) fn system_show_at_with_mcp(
     if let Some(text) = user.as_deref() {
         sections.push(("user", serde_json::json!(text)));
     }
-    if !mcp.is_empty() {
-        sections.push(("mcp", serde_json::json!(mcp)));
+    if let Some(text) = mcp.as_deref() {
+        sections.push(("mcp", serde_json::json!(text)));
     }
     // The three local sections, gated the way the wire gates them: a
     // sandboxed session runs its commands on the far side, where none
@@ -334,26 +334,21 @@ pub(crate) fn decision_section(
     kind.is_none() && rhema_decision_registry::is_configured(profile, secrets)
 }
 
-/// The prompt's mcp lines as config would produce them: global file
-/// plus the profile's own entries, profile winning by name, the
-/// muted set filtered out, invalid entries skipped as the wire step
-/// skips them. No bridge, no spawns, a preview, not a wiring.
-fn mcp_preview_lines(profile: Option<&str>) -> Vec<rhema_config::mcp::McpServerLine> {
-    let config = match Config::load() {
-        Ok(config) => config,
-        Err(_) => return Vec::new(),
-    };
+/// The prompt's mcp section as the local client reports it: the same
+/// `mcp prompt` command the session runs, against the host config. A
+/// preview must not spawn servers, and this does not: `prompt` reads
+/// the config alone.
+fn mcp_preview_text(profile: Option<&str>) -> Option<String> {
+    let config = Config::load().ok()?;
     if config.disabled_mcp_servers.contains(&String::from("*")) {
-        return Vec::new();
+        return None;
     }
-    let effective = config.effective(profile);
-    let merged = crate::mcp_wire::merged_config(&effective);
-    merged
-        .servers
-        .iter()
-        .filter(|server| !config.disabled_mcp_servers.contains(&server.name))
-        .map(rhema_config::mcp::McpServer::prompt_line)
-        .collect()
+    let store = crate::mcp_config::McpStore::local(
+        rhema_config::Home::discover().ok().as_ref(),
+        &config.disabled_mcp_servers,
+    );
+    let _ = profile;
+    store.prompt.clone()
 }
 
 /// Writes the built-in default to `path`, creating the directory. The

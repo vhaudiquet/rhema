@@ -747,7 +747,7 @@ pub(crate) fn settings_page(
         }
         SettingsSection::Mcp => {
             if settings.mcp.is_empty() {
-                lines.extend(settings_hint("no servers in this profile", theme, width));
+                lines.extend(settings_hint("no servers in this sandbox", theme, width));
                 lines.extend(settings_hint(
                     "the add row below installs one",
                     theme,

@@ -3977,7 +3977,7 @@ fn the_mcp_page_lists_the_servers_and_their_marks() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(text.contains("no servers in this profile"), "{text}");
+    assert!(text.contains("no servers in this sandbox"), "{text}");
     assert!(
         text.contains("the add row below installs one"),
         "the empty state nudges at the add row: {text}"

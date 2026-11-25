@@ -52,17 +52,11 @@ pub struct Profile {
     /// file while empty: most profiles never leave `local`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub sandbox_instances: BTreeMap<String, SandboxInstance>,
-    /// The MCP servers this profile exposes to its agents, keyed by a
-    /// user-chosen name matching `[a-z0-9_-]+`. Per profile by
-    /// design: work and personal carry different servers, and a
-    /// server installed through one profile's menu appears nowhere
-    /// else. Resolved through [`crate::mcp::McpConfig::from_entries`]
-    /// at agent-wiring time, a malformed entry is skipped with a
-    /// notice, never a config failure. Absent from the file while
-    /// empty; entries' `env` and `headers` values are secrets at rest
-    /// and redact in [`Debug`].
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
-    pub mcp_servers: BTreeMap<String, crate::mcp::McpServerEntry>,
+    /// Old host-side MCP entries, read once and moved into the
+    /// sandbox's config at startup. Serialization never writes this
+    /// field again, so a saved config carries no host MCP servers.
+    #[serde(default, skip_serializing, rename = "mcp_servers")]
+    pub legacy_mcp_servers: BTreeMap<String, crate::mcp::McpServerEntry>,
     /// The web search providers this profile's agents reach, keyed by
     /// a user-chosen name, the [`ProviderInstance`] twin at search
     /// scale. Per profile by design, work and personal carry
@@ -100,7 +94,6 @@ impl fmt::Debug for Profile {
             .field("thinking", &self.thinking)
             .field("sandbox", &self.sandbox)
             .field("sandbox_instances", &self.sandbox_instances)
-            .field("mcp_servers", &self.mcp_servers.keys().collect::<Vec<_>>())
             .field("websearch", &self.websearch)
             .field("websearch_order", &self.websearch_order)
             .field("decision", &self.decision)

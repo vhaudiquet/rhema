@@ -155,9 +155,10 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         .thinking
         .map(rhema_core::request::ThinkingEffort::from)
         .unwrap_or_else(|| effective.thinking_effort());
+    let rhema_home = rhema_config::Home::discover().ok();
     let base_system = resolve_base_system(
-        rhema_config::Home::discover()
-            .ok()
+        rhema_home
+            .as_ref()
             .map(|home| home.system_prompt())
             .as_deref(),
     );
@@ -218,7 +219,7 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     let kits_registry = crate::kits::Registry::new();
     let inherited = std::env::var_os("BASH_ENV");
     let mut kits = Vec::new();
-    let key = crate::mcp_wire::runtime_session_key(&profile);
+    let key = crate::shared_kit::runtime_session_key(&profile);
     let shared_kits = sandboxed
         .as_ref()
         .and_then(|sandboxed| sandboxed.shared())
@@ -312,39 +313,12 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             rhema_bash::runtime::Needs::HOST_CALL,
         ));
     }
-    // The registry outlives the turn: the session dir behind the env
-    // must live as long as the commands it provisioned.
-    let mcp = crate::mcp_wire::Registry::new();
-    let mcp_entry = mcp.wire_for_session(
-        &profile,
-        &effective,
-        &config.disabled_mcp_servers,
-        sandboxed.as_ref(),
-        None,
-    );
-    if let Some(entry) = &mcp_entry {
-        let mut stubs = vec![crate::app::builtin_stub(
-            rhema_mcp::provision::RESERVED,
-            rhema_mcp::provision::VAR_BIN,
-            vec![rhema_mcp::provision::RESERVED],
-        )];
-        for line in entry.lines() {
-            stubs.push(
-                rhema_bash::runtime::Stub::new(
-                    line.name.clone(),
-                    rhema_mcp::provision::VAR_BIN,
-                    vec!["__server".into(), line.server.clone()],
-                )
-                .expect("the MCP command name passed the provisioner's own check"),
-            );
+    let mcp = match &sandboxed {
+        Some(sandboxed) => sandboxed.mcp().clone(),
+        None => {
+            crate::mcp_config::McpStore::local(rhema_home.as_ref(), &config.disabled_mcp_servers)
         }
-        kits.push(crate::app::kit_for(
-            rhema_bash::runtime::Feature::Mcp,
-            entry.shell_env().clone(),
-            stubs,
-            rhema_bash::runtime::Needs::MCP,
-        ));
-    }
+    };
     let placed_env = if kits.is_empty() {
         None
     } else if let Some(shared) = sandboxed.as_ref().and_then(|s| s.shared()) {
@@ -379,9 +353,6 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         if let Some(wiring) = &decision_wiring {
             agent_config.decision = Some(wiring.section.to_owned());
         }
-        if let Some(entry) = &mcp_entry {
-            agent_config.mcp_servers = entry.lines().to_vec();
-        }
         if let Some(vision) = &vision_wiring {
             if let Some(tools) = agent_config.tools.as_deref() {
                 tools.set_vision_inbox(
@@ -393,7 +364,8 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             }
         }
     }
-    agent_config.disabled_mcp_servers = config.disabled_mcp_servers.clone();
+    agent_config.shell_env.extend(mcp.env.clone());
+    agent_config.mcp = mcp.prompt.clone();
     // Subagents ride in as one tool: the built-in general-purpose
     // definition plus whatever the workspace defines.
     // The handle rides to the UI in the wire-up piece; the registry

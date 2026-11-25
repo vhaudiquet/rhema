@@ -76,22 +76,7 @@ Before you answer, check the skills list below in this priority order.
 {% endif %}
 {% if mcp %}
 
-## MCP servers
-
-Available MCP servers:
-{% for server in mcp %}- {{ server.name }} (server: {{ server.server }}): {{ server.description }}
-{% endfor %}
-
-MCP servers are reachable through bash commands (**not** direct tool calls).
-Usage:
-
-    {{ mcp[0].name }} --help                       # a server's tools
-    {{ mcp[0].name }} <tool> --help                # one tool's arguments
-    {{ mcp[0].name }} <tool> --schema              # one tool's exact input JSON
-    {{ mcp[0].name }} <tool> --flag value          # a call; --prop_json for nested values
-    {{ mcp[0].name }} <tool> --json - <<'EOF' ... EOF # nested payloads: heredoc, no quoting
-    mcp servers | mcp tools <server> | mcp call <server> <tool> <json>
-
+{{ mcp }}
 {% endif %}
 {% if user %}
 

@@ -228,19 +228,6 @@ pub enum Command {
     /// plain lines on stdout. Exit 0 when this build is the newest or
     /// the install landed, 1 when the check or the install failed.
     Update,
-    /// The MCP meta surface (`mcp servers | tools | schema | call`)
-    /// plus the config verbs (`mcp add | list | remove`, which write a
-    /// profile's `mcp_servers` and so work outside any wired shell),
-    /// and the pass-through that makes the agent shell's generated
-    /// functions work: `rhema __server <name> …`. Everything after
-    /// the subcommand goes to the MCP CLI verbatim; the bridge verbs
-    /// read the env the init file set and exit 4 outside a wired
-    /// shell.
-    Mcp {
-        /// The CLI's own argv, passed through untouched.
-        #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
-        args: Vec<std::ffi::OsString>,
-    },
     /// Prints the runtime kit version. The installer checks it after
     /// a copy and the host compares it before using an install.
     #[command(name = "__kit-version")]
@@ -294,12 +281,8 @@ pub enum Command {
         #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
         args: Vec<std::ffi::OsString>,
     },
-    /// The catch-all the init file's stubs land in: `rhema __server
-    /// <name> …` execs this binary with `__server` as the first
-    /// token, and any other unrecognized subcommand follows the same
-    /// road, the MCP CLI answers for the modes it knows and exits 2
-    /// for the ones it does not, preserving the old clap shape's
-    /// error exit.
+    /// Any unrecognized subcommand: exit 2 like clap's old error
+    /// shape. The MCP surface is the standalone `mcp` binary now.
     #[command(external_subcommand)]
     External(Vec<OsString>),
 }

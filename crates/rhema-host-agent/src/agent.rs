@@ -148,18 +148,14 @@ pub fn stamped_system_with_sections(
         .map_err(HostAgentError::from)
 }
 
-/// The prompt sections a config carries, in one list: the six the
-/// config names, then the MCP rows the wire step produced, then
-/// [`HostAgentConfig::sections`], the caller's own.
+/// The prompt sections a config carries, in one list: the named
+/// sections, then [`HostAgentConfig::sections`], the caller's own.
 ///
 /// One list on purpose. When each section was an argument to the render,
 /// a field could ship without its argument, and `websearch` did: the
 /// config set it and the prompt never carried it. Here a section the
 /// config holds is a section the prompt has.
-fn config_sections<'a>(
-    config: &'a HostAgentConfig,
-    mcp: &'a [rhema_config::mcp::McpServerLine],
-) -> Vec<(&'a str, serde_json::Value)> {
+fn config_sections<'a>(config: &'a HostAgentConfig) -> Vec<(&'a str, serde_json::Value)> {
     let mut sections: Vec<(&str, serde_json::Value)> = Vec::new();
     for (name, text) in [
         ("environment", config.environment.as_deref()),
@@ -168,13 +164,11 @@ fn config_sections<'a>(
         ("jobs", config.jobs.as_deref()),
         ("websearch", config.websearch.as_deref()),
         ("decision", config.decision.as_deref()),
+        ("mcp", config.mcp.as_deref()),
     ] {
         if let Some(text) = text {
             sections.push((name, serde_json::json!(text)));
         }
-    }
-    if !mcp.is_empty() {
-        sections.push(("mcp", serde_json::json!(mcp)));
     }
     sections.extend(
         config
@@ -274,17 +268,7 @@ impl HostAgent {
             }
         };
         skills.retain(|skill| !config.disabled_skills.contains(&skill.name));
-        // The MCP section honors the same persisted off switch: the
-        // wire step already filtered before spawning; this is the
-        // prompt-side echo, so a frontend feeding lines directly is
-        // still governed by the switch.
-        let mcp: Vec<rhema_config::mcp::McpServerLine> = config
-            .mcp_servers
-            .iter()
-            .filter(|line| !config.disabled_mcp_servers.contains(&line.server))
-            .cloned()
-            .collect();
-        let sections = config_sections(&config, &mcp);
+        let sections = config_sections(&config);
         let system = match config.system.clone() {
             // An explicit total replacement is the escape hatch:
             // verbatim, not templated.
@@ -1197,6 +1181,7 @@ mod extra_tools_tests {
             jobs: Some("job".to_owned()),
             websearch: Some("search".to_owned()),
             decision: Some("decide".to_owned()),
+            mcp: Some("mcp prompt".to_owned()),
             sections: std::collections::BTreeMap::from([(
                 "hear".to_owned(),
                 serde_json::json!("hear"),
@@ -1208,12 +1193,7 @@ mod extra_tools_tests {
                 AllowAll,
             )
         };
-        let lines = vec![rhema_config::mcp::McpServerLine {
-            name: "atlassian".into(),
-            server: "atlassian".into(),
-            description: "Jira".into(),
-        }];
-        let names: Vec<&str> = config_sections(&config, &lines)
+        let names: Vec<&str> = config_sections(&config)
             .iter()
             .map(|(name, _)| *name)
             .collect();
@@ -1232,7 +1212,7 @@ mod extra_tools_tests {
         );
         // End to end through the built-in template: the section the
         // config set is the section the prompt renders.
-        let sections = config_sections(&config, &lines);
+        let sections = config_sections(&config);
         let prompt =
             stamped_system_with_sections(None, &std::env::temp_dir(), &[], &[], &sections).unwrap();
         assert!(prompt.contains("## Web search"), "{prompt}");

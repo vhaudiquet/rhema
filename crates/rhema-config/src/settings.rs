@@ -83,6 +83,17 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Takes the host MCP entries an older config carried, across
+    /// every profile. The caller moves them into the sandbox config
+    /// and saves, so the next write has none.
+    pub fn take_legacy_mcp_servers(&mut self) -> BTreeMap<String, crate::mcp::McpServerEntry> {
+        let mut entries = BTreeMap::new();
+        for profile in self.profiles.values_mut() {
+            entries.append(&mut profile.legacy_mcp_servers);
+        }
+        entries
+    }
+
     /// The settings that apply for `flag` (or `personal` when absent).
     ///
     /// ISOLATION: a profile's section is authoritative, work never

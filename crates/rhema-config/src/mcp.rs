@@ -1,38 +1,17 @@
-//! MCP server configuration: `<config dir>/mcp.yaml`, user-authored.
+//! The MCP entry shape the settings dialog edits and validates.
 //!
-//! One entry per configured server, stdio (`command:`) or Streamable
-//! HTTP (`url:`), never both. Loading is per-entry and forgiving of
-//! the file, strict of the entry: a malformed entry is skipped and
-//! its reason lands in [`McpConfig::notices`], a whole-file failure
-//! yields an empty config with one notice, and nothing here fails
-//! agent construction. Duplicate server names never reach the fold:
-//! serde_yaml rejects duplicate keys at parse time, so a name said
-//! twice skips the whole file with the parser's message.
-//!
-//! The manager consumes [`McpServer`], the validated shape; the raw
-//! yaml never leaks past this module.
-//!
-//! ```yaml
-//! # <config dir>/mcp.yaml
-//! servers:
-//!   atlassian:
-//!     description: Jira and Confluence
-//!     command: ["npx", "-y", "@modelcontextprotocol/server-atlassian"]
-//!     env: { JIRA_TOKEN: "…" }
-//!   blender:
-//!     description: Blender scene operations
-//!     url: "http://127.0.0.1:9721/mcp"
-//!     headers: { Authorization: "Bearer …" }
-//! ```
+//! The config itself lives in the sandbox, in the standalone `mcp`
+//! client's JSON file. This module owns the per-entry rules both sides
+//! share: stdio (`command`) or Streamable HTTP (`url`), never both, and
+//! the name and command-name charsets. [`McpConfig::from_entries`]
+//! folds a map into the rows the page shows and the notices a skipped
+//! entry earns.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-
-use crate::ConfigError;
 
 /// The handshake budget for stdio servers: `npx` cold starts are slow,
 /// so the default is generous.
@@ -43,18 +22,9 @@ pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// config may lower this but never raise it (the manager's rule).
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// The `<config dir>/mcp.yaml` path.
-pub fn config_path() -> Result<PathBuf, ConfigError> {
-    Ok(crate::Home::discover()?.config.join("mcp.yaml"))
-}
-
-/// The validated MCP configuration: the servers to expose and why any
-/// others were left out.
-///
-/// Construction is infallible by design; loading is too
-/// ([`McpConfig::load`]).
-/// Absence of a server shows up either as a skipped entry's notice or
-/// as an absent file, never as an error a caller must handle.
+/// The validated MCP entries: the servers the page shows and why any
+/// were left out. Construction is infallible: a skipped entry is a
+/// notice, never an error the caller must handle.
 #[derive(Debug, Clone, Default)]
 pub struct McpConfig {
     /// The servers that validated, in file order.
@@ -66,52 +36,7 @@ pub struct McpConfig {
 }
 
 impl McpConfig {
-    /// Loads `<config dir>/mcp.yaml`; a missing file is an empty
-    /// config, every other failure a notice.
-    pub fn load() -> McpConfig {
-        let path = match config_path() {
-            Ok(path) => path,
-            // No config dir, no MCP file: nothing to load, nothing to
-            // report.
-            Err(ConfigError::NoHome) => return McpConfig::default(),
-            Err(err) => {
-                return McpConfig {
-                    notices: vec![format!("mcp.yaml unreadable: {err}")],
-                    ..McpConfig::default()
-                };
-            }
-        };
-        Self::load_from(&path)
-    }
-
-    /// [`McpConfig::load`] against an explicit file, the test seam.
-    pub fn load_from(path: &impl AsRef<Path>) -> McpConfig {
-        let raw = match std::fs::read_to_string(path) {
-            Ok(raw) => raw,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                return McpConfig::default();
-            }
-            Err(err) => {
-                return McpConfig {
-                    notices: vec![format!("mcp.yaml unreadable: {err}")],
-                    ..McpConfig::default()
-                };
-            }
-        };
-        let doc: serde_yaml::Mapping = match serde_yaml::from_str(&raw) {
-            Ok(doc) => doc,
-            Err(err) => {
-                return McpConfig {
-                    notices: vec![format!("mcp.yaml skipped: {err}")],
-                    ..McpConfig::default()
-                };
-            }
-        };
-        Self::from_mapping(&doc)
-    }
-
-    /// Builds from a profile's `mcp_servers` mapping: the same fold
-    /// rules as the file, per-entry validation, a notice per skipped
+    /// Folds a map into the validated rows, with a notice per skipped
     /// entry, never an error. Order is the map's (sorted by name).
     pub fn from_entries(entries: &BTreeMap<String, McpServerEntry>) -> McpConfig {
         let mut config = McpConfig::default();
@@ -125,56 +50,10 @@ impl McpConfig {
         }
         config
     }
-
-    /// Folds the `servers` mapping in file order, skipping entries
-    /// that fail validation with a notice each. Duplicate names
-    /// cannot occur here: serde_yaml rejects duplicate keys before
-    /// this runs.
-    fn from_mapping(doc: &serde_yaml::Mapping) -> McpConfig {
-        let mut config = McpConfig::default();
-        let Some(servers) = doc.get("servers") else {
-            config
-                .notices
-                .push("mcp.yaml has no servers mapping".to_owned());
-            return config;
-        };
-        let Ok(entries) = serde_yaml::from_value::<serde_yaml::Mapping>(servers.clone()) else {
-            config
-                .notices
-                .push("mcp.yaml servers is not a mapping".to_owned());
-            return config;
-        };
-        for (name, entry) in entries {
-            let Some(name) = name.as_str().map(str::to_owned) else {
-                config
-                    .notices
-                    .push("mcp.yaml has a non-string server name; skipped".to_owned());
-                continue;
-            };
-            let raw: McpServerEntry = match serde_yaml::from_value(entry) {
-                Ok(raw) => raw,
-                Err(err) => {
-                    config
-                        .notices
-                        .push(format!("mcp server `{name}` skipped: {err}"));
-                    continue;
-                }
-            };
-            match raw.resolve(&name) {
-                Ok(server) => config.servers.push(server),
-                Err(reason) => {
-                    config
-                        .notices
-                        .push(format!("mcp server `{name}` skipped: {reason}"));
-                }
-            }
-        }
-        config
-    }
 }
 
-/// One configured MCP server, validated: the shape the manager and
-/// provision steps consume.
+/// One entry, validated: the shape the settings page and the sandbox
+/// client agree on.
 #[derive(Debug, Clone)]
 pub struct McpServer {
     /// The config key: `[a-z0-9_-]+`, since it rides URLs and defaults
@@ -189,38 +68,8 @@ pub struct McpServer {
     pub startup_timeout: Duration,
     /// The per-call budget the manager caps at the shell's own limit.
     pub timeout: Duration,
-    /// The generated bash function's name: `command_name` when set,
-    /// else [`McpServer::name`]. Matches bash's identifier rules.
+    /// The client's command alias, when the entry sets one.
     pub command_name: String,
-}
-
-impl McpServer {
-    /// The server as the system prompt's `mcp` section carries it: the
-    /// stub's command name, the config key a `mcp tools <server>` call
-    /// names, and the user-written description, verbatim. Content comes
-    /// from config alone: a server never gets prose into the prompt
-    /// beyond its own yaml line.
-    pub fn prompt_line(&self) -> McpServerLine {
-        McpServerLine {
-            name: self.command_name.clone(),
-            server: self.name.clone(),
-            description: self.description.clone(),
-        }
-    }
-}
-
-/// One wired MCP server as the prompt discloses it, the row
-/// [`McpServer::prompt_line`] builds and a frontend without a config
-/// file (a preview) may build directly.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct McpServerLine {
-    /// The bash command and function name (`command_name` or the
-    /// server name).
-    pub name: String,
-    /// The server's config name, for `mcp tools <server>` style calls.
-    pub server: String,
-    /// The user-written description, verbatim.
-    pub description: String,
 }
 
 /// How a server is reached.
@@ -273,11 +122,10 @@ impl fmt::Debug for SecretMap<'_> {
     }
 }
 
-/// The yaml shape of one MCP server entry, as both config scopes
-/// store it: the global `<config dir>/mcp.yaml` `servers` mapping and
-/// a profile's `mcp_servers` mapping. Validation happens at resolve
-/// time, never at deserialize time, so a stored entry round-trips even
-/// while invalid, the frontend can show and fix it.
+/// One server entry as the settings dialog builds it and the sandbox
+/// JSON stores it. Validation happens at resolve time, never at
+/// deserialize time, so a stored entry round-trips even while invalid,
+/// the page can show and fix it.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct McpServerEntry {
@@ -431,303 +279,4 @@ pub fn command_name_ok(name: &str) -> bool {
         _ => return false,
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn load(yaml: &str) -> McpConfig {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("mcp.yaml");
-        std::fs::write(&path, yaml).expect("write");
-        McpConfig::load_from(&path)
-    }
-
-    #[test]
-    fn missing_file_is_an_empty_config() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("mcp.yaml");
-        let config = McpConfig::load_from(&path);
-        assert!(config.servers.is_empty());
-        assert!(config.notices.is_empty());
-    }
-
-    #[test]
-    fn stdio_and_http_entries_parse_with_defaults() {
-        let config = load(
-            "servers:\n  \
-             atlassian:\n    \
-             description: Jira and Confluence\n    \
-             command: [\"npx\", \"-y\", \"@modelcontextprotocol/server-atlassian\"]\n    \
-             env: { JIRA_TOKEN: \"tok\" }\n  \
-             blender:\n    \
-             description: Blender scene operations\n    \
-             url: \"http://127.0.0.1:9721/mcp\"\n    \
-             headers: { Authorization: \"Bearer tok\" }\n    \
-             startup_timeout: 5\n    \
-             timeout: 30\n    \
-             command_name: blend\n",
-        );
-        assert!(config.notices.is_empty(), "{:?}", config.notices);
-        assert_eq!(config.servers.len(), 2);
-        let atlassian = &config.servers[0];
-        assert_eq!(atlassian.name, "atlassian");
-        assert_eq!(atlassian.command_name, "atlassian");
-        assert_eq!(atlassian.startup_timeout, DEFAULT_STARTUP_TIMEOUT);
-        assert_eq!(atlassian.timeout, DEFAULT_TIMEOUT);
-        let McpTransport::Stdio { command, env } = &atlassian.transport else {
-            panic!("stdio expected, got {:?}", atlassian.transport);
-        };
-        assert_eq!(
-            command,
-            &["npx", "-y", "@modelcontextprotocol/server-atlassian"]
-        );
-        assert_eq!(env.get("JIRA_TOKEN").map(String::as_str), Some("tok"));
-        let blender = &config.servers[1];
-        assert_eq!(blender.command_name, "blend");
-        assert_eq!(blender.startup_timeout, Duration::from_secs(5));
-        assert_eq!(blender.timeout, Duration::from_secs(30));
-        let McpTransport::Http { url, headers } = &blender.transport else {
-            panic!("http expected, got {:?}", blender.transport);
-        };
-        assert_eq!(url, "http://127.0.0.1:9721/mcp");
-        assert_eq!(
-            headers.get("Authorization").map(String::as_str),
-            Some("Bearer tok")
-        );
-    }
-
-    #[test]
-    fn debug_redacts_secret_values() {
-        let config = load(
-            "servers:\n  \
-             a:\n    \
-             description: d\n    \
-             url: \"http://127.0.0.1:9/mcp\"\n    \
-             headers: { Authorization: \"Bearer sekret\" }\n",
-        );
-        let rendered = format!("{:?}", config.servers[0]);
-        assert!(!rendered.contains("sekret"), "{rendered}");
-        assert!(rendered.contains("Authorization"), "{rendered}");
-        assert!(rendered.contains("[…]"), "{rendered}");
-    }
-
-    #[test]
-    fn command_and_url_are_exclusive() {
-        let config = load(
-            "servers:\n  \
-             both:\n    \
-             description: d\n    \
-             command: [\"x\"]\n    \
-             url: \"http://127.0.0.1:9/mcp\"\n",
-        );
-        assert!(config.servers.is_empty());
-        assert!(
-            config.notices.iter().any(|n| n.contains("exclusive")),
-            "{:?}",
-            config.notices
-        );
-    }
-
-    #[test]
-    fn missing_transport_is_a_notice() {
-        let config = load("servers:\n  neither:\n    description: d\n");
-        assert!(config.servers.is_empty());
-        assert!(
-            config
-                .notices
-                .iter()
-                .any(|n| n.contains("one of `command`")),
-            "{:?}",
-            config.notices
-        );
-    }
-
-    #[test]
-    fn a_missing_description_defaults_instead_of_dropping_the_server() {
-        // A forgotten yaml field is not a reason to skip the server:
-        // the entry parses with no description and the fold
-        // substitutes the --help pointer at disclosure time.
-        let config = load("servers:\n  blender:\n    command: [uvx, blender-mcp]\n");
-        assert!(config.notices.is_empty(), "{:?}", config.notices);
-        let server = config.servers.first().expect("the server survives");
-        assert_eq!(
-            server.description,
-            "no description provided; blender --help lists its tools"
-        );
-        // And an explicit one rides verbatim.
-        let config = load("servers:\n  b:\n    description: scene ops\n    command: [x]\n");
-        assert_eq!(config.servers[0].description, "scene ops");
-    }
-
-    #[test]
-    fn misplaced_env_and_headers_reject() {
-        let config = load(
-            "servers:\n  \
-             a:\n    \
-             description: d\n    \
-             url: \"http://127.0.0.1:9/mcp\"\n    \
-             env: { X: \"y\" }\n",
-        );
-        assert!(config.servers.is_empty());
-        assert!(
-            config.notices.iter().any(|n| n.contains("`env` belongs")),
-            "{:?}",
-            config.notices
-        );
-    }
-
-    #[test]
-    fn bad_names_and_command_names_skip() {
-        let config = load(
-            "servers:\n  \
-             \"My Server\":\n    \
-             description: d\n    \
-             command: [\"x\"]\n  \
-             good-one:\n    \
-             description: d\n    \
-             command: [\"x\"]\n    \
-             command_name: \"2bad\"\n",
-        );
-        assert_eq!(config.servers.len(), 0);
-        assert_eq!(config.notices.len(), 2, "{:?}", config.notices);
-    }
-
-    #[test]
-    fn duplicate_names_reject_the_whole_file() {
-        // serde_yaml's parser rejects duplicate keys outright, so the
-        // fold never sees them: the file skips whole, notice carries
-        // the parser's message.
-        let config = load(
-            "servers:\n  \
-             a:\n    \
-             description: first\n    \
-             command: [\"x\"]\n  \
-             a:\n    \
-             description: second\n    \
-             command: [\"y\"]\n",
-        );
-        assert!(config.servers.is_empty());
-        assert!(
-            config.notices.iter().any(|n| n.contains("duplicate entry")),
-            "{:?}",
-            config.notices
-        );
-    }
-
-    #[test]
-    fn a_malformed_entry_leaves_its_neighbors_alive() {
-        let config = load(
-            "servers:\n  \
-             broken:\n    \
-             description: d\n    \
-             startup_timeout: \"fast\"\n    \
-             command: [\"x\"]\n  \
-             working:\n    \
-             description: d\n    \
-             command: [\"x\"]\n",
-        );
-        assert_eq!(config.servers.len(), 1);
-        assert_eq!(config.servers[0].name, "working");
-        assert_eq!(config.notices.len(), 1);
-    }
-
-    #[test]
-    fn unknown_fields_reject_the_entry_not_the_file() {
-        let config = load(
-            "servers:\n  \
-             a:\n    \
-             description: d\n    \
-             command: [\"x\"]\n    \
-             oauth: true\n",
-        );
-        assert!(config.servers.is_empty());
-        assert!(
-            config.notices.iter().any(|n| n.contains("unknown field")),
-            "{:?}",
-            config.notices
-        );
-    }
-
-    #[test]
-    fn unparseable_file_is_one_notice_and_no_servers() {
-        let config = load("servers: [oops");
-        assert!(config.servers.is_empty());
-        assert_eq!(config.notices.len(), 1);
-    }
-
-    #[test]
-    fn servers_mapping_of_the_wrong_shape_is_a_notice() {
-        let config = load("servers: 3\n");
-        assert!(config.servers.is_empty());
-        assert!(config.notices.iter().any(|n| n.contains("not a mapping")));
-    }
-
-    #[test]
-    fn missing_servers_mapping_is_a_notice() {
-        let config = load("other: true\n");
-        assert!(config.servers.is_empty());
-        assert!(
-            config
-                .notices
-                .iter()
-                .any(|n| n.contains("no servers mapping"))
-        );
-    }
-
-    #[test]
-    fn zero_timeouts_reject() {
-        let config = load(
-            "servers:\n  \
-             a:\n    \
-             description: d\n    \
-             command: [\"x\"]\n    \
-             timeout: 0\n",
-        );
-        assert!(config.servers.is_empty());
-        assert!(
-            config
-                .notices
-                .iter()
-                .any(|n| n.contains("at least one second")),
-            "{:?}",
-            config.notices
-        );
-    }
-
-    #[test]
-    fn the_reserved_name_survives_config() {
-        // `mcp` is reserved for the meta surface; provision withholds
-        // its generated function, config keeps the server reachable
-        // through `mcp call`.
-        let config = load(
-            "servers:\n  \
-             mcp:\n    \
-             description: d\n    \
-             command: [\"x\"]\n",
-        );
-        assert!(config.notices.is_empty(), "{:?}", config.notices);
-        assert_eq!(config.servers.len(), 1);
-    }
-
-    #[test]
-    fn the_name_charset_is_lowercase_only() {
-        assert!(server_name_ok("atlassian"));
-        assert!(server_name_ok("my-server_2"));
-        assert!(!server_name_ok(""));
-        assert!(!server_name_ok("GitHub"));
-        assert!(!server_name_ok("a b"));
-        assert!(!server_name_ok("a.b"));
-    }
-
-    #[test]
-    fn the_command_name_charset_is_a_bash_identifier() {
-        assert!(command_name_ok("jira"));
-        assert!(command_name_ok("my-server_2"));
-        assert!(!command_name_ok("2jira"));
-        assert!(!command_name_ok("-jira"));
-        assert!(!command_name_ok(""));
-        assert!(!command_name_ok("ji.ra"));
-    }
 }

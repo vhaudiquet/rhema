@@ -1,13 +1,13 @@
-//! The settings MCP page: the active profile's servers as rows, the
+//! The settings MCP page: the sandbox's servers as rows, the
 //! validation state each carries, and the add-server dialog, the
 //! state machine behind the install flow.
 
 use super::*;
 
-/// One row of the MCP page: one server of the active profile's map.
+/// One row of the MCP page: one server of the sandbox's config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServerRow {
-    /// The server's name, the profile map's key.
+    /// The server's name, the config map's key.
     pub name: String,
     /// How it is reached: `stdio` for a command, `http` for a URL.
     /// `None` when the entry names neither (or both), the state the
@@ -25,7 +25,7 @@ pub struct McpServerRow {
     pub notice: Option<String>,
 }
 
-/// The profile's `mcp_servers` map as rendered rows, in name order,
+/// The sandbox's MCP entries as rendered rows, in name order,
 /// each tagged muted from `disabled`. Validation runs through
 /// [`rhema_config::mcp::McpConfig::from_entries`], the same fold the
 /// assembly runs, so a row the manager would keep is clean and a row
@@ -212,9 +212,8 @@ impl Default for PairLines {
 /// The pop-in dialog over the MCP page: the name, the description, the
 /// transport, the command or URL it names, the env or header lines
 /// that ride it, and the optional bash-name override. Building the
-/// entry is the dialog's; inserting it and persisting the profile are
-/// the app's, through the same profile-write path every settings page
-/// uses.
+/// entry is the dialog's; inserting it and writing the sandbox config
+/// are the app's.
 #[derive(Debug)]
 pub struct AddMcpServerDialog {
     /// Which stage of the flow is showing.
@@ -249,7 +248,7 @@ pub struct AddMcpServerDialog {
 }
 
 impl AddMcpServerDialog {
-    /// A dialog at the name stage, refusing the profile's current
+    /// A dialog at the name stage, refusing the sandbox's current
     /// server names.
     pub fn new(taken: BTreeSet<String>) -> Self {
         Self {

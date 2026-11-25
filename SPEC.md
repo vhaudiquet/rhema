@@ -378,7 +378,7 @@ Requested work has a durable record too. `rhema-submissions` keeps one ledger un
   drift test. The format takes further `run` kinds without a
   migration, but the noted `exec` kind (spawn a command, args on
   stdin, stdout is the result) will not be built: user-written script
-  tools are an MCP server's job, `rhema-mcp` already wires those, and
+  tools are an MCP server's job, the standalone `mcp` client already wires those, and
   a second process protocol would be a small reinvention of it. Home:
   the consumer, not the framework. The 0.5.0 review cut the whole
   resident tool seam (`Allowlist`, the `Tool` trait, the registry and

@@ -22,8 +22,26 @@ fn registry() -> &'static Mutex<BTreeMap<String, Wirings>> {
     WIRED.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
+/// The session's runtime key: the profile name, filtered to the
+/// characters a directory can take, plus the process id so two live
+/// sessions never share a tree.
+pub(crate) fn runtime_session_key(session_key: &str) -> String {
+    let clean: String = session_key
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(96)
+        .collect();
+    format!("{clean}-{}", std::process::id())
+}
+
 /// The session's wirings, built once per key. `key` is the runtime
-/// session key [`crate::mcp_wire::runtime_session_key`] returns, the
+/// session key [`runtime_session_key`] returns, the
 /// same name [`rhema_sandbox::kit::place_shared`] places the init under.
 pub(crate) fn wire(root: &SharedRoot, key: &str, jobs_tag: &str) -> Wirings {
     let mut registry = registry().lock().unwrap_or_else(PoisonError::into_inner);

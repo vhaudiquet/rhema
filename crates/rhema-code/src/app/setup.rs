@@ -1026,7 +1026,7 @@ fn agent_config(
 /// the same truth; a sandboxed session answers empty.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn session_agent_config(
-    mcp: &crate::mcp_wire::Registry,
+    mcp: &crate::mcp_config::McpStore,
     kits_registry: &crate::kits::Registry,
     options: &RunOptions,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
@@ -1037,7 +1037,6 @@ pub(crate) fn session_agent_config(
     profile: &rhema_config::Profile,
     session_key: &str,
     session_id: Option<&str>,
-    disabled_mcp: &std::collections::BTreeSet<String>,
     secrets: Option<&Arc<dyn rhema_config::secrets::SecretStore>>,
     jobs_steering: Option<Arc<dyn rhema_host_agent::Steering>>,
     jobs_tag: &str,
@@ -1094,7 +1093,7 @@ pub(crate) fn session_agent_config(
     // session tree; the wirings live in the process registry because
     // dropping one deletes the directory. A sandbox with no shared
     // root (ssh, http) gets neither yet.
-    let key = crate::mcp_wire::runtime_session_key(session_key);
+    let key = crate::shared_kit::runtime_session_key(session_key);
     let shared_kits = sandboxed
         .and_then(|sandboxed| sandboxed.shared())
         .map(|shared| crate::shared_kit::wire(shared, &key, jobs_tag));
@@ -1178,34 +1177,10 @@ pub(crate) fn session_agent_config(
             Needs::HOST_CALL,
         ));
     }
-    let mcp_entry = mcp.wire_for_session(session_key, profile, disabled_mcp, sandboxed, None);
-    if let Some(entry) = &mcp_entry {
-        let mut stubs = vec![builtin_stub(
-            rhema_mcp::provision::RESERVED,
-            rhema_mcp::provision::VAR_BIN,
-            vec![rhema_mcp::provision::RESERVED],
-        )];
-        for line in entry.lines() {
-            stubs.push(
-                Stub::new(
-                    line.name.clone(),
-                    rhema_mcp::provision::VAR_BIN,
-                    vec!["__server".into(), line.server.clone()],
-                )
-                .expect("the MCP command name passed the provisioner's own check"),
-            );
-        }
-        kits.push(kit_for(
-            Feature::Mcp,
-            entry.shell_env().clone(),
-            stubs,
-            Needs::MCP,
-        ));
-    }
     let placed_env = if kits.is_empty() {
         None
     } else if let Some(shared) = sandboxed.and_then(|s| s.shared()) {
-        let key = crate::mcp_wire::runtime_session_key(session_key);
+        let key = crate::shared_kit::runtime_session_key(session_key);
         match rhema_sandbox::kit::place_shared(shared, &key, &kits) {
             Ok(placed) => {
                 if let Some(sandboxed) = sandboxed {
@@ -1237,9 +1212,6 @@ pub(crate) fn session_agent_config(
         if let Some(wiring) = &decision_wiring {
             config.decision = Some(wiring.section.to_owned());
         }
-        if let Some(entry) = &mcp_entry {
-            config.mcp_servers = entry.lines().to_vec();
-        }
         // The env names the sandbox's staging path; the host attaches
         // from the same directory through its own path.
         if let Some(vision) = &vision_wiring {
@@ -1253,7 +1225,8 @@ pub(crate) fn session_agent_config(
             }
         }
     }
-    config.disabled_mcp_servers = disabled_mcp.clone();
+    config.shell_env.extend(mcp.env.clone());
+    config.mcp = mcp.prompt.clone();
     let (mut config, subagents) = rhema_subagents::wire(config);
     // One steering slot, two feeds: the subagent registry drains
     // first, the background-shell feed second, so the announcements

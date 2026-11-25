@@ -171,18 +171,11 @@ pub struct HostAgentConfig {
     /// the model. `None`, the default, runs the turn exactly as
     /// before: the loop is the provided `run_turn` with no injection.
     pub steering: Option<Arc<dyn Steering>>,
-    /// The wired MCP servers, as the prompt's `mcp` section carries
-    /// them, the lines a frontend's wire step produced (spec:
-    /// `specs/rhema-mcp.md` §10). Empty renders no section: a
-    /// frontend that wires nothing advertises nothing.
-    pub mcp_servers: Vec<rhema_config::mcp::McpServerLine>,
-    /// MCP server names to drop from the prompt's section, the
-    /// persisted off switch a frontend reads out of its stored
-    /// settings, the [`disabled_skills`](Self::disabled_skills)
-    /// mechanism. Applied at stamp time over
-    /// [`mcp_servers`](Self::mcp_servers) by config name; the wire
-    /// step filters the same set before anything spawns.
-    pub disabled_mcp_servers: std::collections::BTreeSet<String>,
+    /// The prompt's `mcp` section, verbatim: the output of `mcp
+    /// prompt` in the session, produced by the sandbox's client. `None`
+    /// renders no section. The list is the client's, not the host's:
+    /// the config lives where the servers do.
+    pub mcp: Option<String>,
     /// Subagent definition folder names the subagent wire drops from
     /// discovery, the persisted off switch a frontend reads out of
     /// its stored settings, the [`disabled_skills`](Self::disabled_skills)
@@ -217,7 +210,7 @@ pub struct HostAgentConfig {
     /// function's documentation, produced by the frontend's
     /// provisioning and passed verbatim. `None` renders no section: a
     /// frontend that wired nothing advertises nothing, the same rule
-    /// the `mcp_servers` section follows.
+    /// the `mcp` section follows.
     pub vision: Option<String>,
     /// The prompt section documenting the wired
     /// [`jobs`](rhema_bash::jobs) macro, the `job` bash
@@ -328,8 +321,7 @@ impl HostAgentConfig {
             summary_worker: None,
             steering: None,
             shell_env: std::collections::BTreeMap::new(),
-            mcp_servers: Vec::new(),
-            disabled_mcp_servers: std::collections::BTreeSet::new(),
+            mcp: None,
             disabled_subagents: std::collections::BTreeSet::new(),
             subagent_providers: None,
             environment: None,

@@ -120,50 +120,6 @@ fn the_provider_name_follows_the_same_env_wins_convention() {
 }
 
 #[test]
-fn profile_mcp_servers_round_trip_and_resolve_and_redact() {
-    let yaml = r#"
-profiles:
-  personal:
-    provider: llama-cpp
-    mcp_servers:
-      atlassian:
-        description: Jira and Confluence
-        command: ["npx", "-y", "@modelcontextprotocol/server-atlassian"]
-        env: { JIRA_TOKEN: "hunter2" }
-      blender:
-        description: Blender scene operations
-        url: "http://127.0.0.1:9721/mcp"
-        headers: { Authorization: "Bearer hunter2" }
-      broken:
-        description: both transports named
-        command: ["true"]
-        url: "http://127.0.0.1:1/mcp"
-"#;
-    let settings: Settings = serde_yaml::from_str(yaml).expect("settings parse");
-    let profile = &settings.profiles["personal"];
-    assert_eq!(profile.mcp_servers.len(), 3);
-
-    // The round trip: serialize back, empty map absent, entry
-    // fields stable.
-    let round = serde_yaml::to_string(&settings).unwrap();
-    assert!(!round.contains("mcp_servers: {}"));
-    assert!(round.contains("atlassian:"));
-
-    // Resolve: two valid servers, the transport-XOR entry skips
-    // with a notice naming it.
-    let resolved = crate::mcp::McpConfig::from_entries(&profile.mcp_servers);
-    assert_eq!(resolved.servers.len(), 2);
-    assert!(resolved.notices.iter().any(|n| n.contains("`broken`")));
-
-    // Secrets redact in the entry's Debug: values gone, keys
-    // present. The profile's own Debug names servers only.
-    let debug = format!("{:?}", profile.mcp_servers["atlassian"]);
-    assert!(!debug.contains("hunter2"));
-    assert!(debug.contains("JIRA_TOKEN"));
-    assert!(!format!("{profile:?}").contains("hunter2"));
-}
-
-#[test]
 fn the_sandbox_instance_resolves_through_the_active_name_then_the_first() {
     let mut profile = Profile {
         sandbox: Some(SandboxSettings {
@@ -892,4 +848,13 @@ fn place_decision_key_prefers_the_store_and_falls_back_to_the_file() {
             .as_deref(),
         Some("sk-file")
     );
+}
+
+#[test]
+fn an_old_host_mcp_map_loads_once_and_never_serializes_again() {
+    let yaml = "profiles:\n  personal:\n    mcp_servers:\n      jira:\n        description: Jira\n        command: [uvx, jira-mcp]\n";
+    let settings: Settings = serde_yaml::from_str(yaml).expect("the old shape still loads");
+    assert_eq!(settings.profiles["personal"].legacy_mcp_servers.len(), 1);
+    let round = serde_yaml::to_string(&settings).unwrap();
+    assert!(!round.contains("mcp_servers"), "{round}");
 }

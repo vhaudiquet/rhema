@@ -75,9 +75,9 @@ pub struct App {
     /// transcript showed every one as a sent user line at submit time;
     /// this queue is the promise they reach the model in that order.
     pending_prompts: std::collections::VecDeque<String>,
-    /// The MCP wirings this process owns. Dropping the app drops the
-    /// entries, which removes their session and provision dirs.
-    pub(crate) mcp: crate::mcp_wire::Registry,
+    /// The sandbox-owned MCP config: the settings page's entries and
+    /// the `mcp prompt` section the model sees.
+    pub(crate) mcp: crate::mcp_config::McpStore,
     /// The placed kit files this app owns. Dropping the app removes
     /// their init directories.
     pub(crate) kits: crate::kits::Registry,
@@ -484,7 +484,7 @@ impl App {
     /// stored model: the footer names what is missing in red, the
     /// commands to fix it are one keystroke away, and nothing gates the
     /// session behind a login screen.
-    pub fn new(setup: AppSetup) -> Result<Self, HostAgentError> {
+    pub fn new(mut setup: AppSetup) -> Result<Self, HostAgentError> {
         let mut session = setup.session;
         let sessions_base = setup
             .sessions_base
@@ -559,9 +559,36 @@ impl App {
             }
         }
         let transcript = Transcript::from_history(&session.history);
-        // One registry per app: its entries own the MCP session dirs,
-        // so the app's own drop removes them.
-        let mcp = crate::mcp_wire::Registry::new();
+        // The MCP config belongs to the sandbox, not the host profile:
+        // a mounted sandbox's store reads the shared runtime root, the
+        // local session's reads `~/.config/rhema/mcp/config.json`.
+        let mut mcp = match &setup.sandboxed {
+            Some(sandboxed) => sandboxed.mcp().clone(),
+            None => crate::mcp_config::McpStore::local(
+                rhema_home.as_ref(),
+                &setup.config.disabled_mcp_servers,
+            ),
+        };
+        let muted_before = mcp.env.get("MCP_DISABLED").cloned().unwrap_or_default();
+        mcp.set_disabled(setup.config.disabled_mcp_servers.clone());
+        if muted_before != mcp.env.get("MCP_DISABLED").cloned().unwrap_or_default() {
+            mcp.reprobe();
+        }
+        // An older config kept the servers host-side. Move them into
+        // the sandbox's config once, then save without the legacy
+        // field; the page and the prompt see the moved set.
+        let legacy = setup.config.take_legacy_mcp_servers();
+        if !legacy.is_empty() {
+            for (name, entry) in legacy {
+                mcp.insert(name, entry);
+            }
+            if let Err(err) = mcp.save_and_probe() {
+                eprintln!("warning: the old MCP servers did not move into the sandbox: {err}");
+            }
+            if let Err(err) = setup.store.save(&setup.config) {
+                eprintln!("warning: the old MCP servers were not cleared from the config: {err}");
+            }
+        }
         let kits = crate::kits::Registry::new();
         let screen = if setup.onboard {
             let workspace = crate::args::canonical(&setup.options.workspace);
@@ -610,7 +637,6 @@ impl App {
                             .as_deref()
                             .unwrap_or(rhema_config::DEFAULT_PROFILE),
                         Some(&jobs_tag),
-                        &setup.config.disabled_mcp_servers,
                         setup.secrets.as_ref(),
                         jobs.as_ref().map(crate::jobs::JobsHandle::steering),
                         &jobs_tag,

@@ -147,21 +147,13 @@ mod system_tests {
         // shape; the lines are injected, not read from the machine's
         // mcp.yaml.
         let base = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            base.path(),
-            "{% for n in mcp %}- {{ n.name }} (server: {{ n.server }}): {{ n.description }}\n{% endfor %}",
-        )
-        .unwrap();
+        std::fs::write(base.path(), "{{ mcp }}").unwrap();
         let workspace = tempfile::tempdir().unwrap();
-        let mcp = vec![rhema_config::mcp::McpServerLine {
-            name: "blender".to_owned(),
-            server: "blender".to_owned(),
-            description: "Blender scene operations".to_owned(),
-        }];
+        let mcp = Some("MCP servers installed:\n- blender: Blender scene operations".to_owned());
         let prompt =
             system_show_at_with_mcp(Some(base.path()), workspace.path(), None, mcp, None).unwrap();
         assert!(
-            prompt.contains("- blender (server: blender): Blender scene operations"),
+            prompt.contains("- blender: Blender scene operations"),
             "{prompt}"
         );
     }

@@ -116,7 +116,6 @@ rhema-websearch-registry = { path = "../rhema-websearch-registry", version = "0.
 rhema-decision = { path = "../rhema-decision", version = "0.4.2", default-features = false }
 rhema-decision-registry = { path = "../rhema-decision-registry", version = "0.4.2" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync"] }
-rhema-mcp = { version = "0.4.2", path = "../rhema-mcp" }
 serde_yaml.workspace = true
 # The installer's published `<url>.sha256` is checked before it runs
 sha2 = "0.11"
@@ -132,9 +131,6 @@ rhema-decision = { path = "../rhema-decision", version = "0.4.2", features = ["m
 rhema-sandbox = { path = "../rhema-sandbox", features = ["mock"] }
 tempfile = "3"
 
-[[test]]
-name = "mcp_wire_turn"
-harness = false
 
 [lints]
 workspace = true

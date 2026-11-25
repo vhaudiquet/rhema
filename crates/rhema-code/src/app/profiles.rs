@@ -150,6 +150,25 @@ impl App {
             outgoing.shutdown();
         }
         self.sandboxed = assembled;
+        // The config lives where the commands now run. A switch to
+        // another sandbox (or back to the host) must move the page's
+        // store with it, not leave the old machine's file behind.
+        let mut mcp = match &self.sandboxed {
+            Some(sandboxed) => sandboxed.mcp().clone(),
+            None => crate::mcp_config::McpStore::local(
+                self.home
+                    .as_deref()
+                    .map(rhema_config::Home::under_home)
+                    .as_ref(),
+                &self.disabled_mcp_servers,
+            ),
+        };
+        let before = mcp.env.get("MCP_DISABLED").cloned().unwrap_or_default();
+        mcp.set_disabled(self.disabled_mcp_servers.clone());
+        if before != mcp.env.get("MCP_DISABLED").cloned().unwrap_or_default() {
+            mcp.reprobe();
+        }
+        self.mcp = mcp;
     }
 
     /// Rebuilds the running agent carrying the conversation over, the
@@ -261,7 +280,6 @@ impl App {
                 .as_deref()
                 .unwrap_or(rhema_config::DEFAULT_PROFILE),
             Some(&self.jobs_tag),
-            &self.config.disabled_mcp_servers,
             self.secrets.as_ref(),
             self.jobs.as_ref().map(crate::jobs::JobsHandle::steering),
             &self.jobs_tag,

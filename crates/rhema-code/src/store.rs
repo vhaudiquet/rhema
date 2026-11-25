@@ -197,6 +197,14 @@ impl Default for Document {
 }
 
 impl Document {
+    /// Takes the old host MCP entries so the app can move them into
+    /// the sandbox's config.
+    pub fn take_legacy_mcp_servers(
+        &mut self,
+    ) -> BTreeMap<String, rhema_config::mcp::McpServerEntry> {
+        self.settings.take_legacy_mcp_servers()
+    }
+
     /// Loads the document; a missing file is the default document, not
     /// an error.
     pub fn load() -> Result<Document, ConfigError> {

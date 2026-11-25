@@ -38,10 +38,8 @@ impl App {
             .as_deref()
             .and_then(|kind| SandboxChoice::from_stored(Some(kind)));
         settings.update = self.update.clone();
-        settings.mcp = crate::screens::mcp_server_rows(
-            &settings.stored.mcp_servers,
-            &self.disabled_mcp_servers,
-        );
+        settings.mcp =
+            crate::screens::mcp_server_rows(self.mcp.entries(), &self.disabled_mcp_servers);
         settings.websearch = crate::screens::websearch_rows(
             &settings.stored.websearch,
             &settings.stored.websearch_order,
@@ -186,10 +184,8 @@ impl App {
         };
         settings.mcp_dialog = None;
         settings.stored = self.config.effective(self.session_profile.as_deref());
-        settings.mcp = crate::screens::mcp_server_rows(
-            &settings.stored.mcp_servers,
-            &self.disabled_mcp_servers,
-        );
+        settings.mcp =
+            crate::screens::mcp_server_rows(self.mcp.entries(), &self.disabled_mcp_servers);
         let rows = settings.mcp.len() + 1;
         if settings.row >= rows {
             settings.row = rows.saturating_sub(1);
@@ -202,7 +198,7 @@ impl App {
         let Screen::Settings(settings) = &mut self.screen else {
             return;
         };
-        let taken = settings.stored.mcp_servers.keys().cloned().collect();
+        let taken = self.mcp.entries().keys().cloned().collect();
         settings.mcp_dialog = Some(crate::screens::AddMcpServerDialog::new(taken));
     }
 
@@ -224,6 +220,8 @@ impl App {
         } else {
             self.config.disabled_mcp_servers.remove(name);
         }
+        self.mcp.set_disabled(self.disabled_mcp_servers.clone());
+        self.mcp.reprobe();
         if let Screen::Settings(settings) = &mut self.screen {
             for row in &mut settings.mcp {
                 if row.name == name {
@@ -246,8 +244,8 @@ impl App {
     }
 
     /// The add-server dialog's accepted entry: it lands in the
-    /// profile's `mcp_servers` map through the same profile write the
-    /// other settings pages use, and the snapshot follows.
+    /// sandbox's MCP config, not the host profile. The running agent
+    /// rebuilds so the next turn's prompt carries the new server.
     pub(crate) fn submit_mcp_server(&mut self) -> Vec<Effect> {
         let built = match &self.screen {
             Screen::Settings(settings) => settings
@@ -259,45 +257,28 @@ impl App {
         let Some((name, entry)) = built else {
             return Vec::new();
         };
-        // The dialog dedupes against its opening snapshot; this is
-        // the belt for a path that should not exist.
-        if self.effective().mcp_servers.contains_key(&name) {
+        if self.mcp.entries().contains_key(&name) {
             self.transcript
                 .push_notice(&format!("a server named {name} already exists"));
             return Vec::new();
         }
-        self.config
-            .set_for_profile(self.session_profile.as_deref(), |profile| {
-                profile.mcp_servers.insert(name.clone(), entry);
-            });
-        if !self.save_config() {
+        self.mcp.insert(name.clone(), entry);
+        if let Err(err) = self.mcp.save_and_probe() {
+            self.mcp.remove(&name);
+            self.transcript
+                .push_notice(&format!("the {name} server was not saved: {err}"));
             return Vec::new();
         }
         self.refresh_mcp_page();
-        // The tool surface changed, so the cached wiring is stale:
-        // drop it and rebuild, and the very next turn's prompt lists
-        // the new server. Same shape as the mute toggle's rebuild,
-        // the conversation rides over.
-        self.mcp.rewire(self.mcp_session_key().as_str());
         let _ = self.rebuild_live_agent(false);
         self.transcript.push_notice(&format!(
-            "added the {name} server to this profile, the agent rebuilt with it"
+            "added the {name} server to this sandbox, the agent rebuilt with it"
         ));
         Vec::new()
     }
 
-    /// The MCP registry key for this session: the profile's name, the
-    /// same key `session_agent_config` wired under.
-    pub(crate) fn mcp_session_key(&self) -> String {
-        self.session_profile
-            .clone()
-            .unwrap_or_else(|| rhema_config::DEFAULT_PROFILE.to_owned())
-    }
-
-    /// `y` on the removal confirm: the entry leaves the profile's map
-    /// and the config persists, the way the sandbox instance removal
-    /// writes. A muted name dies with its server, nothing left to
-    /// mute.
+    /// `y` on the removal confirm: the entry leaves the sandbox's MCP
+    /// config and the running agent rebuilds without it.
     pub(crate) fn remove_mcp_server(&mut self) -> Vec<Effect> {
         let Some(name) = (match &self.screen {
             Screen::Settings(settings) => settings.selected_mcp_server().map(str::to_owned),
@@ -305,22 +286,23 @@ impl App {
         }) else {
             return Vec::new();
         };
-        let mut removed = false;
-        self.config
-            .set_for_profile(self.session_profile.as_deref(), |profile| {
-                removed = profile.mcp_servers.remove(&name).is_some();
-            });
-        if !removed {
+        let Some(entry) = self.mcp.entries().get(&name).cloned() else {
+            return Vec::new();
+        };
+        if !self.mcp.remove(&name) {
             return Vec::new();
         }
-        if !self.save_config() {
+        if let Err(err) = self.mcp.save_and_probe() {
+            self.mcp.insert(name.clone(), entry);
+            self.transcript
+                .push_notice(&format!("the {name} server was not removed: {err}"));
             return Vec::new();
         }
         self.disabled_mcp_servers.remove(&name);
+        self.config.disabled_mcp_servers.remove(&name);
+        let _ = self.save_config();
+        self.mcp.set_disabled(self.disabled_mcp_servers.clone());
         self.refresh_mcp_page();
-        // The surface shrank: drop the wiring so the rebuilt agent
-        // stops advertising the removed server.
-        self.mcp.rewire(self.mcp_session_key().as_str());
         let _ = self.rebuild_live_agent(false);
         self.transcript
             .push_notice(&format!("removed the {name} server"));

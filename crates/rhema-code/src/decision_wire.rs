@@ -11,7 +11,7 @@
 //! wiring's env var, pinned at session start, the one per-session
 //! input a standalone exec can carry without session state.
 //!
-//! The session wiring gate is the mcp_wire rule: a sandboxed session
+//! The session wiring gate is the sandbox wiring rule: a sandboxed session
 //! wires nothing, and a profile naming no decision provider wires
 //! nothing, no function and no prompt section
 //! (`specs/rhema-decision.md` §10). One wiring per session key, held
@@ -54,7 +54,7 @@ const USAGE: &str = "decide: ask a decision model (Jev, Clef, or one OpenRouter 
 /// misdirected pipe is a hang with output.
 const MAX_REQUEST_BYTES: u64 = 4 * 1024 * 1024;
 
-/// One session's wiring, the mcp_wire shape: the provisioned init
+/// One session's wiring, the sandbox wiring shape: the provisioned init
 /// file held for the process's life, one per session key.
 static WIRED: OnceLock<Mutex<BTreeMap<String, Arc<rhema_bash::decision::Wiring>>>> =
     OnceLock::new();
@@ -621,6 +621,7 @@ mod sandbox_tests {
             instance_lock: None,
             managed: None,
             shared: Some(rhema_sandbox::kit::SharedRoot::new(dir.path())),
+            mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
             session: Default::default(),
         };
         (sandboxed, dir)

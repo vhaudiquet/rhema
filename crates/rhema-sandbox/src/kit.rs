@@ -756,7 +756,6 @@ mod tests {
                 kit(Feature::Jobs, Needs::MACRO),
                 kit(Feature::Vision, Needs::MACRO),
                 kit(Feature::Search, Needs::HOST_CALL),
-                kit(Feature::Mcp, Needs::MCP),
             ],
             &caps,
         );
@@ -766,14 +765,6 @@ mod tests {
                 .all(|(_, decision)| *decision == Decision::Shared),
             "{decisions:?}"
         );
-    }
-
-    #[test]
-    fn a_pulling_sandbox_keeps_jobs_and_vision_but_loses_mcp() {
-        let jobs = decide(&Needs::MACRO, &Capabilities::SANDBOX);
-        assert_eq!(jobs, Decision::Sandbox);
-        let mcp = decide(&Needs::MCP, &Capabilities::SANDBOX);
-        assert_eq!(mcp, Decision::Skip("the mcp socket needs a shared path"));
     }
 
     #[test]

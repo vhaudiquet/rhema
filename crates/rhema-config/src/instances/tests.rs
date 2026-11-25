@@ -104,6 +104,7 @@ fn a_custom_endpoint_api_choice_round_trips_and_parses_both_spellings() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.yaml");
     let profile = Profile {
+        legacy_mcp_servers: BTreeMap::new(),
         provider: Some("openai".into()),
         instance: Some("proxy".into()),
         instances: BTreeMap::from([(
@@ -117,7 +118,6 @@ fn a_custom_endpoint_api_choice_round_trips_and_parses_both_spellings() {
             },
         )]),
         sandbox_instances: BTreeMap::new(),
-        mcp_servers: BTreeMap::new(),
         websearch: BTreeMap::new(),
         websearch_order: Vec::new(),
         decision: None,

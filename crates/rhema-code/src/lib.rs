@@ -67,7 +67,7 @@ pub mod icons;
 pub mod jobs;
 pub(crate) mod kits;
 pub mod markdown;
-pub(crate) mod mcp_wire;
+pub(crate) mod mcp_config;
 pub mod onboarding;
 mod open_url;
 pub mod palette;

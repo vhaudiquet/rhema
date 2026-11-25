@@ -98,9 +98,7 @@ Rules:
   - `decision-registry`: the decision fleet's name-to-adapter wiring
     and the profile-to-provider resolution
     (`crates/rhema-decision-registry/`)
-  - `mcp`: the MCP client extension: the protocol subset, the manager,
-    the bridge, and the provisioned shell functions
-    (`crates/rhema-mcp/`)
+  - `mcp` is a separate workspace: the CLI client, not a rhema crate
   - `mcp-to-cli`: the schema-to-CLI mapping crate: MCP tool catalogs
     to clap commands, argv matches to JSON (its own repository,
     `git.vhaudiquet.fr/vhaudiquet/mcp-to-cli`; zero rhema deps)

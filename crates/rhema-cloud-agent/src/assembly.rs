@@ -170,8 +170,7 @@ impl AgentAssembly {
             // Skill selection is the client's: the seeds it sends are
             // the whole list, nothing filtered here.
             disabled_skills: Default::default(),
-            mcp_servers: Vec::new(),
-            disabled_mcp_servers: std::collections::BTreeSet::new(),
+            mcp: None,
             // No subagent wire runs here (nothing discovers off a
             // filesystem), so nothing to hold back either, and no
             // provider factory to resolve a cross-provider `model`

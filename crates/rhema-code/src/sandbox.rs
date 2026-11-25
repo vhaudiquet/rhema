@@ -104,6 +104,8 @@ pub struct Sandboxed {
     /// has one: the install, the MCP socket, and the session tree
     /// live under it, and the sandbox sees the host path itself.
     pub(crate) shared: Option<SharedRoot>,
+    /// The sandbox-owned MCP config and its `mcp prompt` section.
+    pub(crate) mcp: crate::mcp_config::McpStore,
     /// The shared session tree's guard, when this session placed kits.
     /// Dropping it removes the tree; the field keeps it alive as long
     /// as the frontend keeps this assembly.
@@ -475,6 +477,14 @@ pub async fn assemble(
         lock.share()
             .map_err(|err| anyhow::anyhow!("the sandbox lock: {err}"))?;
     }
+    let mcp = crate::mcp_config::McpStore::for_sandbox(
+        Arc::clone(&sandbox),
+        shared.as_ref(),
+        &target,
+        &workspace_string,
+        &std::collections::BTreeSet::new(),
+    )
+    .await;
     let tools = Arc::new(ShellTools::with_executor(
         workspace_string.clone(),
         Arc::new(ShellSandbox::new(sandbox)),
@@ -488,11 +498,17 @@ pub async fn assemble(
         instance_lock,
         managed,
         shared,
+        mcp,
         session: std::sync::Mutex::new(None),
     })
 }
 
 impl Sandboxed {
+    /// The sandbox-owned MCP state.
+    pub(crate) fn mcp(&self) -> &crate::mcp_config::McpStore {
+        &self.mcp
+    }
+
     /// The runtime root the sandbox shares with this host, when the
     /// backend mounts one.
     pub(crate) fn shared(&self) -> Option<&SharedRoot> {

@@ -138,7 +138,7 @@ A skill in a rhema directory hides a skill with the same name in an `.agents` di
 
 Rhema bundles two skills, `commit-message` and `unslop`, and seeds them into the global skills directory on start. A bundled skill you have edited is left alone, and a folder of the same name shadows it like any other. Toggle skills on and off from the Skills page (`enter`/`space`) or at onboarding; a switched-off skill's trigger leaves the system prompt but keeps its row, greyed, in the lists.
 
-MCP servers wire through bash: the global `~/.config/rhema/mcp.yaml` (or the profile's `mcp_servers`) names them, the prompt's `mcp` section discloses what survived, and the generated `atlassian create_issue --project ENG`-shaped commands call the bridge (`rhema mcp servers/tools/schema/call` runs the same calls from your own shell; `specs/rhema-mcp.md` is the design).
+MCP servers live in the sandbox, not the host profile. The settings page edits `~/.config/rhema/mcp/config.json` inside the sandbox (the shared runtime root's `mcp/<target>/config.json` for mounted backends), and the prompt's `mcp` section is the standalone `mcp prompt` output. The model calls `mcp <server> --list`, `mcp <server> <tool> --flag value`, and the rest; no host bridge and no `rhema mcp` subcommand.
 
 ### Subagents
 

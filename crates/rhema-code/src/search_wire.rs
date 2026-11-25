@@ -10,7 +10,7 @@
 //! pinned at session start, the one per-session input a standalone
 //! exec can carry without session state.
 //!
-//! The session wiring gate is the mcp_wire rule: a sandboxed session
+//! The session wiring gate is the sandbox wiring rule: a sandboxed session
 //! wires nothing, and a profile with no providers wires nothing, no
 //! function and no prompt section (`specs/rhema-websearch.md` §8).
 //! One wiring per session key, held for the process, because the
@@ -42,7 +42,7 @@ const USAGE: &str = "search: web search through this session's providers
     exit 0: results printed      exit 1: every provider failed
     exit 2: bad usage            exit 4: not wired in this shell";
 
-/// One session's wiring, the mcp_wire shape: the provisioned init
+/// One session's wiring, the sandbox wiring shape: the provisioned init
 /// file held for the process's life, one per session key.
 static WIRED: OnceLock<Mutex<BTreeMap<String, Arc<rhema_bash::websearch::Wiring>>>> =
     OnceLock::new();
@@ -428,6 +428,7 @@ mod sandbox_tests {
             instance_lock: None,
             managed: None,
             shared: shared.then(|| rhema_sandbox::kit::SharedRoot::new(dir.path())),
+            mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
             session: Default::default(),
         };
         (sandboxed, dir)

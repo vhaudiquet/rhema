@@ -1,3 +1,9 @@
+> **Superseded.** The host-side bridge, profile `mcp_servers`, and
+> `rhema mcp` subcommand are gone. The sandbox-owned config and the
+> standalone `mcp` CLI are the current design; see
+> `crates/rhema-code/src/mcp_config.rs` and the `mcp-cli` workspace.
+> The protocol notes below still describe the client.
+
 # rhema-mcp, the MCP client, wired through bash
 
 > **Status:** v2, 2026-11-03. Supersedes the same-day v1 draft; the

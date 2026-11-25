@@ -375,7 +375,7 @@ fn harness_inner(
             .map(|store| store as Arc<dyn rhema_config::secrets::SecretStore>),
         sandboxed: None,
         sandbox_machines: crate::sandbox::SandboxMachines::default(),
-        home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
+        home: Some(sessions.path().join("home")),
         onboard: false,
         options: RunOptions {
             colors: crate::palette::Palette::Rhema,
@@ -3847,6 +3847,7 @@ fn choosing_a_sandbox_stores_the_kind_notes_the_workspace_and_rebuilds() {
         instance_lock: None,
         managed: None,
         shared: None,
+        mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
         session: Default::default(),
     });
     h.app.sandbox_offered = offered(true, true, false, false, false);
@@ -3898,6 +3899,7 @@ fn choosing_a_non_local_sandbox_assembles_through_an_effect() {
         instance_lock: None,
         managed: None,
         shared: None,
+        mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
         session: Default::default(),
     };
     let effects = h.app.on_event(crate::events::UiEvent::SandboxAssembled {
@@ -4053,6 +4055,7 @@ fn a_profile_switch_moves_bash_to_the_new_profiles_sandbox() {
         instance_lock: None,
         managed: None,
         shared: None,
+        mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
         session: Default::default(),
     });
     // work (moving in) stores nothing: its own sandbox is local.
@@ -4122,6 +4125,7 @@ fn a_switch_keeps_a_sandbox_the_new_profile_resolves_to() {
         instance_lock: None,
         managed: None,
         shared: None,
+        mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
         session: Default::default(),
     });
     // work resolves to the same kind AND the same target: the
@@ -4186,6 +4190,7 @@ fn the_sandbox_badge_names_the_kind_or_the_instance() {
         instance_lock: None,
         managed: None,
         shared: None,
+        mcp: crate::mcp_config::McpStore::local(None, &std::collections::BTreeSet::new()),
         session: Default::default(),
     });
     // No instance stored: the badge is the kind.
@@ -4629,7 +4634,7 @@ fn a_logged_in_profile_opens_the_chat_without_the_login_screen() {
         secrets: None,
         sandboxed: None,
         sandbox_machines: crate::sandbox::SandboxMachines::default(),
-        home: Some(std::env::temp_dir().join(format!("rhema-app-home-{}", std::process::id()))),
+        home: Some(std::env::temp_dir().join(format!("rhema-startup-home-{}", std::process::id()))),
         onboard: false,
         options: RunOptions {
             colors: crate::palette::Palette::Rhema,
@@ -7361,27 +7366,19 @@ fn retry_waits_while_a_turn_runs() {
 
 /// A stdio server stored on the harness's profile.
 fn store_mcp_server(h: &mut Harness, name: &str) {
-    h.app.config.set_for_profile(Some("personal"), |profile| {
-        profile.mcp_servers.insert(
-            name.to_owned(),
-            rhema_config::mcp::McpServerEntry {
-                description: "Jira and Confluence".to_owned(),
-                command: Some(vec!["npx".to_owned(), "-y".to_owned(), "server".to_owned()]),
-                url: None,
-                env: BTreeMap::new(),
-                headers: BTreeMap::new(),
-                startup_timeout: None,
-                timeout: None,
-                command_name: None,
-            },
-        );
-    });
-    h.store.save(&h.app.config).unwrap();
-}
-
-/// The profile the store holds, reloaded.
-fn stored_profile(h: &Harness) -> rhema_config::Profile {
-    h.store.load().unwrap().effective(Some("personal"))
+    h.app.mcp.insert(
+        name.to_owned(),
+        rhema_config::mcp::McpServerEntry {
+            description: "Jira and Confluence".to_owned(),
+            command: Some(vec!["npx".to_owned(), "-y".to_owned(), "server".to_owned()]),
+            url: None,
+            env: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            startup_timeout: None,
+            timeout: None,
+            command_name: None,
+        },
+    );
 }
 
 #[test]
@@ -7452,14 +7449,14 @@ fn the_mcp_add_dialog_inserts_and_persists() {
         panic!("expected the settings screen");
     };
     assert!(settings.mcp_dialog.is_none(), "the dialog spent itself");
-    let entry = &settings.stored.mcp_servers["atlassian"];
+    let entry = &h.app.mcp.entries()["atlassian"];
     assert_eq!(entry.description, "Jira and Confluence");
     assert_eq!(entry.env.get("JIRA_TOKEN").map(String::as_str), Some("t"));
-    // The store holds it: the profile write went through save_config.
-    let stored = stored_profile(&h);
-    assert_eq!(stored.mcp_servers.len(), 1);
+    // The sandbox store holds it; the host profile carries no copy.
+    let stored = h.app.mcp.entries();
+    assert_eq!(stored.len(), 1);
     assert_eq!(
-        stored.mcp_servers["atlassian"].command,
+        stored["atlassian"].command,
         Some(vec![
             "npx".to_owned(),
             "-y".to_owned(),
@@ -7492,11 +7489,7 @@ fn the_mcp_remove_confirms_then_deletes_and_persists() {
         panic!("expected the settings screen");
     };
     assert_eq!(settings.mcp_confirm.as_deref(), Some("atlassian"));
-    assert_eq!(
-        stored_profile(&h).mcp_servers.len(),
-        1,
-        "d alone removes nothing"
-    );
+    assert_eq!(h.app.mcp.entries().len(), 1, "d alone removes nothing");
     // Anything but y and n keeps asking.
     h.app.on_key(key(KeyCode::Char('x')));
     let Screen::Settings(settings) = &h.app.screen else {
@@ -7507,11 +7500,11 @@ fn the_mcp_remove_confirms_then_deletes_and_persists() {
     h.app.on_key(key(KeyCode::Char('n')));
     h.app.on_key(key(KeyCode::Char('d')));
     h.app.on_key(key(KeyCode::Char('y')));
-    let stored = stored_profile(&h);
+    let stored = h.app.mcp.entries();
     assert!(
-        stored.mcp_servers.is_empty(),
+        stored.is_empty(),
         "the confirm removed it: {:?}",
-        stored.mcp_servers.keys().collect::<Vec<_>>()
+        stored.keys().collect::<Vec<_>>()
     );
     let Screen::Settings(settings) = &h.app.screen else {
         panic!("expected the settings screen");
@@ -7539,7 +7532,7 @@ fn the_mcp_mute_round_trips() {
         h.app.disabled_mcp_servers.contains("atlassian"),
         "the mute lands in the set"
     );
-    assert_eq!(stored_profile(&h).mcp_servers.len(), 1, "the entry stays");
+    assert_eq!(h.app.mcp.entries().len(), 1, "the entry stays");
     let Screen::Settings(settings) = &h.app.screen else {
         panic!("expected the settings screen");
     };
