@@ -15,10 +15,12 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 # The encrypted file store (see src/secrets.rs): the age format, a
-# pure-Rust X25519 + ChaCha20-Poly1305 implementation. 0.12 pulls
-# ml-kem 0.2.1, which currently fails to build against crypto-common
-# 0.2; 0.11 has the same X25519 API without the post-quantum branch.
-age = "0.11"
+# pure-Rust X25519 + ChaCha20-Poly1305 implementation. The 0.12.1
+# release still pins ml-kem 0.2, whose `kem` requirement collides with
+# the 0.3 that russh needs (see crates/rhema-sandbox-ssh). Main has
+# moved to the new RustCrypto stack (ml-kem 0.3) with the same X25519
+# API; pin a rev until a release carries it.
+age = { git = "https://github.com/str4d/rage", rev = "eaa85530ba78734924ccf41b16dd55daa29b7cfd" }
 # The old OS keyring, read-only: the one-way importer opens it to copy
 # `secret_ref`s the file store is missing. Nothing writes or deletes
 # there, and an SSH session skips it (see src/secrets.rs).
