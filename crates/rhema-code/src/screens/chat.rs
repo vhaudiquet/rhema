@@ -318,13 +318,10 @@ impl ChatState {
         self.byte_offset_at(self.cursor)
     }
 
-    /// Deletes the word left of the cursor: its trailing whitespace,
-    /// then the run of non-whitespace before it. Alt-Backspace is the
-    /// readline `backward-kill-word` shape.
-    fn delete_word_backward(&mut self) {
-        if self.cursor == 0 {
-            return;
-        }
+    /// The character index where the word left of the cursor starts:
+    /// past its trailing whitespace, then past the run of non-whitespace
+    /// before it.
+    fn word_start(&self) -> usize {
         let chars: Vec<char> = self.input.chars().collect();
         let mut start = self.cursor.min(chars.len());
         while start > 0 && chars[start - 1].is_whitespace() {
@@ -332,6 +329,44 @@ impl ChatState {
         }
         while start > 0 && !chars[start - 1].is_whitespace() {
             start -= 1;
+        }
+        start
+    }
+
+    /// The character index where the word right of the cursor ends:
+    /// past its leading whitespace, then past the run of non-whitespace
+    /// after it. The cursor itself when it sits at the input's end.
+    fn word_end(&self) -> usize {
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut end = self.cursor.min(chars.len());
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+        end
+    }
+
+    /// Moves the cursor to [`Self::word_start`]: Alt-Left, the readline
+    /// `backward-word` shape.
+    fn move_word_backward(&mut self) {
+        self.cursor = self.word_start();
+    }
+
+    /// Moves the cursor to [`Self::word_end`]: Alt-Right, the readline
+    /// `forward-word` shape.
+    fn move_word_forward(&mut self) {
+        self.cursor = self.word_end();
+    }
+
+    /// Deletes the word left of the cursor: its trailing whitespace,
+    /// then the run of non-whitespace before it. Alt-Backspace is the
+    /// readline `backward-kill-word` shape.
+    fn delete_word_backward(&mut self) {
+        let start = self.word_start();
+        if start == self.cursor {
+            return;
         }
         let end = self.byte_offset();
         self.delete_range(self.byte_offset_at(start), end);
@@ -342,16 +377,9 @@ impl ChatState {
     /// [`Self::delete_word_backward`]: leading whitespace, then the run
     /// of non-whitespace after it.
     fn delete_word_forward(&mut self) {
-        let chars: Vec<char> = self.input.chars().collect();
-        if self.cursor >= chars.len() {
+        let end = self.word_end();
+        if end == self.cursor {
             return;
-        }
-        let mut end = self.cursor;
-        while end < chars.len() && chars[end].is_whitespace() {
-            end += 1;
-        }
-        while end < chars.len() && !chars[end].is_whitespace() {
-            end += 1;
         }
         self.delete_range(self.byte_offset(), self.byte_offset_at(end));
     }
@@ -459,6 +487,16 @@ impl ChatState {
                     self.cursor -= 1;
                     self.delete_range(start, end);
                 }
+                ChatAction::None
+            }
+            // Alt-Left and Alt-Right move by word, the readline pair
+            // every shell and every editor binds.
+            KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_backward();
+                ChatAction::None
+            }
+            KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.move_word_forward();
                 ChatAction::None
             }
             KeyCode::Left => {

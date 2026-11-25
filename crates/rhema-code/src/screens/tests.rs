@@ -1627,6 +1627,42 @@ fn alt_backspace_and_alt_delete_erase_one_word() {
 }
 
 #[test]
+fn alt_left_and_alt_right_move_one_word() {
+    fn alt(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::ALT)
+    }
+    let mut chat = ChatState::new();
+    chat.insert_str("git commit -m msg");
+    assert_eq!(chat.cursor, 17);
+    chat.handle_key(alt(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 14);
+    // `-m` is one word: the run between the spaces.
+    chat.handle_key(alt(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 11);
+    chat.handle_key(alt(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 4);
+    chat.handle_key(alt(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 0);
+    // At the start of the input, the key is inert.
+    chat.handle_key(alt(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 0);
+    chat.handle_key(alt(KeyCode::Right), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 3);
+    chat.handle_key(alt(KeyCode::Right), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 10);
+    chat.handle_key(alt(KeyCode::Right), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 13);
+    chat.handle_key(alt(KeyCode::Right), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 17);
+    // At the end of the input, the key is inert too.
+    chat.handle_key(alt(KeyCode::Right), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 17);
+    // Plain arrows stay one character.
+    chat.handle_key(key(KeyCode::Left), &[], &[], &[], &crate::icons::UNICODE);
+    assert_eq!(chat.cursor, 16);
+}
+
+#[test]
 fn alt_backspace_drops_the_chip_of_an_erased_paste() {
     let mut chat = ChatState::new();
     chat.insert_str("before ");
