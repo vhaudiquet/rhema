@@ -200,6 +200,12 @@ impl Kit {
             needs,
         }
     }
+
+    /// The env entries beside `BASH_ENV`.
+    pub fn with_vars(mut self, vars: BTreeMap<String, String>) -> Self {
+        self.vars = vars;
+        self
+    }
 }
 
 /// The header every generated init file starts with.

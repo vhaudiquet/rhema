@@ -248,6 +248,7 @@ impl App {
         let provider = backend.provider();
         let (agent_config, subagents, missing_tools) = session_agent_config(
             &self.mcp,
+            &self.kits,
             &self.options,
             self.sandboxed.as_ref(),
             effective.model.clone(),

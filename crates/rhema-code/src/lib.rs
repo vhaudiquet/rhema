@@ -65,6 +65,7 @@ pub(crate) mod decision_wire;
 pub mod events;
 pub mod icons;
 pub mod jobs;
+pub(crate) mod kits;
 pub mod markdown;
 pub(crate) mod mcp_wire;
 pub mod onboarding;

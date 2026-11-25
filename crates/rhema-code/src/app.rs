@@ -76,6 +76,9 @@ pub struct App {
     /// The MCP wirings this process owns. Dropping the app drops the
     /// entries, which removes their session and provision dirs.
     pub(crate) mcp: crate::mcp_wire::Registry,
+    /// The placed kit files this app owns. Dropping the app removes
+    /// their init directories.
+    pub(crate) kits: crate::kits::Registry,
     /// The provider behind the backend.
     pub provider: Option<Arc<dyn ModelProvider>>,
     /// The startup flags.
@@ -553,6 +556,7 @@ impl App {
         // One registry per app: its entries own the MCP session dirs,
         // so the app's own drop removes them.
         let mcp = crate::mcp_wire::Registry::new();
+        let kits = crate::kits::Registry::new();
         let screen = if setup.onboard {
             let workspace = crate::args::canonical(&setup.options.workspace);
             let agents = rhema_home.as_ref().map(|home| home.agents_skills());
@@ -586,6 +590,7 @@ impl App {
                         .ok_or(AgentError::MissingProvider)?;
                     let (agent_config, subagents, missing_tools) = session_agent_config(
                         &mcp,
+                        &kits,
                         &setup.options,
                         setup.sandboxed.as_ref(),
                         effective.model.clone(),
@@ -624,6 +629,7 @@ impl App {
         let config_disabled_mcp = setup.config.disabled_mcp_servers.clone();
         let mut app = Self {
             mcp,
+            kits,
             secrets: setup.secrets,
             // Read before `options` moves into the struct.
             theme: setup.options.resolved_theme(),

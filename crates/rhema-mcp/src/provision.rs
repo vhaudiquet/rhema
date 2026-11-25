@@ -28,7 +28,7 @@ use rhema_config::mcp::{McpConfig, command_name_ok};
 
 /// The name reserved for the meta surface (`mcp call`, `mcp
 /// servers`): a server claiming it gets no generated function.
-const RESERVED: &str = "mcp";
+pub const RESERVED: &str = "mcp";
 
 /// The init file's env var names, in one place: the file's text
 /// references them and the env map sets them, so a rename means

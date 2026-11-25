@@ -4,6 +4,7 @@
 //! agent builds read.
 
 use super::*;
+use rhema_bash::runtime::{Feature, Kit, Needs, Stub};
 use rhema_provider_registry::build;
 
 /// Everything the runner fixed before the app started: flags, store,
@@ -1026,6 +1027,7 @@ fn agent_config(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn session_agent_config(
     mcp: &crate::mcp_wire::Registry,
+    kits_registry: &crate::kits::Registry,
     options: &RunOptions,
     sandboxed: Option<&crate::sandbox::Sandboxed>,
     model: Option<String>,
@@ -1072,76 +1074,124 @@ pub(crate) fn session_agent_config(
         sandboxed.apply_tools(&mut config);
     }
     let missing_tools = apply_prompt_sections(&mut config, options, sandboxed);
-    // Jobs and vision: the same local-only gate, chained into one
-    // `BASH_ENV` lineage. Jobs lands first, so the chain reads
-    // jobs -> vision -> search -> decision -> MCP: each init file
-    // sources its predecessor by
-    // literal path and guards the failure, and every generated function
-    // ends up defined whichever file the variable names.
+    // Every kit this session places shares one init file: the stub
+    // text is static, the per-session values are env. The wirings
+    // still provision their state and prompt section; the kit owns
+    // the file and its env. A sandboxed session waits for the shared
+    // placement, so the local gate stays for now.
+    let inherited = std::env::var_os("BASH_ENV");
+    let mut kits = Vec::new();
     let jobs_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::jobs::wire(std::env::var_os("BASH_ENV"), jobs_tag))
+        .then(|| rhema_bash::jobs::wire(None, jobs_tag))
         .flatten();
     if let Some(wiring) = &jobs_wiring {
-        config.shell_env.extend(wiring.shell_env.clone());
-        config.jobs = Some(wiring.section.to_owned());
+        kits.push(kit(
+            Feature::Jobs,
+            wiring.shell_env.clone(),
+            vec![stub(
+                rhema_bash::jobs::NAME,
+                rhema_bash::jobs::VAR_BIN,
+                vec![rhema_bash::jobs::MODE],
+            )],
+            Needs::MACRO,
+        ));
     }
-    let bash_env = jobs_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or_else(|| std::env::var_os("BASH_ENV"));
     let vision_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::vision::wire(bash_env.clone()))
+        .then(|| rhema_bash::vision::wire(None))
         .flatten();
     if let Some(wiring) = &vision_wiring {
-        config.shell_env.extend(wiring.shell_env.clone());
-        config.vision = Some(wiring.section.to_owned());
+        kits.push(kit(
+            Feature::Vision,
+            wiring.shell_env.clone(),
+            vec![stub(
+                rhema_bash::vision::NAME,
+                rhema_bash::vision::VAR_BIN,
+                vec![rhema_bash::vision::MODE],
+            )],
+            Needs::MACRO,
+        ));
     }
-    let bash_env = vision_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or(bash_env);
-    // Search: the same chain's third link, gated twice like MCP's
-    // wire, on the sandbox and on the profile carrying providers at
-    // all. The chain the mode runs is assembled fresh per invocation;
-    // this wiring only decides the function and the section exist.
     let search_wiring = crate::search_wire::wire_for_session(
         session_key,
         profile,
         secrets.map(|secrets| secrets.as_ref()),
         sandboxed,
-        bash_env.clone(),
+        None,
     );
     if let Some(wiring) = &search_wiring {
-        config.shell_env.extend(wiring.shell_env.clone());
-        config.websearch = Some(wiring.section.to_owned());
+        kits.push(kit(
+            Feature::Search,
+            wiring.shell_env.clone(),
+            vec![stub(
+                rhema_bash::websearch::NAME,
+                rhema_bash::websearch::VAR_BIN,
+                vec![rhema_bash::websearch::MODE],
+            )],
+            Needs::HOST_CALL,
+        ));
     }
-    let bash_env = search_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or(bash_env);
-    // Decision: the lineage's fourth link, the same two gates as
-    // search (the sandbox, and a profile naming a provider at all).
-    // The provider the mode asks is resolved fresh per invocation;
-    // this wiring only decides the function and the section exist.
     let decision_wiring = crate::decision_wire::wire_for_session(
         session_key,
         profile,
         secrets.map(|secrets| secrets.as_ref()),
         sandboxed,
-        bash_env.clone(),
+        None,
     );
     if let Some(wiring) = &decision_wiring {
-        config.shell_env.extend(wiring.shell_env.clone());
-        config.decision = Some(wiring.section.to_owned());
+        kits.push(kit(
+            Feature::Decision,
+            wiring.shell_env.clone(),
+            vec![stub(
+                rhema_bash::decision::NAME,
+                rhema_bash::decision::VAR_BIN,
+                vec![rhema_bash::decision::MODE],
+            )],
+            Needs::HOST_CALL,
+        ));
     }
-    let bash_env = decision_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or(bash_env);
-    // MCP: the local-only wire, gated on the sandbox, a session
-    // whose bash runs elsewhere never sees the section, because its
-    // executor could not reach the socket or the provisioned env.
-    if let Some(entry) =
-        mcp.wire_for_session(session_key, profile, disabled_mcp, sandboxed, bash_env)
+    let mcp_entry = mcp.wire_for_session(session_key, profile, disabled_mcp, sandboxed, None);
+    if let Some(entry) = &mcp_entry {
+        let mut stubs = vec![stub(
+            rhema_mcp::provision::RESERVED,
+            rhema_mcp::provision::VAR_BIN,
+            vec![rhema_mcp::provision::RESERVED],
+        )];
+        for line in entry.lines() {
+            stubs.push(
+                Stub::new(
+                    line.name.clone(),
+                    rhema_mcp::provision::VAR_BIN,
+                    vec!["__server".into(), line.server.clone()],
+                )
+                .expect("the MCP command name passed the provisioner's own check"),
+            );
+        }
+        kits.push(kit(
+            Feature::Mcp,
+            entry.shell_env().clone(),
+            stubs,
+            Needs::MCP,
+        ));
+    }
+    if !kits.is_empty()
+        && let Some(placed) = kits_registry.place(&kits, inherited.as_deref())
     {
-        config.shell_env.extend(entry.shell_env().clone());
-        config.mcp_servers = entry.lines().to_vec();
+        config.shell_env = placed.env.clone();
+        if let Some(wiring) = &jobs_wiring {
+            config.jobs = Some(wiring.section.to_owned());
+        }
+        if let Some(wiring) = &vision_wiring {
+            config.vision = Some(wiring.section.to_owned());
+        }
+        if let Some(wiring) = &search_wiring {
+            config.websearch = Some(wiring.section.to_owned());
+        }
+        if let Some(wiring) = &decision_wiring {
+            config.decision = Some(wiring.section.to_owned());
+        }
+        if let Some(entry) = &mcp_entry {
+            config.mcp_servers = entry.lines().to_vec();
+        }
     }
     config.disabled_mcp_servers = disabled_mcp.clone();
     let (mut config, subagents) = rhema_subagents::wire(config);
@@ -1162,6 +1212,28 @@ pub(crate) fn session_agent_config(
         sandboxed.apply_workspace(&mut config);
     }
     (config, subagents, missing_tools)
+}
+
+/// The built-in kit stub: the names are constants, so an invalid one
+/// is a bug in this tree, not a session's input.
+fn stub(name: &str, bin_var: &str, args: Vec<&str>) -> Stub {
+    Stub::new(name, bin_var, args.into_iter().map(str::to_owned).collect())
+        .expect("the built-in kit stub is a valid bash identifier")
+}
+
+/// One kit from a wiring's env: `BASH_ENV` is the placement's, and the
+/// inherited file is baked into the init text, not carried as a var.
+fn kit(
+    feature: Feature,
+    env: std::collections::BTreeMap<String, String>,
+    stubs: Vec<Stub>,
+    needs: Needs,
+) -> Kit {
+    let vars = env
+        .into_iter()
+        .filter(|(name, _)| name != "BASH_ENV" && name != "RHEMA_INHERITED_BASH_ENV")
+        .collect();
+    Kit::new(feature, stubs, needs).with_vars(vars)
 }
 
 /// The prompt's two optional sections, through the one gate the
