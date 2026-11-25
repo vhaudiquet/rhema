@@ -704,3 +704,72 @@ async fn a_failed_registration_fails_without_instructions() {
 
     assert!(matches!(sink.0[0], LoginUpdate::Failed(_)), "{:?}", sink.0);
 }
+
+#[tokio::test]
+async fn a_chat_400_naming_reasoning_effort_retries_without_it() {
+    let server = MockServer::start().await;
+    mount_exchange(&server, &server.uri(), 4_102_444_800, 1).await;
+    // A model without a reasoning level: the proxy refuses the field the
+    // app sends by default, and the plain retry is the turn.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_partial_json(serde_json::json!({ "reasoning_effort": "medium" })))
+        .respond_with(ResponseTemplate::new(400).set_body_string(
+            r#"{"error":{"message":"Unsupported parameter: 'reasoning_effort' is not supported with this model."}}"#,
+        ))
+        .with_priority(1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse_body()),
+        )
+        .with_priority(2)
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    let p = provider(&server.uri());
+    let mut request = rhema_core::ModelRequest {
+        system: None,
+        messages: vec![Message::text(Role::User, "say hello")],
+        tools: vec![],
+        params: ChatParams::new("gpt-4.1"),
+    };
+    request.params.thinking = rhema_core::request::ThinkingEffort::Medium;
+    let repeat = request.clone();
+    let mut sink = Collector(vec![]);
+    let output = p
+        .complete(request, &mut sink)
+        .await
+        .expect("the plain retry lands");
+    assert_eq!(output.message.content, vec![Content::Text("Hello".into())]);
+
+    // The refusal is remembered: the next turn drops the field before
+    // sending, with no second 400.
+    p.complete(repeat, &mut sink)
+        .await
+        .expect("the next turn goes out plain");
+
+    let received = server
+        .received_requests()
+        .await
+        .expect("request recording is on");
+    let chat: Vec<_> = received
+        .iter()
+        .filter(|request| request.url.path() == "/chat/completions")
+        .collect();
+    assert_eq!(chat.len(), 3);
+    let first: serde_json::Value = serde_json::from_slice(&chat[0].body).expect("json body");
+    assert_eq!(first["reasoning_effort"], "medium");
+    for body in &chat[1..] {
+        let body: serde_json::Value = serde_json::from_slice(&body.body).expect("json body");
+        assert!(body.get("reasoning_effort").is_none(), "{body}");
+    }
+    server.verify().await;
+}

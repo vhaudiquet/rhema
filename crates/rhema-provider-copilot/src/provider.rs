@@ -326,6 +326,10 @@ pub struct CopilotProvider {
     /// endpoint's own rejection. One provider serves every listed model,
     /// so the route is remembered per id.
     responses_only: Arc<AsyncMutex<HashSet<String>>>,
+    /// Model ids that refuse the reasoning field, learned from the
+    /// rejection so later turns drop it before sending instead of
+    /// paying a 400 each time.
+    no_reasoning: Arc<AsyncMutex<HashSet<String>>>,
 }
 
 impl std::fmt::Debug for CopilotProvider {
@@ -336,6 +340,7 @@ impl std::fmt::Debug for CopilotProvider {
             .field("tokens", &self.tokens)
             .field("messages", &self.messages)
             .field("responses_only", &self.responses_only)
+            .field("no_reasoning", &self.no_reasoning)
             .finish()
     }
 }
@@ -352,6 +357,7 @@ impl CopilotProvider {
             )),
             messages: OnceLock::new(),
             responses_only: Arc::new(AsyncMutex::new(HashSet::new())),
+            no_reasoning: Arc::new(AsyncMutex::new(HashSet::new())),
         }
     }
 
@@ -584,7 +590,14 @@ impl ModelProvider for CopilotProvider {
         req: ModelRequest,
         sink: &mut dyn EventSink,
     ) -> Result<ModelOutput, ProviderError> {
-        let req = req.normalized();
+        let mut req = req.normalized();
+        // A model that refused the reasoning field keeps the turn cheap:
+        // the level is dropped before the request, not after a 400.
+        if req.params.thinking != rhema_core::request::ThinkingEffort::Default
+            && self.rejects_reasoning(&req.params.model).await
+        {
+            req.params.thinking = rhema_core::request::ThinkingEffort::Default;
+        }
         // Claude models: Copilot serves them in Anthropic Messages
         // shape at /v1/messages, where prompt caching needs
         // caller-placed breakpoints; the chat-completions route sends
@@ -617,9 +630,23 @@ impl ModelProvider for CopilotProvider {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
-            if status == reqwest::StatusCode::BAD_REQUEST && names_another_endpoint(&text) {
-                self.remember_responses(&req.params.model).await;
-                return self.complete_responses(&req, sink).await;
+            if status == reqwest::StatusCode::BAD_REQUEST {
+                if names_another_endpoint(&text) {
+                    self.remember_responses(&req.params.model).await;
+                    return self.complete_responses(&req, sink).await;
+                }
+                // The proxy validates the reasoning field against the
+                // model's capabilities. A model that takes none (the
+                // editor sends it only where the models page lists a
+                // level) must not fail the turn over the default level.
+                if reasoning_unsupported(&text)
+                    && req.params.thinking != rhema_core::request::ThinkingEffort::Default
+                {
+                    self.remember_no_reasoning(&req.params.model).await;
+                    let mut plain = req.clone();
+                    plain.params.thinking = rhema_core::request::ThinkingEffort::Default;
+                    return self.complete(plain, sink).await;
+                }
             }
             return Err(api_error(status, &text));
         }
@@ -640,6 +667,17 @@ impl CopilotProvider {
     /// turn skips the chat endpoint.
     async fn remember_responses(&self, model: &str) {
         self.responses_only.lock().await.insert(model.to_owned());
+    }
+
+    /// Whether `model` refused the reasoning field on an earlier turn.
+    async fn rejects_reasoning(&self, model: &str) -> bool {
+        self.no_reasoning.lock().await.contains(model)
+    }
+
+    /// Records that `model` takes no reasoning field, so every later
+    /// turn drops it before sending.
+    async fn remember_no_reasoning(&self, model: &str) {
+        self.no_reasoning.lock().await.insert(model.to_owned());
     }
 
     /// Completes a turn on the Responses-API route, the one the proxy
@@ -663,6 +701,17 @@ impl CopilotProvider {
         let status = response.status();
         if !status.is_success() {
             let text = response.text().await.unwrap_or_default();
+            // Same fallback as the chat route: a model that takes no
+            // reasoning still runs with the field dropped.
+            if status == reqwest::StatusCode::BAD_REQUEST
+                && reasoning_unsupported(&text)
+                && req.params.thinking != rhema_core::request::ThinkingEffort::Default
+            {
+                self.remember_no_reasoning(&req.params.model).await;
+                let mut plain = req.clone();
+                plain.params.thinking = rhema_core::request::ThinkingEffort::Default;
+                return self.complete(plain, sink).await;
+            }
             return Err(api_error(status, &text));
         }
 
@@ -714,8 +763,41 @@ fn names_another_endpoint(raw: &str) -> bool {
         .contains("not accessible via the /chat/completions")
 }
 
+/// Whether the proxy's rejection names the reasoning field as one the
+/// model does not take, rather than a real fault in the request.
+fn reasoning_unsupported(raw: &str) -> bool {
+    let message = raw.to_ascii_lowercase();
+    // Every spelling of the field carries `reasoning`; the refusals
+    // below name it alone when the proxy drops the key.
+    let names = message.contains("reasoning");
+    names
+        && (message.contains("not supported")
+            || message.contains("unsupported")
+            || message.contains("unrecognized")
+            || message.contains("unknown"))
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{names_another_endpoint, reasoning_unsupported};
+
+    #[test]
+    fn the_reasoning_detector_only_reads_refusals_of_that_field() {
+        assert!(reasoning_unsupported(
+            r#"{"error":{"message":"Unsupported parameter: 'reasoning_effort' is not supported with this model."}}"#
+        ));
+        assert!(reasoning_unsupported(
+            r#"{"error":{"message":"Unknown parameter: reasoning"}}"#
+        ));
+        assert!(!reasoning_unsupported(
+            r#"{"error":{"message":"model \"gpt-6-luna\" is not accessible via the /chat/completions endpoint"}}"#
+        ));
+        assert!(!reasoning_unsupported(
+            r#"{"error":{"message":"bad request"}}"#
+        ));
+        assert!(!names_another_endpoint("bad request"));
+    }
+
     use super::*;
 
     #[test]
