@@ -23,7 +23,7 @@ pub enum SettingsSection {
     Skills,
     /// The discovered subagent definitions, editable in `$EDITOR`.
     Subagents,
-    /// The active profile's MCP servers: list, add, mute, remove.
+    /// The session's MCP servers: list, add, mute, remove.
     Mcp,
     /// The active profile's web search providers: list, add, remove,
     /// and the fallback order between them.

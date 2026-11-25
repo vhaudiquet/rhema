@@ -484,7 +484,7 @@ impl App {
     /// stored model: the footer names what is missing in red, the
     /// commands to fix it are one keystroke away, and nothing gates the
     /// session behind a login screen.
-    pub fn new(mut setup: AppSetup) -> Result<Self, HostAgentError> {
+    pub fn new(setup: AppSetup) -> Result<Self, HostAgentError> {
         let mut session = setup.session;
         let sessions_base = setup
             .sessions_base
@@ -573,21 +573,6 @@ impl App {
         mcp.set_disabled(setup.config.disabled_mcp_servers.clone());
         if muted_before != mcp.env.get("MCP_DISABLED").cloned().unwrap_or_default() {
             mcp.reprobe();
-        }
-        // An older config kept the servers host-side. Move them into
-        // the sandbox's config once, then save without the legacy
-        // field; the page and the prompt see the moved set.
-        let legacy = setup.config.take_legacy_mcp_servers();
-        if !legacy.is_empty() {
-            for (name, entry) in legacy {
-                mcp.insert(name, entry);
-            }
-            if let Err(err) = mcp.save_and_probe() {
-                eprintln!("warning: the old MCP servers did not move into the sandbox: {err}");
-            }
-            if let Err(err) = setup.store.save(&setup.config) {
-                eprintln!("warning: the old MCP servers were not cleared from the config: {err}");
-            }
         }
         let kits = crate::kits::Registry::new();
         let screen = if setup.onboard {

@@ -851,10 +851,9 @@ fn place_decision_key_prefers_the_store_and_falls_back_to_the_file() {
 }
 
 #[test]
-fn an_old_host_mcp_map_loads_once_and_never_serializes_again() {
+fn an_old_host_mcp_map_still_loads_and_never_serializes_again() {
     let yaml = "profiles:\n  personal:\n    mcp_servers:\n      jira:\n        description: Jira\n        command: [uvx, jira-mcp]\n";
     let settings: Settings = serde_yaml::from_str(yaml).expect("the old shape still loads");
-    assert_eq!(settings.profiles["personal"].legacy_mcp_servers.len(), 1);
     let round = serde_yaml::to_string(&settings).unwrap();
     assert!(!round.contains("mcp_servers"), "{round}");
 }

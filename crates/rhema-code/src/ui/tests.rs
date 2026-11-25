@@ -2391,6 +2391,7 @@ mod scroll_tests {
             instance_lock: None,
             managed: None,
             shared: None,
+            mcp: crate::mcp_config::McpStore::local(None, &Default::default()),
             session: Default::default(),
         });
         app.config.set_for_profile(Some("personal"), |profile| {

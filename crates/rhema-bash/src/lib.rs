@@ -18,8 +18,7 @@
 //!   output, providers per profile tried in order
 //! - [`decision`]: the `decide` macro: a decision model's typed
 //!   answers as shell output, one provider and model per profile
-//! - [`init`]: the one `BASH_ENV` init-file provisioner the macros
-//!   and the MCP bridge share
+//! - [`init`]: the one `BASH_ENV` init-file provisioner the macros share
 //! - [`runtime`]: the kit description and the one init-file generator
 //!   a helper writes inside a sandbox
 //!   (`specs/rhema-runtime-kit.md`)

@@ -48,8 +48,6 @@ pub struct Needs {
     /// State the host must read (jobs, vision): a shared root or a
     /// `read_file` pull.
     pub shared_state: bool,
-    /// A live host endpoint, when a frontend wires one.
-    pub bridge: bool,
     /// Host-side config or keys (search, decide).
     pub secrets: bool,
 }
@@ -60,14 +58,12 @@ impl Needs {
     pub const MACRO: Self = Self {
         exec: true,
         shared_state: true,
-        bridge: false,
         secrets: false,
     };
     /// A macro whose CLI talks to host providers: search and decide.
     pub const HOST_CALL: Self = Self {
         exec: true,
         shared_state: false,
-        bridge: false,
         secrets: true,
     };
 }

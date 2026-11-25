@@ -19,8 +19,6 @@ pub struct Capabilities {
     pub upload: bool,
     /// The host can read the sandbox's files (`read_file`).
     pub pull: bool,
-    /// The sandbox can dial a host TCP endpoint.
-    pub inbound_net: bool,
 }
 
 impl Capabilities {
@@ -30,7 +28,6 @@ impl Capabilities {
             shared_root: Some(root),
             upload: true,
             pull: true,
-            inbound_net: false,
         }
     }
 
@@ -39,7 +36,6 @@ impl Capabilities {
         shared_root: None,
         upload: true,
         pull: true,
-        inbound_net: false,
     };
 
     /// A sandbox whose files cannot be read back either.
@@ -47,15 +43,6 @@ impl Capabilities {
         shared_root: None,
         upload: false,
         pull: false,
-        inbound_net: false,
-    };
-
-    /// A remote box that can dial a host endpoint.
-    pub const NET: Self = Self {
-        shared_root: None,
-        upload: true,
-        pull: true,
-        inbound_net: true,
     };
 }
 
@@ -66,11 +53,6 @@ pub struct SharedRoot {
     pub host: PathBuf,
     /// The same directory as the sandbox sees it.
     pub sandbox: String,
-    /// Whether a Unix socket on the share accepts `connect()` from the
-    /// sandbox: true for a bind mount and a disk device, and for
-    /// ecrou's virtiofs by default; a failed bind turns MCP off at
-    /// runtime.
-    pub unix_socket: bool,
 }
 
 impl SharedRoot {
@@ -78,19 +60,7 @@ impl SharedRoot {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let host = path.into();
         let sandbox = host.to_string_lossy().into_owned();
-        Self {
-            host,
-            sandbox,
-            unix_socket: true,
-        }
-    }
-
-    /// A root whose share carries files but not a working Unix socket.
-    pub fn without_unix_socket(path: impl Into<PathBuf>) -> Self {
-        Self {
-            unix_socket: false,
-            ..Self::new(path)
-        }
+        Self { host, sandbox }
     }
 
     /// The helper install for one kit version.
@@ -103,24 +73,10 @@ impl SharedRoot {
         self.install_dir(version).join(format!("init-{kit}.sh"))
     }
 
-    /// The per-session tree: vision staging, jobs state, MCP media.
+    /// The per-session tree: vision staging and jobs state.
     pub fn session_dir(&self, session: &str) -> PathBuf {
         self.host.join("sessions").join(session)
     }
-
-    /// The MCP socket's directory for one session.
-    pub fn mcp_dir(&self, session: &str) -> PathBuf {
-        self.host.join("mcp").join(session)
-    }
-}
-
-/// Where a kit's helper and init live.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Root {
-    /// A directory mounted into the sandbox (docker, lxd, ecrou).
-    Shared(SharedRoot),
-    /// No shared directory: a sandbox-side cache (ssh, http).
-    Sandbox,
 }
 
 /// Where one kit lands.
@@ -136,20 +92,7 @@ pub enum Decision {
 }
 
 /// The gate: needs against capabilities, one answer per kit.
-///
-/// A socket is the exception: it needs one live path both sides
-/// reach, so a sandbox with no shared root skips MCP and keeps the
-/// other four.
 pub fn decide(needs: &Needs, caps: &Capabilities) -> Decision {
-    if needs.bridge {
-        return if caps.shared_root.is_some() {
-            // v1 is the UDS on the mount; the TCP fallback is the
-            // next transport, not a skipped kit.
-            Decision::Shared
-        } else {
-            Decision::Skip("the mcp socket needs a shared path")
-        };
-    }
     if needs.exec && !caps.upload && caps.shared_root.is_none() {
         return Decision::Skip("the backend cannot place the helper");
     }
@@ -353,7 +296,7 @@ pub async fn ensure_shared(
     verify(sandbox, shared).await?;
 
     let session_dir = shared.session_dir(session);
-    for sub in ["vision/staging", "jobs", "mcp"] {
+    for sub in ["vision/staging", "jobs"] {
         std::fs::create_dir_all(session_dir.join(sub))?;
     }
     let session_file = session_dir.join("jobs/session");
@@ -434,7 +377,7 @@ pub async fn ensure_shared(
 pub fn place_shared(shared: &SharedRoot, session: &str, kits: &[Kit]) -> std::io::Result<Placed> {
     sweep(shared);
     let host_session = shared.session_dir(session);
-    for sub in ["vision/staging", "jobs", "mcp"] {
+    for sub in ["vision/staging", "jobs"] {
         std::fs::create_dir_all(host_session.join(sub))?;
     }
     let init = write_init(&host_session, kits)?;
@@ -891,10 +834,6 @@ mod tests {
         assert_eq!(
             root.session_dir("s1"),
             PathBuf::from("/run/user/1000/rhema/sessions/s1")
-        );
-        assert_eq!(
-            root.mcp_dir("s1"),
-            PathBuf::from("/run/user/1000/rhema/mcp/s1")
         );
     }
 }

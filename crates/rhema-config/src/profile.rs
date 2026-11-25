@@ -52,11 +52,11 @@ pub struct Profile {
     /// file while empty: most profiles never leave `local`.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub sandbox_instances: BTreeMap<String, SandboxInstance>,
-    /// Old host-side MCP entries, read once and moved into the
-    /// sandbox's config at startup. Serialization never writes this
-    /// field again, so a saved config carries no host MCP servers.
+    /// The old host-side MCP map. The frontend no longer reads it,
+    /// but a config written by an older build still loads; the field
+    /// never serializes, so the next save drops it.
     #[serde(default, skip_serializing, rename = "mcp_servers")]
-    pub legacy_mcp_servers: BTreeMap<String, crate::mcp::McpServerEntry>,
+    pub ignored_mcp_servers: serde_yaml::Value,
     /// The web search providers this profile's agents reach, keyed by
     /// a user-chosen name, the [`ProviderInstance`] twin at search
     /// scale. Per profile by design, work and personal carry

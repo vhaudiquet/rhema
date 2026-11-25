@@ -27,14 +27,14 @@ pub struct McpServerRow {
 
 /// The sandbox's MCP entries as rendered rows, in name order,
 /// each tagged muted from `disabled`. Validation runs through
-/// [`rhema_config::mcp::McpConfig::from_entries`], the same fold the
+/// [`crate::mcp::McpConfig::from_entries`], the same fold the
 /// assembly runs, so a row the manager would keep is clean and a row
 /// it would skip carries the notice that says why.
 pub fn mcp_server_rows(
-    entries: &BTreeMap<String, rhema_config::mcp::McpServerEntry>,
+    entries: &BTreeMap<String, crate::mcp::McpServerEntry>,
     disabled: &BTreeSet<String>,
 ) -> Vec<McpServerRow> {
-    let resolved = rhema_config::mcp::McpConfig::from_entries(entries);
+    let resolved = crate::mcp::McpConfig::from_entries(entries);
     let kept: Vec<&str> = resolved.servers.iter().map(|s| s.name.as_str()).collect();
     entries
         .iter()
@@ -88,8 +88,6 @@ pub enum McpDialogStage {
     EnvLines,
     /// The editable header lines of an HTTP server.
     HeaderLines,
-    /// The optional bash-name override.
-    CommandName,
 }
 
 /// What one add-server-dialog keypress means.
@@ -210,10 +208,9 @@ impl Default for PairLines {
 }
 
 /// The pop-in dialog over the MCP page: the name, the description, the
-/// transport, the command or URL it names, the env or header lines
-/// that ride it, and the optional bash-name override. Building the
-/// entry is the dialog's; inserting it and writing the sandbox config
-/// are the app's.
+/// transport, the command or URL it names, and the env or header lines
+/// that ride it. Building the entry is the dialog's; inserting it and
+/// writing the sandbox config are the app's.
 #[derive(Debug)]
 pub struct AddMcpServerDialog {
     /// Which stage of the flow is showing.
@@ -240,8 +237,6 @@ pub struct AddMcpServerDialog {
     pub env: PairLines,
     /// The HTTP header lines, from the headers stage on.
     pub headers: PairLines,
-    /// The accepted bash-name override; empty means none.
-    pub command_name: String,
     /// The server names taken when the dialog opened: the name stage
     /// refuses them. A snapshot, not a window, the dialog is modal.
     pub(crate) taken: BTreeSet<String>,
@@ -262,7 +257,6 @@ impl AddMcpServerDialog {
             url: None,
             env: PairLines::new(),
             headers: PairLines::new(),
-            command_name: String::new(),
             taken,
         }
     }
@@ -288,11 +282,8 @@ impl AddMcpServerDialog {
             }
             McpDialogStage::Url => "the endpoint URL · enter continues · esc back".to_owned(),
             McpDialogStage::EnvLines | McpDialogStage::HeaderLines => {
-                "KEY=value per line · enter adds one, enter on a blank line continues · esc back"
+                "KEY=value per line · enter adds one, enter on a blank line stores · esc back"
                     .to_owned()
-            }
-            McpDialogStage::CommandName => {
-                "optional bash name override · enter stores · esc back".to_owned()
             }
         }
     }
@@ -305,7 +296,6 @@ impl AddMcpServerDialog {
             McpDialogStage::Description => "description: ",
             McpDialogStage::Command => "command: ",
             McpDialogStage::Url => "url: ",
-            McpDialogStage::CommandName => "bash name: ",
             _ => "",
         }
     }
@@ -379,8 +369,8 @@ impl AddMcpServerDialog {
     }
 
     /// Keys on the env or header lines: the lines editor takes the
-    /// editing keys, enter on the blank last line descends into the
-    /// bash-name stage, esc returns to the transport list.
+    /// editing keys, enter on the blank last line builds and submits
+    /// the entry, esc returns to the transport list.
     fn handle_lines_key(&mut self, key: KeyEvent) -> McpDialogAction {
         let lines = match self.stage {
             McpDialogStage::EnvLines => &mut self.env,
@@ -402,7 +392,7 @@ impl AddMcpServerDialog {
                         Ok(_) => {
                             self.error = None;
                             self.input.clear();
-                            self.stage = McpDialogStage::CommandName;
+                            return self.submit();
                         }
                         Err(err) => self.error = Some(err),
                     }
@@ -455,16 +445,6 @@ impl AddMcpServerDialog {
                         self.input = self.url.clone().unwrap_or_default();
                         self.stage = McpDialogStage::Transport;
                     }
-                    // The bash-name stage's parent is wherever the
-                    // lines were edited.
-                    McpDialogStage::CommandName => {
-                        self.input = self.command_name.clone();
-                        self.stage = if self.url.is_some() {
-                            McpDialogStage::HeaderLines
-                        } else {
-                            McpDialogStage::EnvLines
-                        };
-                    }
                     _ => {}
                 }
             }
@@ -474,9 +454,7 @@ impl AddMcpServerDialog {
     }
 
     /// Enter on a single-line stage: validate the line, store it, and
-    /// step forward, or name the problem and stay. The bash-name
-    /// stage's enter is the dialog's store: it builds and validates
-    /// the whole entry.
+    /// step forward, or name the problem and stay.
     fn accept_line(&mut self) -> McpDialogAction {
         let text = self.input.trim().to_owned();
         match self.stage {
@@ -530,19 +508,14 @@ impl AddMcpServerDialog {
                 self.headers = PairLines::new();
                 self.stage = McpDialogStage::HeaderLines;
             }
-            McpDialogStage::CommandName => {
-                self.command_name = text;
-                return self.submit();
-            }
             _ => {}
         }
         McpDialogAction::None
     }
 
-    /// Enter on the bash-name stage: build the entry and run the
-    /// config layer's own validation over it. An error renders inline
-    /// and keeps the dialog up; success hands the transition to the
-    /// app.
+    /// Enter on the last lines stage: build the entry and run the
+    /// entry's own validation over it. An error renders inline and
+    /// keeps the dialog up; success hands the transition to the app.
     fn submit(&mut self) -> McpDialogAction {
         match self.build() {
             Ok(_) => McpDialogAction::Submit,
@@ -553,11 +526,10 @@ impl AddMcpServerDialog {
         }
     }
 
-    /// The entry the dialog collected, with its name: the config
-    /// layer's resolve is the validator, name charset, transport
-    /// XOR, and the pairs' placement are its rules, so the stored
-    /// entry is one the assembly will keep.
-    pub fn build(&self) -> Result<(String, rhema_config::mcp::McpServerEntry), String> {
+    /// The entry the dialog collected, with its name: `resolve` is
+    /// the validator, so the stored entry is one the client will
+    /// accept.
+    pub fn build(&self) -> Result<(String, crate::mcp::McpServerEntry), String> {
         if self.name.is_empty() {
             return Err("a name is required".to_owned());
         }
@@ -572,19 +544,17 @@ impl AddMcpServerDialog {
             true => self.headers.pairs()?,
             false => BTreeMap::new(),
         };
-        let entry = rhema_config::mcp::McpServerEntry {
+        let entry = crate::mcp::McpServerEntry {
             description: self.description.clone(),
             command: self.command.clone(),
             url: self.url.clone(),
             env,
             headers,
-            startup_timeout: None,
-            timeout: None,
-            command_name: (!self.command_name.is_empty()).then(|| self.command_name.clone()),
+            args: Vec::new(),
         };
         // The resolution result is discarded: it is the validation,
-        // not the shape the dialog hands over, the stored form is
-        // the entry itself, which the profile map round-trips.
+        // not the shape the dialog hands over. The stored form is the
+        // entry itself, which the sandbox config round-trips.
         entry
             .resolve(&self.name)
             .map(|_| (self.name.clone(), entry))

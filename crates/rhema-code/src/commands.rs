@@ -159,7 +159,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     },
     CommandSpec {
         name: "/mcp",
-        description: "this profile's MCP servers (add, mute, remove)",
+        description: "this session's MCP servers (add, mute, remove)",
         argument: Argument::None,
         handler: mcp,
     },

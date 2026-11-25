@@ -1,26 +1,14 @@
 //! The MCP entry shape the settings dialog edits and validates.
 //!
-//! The config itself lives in the sandbox, in the standalone `mcp`
-//! client's JSON file. This module owns the per-entry rules both sides
-//! share: stdio (`command`) or Streamable HTTP (`url`), never both, and
-//! the name and command-name charsets. [`McpConfig::from_entries`]
-//! folds a map into the rows the page shows and the notices a skipped
-//! entry earns.
+//! `mcp-cli` owns the file and its accepted fields. This module mirrors
+//! those fields so the page can show and edit them: stdio (`command`)
+//! or Streamable HTTP (`url`), never both, plus the env and header maps.
+//! Nothing here belongs in the host profile any more.
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
-
-/// The handshake budget for stdio servers: `npx` cold starts are slow,
-/// so the default is generous.
-pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
-
-/// The per-call budget, aligned with the shell tool's own cap: a call
-/// configured longer is moot while the invoking shell dies first, so
-/// config may lower this but never raise it (the manager's rule).
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The validated MCP entries: the servers the page shows and why any
 /// were left out. Construction is infallible: a skipped entry is a
@@ -56,20 +44,12 @@ impl McpConfig {
 /// client agree on.
 #[derive(Debug, Clone)]
 pub struct McpServer {
-    /// The config key: `[a-z0-9_-]+`, since it rides URLs and defaults
-    /// the command name.
+    /// The config key: `[a-z0-9_-]+`.
     pub name: String,
     /// The user-written description feeding the prompt disclosure.
     pub description: String,
     /// How to reach it.
     pub transport: McpTransport,
-    /// The handshake budget: [`DEFAULT_STARTUP_TIMEOUT`] unless the
-    /// entry set `startup_timeout`.
-    pub startup_timeout: Duration,
-    /// The per-call budget the manager caps at the shell's own limit.
-    pub timeout: Duration,
-    /// The client's command alias, when the entry sets one.
-    pub command_name: String,
 }
 
 /// How a server is reached.
@@ -126,19 +106,28 @@ impl fmt::Debug for SecretMap<'_> {
 /// JSON stores it. Validation happens at resolve time, never at
 /// deserialize time, so a stored entry round-trips even while invalid,
 /// the page can show and fix it.
+///
+/// The fields are the ones `mcp-cli` reads. `command` accepts an argv
+/// array or a bare program name; `args` carries the rest of a bare
+/// program's argv, the shape most MCP client configs use.
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields, rename_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
 pub struct McpServerEntry {
     /// The user-written description feeding the prompt disclosure.
     /// Empty is legal, the fold substitutes a line that names the
-    /// discovery command, because the field is optional knowledge,
-    /// not identity: the server's own `--help` is the real
-    /// documentation and this is only the reason to run it.
+    /// discovery command.
     #[serde(default)]
     pub description: String,
     /// The program and its arguments, argv style; stdio servers.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "command_from_json",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub command: Option<Vec<String>>,
+    /// Extra stdio arguments when `command` is a bare program name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     /// The Streamable HTTP endpoint URL; HTTP servers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -149,15 +138,28 @@ pub struct McpServerEntry {
     /// Headers sent verbatim with every HTTP request.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    /// Handshake seconds, overriding [`DEFAULT_STARTUP_TIMEOUT`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub startup_timeout: Option<u64>,
-    /// Per-call seconds, overriding [`DEFAULT_TIMEOUT`].
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout: Option<u64>,
-    /// Override of the generated bash function's name.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command_name: Option<String>,
+}
+
+/// The two spellings `mcp-cli` accepts for `command`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawCommand {
+    /// The whole argv.
+    Line(Vec<String>),
+    /// The program; `args` carries the rest.
+    Program(String),
+}
+
+fn command_from_json<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<RawCommand>::deserialize(deserializer)?.map(|command| match command {
+            RawCommand::Line(argv) => argv,
+            RawCommand::Program(program) => vec![program],
+        }),
+    )
 }
 
 impl fmt::Debug for McpServerEntry {
@@ -167,45 +169,34 @@ impl fmt::Debug for McpServerEntry {
         f.debug_struct("McpServerEntry")
             .field("description", &self.description)
             .field("command", &self.command)
+            .field("args", &self.args)
             .field("url", &self.url)
             .field("env", &SecretMap(&self.env))
             .field("headers", &SecretMap(&self.headers))
-            .field("startup_timeout", &self.startup_timeout)
-            .field("timeout", &self.timeout)
-            .field("command_name", &self.command_name)
             .finish()
     }
 }
 
 impl McpServerEntry {
     /// Validates into the manager-facing shape: transport XOR, name
-    /// and command-name charsets, sane timeouts.
+    /// charset, and command/URL placement.
     pub fn resolve(&self, name: &str) -> Result<McpServer, String> {
         if !server_name_ok(name) {
             return Err(format!(
-                "`{name}` does not match [a-z0-9_-]+; the name rides URLs \
-                 and defaults the command name"
+                "`{name}` does not match [a-z0-9_-]+; the name is the server key"
             ));
         }
-        let command_name = self.command_name.clone().unwrap_or_else(|| name.to_owned());
         // An absent description is a fold-time default, not a parse
         // failure: the disclosure line happens before any connection,
-        // so the server cannot be asked, and a forgotten yaml field
-        // must not drop the whole server. `--help` is the real
-        // documentation; the line's fallback points at it.
+        // so the server cannot be asked.
         let description = if self.description.is_empty() {
-            format!("no description provided; {command_name} --help lists its tools")
+            format!("no description provided; mcp {name} --list lists its tools")
         } else {
             self.description.clone()
         };
-        if !command_name_ok(&command_name) {
-            return Err(format!(
-                "`{command_name}` is not a bash identifier: it must match \
-                 [a-zA-Z_][a-zA-Z0-9_-]*"
-            ));
-        }
         let transport = match (self.command.clone(), self.url.clone()) {
-            (Some(command), None) => {
+            (Some(mut command), None) => {
+                command.extend(self.args.clone());
                 if command.is_empty() {
                     return Err("`command` is empty".to_owned());
                 }
@@ -220,6 +211,9 @@ impl McpServerEntry {
             (None, Some(url)) => {
                 if url.trim().is_empty() {
                     return Err("`url` is empty".to_owned());
+                }
+                if !self.args.is_empty() {
+                    return Err("`args` belong to `command` servers".to_owned());
                 }
                 if !self.env.is_empty() {
                     return Err("`env` belongs to `command` servers".to_owned());
@@ -236,47 +230,18 @@ impl McpServerEntry {
                 return Err("one of `command` (stdio) or `url` (HTTP) is required".to_owned());
             }
         };
-        let startup_timeout = seconds(self.startup_timeout, "startup_timeout")?;
-        let timeout = seconds(self.timeout, "timeout")?;
         Ok(McpServer {
             name: name.to_owned(),
             description,
             transport,
-            startup_timeout: startup_timeout.unwrap_or(DEFAULT_STARTUP_TIMEOUT),
-            timeout: timeout.unwrap_or(DEFAULT_TIMEOUT),
-            command_name,
         })
     }
 }
 
-/// Seconds to a positive [`Duration`]; zero and overflow reject.
-fn seconds(raw: Option<u64>, field: &str) -> Result<Option<Duration>, String> {
-    match raw {
-        None => Ok(None),
-        Some(0) => Err(format!("`{field}` must be at least one second")),
-        Some(secs) => Ok(Some(Duration::from_secs(secs))),
-    }
-}
-
-/// Whether a server name can ride URLs and default function names.
+/// Whether a server name can ride a command line unquoted.
 fn server_name_ok(name: &str) -> bool {
     !name.is_empty()
         && name
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-}
-
-/// Whether a generated function name is a legal bash identifier.
-/// Hyphens verified legal on bash 3.2 and 5.x (spec §2).
-/// Whether `name` is a legal bash function name: an ASCII letter or
-/// underscore first, then letters, digits, underscores, hyphens
-/// (hyphens verified legal in bash 3.2 and 5.x). The config layer
-/// rejects entries that fail it; provision re-checks defensively.
-pub fn command_name_ok(name: &str) -> bool {
-    let mut chars = name.chars();
-    match chars.next() {
-        Some(first) if first.is_ascii_alphabetic() || first == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }

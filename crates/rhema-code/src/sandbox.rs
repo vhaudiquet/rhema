@@ -102,8 +102,8 @@ pub struct Sandboxed {
     /// a stored target names an instance the user owns, never stopped.
     pub(crate) managed: Option<ManagedInstance>,
     /// The runtime root the backend mounts at the same path, when it
-    /// has one: the install, the MCP socket, and the session tree
-    /// live under it, and the sandbox sees the host path itself.
+    /// has one: the install and the session tree live under it, and
+    /// the sandbox sees the host path itself.
     pub(crate) shared: Option<SharedRoot>,
     /// The sandbox-owned MCP config and its `mcp prompt` section.
     pub(crate) mcp: crate::mcp_config::McpStore,
@@ -474,9 +474,10 @@ pub async fn assemble(
                         None
                     }
                 });
-            // The virtiofs share carries a Unix socket; the bridge
-            // binds it and the guest connects. Unproven on ecrou, so a
-            // failed bind leaves MCP off and the other kits untouched.
+            // The virtiofs share carries the helper install and the
+            // session state the kit macros need. A failed private
+            // directory leaves the kits, MCP included, on the
+            // sandbox-side fallback.
             shared = runtime.as_ref().map(SharedRoot::new);
             let sandbox = EcrouSandbox::new(image, root, host_workspace.clone());
             let sandbox = if profile.sandbox_persist() {
@@ -545,16 +546,6 @@ pub async fn assemble(
         .map(|(name, body)| (name.as_str(), body.as_str()))
         .collect();
     ensure_seeded(&*sandbox, &workspace_string, &bodies, base_system).await?;
-    // ssh and http have no shared root, so the mounted helper install
-    // below cannot run. They still run the same installer, into a
-    // sandbox-side cache; the MCP store puts that cache on PATH.
-    if shared.is_none() && matches!(choice, SandboxChoice::Ssh | SandboxChoice::Http) {
-        if let Err(err) = install_mcp_client(&*sandbox, &workspace_string).await {
-            eprintln!(
-                "warning: the sandbox MCP client did not install, its prompt stays off: {err}"
-            );
-        }
-    }
     // A mounted backend now has its helper: the sandbox's own
     // installer fetches the release for the sandbox's target, and the
     // shared root carries it. An install that fails closes the kits
@@ -566,6 +557,14 @@ pub async fn assemble(
             "warning: the sandbox kit helper did not install, the shell kits stay off: {err}"
         );
         shared = None;
+    }
+    // No shared root, by posture or by a failed helper install: run
+    // the same installer into a sandbox-side cache. The MCP store puts
+    // that cache on PATH and reads the config through the shell.
+    if shared.is_none()
+        && let Err(err) = install_mcp_client(&*sandbox, &workspace_string).await
+    {
+        eprintln!("warning: the sandbox MCP client did not install, its prompt stays off: {err}");
     }
     // The assembly is done, devices, provision, and seed all landed
     // under the exclusive hold. Downgrade to the session's shared

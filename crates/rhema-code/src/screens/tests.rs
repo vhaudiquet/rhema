@@ -2818,8 +2818,8 @@ fn the_add_profile_dialog_edits_refuses_and_closes() {
 // --- MCP page ---
 
 /// A stdio entry under `name`, with one env pair.
-fn stdio_entry(description: &str, env: &[(&str, &str)]) -> rhema_config::mcp::McpServerEntry {
-    rhema_config::mcp::McpServerEntry {
+fn stdio_entry(description: &str, env: &[(&str, &str)]) -> crate::mcp::McpServerEntry {
+    crate::mcp::McpServerEntry {
         description: description.to_owned(),
         command: Some(vec!["npx".to_owned(), "-y".to_owned(), "server".to_owned()]),
         url: None,
@@ -2828,30 +2828,26 @@ fn stdio_entry(description: &str, env: &[(&str, &str)]) -> rhema_config::mcp::Mc
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect(),
         headers: BTreeMap::new(),
-        startup_timeout: None,
-        timeout: None,
-        command_name: None,
+        args: Vec::new(),
     }
 }
 
 /// A http entry under a url and one header.
-fn http_entry(description: &str) -> rhema_config::mcp::McpServerEntry {
-    rhema_config::mcp::McpServerEntry {
+fn http_entry(description: &str) -> crate::mcp::McpServerEntry {
+    crate::mcp::McpServerEntry {
         description: description.to_owned(),
         command: None,
         url: Some("http://127.0.0.1:9721/mcp".to_owned()),
         env: BTreeMap::new(),
         headers: BTreeMap::from([("Authorization".to_owned(), "Bearer t".to_owned())]),
-        startup_timeout: None,
-        timeout: None,
-        command_name: None,
+        args: Vec::new(),
     }
 }
 
 /// A settings screen on the MCP page over `entries`, with `disabled`
 /// named muted.
 fn mcp_screen(
-    entries: BTreeMap<String, rhema_config::mcp::McpServerEntry>,
+    entries: BTreeMap<String, crate::mcp::McpServerEntry>,
     disabled: &[&str],
 ) -> SettingsScreen {
     let mut settings = SettingsScreen::new();
@@ -2897,15 +2893,13 @@ fn the_mcp_screen_lists_the_active_profile_s_servers() {
     let mut broken = entries;
     broken.insert(
         "both".to_owned(),
-        rhema_config::mcp::McpServerEntry {
+        crate::mcp::McpServerEntry {
             description: "both transports named".to_owned(),
             command: Some(vec!["true".to_owned()]),
             url: Some("http://127.0.0.1:1/mcp".to_owned()),
             env: BTreeMap::new(),
             headers: BTreeMap::new(),
-            startup_timeout: None,
-            timeout: None,
-            command_name: None,
+            args: Vec::new(),
         },
     );
     let rows = mcp_server_rows(&broken, &BTreeSet::new());
@@ -2913,7 +2907,7 @@ fn the_mcp_screen_lists_the_active_profile_s_servers() {
     assert_eq!(both.transport, None, "neither transport wins");
     assert_eq!(
         both.notice,
-        rhema_config::mcp::McpConfig::from_entries(&broken)
+        crate::mcp::McpConfig::from_entries(&broken)
             .notices
             .iter()
             .find(|n| n.contains("`both`"))
@@ -3042,7 +3036,7 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
         McpDialogAction::None
     );
     // The description is optional: an empty one advances, and the
-    // fold substitutes the "--help lists its tools" line.
+    // fold substitutes the `mcp <name> --list` line.
     assert_eq!(dialog.stage, McpDialogStage::Transport);
     assert_eq!(dialog.description, "");
     // Esc back, type one, and it lands too.
@@ -3074,20 +3068,9 @@ fn the_add_mcp_dialog_rejects_bad_names_and_both_transports() {
         built.as_ref().is_err_and(|e| e.contains("exclusive")),
         "both transports reject: {built:?}"
     );
-    // So does a command_name that is no bash identifier.
+    // Malformed and duplicated env lines reject at the stage's exit.
     dialog.command = Some(vec!["true".to_owned()]);
     dialog.url = None;
-    dialog.command_name = "2bad".to_owned();
-    assert!(
-        dialog
-            .build()
-            .err()
-            .is_some_and(|e| e.contains("bash identifier")),
-        "{:?}",
-        dialog.build()
-    );
-    // Malformed and duplicated env lines reject at the stage's exit.
-    dialog.command_name.clear();
     dialog.stage = McpDialogStage::EnvLines;
     dialog.env = PairLines {
         lines: vec!["TOKEN".to_owned(), String::new()],
@@ -3143,16 +3126,6 @@ fn the_add_mcp_dialog_walks_the_stdio_flow_and_builds_the_entry() {
     );
     assert_eq!(
         dialog.handle_key(key(KeyCode::Enter)),
-        McpDialogAction::None
-    );
-    assert_eq!(dialog.stage, McpDialogStage::CommandName);
-    // Esc steps back to the lines, then forward again; the empty
-    // override stores.
-    dialog.handle_key(key(KeyCode::Esc));
-    assert_eq!(dialog.stage, McpDialogStage::EnvLines);
-    dialog.handle_key(key(KeyCode::Enter));
-    assert_eq!(
-        dialog.handle_key(key(KeyCode::Enter)),
         McpDialogAction::Submit
     );
     let (name, entry) = dialog.build().expect("the entry builds");
@@ -3171,7 +3144,7 @@ fn the_add_mcp_dialog_walks_the_stdio_flow_and_builds_the_entry() {
         Some("hunter2")
     );
     assert_eq!(entry.url, None);
-    assert_eq!(entry.command_name, None, "empty means none");
+    assert!(entry.args.is_empty());
     assert_eq!(entry.resolve(&name).map(|_| ()), Ok(()));
 }
 
@@ -3211,13 +3184,8 @@ fn the_add_mcp_dialog_walks_the_http_flow_with_headers() {
     );
     assert_eq!(
         dialog.handle_key(key(KeyCode::Enter)),
-        McpDialogAction::None,
+        McpDialogAction::Submit,
         "the blank line finished the stage"
-    );
-    assert_eq!(dialog.stage, McpDialogStage::CommandName);
-    assert_eq!(
-        dialog.handle_key(key(KeyCode::Enter)),
-        McpDialogAction::Submit
     );
     let (_, entry) = dialog.build().expect("the entry builds");
     assert_eq!(entry.url.as_deref(), Some("http://127.0.0.1:9721/mcp"));
@@ -3233,7 +3201,7 @@ fn the_add_mcp_dialog_walks_the_http_flow_with_headers() {
     assert_eq!(entry.env, BTreeMap::new(), "headers servers carry no env");
     // A paste lands on the dialog's inputs, control characters and
     // all dropped.
-    dialog.stage = McpDialogStage::CommandName;
+    dialog.stage = McpDialogStage::Name;
     dialog.paste("na\nme\u{7}");
     assert_eq!(dialog.input, "name");
     assert_eq!(

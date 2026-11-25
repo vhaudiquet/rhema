@@ -36,8 +36,6 @@ datealgo = "0.2"
 # boundaries and the transcript's view invariants. Pinned exactly:
 # Hegel is beta and changes its API between releases.
 hegeltest = "=0.52.6"
-# The MCP bridge's HTTP surface
-axum = { version = "0.8", features = ["json"] }
 # The system-prompt template (Jinja syntax); whitespace rules fit
 # markdown templates. Builtins for the standard filters, `tojson`
 # renders a tool's JSON schema into the prompt.

@@ -11,9 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::mcp::McpServerEntry;
 use base64::Engine as _;
 use rhema_bash::runtime::KIT_VERSION;
-use rhema_config::mcp::McpServerEntry;
 use rhema_sandbox::kit::SharedRoot;
 use rhema_sandbox::{OutputOnly, RunRequest, Sandbox};
 
@@ -41,7 +41,7 @@ enum Place {
         media: String,
         sandbox: Arc<dyn Sandbox>,
     },
-    /// ssh and http: no shared file system. The host reads and writes
+    /// A backend with no shared file system: the host reads and writes
     /// through the sandbox's shell.
     Remote {
         config: String,
@@ -111,7 +111,8 @@ impl McpStore {
 
     /// A sandbox session's store. A mounted backend puts the file in
     /// the shared runtime root, where the host and the sandbox both
-    /// reach it. ssh and http use the sandbox's home.
+    /// reach it. A backend without that root keeps it in the sandbox's
+    /// home.
     pub(crate) async fn for_sandbox(
         sandbox: Arc<dyn Sandbox>,
         shared: Option<&SharedRoot>,
@@ -238,6 +239,15 @@ impl McpStore {
     pub(crate) fn set_disabled(&mut self, disabled: BTreeSet<String>) {
         self.disabled = disabled;
         self.refresh_env();
+    }
+
+    /// The async twin for a caller already on a runtime: writes the
+    /// mute into the client environment and probes again without
+    /// parking the reactor.
+    pub(crate) async fn set_disabled_async(&mut self, disabled: BTreeSet<String>) {
+        self.disabled = disabled;
+        self.refresh_env();
+        self.prompt = self.probe().await;
     }
 
     /// Persists the entries and refreshes the prompt. Returns a message
@@ -404,10 +414,7 @@ impl McpStore {
 
     async fn probe_shared(&self) -> Option<String> {
         let bin = match &self.place {
-            Place::Shared { config, .. } => {
-                let root = Path::new(config).parent()?.parent()?;
-                format!("{}/bin/{KIT_VERSION}/mcp", root.to_string_lossy())
-            }
+            Place::Shared { .. } => format!("{}/mcp", self.bin_dir.as_deref()?),
             _ => return None,
         };
         let outcome = self
@@ -482,12 +489,11 @@ where
 /// Where a host-side `mcp` lives: `MCP_BIN`'s directory when it names
 /// a path, else the installer's `~/.local/bin`.
 fn local_bin_dir(home: Option<&rhema_config::Home>) -> Option<String> {
-    if let Ok(bin) = std::env::var("MCP_BIN") {
-        if Path::new(&bin).is_absolute() {
-            if let Some(parent) = Path::new(&bin).parent() {
-                return Some(parent.to_string_lossy().into_owned());
-            }
-        }
+    if let Ok(bin) = std::env::var("MCP_BIN")
+        && Path::new(&bin).is_absolute()
+        && let Some(parent) = Path::new(&bin).parent()
+    {
+        return Some(parent.to_string_lossy().into_owned());
     }
     home.map(|home| home.home.join(".local/bin").to_string_lossy().into_owned())
         .or_else(|| {
@@ -520,11 +526,20 @@ fn parse(raw: &str) -> BTreeMap<String, McpServerEntry> {
         .or_else(|| value.as_object().map(|_| value.clone()))
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    serde_json::from_value::<BTreeMap<String, McpServerEntry>>(serde_json::Value::Object(map))
-        .unwrap_or_else(|err| {
-            eprintln!("mcp: the config entries are invalid: {err}");
-            BTreeMap::new()
-        })
+    let mut entries =
+        serde_json::from_value::<BTreeMap<String, McpServerEntry>>(serde_json::Value::Object(map))
+            .unwrap_or_else(|err| {
+                eprintln!("mcp: the config entries are invalid: {err}");
+                BTreeMap::new()
+            });
+    // Normalize the `command: "program", args: [...]` spelling into the
+    // argv array `mcp-cli` spawns, so a later save writes one shape.
+    for entry in entries.values_mut() {
+        if let Some(command) = &mut entry.command {
+            command.append(&mut entry.args);
+        }
+    }
+    entries
 }
 
 /// Runs one command with no session env and returns its trimmed
@@ -577,6 +592,46 @@ fn scope_name(target: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+
+    use rhema_sandbox::{RunOutcome, SandboxError, ToolProgress, WorkspaceSeed};
+
+    /// A sandbox that answers every command with the same prompt line
+    /// and records what it was asked.
+    #[derive(Default)]
+    struct FakeSandbox {
+        commands: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Sandbox for FakeSandbox {
+        async fn run(
+            &self,
+            request: RunRequest,
+            _cancelled: &AtomicBool,
+            _progress: &mut dyn ToolProgress,
+        ) -> Result<RunOutcome, SandboxError> {
+            self.commands.lock().unwrap().push(request.command);
+            Ok(RunOutcome {
+                stdout: b"MCP servers installed:\n- jira: Jira".to_vec(),
+                stderr: Vec::new(),
+                code: Some(0),
+            })
+        }
+
+        async fn seed(&self, _seed: &WorkspaceSeed) -> Result<(), SandboxError> {
+            Ok(())
+        }
+
+        async fn read_file(&self, _path: &str) -> Result<Vec<u8>, SandboxError> {
+            Ok(Vec::new())
+        }
+
+        async fn write_file(&self, _path: &str, _contents: &[u8]) -> Result<(), SandboxError> {
+            Ok(())
+        }
+    }
 
     fn entry() -> McpServerEntry {
         McpServerEntry {
@@ -585,9 +640,7 @@ mod tests {
             url: None,
             env: BTreeMap::new(),
             headers: BTreeMap::new(),
-            startup_timeout: None,
-            timeout: None,
-            command_name: None,
+            args: Vec::new(),
         }
     }
 
@@ -608,6 +661,28 @@ mod tests {
             reloaded.entries()["jira"].command.as_deref(),
             Some(["uvx".to_owned(), "jira-mcp".to_owned()].as_slice())
         );
+    }
+
+    #[test]
+    fn the_client_string_command_and_args_load_as_one_argv() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = rhema_config::Home::under_home(dir.path());
+        let path = home.config.join("mcp/config.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            r#"{"servers":{"jira":{"command":"uvx","args":["jira-mcp"],"env":{"TOKEN":"x"}}}}"#,
+        )
+        .unwrap();
+        let mut store = McpStore::local(Some(&home), &BTreeSet::new());
+        assert_eq!(
+            store.entries()["jira"].command.as_deref(),
+            Some(["uvx".to_owned(), "jira-mcp".to_owned()].as_slice())
+        );
+        assert!(store.entries()["jira"].args.is_empty());
+        store.save_and_probe().unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("\"args\""), "{raw}");
     }
 
     #[test]
@@ -632,6 +707,35 @@ mod tests {
         assert_eq!(
             store.env.get("MCP_DISABLED").map(String::as_str),
             Some("jira")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_shared_probe_uses_the_kit_bin_directory() {
+        let sandbox = Arc::new(FakeSandbox::default());
+        let store = McpStore {
+            entries: BTreeMap::new(),
+            prompt: None,
+            env: BTreeMap::new(),
+            disabled: BTreeSet::new(),
+            place: Place::Shared {
+                config_host: PathBuf::from("/tmp/rhema-mcp-test/config.json"),
+                media_host: PathBuf::from("/tmp/rhema-mcp-test/media"),
+                config: "/run/rhema/mcp/box/config.json".to_owned(),
+                media: "/run/rhema/mcp/box/media".to_owned(),
+                sandbox: sandbox.clone(),
+            },
+            workspace: "/workspace".to_owned(),
+            bin_dir: Some("/run/rhema/bin/3".to_owned()),
+            base_path: None,
+        };
+        assert_eq!(
+            store.probe_shared().await.as_deref(),
+            Some("MCP servers installed:\n- jira: Jira")
+        );
+        assert_eq!(
+            sandbox.commands.lock().unwrap().as_slice(),
+            ["\"/run/rhema/bin/3/mcp\" prompt"]
         );
     }
 

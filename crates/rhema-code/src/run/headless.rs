@@ -313,12 +313,18 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
             rhema_bash::runtime::Needs::HOST_CALL,
         ));
     }
-    let mcp = match &sandboxed {
+    let mut mcp = match &sandboxed {
         Some(sandboxed) => sandboxed.mcp().clone(),
         None => {
             crate::mcp_config::McpStore::local(rhema_home.as_ref(), &config.disabled_mcp_servers)
         }
     };
+    if sandboxed.is_some() {
+        // The assembly probes before the profile's mute set exists.
+        // Apply it here, on the runtime this runner already holds.
+        mcp.set_disabled_async(config.disabled_mcp_servers.clone())
+            .await;
+    }
     let placed_env = if kits.is_empty() {
         None
     } else if let Some(shared) = sandboxed.as_ref().and_then(|s| s.shared()) {
@@ -353,15 +359,15 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         if let Some(wiring) = &decision_wiring {
             agent_config.decision = Some(wiring.section.to_owned());
         }
-        if let Some(vision) = &vision_wiring {
-            if let Some(tools) = agent_config.tools.as_deref() {
-                tools.set_vision_inbox(
-                    vision
-                        .shell_env
-                        .get(rhema_bash::vision::VAR_STAGING)
-                        .map(std::path::PathBuf::from),
-                );
-            }
+        if let Some(vision) = &vision_wiring
+            && let Some(tools) = agent_config.tools.as_deref()
+        {
+            tools.set_vision_inbox(
+                vision
+                    .shell_env
+                    .get(rhema_bash::vision::VAR_STAGING)
+                    .map(std::path::PathBuf::from),
+            );
         }
     }
     agent_config.shell_env.extend(mcp.env.clone());

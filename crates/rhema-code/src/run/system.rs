@@ -195,8 +195,8 @@ pub(crate) fn system_show_at(
 }
 
 /// The preview over explicit mcp lines, the test seam. Production
-/// derives them from config ([`mcp_preview_lines`]); a test injects
-/// its own rather than reading the machine's real `mcp.yaml`.
+/// derives them from config ([`mcp_preview_text`]); a test injects its
+/// own rather than reading the machine's real MCP config.
 pub(crate) fn system_show_at_with_mcp(
     path: Option<&std::path::Path>,
     workspace: &std::path::Path,
@@ -338,8 +338,19 @@ pub(crate) fn decision_section(
 /// `mcp prompt` command the session runs, against the host config. A
 /// preview must not spawn servers, and this does not: `prompt` reads
 /// the config alone.
+///
+/// A sandbox keeps its MCP config inside itself. This preview has no
+/// assembly and no async probe, so it leaves the section out and says
+/// why rather than printing the host's servers for a session that will
+/// never see them.
 fn mcp_preview_text(profile: Option<&str>) -> Option<String> {
     let config = Config::load().ok()?;
+    if config.effective(profile).sandbox_kind().is_some() {
+        eprintln!(
+            "warning: the MCP prompt section is built inside the sandbox; this preview leaves it out"
+        );
+        return None;
+    }
     if config.disabled_mcp_servers.contains(&String::from("*")) {
         return None;
     }
@@ -347,7 +358,6 @@ fn mcp_preview_text(profile: Option<&str>) -> Option<String> {
         rhema_config::Home::discover().ok().as_ref(),
         &config.disabled_mcp_servers,
     );
-    let _ = profile;
     store.prompt.clone()
 }
 

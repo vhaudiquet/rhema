@@ -1,8 +1,9 @@
 # rhema-runtime-kit, what a generated bash function needs and how it crosses a sandbox
 
-> **Status:** v1 scope frozen, 2026-11-25. v1 is local, docker, and
-> lxd containers, for jobs, vision, and mcp. Decisions in §12, rollout
-> in §11, open items in §14. Nothing here is implemented yet.
+> **Status:** v1 implemented for jobs, vision, search, and decide.
+> MCP is no longer a kit: `mcp-cli` runs inside the sandbox and reads
+> its own config there. The bridge and socket sections below describe
+> the earlier host-side design and are kept as history.
 > **Grounding:** `specs/rhema-sandbox.md` (the seam and its two
 > families), `specs/rhema-mcp.md` (§5, §10, §12), `rhema-bash::init`
 > (today's provisioner), `app/setup.rs` (the five gates).

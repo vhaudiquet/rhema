@@ -7387,15 +7387,13 @@ fn retry_waits_while_a_turn_runs() {
 fn store_mcp_server(h: &mut Harness, name: &str) {
     h.app.mcp.insert(
         name.to_owned(),
-        rhema_config::mcp::McpServerEntry {
+        crate::mcp::McpServerEntry {
             description: "Jira and Confluence".to_owned(),
             command: Some(vec!["npx".to_owned(), "-y".to_owned(), "server".to_owned()]),
             url: None,
             env: BTreeMap::new(),
             headers: BTreeMap::new(),
-            startup_timeout: None,
-            timeout: None,
-            command_name: None,
+            args: Vec::new(),
         },
     );
 }

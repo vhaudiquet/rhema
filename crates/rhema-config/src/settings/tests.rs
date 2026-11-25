@@ -90,7 +90,7 @@ fn config_round_trips_through_disk_as_yaml() {
         profiles: BTreeMap::from([(
             "personal".to_owned(),
             Profile {
-                legacy_mcp_servers: BTreeMap::new(),
+                ignored_mcp_servers: serde_yaml::Value::Null,
                 sandbox_instances: BTreeMap::new(),
                 websearch: BTreeMap::new(),
                 websearch_order: Vec::new(),
