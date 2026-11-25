@@ -58,13 +58,19 @@ pub(crate) struct McpStore {
     /// The `mcp prompt` output, absent when the client is missing or
     /// the file holds no servers.
     pub(crate) prompt: Option<String>,
-    /// `MCP_CONFIG`, `MCP_MEDIA_DIR`, `MCP_DISABLED`.
+    /// `MCP_CONFIG`, `MCP_MEDIA_DIR`, `MCP_DISABLED`, and `PATH`.
     pub(crate) env: BTreeMap<String, String>,
     /// The names the session muted. The client filters them from
     /// `list` and `prompt`; a direct call still works.
     disabled: BTreeSet<String>,
     place: Place,
     workspace: String,
+    /// The directory the client was installed into, prepended to
+    /// `PATH` so `mcp` resolves without a global install.
+    bin_dir: Option<String>,
+    /// The PATH the sandbox already had. `None` leaves `PATH` alone,
+    /// which keeps a shell's default in place.
+    base_path: Option<String>,
 }
 
 impl McpStore {
@@ -86,6 +92,8 @@ impl McpStore {
         };
         let _ = std::fs::create_dir_all(&media);
         let entries = read_host(&config);
+        let bin_dir = local_bin_dir(home.as_ref());
+        let base_path = std::env::var("PATH").ok();
         let mut store = Self {
             entries,
             prompt: None,
@@ -93,6 +101,8 @@ impl McpStore {
             disabled: disabled.clone(),
             place: Place::Host { config, media },
             workspace: String::new(),
+            bin_dir,
+            base_path,
         };
         store.refresh_env();
         store.prompt = store.probe_host();
@@ -109,7 +119,7 @@ impl McpStore {
         workspace: &str,
         disabled: &BTreeSet<String>,
     ) -> Self {
-        let (place, _config_guest, _media_guest) = match shared {
+        let (place, _config_guest, _media_guest, bin_dir, base_path) = match shared {
             Some(shared) => {
                 let scope = scope_name(target);
                 let host = shared.host.join("mcp").join(&scope);
@@ -119,6 +129,17 @@ impl McpStore {
                 let guest = format!("{}/mcp/{scope}", shared.sandbox.trim_end_matches('/'));
                 let config = format!("{guest}/{CONFIG_FILE}");
                 let media = format!("{guest}/media");
+                let bin_dir = Some(format!(
+                    "{}/bin/{KIT_VERSION}",
+                    shared.sandbox.trim_end_matches('/')
+                ));
+                let base_path = run_text(
+                    Arc::clone(&sandbox),
+                    "printf %s \"$PATH\"",
+                    workspace,
+                    BTreeMap::new(),
+                )
+                .await;
                 (
                     Place::Shared {
                         config_host,
@@ -129,6 +150,8 @@ impl McpStore {
                     },
                     config,
                     media,
+                    bin_dir,
+                    base_path,
                 )
             }
             None => {
@@ -151,6 +174,14 @@ impl McpStore {
                 };
                 let config = format!("{home}/.config/rhema/mcp/config.json");
                 let media = format!("{home}/.cache/rhema/mcp/media");
+                let bin_dir = Some(format!("{home}/.local/bin"));
+                let base_path = run_text(
+                    Arc::clone(&sandbox),
+                    "printf %s \"$PATH\"",
+                    workspace,
+                    BTreeMap::new(),
+                )
+                .await;
                 (
                     Place::Remote {
                         config: config.clone(),
@@ -159,6 +190,8 @@ impl McpStore {
                     },
                     config,
                     media,
+                    bin_dir,
+                    base_path,
                 )
             }
         };
@@ -169,6 +202,8 @@ impl McpStore {
             disabled: disabled.clone(),
             place,
             workspace: workspace.to_owned(),
+            bin_dir,
+            base_path,
         };
         store.refresh_env();
         store.entries = store.read().await.unwrap_or_default();
@@ -256,6 +291,18 @@ impl McpStore {
             "MCP_DISABLED".to_owned(),
             self.disabled.iter().cloned().collect::<Vec<_>>().join(","),
         );
+        // No init file runs for ssh and http, and the mounted init
+        // runs only when a session places its kit. Put the install
+        // directory on PATH here, so the model's `mcp` and the
+        // prompt probe resolve the same binary on every backend.
+        if let (Some(bin), Some(base)) = (&self.bin_dir, &self.base_path) {
+            let path = if base.is_empty() {
+                format!("{bin}:/usr/local/bin:/usr/bin:/bin")
+            } else {
+                format!("{bin}:{base}")
+            };
+            self.env.insert("PATH".to_owned(), path);
+        }
     }
 
     async fn read(&self) -> Option<BTreeMap<String, McpServerEntry>> {
@@ -320,7 +367,16 @@ impl McpStore {
     }
 
     fn probe_host(&self) -> Option<String> {
-        let program = std::env::var("MCP_BIN").unwrap_or_else(|_| "mcp".to_owned());
+        // `Command` resolves a bare name with the parent's PATH, not
+        // the child's environment, so try the install directory
+        // explicitly before falling back to an inherited `mcp`.
+        let program = std::env::var("MCP_BIN").ok().unwrap_or_else(|| {
+            self.bin_dir
+                .as_ref()
+                .map(|dir| format!("{dir}/mcp"))
+                .filter(|path| Path::new(path).is_file())
+                .unwrap_or_else(|| "mcp".to_owned())
+        });
         let output = std::process::Command::new(program)
             .arg("prompt")
             .envs(&self.env)
@@ -416,6 +472,27 @@ where
             runtime.block_on(future)
         }
     }
+}
+
+/// Where a host-side `mcp` lives: `MCP_BIN`'s directory when it names
+/// a path, else the installer's `~/.local/bin`.
+fn local_bin_dir(home: Option<&rhema_config::Home>) -> Option<String> {
+    if let Ok(bin) = std::env::var("MCP_BIN") {
+        if Path::new(&bin).is_absolute() {
+            if let Some(parent) = Path::new(&bin).parent() {
+                return Some(parent.to_string_lossy().into_owned());
+            }
+        }
+    }
+    home.map(|home| home.home.join(".local/bin").to_string_lossy().into_owned())
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| {
+                PathBuf::from(home)
+                    .join(".local/bin")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+        })
 }
 
 fn read_host(path: &Path) -> BTreeMap<String, McpServerEntry> {
@@ -526,6 +603,19 @@ mod tests {
             reloaded.entries()["jira"].command.as_deref(),
             Some(["uvx".to_owned(), "jira-mcp".to_owned()].as_slice())
         );
+    }
+
+    #[test]
+    fn the_client_directory_leads_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = rhema_config::Home::under_home(dir.path());
+        let store = McpStore::local(Some(&home), &BTreeSet::new());
+        let path = store.env.get("PATH").expect("PATH");
+        assert!(
+            path.starts_with(&format!("{}:", home.home.join(".local/bin").display())),
+            "{path}"
+        );
+        assert!(path.contains(&std::env::var("PATH").unwrap_or_default()));
     }
 
     #[test]
