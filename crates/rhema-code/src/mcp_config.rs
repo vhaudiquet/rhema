@@ -174,7 +174,12 @@ impl McpStore {
                 };
                 let config = format!("{home}/.config/rhema/mcp/config.json");
                 let media = format!("{home}/.cache/rhema/mcp/media");
-                let bin_dir = Some(format!("{home}/.local/bin"));
+                // The sandbox-side installer puts `mcp` in this cache;
+                // `~/.local/bin` stays a fallback for a hand-installed
+                // client.
+                let bin_dir = Some(format!(
+                    "{home}/.cache/rhema/kit/{KIT_VERSION}:{home}/.local/bin"
+                ));
                 let base_path = run_text(
                     Arc::clone(&sandbox),
                     "printf %s \"$PATH\"",

@@ -25,12 +25,13 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use rhema_bash::ShellTools;
+use rhema_bash::runtime::KIT_VERSION;
 use rhema_config::Profile;
 use rhema_config::secrets::SecretStore;
 use rhema_host_agent::HostAgentConfig;
 use rhema_prompt::Skill;
 use rhema_sandbox::kit::SharedRoot;
-use rhema_sandbox::{FsRoot, InstanceLock, Sandbox, ShellSandbox, seed_workspace};
+use rhema_sandbox::{FsRoot, InstanceLock, OutputOnly, Sandbox, ShellSandbox, seed_workspace};
 use rhema_sandbox_docker::DockerSandbox;
 use rhema_sandbox_ecrou::{DEFAULT_IMAGE, EcrouSandbox};
 use rhema_sandbox_http::HttpSandbox;
@@ -221,6 +222,92 @@ async fn install_helper(sandbox: &dyn Sandbox, shared: &SharedRoot) -> anyhow::R
     rhema_sandbox::kit::install(sandbox, shared, &installer)
         .await
         .map_err(|err| anyhow::anyhow!("{err}"))
+}
+
+/// Installs the `mcp` client into a sandbox-side cache on backends
+/// with no shared root. The script is the same checksum-verified
+/// release installer the mounted path runs; uploading it is the only
+/// file the host sends.
+async fn install_mcp_client(sandbox: &dyn Sandbox, workspace: &str) -> anyhow::Result<()> {
+    let workspace = workspace.trim_end_matches('/');
+    let probe = format!("test -x \"$HOME/.cache/rhema/kit/{KIT_VERSION}/mcp\"");
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut progress = OutputOnly(|_| {});
+    if let Ok(outcome) = sandbox
+        .run(
+            rhema_sandbox::RunRequest {
+                command: probe,
+                cwd: PathBuf::from(workspace),
+                timeout: Duration::from_secs(10),
+                env: std::collections::BTreeMap::new(),
+            },
+            &cancel,
+            &mut progress,
+        )
+        .await
+        && outcome.code == Some(0)
+    {
+        return Ok(());
+    }
+    let url = format!("{}/code", crate::update::dist_base());
+    let script = tokio::task::spawn_blocking(move || crate::update::fetch_verified_script(&url))
+        .await
+        .map_err(|err| anyhow::anyhow!("the installer fetch task failed: {err}"))?
+        .map_err(|err| anyhow::anyhow!("the installer fetch failed: {err}"))?;
+    let script_path = format!("{workspace}/.rhema-mcp-install.sh");
+    sandbox
+        .write_file(&script_path, script.as_bytes())
+        .await
+        .map_err(|err| anyhow::anyhow!("uploading the installer failed: {err}"))?;
+    let quoted = shell_quote(&script_path);
+    let command = format!(
+        "set -eu\n\
+         script={quoted}\n\
+         trap 'rm -f \"$script\"' EXIT\n\
+         dir=\"$HOME/.cache/rhema/kit/{KIT_VERSION}\"\n\
+         if [ -x \"$dir/mcp\" ]; then exit 0; fi\n\
+         mkdir -p \"$dir\"\n\
+         RHEMA_INSTALL_DIR=\"$dir\" sh \"$script\"\n\
+         test -x \"$dir/mcp\" || {{ echo 'the installer did not place mcp' >&2; exit 1; }}"
+    );
+    let mut env = std::collections::BTreeMap::new();
+    if let Ok(base) = std::env::var("RHEMA_DIST_BASE") {
+        env.insert("RHEMA_DIST_BASE".to_owned(), base);
+    }
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut progress = OutputOnly(|_| {});
+    let outcome = sandbox
+        .run(
+            rhema_sandbox::RunRequest {
+                command,
+                cwd: PathBuf::from(workspace),
+                timeout: Duration::from_secs(300),
+                env,
+            },
+            &cancel,
+            &mut progress,
+        )
+        .await
+        .map_err(|err| anyhow::anyhow!("the installer did not run: {err}"))?;
+    if outcome.code == Some(0) {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&outcome.stderr);
+    let detail = detail.trim();
+    Err(anyhow::anyhow!(
+        "the installer exited {:?}{}",
+        outcome.code,
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    ))
+}
+
+/// Single-quotes one word for a sandbox shell.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Builds the tool set a non-local choice runs the agent on: the
@@ -458,6 +545,16 @@ pub async fn assemble(
         .map(|(name, body)| (name.as_str(), body.as_str()))
         .collect();
     ensure_seeded(&*sandbox, &workspace_string, &bodies, base_system).await?;
+    // ssh and http have no shared root, so the mounted helper install
+    // below cannot run. They still run the same installer, into a
+    // sandbox-side cache; the MCP store puts that cache on PATH.
+    if shared.is_none() && matches!(choice, SandboxChoice::Ssh | SandboxChoice::Http) {
+        if let Err(err) = install_mcp_client(&*sandbox, &workspace_string).await {
+            eprintln!(
+                "warning: the sandbox MCP client did not install, its prompt stays off: {err}"
+            );
+        }
+    }
     // A mounted backend now has its helper: the sandbox's own
     // installer fetches the release for the sandbox's target, and the
     // shared root carries it. An install that fails closes the kits
