@@ -79,7 +79,7 @@ crossterm = "0.29"
 # on an ssh drop or an external kill (`install_signal_restore`);
 # crossterm already pulls both crate and version, so the lockfile
 # does not move.
-signal-hook = "0.3"
+signal-hook = "0.4"
 # Display width for the transcript word wrap (same crate ratatui uses)
 unicode-width = "0.2"
 # CommonMark parser for rendering assistant markdown (same crate rustdoc uses)
