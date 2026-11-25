@@ -235,31 +235,14 @@ mod tests {
             "the rewire built a fresh wiring, not the cache"
         );
 
-        let init = second
-            .shell_env()
-            .get("BASH_ENV")
-            .cloned()
-            .expect("init path");
         let tmp = second
             .shell_env()
             .get("RHEMA_MCP_TMP")
             .cloned()
             .expect("session tmp");
-
-        // What the two dirs hold while they live: the provision dir
-        // is the init file alone, the session dir the bridge socket.
-        let provision_dir = std::path::Path::new(&init)
-            .parent()
-            .expect("the init file has a dir");
-        let placed: Vec<_> = std::fs::read_dir(provision_dir)
-            .expect("provision dir")
-            .flatten()
-            .map(|entry| entry.file_name())
-            .collect();
-        assert_eq!(
-            placed,
-            vec![std::ffi::OsString::from("init.bash")],
-            "no binary rides in the provision dir"
+        assert!(
+            !second.shell_env().contains_key("BASH_ENV"),
+            "the kit placement names the one init file, not the wiring"
         );
         assert!(
             std::path::Path::new(&tmp).join("mcp.sock").exists(),
@@ -270,15 +253,10 @@ mod tests {
         // registry is the app's exit path.
         drop(first);
         drop(second);
-        assert!(std::path::Path::new(&init).exists());
         assert!(std::path::Path::new(&tmp).exists());
 
         drop(reg);
 
-        assert!(
-            !std::path::Path::new(&init).exists(),
-            "the provision dir went with the entry"
-        );
         assert!(
             !std::path::Path::new(&tmp).exists(),
             "the session dir went with the entry"

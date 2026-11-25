@@ -122,13 +122,14 @@ pub fn wire(
     agent_id: &str,
     bash_env: Option<std::ffi::OsString>,
 ) -> std::io::Result<Wiring> {
-    wire_with_bin(
+    wire_inner(
         config,
         disabled,
         session_tmp,
         agent_id,
         bash_env,
         &std::env::current_exe()?,
+        false,
     )
 }
 
@@ -148,6 +149,21 @@ pub fn wire_with_bin(
     bash_env: Option<std::ffi::OsString>,
     bin: &Path,
 ) -> std::io::Result<Wiring> {
+    wire_inner(config, disabled, session_tmp, agent_id, bash_env, bin, true)
+}
+
+/// The body both entries share. `write_init` is the test seam: the
+/// production entry places one kit init for every surface and leaves
+/// the per-agent dir without one.
+fn wire_inner(
+    config: &McpConfig,
+    disabled: &BTreeSet<String>,
+    session_tmp: &Path,
+    agent_id: &str,
+    bash_env: Option<std::ffi::OsString>,
+    bin: &Path,
+    write_init: bool,
+) -> std::io::Result<Wiring> {
     // Filter before anything spawns: a disabled server gets no
     // manager slot, no stub, no prompt line.
     let filtered = McpConfig {
@@ -165,7 +181,7 @@ pub fn wire_with_bin(
     // drops an empty wiring, so the session runs without the servers.
     #[cfg(not(unix))]
     {
-        let _ = (disabled, agent_id, bash_env, bin);
+        let _ = (disabled, agent_id, bash_env, bin, write_init);
         Ok(Wiring {
             shell_env: BTreeMap::new(),
             socket_path: session_tmp.join("mcp.sock"),
@@ -183,7 +199,7 @@ pub fn wire_with_bin(
     }
 
     #[cfg(unix)]
-    wire_with_bin_unix(&filtered, session_tmp, agent_id, bash_env, bin)
+    wire_with_bin_unix(&filtered, session_tmp, agent_id, bash_env, bin, write_init)
 }
 
 /// The unix wiring body: bind the bridge in the session temp dir,
@@ -195,6 +211,7 @@ fn wire_with_bin_unix(
     agent_id: &str,
     bash_env: Option<std::ffi::OsString>,
     bin: &Path,
+    write_init: bool,
 ) -> std::io::Result<Wiring> {
     let socket_path = session_tmp.join("mcp.sock");
     let socket = socket_path.clone();
@@ -243,7 +260,7 @@ fn wire_with_bin_unix(
     let bridge = ready_rx
         .recv()
         .map_err(|_| std::io::Error::other("the bridge thread died before binding"))??;
-    let provisioned = provision::provision_with_bin(
+    let provisioned = provision::provision_inner(
         filtered,
         bridge.socket_path(),
         &token,
@@ -251,6 +268,7 @@ fn wire_with_bin_unix(
         bash_env.clone(),
         agent_id,
         bin,
+        write_init,
     )?;
 
     let skipped = provisioned.skipped.clone();

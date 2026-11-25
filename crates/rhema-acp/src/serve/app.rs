@@ -95,6 +95,9 @@ pub(crate) struct App {
     /// load handler reads it directly.
     pub(crate) base: Option<std::path::PathBuf>,
     sessions: Mutex<HashMap<String, SessionSlot>>,
+    /// The placed vision kit this connection owns; dropping the app
+    /// removes its init directory.
+    kits: rhema_bash::placement::Registry,
     next_id: AtomicU64,
 }
 
@@ -159,6 +162,7 @@ impl App {
             base_system,
             base,
             sessions: Mutex::new(HashMap::new()),
+            kits: rhema_bash::placement::Registry::new(),
             next_id: AtomicU64::new(0),
         }
     }
@@ -287,12 +291,33 @@ impl App {
         // restarts, so a resumed conversation keeps its sticky bucket.
         config.session_id = Some(session_id.to_owned());
         // The `bash` tool does its own I/O here (no fs/terminal
-        // callbacks), so commands run on this host and the vision
-        // wiring works; the map carries it to the shell and the prompt
-        // section documents the function.
-        if let Some(wiring) = rhema_bash::vision::wire(std::env::var_os("BASH_ENV")) {
-            config.shell_env.extend(wiring.shell_env.clone());
-            config.vision = Some(wiring.section.to_owned());
+        // callbacks), so commands run on this host. The one init file
+        // carries the stub; the connection's registry owns it.
+        let inherited = std::env::var_os("BASH_ENV");
+        if let Some(wiring) = rhema_bash::vision::wire(None) {
+            let vars = wiring
+                .shell_env
+                .iter()
+                .filter(|(name, _)| name.as_str() != "BASH_ENV")
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect();
+            let kit = rhema_bash::runtime::Kit::new(
+                rhema_bash::runtime::Feature::Vision,
+                vec![
+                    rhema_bash::runtime::Stub::new(
+                        rhema_bash::vision::NAME,
+                        rhema_bash::vision::VAR_BIN,
+                        vec![rhema_bash::vision::MODE.to_owned()],
+                    )
+                    .expect("the vision stub is a valid bash identifier"),
+                ],
+                rhema_bash::runtime::Needs::MACRO,
+            )
+            .with_vars(vars);
+            if let Some(placed) = self.kits.place(&[kit], inherited.as_deref()) {
+                config.shell_env = placed.env.clone();
+                config.vision = Some(wiring.section.to_owned());
+            }
         }
         config
     }

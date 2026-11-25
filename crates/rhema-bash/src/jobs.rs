@@ -185,7 +185,7 @@ pub fn wire(bash_env: Option<OsString>, session: &str) -> Option<&'static Arc<Wi
                 return None;
             }
             let bin = std::env::current_exe().ok()?;
-            provision_with_bin(bash_env, &bin, session)
+            provision_inner(bash_env, &bin, session, false)
                 .map(Arc::new)
                 .ok()
         })
@@ -284,11 +284,27 @@ pub fn provision_with_bin(
     bin: &Path,
     session: &str,
 ) -> std::io::Result<Wiring> {
-    let dir = crate::init::temp_dir("rhema-jobs")?;
-    let body = crate::init::function(NAME, VAR_BIN, MODE);
-    let init_path = crate::init::write(&dir, "rhema-bash", bash_env, &body)?;
+    provision_inner(bash_env, bin, session, true)
+}
 
-    let mut shell_env = crate::init::env_with(&init_path);
+/// The state provision. `write_init` is the test seam: production
+/// places one kit init file for every surface and leaves this dir
+/// without one; a test of this module's own stub asks for the file.
+fn provision_inner(
+    bash_env: Option<OsString>,
+    bin: &Path,
+    session: &str,
+    write_init: bool,
+) -> std::io::Result<Wiring> {
+    let dir = crate::init::temp_dir("rhema-jobs")?;
+    let (init_path, mut shell_env) = if write_init {
+        let body = crate::init::function(NAME, VAR_BIN, MODE);
+        let path = crate::init::write(&dir, "rhema-bash", bash_env, &body)?;
+        let env = crate::init::env_with(&path);
+        (path, env)
+    } else {
+        (dir.join("init.bash"), std::collections::BTreeMap::new())
+    };
     shell_env.insert(VAR_BIN.to_owned(), bin.display().to_string());
     shell_env.insert(VAR_SESSION.to_owned(), session.to_owned());
 

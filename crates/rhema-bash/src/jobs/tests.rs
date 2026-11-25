@@ -556,6 +556,24 @@ fn fake_bin(dir: &std::path::Path) -> PathBuf {
 
 #[cfg(unix)]
 #[test]
+fn the_state_provision_writes_no_init_file() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let bin = fake_bin(dir.path());
+    let wiring = provision_inner(None, &bin, "no-init", false).expect("provisions");
+    assert!(!wiring.init_path.exists(), "production writes no init");
+    assert!(
+        !wiring.shell_env.contains_key(VAR_BASH_ENV),
+        "the kit placement names the one init file: {:?}",
+        wiring.shell_env
+    );
+    assert_eq!(
+        wiring.shell_env.get(VAR_BIN).map(String::as_str),
+        Some(bin.to_string_lossy().as_ref())
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn the_init_file_defines_the_function_in_a_noninteractive_shell() {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin = fake_bin(dir.path());

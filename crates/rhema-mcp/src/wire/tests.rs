@@ -116,7 +116,15 @@ fn wiring_produces_env_lines_and_a_live_bridge() {
     let mut disabled = BTreeSet::new();
     disabled.insert("atlassian".to_owned());
 
-    let mut wiring = wire(&config, &disabled, session.path(), "wire-env", None).unwrap();
+    let mut wiring = wire_with_bin(
+        &config,
+        &disabled,
+        session.path(),
+        "wire-env",
+        None,
+        &std::env::current_exe().unwrap(),
+    )
+    .unwrap();
 
     // The disabled server left no trace: no line, no stub, no env var
     // pointing at a spawn.
@@ -215,12 +223,13 @@ fn the_generated_command_mode_round_trips_through_the_bridge() {
 #[test]
 fn an_inherited_bash_env_is_baked_into_the_init_not_the_map() {
     let session = tempfile::tempdir().unwrap();
-    let mut wiring = wire(
+    let mut wiring = wire_with_bin(
         &config(vec![fake_command_server("counter")]),
         &BTreeSet::new(),
         session.path(),
         "wire-inh",
         Some("/etc/profile.d/agent.sh".into()),
+        &std::env::current_exe().unwrap(),
     )
     .unwrap();
     assert!(

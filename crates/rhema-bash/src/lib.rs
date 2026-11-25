@@ -38,6 +38,7 @@ pub mod decision;
 pub mod exec;
 pub mod init;
 pub mod jobs;
+pub mod placement;
 pub mod runtime;
 pub mod shell;
 pub mod vision;

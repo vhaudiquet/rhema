@@ -88,7 +88,7 @@ pub fn provision(
     bash_env: Option<OsString>,
     agent_id: &str,
 ) -> std::io::Result<Provision> {
-    provision_with_bin(
+    provision_inner(
         config,
         bridge_socket,
         token,
@@ -96,6 +96,7 @@ pub fn provision(
         bash_env,
         agent_id,
         &std::env::current_exe()?,
+        true,
     )
 }
 
@@ -115,6 +116,31 @@ pub fn provision_with_bin(
     bash_env: Option<OsString>,
     agent_id: &str,
     bin_source: &Path,
+) -> std::io::Result<Provision> {
+    provision_inner(
+        config,
+        bridge_socket,
+        token,
+        session_tmp,
+        bash_env,
+        agent_id,
+        bin_source,
+        true,
+    )
+}
+
+/// The body both entries share. `write_init` is the test seam: the
+/// production entry places one kit init for every surface.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn provision_inner(
+    config: &McpConfig,
+    bridge_socket: &Path,
+    token: &str,
+    session_tmp: &Path,
+    bash_env: Option<OsString>,
+    agent_id: &str,
+    bin_source: &Path,
+    write_init: bool,
 ) -> std::io::Result<Provision> {
     // The per-agent dir: 0700, unique per agent, under the system
     // temp dir, not under the session tmp, because RHEMA_MCP_TMP is
@@ -152,10 +178,13 @@ pub fn provision_with_bin(
     }
 
     let meta = rhema_bash::init::function(RESERVED, VAR_BIN, RESERVED);
-    let init_path =
-        rhema_bash::init::write(&dir, "rhema-mcp", bash_env, &format!("{meta}{stubs}"))?;
-
-    let mut env = rhema_bash::init::env_with(&init_path);
+    let (init_path, mut env) = if write_init {
+        let path = rhema_bash::init::write(&dir, "rhema-mcp", bash_env, &format!("{meta}{stubs}"))?;
+        let env = rhema_bash::init::env_with(&path);
+        (path, env)
+    } else {
+        (dir.join("init.bash"), BTreeMap::new())
+    };
     // The stubs exec the running binary in place. The link formerly
     // placed here pinned the inode across a mid-session `cargo
     // install`, but it put a 400MB copy (or a link keeping the old

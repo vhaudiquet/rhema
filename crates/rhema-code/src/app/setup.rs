@@ -1085,10 +1085,10 @@ pub(crate) fn session_agent_config(
         .then(|| rhema_bash::jobs::wire(None, jobs_tag))
         .flatten();
     if let Some(wiring) = &jobs_wiring {
-        kits.push(kit(
+        kits.push(kit_for(
             Feature::Jobs,
             wiring.shell_env.clone(),
-            vec![stub(
+            vec![builtin_stub(
                 rhema_bash::jobs::NAME,
                 rhema_bash::jobs::VAR_BIN,
                 vec![rhema_bash::jobs::MODE],
@@ -1100,10 +1100,10 @@ pub(crate) fn session_agent_config(
         .then(|| rhema_bash::vision::wire(None))
         .flatten();
     if let Some(wiring) = &vision_wiring {
-        kits.push(kit(
+        kits.push(kit_for(
             Feature::Vision,
             wiring.shell_env.clone(),
-            vec![stub(
+            vec![builtin_stub(
                 rhema_bash::vision::NAME,
                 rhema_bash::vision::VAR_BIN,
                 vec![rhema_bash::vision::MODE],
@@ -1119,10 +1119,10 @@ pub(crate) fn session_agent_config(
         None,
     );
     if let Some(wiring) = &search_wiring {
-        kits.push(kit(
+        kits.push(kit_for(
             Feature::Search,
             wiring.shell_env.clone(),
-            vec![stub(
+            vec![builtin_stub(
                 rhema_bash::websearch::NAME,
                 rhema_bash::websearch::VAR_BIN,
                 vec![rhema_bash::websearch::MODE],
@@ -1138,10 +1138,10 @@ pub(crate) fn session_agent_config(
         None,
     );
     if let Some(wiring) = &decision_wiring {
-        kits.push(kit(
+        kits.push(kit_for(
             Feature::Decision,
             wiring.shell_env.clone(),
-            vec![stub(
+            vec![builtin_stub(
                 rhema_bash::decision::NAME,
                 rhema_bash::decision::VAR_BIN,
                 vec![rhema_bash::decision::MODE],
@@ -1151,7 +1151,7 @@ pub(crate) fn session_agent_config(
     }
     let mcp_entry = mcp.wire_for_session(session_key, profile, disabled_mcp, sandboxed, None);
     if let Some(entry) = &mcp_entry {
-        let mut stubs = vec![stub(
+        let mut stubs = vec![builtin_stub(
             rhema_mcp::provision::RESERVED,
             rhema_mcp::provision::VAR_BIN,
             vec![rhema_mcp::provision::RESERVED],
@@ -1166,7 +1166,7 @@ pub(crate) fn session_agent_config(
                 .expect("the MCP command name passed the provisioner's own check"),
             );
         }
-        kits.push(kit(
+        kits.push(kit_for(
             Feature::Mcp,
             entry.shell_env().clone(),
             stubs,
@@ -1216,14 +1216,14 @@ pub(crate) fn session_agent_config(
 
 /// The built-in kit stub: the names are constants, so an invalid one
 /// is a bug in this tree, not a session's input.
-fn stub(name: &str, bin_var: &str, args: Vec<&str>) -> Stub {
+pub(crate) fn builtin_stub(name: &str, bin_var: &str, args: Vec<&str>) -> Stub {
     Stub::new(name, bin_var, args.into_iter().map(str::to_owned).collect())
         .expect("the built-in kit stub is a valid bash identifier")
 }
 
 /// One kit from a wiring's env: `BASH_ENV` is the placement's, and the
 /// inherited file is baked into the init text, not carried as a var.
-fn kit(
+pub(crate) fn kit_for(
     feature: Feature,
     env: std::collections::BTreeMap<String, String>,
     stubs: Vec<Stub>,

@@ -139,7 +139,7 @@ pub fn wire(bash_env: Option<OsString>) -> Option<&'static Arc<Wiring>> {
     WIRED
         .get_or_init(|| {
             let bin = std::env::current_exe().ok()?;
-            provision_with_bin(bash_env, &bin).map(Arc::new).ok()
+            provision_inner(bash_env, &bin, false).map(Arc::new).ok()
         })
         .as_ref()
 }
@@ -154,13 +154,27 @@ pub fn wire(bash_env: Option<OsString>) -> Option<&'static Arc<Wiring>> {
 /// Filesystem failures: the dir cannot be created or the init file
 /// cannot be written.
 pub fn provision_with_bin(bash_env: Option<OsString>, bin: &Path) -> std::io::Result<Wiring> {
+    provision_inner(bash_env, bin, true)
+}
+
+/// The state provision; `write_init` is this module's test seam (see
+/// [`crate::jobs`]).
+fn provision_inner(
+    bash_env: Option<OsString>,
+    bin: &Path,
+    write_init: bool,
+) -> std::io::Result<Wiring> {
     let dir = crate::init::temp_dir("rhema-vision")?;
     let staging = dir.join("staging");
     std::fs::create_dir_all(&staging)?;
-    let body = crate::init::function(NAME, VAR_BIN, MODE);
-    let init_path = crate::init::write(&dir, "rhema-bash", bash_env, &body)?;
-
-    let mut shell_env = crate::init::env_with(&init_path);
+    let (init_path, mut shell_env) = if write_init {
+        let body = crate::init::function(NAME, VAR_BIN, MODE);
+        let path = crate::init::write(&dir, "rhema-bash", bash_env, &body)?;
+        let env = crate::init::env_with(&path);
+        (path, env)
+    } else {
+        (dir.join("init.bash"), std::collections::BTreeMap::new())
+    };
     shell_env.insert(VAR_BIN.to_owned(), bin.display().to_string());
     shell_env.insert(VAR_STAGING.to_owned(), staging.display().to_string());
 

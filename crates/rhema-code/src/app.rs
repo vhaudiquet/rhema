@@ -39,7 +39,9 @@ mod setup;
 pub use setup::{
     AppSetup, Backend, Candidate, Effect, OnboardingHit, RunOptions, Screen, SettingsHit,
 };
-pub(crate) use setup::{NO_PROVIDER_HELP, context_tokens, startup_profile, startup_sandbox};
+pub(crate) use setup::{
+    NO_PROVIDER_HELP, builtin_stub, context_tokens, kit_for, startup_profile, startup_sandbox,
+};
 use setup::{
     estimate_history_tokens, profile_sandbox, session_agent_config, shadow_builtin, skill_rows,
     subagent_rows,

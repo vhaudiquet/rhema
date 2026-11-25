@@ -199,9 +199,8 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     if let Some(assembled) = &sandboxed {
         assembled.apply_tools(&mut agent_config);
     }
-    // Jobs and vision: the TUI's chain, in the TUI's order (jobs ->
-    // vision -> MCP), so a one-shot run wires the same shell a session
-    // does and its `job` calls land in the same backend.
+    // Jobs and vision: the same kit placement the TUI runs, so a
+    // one-shot's `job` calls land in the same backend.
     if let Some(problem) = rhema_bash::jobs::backend_problem() {
         eprintln!("warning: background jobs disabled: {problem}");
     }
@@ -214,12 +213,25 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
         .as_deref()
         .and_then(crate::jobs::tag_from_path)
         .unwrap_or_else(crate::jobs::fallback_tag);
+    // One kit set, one init file: the same placement the TUI runs,
+    // kept for this run's lifetime so the file outlives every command.
+    let kits_registry = crate::kits::Registry::new();
+    let inherited = std::env::var_os("BASH_ENV");
+    let mut kits = Vec::new();
     let jobs_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::jobs::wire(std::env::var_os("BASH_ENV"), &jobs_tag))
+        .then(|| rhema_bash::jobs::wire(None, &jobs_tag))
         .flatten();
     if let Some(wiring) = &jobs_wiring {
-        agent_config.shell_env.extend(wiring.shell_env.clone());
-        agent_config.jobs = Some(wiring.section.to_owned());
+        kits.push(crate::app::kit_for(
+            rhema_bash::runtime::Feature::Jobs,
+            wiring.shell_env.clone(),
+            vec![crate::app::builtin_stub(
+                rhema_bash::jobs::NAME,
+                rhema_bash::jobs::VAR_BIN,
+                vec![rhema_bash::jobs::MODE],
+            )],
+            rhema_bash::runtime::Needs::MACRO,
+        ));
     }
     // The subscription is the notification feed: the one turn's driver
     // steers from it, so a job that dies mid-run is announced at the
@@ -227,67 +239,113 @@ pub(crate) async fn run_prompt(args: RunArgs, prompt: String) -> anyhow::Result<
     // comes. The one-shot has no idle path: a job outliving the run is
     // the daemon's, and a later run sees it only through `job ls`.
     let jobs = (jobs_wiring.is_some())
-        .then(|| crate::jobs::JobsHandle::spawn(jobs_tag))
+        .then(|| crate::jobs::JobsHandle::spawn(jobs_tag.clone()))
         .flatten();
-    let bash_env = jobs_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or_else(|| std::env::var_os("BASH_ENV"));
     let vision_wiring = (sandboxed.is_none())
-        .then(|| rhema_bash::vision::wire(bash_env.clone()))
+        .then(|| rhema_bash::vision::wire(None))
         .flatten();
     if let Some(wiring) = &vision_wiring {
-        agent_config.shell_env.extend(wiring.shell_env.clone());
-        agent_config.vision = Some(wiring.section.to_owned());
+        kits.push(crate::app::kit_for(
+            rhema_bash::runtime::Feature::Vision,
+            wiring.shell_env.clone(),
+            vec![crate::app::builtin_stub(
+                rhema_bash::vision::NAME,
+                rhema_bash::vision::VAR_BIN,
+                vec![rhema_bash::vision::MODE],
+            )],
+            rhema_bash::runtime::Needs::MACRO,
+        ));
     }
-    let bash_env = vision_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or(bash_env);
-    // Search: the TUI's third link, the same two gates. The profile
-    // name rides the wiring's env var; the mode reads the settings
-    // fresh per call.
     let search_wiring = crate::search_wire::wire_for_session(
         &profile,
         &effective,
         secrets.as_deref(),
         sandboxed.as_ref(),
-        bash_env.clone(),
+        None,
     );
     if let Some(wiring) = &search_wiring {
-        agent_config.shell_env.extend(wiring.shell_env.clone());
-        agent_config.websearch = Some(wiring.section.to_owned());
+        kits.push(crate::app::kit_for(
+            rhema_bash::runtime::Feature::Search,
+            wiring.shell_env.clone(),
+            vec![crate::app::builtin_stub(
+                rhema_bash::websearch::NAME,
+                rhema_bash::websearch::VAR_BIN,
+                vec![rhema_bash::websearch::MODE],
+            )],
+            rhema_bash::runtime::Needs::HOST_CALL,
+        ));
     }
-    let bash_env = search_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or(bash_env);
-    // Decision: the TUI's fourth link, the same two gates.
     let decision_wiring = crate::decision_wire::wire_for_session(
         &profile,
         &effective,
         secrets.as_deref(),
         sandboxed.as_ref(),
-        bash_env.clone(),
+        None,
     );
     if let Some(wiring) = &decision_wiring {
-        agent_config.shell_env.extend(wiring.shell_env.clone());
-        agent_config.decision = Some(wiring.section.to_owned());
+        kits.push(crate::app::kit_for(
+            rhema_bash::runtime::Feature::Decision,
+            wiring.shell_env.clone(),
+            vec![crate::app::builtin_stub(
+                rhema_bash::decision::NAME,
+                rhema_bash::decision::VAR_BIN,
+                vec![rhema_bash::decision::MODE],
+            )],
+            rhema_bash::runtime::Needs::HOST_CALL,
+        ));
     }
-    let bash_env = decision_wiring
-        .map(|wiring| std::ffi::OsString::from(wiring.init_path.display().to_string()))
-        .or(bash_env);
-    // MCP: the same local-only gate the TUI applies, a sandboxed
-    // executor cannot reach the socket, so it advertises nothing.
     // The registry outlives the turn: the session dir behind the env
     // must live as long as the commands it provisioned.
     let mcp = crate::mcp_wire::Registry::new();
-    if let Some(entry) = mcp.wire_for_session(
+    let mcp_entry = mcp.wire_for_session(
         &profile,
         &effective,
         &config.disabled_mcp_servers,
         sandboxed.as_ref(),
-        bash_env,
-    ) {
-        agent_config.shell_env.extend(entry.shell_env().clone());
-        agent_config.mcp_servers = entry.lines().to_vec();
+        None,
+    );
+    if let Some(entry) = &mcp_entry {
+        let mut stubs = vec![crate::app::builtin_stub(
+            rhema_mcp::provision::RESERVED,
+            rhema_mcp::provision::VAR_BIN,
+            vec![rhema_mcp::provision::RESERVED],
+        )];
+        for line in entry.lines() {
+            stubs.push(
+                rhema_bash::runtime::Stub::new(
+                    line.name.clone(),
+                    rhema_mcp::provision::VAR_BIN,
+                    vec!["__server".into(), line.server.clone()],
+                )
+                .expect("the MCP command name passed the provisioner's own check"),
+            );
+        }
+        kits.push(crate::app::kit_for(
+            rhema_bash::runtime::Feature::Mcp,
+            entry.shell_env().clone(),
+            stubs,
+            rhema_bash::runtime::Needs::MCP,
+        ));
+    }
+    if !kits.is_empty()
+        && let Some(placed) = kits_registry.place(&kits, inherited.as_deref())
+    {
+        agent_config.shell_env = placed.env.clone();
+        if let Some(wiring) = &jobs_wiring {
+            agent_config.jobs = Some(wiring.section.to_owned());
+        }
+        if let Some(wiring) = &vision_wiring {
+            agent_config.vision = Some(wiring.section.to_owned());
+        }
+        if let Some(wiring) = &search_wiring {
+            agent_config.websearch = Some(wiring.section.to_owned());
+        }
+        if let Some(wiring) = &decision_wiring {
+            agent_config.decision = Some(wiring.section.to_owned());
+        }
+        if let Some(entry) = &mcp_entry {
+            agent_config.mcp_servers = entry.lines().to_vec();
+        }
     }
     agent_config.disabled_mcp_servers = config.disabled_mcp_servers.clone();
     // Subagents ride in as one tool: the built-in general-purpose
