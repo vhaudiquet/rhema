@@ -747,7 +747,10 @@ impl App {
         }
         // Esc while entering a command cancels the entry instead of the
         // chat-level meanings (quit confirm / decline).
-        if key.code == KeyCode::Esc && self.chat.input.starts_with('/') {
+        if key.code == KeyCode::Esc
+            && self.chat.input.starts_with('/')
+            && !self.chat.input.contains('\n')
+        {
             self.chat.input.clear();
             self.chat.cursor = 0;
             return Vec::new();
@@ -783,17 +786,18 @@ impl App {
                     // for idle on their own. Every other command stays
                     // idle-only, it acts on app state the running turn
                     // also touches, and keeps the input, as before.
-                    if text.split_whitespace().next() == Some("/settings") {
+                    if !text.contains('\n') && text.split_whitespace().next() == Some("/settings") {
                         self.chat.input.clear();
                         self.chat.cursor = 0;
                         self.chat.chips.clear();
                         crate::commands::dispatch(self, text.trim())
-                    } else if text.trim().starts_with('/') {
+                    } else if !text.contains('\n') && text.trim().starts_with('/') {
                         Vec::new()
                     } else {
                         self.steer_turn(text)
                     }
-                } else if images.is_empty() && text.trim().starts_with('/') {
+                } else if images.is_empty() && !text.contains('\n') && text.trim().starts_with('/')
+                {
                     self.chat.input.clear();
                     self.chat.cursor = 0;
                     self.chat.chips.clear();

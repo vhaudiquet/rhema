@@ -67,7 +67,8 @@ pub struct PaletteSandbox {
 /// palette's rendering and its keys (arrows, tab) read the same rows.
 #[derive(Debug, Clone)]
 pub enum PaletteRow {
-    /// A slash command; completing replaces the whole input with its name.
+    /// A slash command; completing fills its name and, when it takes an
+    /// argument, the space that opens the argument rows.
     Command(&'static crate::commands::CommandSpec),
     /// A model under `/model` or `/switch`; completing fills the
     /// argument. The provider's config name prefixes the row and rides
@@ -139,7 +140,10 @@ pub fn palette_rows(
     sandboxes: &[PaletteSandbox],
     icons: &crate::icons::Icons,
 ) -> Vec<PaletteRow> {
-    if !input.starts_with('/') {
+    // Commands live on one line. A multi-line prompt completes only
+    // the path token under the cursor, never a command or its
+    // arguments.
+    if !input.starts_with('/') || input.contains('\n') {
         return path_completion_rows(input, cursor);
     }
     // Both model commands complete from the same catalog: `/model`
@@ -325,16 +329,22 @@ pub(crate) fn path_completion_rows(input: &str, cursor: usize) -> Vec<PaletteRow
     entries.truncate(MAX_PATH_ROWS);
     entries
         .into_iter()
-        .map(|(name, is_dir)| PaletteRow::Path {
-            token_start,
-            token_end,
-            name: if is_dir {
-                format!("{name}/")
-            } else {
-                name.clone()
-            },
-            is_dir,
-            completion: format!("{dir_part}{name}{}", if is_dir { "/" } else { "" }),
+        .filter_map(|(name, is_dir)| {
+            let completion = format!("{dir_part}{name}{}", if is_dir { "/" } else { "" });
+            // The token already spells this entry: there is nothing to
+            // complete, and a row that cannot change the input would
+            // keep Enter from submitting the prompt.
+            (completion != token).then_some(PaletteRow::Path {
+                token_start,
+                token_end,
+                name: if is_dir {
+                    format!("{name}/")
+                } else {
+                    name.clone()
+                },
+                is_dir,
+                completion,
+            })
         })
         .collect()
 }

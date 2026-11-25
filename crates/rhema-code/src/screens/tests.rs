@@ -2193,8 +2193,9 @@ fn arrows_navigate_the_palette_and_tab_completes() {
     chat.handle_key(key(KeyCode::Up), &[], &[], &[], &crate::icons::UNICODE);
     assert_eq!(chat.palette_index, 1);
     chat.handle_key(key(KeyCode::Tab), &[], &[], &[], &crate::icons::UNICODE);
-    assert_eq!(chat.input, "/switch");
-    assert_eq!(chat.cursor, "/switch".chars().count());
+    // An argument command completes with the space that opens its rows.
+    assert_eq!(chat.input, "/switch ");
+    assert_eq!(chat.cursor, "/switch ".chars().count());
 }
 
 #[test]

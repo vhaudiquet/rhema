@@ -212,7 +212,9 @@ fn split(input: &str) -> (&str, Option<&str>) {
 
 /// Parses one chat input through the table.
 pub fn parse(input: &str) -> Parsed {
-    if !input.starts_with('/') {
+    // A command is one line: a multi-line prompt that happens to start
+    // with a slash is prose, not a command.
+    if !input.starts_with('/') || input.contains('\n') {
         return Parsed::Prompt(input.to_owned());
     }
     let (name, argument) = split(input);
@@ -236,7 +238,7 @@ pub fn parse(input: &str) -> Parsed {
 /// with the typed token. An exact name leads, so `/r` opens resume instead
 /// of stopping on `/retry`, the earlier row its prefix also matches.
 pub fn candidates(input: &str) -> Vec<&'static CommandSpec> {
-    if !input.starts_with('/') {
+    if !input.starts_with('/') || input.contains('\n') {
         return Vec::new();
     }
     let needle = input.to_lowercase();
@@ -245,6 +247,17 @@ pub fn candidates(input: &str) -> Vec<&'static CommandSpec> {
         .filter(|spec| spec.name.starts_with(&needle))
         .collect();
     rows.sort_by_key(|spec| spec.name != needle);
+    // A lone exact no-argument name is already the whole command, so
+    // there is nothing left to complete and the palette closes. A
+    // prefix that also names siblings keeps its rows (`/r` still lists
+    // `/retry` and `/resume`), and an argument command keeps its row so
+    // tab can open the argument list.
+    if rows.len() == 1
+        && rows[0].name == needle.as_str()
+        && matches!(rows[0].argument, Argument::None)
+    {
+        rows.clear();
+    }
     rows
 }
 

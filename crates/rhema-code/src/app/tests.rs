@@ -1461,10 +1461,9 @@ fn slash_model_with_a_unique_prefix_resolves_and_an_unknown_needle_says_so() {
         remaining: 0,
         result: loaded("google", models()),
     });
-    for c in "/model google/m-".chars() {
-        h.app.on_key(key(KeyCode::Char(c)));
-    }
-    h.app.on_key(key(KeyCode::Enter));
+    // Dispatch the ambiguity past the palette: the resolver, not the
+    // highlighted row, is what this test names.
+    crate::commands::dispatch(&mut h.app, "/model google/m-");
     assert!(
         matches!(h.app.screen, Screen::Chat),
         "the picker never opens"
@@ -1477,10 +1476,7 @@ fn slash_model_with_a_unique_prefix_resolves_and_an_unknown_needle_says_so() {
             .any(|line| matches!(line, Line::Notice(text) if text.contains("2 models match"))),
         "ambiguous prefix says so"
     );
-    for c in "/model nope".chars() {
-        h.app.on_key(key(KeyCode::Char(c)));
-    }
-    h.app.on_key(key(KeyCode::Enter));
+    crate::commands::dispatch(&mut h.app, "/model nope");
     assert!(
         h.app
             .transcript
@@ -1490,10 +1486,7 @@ fn slash_model_with_a_unique_prefix_resolves_and_an_unknown_needle_says_so() {
     );
     // A bare id names no provider, so it resolves to nothing: the
     // needle must be the fully-qualified row.
-    for c in "/model m-b".chars() {
-        h.app.on_key(key(KeyCode::Char(c)));
-    }
-    h.app.on_key(key(KeyCode::Enter));
+    crate::commands::dispatch(&mut h.app, "/model m-b");
     assert!(
         h.app
             .transcript
@@ -3029,6 +3022,32 @@ fn a_submit_carries_the_pastes_payload_and_its_span() {
         Some(&Line::User {
             pastes: spans,
             text: long.to_owned(),
+            images: Vec::new()
+        })
+    );
+}
+
+/// A slash at the head of a multi-line prompt is prose: commands only
+/// live on one line, so the text rides a normal turn.
+#[test]
+fn a_multiline_slash_input_submits_as_a_prompt() {
+    let mut h = harness(Some("k"), Some("m-a"), Session::default());
+    let text = "/clear\nand keep the log";
+    h.app.chat.insert_str(text);
+    assert_eq!(
+        h.app.on_key(key(KeyCode::Enter)),
+        vec![Effect::StartTurn {
+            text: text.into(),
+            images: Vec::new(),
+            spans: Vec::new(),
+        }]
+    );
+    assert!(matches!(h.app.screen, Screen::Chat));
+    assert_eq!(
+        h.app.transcript.lines().first(),
+        Some(&Line::User {
+            pastes: Vec::new(),
+            text: text.into(),
             images: Vec::new()
         })
     );

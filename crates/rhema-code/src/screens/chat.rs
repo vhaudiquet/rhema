@@ -83,6 +83,25 @@ pub(crate) struct CompletionCache {
     pub(crate) rows: Vec<PaletteRow>,
 }
 
+/// The input a non-path palette row completes to: a command's name, or
+/// a command with its argument. None for a path row, which splices over
+/// the token it came from instead of replacing the line.
+fn completion_input(row: &PaletteRow) -> Option<String> {
+    match row {
+        PaletteRow::Command(spec) => Some(spec.name.to_owned()),
+        PaletteRow::Model {
+            command,
+            provider,
+            id,
+            ..
+        } => Some(format!("{command} {provider}/{id}")),
+        PaletteRow::Profile { name, .. } => Some(format!("/profile {name}")),
+        PaletteRow::Choice { command, value, .. } => Some(format!("{command} {value}")),
+        PaletteRow::Sandbox { value, .. } => Some(format!("/sandbox {value}")),
+        PaletteRow::Path { .. } => None,
+    }
+}
+
 impl ChatState {
     /// Rows per PageUp/PageDown press, one mouse-wheel tick, so both
     /// controls step the history identically.
@@ -192,6 +211,19 @@ impl ChatState {
             self.chips.drain(first..first + dropped);
         }
         self.input.replace_range(start..end, "");
+    }
+
+    /// Splices a path completion over the token it came from, the
+    /// splice half of a path row shared by Tab and Enter. Anchors
+    /// outside the token keep their payloads; any inside it go with
+    /// their range.
+    fn splice_path(&mut self, token_start: usize, token_end: usize, completion: &str) {
+        self.cursor = token_end.min(self.input.chars().count());
+        let end = self.byte_offset();
+        self.cursor = token_start;
+        let start = self.byte_offset();
+        self.delete_range(start, end);
+        self.insert_str(completion);
     }
 
     /// What a submit sends: the typed input with every paste's payload
@@ -521,7 +553,15 @@ impl ChatState {
             // commands, models under `/model`, profiles under
             // `/profile`, or the path entries under the cursor's token.
             KeyCode::Up | KeyCode::Down
-                if !palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons)
+                if !self.input.contains('\n')
+                    && !palette_rows(
+                        &self.input,
+                        self.cursor,
+                        models,
+                        profiles,
+                        sandboxes,
+                        icons,
+                    )
                     .is_empty() =>
             {
                 let count =
@@ -549,41 +589,17 @@ impl ChatState {
                 if let Some(row) = rows.get(self.palette_index.min(rows.len().saturating_sub(1))) {
                     match row {
                         PaletteRow::Command(spec) => {
-                            // The input is replaced wholesale: any
-                            // anchors in it go, and their payloads go
-                            // with them.
                             self.chips.clear();
-                            self.input = spec.name.to_owned();
+                            // An argument command completes with the
+                            // space that opens its argument rows; a
+                            // no-argument name is already whole.
+                            self.input = if spec.argument == crate::commands::Argument::None {
+                                spec.name.to_owned()
+                            } else {
+                                format!("{} ", spec.name)
+                            };
                             self.cursor = self.input.chars().count();
-                        }
-                        PaletteRow::Model {
-                            command,
-                            provider,
-                            id,
-                            ..
-                        } => {
-                            self.chips.clear();
-                            // The argument is the fully-qualified name,
-                            // the only shape `/model` and `/switch`
-                            // accept, since a bare id cannot name its
-                            // provider.
-                            self.input = format!("{command} {provider}/{id}");
-                            self.cursor = self.input.chars().count();
-                        }
-                        PaletteRow::Profile { name, .. } => {
-                            self.chips.clear();
-                            self.input = format!("/profile {name}");
-                            self.cursor = self.input.chars().count();
-                        }
-                        PaletteRow::Choice { command, value, .. } => {
-                            self.chips.clear();
-                            self.input = format!("{command} {value}");
-                            self.cursor = self.input.chars().count();
-                        }
-                        PaletteRow::Sandbox { value, .. } => {
-                            self.chips.clear();
-                            self.input = format!("/sandbox {value}");
-                            self.cursor = self.input.chars().count();
+                            self.palette_index = 0;
                         }
                         PaletteRow::Path {
                             token_start,
@@ -591,15 +607,15 @@ impl ChatState {
                             completion,
                             ..
                         } => {
-                            // A local splice: anchors outside the token
-                            // keep their payloads, and delete_range
-                            // drops any inside it.
-                            self.cursor = (*token_end).min(self.input.chars().count());
-                            let end = self.byte_offset();
-                            self.cursor = *token_start;
-                            let start = self.byte_offset();
-                            self.delete_range(start, end);
-                            self.insert_str(completion);
+                            self.splice_path(*token_start, *token_end, completion);
+                        }
+                        _ => {
+                            if let Some(input) = completion_input(row) {
+                                self.chips.clear();
+                                self.input = input;
+                                self.cursor = self.input.chars().count();
+                                self.palette_index = 0;
+                            }
                         }
                     }
                 }
@@ -614,9 +630,36 @@ impl ChatState {
                 ChatAction::None
             }
             KeyCode::Enter => {
-                // A new prompt goes to the live tail; stop pinning
-                // history. The input is NOT cleared: the app clears when
-                // it accepts the submit, so a declined one keeps it.
+                // A highlighted row takes the key first. A command or
+                // argument row runs the input it completes to; a path
+                // row only splices itself into the prompt. With no row
+                // the key is the ordinary submit.
+                let rows =
+                    palette_rows(&self.input, self.cursor, models, profiles, sandboxes, icons);
+                if let Some(row) = rows.get(self.palette_index.min(rows.len().saturating_sub(1))) {
+                    if let Some(text) = completion_input(row) {
+                        // A new prompt goes to the live tail; stop
+                        // pinning history. The input is NOT cleared: the
+                        // app clears when it accepts the submit, so a
+                        // declined one keeps it.
+                        self.scroll = 0;
+                        return ChatAction::Submit {
+                            text,
+                            images: Vec::new(),
+                            spans: Vec::new(),
+                        };
+                    }
+                    if let PaletteRow::Path {
+                        token_start,
+                        token_end,
+                        completion,
+                        ..
+                    } = row
+                    {
+                        self.splice_path(*token_start, *token_end, completion);
+                        return ChatAction::None;
+                    }
+                }
                 self.scroll = 0;
                 let (text, images, spans) = self.submission();
                 ChatAction::Submit {
