@@ -209,19 +209,17 @@ impl OpenAiCompatibleProvider {
     }
 }
 
-/// The api.deepseek.com host, the one endpoint this adapter decorates
-/// with a published catalog, because their `/models` serves ids alone.
+/// The api.deepseek.com host, where the standard rate table applies:
+/// their `/models` serves ids alone.
 const DEEPSEEK_HOST: &str = "api.deepseek.com";
 
-/// One row of DeepSeek's published catalog: context window, output
-/// ceiling, and the standard per-MTok rates, cached input, uncached
-/// input, output; off-peak halves every rate. The numbers move with
-/// DeepSeek's price list (api-docs.deepseek.com/quick_start/pricing,
-/// fetched 2026-10-10); the endpoint serves none of them.
+/// One row of DeepSeek's standard per-MTok rates. The endpoint serves
+/// none, and the live catalog carries the off-peak half; the standard
+/// rate stays here so the picker does not understate the day rate. The
+/// numbers move with DeepSeek's price list
+/// (api-docs.deepseek.com/quick_start/pricing, fetched 2026-10-10).
 struct DeepSeekFacts {
     id: &'static str,
-    context: u64,
-    output: u64,
     cached_input_per_mtok: f64,
     input_per_mtok: f64,
     output_per_mtok: f64,
@@ -230,32 +228,25 @@ struct DeepSeekFacts {
 const DEEPSEEK_CATALOG: &[DeepSeekFacts] = &[
     DeepSeekFacts {
         id: "deepseek-flash",
-        context: 1_048_576,
-        output: 393_216,
         cached_input_per_mtok: 0.006,
         input_per_mtok: 0.30,
         output_per_mtok: 1.20,
     },
     DeepSeekFacts {
         id: "deepseek-v4-pro",
-        context: 1_048_576,
-        output: 393_216,
         cached_input_per_mtok: 0.044,
         input_per_mtok: 1.32,
         output_per_mtok: 3.96,
     },
 ];
 
-/// Fills DeepSeek's published facts into a listing: ids naming a catalog
-/// row gain their context window and pricing, everything else passes
-/// through untouched, unknown models simply show no facts.
+/// Fills DeepSeek's standard rates into a listing: ids naming a table
+/// row gain their price, everything else passes through untouched,
+/// unknown models simply show no price. Limits and vision come from the
+/// live catalog.
 fn decorate_deepseek(models: &mut [ModelCard]) {
     for model in models {
         if let Some(row) = DEEPSEEK_CATALOG.iter().find(|row| row.id == model.id) {
-            model.input_token_limit = Some(row.context);
-            model.output_token_limit = Some(row.output);
-            // The generic listing exposes no modality; the live catalog
-            // answers vision for both the table's ids and unknown ones.
             model.pricing = Some(Pricing {
                 input_per_mtok: row.input_per_mtok,
                 output_per_mtok: row.output_per_mtok,
@@ -765,7 +756,7 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_models_carry_the_published_facts() {
+    fn deepseek_models_carry_the_standard_rates() {
         let page = serde_json::json!({
             "data": [
                 { "id": "deepseek-flash" },
@@ -779,9 +770,10 @@ mod tests {
 
         decorate_deepseek(&mut models);
         let flash = &models[0];
-        assert_eq!(flash.input_token_limit, Some(1_048_576));
-        assert_eq!(flash.output_token_limit, Some(393_216));
-        // Vision is the live catalog's fact, not the table's.
+        // Limits and vision are the live catalog's facts: the table
+        // carries neither, so it cannot lock a stale value in.
+        assert_eq!(flash.input_token_limit, None);
+        assert_eq!(flash.output_token_limit, None);
         assert_eq!(flash.supports_vision, None);
         let pricing = flash.pricing.expect("flash is priced");
         assert_eq!(pricing.input_per_mtok, 0.30);
