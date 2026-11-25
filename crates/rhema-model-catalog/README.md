@@ -111,5 +111,8 @@ run it with `cargo test -p rhema-model-catalog --test live -- --ignored`
 to check the live endpoint.
 
 models.dev is community-maintained and its prices lag the vendors'. An
-adapter that has measured a route (Mistral Vibe's meter, Z.ai's plan,
-Google's promo tier) keeps its own number and the catalog stays out.
+adapter that has measured a route (Mistral Vibe's meter, DeepSeek's
+standard rate, Google's promo tier) keeps its own number and the
+catalog stays out. Z.ai's table is gone: models.dev's `zai` rows match
+it on price and on the context window, so the adapter now ships no
+facts for those rows at all.

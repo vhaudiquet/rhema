@@ -38,7 +38,7 @@ use rhema_core::output::ModelOutput;
 use rhema_core::provider::{ModelProvider, ProviderError};
 use rhema_core::request::ModelRequest;
 use rhema_provider::{
-    Allowance, HttpRequest, HttpResponse, ModelCard, ModelListing, Pricing, SseDecoder, Transport,
+    Allowance, HttpRequest, HttpResponse, ModelCard, ModelListing, SseDecoder, Transport,
     TransportError,
 };
 
@@ -229,78 +229,13 @@ impl AnthropicProvider {
     }
 }
 
-/// The api.z.ai host, the one endpoint this adapter decorates, because
-/// its `/models` serves ids alone: the Anthropic schema has no room for
-/// catalog facts.
+/// The api.z.ai host: its Anthropic-compatible route and the Coding
+/// Plan's monitor endpoint answer there.
 const ZAI_HOST: &str = "api.z.ai";
 
 /// The mainland host the same plan is sold through: its
 /// Anthropic-compatible route and monitor endpoint answer there too.
 const ZAI_CN_HOST: &str = "open.bigmodel.cn";
-
-/// One row of Z.ai's published GLM catalog: context window, output
-/// ceiling, and the standard per-MTok rates, cached input, uncached
-/// input, output. The numbers move with Z.ai's price list
-/// (docs.z.ai/guides/overview/pricing and the models' pages, fetched
-/// 2026-10-14); the endpoint serves none of them. List prices, even on
-/// the Coding Plan, which bills subscription credits rather than tokens.
-struct ZaiFacts {
-    id: &'static str,
-    context: u64,
-    output: u64,
-    cached_input_per_mtok: f64,
-    input_per_mtok: f64,
-    output_per_mtok: f64,
-}
-
-const ZAI_CATALOG: &[ZaiFacts] = &[
-    ZaiFacts {
-        id: "glm-5.3",
-        context: 1_000_000,
-        output: 128_000,
-        cached_input_per_mtok: 0.26,
-        input_per_mtok: 1.4,
-        output_per_mtok: 4.4,
-    },
-    ZaiFacts {
-        id: "glm-5.3-flash",
-        context: 1_000_000,
-        output: 128_000,
-        cached_input_per_mtok: 0.03,
-        input_per_mtok: 0.15,
-        output_per_mtok: 0.5,
-    },
-    ZaiFacts {
-        id: "glm-5.3-flashx",
-        context: 1_000_000,
-        output: 128_000,
-        cached_input_per_mtok: 0.075,
-        input_per_mtok: 0.37,
-        output_per_mtok: 1.25,
-    },
-];
-
-/// Fills Z.ai's published facts into a listing: ids naming a catalog row
-/// gain their context window and pricing, everything else passes through
-/// untouched, unknown models simply show no facts. The match is
-/// case-insensitive: the endpoint spells the ids lowercase, Z.ai's own
-/// docs uppercase.
-fn decorate_zai(models: &mut [ModelCard]) {
-    for model in models {
-        if let Some(row) = ZAI_CATALOG
-            .iter()
-            .find(|row| row.id.eq_ignore_ascii_case(&model.id))
-        {
-            model.input_token_limit = Some(row.context);
-            model.output_token_limit = Some(row.output);
-            model.pricing = Some(Pricing {
-                input_per_mtok: row.input_per_mtok,
-                output_per_mtok: row.output_per_mtok,
-                cached_input_per_mtok: Some(row.cached_input_per_mtok),
-            });
-        }
-    }
-}
 
 /// The host of a `scheme://host[:port]/...` URL, port stripped, the one
 /// piece of URL parsing this crate needs, done by hand so the wasm build
@@ -445,9 +380,9 @@ fn feed_chunk(
 impl ModelListing for AnthropicProvider {
     /// Every model the key can see, following `has_more`/`after_id`
     /// pagination until the list is exhausted. Anthropic's listing is
-    /// text chat models only, so there is nothing to filter; the
-    /// api.z.ai route's rows gain the published catalog facts, via the
-    /// crate-private decorate_zai helper.
+    /// text chat models only, so there is nothing to filter. The rows
+    /// carry ids and names alone; the live model catalog fills the
+    /// facts.
     async fn list_models(&self) -> Result<Vec<ModelCard>, ProviderError> {
         let mut models = Vec::new();
         let mut after_id: Option<String> = None;
@@ -489,12 +424,7 @@ impl ModelListing for AnthropicProvider {
             // from spinning this loop forever.
             match page.has_more.then_some(page.last_id).flatten() {
                 Some(cursor) if fetched > 0 => after_id = Some(cursor),
-                _ => {
-                    if self.base_url.contains(ZAI_HOST) {
-                        decorate_zai(&mut models);
-                    }
-                    return Ok(models);
-                }
+                _ => return Ok(models),
             }
         }
     }
@@ -575,50 +505,6 @@ impl ModelProvider for AnthropicProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn row(id: &str) -> ModelCard {
-        ModelCard {
-            id: id.to_owned(),
-            display_name: id.to_owned(),
-            description: String::new(),
-            input_token_limit: None,
-            output_token_limit: None,
-            supports_vision: None,
-            generation_methods: vec!["generateContent".to_owned()],
-            pricing: None,
-        }
-    }
-
-    #[test]
-    fn zai_rows_carry_the_published_facts_and_unknown_pass_through() {
-        let mut models = vec![row("glm-5.3"), row("GLM-5.3-FLASHX"), row("glm-brand-new")];
-        decorate_zai(&mut models);
-        assert_eq!(models[0].input_token_limit, Some(1_000_000));
-        assert_eq!(models[0].output_token_limit, Some(128_000));
-        assert_eq!(
-            models[0].pricing,
-            Some(Pricing {
-                input_per_mtok: 1.4,
-                output_per_mtok: 4.4,
-                cached_input_per_mtok: Some(0.26),
-            })
-        );
-        // Vision is the live catalog's fact: the table has no column
-        // for it, so it cannot lock a stale verdict in.
-        assert_eq!(models[0].supports_vision, None);
-        // The endpoint spells the ids lowercase, the docs uppercase,
-        // both hit the catalog row.
-        assert_eq!(models[1].input_token_limit, Some(1_000_000));
-        assert_eq!(
-            models[1].pricing.map(|pricing| pricing.input_per_mtok),
-            Some(0.37)
-        );
-        assert_eq!(models[1].supports_vision, None);
-        // An id outside the catalog shows no invented facts.
-        assert_eq!(models[2].input_token_limit, None);
-        assert_eq!(models[2].pricing, None);
-        assert_eq!(models[2].supports_vision, None);
-    }
 
     #[test]
     fn the_quota_url_lives_on_the_plan_hosts_and_nowhere_else() {
